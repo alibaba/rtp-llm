@@ -349,6 +349,7 @@ struct FIFOSchedulerConfig {
     //   "ratio" -> PDFusionRatioScheduler with decode_prefill_ratio
     std::string pdfusion_scheduler_mode = "";
     // PDFusionRatioScheduler cadence knob, as a decode:prefill round ratio string.
+    //   "0"   -> always try PREFILL first when a waiting stream exists.
     //   "N"   -> 1 prefill : N decode (decode-heavy); "1" = strict alternation.
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".

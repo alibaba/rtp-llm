@@ -123,6 +123,22 @@ int KVCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_k
     return allocator_->singleBatchNeedBlocks(batch_kv_cache_resource, seq_len, reserve_step);
 }
 
+int KVCacheManager::estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                           int                            seq_len,
+                                           int                            common_seq_len,
+                                           int                            remaining_tokens,
+                                           int                            reserve_step,
+                                           bool                           enable_reuse_cache,
+                                           int                            target_batch_size) const {
+    return allocator_->estimateBatchPeakNeedBlocks(batch_kv_cache_resource,
+                                                   seq_len,
+                                                   common_seq_len,
+                                                   remaining_tokens,
+                                                   reserve_step,
+                                                   enable_reuse_cache,
+                                                   target_batch_size);
+}
+
 // 块操作相关
 
 void KVCacheManager::blockCopy(int src_block_index, int dest_block_index) {
@@ -396,6 +412,10 @@ size_t KVCacheManager::freeBlocksNum() const {
 
 size_t KVCacheManager::availableBlocksNum() const {
     return allocator_->availableBlocksNum();
+}
+
+size_t KVCacheManager::reserveBlocksNum() const {
+    return allocator_->reserveBlocksNum();
 }
 
 size_t KVCacheManager::notInUseBlocksNum() const {

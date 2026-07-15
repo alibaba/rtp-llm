@@ -144,6 +144,8 @@ public:
     virtual absl::Status incrKVBlock();
     virtual void         releaseResource();
     int                  nextNeedBlockNums(int reserve_step) const;
+    int                  estimateInitialNeedBlocks() const;
+    int                  estimatePeakNeedBlocks(int remaining_tokens) const;
     void                 setNeedReleaseResource(bool need_release_resource);
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id = 0) const;
@@ -537,6 +539,7 @@ public:
     bool     queryPdSep() const;
 
 protected:
+    int  estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
     void updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
     void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
     void fillSubGenerateStatus(StreamState state);

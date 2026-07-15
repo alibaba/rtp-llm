@@ -1,11 +1,51 @@
 #include "rtp_llm/cpp/cache/LinearKVCacheGroup.h"
 
 #include <algorithm>
+#include <numeric>
 #include <unordered_set>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+namespace {
+
+bool shouldAllocateSlot(int slot, int seq_slots, int reserve_step, bool enable_reuse_cache, int linear_step) {
+    const bool is_seq_tail = seq_slots > 0 && slot == seq_slots - 1;
+    const bool is_reserve  = reserve_step > 0 && slot >= seq_slots;
+    const bool step_hit    = (slot + 1) % linear_step == 0;
+    return is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
+}
+
+int estimatePeakFromSlotCosts(std::vector<int> block_costs,
+                              int              final_slots,
+                              int              new_slot_cost,
+                              int              reserve_step,
+                              bool             enable_reuse_cache,
+                              int              linear_step) {
+    int physical_blocks = std::accumulate(block_costs.begin(), block_costs.end(), 0);
+    int peak_blocks     = physical_blocks;
+
+    while (static_cast<int>(block_costs.size()) < final_slots) {
+        block_costs.push_back(new_slot_cost);
+        physical_blocks += new_slot_cost;
+        peak_blocks = std::max(peak_blocks, physical_blocks);
+
+        for (int slot = static_cast<int>(block_costs.size()) - 3 - reserve_step; slot >= 0; --slot) {
+            auto& cost = block_costs[static_cast<size_t>(slot)];
+            if (cost == 0) {
+                break;
+            }
+            if (enable_reuse_cache && (slot + 1) % linear_step == 0) {
+                continue;
+            }
+            physical_blocks -= cost;
+            cost = 0;
+        }
+    }
+    return peak_blocks;
+}
+
+}  // namespace
 
 void LinearKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
     out.clear();
@@ -20,6 +60,74 @@ void LinearKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndi
 int LinearKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
     int extra_blocks = reserve_step ? reserve_step - 1 : 0;
     return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ + extra_blocks - current_blocks, 0);
+}
+
+int LinearKVCacheGroup::estimatePeakNeedBlocks(int                     seq_len,
+                                               const BlockIndicesType& current_block_indices,
+                                               int                     remaining_tokens,
+                                               int                     reserve_step,
+                                               bool                    enable_reuse_cache) const {
+    const int step              = std::max(1, linear_step_);
+    const int current_seq_slots = (seq_len + seq_size_per_block_ - 1) / seq_size_per_block_;
+    const int final_seq_slots =
+        (seq_len + remaining_tokens + seq_size_per_block_ - 1) / seq_size_per_block_;
+    const int extra_blocks = reserve_step ? reserve_step - 1 : 0;
+    const int total_slots  = final_seq_slots + extra_blocks;
+
+    std::vector<int> block_costs;
+    block_costs.reserve(std::max(total_slots, static_cast<int>(current_block_indices.size())));
+
+    int current_physical_blocks = 0;
+    if (!current_block_indices.empty()) {
+        for (const auto block_index : current_block_indices) {
+            const bool allocated = !isNullBlockIdx(block_index);
+            block_costs.push_back(allocated ? 1 : 0);
+            current_physical_blocks += allocated;
+        }
+    } else {
+        const int initial_slots = current_seq_slots + extra_blocks;
+        for (int i = 0; i < initial_slots; ++i) {
+            block_costs.push_back(
+                shouldAllocateSlot(i, current_seq_slots, reserve_step, enable_reuse_cache, step) ? 1 : 0);
+        }
+    }
+
+    const int peak_blocks =
+        estimatePeakFromSlotCosts(std::move(block_costs), total_slots, 1, reserve_step, enable_reuse_cache, step);
+    return std::max(peak_blocks - current_physical_blocks, 0);
+}
+
+int LinearKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
+                                                           int  common_seq_len,
+                                                           int  remaining_tokens,
+                                                           int  reserve_step,
+                                                           bool enable_reuse_cache,
+                                                           int  target_batch_size) const {
+    const int step       = std::max(1, linear_step_);
+    const int batch_size = std::max(target_batch_size, 1);
+    const auto seq_slots = [&](int length) { return (length + seq_size_per_block_ - 1) / seq_size_per_block_; };
+
+    const int common_slots     = seq_slots(common_seq_len);
+    const int initial_slots    = seq_slots(seq_len);
+    const int reserve_blocks   = reserve_step > 0 ? reserve_step - 1 : 0;
+    const int initial_total    = initial_slots + reserve_blocks;
+    const int final_total      = seq_slots(seq_len + remaining_tokens) + reserve_blocks;
+    std::vector<int> block_costs;
+    block_costs.reserve(static_cast<size_t>(std::max(initial_total, final_total)));
+
+    for (int slot = 0; slot < common_slots; ++slot) {
+        block_costs.push_back(
+            shouldAllocateSlot(slot, common_slots, 0, enable_reuse_cache, step) ? 1 : 0);
+    }
+
+    // initMalloc's incrMalloc phase appends the whole prompt suffix without sparse cleanup.
+    for (int slot = common_slots; slot < initial_total; ++slot) {
+        block_costs.push_back(
+            shouldAllocateSlot(slot, initial_slots, reserve_step, enable_reuse_cache, step) ? batch_size : 0);
+    }
+
+    return estimatePeakFromSlotCosts(
+        std::move(block_costs), final_total, batch_size, reserve_step, enable_reuse_cache, step);
 }
 
 NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(

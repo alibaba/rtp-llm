@@ -114,7 +114,7 @@ const CacheKeysType& GenerateStream::cacheKeys(int32_t batch_id) const {
 absl::Status GenerateStream::initKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
-    auto                        ret = stream_cache_resource_->initKVBlock(reserve_step_);
+    auto                        ret = stream_cache_resource_->initKVBlock();
     if (!ret.ok()) {
         RTP_LLM_LOG_WARNING("GenerateStream::initKVBlock: initKVBlock failed, stream_id: %lld", streamId());
     }
@@ -129,7 +129,7 @@ void GenerateStream::fakeInitKVBlock(size_t reserved_blocks) {
 absl::Status GenerateStream::incrKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
-    return stream_cache_resource_->incrKVBlock(reserve_step_);
+    return stream_cache_resource_->incrKVBlock();
 }
 
 void GenerateStream::releaseResource() {
@@ -146,6 +146,24 @@ void GenerateStream::setNeedReleaseResource(bool need_release_resource) {
 int GenerateStream::nextNeedBlockNums(int reserve_step) const {
     // TODO: maybe need fix when context and reuse
     return stream_cache_resource_->singleBatchNeedBlocks(seqLength(), reserve_step) * nextBatchSize();
+}
+
+int GenerateStream::estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const {
+    const int reserve_step   = complete_token_ids_->getReserveStep();
+    int common_seq_len = std::min(complete_token_ids_->commonSeqLength(), seqLength());
+    if (target_batch_size > 1) {
+        common_seq_len = common_seq_len / seqSizePerBlock() * seqSizePerBlock();
+    }
+    return stream_cache_resource_->estimatePeakNeedBlocks(
+        seqLength(), common_seq_len, remaining_tokens, reserve_step, target_batch_size);
+}
+
+int GenerateStream::estimateInitialNeedBlocks() const {
+    return estimateKVNeedBlocks(/*remaining_tokens=*/0, currentBatchSize());
+}
+
+int GenerateStream::estimatePeakNeedBlocks(int remaining_tokens) const {
+    return estimateKVNeedBlocks(remaining_tokens, maxBatchSize());
 }
 
 std::shared_ptr<GenerateInput> GenerateStream::generateInput() const {
@@ -532,8 +550,10 @@ bool GenerateStream::isActive() const {
 }
 
 void GenerateStream::setReserveStep(size_t reserve_step) {
+    // Keep GenerateStream as the only entry point for setting reserve_step.
     reserve_step_ = reserve_step;
     generate_status_->setReserveStep(reserve_step);
+    complete_token_ids_->setReserveStep(static_cast<int>(reserve_step));
 }
 
 StreamState GenerateStream::moveToNext() {
