@@ -18,6 +18,13 @@ cc_library(
     copts = copts(),
 )
 
+# Keep the original label available for internal architecture overlays that
+# have not yet migrated to the shorter target name.
+alias(
+    name = "cpu_tp_broadcaster",
+    actual = ":cpu_broadcaster",
+)
+
 cc_library(
     name = "cpu_broadcast_hdr",
     hdrs = ["CpuBroadcast.h"],
