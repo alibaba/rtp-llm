@@ -156,10 +156,10 @@ protected:
     }
     std::unordered_map<int64_t, RunningEntry>                   running_streams_;
     std::list<std::pair<int64_t, EngineScheduleInfo::TaskInfo>> finished_streams_;
-    std::atomic<int64_t>                                        version_{0};
-    mutable std::shared_mutex                                   read_write_lock_;
-    int64_t                                                     timeout_ms_        = 5000;
-    int64_t                                                     finished_capacity_ = 1000;
+    std::atomic<int64_t>      version_{autil::TimeUtility::currentTimeInMicroSeconds()};
+    mutable std::shared_mutex read_write_lock_;
+    int64_t                   timeout_ms_        = 5000;
+    int64_t                   finished_capacity_ = 1000;
 };
 
 };  // namespace rtp_llm
