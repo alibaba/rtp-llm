@@ -29,9 +29,11 @@ from rtp_llm.models.base_model import BaseModel
 from rtp_llm.openai.api_datatype import (
     ChatCompletionExtraOutputs,
     ChatCompletionRequest,
+    ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse,
     ChatMessage,
     DebugInfo,
+    DeltaMessage,
     FinisheReason,
     GPTFunctionDefinition,
     GPTToolDefinition,
@@ -40,6 +42,7 @@ from rtp_llm.openai.api_datatype import (
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
 from rtp_llm.openai.renderers import custom_renderer
+from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
 from rtp_llm.openai.renderers.chatglm45_renderer import ChatGlm45Renderer
 from rtp_llm.openai.renderers.deepseekv31_renderer import DeepseekV31Renderer
 from rtp_llm.openai.renderers.kimik2_renderer import KimiK2Renderer
@@ -172,6 +175,24 @@ async def fake_output_generator_once(
 
 
 MAX_SEQ_LEN = 1024
+
+
+class ThinkingTemplateTokenizer:
+    chat_template = (
+        "{{ thinking_mode }}|"
+        "{% if enable_thinking is defined %}{{ enable_thinking }}"
+        "{% else %}unset{% endif %}"
+    )
+    default_chat_template = None
+    special_tokens_map = {}
+    additional_special_tokens = []
+    path = ""
+
+    def encode(self, text, *args, **kwargs):
+        return list(text.encode("utf-8"))
+
+    def decode(self, token_ids, *args, **kwargs):
+        return bytes(token_ids).decode("utf-8")
 
 
 class BaseToolCallTestSuite:
@@ -551,6 +572,63 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         self.assertFalse(delta.reasoning_content)
         self.assertEqual(delta.content, "answer")
+
+    def test_basic_renderer_receives_resolved_openai_thinking_mode(self):
+        tokenizer = ThinkingTemplateTokenizer()
+        renderer = BasicRenderer(
+            tokenizer,
+            RendererParams(
+                model_type="test",
+                max_seq_len=MAX_SEQ_LEN,
+                eos_token_id=0,
+                stop_word_ids_list=[],
+            ),
+            generate_env_config=GenerateEnvConfig(),
+            render_config=RenderConfig(),
+        )
+
+        cases = [
+            (None, "adaptive|unset"),
+            (True, "enabled|True"),
+            (False, "disabled|False"),
+        ]
+        for enable_thinking, expected_prompt in cases:
+            with self.subTest(enable_thinking=enable_thinking):
+                request_kwargs = (
+                    {}
+                    if enable_thinking is None
+                    else {"enable_thinking": enable_thinking}
+                )
+                request = ChatCompletionRequest(
+                    messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+                    **request_kwargs,
+                )
+
+                rendered = renderer.render_chat(request)
+
+                self.assertEqual(rendered.rendered_prompt, expected_prompt)
+
+    async def test_complete_response_keeps_reasoning_from_first_chunk(self):
+        async def response_generator():
+            yield custom_renderer.StreamResponseObject(
+                choices=[
+                    ChatCompletionResponseStreamChoice(
+                        index=0,
+                        delta=DeltaMessage(
+                            role=RoleEnum.assistant,
+                            reasoning_content="reasoning",
+                            content="answer",
+                        ),
+                    )
+                ]
+            )
+
+        response = await OpenaiEndpoint._collect_complete_response(
+            response_generator(), debug_info=None
+        )
+
+        self.assertEqual(response.choices[0].message.reasoning_content, "reasoning")
+        self.assertEqual(response.choices[0].message.content, "answer")
 
     async def test_parse_qwen_function_call(self):
         tokenizer = QwenTestTokenizer(

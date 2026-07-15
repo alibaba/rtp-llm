@@ -441,6 +441,48 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
         self.assertTrue(config.in_think_mode)
 
+    def test_resolved_chat_template_kwargs_match_backend_thinking_mode(self):
+        cases = [
+            ({}, ThinkingMode.ADAPTIVE, "adaptive", None),
+            ({"enable_thinking": True}, ThinkingMode.ENABLED, "enabled", True),
+            ({"enable_thinking": False}, ThinkingMode.DISABLED, "disabled", False),
+        ]
+        for (
+            request_kwargs,
+            expected_mode,
+            expected_template_mode,
+            expected_enabled,
+        ) in cases:
+            with self.subTest(request_kwargs=request_kwargs):
+                request = ChatCompletionRequest(messages=[], **request_kwargs)
+
+                self.assertEqual(request.resolve_thinking_mode(), expected_mode)
+                template_kwargs = request.get_resolved_chat_template_kwargs()
+                self.assertEqual(
+                    template_kwargs["thinking_mode"], expected_template_mode
+                )
+                self.assertEqual(
+                    template_kwargs.get("enable_thinking"), expected_enabled
+                )
+
+    def test_chat_template_kwargs_are_merged_before_resolving_thinking(self):
+        request = ChatCompletionRequest(
+            messages=[],
+            chat_template_kwargs={"enable_thinking": False, "request_arg": 1},
+            extra_configs=GenerateConfig(chat_template_kwargs={"extra_arg": 2}),
+        )
+
+        self.assertEqual(request.resolve_thinking_mode(), ThinkingMode.DISABLED)
+        self.assertEqual(
+            request.get_resolved_chat_template_kwargs(),
+            {
+                "enable_thinking": False,
+                "thinking_mode": "disabled",
+                "request_arg": 1,
+                "extra_arg": 2,
+            },
+        )
+
     def test_openai_max_completion_tokens_thinking_budget_keeps_backend_limit(self):
         generate_env_config = GenerateEnvConfig()
         generate_env_config.think_mode = 1
