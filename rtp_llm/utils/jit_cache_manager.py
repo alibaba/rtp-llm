@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import urlsplit, urlunsplit
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -160,13 +160,23 @@ COMPONENTS = (
 )
 
 
+def _normalize_remote_jit_uri(uri: str) -> str:
+    """Normalize directory URIs for FUSE without changing bucket-root paths."""
+    parts = urlsplit(uri)
+    if parts.query and parts.path.endswith("/") and parts.path != "/":
+        parts = parts._replace(path=parts.path.rstrip("/"))
+        return urlunsplit(parts)
+    return uri
+
+
 def resolve_remote_root(remote_jit_dir: Any) -> Path | None:
     text = str(remote_jit_dir or "").strip()
     if not text:
         return None
-    if urlparse(text).scheme:
+    if urlsplit(text).scheme:
         from rtp_llm.utils.fuser import MountRwMode, fetch_remote_file_to_local
 
+        text = _normalize_remote_jit_uri(text)
         text = fetch_remote_file_to_local(text, MountRwMode.RWMODE_RW, True)
     path = Path(text).expanduser().absolute()
     if not path.is_dir():

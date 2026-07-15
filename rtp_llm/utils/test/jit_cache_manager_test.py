@@ -101,6 +101,24 @@ class JitCacheManagerTest(unittest.TestCase):
             manager = jit.JitCacheManager(config)
         self.assertIsNone(manager.store)
 
+    def test_remote_uri_trailing_slash_before_query_is_normalized(self):
+        remote = self.root / "remote"
+        remote.mkdir()
+        uri = "oss://bucket/deepseek/jit_cache/?OSS_ENDPOINT=endpoint"
+        expected = "oss://bucket/deepseek/jit_cache?OSS_ENDPOINT=endpoint"
+
+        with mock.patch(
+            "rtp_llm.utils.fuser.fetch_remote_file_to_local",
+            return_value=str(remote),
+        ) as fetch:
+            self.assertEqual(jit.resolve_remote_root(uri), remote.absolute())
+
+        self.assertEqual(fetch.call_args.args[0], expected)
+
+    def test_remote_bucket_root_uri_keeps_trailing_slash(self):
+        uri = "oss://bucket/?OSS_ENDPOINT=endpoint"
+        self.assertEqual(jit._normalize_remote_jit_uri(uri), uri)
+
     def test_restore_tolerates_missing_mtime_manifest(self):
         remote = self.root / "remote"
         remote.mkdir()
