@@ -35,7 +35,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     pd_sep_config_(pd_sep_config),
     cache_store_config_(cache_store_config) {
     if (warmup) {
-        config_.block_num = 1;
+        setCommonBlockNum(1);
     } else {
         allocateAndSync();
     }
@@ -490,8 +490,19 @@ void KVCacheManager::initConnectorCoordinator() {
     RTP_LLM_CHECK_WITH_INFO(coordinator_->init(), "connector coordinator init failed");
 }
 
+void KVCacheManager::setCommonBlockNum(uint32_t block_num) {
+    RTP_LLM_CHECK_WITH_INFO(block_num > 0, "common block_num must be greater than 0");
+    config_.block_num = block_num;
+    for (size_t i = 0; i < config_.mtp_sub_configs.size(); ++i) {
+        auto& sub_config = config_.mtp_sub_configs[i];
+        RTP_LLM_CHECK_WITH_INFO(sub_config != nullptr, "mtp_sub_configs[%zu] is null", i);
+        sub_config->block_num = block_num;
+    }
+}
+
 void KVCacheManager::allocateAndSync() {
-    size_t world_size = parallelism_config_.tp_size * parallelism_config_.dp_size;
+    size_t   world_size       = parallelism_config_.tp_size * parallelism_config_.dp_size;
+    uint32_t common_block_num = config_.block_num;
     if (world_size > 1) {
         size_t local_rank    = parallelism_config_.tp_size * parallelism_config_.dp_rank + parallelism_config_.tp_rank;
         auto   block_num_t   = torch::empty({(int64_t)world_size}, torch::kInt32).pin_memory();
@@ -502,11 +513,12 @@ void KVCacheManager::allocateAndSync() {
         cudaSyncAndCheck();
 
         if (parallelism_config_.ffn_disaggregate_config.is_ffn_service()) {
-            config_.block_num = 1;
+            common_block_num = 1;
         } else {
-            config_.block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);
+            common_block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);
         }
     }
+    setCommonBlockNum(common_block_num);
     RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
 }
 

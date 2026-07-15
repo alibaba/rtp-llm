@@ -126,6 +126,7 @@ public:
 
 private:
     void initConnectorCoordinator();
+    void setCommonBlockNum(uint32_t block_num);
     void allocateAndSync();
     void reportMetricsLoop();
 

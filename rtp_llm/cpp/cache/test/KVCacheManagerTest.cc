@@ -9,6 +9,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
@@ -95,6 +96,32 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
 
     EXPECT_EQ(cache_manager->totalBlocksNum(), 0);
     EXPECT_EQ(cache_manager->freeBlocksNum(), 0);
+}
+
+TEST_F(KVCacheManagerTest, MTPLayoutsUseCommonBlockNum) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
+    auto mtp_config = std::make_shared<CacheConfig>(makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/7, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8));
+    cache_config.mtp_sub_configs.push_back(mtp_config);
+
+    // A BlockPool owns one shared block-id domain. Even if a caller supplies a stale
+    // MTP sub-config, every memory layout must use the top-level common capacity.
+    auto pool_config = BlockPoolConfigHelper::createConfig(cache_config);
+    ASSERT_EQ(pool_config.memory_layouts.size(), 2u);
+    EXPECT_EQ(pool_config.block_num, 4u);
+    EXPECT_EQ(pool_config.memory_layouts[0].block_num, 4u);
+    EXPECT_EQ(pool_config.memory_layouts[1].block_num, 4u);
+
+    // The manager also normalizes metadata so downstream MTP executors cannot
+    // observe the pre-TP-sync per-rank block count.
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    EXPECT_EQ(cache_manager->cacheConfig().block_num, 4u);
+    EXPECT_EQ(cache_manager->getMTPModuleCacheConfig(0).block_num, 4u);
+
+    auto warmup_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
+    EXPECT_EQ(warmup_manager->cacheConfig().block_num, 1u);
+    EXPECT_EQ(warmup_manager->getMTPModuleCacheConfig(0).block_num, 1u);
 }
 
 TEST_F(KVCacheManagerTest, MetricsThreadSmoke) {

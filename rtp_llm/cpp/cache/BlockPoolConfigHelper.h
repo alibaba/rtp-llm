@@ -28,6 +28,7 @@ public:
                                                                   cache_config.kv_block_stride_bytes,
                                                                   cache_config.kv_scale_stride_bytes,
                                                                   main_spec,
+                                                                  config.block_num,
                                                                   cache_config);
 
         main_layout.kv_cache_offset_bytes = 0;
@@ -54,6 +55,7 @@ public:
                                                                      mtp_sub_config->kv_block_stride_bytes,
                                                                      mtp_sub_config->kv_scale_stride_bytes,
                                                                      mtp_spec,
+                                                                     config.block_num,
                                                                      *mtp_sub_config);
 
             mtp_layout.kv_cache_offset_bytes = current_offset;
@@ -110,10 +112,11 @@ private:
                                                        size_t         kv_block_stride_bytes,
                                                        size_t         kv_scale_stride_bytes,
                                                        KVCacheSpecPtr spec,
-                                                       CacheConfig    cache_config) {
+                                                       uint32_t           common_block_num,
+                                                       const CacheConfig& cache_config) {
         MemoryLayoutConfig cfg;
         cfg.layer_num             = layer_num;
-        cfg.block_num             = cache_config.block_num;
+        cfg.block_num             = common_block_num;
         cfg.kv_block_stride_bytes = kv_block_stride_bytes;
         cfg.k_block_stride_bytes  = spec->k_block_size_bytes();
         cfg.v_block_stride_bytes  = spec->v_block_size_bytes();
