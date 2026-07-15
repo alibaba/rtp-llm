@@ -128,11 +128,7 @@ def plan_dash_sc_thinking(
         return DashScThinkPlan.disabled(ids, "empty_think_present_tail")
 
     if isinstance(max_new_think_tokens, int):
-        max_thinking_tokens = (
-            _DEFAULT_MAX_THINKING_TOKENS
-            if max_new_think_tokens < 0
-            else int(max_new_think_tokens)
-        )
+        max_thinking_tokens = int(max_new_think_tokens)
     else:
         max_thinking_tokens = int(default_max_thinking_tokens)
     bos_token_id = think_config.bos_token_id

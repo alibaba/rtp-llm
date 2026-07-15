@@ -550,6 +550,14 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertEqual(config.max_thinking_tokens, 10)
         self.assertTrue(config.in_think_mode)
 
+    def test_openai_negative_thinking_budget_is_preserved(self):
+        generate_env_config = GenerateEnvConfig()
+        request = ChatCompletionRequest(messages=[], thinking_budget=-1)
+
+        config = self._extract_openai_generation_config(request, generate_env_config)
+
+        self.assertEqual(config.max_thinking_tokens, -1)
+
     def test_openai_max_completion_tokens_respects_max_tokens_total_cap(self):
         generate_env_config = GenerateEnvConfig()
         generate_env_config.think_mode = 1

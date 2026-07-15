@@ -607,12 +607,11 @@ class SamplingParams:
         request_max_think = self.max_new_think_tokens
         if request_max_think is None and other is not None:
             request_max_think = other.max_new_think_tokens
-        if request_max_think is None:
-            max_thinking_tokens = _DEFAULT_MAX_THINKING_TOKENS
-        elif request_max_think < 0:
-            max_thinking_tokens = _DEFAULT_MAX_THINKING_TOKENS
-        else:
-            max_thinking_tokens = request_max_think
+        max_thinking_tokens = (
+            _DEFAULT_MAX_THINKING_TOKENS
+            if request_max_think is None
+            else request_max_think
+        )
         backend_max_new_tokens = self.max_new_tokens
         if (
             other is not None
@@ -1007,7 +1006,7 @@ def _append_dashllm_limit_parameters(
             getattr(generate_config, "max_new_tokens", 0) or 0
         )
         max_think = int(getattr(generate_config, "max_thinking_tokens", 0) or 0)
-        if max_think > 0:
+        if max_think != 0:
             infer.parameters["max_new_think_tokens"].int64_param = max_think
 
     stop_id = _first_int(eos_token_id)
