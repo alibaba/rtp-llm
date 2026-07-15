@@ -249,6 +249,12 @@ def h20_oss_suites():
                 smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --disable_flash_infer 1 --pdfusion_scheduler_mode ratio --decode_prefill_ratio 3",
                 gpu_type=["H20"],
             ),
+            smoke_test(
+                name="dense_prompt_scoring",
+                task_info="data/model/qwen25/q_r_prompt_scoring.json",
+                smoke_args="--act_type BF16 --warm_up 0",
+                gpu_type=["H20"],
+            ),
         ],
     )
 

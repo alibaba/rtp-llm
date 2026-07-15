@@ -1,4 +1,15 @@
 py_test(
+    name = "kv_cache_specs_test",
+    srcs = [
+        "kv_cache_specs_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
     name = "generate_config_test",
     srcs = [
         "generate_config_test.py",
@@ -109,6 +120,28 @@ py_test(
         "//rtp_llm:sdk",
     ],
     deps = [
+        "//rtp_llm:uvicorn",
+        "//rtp_llm:fastapi",
+        "//rtp_llm:psutil",
+        "//rtp_llm:tiktoken",
+        "//rtp_llm:testlib",
+    ],
+    imports = ["aios/kmonitor/python_client"],
+    tags = ["manual"],
+    timeout = 'eternal',
+)
+
+py_test(
+    name = "prompt_scoring_test",
+    srcs = [
+        "prompt_scoring_test.py",
+    ],
+    data = [
+        "//rtp_llm:sdk",
+        "//rtp_llm/test/prompt_scoring_data:testdata",
+    ],
+    deps = [
+        "//rtp_llm/test/utils:maga_server_manager",
         "//rtp_llm:uvicorn",
         "//rtp_llm:fastapi",
         "//rtp_llm:psutil",

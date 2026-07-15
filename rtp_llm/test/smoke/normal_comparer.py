@@ -1,14 +1,13 @@
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 from pydantic import BaseModel, ValidationError
 from smoke.base_comparer import BaseComparer
 from smoke.common_def import ABS_PATH, REL_PATH, QueryStatus, SmokeException
 from smoke.utils import create_temporary_copy, save_hidden_states, save_logits
-from typing import Any, Callable, Optional
 
 from rtp_llm.config.generate_config import GenerateConfig
 
@@ -46,6 +45,7 @@ class QueryInfo(BaseModel):
     def is_batch(self):
         return self.prompt_batch is not None
 
+
 class AuxInfo(BaseModel):
     input_len: Optional[int] = None
     prefix_len: Optional[int] = None
@@ -71,6 +71,16 @@ class AuxInfo(BaseModel):
     softmax_probs: Optional[List[float]] = None
 
 
+class PromptLogitsGolden(BaseModel):
+    start_pos: int = 0
+    end_pos: int = 0
+    topk_logprobs_head: Optional[List[List[float]]] = None
+    topk_token_ids_head: Optional[List[List[int]]] = None
+    topk_logprobs: Optional[List[List[float]]] = None
+    topk_token_ids: Optional[List[List[int]]] = None
+    target_logprobs: Optional[List[float]] = None
+
+
 class SmokeResponse(BaseModel):
     class Config:
         arbitrary_types_allowed = True
@@ -83,6 +93,7 @@ class SmokeResponse(BaseModel):
     input_ids: Optional[List[List[int]]] = None
     output_ids: Optional[List[List[int]]] = None
     aux_info: Optional[Union[AuxInfo, List[AuxInfo]]] = None
+    prompt_logprobs: Optional[PromptLogitsGolden] = None
 
     def __init__(
         self,
@@ -137,7 +148,7 @@ class NormalComparer(BaseComparer):
         query_info = QueryInfo(**query_json)
         self._rewrite_query(query_info)
         return query_info
-    
+
     def get_concurrency_batch(self, query_info: QueryInfo) -> int:
         if query_info.prompt_batch is not None:
             return len(query_info.prompt_batch)
@@ -268,12 +279,14 @@ class NormalComparer(BaseComparer):
             "",
         ]
         if exp_len != act_len:
-            lines.extend([
-                "  length:",
-                f"    expect: {exp_len}",
-                f"    actual:  {act_len}",
-                "",
-            ])
+            lines.extend(
+                [
+                    "  length:",
+                    f"    expect: {exp_len}",
+                    f"    actual:  {act_len}",
+                    "",
+                ]
+            )
         lines.append("  expect (full list):")
         for i, s in enumerate(expect_beams or []):
             lines.append(f"    [{i}] {repr(s)}")
@@ -286,8 +299,16 @@ class NormalComparer(BaseComparer):
         max_len = max(exp_len, act_len)
         any_diff = False
         for i in range(max_len):
-            exp = expect_beams[i] if expect_beams and i < len(expect_beams) else "<missing>"
-            act = actual_beams[i] if actual_beams and i < len(actual_beams) else "<missing>"
+            exp = (
+                expect_beams[i]
+                if expect_beams and i < len(expect_beams)
+                else "<missing>"
+            )
+            act = (
+                actual_beams[i]
+                if actual_beams and i < len(actual_beams)
+                else "<missing>"
+            )
             if exp != act:
                 any_diff = True
                 lines.append(f"    [{i}] expect: {repr(exp)}")
@@ -323,27 +344,43 @@ class NormalComparer(BaseComparer):
 
         # 普通字段直接比较
         for field in [
-            "input_len", "prefix_len", "reuse_len", "output_len", "iter_count",
-            "local_reuse_len", "remote_reuse_len", "memory_reuse_len",
-            "prefill_total_reuse_len", "prefill_local_reuse_len",
-            "prefill_remote_reuse_len", "prefill_memory_reuse_len",
-            "decode_total_reuse_len", "decode_local_reuse_len",
-            "decode_remote_reuse_len", "decode_memory_reuse_len",
+            "input_len",
+            "prefix_len",
+            "reuse_len",
+            "output_len",
+            "iter_count",
+            "local_reuse_len",
+            "remote_reuse_len",
+            "memory_reuse_len",
+            "prefill_total_reuse_len",
+            "prefill_local_reuse_len",
+            "prefill_remote_reuse_len",
+            "prefill_memory_reuse_len",
+            "decode_total_reuse_len",
+            "decode_local_reuse_len",
+            "decode_remote_reuse_len",
+            "decode_memory_reuse_len",
         ]:
             expect_val = getattr(expect_aux, field)
             actual_val = getattr(actual_aux, field)
             check_equal(field, expect_val, actual_val)
 
-        check_equal("beam_responses", expect_aux.beam_responses, actual_aux.beam_responses)
+        check_equal(
+            "beam_responses", expect_aux.beam_responses, actual_aux.beam_responses
+        )
 
         def is_close_list(a: Any, b: Any) -> bool:
             if a is None or b is None:
                 return a == b
             if len(a) != len(b):
                 return False
-            return bool(torch.all(torch.isclose(
-                torch.tensor(a), torch.tensor(b), rtol=1e-2, atol=1e-2
-            )))
+            return bool(
+                torch.all(
+                    torch.isclose(
+                        torch.tensor(a), torch.tensor(b), rtol=1e-2, atol=1e-2
+                    )
+                )
+            )
 
         check_equal(
             "softmax_probs",
@@ -370,7 +407,10 @@ class NormalComparer(BaseComparer):
 
         # response
         if expect.response != actual.response:
-            if expect.response_alternatives and actual.response in expect.response_alternatives:
+            if (
+                expect.response_alternatives
+                and actual.response in expect.response_alternatives
+            ):
                 logging.info(
                     f"[STABILITY_DIAG] Response matched alternative: "
                     f"primary=[{expect.response}] actual=[{actual.response}] "
@@ -386,7 +426,9 @@ class NormalComparer(BaseComparer):
                     exp_beams = getattr(expect.aux_info, "beam_responses", None)
                     act_beams = getattr(actual.aux_info, "beam_responses", None)
                     if exp_beams is not None or act_beams is not None:
-                        msg += "\n\n" + self._format_beam_responses_diff(exp_beams, act_beams)
+                        msg += "\n\n" + self._format_beam_responses_diff(
+                            exp_beams, act_beams
+                        )
                 diffs.append(msg)
 
         # loss
@@ -442,6 +484,77 @@ class NormalComparer(BaseComparer):
             diffs.append(
                 f"{prefix}input_ids:\n    expect: {expect.input_ids}\n    actual:  {actual.input_ids}"
             )
+
+        # prompt_logits
+        if expect.prompt_logprobs is not None and actual.prompt_logprobs is None:
+            diffs.append(f"{prefix}prompt_logits: expected but missing in actual")
+        elif expect.prompt_logprobs is not None and actual.prompt_logprobs is not None:
+            epl = expect.prompt_logprobs
+            apl = actual.prompt_logprobs
+            if epl.start_pos != apl.start_pos or epl.end_pos != apl.end_pos:
+                diffs.append(
+                    f"{prefix}prompt_logits range:\n"
+                    f"    expect: [{epl.start_pos}, {epl.end_pos})\n"
+                    f"    actual:  [{apl.start_pos}, {apl.end_pos})"
+                )
+            exp_ids_head = epl.topk_token_ids_head
+            exp_lp_head = epl.topk_logprobs_head
+            act_ids_head = apl.topk_token_ids_head
+            act_lp_head = apl.topk_logprobs_head
+            if (
+                act_ids_head is None
+                and apl.topk_token_ids is not None
+                and exp_ids_head is not None
+            ):
+                head_n = len(exp_ids_head)
+                act_ids_head = apl.topk_token_ids[:head_n]
+            if (
+                act_lp_head is None
+                and apl.topk_logprobs is not None
+                and exp_lp_head is not None
+            ):
+                head_n = len(exp_lp_head)
+                act_lp_head = apl.topk_logprobs[:head_n]
+            if exp_ids_head is not None and act_ids_head is not None:
+                # Only compare top-1 token id per position to avoid BF16 near-tie ordering flips
+                exp_top1 = [row[0] for row in exp_ids_head if row]
+                act_top1 = [row[0] for row in act_ids_head if row]
+                if exp_top1 != act_top1:
+                    diffs.append(
+                        f"{prefix}prompt_logits topk_token_ids top-1 mismatch:\n"
+                        f"    expect top1: {exp_top1}\n"
+                        f"    actual top1: {act_top1}"
+                    )
+            if exp_lp_head is not None:
+                if act_lp_head is None:
+                    diffs.append(
+                        f"{prefix}prompt_logits topk_logprobs_head: expected but missing in actual"
+                    )
+                else:
+                    cmp = torch.isclose(
+                        torch.tensor(exp_lp_head),
+                        torch.tensor(act_lp_head),
+                        rtol=rtol,
+                        atol=atol,
+                    )
+                    if not all(cmp.reshape(-1)):
+                        diffs.append(
+                            f"{prefix}prompt_logits topk_logprobs_head not close"
+                        )
+            if epl.target_logprobs is not None:
+                if apl.target_logprobs is None:
+                    diffs.append(
+                        f"{prefix}prompt_logits target_logprobs: expected but missing in actual"
+                    )
+                else:
+                    cmp = torch.isclose(
+                        torch.tensor(epl.target_logprobs),
+                        torch.tensor(apl.target_logprobs),
+                        rtol=rtol,
+                        atol=atol,
+                    )
+                    if not all(cmp.reshape(-1)):
+                        diffs.append(f"{prefix}prompt_logits target_logprobs not close")
 
         # aux_info: skip comparison when expected auxinfo is null
         if expect.aux_info is not None and actual.aux_info is not None:

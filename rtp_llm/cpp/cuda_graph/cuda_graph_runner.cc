@@ -163,15 +163,13 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
             if (!py_model_inputs_.combo_position_ids.defined()) {
                 RTP_LLM_LOG_WARNING("combo_position_ids not defined in graph but present in input, skipping copy");
             } else {
-                size_t copy_size = inputs.combo_position_ids.numel() * sizeof(int);
-                if (py_model_inputs_.combo_position_ids.numel() * sizeof(int) >= copy_size) {
-                    optimizedCopyAsync(inputs.combo_position_ids, py_model_inputs_.combo_position_ids, copy_size);
-                } else {
-                    RTP_LLM_LOG_WARNING(
-                        "combo_position_ids target tensor size (%zu) is smaller than needed (%zu), skipping copy",
-                        py_model_inputs_.combo_position_ids.numel() * sizeof(int),
-                        copy_size);
-                }
+                const size_t copy_size   = inputs.combo_position_ids.numel() * sizeof(int);
+                const size_t target_size = py_model_inputs_.combo_position_ids.numel() * sizeof(int);
+                RTP_LLM_CHECK_WITH_INFO(target_size >= copy_size,
+                                        "combo_position_ids target tensor size (%zu) is smaller than needed (%zu)",
+                                        target_size,
+                                        copy_size);
+                optimizedCopyAsync(inputs.combo_position_ids, py_model_inputs_.combo_position_ids, copy_size);
             }
         }
     } else {

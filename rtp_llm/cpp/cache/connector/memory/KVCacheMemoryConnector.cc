@@ -122,7 +122,7 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
         return nullptr;
     }
 
-    const auto& layer_block_ids = resource->layerBlocks();
+    const auto layer_block_ids = resource->layerBlocks();
     if (!checkLayerBlocks(layer_block_ids, cache_keys_size)) {
         RTP_LLM_LOG_WARNING("async match failed, invalid layer_block_ids, cache_keys_size=%zu", cache_keys_size);
         return nullptr;
@@ -200,7 +200,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
 
     autil::ScopedTime2 timer;
 
-    const auto& layer_block_ids = resource->layerBlocks();
+    const auto layer_block_ids = resource->layerBlocks();
     if (!checkLayerBlocks(layer_block_ids, cache_keys_size)) {
         reportReadMetrics(false, timer.done_us(), cache_keys_size, 0);
         return nullptr;
@@ -315,7 +315,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
 
     autil::ScopedTime2 timer;
 
-    const auto& layer_block_ids = resource->layerBlocks();
+    const auto layer_block_ids = resource->layerBlocks();
     if (!checkLayerBlocks(layer_block_ids, cache_keys_size)) {
         reportWriteMetrics(false, timer.done_us(), cache_keys_size, 0);
         return nullptr;
@@ -676,6 +676,10 @@ bool KVCacheMemoryConnector::checkLayerBlocks(const LayerBlockIds& layer_block_i
         return false;
     }
     for (const auto& blocks : layer_block_ids) {
+        if (blocks == nullptr) {
+            RTP_LLM_LOG_WARNING("check layer blocks failed, layer block ids contains null block ids");
+            return false;
+        }
         if (blocks->blocksNum() < required_len) {
             RTP_LLM_LOG_WARNING(
                 "check layer blocks failed, layer blocksNum is less than required_len, blocksNum: %zu, required_len: %zu",

@@ -794,6 +794,31 @@ def update_tokenizer_special_tokens(special_tokens, tokenizer: Any) -> None:
 # ============================================================================
 
 
+def apply_layer_num_override(model_config: ModelConfig, num_layers: int) -> None:
+    """Apply a debug layer-count reduction while preserving per-layer metadata."""
+    old_num_layers = model_config.num_layers
+    if num_layers <= 0 or num_layers > old_num_layers:
+        raise ValueError(
+            f"layer override must be in [1, {old_num_layers}], got {num_layers}"
+        )
+
+    hybrid_config = model_config.hybrid_attention_config
+    if hybrid_config.enable_hybrid_attention:
+        hybrid_attention_types = hybrid_config.hybrid_attention_types
+        if len(hybrid_attention_types) != old_num_layers:
+            raise ValueError(
+                "hybrid_attention_types size "
+                f"{len(hybrid_attention_types)} != num_layers {old_num_layers}"
+            )
+        hybrid_config.hybrid_attention_types = hybrid_attention_types[:num_layers]
+
+    model_config.moe_layer_index = [
+        layer_id for layer_id in model_config.moe_layer_index if layer_id < num_layers
+    ]
+    model_config.kv_cache_spec_descs = []
+    model_config.num_layers = num_layers
+
+
 def build_model_config(
     model_config: ModelConfig,  # ModelConfig instance to build
     model_args: Any,  # ModelArgs from py_env_configs
@@ -878,7 +903,7 @@ def build_model_config(
     hack_layer_num = profiling_debug_logging_config.hack_layer_num
     if hack_layer_num:
         logging.info(f"hack layernum to {hack_layer_num}")
-        model_config.num_layers = hack_layer_num
+        apply_layer_num_override(model_config, hack_layer_num)
 
     if model_args.enable_fp32_lm_head is not None:
         model_config.enable_fp32_lm_head = model_args.enable_fp32_lm_head
