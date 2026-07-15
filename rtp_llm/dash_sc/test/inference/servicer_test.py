@@ -435,7 +435,21 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             [1],
             struct.pack("<i", -1),
         )
-        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        _add_input_tensor(
+            req,
+            "max_new_tokens",
+            "INT32",
+            [1],
+            struct.pack("<i", 1),
+        )
+        out = GenerateOutput(
+            output_ids=torch.tensor([10, 128822, 271], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
         tok = _dsv4_tokenizer()
         env_cfg = _GenerateEnvCfg()
         servicer = DashScInferenceServicer(
@@ -447,13 +461,15 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         context = MagicMock()
         context.invocation_metadata.return_value = ()
 
-        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), context))
+        chunks = await _drain(servicer.ModelStreamInfer(_areq_iter([req]), context))
 
         self.assertEqual(visitor.enqueue_called, 1)
         gc = visitor.last_generate_input.generate_config
+        self.assertEqual(gc.max_new_tokens, 1)
         self.assertTrue(gc.in_think_mode)
         self.assertEqual(gc.max_thinking_tokens, -1)
         self.assertEqual(gc.end_think_token_ids, [128822, 271])
+        self.assertEqual(_gen_ids(chunks[0]), [10, 128822, 271])
 
     async def test_budget_zero_disables_thinking_even_if_add_thinking_params_fails(
         self,
