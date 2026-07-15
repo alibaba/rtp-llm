@@ -47,6 +47,7 @@ py_library(
     ],
     deps = [
         ":utils",
+        "//rtp_llm/metrics:metrics",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:moriep_wrapper",

@@ -9,7 +9,7 @@ timed region; benchmark-only attention helpers are not used here.
 import math
 import os
 import time
-from unittest import SkipTest, TestCase, main, skipIf
+from unittest import SkipTest, TestCase, main, mock, skipIf
 
 import torch
 import torch.nn.functional as F
@@ -38,6 +38,7 @@ SKIP_REASON = "requires an H20-class CUDA >= 12.9 worker with flash_mla"
 
 if CUDA_FLASHMLA_OK:
     from rtp_llm.config.model_config import ModelConfig
+    from rtp_llm.metrics import GaugeMetrics, kmonitor
     from rtp_llm.models_py.distributed.collective_torch import (
         destroy_distributed_environment,
         init_distributed_environment,
@@ -379,7 +380,10 @@ class TopologyKvCudaProductionBoundaryTest(TestCase):
         indexer.topology_kv_policy = "topology_only"
         torch.cuda.synchronize()
         policy_started = time.perf_counter()
-        policy_topk = indexer(hidden, q_lora, cache, params, inputs, False, None)
+        # The reporter spy observes production telemetry without replacing the
+        # real Indexer, ragged top-k, coordinate conversion, or sparse MLA path.
+        with mock.patch.object(kmonitor, "report") as metric_report:
+            policy_topk = indexer(hidden, q_lora, cache, params, inputs, False, None)
         policy_output = sparse_op.forward(q, kv, policy_topk)
         torch.cuda.synchronize()
         policy_ms = (time.perf_counter() - policy_started) * 1000.0
@@ -390,6 +394,14 @@ class TopologyKvCudaProductionBoundaryTest(TestCase):
         )
         self.assertFalse(torch.equal(baseline_topk[over_topk], policy_topk[over_topk]))
         self.assertTrue(torch.all((policy_topk >= 0).any(dim=1)).item())
+        reported_metrics = {call.args[0] for call in metric_report.call_args_list}
+        self.assertTrue(
+            {
+                GaugeMetrics.TOPOLOGY_KV_POLICY_SCHEDULE_MS_METRIC,
+                GaugeMetrics.TOPOLOGY_KV_POLICY_SELECTED_TOKENS_METRIC,
+                GaugeMetrics.TOPOLOGY_KV_POLICY_EVICTED_TOKENS_METRIC,
+            }.issubset(reported_metrics)
+        )
         self._assert_sparse_output_matches_reference(
             sparse_op, baseline_output, q, kv, baseline_topk
         )

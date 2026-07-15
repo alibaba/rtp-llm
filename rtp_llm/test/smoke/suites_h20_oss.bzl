@@ -8,6 +8,8 @@ def h20_oss_suites():
     native.test_suite(
         name = "smoke_h20_mla",
         tests = [
+            # Explicit production-boundary regression for the H20 merge gate.
+            "//rtp_llm/models_py/modules/hybrid/test:topology_kv_cuda_integration_test",
             smoke_test(
                 name="mla_fp8_redundant_expert_tp2",
                 task_info="data/model/deepseek_v2/q_r_3090_mla_r24.json",

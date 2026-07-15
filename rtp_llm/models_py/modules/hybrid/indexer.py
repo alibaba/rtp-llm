@@ -5,10 +5,12 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 from torch import nn
 
+from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.models_py.modules import IndexerOp, LayerNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.hybrid.topology_kv_policy import (
     TopologyKvPolicyConfig,
+    TopologyKvPolicyResult,
     apply_topology_kv_policy,
     normalize_topology_kv_policy,
 )
@@ -18,6 +20,7 @@ from rtp_llm.utils.model_weight import W
 
 _TOPOLOGY_KV_CUDA_SYNC_WARNING_EMITTED = False
 _TOPOLOGY_KV_BYPASS_WARNED_REASONS: set[str] = set()
+_TOPOLOGY_KV_FALLBACK_WARNED_REASONS: set[str] = set()
 
 
 def _topology_env_int(name: str, default: int) -> int:
@@ -237,6 +240,14 @@ class Indexer(nn.Module):
             topk_result.is_cuda
             and os.getenv("RTP_LLM_TOPOLOGY_KV_ALLOW_CUDA_SYNC") != "1"
         ):
+            kmonitor.report(
+                AccMetrics.TOPOLOGY_KV_POLICY_BYPASS_QPS_METRIC,
+                1,
+                {
+                    "policy": self.topology_kv_policy,
+                    "reason": "cuda_sync_disabled",
+                },
+            )
             global _TOPOLOGY_KV_CUDA_SYNC_WARNING_EMITTED
             if not _TOPOLOGY_KV_CUDA_SYNC_WARNING_EMITTED:
                 logging.warning(
@@ -269,8 +280,67 @@ class Indexer(nn.Module):
             stable_scaffold=self.topology_stable_scaffold,
             output_contract=self.topology_output_contract,
         )
-        if result.counters.policy_bypassed:
+        self._report_topology_kv_policy_result(
+            result,
+            coordinate_mismatch_action=config.coordinate_mismatch_action,
+        )
+        return result.topk_indices
+
+    def _report_topology_kv_policy_result(
+        self,
+        result: TopologyKvPolicyResult,
+        *,
+        coordinate_mismatch_action: str,
+    ) -> None:
+        """Report bounded-cardinality policy outcomes before returning only indices."""
+        counters = result.counters
+        policy_tags = {"policy": self.topology_kv_policy}
+        kmonitor.report(
+            GaugeMetrics.TOPOLOGY_KV_POLICY_SCHEDULE_MS_METRIC,
+            counters.schedule_ms,
+            policy_tags,
+        )
+        kmonitor.report(
+            GaugeMetrics.TOPOLOGY_KV_POLICY_SELECTED_TOKENS_METRIC,
+            counters.raw_selected_tokens,
+            policy_tags,
+        )
+        kmonitor.report(
+            GaugeMetrics.TOPOLOGY_KV_POLICY_EVICTED_TOKENS_METRIC,
+            counters.learned_evicted_tokens,
+            policy_tags,
+        )
+
+        if counters.coordinate_mismatch_fallbacks:
+            reason = "coordinate_mismatch"
+            fallback_tags = {
+                **policy_tags,
+                "reason": reason,
+                "action": coordinate_mismatch_action,
+            }
+            kmonitor.report(
+                AccMetrics.TOPOLOGY_KV_COORDINATE_FALLBACK_QPS_METRIC,
+                counters.coordinate_mismatch_fallbacks,
+                fallback_tags,
+            )
+            if reason not in _TOPOLOGY_KV_FALLBACK_WARNED_REASONS:
+                _TOPOLOGY_KV_FALLBACK_WARNED_REASONS.add(reason)
+                logging.warning(
+                    "Topology KV policy fallback (coordinate_mismatch): "
+                    "policy=%s, action=%s; returning the original top-k. "
+                    "Check row_starts/topk_indices_offset absolute-coordinate contract.",
+                    self.topology_kv_policy,
+                    coordinate_mismatch_action,
+                )
+
+        if counters.policy_bypassed:
             for reason in result.bypass_reasons or ("unknown_limit",):
+                bypass_tags = {**policy_tags, "reason": reason}
+                kmonitor.report(
+                    AccMetrics.TOPOLOGY_KV_POLICY_BYPASS_QPS_METRIC,
+                    counters.policy_bypassed,
+                    bypass_tags,
+                )
                 if reason in _TOPOLOGY_KV_BYPASS_WARNED_REASONS:
                     continue
                 # Claim the reason before logging so concurrent requests cannot
@@ -284,15 +354,14 @@ class Indexer(nn.Module):
                     "RTP_LLM_TOPOLOGY_MAX_TOPK_WIDTH=%d, "
                     "RTP_LLM_TOPOLOGY_MAX_TOPK_ELEMENTS=%d.",
                     self.topology_kv_policy,
-                    topk_result.size(0),
+                    result.topk_indices.size(0),
                     result.max_sequence_length,
-                    topk_result.size(1),
-                    topk_result.numel(),
+                    result.topk_indices.size(1),
+                    result.topk_indices.numel(),
                     self.topology_max_policy_tokens,
                     self.topology_max_topk_width,
                     self.topology_max_topk_elements,
                 )
-        return result.topk_indices
 
     def _compute_topk(
         self,

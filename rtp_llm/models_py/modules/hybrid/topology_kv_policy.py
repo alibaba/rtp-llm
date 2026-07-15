@@ -333,6 +333,7 @@ def _passthrough_result(
     policy_bypassed: int = 0,
     bypass_reasons: tuple[str, ...] = (),
     max_sequence_length: int = 0,
+    schedule_ms: float = 0.0,
 ) -> TopologyKvPolicyResult:
     counters = _zero_counters(topk_indices)
     counters = TopologyKvCounters(
@@ -344,7 +345,7 @@ def _passthrough_result(
         compression_hits=0,
         coordinate_mismatch_fallbacks=coordinate_mismatch_fallbacks,
         policy_bypassed=policy_bypassed,
-        schedule_ms=0.0,
+        schedule_ms=schedule_ms,
     )
     return TopologyKvPolicyResult(
         topk_indices,
@@ -410,6 +411,7 @@ def apply_topology_kv_policy(
             policy_bypassed=1,
             bypass_reasons=tuple(bypass_reasons),
             max_sequence_length=max_sequence_length,
+            schedule_ms=(time.perf_counter() - started) * 1000,
         )
 
     topk_cpu = topk_indices.detach().cpu()
@@ -463,7 +465,11 @@ def apply_topology_kv_policy(
         except ValueError:
             if config.coordinate_mismatch_action == "fallback_disabled":
                 return _passthrough_result(
-                    topk_indices, fingerprint, coordinate_mismatch_fallbacks=1
+                    topk_indices,
+                    fingerprint,
+                    coordinate_mismatch_fallbacks=1,
+                    max_sequence_length=max_sequence_length,
+                    schedule_ms=(time.perf_counter() - started) * 1000,
                 )
             raise
         row_result = _merge_row(

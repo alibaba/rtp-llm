@@ -8,24 +8,33 @@ from pathlib import Path
 
 import torch
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "rtp_llm"
-    / "models_py"
-    / "modules"
-    / "hybrid"
-    / "topology_kv_policy.py"
+    REPO_ROOT / "rtp_llm" / "models_py" / "modules" / "hybrid" / "topology_kv_policy.py"
 )
 INDEXER_PATH = MODULE_PATH.with_name("indexer.py")
 CUDA_INTEGRATION_PATH = (
     MODULE_PATH.parent / "test" / "topology_kv_cuda_integration_test.py"
 )
 HYBRID_TEST_BUILD_PATH = MODULE_PATH.parent / "test" / "BUILD"
+H20_SUITE_PATH = REPO_ROOT / "rtp_llm" / "test" / "smoke" / "suites_h20_oss.bzl"
+SMOKE_BUILD_PATH = REPO_ROOT / "rtp_llm" / "test" / "smoke" / "BUILD"
+MODELS_BUILD_PATH = REPO_ROOT / "rtp_llm" / "models_py" / "BUILD"
+METRICS_REPORTER_PATH = (
+    REPO_ROOT / "rtp_llm" / "metrics" / "kmonitor_metric_reporter.py"
+)
 
 spec = importlib.util.spec_from_file_location("topology_kv_policy", MODULE_PATH)
 topology_kv_policy = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(topology_kv_policy)
+
+metrics_spec = importlib.util.spec_from_file_location(
+    "topology_kv_metric_enums", METRICS_REPORTER_PATH
+)
+topology_kv_metric_enums = importlib.util.module_from_spec(metrics_spec)
+assert metrics_spec.loader is not None
+metrics_spec.loader.exec_module(topology_kv_metric_enums)
 
 TopologyKvPolicyConfig = topology_kv_policy.TopologyKvPolicyConfig
 apply_topology_kv_policy = topology_kv_policy.apply_topology_kv_policy
@@ -40,6 +49,7 @@ def _load_indexer_for_unit_test():
         "rtp_llm.models_py.modules.factory",
         "rtp_llm.models_py.modules.hybrid",
         "rtp_llm.models_py.modules.hybrid.topology_kv_policy",
+        "rtp_llm.metrics",
         "rtp_llm.ops",
         "rtp_llm.ops.compute_ops",
         "rtp_llm.utils",
@@ -58,6 +68,10 @@ def _load_indexer_for_unit_test():
     ops.ParallelismConfig = object
     compute_ops = types.ModuleType("rtp_llm.ops.compute_ops")
     compute_ops.KVCache = object
+    metrics = types.ModuleType("rtp_llm.metrics")
+    metrics.AccMetrics = topology_kv_metric_enums.AccMetrics
+    metrics.GaugeMetrics = topology_kv_metric_enums.GaugeMetrics
+    metrics.kmonitor = SimpleNamespace(report=lambda *args, **kwargs: None)
     model_weight = types.ModuleType("rtp_llm.utils.model_weight")
     model_weight.W = object
 
@@ -71,6 +85,7 @@ def _load_indexer_for_unit_test():
     sys.modules["rtp_llm.models_py.modules.hybrid.topology_kv_policy"] = (
         topology_kv_policy
     )
+    sys.modules["rtp_llm.metrics"] = metrics
     sys.modules["rtp_llm.ops"] = ops
     sys.modules["rtp_llm.ops.compute_ops"] = compute_ops
     sys.modules["rtp_llm.utils"] = types.ModuleType("rtp_llm.utils")
@@ -587,14 +602,23 @@ class TopologyKvPolicyTest(unittest.TestCase):
         indexer = _make_indexer(topk)
         indexer.topology_coordinate_mismatch_action = "FALLBACK_DISABLED"
 
-        result = indexer._apply_topology_kv_policy(
-            topk,
-            torch.tensor([8], dtype=torch.int32),
-            row_starts=torch.tensor([10], dtype=torch.int32),
-            topk_indices_offset=torch.tensor([100], dtype=torch.int32),
-        )
+        with mock.patch.object(indexer_module.logging, "warning"):
+            with mock.patch.object(indexer_module.kmonitor, "report") as report:
+                result = indexer._apply_topology_kv_policy(
+                    topk,
+                    torch.tensor([8], dtype=torch.int32),
+                    row_starts=torch.tensor([10], dtype=torch.int32),
+                    topk_indices_offset=torch.tensor([100], dtype=torch.int32),
+                )
 
         self.assertIs(result, topk)
+        fallback_call = next(
+            call
+            for call in report.call_args_list
+            if call.args[0]
+            is indexer_module.AccMetrics.TOPOLOGY_KV_COORDINATE_FALLBACK_QPS_METRIC
+        )
+        self.assertEqual(fallback_call.args[2]["action"], "fallback_disabled")
 
     def test_rejects_learned_topk_outside_absolute_contract(self):
         topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)
@@ -640,6 +664,7 @@ class TopologyKvPolicyTest(unittest.TestCase):
 
         self.assertIs(result.topk_indices, topk)
         self.assertEqual(result.counters.coordinate_mismatch_fallbacks, 1)
+        self.assertGreater(result.counters.schedule_ms, 0.0)
 
     def test_ragged_coordinates_use_topk_offset_not_row_start_plus_offset(self):
         topk = torch.tensor([[107, 106, 105, 104]], dtype=torch.int32)
@@ -784,9 +809,10 @@ class TopologyKvPolicyTest(unittest.TestCase):
         )
         attention_inputs = SimpleNamespace(is_prefill=True)
 
-        result = indexer._compute_topk(
-            None, None, None, fmha_params, attention_inputs, None
-        )
+        with mock.patch.object(indexer_module.logging, "warning"):
+            result = indexer._compute_topk(
+                None, None, None, fmha_params, attention_inputs, None
+            )
 
         self.assertIs(result, topk)
 
@@ -835,12 +861,23 @@ class TopologyKvPolicyTest(unittest.TestCase):
 
         with mock.patch.dict("os.environ", {}, clear=True):
             with mock.patch.object(indexer_module.logging, "warning") as warning:
-                first = indexer._apply_topology_kv_policy(topk, torch.tensor([8]))
-                second = indexer._apply_topology_kv_policy(topk, torch.tensor([8]))
+                with mock.patch.object(indexer_module.kmonitor, "report") as report:
+                    first = indexer._apply_topology_kv_policy(topk, torch.tensor([8]))
+                    second = indexer._apply_topology_kv_policy(topk, torch.tensor([8]))
 
         self.assertIs(first, topk)
         self.assertIs(second, topk)
         warning.assert_called_once()
+        bypass_calls = [
+            call
+            for call in report.call_args_list
+            if call.args[0]
+            is indexer_module.AccMetrics.TOPOLOGY_KV_POLICY_BYPASS_QPS_METRIC
+        ]
+        self.assertEqual(len(bypass_calls), 2)
+        self.assertTrue(
+            all(call.args[2]["reason"] == "cuda_sync_disabled" for call in bypass_calls)
+        )
 
     def test_indexer_warns_once_when_long_prefix_exceeds_policy_limit(self):
         topk = torch.arange(2048, dtype=torch.int32).view(1, -1)
@@ -861,6 +898,73 @@ class TopologyKvPolicyTest(unittest.TestCase):
         self.assertIn("sequence_length_limit", warning.call_args.args[0])
         self.assertIn("RTP_LLM_TOPOLOGY_MAX_POLICY_TOKENS", warning.call_args.args[0])
 
+    def test_indexer_reports_coordinate_fallback_from_production_compute_path(self):
+        topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)
+        indexer = _make_indexer(topk)
+        indexer_module._TOPOLOGY_KV_FALLBACK_WARNED_REASONS = set()
+        attention_inputs = SimpleNamespace(is_prefill=True)
+        fmha_params = SimpleNamespace(
+            expanded_seq_lens=torch.tensor([8], dtype=torch.int32),
+            ks=torch.tensor([10], dtype=torch.int32),
+            topk_indices_offset=torch.tensor([100], dtype=torch.int32),
+        )
+
+        with mock.patch.object(indexer_module.logging, "warning") as warning:
+            with mock.patch.object(indexer_module.kmonitor, "report") as report:
+                first = indexer._compute_topk(
+                    None, None, None, fmha_params, attention_inputs, None
+                )
+                second = indexer._compute_topk(
+                    None, None, None, fmha_params, attention_inputs, None
+                )
+
+        self.assertIs(first, topk)
+        self.assertIs(second, topk)
+        warning.assert_called_once()
+        self.assertIn("coordinate_mismatch", warning.call_args.args[0])
+        fallback_calls = [
+            call
+            for call in report.call_args_list
+            if call.args[0]
+            is indexer_module.AccMetrics.TOPOLOGY_KV_COORDINATE_FALLBACK_QPS_METRIC
+        ]
+        self.assertEqual(len(fallback_calls), 2)
+        self.assertTrue(all(call.args[1] == 1 for call in fallback_calls))
+        self.assertTrue(
+            all(
+                call.args[2]["reason"] == "coordinate_mismatch"
+                for call in fallback_calls
+            )
+        )
+
+    def test_indexer_reports_schedule_selection_and_eviction_counters(self):
+        topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)
+        indexer = _make_indexer(topk)
+
+        with mock.patch.object(indexer_module.kmonitor, "report") as report:
+            result = indexer._apply_topology_kv_policy(
+                topk, torch.tensor([8], dtype=torch.int32)
+            )
+
+        self.assertIsNot(result, topk)
+        reported = {call.args[0]: call.args[1] for call in report.call_args_list}
+        self.assertIn(
+            indexer_module.GaugeMetrics.TOPOLOGY_KV_POLICY_SCHEDULE_MS_METRIC,
+            reported,
+        )
+        self.assertGreaterEqual(
+            reported[indexer_module.GaugeMetrics.TOPOLOGY_KV_POLICY_SCHEDULE_MS_METRIC],
+            0.0,
+        )
+        self.assertIn(
+            indexer_module.GaugeMetrics.TOPOLOGY_KV_POLICY_SELECTED_TOKENS_METRIC,
+            reported,
+        )
+        self.assertIn(
+            indexer_module.GaugeMetrics.TOPOLOGY_KV_POLICY_EVICTED_TOKENS_METRIC,
+            reported,
+        )
+
     def test_indexer_has_disabled_by_default_topology_kv_gate(self):
         source = INDEXER_PATH.read_text(encoding="utf-8")
 
@@ -877,6 +981,7 @@ class TopologyKvPolicyTest(unittest.TestCase):
             "SparseMlaImpl",
             "SparseMlaCpImpl",
             "RTP_LLM_TOPOLOGY_KV_ALLOW_CUDA_SYNC",
+            "TOPOLOGY_KV_POLICY_SCHEDULE_MS_METRIC",
         ):
             with self.subTest(production_symbol=production_symbol):
                 self.assertIn(production_symbol, source)
@@ -884,7 +989,24 @@ class TopologyKvPolicyTest(unittest.TestCase):
         build = HYBRID_TEST_BUILD_PATH.read_text(encoding="utf-8")
         self.assertIn('name = "topology_kv_cuda_integration_test"', build)
         self.assertIn('"topology_kv_cuda_integration_test.py"', build)
-        self.assertIn('tags = ["open_skip", "H20"]', build)
+        target_block = build.split(
+            'name = "topology_kv_cuda_integration_test"', maxsplit=1
+        )[1].split("\n)", maxsplit=1)[0]
+        self.assertIn('tags = ["H20"]', target_block)
+        self.assertNotIn("open_skip", target_block)
+        self.assertIn('visibility = ["//rtp_llm/test/smoke:__pkg__"]', target_block)
+        suite = H20_SUITE_PATH.read_text(encoding="utf-8")
+        self.assertIn(
+            '"//rtp_llm/models_py/modules/hybrid/test:topology_kv_cuda_integration_test"',
+            suite,
+        )
+        smoke_build = SMOKE_BUILD_PATH.read_text(encoding="utf-8")
+        merge_suite = smoke_build.split('name = "maga_model_smoke"', maxsplit=1)[
+            1
+        ].split("\n)", maxsplit=1)[0]
+        self.assertIn('":smoke_h20_mla"', merge_suite)
+        models_build = MODELS_BUILD_PATH.read_text(encoding="utf-8")
+        self.assertIn('"//rtp_llm/metrics:metrics"', models_build)
 
     def test_indexer_topology_env_int_reports_bad_value(self):
         with mock.patch.dict("os.environ", {"RTP_LLM_TOPOLOGY_SINK_BLOCKS": "true"}):

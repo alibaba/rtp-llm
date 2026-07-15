@@ -36,6 +36,12 @@ class AccMetrics(Enum):
     VIT_RPC_SERVER_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_server_error_qps"
     VIT_RPC_PROXY_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_proxy_error_qps"
 
+    # topology KV policy
+    TOPOLOGY_KV_COORDINATE_FALLBACK_QPS_METRIC = (
+        "py_rtp_topology_kv_coordinate_fallback_qps"
+    )
+    TOPOLOGY_KV_POLICY_BYPASS_QPS_METRIC = "py_rtp_topology_kv_policy_bypass_qps"
+
 
 class GaugeMetrics(Enum):
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
@@ -86,6 +92,15 @@ class GaugeMetrics(Enum):
     VIT_IMAGE_RESIZE_RT_US_METRIC = "rtp_llm_vit_image_resize_rt_us"
     VIT_IMAGE_PROCESSOR_RT_US_METRIC = "rtp_llm_vit_image_processor_rt_us"
     VIT_RESIZED_PIXEL_COUNT_METRIC = "rtp_llm_vit_resized_pixel_count"
+
+    # topology KV policy
+    TOPOLOGY_KV_POLICY_SCHEDULE_MS_METRIC = "py_rtp_topology_kv_policy_schedule_ms"
+    TOPOLOGY_KV_POLICY_SELECTED_TOKENS_METRIC = (
+        "py_rtp_topology_kv_policy_selected_tokens"
+    )
+    TOPOLOGY_KV_POLICY_EVICTED_TOKENS_METRIC = (
+        "py_rtp_topology_kv_policy_evicted_tokens"
+    )
 
 
 class MetricReporter(object):
