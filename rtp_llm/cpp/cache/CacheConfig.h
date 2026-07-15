@@ -33,18 +33,18 @@ struct LayerBase {
 };
 
 struct CacheConfig {
-    std::vector<GroupBase>          groups;
-    std::vector<LayerBase>          layers;
+    std::vector<GroupBase>               groups;
+    std::vector<LayerBase>               layers;
     std::unordered_map<std::string, int> tag_to_gid;
 
     // Cache specification and layer mapping are owned by groups/layers above.
-    std::vector<int>               layer_to_block_stride_bytes;
-    std::vector<size_t>            group_seq_size_per_block;
-    bool                           group_block_layout_initialized          = false;
-    bool                           use_independent_block_pools              = false;
-    bool                           use_typed_cache_regions                  = false;
-    bool                           use_opaque_kv_cache_store                = false;
-    bool                           disable_decode_first_malloc_device_reuse = false;
+    std::vector<int>    layer_to_block_stride_bytes;
+    std::vector<size_t> group_seq_size_per_block;
+    bool                group_block_layout_initialized           = false;
+    bool                use_independent_block_pools              = false;
+    bool                use_typed_cache_regions                  = false;
+    bool                use_opaque_kv_cache_store                = false;
+    bool                disable_decode_first_malloc_device_reuse = false;
 
     // Model configuration
     rtp_llm::DataType dtype;
@@ -68,9 +68,9 @@ struct CacheConfig {
 
     // Block sizing information
     // ---- Per-block sizes (all layers) ----
-    size_t kv_block_size_bytes  = 0;
-    size_t kv_scale_size_bytes  = 0;
-    size_t block_size_bytes     = 0;  // (kv + scales together)
+    size_t kv_block_size_bytes = 0;
+    size_t kv_scale_size_bytes = 0;
+    size_t block_size_bytes    = 0;  // (kv + scales together)
 
     // ---- Per-block strides (one layer) ----
     size_t kv_block_stride_bytes = 0;
@@ -82,8 +82,8 @@ struct CacheConfig {
     size_t explicitly_sized_pool_reserve_bytes = 0;
 
     // Attention-specific configuration
-    int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
-    int group_layer_num  = 1;  // Number of layers per group for hybrid attention
+    int linear_step     = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
+    int group_layer_num = 1;  // Number of layers per group for hybrid attention
 
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
@@ -95,14 +95,22 @@ struct CacheConfig {
     }
 
     const KVCacheSpecPtr& specForGroup(size_t gid) const {
-        RTP_LLM_CHECK_WITH_INFO(gid < groups.size(), "CacheConfig::specForGroup invalid gid=%zu size=%zu", gid, groups.size());
+        RTP_LLM_CHECK_WITH_INFO(
+            gid < groups.size(), "CacheConfig::specForGroup invalid gid=%zu size=%zu", gid, groups.size());
         RTP_LLM_CHECK_WITH_INFO(groups[gid].spec != nullptr, "CacheConfig::specForGroup null spec gid=%zu", gid);
         return groups[gid].spec;
     }
 
     CacheGroupType typeForGroup(size_t gid) const {
-        RTP_LLM_CHECK_WITH_INFO(gid < groups.size(), "CacheConfig::typeForGroup invalid gid=%zu size=%zu", gid, groups.size());
+        RTP_LLM_CHECK_WITH_INFO(
+            gid < groups.size(), "CacheConfig::typeForGroup invalid gid=%zu size=%zu", gid, groups.size());
         return groups[gid].policy.group_type;
+    }
+
+    int slidingWindowForGroup(size_t gid) const {
+        RTP_LLM_CHECK_WITH_INFO(
+            gid < groups.size(), "CacheConfig::slidingWindowForGroup invalid gid=%zu size=%zu", gid, groups.size());
+        return groups[gid].policy.sliding_window_size;
     }
 
     const std::string& tagForGroup(size_t gid) const {
@@ -116,7 +124,8 @@ struct CacheConfig {
     }
 
     const std::vector<int>& layerIdsForGroup(size_t gid) const {
-        RTP_LLM_CHECK_WITH_INFO(gid < groups.size(), "CacheConfig::layerIdsForGroup invalid gid=%zu size=%zu", gid, groups.size());
+        RTP_LLM_CHECK_WITH_INFO(
+            gid < groups.size(), "CacheConfig::layerIdsForGroup invalid gid=%zu size=%zu", gid, groups.size());
         return groups[gid].layer_ids;
     }
 
@@ -212,7 +221,8 @@ struct CacheConfig {
     }
 
     uint32_t blockNumForGroup(size_t gid) const {
-        RTP_LLM_CHECK_WITH_INFO(gid < groups.size(), "CacheConfig::blockNumForGroup invalid gid=%zu size=%zu", gid, groups.size());
+        RTP_LLM_CHECK_WITH_INFO(
+            gid < groups.size(), "CacheConfig::blockNumForGroup invalid gid=%zu size=%zu", gid, groups.size());
         if (group_block_layout_initialized && groups[gid].block_num > 0) {
             return groups[gid].block_num;
         }
@@ -220,7 +230,10 @@ struct CacheConfig {
     }
 
     size_t kvBlockStrideBytesForGroup(size_t gid) const {
-        RTP_LLM_CHECK_WITH_INFO(gid < groups.size(), "CacheConfig::kvBlockStrideBytesForGroup invalid gid=%zu size=%zu", gid, groups.size());
+        RTP_LLM_CHECK_WITH_INFO(gid < groups.size(),
+                                "CacheConfig::kvBlockStrideBytesForGroup invalid gid=%zu size=%zu",
+                                gid,
+                                groups.size());
         if (group_block_layout_initialized) {
             return groups[gid].kv_block_stride_bytes;
         }
@@ -228,7 +241,10 @@ struct CacheConfig {
     }
 
     size_t kvScaleStrideBytesForGroup(size_t gid) const {
-        RTP_LLM_CHECK_WITH_INFO(gid < groups.size(), "CacheConfig::kvScaleStrideBytesForGroup invalid gid=%zu size=%zu", gid, groups.size());
+        RTP_LLM_CHECK_WITH_INFO(gid < groups.size(),
+                                "CacheConfig::kvScaleStrideBytesForGroup invalid gid=%zu size=%zu",
+                                gid,
+                                groups.size());
         if (group_block_layout_initialized) {
             return groups[gid].kv_scale_stride_bytes;
         }
@@ -278,10 +294,8 @@ struct CacheConfig {
     }
 
     void setLayerIdsForGroup(size_t gid, const std::vector<int>& layer_ids) {
-        RTP_LLM_CHECK_WITH_INFO(gid < groups.size(),
-                                "CacheConfig::setLayerIdsForGroup invalid gid=%zu size=%zu",
-                                gid,
-                                groups.size());
+        RTP_LLM_CHECK_WITH_INFO(
+            gid < groups.size(), "CacheConfig::setLayerIdsForGroup invalid gid=%zu size=%zu", gid, groups.size());
         groups[gid].layer_ids = layer_ids;
         if (groups[gid].spec != nullptr) {
             groups[gid].spec->layers = layer_ids;
@@ -289,10 +303,8 @@ struct CacheConfig {
     }
 
     void appendLayerToGroup(size_t gid, int layer_id, const std::string& tag) {
-        RTP_LLM_CHECK_WITH_INFO(gid < groups.size(),
-                                "CacheConfig::appendLayerToGroup invalid gid=%zu size=%zu",
-                                gid,
-                                groups.size());
+        RTP_LLM_CHECK_WITH_INFO(
+            gid < groups.size(), "CacheConfig::appendLayerToGroup invalid gid=%zu size=%zu", gid, groups.size());
         RTP_LLM_CHECK_WITH_INFO(layer_id >= 0, "CacheConfig::appendLayerToGroup invalid layer_id=%d", layer_id);
         const auto layer = static_cast<size_t>(layer_id);
         if (layer >= layers.size()) {
@@ -317,9 +329,8 @@ struct CacheConfig {
         return 0;
     }
 
-    std::shared_ptr<CacheConfig> mergeMTPModule(const CacheConfig& propose_config,
-                                                int                module_index,
-                                                uint32_t           main_layer_num) {
+    std::shared_ptr<CacheConfig>
+    mergeMTPModule(const CacheConfig& propose_config, int module_index, uint32_t main_layer_num) {
         RTP_LLM_CHECK_WITH_INFO(!groups.empty(), "CacheConfig::mergeMTPModule requires destination topology views");
         RTP_LLM_CHECK_WITH_INFO(!propose_config.groups.empty(),
                                 "CacheConfig::mergeMTPModule requires propose topology views");
@@ -342,7 +353,7 @@ struct CacheConfig {
         // block tables by gid without a draft-local remap.  Therefore the sub-config
         // keeps every target group in first-seen order. Groups not used by the propose
         // model are placeholders with an empty layer list.
-        const auto target_group_num = static_cast<size_t>(groupNums());
+        const auto                              target_group_num = static_cast<size_t>(groupNums());
         std::unordered_map<std::string, size_t> propose_gid_by_tag;
         for (size_t gid = 0; gid < static_cast<size_t>(propose_config.groupNums()); ++gid) {
             propose_gid_by_tag.emplace(propose_config.tagForGroup(gid), gid);
@@ -355,12 +366,12 @@ struct CacheConfig {
         sub_group_seq_size_per_block.reserve(target_group_num);
 
         for (size_t target_gid = 0; target_gid < target_group_num; ++target_gid) {
-            const auto& tag = tagForGroup(target_gid);
-            const auto  propose_it = propose_gid_by_tag.find(tag);
-            const bool  has_propose_group = propose_it != propose_gid_by_tag.end();
-            const size_t source_gid = has_propose_group ? propose_it->second : target_gid;
-            const auto&  source_config = has_propose_group ? propose_config : *this;
-            const auto&  source_group  = source_config.groups[source_gid];
+            const auto&  tag               = tagForGroup(target_gid);
+            const auto   propose_it        = propose_gid_by_tag.find(tag);
+            const bool   has_propose_group = propose_it != propose_gid_by_tag.end();
+            const size_t source_gid        = has_propose_group ? propose_it->second : target_gid;
+            const auto&  source_config     = has_propose_group ? propose_config : *this;
+            const auto&  source_group      = source_config.groups[source_gid];
 
             GroupBase sub_group;
             sub_group.spec                  = source_group.spec->clone();
@@ -376,7 +387,7 @@ struct CacheConfig {
                     }
                     const auto global_layer_id = static_cast<int>(main_layer_num)
                                                  + module_index * static_cast<int>(mtp_layer_num) + local_layer_id;
-                    const auto global_layer    = static_cast<size_t>(global_layer_id);
+                    const auto global_layer = static_cast<size_t>(global_layer_id);
 
                     sub_group.layer_ids.push_back(global_layer_id);
                     auto& sub_layer = sub_layers[static_cast<size_t>(local_layer_id)];
@@ -407,8 +418,8 @@ struct CacheConfig {
                                     layer_id);
         }
 
-        sub_cfg->groups                         = std::move(sub_groups);
-        sub_cfg->layers                         = std::move(sub_layers);
+        sub_cfg->groups = std::move(sub_groups);
+        sub_cfg->layers = std::move(sub_layers);
         sub_cfg->tag_to_gid.clear();
         for (size_t gid = 0; gid < sub_cfg->groups.size(); ++gid) {
             sub_cfg->tag_to_gid.emplace(sub_cfg->groups[gid].spec->tag, static_cast<int>(gid));
@@ -427,7 +438,8 @@ struct CacheConfig {
     }
 
     CacheGroupPolicy policyForGroup(size_t gid) const {
-        RTP_LLM_CHECK_WITH_INFO(gid < groups.size(), "CacheConfig::policyForGroup invalid gid=%zu size=%zu", gid, groups.size());
+        RTP_LLM_CHECK_WITH_INFO(
+            gid < groups.size(), "CacheConfig::policyForGroup invalid gid=%zu size=%zu", gid, groups.size());
         return groups[gid].policy;
     }
 
@@ -489,12 +501,10 @@ struct CacheConfig {
                && lhs.reserve_from_paged_budget == rhs.reserve_from_paged_budget
                && lhs.prefix_reusable == rhs.prefix_reusable
                && lhs.uses_pinned_cpu_backing == rhs.uses_pinned_cpu_backing
-               && lhs.is_cp_shardable == rhs.is_cp_shardable
-               && lhs.has_sparse_slots == rhs.has_sparse_slots
+               && lhs.is_cp_shardable == rhs.is_cp_shardable && lhs.has_sparse_slots == rhs.has_sparse_slots
                && lhs.has_kernel_block_subdiv == rhs.has_kernel_block_subdiv
-               && lhs.cp_compact_tail_blocks == rhs.cp_compact_tail_blocks
-               && lhs.is_reservable == rhs.is_reservable
-               && lhs.group_type == rhs.group_type;
+               && lhs.cp_compact_tail_blocks == rhs.cp_compact_tail_blocks && lhs.is_reservable == rhs.is_reservable
+               && lhs.group_type == rhs.group_type && lhs.sliding_window_size == rhs.sliding_window_size;
     }
 
     void setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers) {
@@ -509,16 +519,15 @@ struct CacheConfig {
         for (size_t gid = 0; gid < new_groups.size(); ++gid) {
             auto& group = new_groups[gid];
             RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "CacheConfig::setTopology got null spec at group %zu", gid);
-            RTP_LLM_CHECK_WITH_INFO(!group.spec->tag.empty(),
-                                    "CacheConfig::setTopology requires non-empty tag for group %zu",
-                                    gid);
+            RTP_LLM_CHECK_WITH_INFO(
+                !group.spec->tag.empty(), "CacheConfig::setTopology requires non-empty tag for group %zu", gid);
             new_tag_to_gid.emplace(group.spec->tag, static_cast<int>(gid));
             group.spec         = group.spec->clone();
             group.spec->layers = group.layer_ids;
         }
 
-        std::vector<std::vector<bool>> group_has_layer(
-            new_groups.size(), std::vector<bool>(static_cast<size_t>(layer_num), false));
+        std::vector<std::vector<bool>> group_has_layer(new_groups.size(),
+                                                       std::vector<bool>(static_cast<size_t>(layer_num), false));
         for (size_t gid = 0; gid < new_groups.size(); ++gid) {
             for (int layer_id : new_groups[gid].layer_ids) {
                 RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < new_layers.size(),
@@ -537,9 +546,8 @@ struct CacheConfig {
 
         for (size_t layer_id = 0; layer_id < new_layers.size(); ++layer_id) {
             auto& layer = new_layers[layer_id];
-            RTP_LLM_CHECK_WITH_INFO(!layer.group_ids.empty(),
-                                    "CacheConfig::setTopology missing group mapping for layer %zu",
-                                    layer_id);
+            RTP_LLM_CHECK_WITH_INFO(
+                !layer.group_ids.empty(), "CacheConfig::setTopology missing group mapping for layer %zu", layer_id);
             std::map<int, bool> seen_gids;
             for (int gid : layer.group_ids) {
                 RTP_LLM_CHECK_WITH_INFO(gid >= 0 && static_cast<size_t>(gid) < new_groups.size(),
@@ -583,7 +591,7 @@ struct CacheConfig {
         group_block_layout_initialized = false;
     }
 
-    void fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&    specs,
+    void fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
                           const std::vector<std::vector<int>>& layers_by_group,
                           const std::vector<CacheGroupType>&   types,
                           const std::vector<std::string>&      tags = {}) {
@@ -614,9 +622,8 @@ struct CacheConfig {
             if (tag.empty() && group_num == 1) {
                 tag = "default";
             }
-            RTP_LLM_CHECK_WITH_INFO(!tag.empty(),
-                                    "CacheConfig::fromGroupedSpecs requires non-empty tag for cache spec %zu",
-                                    gid);
+            RTP_LLM_CHECK_WITH_INFO(
+                !tag.empty(), "CacheConfig::fromGroupedSpecs requires non-empty tag for cache spec %zu", gid);
             auto stored_spec = spec->clone();
             stored_spec->tag = tag;
 
@@ -658,7 +665,7 @@ struct CacheConfig {
         for (size_t gid = 0; gid < groups.size(); ++gid) {
             const auto explicit_independent_blocks = explicitIndependentBlocks(gid);
             const auto rule_blocks = explicit_independent_blocks > 0 ? explicit_independent_blocks : global_block_num;
-            groups[gid].block_num = rule_blocks;
+            groups[gid].block_num  = rule_blocks;
 
             // Explicit independent pools are allocated outside the paged pool budget.
             if (explicit_independent_blocks > 0) {
@@ -706,10 +713,10 @@ struct CacheConfig {
         OUTPUT_FIELD(kv_scale_stride_bytes);
         os << "\n";
 
-        const auto group_policies      = groupPoliciesSnapshot();
-        const auto group_block_nums    = groupBlockNumsSnapshot();
-        const auto group_layer_ids     = layerGroupIdsSnapshot();
-        const auto group_tags          = groupTagsSnapshot();
+        const auto                    group_policies   = groupPoliciesSnapshot();
+        const auto                    group_block_nums = groupBlockNumsSnapshot();
+        const auto                    group_layer_ids  = layerGroupIdsSnapshot();
+        const auto                    group_tags       = groupTagsSnapshot();
         std::vector<std::vector<int>> layers_by_group;
         layers_by_group.reserve(groups.size());
         for (const auto& group : groups) {
@@ -721,14 +728,17 @@ struct CacheConfig {
         OUTPUT_FIELD(linear_step);
         OUTPUT_FIELD(group_layer_num);
         OUTPUT_FIELD_EXPR("full_group_num",
-                          std::count_if(group_policies.begin(), group_policies.end(),
-                                        [](const CacheGroupPolicy& p) { return p.group_type == CacheGroupType::FULL; }));
+                          std::count_if(group_policies.begin(), group_policies.end(), [](const CacheGroupPolicy& p) {
+                              return p.group_type == CacheGroupType::FULL;
+                          }));
         OUTPUT_FIELD_EXPR("linear_group_num",
-                          std::count_if(group_policies.begin(), group_policies.end(),
-                                        [](const CacheGroupPolicy& p) { return p.group_type == CacheGroupType::LINEAR; }));
+                          std::count_if(group_policies.begin(), group_policies.end(), [](const CacheGroupPolicy& p) {
+                              return p.group_type == CacheGroupType::LINEAR;
+                          }));
         OUTPUT_FIELD_EXPR("swa_group_num",
-                          std::count_if(group_policies.begin(), group_policies.end(),
-                                        [](const CacheGroupPolicy& p) { return p.group_type == CacheGroupType::SWA; }));
+                          std::count_if(group_policies.begin(), group_policies.end(), [](const CacheGroupPolicy& p) {
+                              return p.group_type == CacheGroupType::SWA;
+                          }));
         OUTPUT_FIELD(use_independent_block_pools);
         OUTPUT_FIELD(use_typed_cache_regions);
         OUTPUT_FIELD(use_opaque_kv_cache_store);

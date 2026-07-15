@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <limits>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "rtp_llm/cpp/utils/StringUtil.h"
 
@@ -23,7 +25,7 @@ namespace {
 
 // Create a ComponentGroup based on CacheGroupType.
 ComponentGroupPtr
-createComponentGroup(int group_id, CacheGroupType type, int seq_size_per_block, const SWAGroupConfig& swa_configs) {
+createComponentGroup(int group_id, CacheGroupType type, int seq_size_per_block, int sliding_window_size) {
     ComponentGroupPtr group;
 
     switch (type) {
@@ -32,11 +34,6 @@ createComponentGroup(int group_id, CacheGroupType type, int seq_size_per_block, 
             break;
         }
         case CacheGroupType::SWA: {
-            int  sliding_window_size = 0;
-            auto it                  = swa_configs.find(group_id);
-            if (it != swa_configs.end()) {
-                sliding_window_size = it->second;
-            }
             RTP_LLM_CHECK_WITH_INFO(
                 sliding_window_size >= 0, "SWA sliding_window_size must be non-negative, got %d", sliding_window_size);
             RTP_LLM_CHECK_WITH_INFO(
@@ -57,31 +54,33 @@ createComponentGroup(int group_id, CacheGroupType type, int seq_size_per_block, 
     return group;
 }
 
-// Create the single-pool DeviceKVCacheGroup for one component group. Mirrors the group
+// Create the single-pool DeviceKVCacheGroup for one per-tag cache group. Mirrors the group
 // construction previously done in the allocators' doInit(): derives layer_ids / spec /
-// policy from cache_config and wraps exactly one device pool.
+// policy from cache_config (indexed by the per-tag gid) and wraps exactly one device pool.
+// The per-tag gid is retained as the DeviceKVCacheGroup's own group id because allocators
+// address blocks by per-tag gid.
 DeviceKVCacheGroupPtr
-createDeviceKVCacheGroup(int type, int gid, const CacheConfig& cache_config, DeviceBlockPoolPtr device_pool) {
-    const auto ids    = cache_config.layerIdsForGroup(static_cast<size_t>(gid));
-    auto       spec   = cache_config.specForGroup(static_cast<size_t>(gid));
-    const auto policy = cache_config.policyForGroup(static_cast<size_t>(gid));
+createDeviceKVCacheGroup(int type, int tag_gid, const CacheConfig& cache_config, DeviceBlockPoolPtr device_pool) {
+    const auto ids    = cache_config.layerIdsForGroup(static_cast<size_t>(tag_gid));
+    auto       spec   = cache_config.specForGroup(static_cast<size_t>(tag_gid));
+    const auto policy = cache_config.policyForGroup(static_cast<size_t>(tag_gid));
 
     DeviceKVCacheGroupPtr group;
     switch (static_cast<CacheGroupType>(type)) {
         case CacheGroupType::LINEAR:
             group = std::make_shared<DeviceLinearKVCacheGroup>(
-                ids, spec, device_pool, gid, cache_config.linear_step, nullptr, policy);
+                ids, spec, device_pool, tag_gid, cache_config.linear_step, nullptr, policy);
             break;
         case CacheGroupType::SWA:
             group = std::make_shared<DeviceSWAKVCacheGroup>(
-                ids, spec, device_pool, gid, cache_config.linear_step, nullptr, policy);
+                ids, spec, device_pool, tag_gid, cache_config.linear_step, nullptr, policy);
             break;
         case CacheGroupType::FULL:
         default:
-            group = std::make_shared<DeviceFullKVCacheGroup>(ids, spec, device_pool, gid, nullptr, policy);
+            group = std::make_shared<DeviceFullKVCacheGroup>(ids, spec, device_pool, tag_gid, nullptr, policy);
             break;
     }
-    RTP_LLM_CHECK_WITH_INFO(group->init(), "Failed to initialize DeviceKVCacheGroup (gid %d)", gid);
+    RTP_LLM_CHECK_WITH_INFO(group->init(), "Failed to initialize DeviceKVCacheGroup (tag_gid %d)", tag_gid);
     return group;
 }
 
@@ -104,14 +103,15 @@ int checkedTransferTimeoutMs(int64_t timeout_ms, const char* config_name) {
 // Create v4 HostBlockPool for L2 memory cache.
 // usable_block_count is the number of blocks usable by the tree (excluding the
 // reserved block 0); physical_block_count is usable_block_count + 1.
-std::shared_ptr<HostBlockPool> createHostPool(size_t payload_bytes, size_t usable_block_count) {
+std::shared_ptr<HostBlockPool>
+createHostPool(const std::string& pool_name, size_t payload_bytes, size_t usable_block_count) {
     if (payload_bytes == 0 || usable_block_count == 0) {
         return nullptr;
     }
 
     auto config                  = std::make_shared<HostBlockPoolConfig>();
     config->pool_type            = BlockPoolType::HOST;
-    config->pool_name            = "block_tree_host";
+    config->pool_name            = pool_name;
     config->physical_block_count = usable_block_count + 1;
     config->payload_bytes        = payload_bytes;
     config->stride_bytes         = alignUp(payload_bytes, kBlockTreeCachePoolAlignment);
@@ -120,17 +120,19 @@ std::shared_ptr<HostBlockPool> createHostPool(size_t payload_bytes, size_t usabl
 
     auto pool = std::make_shared<HostBlockPool>(config);
     if (!pool->init()) {
-        RTP_LLM_LOG_ERROR("Failed to initialize HostBlockPool for BlockTreeCache");
+        RTP_LLM_LOG_ERROR("Failed to initialize HostBlockPool %s for BlockTreeCache", pool_name.c_str());
         return nullptr;
     }
     return pool;
 }
 
 // Create v4 DiskBlockPool for L3 disk cache.
-// physical_block_count is derived inside DiskBlockPool::normalizeConfig from
-// disk_size_bytes / stride_bytes, so it is not set here.
+// disk_size_bytes bounds the pool; DiskBlockPool::normalizeConfig derives the physical
+// block_count from disk_size_bytes / stride_bytes.
 std::shared_ptr<DiskBlockPool> createDiskPool(const KVCacheConfig& kv_cache_config,
+                                              const std::string&   pool_name,
                                               size_t               payload_bytes,
+                                              size_t               disk_size_bytes,
                                               int64_t              world_rank,
                                               int64_t              local_rank,
                                               int64_t              local_world_size) {
@@ -143,22 +145,79 @@ std::shared_ptr<DiskBlockPool> createDiskPool(const KVCacheConfig& kv_cache_conf
 
     auto config             = std::make_shared<DiskBlockPoolConfig>();
     config->pool_type       = BlockPoolType::DISK;
-    config->pool_name       = "block_tree_disk";
+    config->pool_name       = pool_name;
     config->work_dir        = mount_path;
     config->manage_mount    = true;
     config->local_rank      = local_rank;
     config->world_rank      = world_rank;
-    config->disk_size_bytes = static_cast<size_t>(kv_cache_config.memory_cache_disk_size_mb) * 1024UL * 1024UL;
+    config->disk_size_bytes = disk_size_bytes;
     config->payload_bytes   = payload_bytes;
     config->stride_bytes    = alignUp(payload_bytes, kBlockTreeCachePoolAlignment);
     config->buffered_io     = kv_cache_config.memory_cache_disk_buffered_io;
 
     auto pool = std::make_shared<DiskBlockPool>(config);
     if (!pool->init()) {
-        RTP_LLM_LOG_ERROR("Failed to initialize DiskBlockPool for BlockTreeCache");
+        RTP_LLM_LOG_ERROR("Failed to initialize DiskBlockPool %s for BlockTreeCache", pool_name.c_str());
         return nullptr;
     }
     return pool;
+}
+
+// Per-group_type aggregation plan. component_group_id space is per-group_type (compact,
+// first-seen order over REUSABLE tags); the per-tag pool/component space stays per-tag.
+struct AggregationPlan {
+    std::vector<CacheGroupType>   cg_types;            // indexed by component_group_id
+    std::vector<std::vector<int>> cg_member_tags;      // component_group_id -> per-tag gids (local pool order)
+    std::vector<int>              per_tag_cg;          // per-tag gid -> component_group_id (-1 = NON_REUSABLE)
+    std::vector<int>              per_tag_local_pool;  // per-tag gid -> local pool index (-1 = NON_REUSABLE)
+};
+
+// Aggregate REUSABLE per-tag groups by group_type. NON_REUSABLE tags (skip_prefix_reuse)
+// are excluded from the tree/eviction model but still get their own DeviceKVCacheGroup for
+// device allocation (mapped as per_tag_cg = -1). Asserts that all members of one
+// group_type share the same group_seq_size_per_block.
+AggregationPlan buildAggregationPlan(const CacheConfig& cache_config) {
+    const int       group_num = cache_config.groupNums();
+    AggregationPlan plan;
+    plan.per_tag_cg.assign(static_cast<size_t>(group_num), -1);
+    plan.per_tag_local_pool.assign(static_cast<size_t>(group_num), -1);
+
+    auto seqSizeForTag = [&](int gid) -> size_t {
+        if (static_cast<size_t>(gid) < cache_config.group_seq_size_per_block.size()
+            && cache_config.group_seq_size_per_block[static_cast<size_t>(gid)] > 0) {
+            return cache_config.group_seq_size_per_block[static_cast<size_t>(gid)];
+        }
+        return cache_config.seq_size_per_block;
+    };
+
+    std::unordered_map<int, int> type_to_cg;
+    for (int gid = 0; gid < group_num; ++gid) {
+        const auto policy = cache_config.policyForGroup(static_cast<size_t>(gid));
+        if (policy.reuse_policy == CacheReusePolicy::NON_REUSABLE) {
+            continue;  // excluded from the aggregated tree model
+        }
+        const int type_key = static_cast<int>(policy.group_type);
+        auto      it       = type_to_cg.find(type_key);
+        int       cg_id;
+        if (it == type_to_cg.end()) {
+            cg_id                = static_cast<int>(plan.cg_types.size());
+            type_to_cg[type_key] = cg_id;
+            plan.cg_types.push_back(policy.group_type);
+            plan.cg_member_tags.emplace_back();
+        } else {
+            cg_id = it->second;
+            RTP_LLM_CHECK_WITH_INFO(
+                seqSizeForTag(gid) == seqSizeForTag(plan.cg_member_tags[cg_id].front()),
+                "group_type %d aggregates tags with inconsistent group_seq_size_per_block (%zu vs %zu)",
+                type_key,
+                seqSizeForTag(gid),
+                seqSizeForTag(plan.cg_member_tags[cg_id].front()));
+        }
+        plan.per_tag_cg[static_cast<size_t>(gid)]         = cg_id;
+        plan.per_tag_local_pool[static_cast<size_t>(gid)] = static_cast<int>(plan.cg_member_tags[cg_id].size());
+        plan.cg_member_tags[cg_id].push_back(gid);
+    }
+    return plan;
 }
 
 }  // namespace
@@ -196,105 +255,171 @@ std::string resolveDiskMountPath(const std::string& disk_paths_csv, int64_t loca
 BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       cache_config,
                                        const KVCacheConfig&                     kv_cache_config,
                                        const std::shared_ptr<KVCacheAllocator>& allocator,
-                                       int64_t                                  world_rank,
-                                       int64_t                                  local_rank,
-                                       int64_t                                  local_world_size,
-                                       const SWAGroupConfig&                    swa_configs,
+                                       const ParallelismConfig&                 parallelism_config,
                                        std::shared_ptr<StorageBackend>          storage_backend,
                                        std::shared_ptr<BroadcastManager>        broadcast_manager) {
     const int group_num = cache_config.groupNums();
     RTP_LLM_CHECK_WITH_INFO(group_num > 0, "cache_config must have at least one group");
 
-    // 1. Create BlockTree with proper group_slot_count.
-    auto tree = std::make_unique<BlockTree>(group_num);
+    // 1. Aggregate per-tag groups by group_type (REUSABLE only). component_group_id is
+    // per-group_type; the per-tag pool/component space is preserved for the allocator.
+    const AggregationPlan plan   = buildAggregationPlan(cache_config);
+    const int             cg_num = static_cast<int>(plan.cg_types.size());
+    RTP_LLM_CHECK_WITH_INFO(cg_num > 0, "cache_config produced no reusable component groups");
 
-    // 2. Create ComponentGroup for each group.
+    // 2. Create BlockTree sized by the aggregated component group count.
+    auto tree = std::make_unique<BlockTree>(cg_num);
+
+    // 3. Create one ComponentGroup per aggregated group_type.
     std::vector<ComponentGroupPtr> component_groups;
-    component_groups.reserve(static_cast<size_t>(group_num));
-
-    for (int gid = 0; gid < group_num; ++gid) {
-        const auto type               = cache_config.typeForGroup(static_cast<size_t>(gid));
+    component_groups.reserve(static_cast<size_t>(cg_num));
+    for (int cg_id = 0; cg_id < cg_num; ++cg_id) {
+        const auto type               = plan.cg_types[static_cast<size_t>(cg_id)];
+        const int  first_tag          = plan.cg_member_tags[static_cast<size_t>(cg_id)].front();
         int        seq_size_per_block = static_cast<int>(cache_config.seq_size_per_block);
-        // Use group-specific seq_size_per_block if available.
-        if (static_cast<size_t>(gid) < cache_config.group_seq_size_per_block.size()
-            && cache_config.group_seq_size_per_block[gid] > 0) {
-            seq_size_per_block = static_cast<int>(cache_config.group_seq_size_per_block[gid]);
+        if (static_cast<size_t>(first_tag) < cache_config.group_seq_size_per_block.size()
+            && cache_config.group_seq_size_per_block[static_cast<size_t>(first_tag)] > 0) {
+            seq_size_per_block =
+                static_cast<int>(cache_config.group_seq_size_per_block[static_cast<size_t>(first_tag)]);
         }
-
-        auto group = createComponentGroup(gid, type, seq_size_per_block, swa_configs);
-        component_groups.push_back(std::move(group));
+        const int sliding_window_size =
+            (type == CacheGroupType::SWA) ? cache_config.slidingWindowForGroup(static_cast<size_t>(first_tag)) : 0;
+        component_groups.push_back(createComponentGroup(cg_id, type, seq_size_per_block, sliding_window_size));
     }
 
-    // 3. Create Components (empty for now; will be populated when CopyEngine needs them).
-    std::vector<Component> components;
-
-    // Block payload size (raw KV bytes per block); stride is page-aligned inside the pools.
-    const size_t payload_bytes = cache_config.kv_block_size_bytes;
-
-    // 4. Compute Host pool block count and create pool if memory cache enabled.
-    std::shared_ptr<HostBlockPool> host_pool = nullptr;
-    if (kv_cache_config.enable_memory_cache && kv_cache_config.memory_cache_size_mb > 0 && payload_bytes > 0) {
-        // usable_block_count = memory_cache_size_bytes / stride_bytes - 1: the reserved
-        // block 0 is counted within the configured budget so backing never exceeds it.
-        const size_t stride_bytes            = alignUp(payload_bytes, kBlockTreeCachePoolAlignment);
-        const size_t memory_cache_size_bytes = static_cast<size_t>(kv_cache_config.memory_cache_size_mb) * 1024 * 1024;
-        const size_t usable_block_count      = computeHostUsableBlockCount(memory_cache_size_bytes, stride_bytes);
-        RTP_LLM_CHECK_WITH_INFO(usable_block_count > 0,
-                                "L2 memory cache enabled but memory_cache_size_mb=%ld is too small for block "
-                                "stride=%zu bytes (need at least 2 blocks including the reserved block 0)",
-                                kv_cache_config.memory_cache_size_mb,
-                                stride_bytes);
-        host_pool = createHostPool(payload_bytes, usable_block_count);
-    }
-
-    // 5. Create DiskBlockPool if disk cache enabled.
-    std::shared_ptr<DiskBlockPool> disk_pool = nullptr;
-    if (kv_cache_config.enable_memory_cache_disk && kv_cache_config.memory_cache_disk_size_mb > 0) {
-        disk_pool = createDiskPool(kv_cache_config, payload_bytes, world_rank, local_rank, local_world_size);
-    }
-
-    // 6. Set host_pool and disk_pool on each ComponentGroup.
-    for (auto& group : component_groups) {
-        group->setHostPool(host_pool);
-        group->setDiskPool(disk_pool);
-    }
-
-    // 6b. Inject allocator-owned device (GPU) block pools into each ComponentGroup.
-    // Independent multi-pool allocators expose per-group pools via groupBlockPools(); the
-    // single-pool allocators expose one pool via getDeviceBlockPool().
+    // 4. Resolve the per-tag device pools from the allocator.
+    std::vector<DeviceBlockPoolPtr> per_tag_pools(static_cast<size_t>(group_num));
     if (allocator) {
         const auto& group_pools = allocator->groupBlockPools();
-        if (!group_pools.empty()) {
-            for (auto& group : component_groups) {
-                group->setDevicePools(group_pools);
-            }
-        } else if (auto device_pool = allocator->getDeviceBlockPool()) {
-            for (auto& group : component_groups) {
-                group->setDevicePools(std::vector<DeviceBlockPoolPtr>{device_pool});
-            }
-        }
-
-        // 6c. Build the single-pool DeviceKVCacheGroup for each component group. Each group
-        // wraps its own device pool: multi-pool allocators map gid -> group_pools[gid];
-        // single-pool allocators share getDeviceBlockPool().
         for (int gid = 0; gid < group_num; ++gid) {
-            DeviceBlockPoolPtr device_pool;
             if (!group_pools.empty()) {
-                device_pool =
+                per_tag_pools[static_cast<size_t>(gid)] =
                     static_cast<size_t>(gid) < group_pools.size() ? group_pools[static_cast<size_t>(gid)] : nullptr;
             } else {
-                device_pool = allocator->getDeviceBlockPool();
+                per_tag_pools[static_cast<size_t>(gid)] = allocator->getDeviceBlockPool();
             }
-            if (!device_pool) {
-                continue;
-            }
-            const auto type = cache_config.typeForGroup(static_cast<size_t>(gid));
-            auto       dkv  = createDeviceKVCacheGroup(static_cast<int>(type), gid, cache_config, device_pool);
-            component_groups[static_cast<size_t>(gid)]->setDeviceKVGroups({dkv});
         }
     }
 
-    // 7. Build BlockTreeCacheConfig.
+    // 5. Build the global Component vector, per-tag DeviceKVCacheGroup registry, per-tag
+    // mapping, and inject device pools / kv groups / component_indices / host_block_size
+    // into each aggregated ComponentGroup.
+    std::vector<Component>                     components;
+    std::vector<DeviceKVCacheGroupPtr>         per_tag_device_groups(static_cast<size_t>(group_num));
+    std::vector<BlockTreeCache::PerTagMapping> per_tag_mapping(static_cast<size_t>(group_num));
+    std::vector<size_t>                        cg_host_block_size(static_cast<size_t>(cg_num), 0);
+
+    for (int cg_id = 0; cg_id < cg_num; ++cg_id) {
+        const auto&                        member_tags = plan.cg_member_tags[static_cast<size_t>(cg_id)];
+        const auto                         type        = plan.cg_types[static_cast<size_t>(cg_id)];
+        std::vector<DeviceBlockPoolPtr>    cg_pools;
+        std::vector<DeviceKVCacheGroupPtr> cg_dkvs;
+        std::vector<int>                   comp_indices;
+        size_t                             host_block_size = 0;
+
+        for (size_t local = 0; local < member_tags.size(); ++local) {
+            const int  tag_gid = member_tags[local];
+            const auto pool    = per_tag_pools[static_cast<size_t>(tag_gid)];
+            cg_pools.push_back(pool);
+
+            // Component descriptor (one per REUSABLE tag): host packing layout is one slot
+            // per layer, each slot sized by that tag's per-layer device stride.
+            Component comp;
+            comp.component_id       = static_cast<int>(components.size());
+            comp.component_group_id = cg_id;
+            comp.type               = type;
+            comp.device_pool_index  = static_cast<int>(local);
+            const size_t stride     = cache_config.kvBlockStrideBytesForGroup(static_cast<size_t>(tag_gid))
+                                  + cache_config.kvScaleStrideBytesForGroup(static_cast<size_t>(tag_gid));
+            const auto& tag = cache_config.tagForGroup(static_cast<size_t>(tag_gid));
+            for (int layer_id : cache_config.layerIdsForGroup(static_cast<size_t>(tag_gid))) {
+                comp.memory_block_layer_tag_slots.push_back(MemoryBlockLayerTagSlot{layer_id, tag, stride});
+                host_block_size += stride;
+            }
+            comp_indices.push_back(comp.component_id);
+            components.push_back(std::move(comp));
+
+            // Per-tag DeviceKVCacheGroup (wraps this pool; keeps the per-tag gid as its id).
+            DeviceKVCacheGroupPtr dkv =
+                pool ? createDeviceKVCacheGroup(static_cast<int>(type), tag_gid, cache_config, pool) : nullptr;
+            cg_dkvs.push_back(dkv);
+            per_tag_device_groups[static_cast<size_t>(tag_gid)] = dkv;
+            per_tag_mapping[static_cast<size_t>(tag_gid)]       = {cg_id, static_cast<int>(local)};
+        }
+
+        component_groups[static_cast<size_t>(cg_id)]->setDevicePools(cg_pools);
+        component_groups[static_cast<size_t>(cg_id)]->setDeviceKVGroups(cg_dkvs);
+        component_groups[static_cast<size_t>(cg_id)]->component_indices = comp_indices;
+        component_groups[static_cast<size_t>(cg_id)]->host_block_size   = host_block_size;
+        cg_host_block_size[static_cast<size_t>(cg_id)]                  = host_block_size;
+    }
+
+    // 5b. NON_REUSABLE tags are not part of any ComponentGroup but still need a
+    // DeviceKVCacheGroup so the allocator can allocate/query them by per-tag gid.
+    for (int gid = 0; gid < group_num; ++gid) {
+        if (plan.per_tag_cg[static_cast<size_t>(gid)] >= 0) {
+            continue;
+        }
+        const auto pool = per_tag_pools[static_cast<size_t>(gid)];
+        if (pool) {
+            const auto type = cache_config.typeForGroup(static_cast<size_t>(gid));
+            per_tag_device_groups[static_cast<size_t>(gid)] =
+                createDeviceKVCacheGroup(static_cast<int>(type), gid, cache_config, pool);
+        }
+        per_tag_mapping[static_cast<size_t>(gid)] = {-1, -1};
+    }
+
+    // 6. Create per-ComponentGroup Host pools (L2). All groups share a unified usable block
+    // count N so a host-resident tree node occupies one block in every group's pool:
+    // N = memory_cache_size_bytes / Sum(alignUp(host_block_size_g)) - 1 (reserved block 0).
+    if (kv_cache_config.enable_memory_cache && kv_cache_config.memory_cache_size_mb > 0) {
+        size_t sum_aligned = 0;
+        for (int cg_id = 0; cg_id < cg_num; ++cg_id) {
+            sum_aligned += alignUp(cg_host_block_size[static_cast<size_t>(cg_id)], kBlockTreeCachePoolAlignment);
+        }
+        const size_t memory_cache_size_bytes = static_cast<size_t>(kv_cache_config.memory_cache_size_mb) * 1024 * 1024;
+        const size_t usable_block_count      = computeHostUsableBlockCount(memory_cache_size_bytes, sum_aligned);
+        RTP_LLM_CHECK_WITH_INFO(usable_block_count > 0,
+                                "L2 memory cache enabled but memory_cache_size_mb=%ld is too small for the "
+                                "aggregated host block stride sum=%zu bytes (need at least 2 blocks including the "
+                                "reserved block 0)",
+                                kv_cache_config.memory_cache_size_mb,
+                                sum_aligned);
+        for (int cg_id = 0; cg_id < cg_num; ++cg_id) {
+            const size_t payload = cg_host_block_size[static_cast<size_t>(cg_id)];
+            auto host_pool = createHostPool("block_tree_host_g" + std::to_string(cg_id), payload, usable_block_count);
+            component_groups[static_cast<size_t>(cg_id)]->setHostPool(host_pool);
+        }
+    }
+
+    // 7. Create per-ComponentGroup Disk pools (L3) with the same unified usable count.
+    if (kv_cache_config.enable_memory_cache_disk && kv_cache_config.memory_cache_disk_size_mb > 0) {
+        size_t sum_aligned = 0;
+        for (int cg_id = 0; cg_id < cg_num; ++cg_id) {
+            sum_aligned += alignUp(cg_host_block_size[static_cast<size_t>(cg_id)], kBlockTreeCachePoolAlignment);
+        }
+        const size_t disk_size_bytes = static_cast<size_t>(kv_cache_config.memory_cache_disk_size_mb) * 1024UL * 1024UL;
+        const size_t usable_block_count =
+            sum_aligned > 0 ? computeHostUsableBlockCount(disk_size_bytes, sum_aligned) : 0;
+        for (int cg_id = 0; cg_id < cg_num; ++cg_id) {
+            const size_t payload = cg_host_block_size[static_cast<size_t>(cg_id)];
+            if (payload == 0 || usable_block_count == 0) {
+                continue;
+            }
+            // Bound each pool to N usable blocks (+1 reserved) at its own aligned stride.
+            const size_t pool_disk_bytes = (usable_block_count + 1) * alignUp(payload, kBlockTreeCachePoolAlignment);
+            auto         disk_pool       = createDiskPool(kv_cache_config,
+                                            "block_tree_disk_g" + std::to_string(cg_id),
+                                            payload,
+                                            pool_disk_bytes,
+                                            parallelism_config.world_rank,
+                                            parallelism_config.local_rank,
+                                            parallelism_config.local_world_size);
+            component_groups[static_cast<size_t>(cg_id)]->setDiskPool(disk_pool);
+        }
+    }
+
+    // 8. Build BlockTreeCacheConfig.
     BlockTreeCacheConfig config;
     config.enable_device_cache = kv_cache_config.enable_device_cache;
     config.enable_memory_cache = kv_cache_config.enable_memory_cache;
@@ -309,19 +434,20 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         config.memory_cache_disk_sync_timeout_ms = config.memory_cache_sync_timeout_ms;
     }
 
-    // 8. Assemble and return BlockTreeCache.
+    // 9. Assemble and return BlockTreeCache with the per-tag <-> component_group mapping.
     auto cache = std::make_shared<BlockTreeCache>(std::move(tree),
                                                   std::move(component_groups),
                                                   std::move(components),
                                                   std::move(config),
                                                   storage_backend,
-                                                  broadcast_manager);
+                                                  broadcast_manager,
+                                                  std::move(per_tag_device_groups),
+                                                  std::move(per_tag_mapping));
 
-    RTP_LLM_LOG_INFO("Created BlockTreeCache: groups=%d, host_pool=%s, disk_pool=%s, "
+    RTP_LLM_LOG_INFO("Created BlockTreeCache: per_tag_groups=%d, component_groups=%d, "
                      "device=%d, memory=%d, disk=%d, remote=%d",
                      group_num,
-                     host_pool ? "enabled" : "disabled",
-                     disk_pool ? "enabled" : "disabled",
+                     cg_num,
                      kv_cache_config.enable_device_cache,
                      kv_cache_config.enable_memory_cache,
                      kv_cache_config.enable_memory_cache_disk,

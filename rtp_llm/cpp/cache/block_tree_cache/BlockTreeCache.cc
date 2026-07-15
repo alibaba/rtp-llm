@@ -48,16 +48,21 @@ private:
 
 }  // anonymous namespace
 
-BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>        tree,
-                               std::vector<ComponentGroupPtr>    component_groups,
-                               std::vector<Component>            components,
-                               BlockTreeCacheConfig              config,
-                               std::shared_ptr<StorageBackend>   storage_backend,
-                               std::shared_ptr<BroadcastManager> broadcast_manager):
+BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>         tree,
+                               std::vector<ComponentGroupPtr>     component_groups,
+                               std::vector<Component>             components,
+                               BlockTreeCacheConfig               config,
+                               std::shared_ptr<StorageBackend>    storage_backend,
+                               std::shared_ptr<BroadcastManager>  broadcast_manager,
+                               std::vector<DeviceKVCacheGroupPtr> per_tag_device_groups,
+                               std::vector<PerTagMapping>         per_tag_mapping):
     config_(std::move(config)),
     tree_(std::move(tree)),
     component_groups_(std::move(component_groups)),
     components_(std::move(components)),
+    per_tag_device_groups_(std::move(per_tag_device_groups)),
+    per_tag_mapping_(std::move(per_tag_mapping)),
+    aggregated_(!per_tag_mapping_.empty()),
     copy_engine_(std::make_shared<CopyEngine>(component_groups_, components_)),
     storage_backend_(std::move(storage_backend)),
     broadcast_manager_(std::move(broadcast_manager)),
@@ -98,14 +103,25 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>        tree,
     }
     // Wire this cache into each owned DeviceKVCacheGroup so ensureFreeBlocks() can call
     // back into evictForGroup() for cross-group device eviction via std::function callback.
-    for (const auto& g : component_groups_) {
-        if (!g) {
-            continue;
+    // In aggregated mode the per-tag registry (which also covers NON_REUSABLE tags) is the
+    // full set of device groups; in legacy mode they live under each ComponentGroup.
+    auto wireEviction = [this](const DeviceKVCacheGroupPtr& dkv) {
+        if (dkv) {
+            dkv->setEvictionCallback(
+                [this](int group_id, size_t num_blocks) { return evictForGroup(group_id, num_blocks); });
         }
-        for (const auto& dkv : g->deviceKVGroups()) {
-            if (dkv) {
-                dkv->setEvictionCallback(
-                    [this](int group_id, size_t num_blocks) { return evictForGroup(group_id, num_blocks); });
+    };
+    if (aggregated_) {
+        for (const auto& dkv : per_tag_device_groups_) {
+            wireEviction(dkv);
+        }
+    } else {
+        for (const auto& g : component_groups_) {
+            if (!g) {
+                continue;
+            }
+            for (const auto& dkv : g->deviceKVGroups()) {
+                wireEviction(dkv);
             }
         }
     }
@@ -269,21 +285,45 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
         }
     }
 
-    // Collect per-group device block indices for ALL component groups. Whole-sequence
-    // consumers (allocators) pick reuse blocks per group from result.group_block_indices;
-    // result.block_indices above keeps the FULL aggregate for the load_back path.
-    for (const auto& group : component_groups_) {
-        const auto gid     = static_cast<size_t>(group->component_group_id);
-        auto&      indices = result.group_block_indices[group->component_group_id];
-        for (size_t i = 0; i < valid_matched_block_count; ++i) {
-            TreeNode* node = find_result.path[i];
-            if (gid >= node->group_slots.size()) {
+    // Collect per-group device block indices. Whole-sequence consumers (allocators) pick
+    // reuse blocks from result.group_block_indices; result.block_indices above keeps the
+    // FULL aggregate for the load_back path. In aggregated mode the map is keyed by per-tag
+    // gid (the allocator's id space) and each entry pulls the tag's local device pool from
+    // its component group's slots; in legacy mode it is keyed by component_group_id.
+    if (aggregated_) {
+        for (size_t tag_gid = 0; tag_gid < per_tag_mapping_.size(); ++tag_gid) {
+            const auto m = per_tag_mapping_[tag_gid];
+            if (m.component_group_id < 0) {
                 continue;
             }
-            auto& slot = node->group_slots[gid];
-            for (auto block : slot.device_blocks) {
-                if (block != NULL_BLOCK_IDX) {
-                    indices.push_back(block);
+            const auto cg      = static_cast<size_t>(m.component_group_id);
+            const auto local   = static_cast<size_t>(m.local_pool_index);
+            auto&      indices = result.group_block_indices[static_cast<int>(tag_gid)];
+            for (size_t i = 0; i < valid_matched_block_count; ++i) {
+                TreeNode* node = find_result.path[i];
+                if (cg >= node->group_slots.size()) {
+                    continue;
+                }
+                const auto& db = node->group_slots[cg].device_blocks;
+                if (local < db.size() && db[local] != NULL_BLOCK_IDX) {
+                    indices.push_back(db[local]);
+                }
+            }
+        }
+    } else {
+        for (const auto& group : component_groups_) {
+            const auto gid     = static_cast<size_t>(group->component_group_id);
+            auto&      indices = result.group_block_indices[group->component_group_id];
+            for (size_t i = 0; i < valid_matched_block_count; ++i) {
+                TreeNode* node = find_result.path[i];
+                if (gid >= node->group_slots.size()) {
+                    continue;
+                }
+                auto& slot = node->group_slots[gid];
+                for (auto block : slot.device_blocks) {
+                    if (block != NULL_BLOCK_IDX) {
+                        indices.push_back(block);
+                    }
                 }
             }
         }
@@ -336,7 +376,42 @@ void BlockTreeCache::insert(TreeNode*                                  parent,
         return;
     }
 
-    auto      result = tree_->insertNode(parent, cache_keys, slots);
+    // Aggregated mode: the caller supplies slots indexed by per-tag gid (one device block
+    // per tag). Translate them into per-ComponentGroup slots whose device_blocks are indexed
+    // by the group's local device pool index before handing them to the tree.
+    std::vector<std::vector<GroupSlot>>        translated;
+    const std::vector<std::vector<GroupSlot>>* effective_slots = &slots;
+    if (aggregated_) {
+        const size_t num_cg = component_groups_.size();
+        translated.assign(cache_keys.size(), std::vector<GroupSlot>(num_cg));
+        for (size_t i = 0; i < cache_keys.size(); ++i) {
+            for (size_t cg = 0; cg < num_cg; ++cg) {
+                const size_t pools = component_groups_[cg] ? component_groups_[cg]->devicePools().size() : 0;
+                translated[i][cg].device_blocks.assign(pools, NULL_BLOCK_IDX);
+            }
+            if (i >= slots.size()) {
+                continue;
+            }
+            const auto& per_tag = slots[i];
+            for (size_t tag_gid = 0; tag_gid < per_tag.size() && tag_gid < per_tag_mapping_.size(); ++tag_gid) {
+                const auto m = per_tag_mapping_[tag_gid];
+                if (m.component_group_id < 0) {
+                    continue;
+                }
+                const auto& src = per_tag[tag_gid].device_blocks;
+                if (src.empty() || isNullBlockIdx(src.front())) {
+                    continue;
+                }
+                auto& dst = translated[i][static_cast<size_t>(m.component_group_id)].device_blocks;
+                if (static_cast<size_t>(m.local_pool_index) < dst.size()) {
+                    dst[static_cast<size_t>(m.local_pool_index)] = src.front();
+                }
+            }
+        }
+        effective_slots = &translated;
+    }
+
+    auto      result = tree_->insertNode(parent, cache_keys, *effective_slots);
     TreeNode* leaf   = result.leaf;
 
     // incRef cache-hold on new nodes' device blocks (balanced by releaseBlocks on
@@ -427,7 +502,11 @@ int BlockTreeCache::reclaimBlocks(size_t num_blocks, Tier tier) {
 
 size_t BlockTreeCache::evictableBlocksNum(int component_group_id) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto                  gid = static_cast<size_t>(component_group_id);
+    const int                   resolved = resolveComponentGroupId(component_group_id);
+    if (resolved < 0) {
+        return 0;
+    }
+    const auto gid = static_cast<size_t>(resolved);
     if (gid >= component_groups_.size()) {
         return 0;
     }
@@ -453,7 +532,11 @@ int BlockTreeCache::evictForGroup(int component_group_id, size_t num_blocks) {
     if (!config_.isTierEnabled(Tier::DEVICE)) {
         return 0;
     }
-    const auto gid = static_cast<size_t>(component_group_id);
+    const int resolved = resolveComponentGroupId(component_group_id);
+    if (resolved < 0) {
+        return 0;
+    }
+    const auto gid = static_cast<size_t>(resolved);
     if (gid >= component_groups_.size()) {
         return 0;
     }

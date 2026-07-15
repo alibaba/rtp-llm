@@ -203,15 +203,8 @@ bool KVCacheManager::init() {
     // It depends on the device pools produced by allocator_->init(), so it must be
     // built after init(); the allocator (and its owned groups) then receives the
     // BlockTreeCache pointer via setBlockTreeCache for all match/insert/evict calls.
-    block_tree_cache_ = createBlockTreeCache(config_,
-                                             kv_cache_config_,
-                                             allocator_,
-                                             parallelism_config_.world_rank,
-                                             parallelism_config_.local_rank,
-                                             parallelism_config_.local_world_size,
-                                             /*swa_configs=*/SWAGroupConfig{},
-                                             /*storage_backend=*/nullptr,
-                                             broadcast_manager);
+    block_tree_cache_ = createBlockTreeCache(
+        config_, kv_cache_config_, allocator_, parallelism_config_, /*storage_backend=*/nullptr, broadcast_manager);
     if (!block_tree_cache_) {
         RTP_LLM_LOG_ERROR("KVCacheManager::init: failed to create BlockTreeCache");
         return false;
