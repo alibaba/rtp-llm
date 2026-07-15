@@ -454,6 +454,31 @@ class FoundationLoaderTest(unittest.TestCase):
                 [os.path.realpath(shard)],
             )
 
+    def test_index_discovery_allows_shard_symlink_to_external_blob(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            model_path = os.path.join(temp_root, "snapshot")
+            blob_path = os.path.join(temp_root, "blobs", "checkpoint-blob")
+            os.makedirs(model_path)
+            os.makedirs(os.path.dirname(blob_path))
+            save_file({"weight": torch.ones(1)}, blob_path)
+
+            shard_name = "model-00001-of-00001.safetensors"
+            shard_path = os.path.join(model_path, shard_name)
+            os.symlink(blob_path, shard_path)
+            with open(
+                os.path.join(model_path, "model.safetensors.index.json"), "w"
+            ) as handle:
+                json.dump({"weight_map": {"weight": shard_name}}, handle)
+
+            discovered = discover_ckpt_files(model_path)
+            self.assertEqual(discovered, [shard_path])
+            self.assertTrue(
+                torch.equal(
+                    dict(get_all_weights(discovered))["weight"],
+                    torch.ones(1),
+                )
+            )
+
     def test_unindexed_discovery_excludes_non_model_files(self):
         with tempfile.TemporaryDirectory() as model_path:
             model_file = os.path.join(model_path, "model.safetensors")
@@ -562,12 +587,20 @@ class FoundationLoaderTest(unittest.TestCase):
             os.mkdir(model_path)
             outside = os.path.join(parent, "outside.safetensors")
             save_file({"weight": torch.ones(1)}, outside)
-            with open(
-                os.path.join(model_path, "model.safetensors.index.json"), "w"
-            ) as handle:
-                json.dump({"weight_map": {"weight": "../outside.safetensors"}}, handle)
-            with self.assertRaisesRegex(ValueError, "outside model directory"):
-                discover_ckpt_files(model_path)
+            invalid_paths = (
+                "../outside.safetensors",
+                "nested/../../outside.safetensors",
+                outside,
+                r"C:\\outside.safetensors",
+            )
+            for shard_name in invalid_paths:
+                with self.subTest(shard_name=shard_name):
+                    with open(
+                        os.path.join(model_path, "model.safetensors.index.json"), "w"
+                    ) as handle:
+                        json.dump({"weight_map": {"weight": shard_name}}, handle)
+                    with self.assertRaisesRegex(ValueError, "outside model directory"):
+                        discover_ckpt_files(model_path)
 
     def test_checkpoint_index_rejects_non_model_file(self):
         with tempfile.TemporaryDirectory() as model_path:

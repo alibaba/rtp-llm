@@ -1,5 +1,6 @@
 import glob
 import json
+import ntpath
 import os
 import re
 from typing import Dict, Iterator, List, Mapping, Optional, Tuple
@@ -150,7 +151,21 @@ def _files_from_index(model_path: str, index_name: str) -> Optional[List[str]]:
             raise ValueError(
                 f"Checkpoint index {index_path} contains invalid shard {shard_name!r}"
             )
-        shard_path = os.path.realpath(os.path.join(model_root, shard_name))
+        # Validate index text lexically. A symlink already present under model_root
+        # is a trusted filesystem entry and may point to a content-addressed blob.
+        path_parts = re.split(r"[\\/]", shard_name)
+        if (
+            os.path.isabs(shard_name)
+            or ntpath.isabs(shard_name)
+            or os.pardir in path_parts
+        ):
+            raise ValueError(
+                f"Checkpoint index {index_path} references a path outside model directory: "
+                f"{shard_name!r}"
+            )
+
+        normalized_name = os.path.normpath(shard_name)
+        shard_path = os.path.join(model_root, normalized_name)
         try:
             inside_model = os.path.commonpath([model_root, shard_path]) == model_root
         except ValueError:
@@ -160,7 +175,7 @@ def _files_from_index(model_path: str, index_name: str) -> Optional[List[str]]:
                 f"Checkpoint index {index_path} references a path outside model directory: "
                 f"{shard_name!r}"
             )
-        if not _is_model_weight_file(shard_path, allow_consolidated=True):
+        if not _is_model_weight_file(normalized_name, allow_consolidated=True):
             raise ValueError(
                 f"Checkpoint index {index_path} references non-model file {shard_name!r}"
             )
@@ -168,8 +183,9 @@ def _files_from_index(model_path: str, index_name: str) -> Optional[List[str]]:
             raise FileNotFoundError(
                 f"Checkpoint index {index_path} references missing shard {shard_name!r}"
             )
-        if shard_path not in seen:
-            seen.add(shard_path)
+        shard_identity = os.path.realpath(shard_path)
+        if shard_identity not in seen:
+            seen.add(shard_identity)
             files.append(shard_path)
     return files
 
