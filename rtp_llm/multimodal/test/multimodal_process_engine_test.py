@@ -252,6 +252,17 @@ class MMProcessEngineTest(TestCase):
         with self.assertRaises(ValueError):
             MMWorkItem([])
 
+    def test_work_item_uses_global_timeout_when_request_timeout_is_unset(self):
+        preprocess_config = MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], -1)
+        mm_input = MultimodalInput(
+            "", MMUrlType.IMAGE, torch.empty(0), preprocess_config
+        )
+
+        self.assertEqual(preprocess_config.mm_timeout_ms, -1)
+        self.assertEqual(
+            MMWorkItem([mm_input], mm_timeout_ms=123000).mm_timeout_ms, 123000
+        )
+
     def test_embedding_timeout_default_path(self):
         """Default (non-gpu-batch) serial path enforces an embedding-level timeout.
 

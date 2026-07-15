@@ -291,7 +291,7 @@ class RenderedInputs:
 
         if len(preprocess_configs) == 0:
             preprocess_configs = [
-                MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+                MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], -1)
             ] * len(input_urls)
         elif len(preprocess_configs) != len(input_urls):
             raise Exception(
