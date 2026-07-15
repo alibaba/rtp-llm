@@ -33,7 +33,7 @@ private:
         return "FIFOScheduler";
     }
     bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams,
-                               const GenerateStreamPtr&            new_stream) const override;
+                               const GenerateStreamPtr&            new_stream) override;
     void accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool waitPredicate() override;
     void onRunningStream(const GenerateStreamPtr& stream) override;

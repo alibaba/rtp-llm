@@ -112,6 +112,21 @@ BatchKVCacheResourcePtr createBatchKVCacheResource(int batch_size, int layer_num
     return resource;
 }
 
+static int estimateBatchPeakForSingleSequence(const KVCacheAllocator&          allocator,
+                                              const BatchKVCacheResourcePtr& batch_resource,
+                                              int                            seq_len,
+                                              int                            remaining_tokens,
+                                              int                            reserve_step,
+                                              bool                           enable_reuse_cache) {
+    return allocator.estimateBatchPeakNeedBlocks(batch_resource,
+                                                 seq_len,
+                                                 /*common_seq_len=*/seq_len,
+                                                 remaining_tokens,
+                                                 reserve_step,
+                                                 enable_reuse_cache,
+                                                 /*target_batch_size=*/1);
+}
+
 class SingleTypeKVCacheAllocatorTest: public ::testing::Test {
 protected:
     void SetUp() override {
@@ -203,7 +218,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksOnlyAppliedToInitMalloc) {
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
 
-    allocator_->setReserveBlockNum(2);
+    allocator_->setReserveBlocksNum(2);
 
     const size_t available_before = allocator_->availableBlocksNum();
     ASSERT_EQ(available_before, 9u);
@@ -241,7 +256,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseRefere
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
 
-    allocator_->setReserveBlockNum(2);
+    allocator_->setReserveBlocksNum(2);
     ASSERT_EQ(allocator_->availableBlocksNum(), 9);
     ASSERT_EQ(allocator_->freeBlocksNum(), 9);
 
@@ -1221,6 +1236,141 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MixedOperations) {
     }
 
     EXPECT_GT(allocator_->freeBlocksNum(), 0);
+}
+
+
+TEST_F(SingleTypeKVCacheAllocatorTest, EstimatePeakNeedBlocks) {
+    // seq_size_per_block=4, block_num=10
+    auto config = createSingleTypeTestConfig(/*layer_num=*/1, /*block_num=*/10, /*seq_size_per_block=*/4);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+
+    // New resource (no blocks allocated): ceil((8+100)/4) - 0 = 27
+    auto new_res = createBatchKVCacheResource(1, config.layer_num);
+    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator_, new_res, 8, 100, 0, /*enable_reuse_cache=*/false),
+              27);
+
+    // With reserve_step=3: ceil((8+100+3)/4) - 0 = 28
+    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator_, new_res, 8, 100, 3, /*enable_reuse_cache=*/false),
+              28);
+
+    // Allocate blocks for seq_len=8 (2 blocks)
+    auto token_ids = createCompleteTokenIds(1, /*seq_length=*/8, /*seq_size_per_block=*/4);
+    MallocInfo mi{new_res, token_ids};
+    auto result = allocator_->malloc(mi);
+    ASSERT_TRUE(result.success);
+    ASSERT_EQ(new_res->blocksNum(0, 0), 2);
+
+    // After malloc: ceil((8+0)/4) - 2 = 0
+    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator_, new_res, 8, 0, 0, /*enable_reuse_cache=*/false),
+              0);
+
+    // remaining=4: ceil((8+4)/4) - 2 = 1
+    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator_, new_res, 8, 4, 0, /*enable_reuse_cache=*/false),
+              1);
+
+    // remaining=4, reserve=4: ceil((8+4+4)/4) - 2 = 2
+    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator_, new_res, 8, 4, 4, /*enable_reuse_cache=*/false),
+              2);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, EstimateBatchPeakNeedBlocksAccountsForNonEmptyTargetWidth) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/1, /*block_num=*/16, /*seq_size_per_block=*/4);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+
+    auto resource = createBatchKVCacheResource(/*batch_size=*/2, config.layer_num);
+    resource->setBatchBlocks(/*batch_id=*/0, /*group_id=*/0, {1, 2, 3});
+    resource->setBatchBlocks(/*batch_id=*/1, /*group_id=*/0, {1, 2, 4});
+
+    // Two common blocks are shared. Each current batch owns one private tail block.
+    EXPECT_EQ(allocator_->estimateBatchPeakNeedBlocks(resource,
+                                                      /*seq_len=*/9,
+                                                      /*common_seq_len=*/8,
+                                                      /*remaining_tokens=*/0,
+                                                      /*reserve_step=*/0,
+                                                      /*enable_reuse_cache=*/false,
+                                                      /*target_batch_size=*/2),
+              0);
+
+    // Expanding the partial tail from two sequences to four needs two physical copies.
+    EXPECT_EQ(allocator_->estimateBatchPeakNeedBlocks(resource,
+                                                      /*seq_len=*/9,
+                                                      /*common_seq_len=*/8,
+                                                      /*remaining_tokens=*/0,
+                                                      /*reserve_step=*/0,
+                                                      /*enable_reuse_cache=*/false,
+                                                      /*target_batch_size=*/4),
+              2);
+
+    // Existing resources need one additional block for each current batch.
+    EXPECT_EQ(allocator_->estimateBatchPeakNeedBlocks(resource,
+                                                      /*seq_len=*/9,
+                                                      /*common_seq_len=*/8,
+                                                      /*remaining_tokens=*/4,
+                                                      /*reserve_step=*/0,
+                                                      /*enable_reuse_cache=*/false,
+                                                      /*target_batch_size=*/2),
+              2);
+
+    // Charge four future blocks plus two copies of the current partial tail.
+    EXPECT_EQ(allocator_->estimateBatchPeakNeedBlocks(resource,
+                                                      /*seq_len=*/9,
+                                                      /*common_seq_len=*/8,
+                                                      /*remaining_tokens=*/4,
+                                                      /*reserve_step=*/0,
+                                                      /*enable_reuse_cache=*/false,
+                                                      /*target_batch_size=*/4),
+              6);
+
+    // An aligned tail remains shared while the batch expands.
+    EXPECT_EQ(allocator_->estimateBatchPeakNeedBlocks(resource,
+                                                      /*seq_len=*/12,
+                                                      /*common_seq_len=*/8,
+                                                      /*remaining_tokens=*/0,
+                                                      /*reserve_step=*/0,
+                                                      /*enable_reuse_cache=*/false,
+                                                      /*target_batch_size=*/4),
+              0);
+
+    auto empty_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    // Empty resource: two prompt blocks are shared and one future block is private per target batch.
+    EXPECT_EQ(allocator_->estimateBatchPeakNeedBlocks(empty_resource,
+                                                      /*seq_len=*/8,
+                                                      /*common_seq_len=*/8,
+                                                      /*remaining_tokens=*/3,
+                                                      /*reserve_step=*/0,
+                                                      /*enable_reuse_cache=*/false,
+                                                      /*target_batch_size=*/4),
+              6);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, EstimateBatchPeakCoversPartialTailCopiesAtExactCapacity) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/1, /*block_num=*/6, /*seq_size_per_block=*/4);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+
+    auto resource  = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    auto token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/5, /*seq_size_per_block=*/4);
+    ASSERT_TRUE(allocator_->malloc(MallocInfo{resource, token_ids}).success);
+    ASSERT_EQ(allocator_->freeBlocksNum(), 3);
+
+    // The two future KV steps fit in the current tail, but a delayed 1-to-4 beam expansion copies it three times.
+    EXPECT_EQ(allocator_->estimateBatchPeakNeedBlocks(resource,
+                                                      /*seq_len=*/5,
+                                                      /*common_seq_len=*/4,
+                                                      /*remaining_tokens=*/2,
+                                                      /*reserve_step=*/0,
+                                                      /*enable_reuse_cache=*/false,
+                                                      /*target_batch_size=*/4),
+              3);
+
+    std::vector<BlockIdPair> block_update_mapping;
+    ASSERT_TRUE(allocator_->updateKVBlock(
+        resource, /*block_src_batch=*/{0, 0, 0, 0}, /*copy_last_block=*/true, block_update_mapping));
+    EXPECT_EQ(resource->batchSize(), 4);
+    EXPECT_EQ(block_update_mapping.size(), 3);
+    EXPECT_EQ(allocator_->freeBlocksNum(), 0);
 }
 
 }  // namespace test

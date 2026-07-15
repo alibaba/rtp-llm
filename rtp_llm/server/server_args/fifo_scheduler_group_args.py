@@ -40,6 +40,6 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         type=str,
         default="1",
         help="PDFusionRatioScheduler 的 decode:prefill 轮数比字符串。仅当 pdfusion_scheduler_mode='ratio' 生效；"
-        "默认 '1' 严格交替；'N' = 1 轮 prefill 后 N 轮 decode；"
+        "'0' = 有 waiting stream 时优先尝试 prefill；默认 '1' 严格交替；'N' = 1 轮 prefill 后 N 轮 decode；"
         "'1/X' = X 轮 prefill 后 1 轮 decode。非法值回退为 '1'。",
     )

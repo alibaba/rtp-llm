@@ -313,8 +313,19 @@ int StreamCacheResource::singleBatchNeedBlocks(int seq_len, int reserve_step) co
     return resource_context_.cache_manager->singleBatchNeedBlocks(batch_kv_cache_resource_, seq_len, reserve_step);
 }
 
+int StreamCacheResource::estimatePeakNeedBlocks(
+    int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, int target_batch_size) const {
+    return resource_context_.cache_manager->estimatePeakNeedBlocks(batch_kv_cache_resource_,
+                                                                   seq_len,
+                                                                   common_seq_len,
+                                                                   remaining_tokens,
+                                                                   reserve_step,
+                                                                   reuseCache(),
+                                                                   target_batch_size);
+}
+
 // TODO(xinfei.sxf) 保证这个函数的原子性
-absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
+absl::Status StreamCacheResource::initKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
     // Decode side: first malloc should NOT use device cache, regardless of runtime config.
     // Follow-up allocations (incrKVBlock) will respect reuseCache() && enableDeviceCache().
@@ -341,7 +352,6 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     }
     malloc_info.enable_remove_skipped_blocks = false;
 
-    malloc_info.complete_token_ids->setReserveStep(reserve_step);
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {
         malloc_failed_times_++;
@@ -357,7 +367,7 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     return absl::OkStatus();
 }
 
-absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
+absl::Status StreamCacheResource::incrKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
     // TODO(xinfei.sxf) add reserver_blocks
     if (fake_inited_) {
@@ -373,7 +383,6 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     malloc_info.enable_device_cache          = reuseCache() && enableDeviceCache();
     malloc_info.enable_remove_skipped_blocks = true;
 
-    malloc_info.complete_token_ids->setReserveStep(reserve_step);
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {
         malloc_failed_times_++;

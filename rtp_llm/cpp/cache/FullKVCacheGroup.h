@@ -21,6 +21,17 @@ public:
     insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) override;
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     int  needBlocksNum(int seq_len, int current_blocks = 0, int reserve_step = 0) const override;
+    int estimatePeakNeedBlocks(int                     seq_len,
+                               const BlockIndicesType& current_block_indices,
+                               int                     remaining_tokens,
+                               int                     reserve_step,
+                               bool                    enable_reuse_cache) const override;
+    int estimateInitialBatchPeakNeedBlocks(int  seq_len,
+                                           int  common_seq_len,
+                                           int  remaining_tokens,
+                                           int  reserve_step,
+                                           bool enable_reuse_cache,
+                                           int  target_batch_size) const override;
     NeedBlocksInfo getNeedBlocks(int  common_seq_len,
                                  int  seq_len,
                                  int  reserve_step,
