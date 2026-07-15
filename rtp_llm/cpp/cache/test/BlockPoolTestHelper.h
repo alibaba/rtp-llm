@@ -15,9 +15,9 @@
 namespace rtp_llm {
 
 struct TestKVCacheSpec: public KVCacheSpec {
-    DataType dtype = DataType::TYPE_INVALID;
-    size_t   k_block_bytes = 0;
-    size_t   v_block_bytes = 0;
+    DataType dtype             = DataType::TYPE_INVALID;
+    size_t   k_block_bytes     = 0;
+    size_t   v_block_bytes     = 0;
     size_t   k_scale_bytes     = 0;
     size_t   v_scale_bytes     = 0;
     uint32_t local_kv_head_num = 1;
@@ -87,12 +87,12 @@ inline KVCacheSpecPtr createTestKvCacheSpec(uint32_t          layer_num,
     auto spec                = std::make_shared<TestKVCacheSpec>();
     spec->tag                = "default";
     spec->type               = k_block_stride_bytes == v_block_stride_bytes ? KVCacheSpecType::MultiHeadAttention :
-                                                                             KVCacheSpecType::MultiHeadLatentAttention;
+                                                                              KVCacheSpecType::MultiHeadLatentAttention;
     spec->seq_size_per_block = seq_size_per_block;
     spec->dtype              = dtype;
     spec->k_block_bytes      = k_block_stride_bytes;
     spec->v_block_bytes      = v_block_stride_bytes;
-    spec->local_kv_head_num = local_head_num_kv;
+    spec->local_kv_head_num  = local_head_num_kv;
     return spec;
 }
 
@@ -124,7 +124,9 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
     std::vector<int> layer_ids(kLayerNum);
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
-    cache_config.groups[0].local_kv_head_num = test_spec->local_kv_head_num;
+    auto groups                 = cache_config.topology().groups();
+    groups[0].local_kv_head_num = test_spec->local_kv_head_num;
+    cache_config.setTopology(std::move(groups), cache_config.topology().layers());
 
     return BlockPoolConfigHelper::createConfig(cache_config);
 }

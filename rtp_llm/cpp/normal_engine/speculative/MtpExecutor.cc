@@ -27,6 +27,29 @@ bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;
 }
 
+void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
+                                                       ModelBase&      source,
+                                                       bool            request_actual_rows) {
+    if (!model_input.combo_tokens.defined() || model_input.combo_tokens.numel() == 0) {
+        return;
+    }
+    const auto rows   = request_actual_rows ? -1 : model_input.combo_tokens.numel();
+    auto       pre_hc = source.getMtpTargetHiddenStates(rows);
+    if (pre_hc.defined() && pre_hc.numel() > 0) {
+        model_input.last_hidden_states = pre_hc;
+    }
+}
+
+void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source) {
+    if (!model_output.all_hidden_states.defined() || model_output.all_hidden_states.size(0) == 0) {
+        return;
+    }
+    auto pre_hc = source.getMtpTargetHiddenStates(model_output.all_hidden_states.size(0));
+    if (pre_hc.defined() && pre_hc.numel() > 0) {
+        model_output.all_hidden_states = pre_hc;
+    }
+}
+
 void MtpExecutor::maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const {
     bool force = tp_rank_ == 0 && enable_detail_log_;
     if (force) {
@@ -34,6 +57,11 @@ void MtpExecutor::maybePrintModelInput(const GptModelInputs& model_input, const 
     } else {
         RTP_LLM_LOG_DEBUG("%s model_input: %s", prefix.c_str(), model_input.debugString(force).c_str());
     }
+}
+
+static void applyCacheStrideToModelInput(GptModelInputs& model_input, const CacheConfig& cache_config) {
+    model_input.kv_block_stride_bytes = cache_config.kv_block_stride_bytes;
+    model_input.kv_scale_stride_bytes = cache_config.kv_scale_stride_bytes;
 }
 
 static std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
@@ -115,7 +143,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
                          MlaOpsType                                     mla_ops_type,
                          int32_t                                        kv_cache_group_num,
-                         const std::vector<int32_t>&                    kv_cache_layer_to_group,
                          bool                                           warm_up):
     Executor(),
     cache_manager_(cache_manager),
@@ -124,7 +151,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     fast_topk_sampler_(new speculative::FastTopKSampler()),
     warm_up_(warm_up),
     role_type_(params.pd_sep_config.role_type) {
-    (void)kv_cache_layer_to_group;
     data_type_          = params.model_config_.data_type;
     hidden_size_        = params.model_config_.hidden_size;
     propose_step_       = propose_params->gen_num_per_circle;
@@ -167,28 +193,13 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     sampler_.reset(new Sampler(SamplerInitParams{initial_sampler_batch_size, false}));
 
     // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
-    std::optional<CacheLayerLayout> kv_cache_layer_layout = std::nullopt;
+    std::optional<GroupedCacheLayerLayout> kv_cache_layer_layout = std::nullopt;
     if (cache_manager && cache_manager->cacheConfig().groupNums() > 1) {
         kv_cache_layer_layout = cache_manager->allLayerCacheBase();
     }
 
-    auto target_cache_layer_layout = cache_manager->getMainModelCacheLayerLayout();
-    auto draft_cache_layer_layout  = cache_manager->getMTPModuleCacheLayerLayout(0);
-
-    auto buildLayerToGroupVector = [](const std::vector<std::vector<int>>& layer_to_group_ids) -> std::vector<int32_t> {
-        std::vector<int32_t> layer_to_group;
-        layer_to_group.reserve(layer_to_group_ids.size());
-        for (size_t i = 0; i < layer_to_group_ids.size(); ++i) {
-            RTP_LLM_CHECK_WITH_INFO(layer_to_group_ids[i].size() == 1,
-                                    "mtp layer %zu owns %zu cache groups; expected exactly one group",
-                                    i,
-                                    layer_to_group_ids[i].size());
-            layer_to_group.push_back(static_cast<int32_t>(layer_to_group_ids[i].front()));
-        }
-        return layer_to_group;
-    };
-    auto target_layer_to_group = buildLayerToGroupVector(target_cache_layer_layout.layer_to_group_ids);
-    auto draft_layer_to_group  = buildLayerToGroupVector(draft_cache_layer_layout.layer_to_group_ids);
+    auto target_cache_layer_layout = cache_manager->getMainModelGroupedCacheLayerLayout();
+    auto draft_cache_layer_layout  = cache_manager->getMTPModuleGroupedCacheLayerLayout(0);
 
     GptModelInitParams model_init_params(
         {params.gpt_weights,
@@ -207,8 +218,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          params.model_config_.hidden_size,
          params.model_config_.attn_config.tokens_per_block,
          params.model_config_.attn_config.kernel_tokens_per_block,
-         kv_cache_group_num,
-         target_layer_to_group,
          cache_manager});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
@@ -218,8 +227,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(
-            model_init_params, params.py_model, false, true));
+        model_.reset(new PyWrappedModel(model_init_params, params.py_model, false, true));
     }
 
     // when warmup, cache manager maybe nullptr
@@ -255,13 +263,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mtp_params->model_config_.hidden_size,
                                 mtp_params->model_config_.attn_config.tokens_per_block,
                                 mtp_params->model_config_.attn_config.kernel_tokens_per_block,
-                                kv_cache_group_num,
-                                draft_layer_to_group,
                                 cache_manager});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
-            draft_model_.reset(new PyWrappedModel(
-                model_params, params.py_sp_model, false, false));
+            draft_model_.reset(new PyWrappedModel(model_params, params.py_sp_model, false, false));
             // Create separate model for speculative prefill with CUDA graph if enabled (from params)
             const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph;
             RTP_LLM_LOG_INFO(
@@ -270,23 +275,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             if (enable_cuda_graph) {
                 RTP_LLM_LOG_INFO(
                     "[speculative decoding] creating separate prefill draft model with CUDA graph support");
-                sp_prefill_draft_model_.reset(new PyWrappedModel(
-                    model_params, params.py_sp_model, true, false));
+                sp_prefill_draft_model_.reset(new PyWrappedModel(model_params, params.py_sp_model, true, false));
             }
         }
         break;  // NOTE: only support one mtp model now
     }
-
-    auto buildLayerToGroupTensor = [](const std::vector<int32_t>& layer_to_group) -> torch::Tensor {
-        auto t   = torch::empty({(int64_t)layer_to_group.size()}, torch::kInt32);
-        auto ptr = t.data_ptr<int>();
-        for (size_t i = 0; i < layer_to_group.size(); ++i) {
-            ptr[i] = layer_to_group[i];
-        }
-        return t;
-    };
-    target_kv_cache_layer_to_group = buildLayerToGroupTensor(target_layer_to_group);
-    draft_kv_cache_layer_to_group  = buildLayerToGroupTensor(draft_layer_to_group);
 }
 
 /*
@@ -342,6 +335,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     SamplerOutput   sampler_output;
     GptModelOutputs draft_model_output;
     SamplerOutput   draft_sampler_output;
+    const bool      cp_enabled = parallelism_config_.prefill_cp_config.is_enabled();
+    torch::Tensor   draft_last_hidden_states;
 
     // placeholder for some tensors
     torch::Tensor                      draft_probs;
@@ -373,12 +368,30 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     model_->releaseBuffers();
     draft_model_->releaseBuffers();
 
+    // CP input handling replaces combo_tokens with the rank-local chunk and
+    // rewrites input_lengths in place. The MTP shift below operates on the
+    // original request-major sequence, so preserve both tensors before the
+    // target forward and restore them after target sampling. input_lengths
+    // must be cloned because the CP processor mutates its storage in place.
+    torch::Tensor saved_combo_tokens;
+    torch::Tensor saved_input_lengths;
+    if (cp_enabled) {
+        auto snapshotInput = [](const torch::Tensor& tensor) {
+            auto snapshot = tensor.clone();
+            if (snapshot.device().is_cpu() && !snapshot.is_pinned()) {
+                snapshot = snapshot.pin_memory();
+            }
+            return snapshot;
+        };
+        saved_combo_tokens  = snapshotInput(model_input.combo_tokens);
+        saved_input_lengths = snapshotInput(model_input.input_lengths);
+    }
+
     // target model prefill
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
         maybePrintModelInput(model_input, "prefill target model");
-        model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
-        model_output                        = std::move(model_->forward(model_input));
+        model_output = std::move(model_->forward(model_input));
     }
 
     // eplb
@@ -398,6 +411,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             CHECK_AND_RETURN_REF(sampler_input,
                                  batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
             sampler_output = std::move(sampler_->forward(sampler_input));
+            if (cp_enabled) {
+                model_input.combo_tokens  = saved_combo_tokens;
+                model_input.input_lengths = saved_input_lengths;
+            }
             batch_stream_processor_->updatePrefillPostDraftModelInput(
                 stream_groups, model_input, model_output, sampler_output);
         }
@@ -406,13 +423,15 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // draft model prefill
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
+        if (cp_enabled) {
+            model_input.last_hidden_states = torch::Tensor();
+        }
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
-        const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
-        model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
-        model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
-        model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
-        draft_model_output                  = std::move(draft_model_->forward(model_input));
+        const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
+        applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
+        maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
+        draft_model_output = std::move(draft_model_->forward(model_input));
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -420,6 +439,14 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_->releaseBuffers();
         draft_model_->releaseBuffers();
         return absl::OkStatus();
+    }
+
+    if (cp_enabled) {
+        draft_last_hidden_states = draft_model_->getMtpLastHiddenStates(stream_groups.totalSamplerBatchSizeOut());
+        RTP_LLM_CHECK_WITH_INFO(draft_last_hidden_states.defined() && draft_last_hidden_states.numel() > 0,
+                                "CP MTP draft last-hidden buffer must contain per-request rows");
+    } else {
+        maybeOverrideLastHiddenWithMtpBuffer(draft_model_output, *draft_model_);
     }
 
     // draft model sample
@@ -451,7 +478,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         auto result =
             batch_stream_processor_->dispatchPrefill(stream_groups,
                                                      {std::move(model_output), std::move(sampler_output)},
-                                                     {std::move(draft_model_output), std::move(draft_sampler_output)});
+                                                     {std::move(draft_model_output), std::move(draft_sampler_output)},
+                                                     draft_last_hidden_states);
         RTP_LLM_LOG_DEBUG("dispatch done");
 
         model_->releaseBuffers();
@@ -611,7 +639,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     model_->releaseBuffers();
 
     if (propose_step_ > 1) {
-        model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
         draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t);
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
@@ -620,8 +647,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_model_verify)");
         maybePrintModelInput(model_input, "decode target model");
-        model_input.is_target_verify        = true;
-        model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
+        model_input.is_target_verify = true;
         RTP_LLM_LOG_DEBUG(
             "[MTP decode] target model verify forward start, input_lengths_size=%ld, prefix_lengths_size=%ld, seq_lengths_size=%ld",
             model_input.input_lengths.size(0),
@@ -686,15 +712,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(tp_sync_post_rejection)");
         tpSyncModelInputs(model_input, parallelism_config_);
+        maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     }
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_draft_prefill_input)");
         maybePrintModelInput(model_input, "decode post draft model");
-        const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
-        model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
-        model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
-        model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
+        const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
+        applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
     }
 
     {
@@ -704,8 +729,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             // All currently supported draft models are non-MRoPE and do not use
             // model_input.combo_position_ids, so the draft prefill CUDA graph does not need to copy it.
             draft_prefill_model_output = std::move(sp_prefill_draft_model_->forward(model_input));
+            maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *sp_prefill_draft_model_);
         } else {
             draft_prefill_model_output = std::move(draft_model_->forward(model_input));
+            maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_model_);
         }
     }
 
@@ -850,9 +877,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     // clear host buffers holder
     buffer_holder_.release();
 
-    const auto& mtp_cache_cfg         = cache_manager_->getMTPModuleCacheConfig(0);
-    model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
+    const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
+    applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
 
     GptModelOutputs            draft_decode_model_output;
     std::vector<torch::Tensor> draft_token_ids_list;
@@ -884,6 +910,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(loop_iter=%d)", i);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d/%d start, batch_size %zu", i, propose_step_ - 1, batch_size);
         draft_decode_model_output = std::move(draft_model_->forward(model_input));
+        maybeOverrideLastHiddenWithMtpBuffer(draft_decode_model_output, *draft_model_);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d forward done", i);
 
         // sample
@@ -946,9 +973,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             execBroadcast({broadcast_tensors, 0});
         }
 
-        const auto& cache_cfg             = cache_manager_->cacheConfig();
-        model_input.kv_block_stride_bytes = cache_cfg.kv_block_stride_bytes;
-        model_input.kv_scale_stride_bytes = cache_cfg.kv_scale_stride_bytes;
+        applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
     }
 }
 

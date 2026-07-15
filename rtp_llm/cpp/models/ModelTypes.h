@@ -32,25 +32,23 @@ struct GptModelDescription {
 };
 
 struct GptModelInitParams {
-    const rtp_llm::Weights                weights;
-    const GptModelDescription             description;
-    const std::optional<CacheLayerLayout> kv_cache_layer_layout;
-    size_t                                model_id = 0;
-    ParallelismConfig                     parallelism_config;
-    HWKernelConfig                        hw_kernel_config;
-    ProfilingDebugLoggingConfig           profile_debug_logging_config;
-    RuntimeConfig                         runtime_config;
-    ConcurrencyConfig                     concurrency_config;
-    SpeculativeExecutionConfig            sp_config;
-    DeviceResourceConfig                  device_resource_config;
-    MlaOpsType                            mla_ops_type            = MlaOpsType::AUTO;
-    int64_t                               max_seq_len             = 0;
-    int64_t                               hidden_size             = 0;
-    size_t                                tokens_per_block        = 0;
-    size_t                                kernel_tokens_per_block = 0;
-    int32_t                               kv_cache_group_num      = 1;
-    std::vector<int32_t>                  kv_cache_layer_to_group;
-    std::shared_ptr<KVCacheManager>       cache_manager;
+    const rtp_llm::Weights                       weights;
+    const GptModelDescription                    description;
+    const std::optional<GroupedCacheLayerLayout> kv_cache_layer_layout;
+    size_t                                       model_id = 0;
+    ParallelismConfig                            parallelism_config;
+    HWKernelConfig                               hw_kernel_config;
+    ProfilingDebugLoggingConfig                  profile_debug_logging_config;
+    RuntimeConfig                                runtime_config;
+    ConcurrencyConfig                            concurrency_config;
+    SpeculativeExecutionConfig                   sp_config;
+    DeviceResourceConfig                         device_resource_config;
+    MlaOpsType                                   mla_ops_type            = MlaOpsType::AUTO;
+    int64_t                                      max_seq_len             = 0;
+    int64_t                                      hidden_size             = 0;
+    size_t                                       tokens_per_block        = 0;
+    size_t                                       kernel_tokens_per_block = 0;
+    std::shared_ptr<KVCacheManager>              cache_manager;
 };
 
 enum GptModelInputIndex : size_t {
@@ -60,6 +58,7 @@ enum GptModelInputIndex : size_t {
     prefixLengths,
     maxKernelBlocksPerBatch,
     maxBlocksPerBatch,
+    cacheKeysWidth,
     kvCacheGroupNum,
     kvCacheLayerToGroupLen,
     kvCacheGroupTypesLen,
@@ -125,6 +124,12 @@ public:
     virtual ~ModelBase()                                          = default;
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
+    virtual torch::Tensor   getMtpTargetHiddenStates(int64_t /*num_tokens*/) {
+        return torch::Tensor();
+    }
+    virtual torch::Tensor getMtpLastHiddenStates(int64_t /*num_tokens*/) {
+        return torch::Tensor();
+    }
 
     rtp_llm::Weights            weights_;
     rtp_llm::OverallExpertStats overall_expert_stats_;

@@ -7,6 +7,23 @@
 #include <cstring>
 
 namespace rtp_llm {
+namespace {
+
+torch::Tensor cloneHiddenSlice(const torch::Tensor& hidden_states, int64_t start, int64_t length) {
+    if (!hidden_states.defined() || length <= 0) {
+        return torch::Tensor();
+    }
+    RTP_LLM_CHECK_WITH_INFO(
+        hidden_states.dim() == 2, "MTP hidden states must be 2-D, got dim=%ld", hidden_states.dim());
+    RTP_LLM_CHECK_WITH_INFO(start >= 0 && start + length <= hidden_states.size(0),
+                            "MTP hidden slice out of range: start=%ld, length=%ld, rows=%ld",
+                            start,
+                            length,
+                            hidden_states.size(0));
+    return hidden_states.narrow(0, start, length).clone();
+}
+
+}  // namespace
 
 void MtpBatchStreamProcessor::expandTargetVerifyPositionIds(const StreamGroups& stream_groups,
                                                             GptModelInputs&     model_input) const {
@@ -15,8 +32,8 @@ void MtpBatchStreamProcessor::expandTargetVerifyPositionIds(const StreamGroups& 
     }
 
     const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
-    const size_t batch_size = model_input.combo_position_ids.numel() / position_id_len_factor;
-    auto target_combo_position_ids =
+    const size_t batch_size             = model_input.combo_position_ids.numel() / position_id_len_factor;
+    auto         target_combo_position_ids =
         torch::empty({(int64_t)(batch_size * (propose_step_ + 1) * position_id_len_factor)}, torch::kInt32)
             .pin_memory();
 
@@ -49,13 +66,21 @@ void MtpBatchStreamProcessor::expandTargetVerifyPositionIds(const StreamGroups& 
 absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups& stream_groups,
                                                       const MergedOutput& prefill_output,
                                                       const MergedOutput& propose_output) const {
+    return dispatchPrefill(stream_groups, prefill_output, propose_output, torch::Tensor());
+}
+
+absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&  stream_groups,
+                                                      const MergedOutput&  prefill_output,
+                                                      const MergedOutput&  propose_output,
+                                                      const torch::Tensor& draft_last_hidden_states) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     const size_t                      total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
     auto                              new_tokens_all = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
     std::vector<StreamSpecUpdateInfo> spec_update_infos;
 
-    preparePrefillSpecUpdateInfo(stream_groups, prefill_output, propose_output, new_tokens_all, spec_update_infos);
+    preparePrefillSpecUpdateInfo(
+        stream_groups, prefill_output, propose_output, draft_last_hidden_states, new_tokens_all, spec_update_infos);
 
     // we set propose token in extra loop to avoid cuda sync
     updateProposeTokens(stream_groups, propose_output, spec_update_infos);
@@ -261,7 +286,7 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
         const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
         auto         next_position_ids =
             torch::empty({(int64_t)(batch_size * position_id_len_factor)}, torch::kInt32).pin_memory();
-        int* dst_position_ids = next_position_ids.data_ptr<int>();
+        int*       dst_position_ids = next_position_ids.data_ptr<int>();
         const auto src_position_ids = model_input.combo_position_ids.cpu().contiguous();
         const int* src              = src_position_ids.data_ptr<int>();
         for (int64_t i = 0; i < next_position_ids.numel(); ++i) {
@@ -293,12 +318,12 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
     int* input_lengths = model_input.input_lengths.data_ptr<int>();
     int* combo_tokens  = model_input.combo_tokens.data_ptr<int>();
 
-    int offset = 0;
+    int  offset = 0;
     int* combo_position_ids =
         model_input.combo_position_ids.defined() ? model_input.combo_position_ids.data_ptr<int>() : nullptr;
     const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
-    auto all_streams = stream_groups.allStreams();
-    auto stream_it = all_streams.begin();
+    auto         all_streams            = stream_groups.allStreams();
+    auto         stream_it              = all_streams.begin();
     // Speculative decoding rejects num_return_sequences > 1 and beam search before this path.
     for (int i = 0; i < batch_size; i++) {
         // should shift one token for combo_tokens
@@ -324,7 +349,7 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
 
 torch::Tensor MtpBatchStreamProcessor::compactAcceptedPositionIds(const torch::Tensor&    combo_position_ids,
                                                                   const std::vector<int>& accept_lens,
-                                                                  size_t total_accept_len) const {
+                                                                  size_t                  total_accept_len) const {
     if (!combo_position_ids.defined()) {
         return torch::Tensor();
     }
@@ -387,7 +412,8 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     hidden_states_d_t              = torch::cat(hidden_states_list).contiguous();
     model_input.last_hidden_states = hidden_states_d_t;
     model_input.lm_output_indexes  = std::move(lm_output_indexes);
-    auto compact_position_ids = compactAcceptedPositionIds(model_input.combo_position_ids, accept_lens, total_accept_len);
+    auto compact_position_ids =
+        compactAcceptedPositionIds(model_input.combo_position_ids, accept_lens, total_accept_len);
     if (compact_position_ids.defined()) {
         model_input.combo_position_ids = std::move(compact_position_ids);
     }
@@ -441,6 +467,7 @@ void MtpBatchStreamProcessor::updateMultiStepDraftSamplerOutput(const StreamGrou
 void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&                stream_groups,
                                                            const MergedOutput&                prefill_output,
                                                            const MergedOutput&                propose_output,
+                                                           const torch::Tensor&               draft_last_hidden_states,
                                                            const torch::Tensor&               new_tokens_all,
                                                            std::vector<StreamSpecUpdateInfo>& spec_update_infos) const {
     const auto& sampler_output       = prefill_output.sampler_output;
@@ -491,7 +518,12 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
 
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1) {
-            last_hidden_states = draft_model_output.all_hidden_states.narrow(0, token_offset + token_size - 1, 1);
+            if (draft_last_hidden_states.defined() && draft_last_hidden_states.numel() > 0) {
+                last_hidden_states = cloneHiddenSlice(draft_last_hidden_states, batch_idx_out, 1);
+            } else {
+                last_hidden_states =
+                    cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + token_size - 1, 1);
+            }
         }
 
         spec_update_infos.push_back({new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)});

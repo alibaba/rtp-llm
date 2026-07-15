@@ -202,6 +202,7 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     const size_t total_context_batch_size = stream_groups.totalContextBatchSize();
     const size_t total_block_copy_num     = stream_groups.totalBlockUpdateCopyNum();
     const size_t max_blocks_num           = stream_groups.curBlocksNum();
+    const size_t max_cache_keys_num       = std::max(max_blocks_num, stream_groups.maxCacheKeysNum());
     const size_t multimodal_features_len  = stream_groups.mmFeaturesLen();
     const bool   has_multimodal_input     = config_.is_multimodal && stream_groups.has_multimodal_input();
     const bool   need_cal_position_id =
@@ -229,10 +230,13 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
                          pinned_i32);
         model_input.kv_cache_block_id = torch::zeros(
             {(int64_t)config_.kv_cache_group_nums, (int64_t)total_batch_size, (int64_t)max_blocks_num}, pinned_i32);
-        model_input.kv_cache_layer_to_group = torch::empty({(int64_t)config_.num_layers}, pinned_i32);
         model_input.kv_cache_group_types    = torch::empty({(int64_t)config_.kv_cache_group_nums}, pinned_i32);
         model_input.kv_cache_update_mapping = torch::empty({(int64_t)total_block_copy_num, 2}, pinned_i32);
-        model_input.cache_keys = torch::empty({(int64_t)total_context_batch_size, (int64_t)max_blocks_num}, pinned_i64);
+        // CP-sharded group block tables can be narrower than the global cache-key
+        // namespace. Keep cache_keys independently sized so PD writer and reader
+        // derive identical keys from the complete token sequence.
+        model_input.cache_keys =
+            torch::zeros({(int64_t)total_context_batch_size, (int64_t)max_cache_keys_num}, pinned_i64);
     }
 
     if (need_cal_position_id) {
@@ -251,18 +255,13 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     model_input.pd_separation             = config_.role_type == RoleType::PREFILL;
     model_input.warmup                    = config_.warm_up;
     model_input.decode_entrance           = config_.decode_entrance;
+    model_input.use_opaque_kv_cache_store = config_.use_opaque_kv_cache_store;
     model_input.is_fake_stream            = stream_groups.isFakeStream();
 
     return model_input;
 }
 
 void NormalModelInputGatherer::initializeKvCacheMetadata(GptModelInputs& model_input) const {
-    if (model_input.kv_cache_layer_to_group.defined()) {
-        size_t num_layers = config_.layer_to_kv_cache_group_id.size();
-        std::memcpy(model_input.kv_cache_layer_to_group.data_ptr(),
-                    config_.layer_to_kv_cache_group_id.data(),
-                    num_layers * sizeof(int32_t));
-    }
     if (model_input.kv_cache_group_types.defined()) {
         auto* dst = model_input.kv_cache_group_types.data_ptr<int32_t>();
         for (size_t g = 0; g < config_.kv_cache_group_nums; ++g) {
@@ -379,6 +378,11 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                 model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
 
             if (ctx.max_blocks_num && config_.role_type == RoleType::PREFILL && stream->hasCacheKeys()) {
+                RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(stream->cacheKeys(i).size())
+                                            <= model_input.cache_keys.size(1),
+                                        "cache_keys overflow: stream keys=%zu tensor width=%ld",
+                                        stream->cacheKeys(i).size(),
+                                        model_input.cache_keys.size(1));
                 std::memcpy(model_input.cache_keys.data_ptr<int64_t>()
                                 + prefill_batch_idx * model_input.cache_keys.size(1),
                             stream->cacheKeys(i).data(),

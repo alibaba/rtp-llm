@@ -1,8 +1,10 @@
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 
 #include <utility>
+#include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
@@ -116,7 +118,22 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
         return nullptr;
     }
 
-    auto resource = allocator_->incrKVCacheRef(kvcache_resource, kvcache_resource.cacheKeys(), true);
+    const int       cp_size      = cpSize();
+    CacheKeysType   ref_keys     = kvcache_resource.cacheKeys();
+    KVCacheResource ref_resource = kvcache_resource;
+    if (cp_size > 1 && !kvcache_resource.cacheKeysAreCpCanonical()) {
+        CPSlotMapper mapper(cp_size - 1, cp_size, static_cast<int>(cache_config_.seq_size_per_block));
+        ref_keys = mapper.canonicalCacheKeys(kvcache_resource.cacheKeys());
+        // Short requests (< cp_size logical blocks) have no complete virtual
+        // block, so the canonical last-rank-key namespace is empty by design.
+        // Skip silently — connector activity for these is a no-op anyway.
+        if (ref_keys.empty()) {
+            return nullptr;
+        }
+        ref_resource = mapper.projectConnectorResource(kvcache_resource, cache_config_, ref_keys);
+        ref_keys     = ref_resource.cacheKeys();
+    }
+    auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async read failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
@@ -154,7 +171,19 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
         return nullptr;
     }
 
-    auto resource = allocator_->incrKVCacheRef(kvcache_resource, kvcache_resource.cacheKeys(), true);
+    const int       cp_size      = cpSize();
+    CacheKeysType   ref_keys     = kvcache_resource.cacheKeys();
+    KVCacheResource ref_resource = kvcache_resource;
+    if (cp_size > 1 && !kvcache_resource.cacheKeysAreCpCanonical()) {
+        CPSlotMapper mapper(cp_size - 1, cp_size, static_cast<int>(cache_config_.seq_size_per_block));
+        ref_keys = mapper.canonicalCacheKeys(kvcache_resource.cacheKeys());
+        if (ref_keys.empty()) {
+            return nullptr;  // request shorter than one virtual block — nothing to write
+        }
+        ref_resource = mapper.projectConnectorResource(kvcache_resource, cache_config_, ref_keys);
+        ref_keys     = ref_resource.cacheKeys();
+    }
+    auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async write failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
@@ -193,8 +222,12 @@ KVCacheConnectorCoordinator::asyncWriteByLayer(int                              
 }
 
 std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryConnector() {
-    auto memory_connector = std::make_shared<KVCacheMemoryConnector>(
-        cache_config_, kv_cache_config_, allocator_, runtime_config_.worker_grpc_addrs, metrics_reporter_);
+    auto memory_connector = std::make_shared<KVCacheMemoryConnector>(cache_config_,
+                                                                     kv_cache_config_,
+                                                                     parallelism_config_,
+                                                                     allocator_,
+                                                                     runtime_config_.worker_grpc_addrs,
+                                                                     metrics_reporter_);
     RTP_LLM_CHECK_WITH_INFO(memory_connector->init(), "memory connector init failed");
     return memory_connector;
 }
@@ -218,6 +251,21 @@ std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnecto
     RTP_LLM_LOG_ERROR("not RemoteConnector");
     return nullptr;
 #endif
+}
+
+int KVCacheConnectorCoordinator::cpSize() const {
+    const auto& cp_cfg = parallelism_config_.prefill_cp_config;
+    if (!cp_cfg.kv_cache_sharded) {
+        return 1;
+    }
+    if (parallelism_config_.tp_size > 1) {
+        return static_cast<int>(parallelism_config_.tp_size);
+    }
+    if (parallelism_config_.role_type == RoleType::DECODE && cp_cfg.is_prefill_enabled()
+        && cp_cfg.prefill_cp_size > 1) {
+        return static_cast<int>(cp_cfg.prefill_cp_size);
+    }
+    return 1;
 }
 
 void KVCacheConnectorCoordinator::updateOnce() {

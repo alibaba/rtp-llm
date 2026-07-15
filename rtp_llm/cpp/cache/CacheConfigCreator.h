@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include "absl/status/status.h"
@@ -11,6 +13,17 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 
 namespace rtp_llm {
+
+struct KVCacheBlockBudget {
+    size_t explicit_pool_reserve_bytes = 0;
+    size_t paged_block_bytes           = 0;
+    size_t swa_block_bytes             = 0;
+};
+
+// Returns the largest global block count whose independent-pool backing fits
+// in total_budget_bytes:
+//   explicit reserve + N * paged bytes + ceil(N / linear_step) * SWA bytes.
+uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlockBudget& budget, int linear_step);
 
 class CacheConfigCreator {
 public:

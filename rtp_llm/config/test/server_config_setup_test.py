@@ -2,15 +2,43 @@ import unittest
 from unittest import TestCase
 from unittest.mock import patch
 
+from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_and_configure_server,
 )
+from rtp_llm.ops import RoleType
 from rtp_llm.server.server_args.server_args import setup_args
 
 
 class GenerateConfigTest(TestCase):
+
+    def test_engine_config_propagates_role_to_parallelism_config(self):
+        py_env_configs = PyEnvConfigs()
+        py_env_configs.role_config.role_type = RoleType.PREFILL
+
+        engine_config = EngineConfig.create(py_env_configs)
+
+        self.assertEqual(engine_config.pd_sep_config.role_type, RoleType.PREFILL)
+        self.assertEqual(engine_config.parallelism_config.role_type, RoleType.PREFILL)
+
+    def test_set_parallelism_config_propagates_prefill_cp_cache_fields(self):
+        py_env_configs = PyEnvConfigs()
+        py_env_configs.prefill_cp_config.kv_cache_sharded = True
+        py_env_configs.prefill_cp_config.prefill_cp_size = 4
+
+        set_parallelism_config(
+            py_env_configs.parallelism_config,
+            py_prefill_cp_config=py_env_configs.prefill_cp_config,
+        )
+
+        self.assertTrue(
+            py_env_configs.parallelism_config.prefill_cp_config.kv_cache_sharded
+        )
+        self.assertEqual(
+            py_env_configs.parallelism_config.prefill_cp_config.prefill_cp_size, 4
+        )
 
     # EnvArgumentParser in setup_args() reads these env vars (START_PORT, TP_SIZE, etc.)
     # and binds them to py_env_configs; server_port = start_port + rank_id * worker_info_port_num (rank_id=0 here).
@@ -26,6 +54,8 @@ class GenerateConfigTest(TestCase):
             "START_PORT": "20000",
             "MODEL_TYPE": "fake_model",
             "USE_ALL_GATHER": "0",
+            "PREFILL_CP_KV_CACHE_SHARDED": "1",
+            "PREFILL_CP_SIZE": "4",
         },
         clear=True,
     )
@@ -41,6 +71,8 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(pc.tp_size, 4)
         self.assertEqual(pc.world_size, 4)
         self.assertEqual(pc.local_world_size, 2)
+        self.assertTrue(pc.prefill_cp_config.kv_cache_sharded)
+        self.assertEqual(pc.prefill_cp_config.prefill_cp_size, 4)
         self.assertEqual(py_env_configs.server_config.server_port, 20000)
 
         self.assertEqual(py_env_configs.moe_config.use_deepep_moe, True)

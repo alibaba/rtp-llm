@@ -22,12 +22,14 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.kv_cache_kernel_block_id.defined() ? inputs.kv_cache_kernel_block_id.size(2) : 0;
     shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch] =
         inputs.kv_cache_block_id.defined() ? inputs.kv_cache_block_id.size(2) : 0;
+    shape_hints_ptr[GptModelInputIndex::cacheKeysWidth] =
+        inputs.cache_keys.defined() && inputs.cache_keys.dim() >= 2 ? inputs.cache_keys.size(1) : 0;
     shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum] =
         inputs.kv_cache_kernel_block_id.defined() ?
             inputs.kv_cache_kernel_block_id.size(0) :
             (inputs.kv_cache_block_id.defined() ? inputs.kv_cache_block_id.size(0) : 1);
-    shape_hints_ptr[GptModelInputIndex::kvCacheLayerToGroupLen] =
-        inputs.kv_cache_layer_to_group.defined() ? inputs.kv_cache_layer_to_group.numel() : 0;
+    // Kept as a reserved zero-valued slot for shape-hint wire compatibility.
+    shape_hints_ptr[GptModelInputIndex::kvCacheLayerToGroupLen] = 0;
     shape_hints_ptr[GptModelInputIndex::kvCacheGroupTypesLen] =
         inputs.kv_cache_group_types.defined() ? inputs.kv_cache_group_types.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum] =
@@ -111,8 +113,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     auto   max_kernel_blocks       = (size_t)shape_hints_ptr[GptModelInputIndex::maxKernelBlocksPerBatch];
     auto   max_blocks              = (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch];
+    auto   cache_keys_width        = (size_t)shape_hints_ptr[GptModelInputIndex::cacheKeysWidth];
     auto   kv_cache_group_num      = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum];
-    auto   layer_to_group_len      = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheLayerToGroupLen];
     auto   group_types_len         = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheGroupTypesLen];
     auto   combo_position_ids_size = shape_hints_ptr[GptModelInputIndex::comboPositionIds];
     auto   text_tokens_mask_size   = shape_hints_ptr[GptModelInputIndex::textTokensMask];
@@ -160,11 +162,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                 allocBuf(rtp_llm::DataType::TYPE_INT32,
                          {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks});
             if (inputs.pd_separation) {
-                inputs.cache_keys = allocBuf(rtp_llm::DataType::TYPE_INT64, {context_batch_size, max_blocks});
+                inputs.cache_keys = allocBuf(rtp_llm::DataType::TYPE_INT64,
+                                             {context_batch_size, cache_keys_width ? cache_keys_width : max_blocks});
             }
-        }
-        if (layer_to_group_len) {
-            inputs.kv_cache_layer_to_group = allocBuf(rtp_llm::DataType::TYPE_INT32, {layer_to_group_len});
         }
         if (group_types_len) {
             inputs.kv_cache_group_types = allocBuf(rtp_llm::DataType::TYPE_INT32, {group_types_len});
@@ -233,9 +233,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (max_kernel_blocks || max_blocks) {
         collect(inputs.kv_cache_kernel_block_id);
         collect(inputs.kv_cache_block_id);
-        if (layer_to_group_len) {
-            collect(inputs.kv_cache_layer_to_group);
-        }
         if (group_types_len) {
             collect(inputs.kv_cache_group_types);
         }

@@ -29,6 +29,7 @@ py_library(
     name = "cuda_graph_test_utils",
     srcs = ["cuda_graph_test_utils.py"],
     deps = [
+        "//rtp_llm/models_py:utils",
         "//rtp_llm/test/model_test/test_util:test_util",
     ],
     visibility = ["//visibility:public"],

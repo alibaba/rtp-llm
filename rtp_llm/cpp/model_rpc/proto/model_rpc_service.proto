@@ -295,6 +295,7 @@ message BroadcastLoadRequestPB {
     int32 partition_count = 10;
     int32 partition_id = 11;
     repeated IntVector group_block_ids = 12;
+    int32 prefill_cp_size = 13;
 
 }
 
@@ -472,10 +473,34 @@ message MemoryOperationRequestPB {
     message CopyItem {
         int32 mem_block = 1;
         repeated int32 gpu_blocks = 2;
+        bool is_complete = 3;
+        BackingType backing_type = 4;
+        oneof disk_slot_presence {
+            int32 disk_slot = 5;
+        }
+        CacheBlockKind cache_block_kind = 6;
+        oneof src_mem_block_presence {
+            int32 src_mem_block = 7;
+        }
+        repeated uint32 slot_valid_mask = 8;
+        BackingType src_backing_type = 9;
+        oneof src_disk_slot_presence {
+            int32 src_disk_slot = 10;
+        }
     }
     enum CopyDirection {
         H2D = 0;
         D2H = 1;
+    }
+    enum BackingType {
+        MEMORY = 0;
+        DISK = 1;
+    }
+    enum CacheBlockKind {
+        LEGACY_COMPLETE = 0;
+        LEGACY_INCOMPLETE = 1;
+        COMPRESSED_KV = 2;
+        STATE_SWA_KV = 3;
     }
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
@@ -494,6 +519,7 @@ message LayerCacheBlockPB {
     uint32 layer_id = 1;
     repeated int64 cache_keys = 2;
     repeated uint32 block_ids = 3;
+    uint32 group_id = 4;
 }
 
 enum P2PConnectorBroadcastType {

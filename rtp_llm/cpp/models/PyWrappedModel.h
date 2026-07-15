@@ -34,29 +34,31 @@ public:
     PyWrappedModel(const GptModelInitParams& params,
                    py::object                py_instance,
                    bool                      is_prefill_cuda_graph_mode = false,
-                   bool                      use_spec_decoding          = false,
-                   const std::vector<int>&   kv_cache_layer_to_group    = {});
+                   bool                      use_spec_decoding          = false);
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
+    torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
+    torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
 
 private:
     // Helper functions to reduce code duplication
-    torch_ext::PyAttentionInputs   buildPyAttentionInputs(const GptModelInputs& inputs);
-    torch_ext::PyEmbeddingInputs   buildPyEmbeddingInputs(const GptModelInputs& inputs);
-    torch_ext::PyMultimodalInputs  buildPyMultimodalInputs(const GptModelInputs& inputs);
-    torch_ext::BertEmbeddingInputs buildBertEmbeddingInputs(const GptModelInputs& inputs);
-    void setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs, const GptModelInputs& inputs);
-    GptModelOutputs callForwardPostLayers(torch::Tensor         hidden_states,
-                                          const GptModelInputs& inputs,
-                                          bool                  skip_final_layernorm,
-                                          size_t                num_valid_tokens = -1);
-    torch::Tensor   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
+    torch_ext::PyAttentionInputs    buildPyAttentionInputs(const GptModelInputs& inputs);
+    torch_ext::PyEmbeddingInputs    buildPyEmbeddingInputs(const GptModelInputs& inputs);
+    torch_ext::PyMultimodalInputs   buildPyMultimodalInputs(const GptModelInputs& inputs);
+    torch_ext::BertEmbeddingInputs  buildBertEmbeddingInputs(const GptModelInputs& inputs);
+    torch_ext::AttentionInputsByTag setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
+                                                                   const GptModelInputs&         inputs);
+    GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
+                                                          const GptModelInputs& inputs,
+                                                          bool                  skip_final_layernorm,
+                                                          size_t                num_valid_tokens = -1);
+    torch::Tensor                   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
     // Methods absorbed from GptModel
     torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
@@ -75,15 +77,15 @@ private:
     void holdInputsHostBuffers(const GptModelInputs& inputs);
 
     // Member variables (formerly inherited from GptModel)
-    const rtp_llm::ExecProperties            device_props_;
-    const rtp_llm::MlaOpsType                mla_ops_type_;
-    const size_t                             layer_num_;
-    const GptModelDescription                description_;
-    std::optional<rtp_llm::CacheLayerLayout> kv_cache_layer_layout_;
-    std::shared_ptr<KVCacheManager>          cache_manager_;  // For cache_store access
-    torch::Tensor                            residual_scale_fp32_;
-    torch::Tensor                            residual_scale_;
-    ModelBufferHolder                        buffer_holder_;
+    const rtp_llm::ExecProperties                   device_props_;
+    const rtp_llm::MlaOpsType                       mla_ops_type_;
+    const size_t                                    layer_num_;
+    const GptModelDescription                       description_;
+    std::optional<rtp_llm::GroupedCacheLayerLayout> kv_cache_layer_layout_;
+    std::shared_ptr<KVCacheManager>                 cache_manager_;  // For cache_store access
+    torch::Tensor                                   residual_scale_fp32_;
+    torch::Tensor                                   residual_scale_;
+    ModelBufferHolder                               buffer_holder_;
 
     GraphBase* graph_runner_{nullptr};
     py::object py_model_;
@@ -109,8 +111,7 @@ private:
 inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                       py::object                py_instance,
                                       bool                      is_prefill_cuda_graph_mode,
-                                      bool                      use_spec_decoding,
-                                      const std::vector<int>&   kv_cache_layer_to_group):
+                                      bool                      use_spec_decoding):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
@@ -151,33 +152,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     torch_ext::PyModelInitResources init_resources;
 
     if (params.kv_cache_layer_layout.has_value()) {
-        torch_ext::KVCache kv_cache;
-        kv_cache.seq_size_per_block        = params.description.attention_conf.tokens_per_block;
-        kv_cache.kernel_seq_size_per_block = params.description.attention_conf.kernel_tokens_per_block;
-        const auto& layout                 = params.kv_cache_layer_layout.value();
-        kv_cache.kv_cache_base_by_layer.reserve(layout.layers_to_kv_buffer_ptrs.size());
-        kv_cache.num_kv_heads  = params.description.attention_conf.kv_head_num;
-        kv_cache.head_dim      = params.description.attention_conf.size_per_head;
-        kv_cache.use_mla       = params.description.attention_conf.use_mla;
-        kv_cache.kv_lora_rank  = params.description.attention_conf.kv_lora_rank;
-        kv_cache.rope_head_dim = params.description.attention_conf.rope_head_dim;
-        for (const auto& t : layout.layers_to_kv_buffer_ptrs) {
-            kv_cache.kv_cache_base_by_layer.push_back(t);
-        }
-        kv_cache.kv_scale_base_by_layer.reserve(layout.layers_to_scale_buffer_ptrs.size());
-        for (const auto& t : layout.layers_to_scale_buffer_ptrs) {
-            kv_cache.kv_scale_base_by_layer.push_back(t);
-        }
-
-        kv_cache.layer_attn_types   = layout.layer_attn_types;
-        kv_cache.layer_to_group_ids = layout.layer_to_group_ids;
-        kv_cache.group_types        = layout.group_types;
-        kv_cache.group_tags         = layout.group_tags;
-        kv_cache.layer_tag_to_group_id        = layout.layer_tag_to_group_id;
-        kv_cache.kv_cache_base_by_layer_group = layout.layers_to_kv_buffer_ptrs_by_group;
-        kv_cache.kv_scale_base_by_layer_group = layout.layers_to_scale_buffer_ptrs_by_group;
-        init_resources.kv_cache     = kv_cache;
+        init_resources.kv_cache.emplace(params.kv_cache_layer_layout.value());
     }
+    init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
+    init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
+    init_resources.max_context_batch_size = params.runtime_config.fifo_scheduler_config.max_context_batch_size;
 
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
@@ -205,7 +184,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
-        graph_params.kv_cache_group_num           = params.kv_cache_group_num;
+        if (params.kv_cache_layer_layout.has_value()) {
+            graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTagsSnapshot();
+        }
         // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
         // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);
         // >0 = factor (Mrope models such as qwen3-vl / qwen35-moe set rope_config.style
@@ -214,12 +195,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.position_id_len_factor = (description_.attention_conf.rope_config.style == RopeStyle::Mrope) ?
                                                   description_.attention_conf.rope_config.index_factor :
                                                   0;
-
-        if (kv_cache_layer_to_group.size() > 0) {
-            graph_params.kv_cache_layer_to_group = kv_cache_layer_to_group;
-        } else {
-            graph_params.kv_cache_layer_to_group = params.kv_cache_layer_to_group;
-        }
 
         // clang-format off
         // Decision table for num_tokens_per_bs:
@@ -244,7 +219,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         } else {
             graph_params.num_tokens_per_bs = 1;
         }
-        graph_params.is_target_verify = use_spec_decoding;
+        // Target-model decode with SP enabled is the multi-token verify path.
+        // NormalExecutor::decodeWarmUp does not set use_spec_decoding, so infer
+        // this graph role from the model/config identity as well; otherwise the
+        // Python model sees is_prefill=true and incorrectly enters prefill.
+        const bool is_target_verify_decode = params.sp_config.type != SP_TYPE_NONE
+                                             && params.sp_config.gen_num_per_cycle > 0 && !params.model_id
+                                             && !is_prefill_cuda_graph_mode;
+        graph_params.is_target_verify = use_spec_decoding || is_target_verify_decode;
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }
@@ -278,7 +260,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
 
-    cache_store_async_writer_ = std::make_unique<CacheStoreAsyncWriter>();
+    cache_store_async_writer_ = std::make_unique<CacheStoreAsyncWriter>(params.parallelism_config.local_rank);
 
     if (device_props_.enable_prefill_cp) {
         context_parallel_processor_ =

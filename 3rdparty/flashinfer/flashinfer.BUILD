@@ -136,10 +136,10 @@ sub_lib('flashinfer_batch_paged_decode', batch_paged_decode, cuda_copts() + comm
 sub_lib('flashinfer_batch_paged_decode_256', batch_paged_decode_256, cuda_copts() + common_copts)
 sub_lib('flashinfer_batch_ragged_prefill', batch_ragged_prefill, cuda_copts() + common_copts)
 sub_lib('flashinfer_batch_ragged_prefill_256', batch_ragged_prefill_256, cuda_copts() + common_copts)
-sub_lib('flashinfer_single_decode', single_prefill, cuda_copts() + common_copts)
-sub_lib('flashinfer_single_decode_256', single_prefill_256, cuda_copts() + common_copts)
-sub_lib('flashinfer_single_prefill', single_decode, cuda_copts() + common_copts)
-sub_lib('flashinfer_single_prefill_256', single_decode_256, cuda_copts() + common_copts)
+sub_lib('flashinfer_single_decode', single_decode, cuda_copts() + common_copts)
+sub_lib('flashinfer_single_decode_256', single_decode_256, cuda_copts() + common_copts)
+sub_lib('flashinfer_single_prefill', single_prefill, cuda_copts() + common_copts)
+sub_lib('flashinfer_single_prefill_256', single_prefill_256, cuda_copts() + common_copts)
 sub_lib('flashinfer_sm90', [":generated_sm90"], sm90_cuda_copts)
 
 cc_library(

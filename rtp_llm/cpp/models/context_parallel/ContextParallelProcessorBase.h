@@ -31,6 +31,11 @@ public:
                                  const GptModelInputs&                     inputs,
                                  const torch_ext::PyContextParallelParams& cp_params) = 0;
 
+    /// @brief Gather only the lm-head rows selected by lm_output_indexes.
+    virtual void handleOutputsLastHidden(torch::Tensor&                            hidden_states,
+                                         const GptModelInputs&                     inputs,
+                                         const torch_ext::PyContextParallelParams& cp_params) = 0;
+
 protected:
     /// @brief Process and distribute input tokens across context parallel ranks
     ///

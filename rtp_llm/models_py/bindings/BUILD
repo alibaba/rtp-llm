@@ -12,6 +12,7 @@ cc_library(
         "OpDefs.cc",
     ],
     deps = torch_deps() + [
+        "//rtp_llm/cpp/cache:cache_layout",
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/utils:core_utils",
@@ -56,6 +57,17 @@ cc_library(
         ":no_block_copy_hdr",
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps(),
+    visibility = ["//visibility:public"],
+    alwayslink = 1,
+)
+
+cc_library(
+    name = "no_block_copy_fallback",
+    srcs = ["NoBlockCopyFallback.cc"],
+    copts = copts(),
+    deps = [
+        ":no_block_copy_hdr",
+    ],
     visibility = ["//visibility:public"],
     alwayslink = 1,
 )

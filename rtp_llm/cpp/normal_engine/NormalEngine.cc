@@ -45,19 +45,6 @@ void releaseHostMemoryCache() {
 #endif
 }
 
-std::vector<int32_t> flattenLayerToGroup(const CacheConfig& cache_config) {
-    auto layer_to_group_ids = cache_config.layerGroupIdsSnapshot();
-    std::vector<int32_t> layer_to_group;
-    layer_to_group.reserve(layer_to_group_ids.size());
-    for (size_t layer = 0; layer < layer_to_group_ids.size(); ++layer) {
-        RTP_LLM_CHECK_WITH_INFO(layer_to_group_ids[layer].size() == 1,
-                                "layer %zu owns %zu cache groups; expected exactly one group",
-                                layer,
-                                layer_to_group_ids[layer].size());
-        layer_to_group.push_back(static_cast<int32_t>(layer_to_group_ids[layer].front()));
-    }
-    return layer_to_group;
-}
 }  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
@@ -134,21 +121,10 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 void NormalEngine::initExecutor(const EngineInitParams&                        params,
                                 std::unique_ptr<ProposeModelEngineInitParams>& propose_params) {
     if (propose_params_) {
-        executor_.reset(new MtpExecutor(params,
-                                        propose_params,
-                                        resource_context_.cache_manager,
-                                        mla_ops_type_,
-                                        kv_cache_group_num_,
-                                        kv_cache_layer_to_group_));
+        executor_.reset(new MtpExecutor(
+            params, propose_params, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_));
     } else {
-        executor_.reset(new NormalExecutor(params,
-                                           resource_context_.cache_manager,
-                                           false,
-                                           false,
-                                           0,
-                                           mla_ops_type_,
-                                           kv_cache_group_num_,
-                                           kv_cache_layer_to_group_));
+        executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, false, false, 0, mla_ops_type_));
     }
 }
 
@@ -263,8 +239,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
-    executor_.reset(new NormalExecutor(
-        params, nullptr, true, false, 0, mla_ops_type_, kv_cache_group_num_, kv_cache_layer_to_group_));
+    executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
@@ -286,9 +261,8 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
 
-    auto cache_config               = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, 0);
-    cache_config.seq_size_per_block = model_config_.attn_config.tokens_per_block;
-    cache_config.block_num          = 5;
+    auto cache_config      = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, 0);
+    cache_config.block_num = 5;
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
     auto              cache_manager = make_shared<KVCacheManager>(
@@ -296,16 +270,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
-    const auto& temp_cache_config = cache_manager->cacheConfig();
-    auto        temp_layer_to_group = flattenLayerToGroup(temp_cache_config);
-    executor_.reset(new NormalExecutor(params,
-                                       cache_manager,
-                                       true,
-                                       false,
-                                       0,
-                                       mla_ops_type_,
-                                       static_cast<int32_t>(temp_cache_config.groupNums()),
-                                       temp_layer_to_group));
+    executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, mla_ops_type_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
@@ -364,9 +329,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
             RTP_LLM_FAIL("init kv cache manager failed");
         }
 
-        const auto& cache_cfg    = resource_context_.cache_manager->cacheConfig();
-        kv_cache_group_num_      = cache_cfg.groupNums();
-        kv_cache_layer_to_group_ = flattenLayerToGroup(cache_cfg);
+        const auto& cache_cfg = resource_context_.cache_manager->cacheConfig();
+        kv_cache_group_num_   = cache_cfg.groupNums();
     } else {
         auto result = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
@@ -381,9 +345,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
-        const auto& cache_cfg    = resource_context_.cache_manager->cacheConfig();
-        kv_cache_group_num_      = cache_cfg.groupNums();
-        kv_cache_layer_to_group_ = flattenLayerToGroup(cache_cfg);
+        const auto& cache_cfg = resource_context_.cache_manager->cacheConfig();
+        kv_cache_group_num_   = cache_cfg.groupNums();
     }
 }
 

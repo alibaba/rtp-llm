@@ -2,7 +2,6 @@
 
 #include <algorithm>
 
-
 namespace rtp_llm {
 
 size_t BlockIds::blocksNum() const {
@@ -124,9 +123,10 @@ void BlockIds::syncKernelBlocks() {
 
 void KVCacheResource::initGroups(int                                  group_num,
                                  int                                  layer_num,
-                                 const std::vector<std::vector<int>>& layer_to_group_ids,
+                                 const std::vector<std::vector<int>>& layer_group_ids,
                                  size_t                               kernel_blocks_per_kv_block,
-                                 const std::vector<CacheGroupType>&   group_types) {
+                                 const std::vector<CacheGroupType>&   group_types,
+                                 const std::vector<size_t>&           group_kernel_blocks_per_kv_block) {
     group_block_ids.clear();
     layer_group_block_ids.clear();
 
@@ -136,33 +136,41 @@ void KVCacheResource::initGroups(int                                  group_num,
                                 group_types.size(),
                                 group_num);
     }
+    if (!group_kernel_blocks_per_kv_block.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(group_kernel_blocks_per_kv_block.size() >= static_cast<size_t>(group_num),
+                                "KVCacheResource::initGroups: group kernel bpk size %zu < group_num %d",
+                                group_kernel_blocks_per_kv_block.size(),
+                                group_num);
+    }
 
     group_block_ids.reserve(static_cast<size_t>(group_num));
     for (int i = 0; i < group_num; i++) {
-        const bool   is_full = group_types.empty() || group_types[static_cast<size_t>(i)] == CacheGroupType::FULL;
-        const size_t group_kernel_blocks_per_kv_block = is_full ? std::max<size_t>(1, kernel_blocks_per_kv_block) : 1;
-        auto         bid                              = std::make_shared<BlockIds>(group_kernel_blocks_per_kv_block);
+        const bool   is_full_group = group_types.empty() || group_types[static_cast<size_t>(i)] == CacheGroupType::FULL;
+        const size_t configured_bpk = group_kernel_blocks_per_kv_block.empty() ?
+                                          kernel_blocks_per_kv_block :
+                                          group_kernel_blocks_per_kv_block[static_cast<size_t>(i)];
+        const size_t bpk            = is_full_group ? std::max<size_t>(1, configured_bpk) : 1;
+        auto         bid            = std::make_shared<BlockIds>(bpk);
         group_block_ids.push_back(std::move(bid));
     }
 
     if (!group_block_ids.empty()) {
-        RTP_LLM_CHECK_WITH_INFO(layer_to_group_ids.size() >= static_cast<size_t>(layer_num),
-                                "KVCacheResource::initGroups: layer_to_group_ids size %zu < layer_num %d",
-                                layer_to_group_ids.size(),
+        RTP_LLM_CHECK_WITH_INFO(layer_group_ids.size() >= static_cast<size_t>(layer_num),
+                                "KVCacheResource::initGroups: layer_group_ids size %zu < layer_num %d",
+                                layer_group_ids.size(),
                                 layer_num);
         layer_group_block_ids.resize(static_cast<size_t>(layer_num));
         for (int layer = 0; layer < layer_num; ++layer) {
             auto& group_blocks = layer_group_block_ids[static_cast<size_t>(layer)];
             group_blocks.assign(static_cast<size_t>(group_num), nullptr);
 
-            const auto& gids = layer_to_group_ids[static_cast<size_t>(layer)];
+            const auto& gids = layer_group_ids[static_cast<size_t>(layer)];
             for (int gid : gids) {
-                RTP_LLM_CHECK_WITH_INFO(
-                    gid >= 0 && gid < group_num,
-                    "KVCacheResource::initGroups: invalid group id %d for layer %d (group_num=%d)",
-                    gid,
-                    layer,
-                    group_num);
+                RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < group_num,
+                                        "KVCacheResource::initGroups: invalid group id %d for layer %d (group_num=%d)",
+                                        gid,
+                                        layer,
+                                        group_num);
                 group_blocks[static_cast<size_t>(gid)] = group_block_ids[static_cast<size_t>(gid)];
             }
         }
@@ -228,7 +236,7 @@ LayerBlockIds KVCacheResource::layerBlocks() const {
     LayerBlockIds layer_blocks;
     layer_blocks.reserve(layer_group_block_ids.size());
     for (size_t layer = 0; layer < layer_group_block_ids.size(); ++layer) {
-        const auto& group_blocks = layer_group_block_ids[layer];
+        const auto&               group_blocks = layer_group_block_ids[layer];
         std::shared_ptr<BlockIds> selected_blocks;
         int                       selected_group_id = -1;
         int                       mapped_group_num  = 0;
@@ -271,6 +279,60 @@ CacheKeysType& KVCacheResource::cacheKeys() {
 
 const CacheKeysType& KVCacheResource::cacheKeys() const {
     return cache_keys;
+}
+
+void KVCacheResource::setCacheKeys(const CacheKeysType& keys) {
+    cache_keys                   = keys;
+    cache_keys_are_cp_canonical_ = false;
+    rebuildLinearBlockDependencies();
+}
+
+void KVCacheResource::setCacheKeys(CacheKeysType&& keys) {
+    cache_keys                   = std::move(keys);
+    cache_keys_are_cp_canonical_ = false;
+    rebuildLinearBlockDependencies();
+}
+
+bool KVCacheResource::cacheKeysAreCpCanonical() const {
+    return cache_keys_are_cp_canonical_;
+}
+
+void KVCacheResource::setCacheKeysAreCpCanonical(bool cache_keys_are_cp_canonical) {
+    cache_keys_are_cp_canonical_ = cache_keys_are_cp_canonical;
+}
+
+BlockDependenciesType& KVCacheResource::blockDependencies() {
+    return block_dependencies;
+}
+
+const BlockDependenciesType& KVCacheResource::blockDependencies() const {
+    return block_dependencies;
+}
+
+void KVCacheResource::setBlockDependencies(const BlockDependenciesType& dependencies) {
+    block_dependencies = dependencies;
+}
+
+void KVCacheResource::setBlockDependencies(BlockDependenciesType&& dependencies) {
+    block_dependencies = std::move(dependencies);
+}
+
+void KVCacheResource::rebuildLinearBlockDependencies() {
+    block_dependencies.clear();
+    block_dependencies.reserve(cache_keys.size());
+    for (size_t i = 0; i < cache_keys.size(); ++i) {
+        BlockDependency dependency;
+        dependency.ordinal = static_cast<uint32_t>(i);
+        if (i > 0) {
+            dependency.has_parent = true;
+            dependency.parent_key = cache_keys[i - 1];
+        }
+        block_dependencies.push_back(dependency);
+    }
+}
+
+void KVCacheResource::ensureLinearBlockDependencies() {
+    rebuildLinearBlockDependencies();
 }
 
 size_t KVCacheResource::reuseBlockNum() const {

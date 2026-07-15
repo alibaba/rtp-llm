@@ -1,9 +1,107 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 
 namespace rtp_llm {
+
+namespace {
+
+DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&               request_key,
+                                                    const std::vector<std::string>&  peer_addrs,
+                                                    const std::vector<CacheKeyType>& cache_keys,
+                                                    const GroupBlockIds&             block_ids_by_group,
+                                                    int32_t                          prefill_cp_size) {
+    return {/*request_id=*/42,
+            request_key,
+            peer_addrs,
+            cache_keys,
+            block_ids_by_group,
+            /*reuse_block_size=*/0,
+            /*timeout_ms=*/1000,
+            /*partition_count=*/1,
+            /*partition_id=*/0,
+            /*server_context=*/nullptr,
+            prefill_cp_size};
+}
+
+}  // namespace
+
+TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
+    DecodeRpcServer server;
+    server.resource_.workers = {"decode-0", "decode-1"};
+
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101, 102};
+    const GroupBlockIds             block_ids_by_group;
+    const auto load_context = makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2);
+
+    const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs);
+
+    EXPECT_EQ(request.prefill_cp_size(), 2);
+    EXPECT_EQ(request.partition_count(), 1);
+    EXPECT_EQ(request.partition_id(), 0);
+    ASSERT_EQ(request.peer_addrs_size(), 2);
+    EXPECT_EQ(request.peer_addrs(0), "prefill-0");
+    EXPECT_EQ(request.peer_addrs(1), "prefill-1");
+    ASSERT_EQ(request.cache_keys_size(), 2);
+    EXPECT_EQ(request.cache_keys(0), 101);
+    EXPECT_EQ(request.cache_keys(1), 102);
+}
+
+TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
+    DecodeRpcServer server;
+    server.resource_.workers = {"decode-0", "decode-1"};
+
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101};
+    const GroupBlockIds             block_ids_by_group;
+    const auto load_context = makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2);
+
+    const auto request = server.constructRemoteLoadRequestForMla(load_context, /*index=*/1, peer_addrs);
+
+    EXPECT_EQ(request.prefill_cp_size(), 2);
+    EXPECT_EQ(request.partition_count(), 1);
+    EXPECT_EQ(request.partition_id(), 0);
+    ASSERT_EQ(request.peer_addrs_size(), 2);
+    EXPECT_EQ(request.peer_addrs(0), "prefill-0");
+    EXPECT_EQ(request.peer_addrs(1), "prefill-1");
+}
+
+TEST(PrefillRpcServerTest, PDSepEligibilityRejectsUnsupportedGenerationModes) {
+    PrefillRpcServer server;
+    GenerateInputPB  input;
+    auto*            config = input.mutable_generate_config();
+    config->set_max_new_tokens(2);
+    config->set_num_beams(1);
+    config->set_num_return_sequences(1);
+    config->set_can_use_pd_separation(true);
+
+    EXPECT_TRUE(server.canUsePDSep(input));
+
+    auto single_token = input;
+    single_token.mutable_generate_config()->set_max_new_tokens(1);
+    EXPECT_FALSE(server.canUsePDSep(single_token));
+
+    auto beam_search = input;
+    beam_search.mutable_generate_config()->set_num_beams(2);
+    EXPECT_FALSE(server.canUsePDSep(beam_search));
+
+    auto variable_beam = input;
+    variable_beam.mutable_generate_config()->add_variable_num_beams(2);
+    EXPECT_FALSE(server.canUsePDSep(variable_beam));
+
+    auto multi_return = input;
+    multi_return.mutable_generate_config()->set_num_return_sequences(2);
+    EXPECT_FALSE(server.canUsePDSep(multi_return));
+
+    auto explicitly_disabled = input;
+    explicitly_disabled.mutable_generate_config()->set_can_use_pd_separation(false);
+    EXPECT_FALSE(server.canUsePDSep(explicitly_disabled));
+}
 
 TEST(DecodeRpcServerTest, MtpCacheKeyUsesSharedBaseModelIdForEverySlot) {
     constexpr size_t mtp_base_model_id = 17;
