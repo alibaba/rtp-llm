@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
@@ -46,6 +47,11 @@ struct CustomConfig {
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
 };
 
+inline void setDefaultMhaKVCacheSpecDescs(rtp_llm::ModelConfig& model_config) {
+    model_config.kv_cache_spec_descs.assign(static_cast<size_t>(model_config.num_layers),
+                                            {KVCacheSpecDesc{"full", KVCacheSpecType::MultiHeadAttention}});
+}
+
 rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
                                                  rtp_llm::ModelConfig&   model_config,
                                                  rtp_llm::RuntimeConfig& runtime_config,
@@ -67,10 +73,13 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     model_config.attn_config.kv_cache_dtype =
         config.kv_cache_data_type == DataType::TYPE_FP8_E4M3 ? KvCacheDataType::FP8 : KvCacheDataType::BASE;
     model_config.special_tokens.eos_token_id = -1;  // never eos
+    setDefaultMhaKVCacheSpecDescs(model_config);
 
     const size_t inter_size = 512;
     // inter_size is now calculated in ModelDeployWeightInfo, not in ModelConfig
     model_config.attn_config.tokens_per_block = 2;
+    kv_cache_config.seq_size_per_block        = model_config.attn_config.tokens_per_block;
+    kv_cache_config.kernel_seq_size_per_block = model_config.attn_config.tokens_per_block;
     runtime_config.reserve_runtime_mem_mb     = 1024;
     const size_t hidden_units                 = 128;
 

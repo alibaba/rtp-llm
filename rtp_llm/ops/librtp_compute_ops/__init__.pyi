@@ -120,7 +120,7 @@ class LayerKVCache:
     @property
     def kv_cache_base(self) -> torch.Tensor:
         """
-        Key/value cache tensor
+        Key/value cache tensor (per-layer view)
         """
 
     @kv_cache_base.setter
@@ -137,6 +137,18 @@ class LayerKVCache:
     def layer_id(self) -> int:
         """
         Global layer id
+        """
+
+    @property
+    def group_id(self) -> int:
+        """
+        Cache group id (-1 = default)
+        """
+
+    @property
+    def tag(self) -> str:
+        """
+        Cache group tag
         """
 
     @property
@@ -157,9 +169,27 @@ class KVCache:
     use_mla: bool
     kv_lora_rank: int
     rope_head_dim: int
+    layer_attn_types: list[CacheGroupType]
+    group_types: list[CacheGroupType]
+    group_tags: list[str]
+    layer_to_group_ids: list[list[int]]
+    layer_tag_to_group_id: list[dict[str, int]]
+    kv_cache_base_by_layer_group: list[list[torch.Tensor]]
+    kv_scale_base_by_layer_group: list[list[torch.Tensor]]
     def __init__(self) -> None: ...
+    @typing.overload
     def get_layer_cache(self, arg0: int) -> LayerKVCache:
         """Return a per-layer LayerKVCache for the given global layer id."""
+        ...
+    @typing.overload
+    def get_layer_cache(self, arg0: int, arg1: str) -> LayerKVCache:
+        """Return a LayerKVCache for the given layer and tag."""
+        ...
+    def get_layer_cache_by_group(self, arg0: int, arg1: int) -> LayerKVCache:
+        """Return a LayerKVCache for the given layer and group id."""
+        ...
+    def get_layer_caches(self, arg0: int) -> list[LayerKVCache]:
+        """Return all LayerKVCache objects for every group the layer owns."""
         ...
 
 class ParamsBase:
@@ -177,6 +207,7 @@ class ParamsBase:
         """
 
 class PyAttentionInputs:
+    def __init__(self) -> None: ...
     cache_store_inputs: PyCacheStoreInputs | None
     combo_position_ids: torch.Tensor
     context_parallel_info: PyContextParallelParams | None
@@ -185,18 +216,13 @@ class PyAttentionInputs:
     cu_seqlens_device: torch.Tensor
     cu_seqlens: torch.Tensor
     decode_cu_seqlens_device: torch.Tensor
+    decode_cu_seqlens: torch.Tensor
     dtype: TypeMeta
     input_lengths: torch.Tensor
     is_cuda_graph: bool
     is_prefill: bool
     is_s_padded: bool
     is_target_verify: bool
-    kv_cache_block_id_device: torch.Tensor
-    kv_cache_kernel_block_id_device_by_group: list[torch.Tensor]
-    kv_cache_block_id: torch.Tensor
-    kv_cache_kernel_block_id_by_group: list[torch.Tensor]
-    kv_cache_kernel_block_id_device: torch.Tensor
-    kv_cache_kernel_block_id: torch.Tensor
     kv_cache_layer_to_group: torch.Tensor
     padding_offset: torch.Tensor
     prefill_cuda_graph_copy_params: PyPrefillCudaGaphCopyParams | None
@@ -205,14 +231,18 @@ class PyAttentionInputs:
     sequence_lengths_plus_1_device: torch.Tensor
     total_tokens: int
     headwise_config: dict | None
-    def __init__(self) -> None: ...
-    def __repr__(self) -> str: ...
-    def __copy__(self) -> PyAttentionInputs: ...
-    decode_cu_seqlens: torch.Tensor
+    kv_cache_kernel_block_id: torch.Tensor
+    kv_cache_kernel_block_id_device: torch.Tensor
+    kv_cache_block_id: torch.Tensor
+    kv_cache_block_id_device: torch.Tensor
+    kv_cache_kernel_block_id_by_group: list[torch.Tensor]
+    kv_cache_kernel_block_id_device_by_group: list[torch.Tensor]
     @property
     def input_lengths_device(self) -> torch.Tensor: ...
     @property
     def prefix_lengths_device(self) -> torch.Tensor: ...
+    def __repr__(self) -> str: ...
+    def __copy__(self) -> PyAttentionInputs: ...
 
 class PyCacheStoreInputs:
     def __init__(self) -> None: ...
@@ -292,17 +322,17 @@ class PyModelInputs:
         """
         Combo position IDs tensor
         """
+
     @combo_position_ids.setter
-    def combo_position_ids(self, arg0: torch.Tensor) -> None:
-        ...
+    def combo_position_ids(self, arg0: torch.Tensor) -> None: ...
     @property
     def embedding_inputs(self) -> PyEmbeddingInputs:
         """
         Embedding inputs structure
         """
+
     @embedding_inputs.setter
-    def embedding_inputs(self, arg0: PyEmbeddingInputs) -> None:
-        ...
+    def embedding_inputs(self, arg0: PyEmbeddingInputs) -> None: ...
     @property
     def input_hiddens(self) -> torch.Tensor:
         """

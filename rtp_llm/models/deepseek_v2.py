@@ -27,7 +27,7 @@ from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3RotaryEmbedding,
     DeepseekV3YarnRotaryEmbedding,
 )
-from rtp_llm.ops import MlaOpsType
+from rtp_llm.ops import KVCacheSpecDesc, KVCacheSpecType, MlaOpsType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -804,6 +804,18 @@ class DeepSeekV3Mtp(DeepSeekV2):
         config.reverse_e_h_norm = True
         config.is_mtp = True
         return config
+
+    @classmethod
+    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        desc = KVCacheSpecDesc()
+        if model_config.attn_config.use_mla and model_config.mla_ops_type != MlaOpsType.MHA:
+            desc.cache_type = KVCacheSpecType.MLA
+        else:
+            desc.cache_type = KVCacheSpecType.MHA
+        desc.tag = "default"
+        model_config.kv_cache_spec_descs = [
+            [desc] for _ in range(model_config.num_layers)
+        ]
 
     @staticmethod
     def get_weight_cls():

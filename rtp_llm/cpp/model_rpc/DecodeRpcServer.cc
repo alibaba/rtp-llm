@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <mutex>
 #include <memory>
 #include <unistd.h>
@@ -37,6 +38,23 @@ string makeRequestKey(const string& client_id, size_t request_id) {
 
 namespace rtp_llm {
 
+namespace {
+
+size_t nonEmptyGroupCount(const CacheConfig& cache_config, size_t* first_gid = nullptr) {
+    size_t non_empty_group_num = 0;
+    for (size_t gid = 0; gid < static_cast<size_t>(cache_config.groupNums()); ++gid) {
+        if (!cache_config.layerIdsForGroup(gid).empty()) {
+            if (first_gid != nullptr && non_empty_group_num == 0) {
+                *first_gid = gid;
+            }
+            ++non_empty_group_num;
+        }
+    }
+    return non_empty_group_num;
+}
+
+}  // namespace
+
 grpc::Status DecodeRpcServer::init(const EngineInitParams&                                maga_init_params,
                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                                    py::object                                             mm_process_engine) {
@@ -45,6 +63,48 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
         return ret;
     }
     return grpc::Status::OK;
+}
+
+std::string
+DecodeRpcServer::makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id) {
+    return makeCacheKey(mtp_base_model_id, token_id_str, layer_id);
+}
+
+std::vector<DecodeRpcServer::MTPModuleLoadPlan>
+DecodeRpcServer::makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params) {
+    if (propose_params == nullptr || propose_params->mtp_model_params_ == nullptr
+        || propose_params->mtp_model_params_->empty() || propose_params->mtp_model_params_->front() == nullptr) {
+        return {};
+    }
+
+    const auto* active_module = propose_params->mtp_model_params_->front().get();
+    return {{/*module_index=*/0, active_module, active_module->model_id}};
+}
+
+void DecodeRpcServer::logReadFailures(int64_t                         request_id,
+                                      const std::string&              peer_addr,
+                                      ErrorCode                       error_code,
+                                      const std::string&              error_message,
+                                      const std::vector<std::string>& buffer_debug_infos) {
+    if (error_code == ErrorCode::CANCELLED) {
+        return;
+    }
+    if (buffer_debug_infos.empty()) {
+        RTP_LLM_LOG_WARNING("PD_CACHE_KEY_READ_FAILED request_id=%ld peer=%s error_code=%d error=%s buffer={}",
+                            static_cast<long>(request_id),
+                            peer_addr.c_str(),
+                            static_cast<int>(error_code),
+                            error_message.c_str());
+        return;
+    }
+    for (const auto& debug_info : buffer_debug_infos) {
+        RTP_LLM_LOG_WARNING("PD_CACHE_KEY_READ_FAILED request_id=%ld peer=%s error_code=%d error=%s buffer={%s}",
+                            static_cast<long>(request_id),
+                            peer_addr.c_str(),
+                            static_cast<int>(error_code),
+                            error_message.c_str(),
+                            debug_info.c_str());
+    }
 }
 
 void DecodeRpcServer::initThreadPool() {
@@ -577,26 +637,38 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const int peer_cnt = static_cast<int>(load_context.peer_addrs.size());
     RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
 
-    const bool   use_mla       = cache_config.use_mla;
-    const bool   use_hybrid    = cache_config.groupNums() > 1;
-    const auto&  spec          = cache_config.cache_specs[0];
-    const size_t k_total_bytes = spec->k_block_size_bytes();
-    const size_t v_total_bytes = spec->v_block_size_bytes();
+    const bool use_mla    = cache_config.use_mla;
+    const bool use_hybrid = cache_config.groupNums() > 1;
 
     if (!use_mla && peer_cnt > 1) {
-        RTP_LLM_CHECK_WITH_INFO(k_total_bytes % static_cast<size_t>(peer_cnt) == 0,
-                                "k_block bytes[%zu] not divisible by peer_cnt[%d]",
-                                k_total_bytes,
-                                peer_cnt);
-        RTP_LLM_CHECK_WITH_INFO(v_total_bytes % static_cast<size_t>(peer_cnt) == 0,
-                                "v_block bytes[%zu] not divisible by peer_cnt[%d]",
-                                v_total_bytes,
-                                peer_cnt);
+        for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
+            const size_t gid =
+                use_hybrid ? static_cast<size_t>(cache_config.groupIdFor(static_cast<int>(layer_id))) : 0;
+            const auto&  spec          = cache_config.specForGroup(gid);
+            const size_t k_total_bytes = spec->k_block_size_bytes();
+            const size_t v_total_bytes = spec->v_block_size_bytes();
+            RTP_LLM_CHECK_WITH_INFO(k_total_bytes % static_cast<size_t>(peer_cnt) == 0,
+                                    "k_block bytes[%zu] not divisible by peer_cnt[%d]",
+                                    k_total_bytes,
+                                    peer_cnt);
+            RTP_LLM_CHECK_WITH_INFO(v_total_bytes % static_cast<size_t>(peer_cnt) == 0,
+                                    "v_block bytes[%zu] not divisible by peer_cnt[%d]",
+                                    v_total_bytes,
+                                    peer_cnt);
+        }
     }
 
     auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
     auto start_load_time_us = currentTimeUs();
-    std::vector<std::shared_ptr<LoadContext>> load_contexts;
+    std::vector<std::pair<std::string, std::shared_ptr<LoadContext>>> load_contexts;
+    auto buffersDebugInfos = [](const std::vector<std::shared_ptr<RequestBlockBuffer>>& buffers) {
+        std::vector<std::string> debug_infos;
+        debug_infos.reserve(buffers.size());
+        for (const auto& buffer : buffers) {
+            debug_infos.push_back(buffer == nullptr ? "null" : buffer->debugInfo());
+        }
+        return debug_infos;
+    };
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
         auto&                                            peer_addr = load_context.peer_addrs[i];
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
@@ -606,13 +678,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);
             auto load_layer_cache =
                 std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
-            size_t gid = 0;
-            if (use_hybrid && layer_id < cache_config.layer_to_group_id.size()) {
-                const int mapped_gid = cache_config.layer_to_group_id[layer_id];
-                if (mapped_gid >= 0) {
-                    gid = static_cast<size_t>(mapped_gid);
-                }
-            }
+            size_t gid = use_hybrid ? static_cast<size_t>(cache_config.groupIdFor(static_cast<int>(layer_id))) : 0;
             RTP_LLM_CHECK_WITH_INFO(gid < load_context.block_ids_by_group.size(),
                                     "group id out of range: gid=%zu group_num=%zu",
                                     gid,
@@ -626,13 +692,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             std::vector<size_t> block_pos_list;
             block_pos_list.reserve(block_num);
             if (use_hybrid && block_num > 0) {
-                CacheGroupType group_type = CacheGroupType::FULL;
-                if (layer_id < cache_config.layer_to_group_id.size() && !cache_config.group_types.empty()) {
-                    const int gid = cache_config.layer_to_group_id[layer_id];
-                    if (gid >= 0 && static_cast<size_t>(gid) < cache_config.group_types.size()) {
-                        group_type = cache_config.group_types[static_cast<size_t>(gid)];
-                    }
-                }
+                CacheGroupType group_type = cache_config.typeForGroup(gid);
                 if (group_type == CacheGroupType::LINEAR) {
                     block_pos_list.push_back(block_num - 1);
 
@@ -649,9 +709,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
             for (size_t block_pos : block_pos_list) {
                 auto cache_key = makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id);
-                // FT_LOG_DEBUG("large model load cache_key %s", cache_key.c_str());
-                auto block_id = block_ids[block_pos];
-
+                auto block_id  = block_ids[block_pos];
                 const int local_part_cnt = peer_cnt;
                 const int local_part_id  = i;
                 auto parts = cache_manager->convertIndexToBuffer(block_id, layer_id, local_part_cnt, local_part_id);
@@ -690,15 +748,14 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         if (engine_->isMTPEagle()) {
             if (propose_maga_init_params_ && propose_maga_init_params_->mtp_model_params_
                 && !propose_maga_init_params_->mtp_model_params_->empty()) {
-                const size_t mtp_base_model_id = propose_maga_init_params_->mtp_model_params_->at(0)->model_id;
-                for (size_t mtp_model_id = 0; mtp_model_id < propose_maga_init_params_->mtp_model_params_->size();
-                     mtp_model_id++) {
-                    EngineInitParams* mtp_engine_init_params =
-                        propose_maga_init_params_->mtp_model_params_->at(mtp_model_id).get();
-                    if (mtp_engine_init_params == nullptr) {
-                        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
-                                         "mtp_model_params_[" + std::to_string(mtp_model_id) + "] is nullptr");
-                    }
+                const auto mtp_load_plan = makeMTPModuleLoadPlan(propose_maga_init_params_);
+                if (mtp_load_plan.empty()) {
+                    return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "active MTP module0 is missing");
+                }
+
+                for (const auto& module_plan : mtp_load_plan) {
+                    const size_t            mtp_model_id           = module_plan.module_index;
+                    const EngineInitParams* mtp_engine_init_params = module_plan.engine_init_params;
 
                     const auto&  mtp_cache_cfg = cache_manager->getMTPModuleCacheConfig(static_cast<int>(mtp_model_id));
                     const size_t layer_num     = mtp_engine_init_params->model_config_.num_layers;
@@ -707,22 +764,16 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                             "mtp layer_num mismatch: engine=" + std::to_string(layer_num)
                                                 + " cache_cfg=" + std::to_string(mtp_cache_cfg.layer_num)
                                                 + " (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
-                    RTP_LLM_CHECK_WITH_INFO(
-                        !mtp_cache_cfg.global_layer_ids.empty(),
-                        "mtp_cache_cfg.global_layer_ids is empty (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
-
+                    size_t     mtp_single_non_empty_gid = 0;
+                    const bool mtp_use_grouped_layout =
+                        nonEmptyGroupCount(mtp_cache_cfg, &mtp_single_non_empty_gid) > 1;
                     for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
                         auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);
                         auto load_layer_cache =
                             std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
-                        size_t     gid            = 0;
-                        const bool mtp_use_hybrid = mtp_cache_cfg.groupNums() > 1;
-                        if (mtp_use_hybrid && layer_id < mtp_cache_cfg.layer_to_group_id.size()) {
-                            const int mapped_gid = mtp_cache_cfg.layer_to_group_id[layer_id];
-                            if (mapped_gid >= 0) {
-                                gid = static_cast<size_t>(mapped_gid);
-                            }
-                        }
+                        size_t gid = mtp_use_grouped_layout ?
+                                         static_cast<size_t>(mtp_cache_cfg.groupIdFor(static_cast<int>(layer_id))) :
+                                         mtp_single_non_empty_gid;
                         RTP_LLM_CHECK_WITH_INFO(gid < load_context.block_ids_by_group.size(),
                                                 "mtp group id out of range: gid=%zu group_num=%zu",
                                                 gid,
@@ -731,23 +782,25 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             load_context.block_ids_by_group[gid] != nullptr, "null mtp group_block: gid=%zu", gid);
                         const auto& block_ids = load_context.block_ids_by_group[gid]->blocks();
                         auto        block_num = block_ids.size();
-                        size_t      model_id  = mtp_base_model_id;
 
-                        // Use per-module global_layer_ids for address lookup.
-                        const int global_layer_id = mtp_cache_cfg.global_layer_ids[0][layer_id];
+                        const auto global_layer_id = CacheConfig::mtpGlobalLayerId(
+                            static_cast<uint32_t>(maga_init_params_.model_config_.num_layers),
+                            static_cast<int>(mtp_model_id),
+                            static_cast<uint32_t>(layer_num),
+                            static_cast<int>(layer_id));
+                        RTP_LLM_CHECK_WITH_INFO(global_layer_id != std::numeric_limits<uint32_t>::max(),
+                                                "invalid decode MTP global layer: main=%ld module=%zu "
+                                                "module_layers=%zu local=%zu",
+                                                maga_init_params_.model_config_.num_layers,
+                                                mtp_model_id,
+                                                layer_num,
+                                                layer_id);
 
-                        // Hybrid cache: Linear group only needs the last block; Full group needs all blocks.
+                        // Hybrid cache: Linear group only needs the last block; Full group skips the reused prefix.
                         std::vector<size_t> block_pos_list;
                         block_pos_list.reserve(block_num);
-                        if (mtp_use_hybrid && block_num > 0) {
-                            CacheGroupType group_type = CacheGroupType::FULL;
-                            if (layer_id < mtp_cache_cfg.layer_to_group_id.size()
-                                && !mtp_cache_cfg.group_types.empty()) {
-                                const int gid = mtp_cache_cfg.layer_to_group_id[layer_id];
-                                if (gid >= 0 && static_cast<size_t>(gid) < mtp_cache_cfg.group_types.size()) {
-                                    group_type = mtp_cache_cfg.group_types[static_cast<size_t>(gid)];
-                                }
-                            }
+                        if (block_num > 0) {
+                            CacheGroupType group_type = mtp_cache_cfg.typeForGroup(gid);
                             if (group_type == CacheGroupType::LINEAR) {
                                 block_pos_list.push_back(block_num - 1);
 
@@ -764,8 +817,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         }
 
                         for (size_t block_pos : block_pos_list) {
-                            auto cache_key =
-                                makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id);
+                            auto       cache_key      = makeMTPModuleCacheKey(module_plan.cache_model_id,
+                                                                   std::to_string(load_context.cache_keys[block_pos]),
+                                                                   layer_id);
                             auto       block_id       = block_ids[block_pos];
                             const bool mtp_use_mla    = mtp_cache_cfg.use_mla;
                             const int  local_part_cnt = peer_cnt;
@@ -783,7 +837,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                     key, addr, static_cast<uint32_t>(block.size_bytes), true, true);
                             };
 
-                            if (mtp_use_mla || mtp_use_hybrid) {
+                            if (mtp_use_mla || mtp_use_grouped_layout) {
                                 RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 || parts.size() == 2,
                                                         "unexpected mtp mla convertIndexToBuffer parts size=%zu",
                                                         parts.size());
@@ -806,12 +860,18 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         layer_caches.push_back(load_layer_cache);
                     }
                 }
+            } else {
+                return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "active MTP module0 is missing");
             }
         }
 
         auto ip_parts = autil::StringUtil::split(peer_addr, ":");
         if (ip_parts.size() != 3) {
-            RTP_LLM_LOG_WARNING("invalid peer ip to load [%s]", peer_addr.c_str());
+            logReadFailures(load_context.request_id,
+                            peer_addr,
+                            ErrorCode::LOAD_KV_CACHE_FAILED,
+                            "invalid_peer",
+                            buffersDebugInfos(layer_caches));
             return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "invalid peer ip");
         }
 
@@ -825,25 +885,34 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                load_context.partition_count,
                                                load_context.partition_id);
         if (!layer_cache_load_context) {
-            RTP_LLM_LOG_WARNING("request [%s] load cache failed, layer cache load context is nullptr",
-                                request_key.c_str());
+            logReadFailures(load_context.request_id,
+                            peer_addr,
+                            ErrorCode::LOAD_KV_CACHE_FAILED,
+                            "null_load_context",
+                            buffersDebugInfos(layer_caches));
             return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load kv cache failed");
         }
-        load_contexts.push_back(layer_cache_load_context);
+        load_contexts.emplace_back(peer_addr, layer_cache_load_context);
     }
 
-    for (auto& layer_cache_load_context : load_contexts) {
+    for (auto& [peer_addr, layer_cache_load_context] : load_contexts) {
         layer_cache_load_context->waitDone();
         if (layer_cache_load_context->success()) {
             RTP_LLM_LOG_DEBUG("request [%s] load kv cache success", request_key.c_str());
         } else {
             // TODO(xinfei.sxf) add retry for part failed blocks.
-            auto load_done_time_us = currentTimeUs();
+            auto       load_done_time_us = currentTimeUs();
+            const auto error_info        = layer_cache_load_context->getErrorInfo();
+            logReadFailures(load_context.request_id,
+                            peer_addr,
+                            error_info.code(),
+                            error_info.ToString(),
+                            layer_cache_load_context->failedBlockDebugInfos());
             RTP_LLM_LOG_WARNING("request [%s] load cache failed, status [%s], cost time [%ld] ms",
                                 request_key.c_str(),
                                 layer_cache_load_context->getErrorInfoString().c_str(),
                                 (load_done_time_us - start_load_time_us) / 1000);
-            return layer_cache_load_context->getErrorInfo();
+            return error_info;
         }
     }
 

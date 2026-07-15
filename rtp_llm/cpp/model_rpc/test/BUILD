@@ -29,6 +29,7 @@ test_deps = [
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
     "//rtp_llm/cpp/model_rpc:model_rpc_server",
+    "//rtp_llm/cpp/testing:test_log_capture",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
     "@havenask//aios/autil:base64",
@@ -75,6 +76,15 @@ cc_test(
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
         "@havenask//aios/autil:net",
     ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "decode_rpc_server_test",
+    srcs = ["DecodeRpcServerTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
     env = {},
     exec_properties = {'gpu':'H20'},
 )

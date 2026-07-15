@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -135,49 +136,14 @@ private:
                                       rtp_llm::DataType mha_dtype          = rtp_llm::DataType::TYPE_FP16) {
         constexpr int kTestMemoryCacheSizeMb      = 64;
         constexpr int kTestMemoryCacheSyncTimeout = 1000;
-
-        CacheConfig config;
-        config.layer_num                              = layer_num;
-        config.layer_all_num                          = layer_num;
-        config.block_num                              = block_num;
-        config.seq_size_per_block                     = seq_size_per_block;
         kv_cache_config_.memory_cache_size_mb         = kTestMemoryCacheSizeMb;
         kv_cache_config_.memory_cache_sync_timeout_ms = kTestMemoryCacheSyncTimeout;
-
-        auto mha_spec       = std::make_shared<MHAKVCacheSpec>();
-        mha_spec->layer_num = layer_num;
-        // mha_spec->block_nums         = block_num;
-        mha_spec->local_head_num_kv  = 8;
-        mha_spec->size_per_head      = 128;
-        mha_spec->seq_size_per_block = seq_size_per_block;
-        mha_spec->dtype              = mha_dtype;
-        mha_spec->type               = KVCacheSpecType::MultiHeadAttention;
-        config.cache_specs.push_back(mha_spec);
-        // Keep CacheConfig sizes consistent with current business definition (see CacheConfig.h):
-        // - kv_block_stride_bytes / kv_scale_stride_bytes are "per-layer" strides for one logical block
-        // - kv_block_size_bytes / kv_scale_size_bytes are "all layers" totals for one logical block
-        // - block_size_bytes = kv + scales together for one logical block (all layers)
-        config.dtype                 = mha_spec->dtype;
-        config.kv_block_stride_bytes = mha_spec->block_size_bytes();
-        config.kv_scale_stride_bytes = mha_spec->scale_block_size_bytes();
-        config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * config.kv_block_stride_bytes;
-        config.kv_scale_size_bytes   = static_cast<size_t>(layer_num) * config.kv_scale_stride_bytes;
-        config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-        // Per-layer stride used by MemoryConnector merged layout.
-        const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-        config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                                  static_cast<int>(per_layer_stride_bytes));
-
-        std::vector<int> layer_ids(layer_num);
-        for (int i = 0; i < layer_num; ++i) {
-            layer_ids[i] = i;
-        }
-        config.layer_ids.push_back(layer_ids);
-        // SingleTypeKVCacheAllocator::init() expects global_layer_ids[0] to exist.
-        // In these unit tests we only have one "model group", so keep it consistent with layer_ids.
-        config.global_layer_ids.push_back(layer_ids);
-
-        return config;
+        return makeSimpleMhaCacheConfig(layer_num,
+                                        block_num,
+                                        static_cast<size_t>(seq_size_per_block),
+                                        mha_dtype,
+                                        /*local_head_num_kv=*/8,
+                                        /*size_per_head=*/128);
     }
     void startRpcServer(int server_num) {
         for (int i = 0; i < server_num; ++i) {
@@ -396,36 +362,60 @@ private:
         }
         item->set_mem_block(static_cast<int>(mem_block_index));
     }
-    LayerBlockIds makeLayerBlockIds(const std::vector<std::vector<BlockIdxType>>& per_layer_block_indices,
-                                    size_t                                        cache_keys_num) const {
-        LayerBlockIds lbs;
-        const size_t  layer_num = cache_config_.layer_num;
-        lbs.reserve(layer_num);
-
-        for (size_t layer = 0; layer < layer_num; ++layer) {
-            auto ptr = std::make_shared<BlockIds>();
-            if (layer < per_layer_block_indices.size()) {
-                ptr->assign(per_layer_block_indices[layer]);
-            }
-            if (ptr->blocks().size() < cache_keys_num) {
-                ptr->resize(cache_keys_num, NULL_BLOCK_IDX);
-            }
-            lbs.emplace_back(std::move(ptr));
+    BlockIndicesType makeGroupBlockIndices(const std::vector<std::vector<BlockIdxType>>& per_layer_block_indices,
+                                           size_t                                        cache_keys_num) const {
+        BlockIndicesType block_indices;
+        if (!per_layer_block_indices.empty()) {
+            block_indices = per_layer_block_indices.front();
         }
-        return lbs;
+        if (block_indices.size() < cache_keys_num) {
+            block_indices.resize(cache_keys_num, NULL_BLOCK_IDX);
+        }
+        return block_indices;
     }
     std::shared_ptr<KVCacheResource>
     makeCacheResource(const CacheKeysType&                          cache_keys,
                       const std::vector<std::vector<BlockIdxType>>& per_layer_block_indices,
                       size_t                                        reuse_len = 0) const {
-        auto res             = std::make_shared<KVCacheResource>();
-        res->cache_keys      = cache_keys;
-        res->layer_block_ids = makeLayerBlockIds(per_layer_block_indices, cache_keys.size());
+        auto res = std::make_shared<KVCacheResource>();
+        res->cacheKeys() = cache_keys;
+        const size_t                  layer_num = static_cast<size_t>(cache_config_.layer_all_num);
+        std::vector<std::vector<int>> layer_to_group_ids(layer_num, std::vector<int>{0});
+        res->initGroups(/*group_num=*/1, static_cast<int>(layer_num), layer_to_group_ids);
+        const auto default_blocks = makeGroupBlockIndices(per_layer_block_indices, cache_keys.size());
+        res->mutableBlockIds(0).assign(default_blocks);
+        for (size_t layer = 0; layer < layer_num; ++layer) {
+            auto layer_blocks = std::make_shared<BlockIds>();
+            if (layer < per_layer_block_indices.size()) {
+                layer_blocks->assign(makeGroupBlockIndices({per_layer_block_indices[layer]}, cache_keys.size()));
+            } else {
+                layer_blocks->assign(default_blocks);
+            }
+            res->layer_group_block_ids[layer][0] = std::move(layer_blocks);
+        }
         // reuse_len in these tests means "GPU already-reused prefix length".
         // KVCacheResource::reuseBlockNum() is derived from (device + memory + remote),
         // so set device reuse here to make asyncMatch/asyncRead semantics consistent.
         res->setDeviceReuseBlockNum(reuse_len);
         // These unit tests want to include the whole cache_keys range by default.
+        res->setLastBlockAligned(true);
+        return res;
+    }
+
+    std::shared_ptr<KVCacheResource>
+    makeHybridCacheResource(const CacheKeysType& cache_keys,
+                            const std::vector<BlockIdxType>& group0_blocks,
+                            const std::vector<BlockIdxType>& group1_blocks,
+                            size_t reuse_len = 0) const {
+        auto res = std::make_shared<KVCacheResource>();
+        res->cacheKeys() = cache_keys;
+        const size_t layer_num = static_cast<size_t>(cache_config_.layer_all_num);
+        RTP_LLM_CHECK_WITH_INFO(layer_num == 4, "test helper expects 4 layers, got %zu", layer_num);
+        std::vector<std::vector<int>> layer_to_group_ids{{0}, {0}, {1}, {1}};
+        res->initGroups(/*group_num=*/2, static_cast<int>(layer_num), layer_to_group_ids);
+        res->mutableBlockIds(0).assign(group0_blocks);
+        res->mutableBlockIds(1).assign(group1_blocks);
+        res->setDeviceReuseBlockNum(reuse_len);
         res->setLastBlockAligned(true);
         return res;
     }
@@ -667,6 +657,19 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnNull_WhenNoPrefixMatched) {
     EXPECT_EQ(match_ctx, nullptr);
 }
 
+TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnMatchedNum_WithHybridGroups) {
+    CacheKeysType cache_keys{71001, 71002, 71003};
+    auto          res = makeHybridCacheResource(cache_keys,
+                                                /*group0_blocks=*/{1, 2, 3},
+                                                /*group1_blocks=*/{4, 5, 6});
+    ASSERT_EQ(res->layerBlocks().size(), static_cast<size_t>(cache_config_.layer_all_num));
+    putItemsToCache({cache_keys[0]}, memoryCacheBlockBytes());
+
+    auto ctx = connector_->asyncMatch(res, std::make_shared<TestReadMeta>(true));
+    ASSERT_NE(ctx, nullptr);
+    EXPECT_EQ(ctx->matchedBlockCount(), 1u);
+}
+
 TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnMatchedNum_WhenPrefixMatchedAndStopAtFirstMiss) {
     CacheKeysType                          cache_keys{72001, 72002, 72003};
     std::vector<std::vector<BlockIdxType>> lbs_vec{{1, 1, 1}, {2, 2, 2}, {3, 3, 3}, {4, 4, 4}};
@@ -799,13 +802,13 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_InvalidInputs_ReturnNullOrThrow) {
         connector_->asyncRead(res_empty_keys, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/0);
     EXPECT_EQ(ctx1, nullptr);
 
-    // empty layer_block_ids
+    // uninitialized legacy layer view
     // NOTE: asyncRead always skips the last cache_key (cache_keys.size() - 1), so keep size >= 2 here.
-    auto res_empty_lbs = makeCacheResource(/*cache_keys=*/{1, 2}, /*per_layer_block_indices=*/{{1, 2}});
-    res_empty_lbs->layer_block_ids.clear();
-    auto ctx2 =
-        connector_->asyncRead(res_empty_lbs, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/1);
-    EXPECT_EQ(ctx2, nullptr);
+    auto res_empty_lbs = std::make_shared<KVCacheResource>();
+    res_empty_lbs->cacheKeys() = {1, 2};
+    auto ctx_empty_lbs = connector_->asyncRead(
+        res_empty_lbs, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/1);
+    EXPECT_EQ(ctx_empty_lbs, nullptr);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenReuseLenGEKeys) {
@@ -1128,11 +1131,12 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_InvalidInputs_ReturnNullOrThrow) {
     auto ctx1           = connector_->asyncWrite(res_empty_keys, meta);
     EXPECT_EQ(ctx1, nullptr);
 
-    // empty layer_block_ids
-    auto res_empty_lbs = makeCacheResource(/*cache_keys=*/{1}, /*lbs=*/{{1}});
-    res_empty_lbs->layer_block_ids.clear();
-    auto ctx2 = connector_->asyncWrite(res_empty_lbs, meta);
-    EXPECT_EQ(ctx2, nullptr);
+    // uninitialized legacy layer view
+    auto res_empty_lbs = std::make_shared<KVCacheResource>();
+    res_empty_lbs->cacheKeys() = {1};
+    res_empty_lbs->setLastBlockAligned(true);
+    auto ctx_empty_lbs = connector_->asyncWrite(res_empty_lbs, meta);
+    EXPECT_EQ(ctx_empty_lbs, nullptr);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenAllKeysInCache) {
@@ -1699,14 +1703,19 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     constexpr size_t kKvBytesPerTok    = 656;
     constexpr size_t kScaleBytesPerTok = 132;
 
-    auto mla_spec                = std::make_shared<rtp_llm::MLAKVCacheSpec>();
-    mla_spec->type               = rtp_llm::KVCacheSpecType::MultiHeadLatentAttention;
-    mla_spec->layer_num          = static_cast<uint32_t>(kLayerNum);
-    mla_spec->local_head_num_kv  = 1;
-    mla_spec->seq_size_per_block = kSeqPerBlock;
-    mla_spec->kv_lora_rank       = 512;
-    mla_spec->rope_head_dim      = 64;
-    mla_spec->dtype              = rtp_llm::DataType::TYPE_FP8_E4M3;
+    AttentionConfigs attn_config;
+    attn_config.kv_lora_rank      = 512;
+    attn_config.rope_head_dim     = 64;
+    attn_config.tokens_per_block  = kSeqPerBlock;
+    KVCacheSpecDesc desc;
+    desc.tag        = "default";
+    desc.cache_type = rtp_llm::KVCacheSpecType::MultiHeadLatentAttention;
+    desc.dtype      = rtp_llm::DataType::TYPE_FP8_E4M3;
+    SpecBuildContext ctx;
+    ctx.dtype                   = rtp_llm::DataType::TYPE_FP8_E4M3;
+    ctx.seq_size_per_block      = kSeqPerBlock;
+    ctx.attn_config             = &attn_config;
+    auto mla_spec               = SpecBuilder::build(desc, ctx);
 
     cache_config_.layer_num             = static_cast<uint32_t>(kLayerNum);
     cache_config_.layer_all_num         = static_cast<uint32_t>(kLayerNum);
@@ -1714,8 +1723,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     cache_config_.seq_size_per_block    = kSeqPerBlock;
     cache_config_.use_mla               = true;
     cache_config_.is_sparse             = false;
-    cache_config_.dtype                 = mla_spec->dtype;
-    cache_config_.cache_specs           = {mla_spec};
+    cache_config_.dtype                 = rtp_llm::DataType::TYPE_FP8_E4M3;
     cache_config_.kv_block_stride_bytes = kKvBytesPerTok * kSeqPerBlock;
     cache_config_.kv_scale_stride_bytes = kScaleBytesPerTok * kSeqPerBlock;
     cache_config_.kv_block_size_bytes   = static_cast<size_t>(kLayerNum) * cache_config_.kv_block_stride_bytes;
@@ -1728,11 +1736,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     for (int i = 0; i < kLayerNum; ++i) {
         layer_ids[i] = i;
     }
-    cache_config_.layer_ids.clear();
-    cache_config_.global_layer_ids.clear();
-    cache_config_.layer_ids.push_back(layer_ids);
-    cache_config_.global_layer_ids.push_back(layer_ids);
-
+    cache_config_.fromGroupedSpecs({mla_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
     ASSERT_EQ(mla_spec->block_size_bytes(), cache_config_.kv_block_stride_bytes);
 
     const size_t merged_one_key = memoryCacheBlockBytes(cache_config_);
