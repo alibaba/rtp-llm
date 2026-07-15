@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import ch.qos.logback.classic.Level;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.CacheMatchResult;
@@ -16,9 +17,12 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -32,6 +36,21 @@ import java.util.concurrent.ConcurrentHashMap;
  * date: 2025/3/11
  */
 class ShortestTTFTStrategyTest {
+
+    private ch.qos.logback.classic.Logger businessLogger;
+    private Level originalLevel;
+
+    @BeforeEach
+    void enableDebugDecisionSnapshots() {
+        businessLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("flexlbLogger");
+        originalLevel = businessLogger.getLevel();
+        businessLogger.setLevel(Level.DEBUG);
+    }
+
+    @AfterEach
+    void restoreLogLevel() {
+        businessLogger.setLevel(originalLevel);
+    }
 
     @Test
     void test() {
@@ -48,6 +67,10 @@ class ShortestTTFTStrategyTest {
         Map<String, TaskInfo> runningTaskList1 = new HashMap<>();
         Map<String, TaskInfo> finishedTaskList1 = new HashMap<>();
         ConcurrentHashMap<String, TaskInfo> localTaskList1 = new ConcurrentHashMap<>();
+        waitingTaskList1.put("waiting-1", createTask("waiting-1", 400, 128));
+        runningTaskList1.put("running-1", createTask("running-1", 600, 256));
+        localTaskList1.put("waiting-1", createTask("waiting-1", 400, 0));
+        localTaskList1.put("running-1", createTask("running-1", 600, 0));
         WorkerStatus workerStatus1 = createWorkerStatus("127.0.0.2", 100, waitingTaskList1, runningTaskList1, finishedTaskList1, localTaskList1);
 
         prefillStatusMap.put("127.0.0.1:8080", workerStatus);
@@ -92,13 +115,46 @@ class ShortestTTFTStrategyTest {
                 balanceContext.getCacheMatchSelectionByRole().get(RoleType.PREFILL);
         Assertions.assertEquals("127.0.0.2", selection.selectedIp());
         Assertions.assertEquals(768, selection.hitCacheTokens());
+
+        var decision = balanceContext.getShortestTtftDecisionByRole().get(RoleType.PREFILL);
+        Assertions.assertNotNull(decision);
+        Assertions.assertEquals(2, decision.workers().size());
+        var selectedDecision = decision.workers().stream()
+                .filter(worker -> worker.selected())
+                .findFirst()
+                .orElseThrow();
+        Assertions.assertEquals("127.0.0.2", selectedDecision.ip());
+        Assertions.assertEquals(768, selectedDecision.requestHitCacheTokens());
+        Assertions.assertEquals(462, selectedDecision.requestPrefillTime());
+        Assertions.assertEquals(100, selectedDecision.queueTime());
+        Assertions.assertEquals(562, selectedDecision.estimatedTtft());
+        Assertions.assertEquals(2, selectedDecision.trackedTaskCount());
+        Assertions.assertEquals(1, selectedDecision.waitingTaskCount());
+        Assertions.assertEquals(1, selectedDecision.runningTaskCount());
+        Assertions.assertEquals(128, selectedDecision.waitingTasks().getFirst().hitCacheTokens());
+        Assertions.assertEquals(256, selectedDecision.runningTasks().getFirst().hitCacheTokens());
+
+        businessLogger.setLevel(Level.INFO);
+        BalanceContext infoContext = new BalanceContext();
+        infoContext.setConfig(new FlexlbConfig());
+        infoContext.setRequest(req);
+        staticCacheLoadBalancer.select(infoContext, RoleType.PREFILL, null);
+        Assertions.assertTrue(infoContext.getShortestTtftDecisionByRole().isEmpty());
+    }
+
+    private TaskInfo createTask(String requestId, long inputLength, long prefixLength) {
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(requestId);
+        task.setInputLength(inputLength);
+        task.setPrefixLength(prefixLength);
+        return task;
     }
 
     WorkerStatus createWorkerStatus(String ip,
                                     long runningQueueTime,
                                     Map<String, TaskInfo> waitingTaskInfo,
-                                    Map<String, TaskInfo> finishedTaskList,
                                     Map<String, TaskInfo> runningTaslList,
+                                    Map<String, TaskInfo> finishedTaskList,
                                     ConcurrentHashMap<String, TaskInfo> localTaskList) {
         WorkerStatus workerStatus = new WorkerStatus();
 
@@ -113,6 +169,7 @@ class ShortestTTFTStrategyTest {
         workerStatus.setCacheStatus(cacheStatus);
         workerStatus.getRunningQueueTime().getAndSet(runningQueueTime);
         workerStatus.setWaitingTaskList(waitingTaskInfo);
+        workerStatus.setLocalTaskMap(localTaskList);
         workerStatus.updateTaskStates(waitingTaskInfo, runningTaslList, finishedTaskList);
         workerStatus.setRunningTaskList(runningTaslList);
         return workerStatus;

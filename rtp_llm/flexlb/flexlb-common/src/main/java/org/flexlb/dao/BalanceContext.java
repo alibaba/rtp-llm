@@ -5,8 +5,10 @@ import lombok.ToString;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.pv.ShortestTtftDecision;
 import org.flexlb.dao.route.RoleType;
 
+import java.util.Collections;
 import java.util.EnumMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -67,6 +69,8 @@ public class BalanceContext {
     private String cacheMatchSource;
 
     private final Map<RoleType, CacheMatchSelection> cacheMatchSelectionByRole = new EnumMap<>(RoleType.class);
+
+    private Map<RoleType, ShortestTtftDecision> shortestTtftDecisionByRole;
 
     private boolean success = true;
 
@@ -134,6 +138,19 @@ public class BalanceContext {
         this.cacheMatchQueryCount++;
         this.cacheMatchSelectionByRole.put(
                 role, new CacheMatchSelection(role, selectedIp, hitCacheTokens));
+    }
+
+    public void recordShortestTtftDecision(ShortestTtftDecision decision) {
+        if (this.shortestTtftDecisionByRole == null) {
+            this.shortestTtftDecisionByRole = new EnumMap<>(RoleType.class);
+        }
+        this.shortestTtftDecisionByRole.put(decision.role(), decision);
+    }
+
+    public Map<RoleType, ShortestTtftDecision> getShortestTtftDecisionByRole() {
+        return this.shortestTtftDecisionByRole == null
+                ? Collections.emptyMap()
+                : this.shortestTtftDecisionByRole;
     }
 
     public record CacheMatchSelection(RoleType role, String selectedIp, long hitCacheTokens) {

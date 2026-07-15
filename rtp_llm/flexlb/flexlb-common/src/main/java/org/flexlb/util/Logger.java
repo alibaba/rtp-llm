@@ -12,6 +12,10 @@ public final class Logger {
     private Logger() {
     }
 
+    public static boolean isDebugEnabled() {
+        return log.isDebugEnabled();
+    }
+
     public static void trace(String message) {
         log.trace(message);
     }

@@ -12,6 +12,9 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.pv.ShortestTtftDecision;
+import org.flexlb.dao.pv.ShortestTtftDecision.QueueTask;
+import org.flexlb.dao.pv.ShortestTtftDecision.WorkerDecision;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.worker.ScoredWorker;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
@@ -127,7 +130,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
 
         List<ScoredWorker> scoredWorkers = scoreWorkers(availableWorkers, cacheMatchResult.matches(), seqLen);
 
-        ScoredWorker bestWorker = selectBestWorker(scoredWorkers);
+        ScoredWorker bestWorker = selectBestWorker(
+                scoredWorkers, balanceContext, roleType, group, seqLen);
         if (bestWorker == null) {
             Logger.warn("Failed to find best worker for role: {}", roleType);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
@@ -278,7 +282,12 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param scoredWorkers List of scored workers
      * @return Best worker
      */
-    private ScoredWorker selectBestWorker(List<ScoredWorker> scoredWorkers) {
+    private ScoredWorker selectBestWorker(
+            List<ScoredWorker> scoredWorkers,
+            BalanceContext balanceContext,
+            RoleType roleType,
+            String group,
+            long seqLen) {
         if (scoredWorkers.isEmpty()) {
             return null;
         }
@@ -296,7 +305,111 @@ public class ShortestTTFTStrategy implements LoadBalancer {
 
         List<ScoredWorker> similarWorkers = filterSimilarWorkers(candidates, minTTFT, threshold);
 
-        return selectWorkerByScheduleFairness(similarWorkers, candidates);
+        ScoredWorker selectedWorker = selectWorkerByScheduleFairness(similarWorkers, candidates);
+        if (Logger.isDebugEnabled()) {
+            balanceContext.recordShortestTtftDecision(buildDecisionSnapshot(
+                    selectedWorker,
+                    sortedWorkers,
+                    candidates,
+                    similarWorkers,
+                    minTTFT,
+                    threshold,
+                    roleType,
+                    group,
+                    seqLen));
+        }
+        return selectedWorker;
+    }
+
+    private ShortestTtftDecision buildDecisionSnapshot(
+            ScoredWorker selectedWorker,
+            List<ScoredWorker> sortedWorkers,
+            List<ScoredWorker> topCandidates,
+            List<ScoredWorker> similarWorkers,
+            long minimumTtft,
+            double similarTtftThreshold,
+            RoleType roleType,
+            String group,
+            long seqLen) {
+        List<WorkerDecision> workers = sortedWorkers.stream()
+                .map(scoredWorker -> buildWorkerDecision(
+                        scoredWorker,
+                        selectedWorker,
+                        topCandidates,
+                        similarWorkers,
+                        seqLen))
+                .toList();
+        return new ShortestTtftDecision(
+                roleType,
+                group,
+                seqLen,
+                minimumTtft,
+                similarTtftThreshold,
+                workers);
+    }
+
+    private WorkerDecision buildWorkerDecision(
+            ScoredWorker scoredWorker,
+            ScoredWorker selectedWorker,
+            List<ScoredWorker> topCandidates,
+            List<ScoredWorker> similarWorkers,
+            long seqLen) {
+        WorkerStatus worker = scoredWorker.worker();
+        long requestPrefillTime = TaskInfo.estimatePrefillTimeMs(seqLen, scoredWorker.hitCacheTokens());
+        List<QueueTask> trackedTasks = snapshotTrackedTasks(worker.getLocalTaskMap());
+        List<QueueTask> waitingTasks = snapshotWorkerTasks(worker.getWaitingTaskList(), "waiting");
+        List<QueueTask> runningTasks = snapshotWorkerTasks(worker.getRunningTaskList(), "running");
+        long blockSize = worker.getCacheStatus() == null ? 0 : worker.getCacheStatus().getBlockSize();
+
+        return new WorkerDecision(
+                worker.getIp(),
+                worker.getPort(),
+                topCandidates.contains(scoredWorker),
+                similarWorkers.contains(scoredWorker),
+                selectedWorker.equals(scoredWorker),
+                blockSize,
+                scoredWorker.hitCacheTokens(),
+                requestPrefillTime,
+                scoredWorker.ttft() - requestPrefillTime,
+                scoredWorker.ttft(),
+                scoredWorker.lastSelectedTime(),
+                trackedTasks.size(),
+                waitingTasks.size(),
+                runningTasks.size(),
+                trackedTasks,
+                waitingTasks,
+                runningTasks);
+    }
+
+    private List<QueueTask> snapshotTrackedTasks(Map<String, TaskInfo> tasks) {
+        if (MapUtils.isEmpty(tasks)) {
+            return List.of();
+        }
+        return tasks.entrySet().stream()
+                .filter(entry -> entry.getValue() != null)
+                .map(entry -> toQueueTask(
+                        entry.getKey(), entry.getValue(), entry.getValue().getTaskState().getValue()))
+                .toList();
+    }
+
+    private List<QueueTask> snapshotWorkerTasks(Map<String, TaskInfo> tasks, String state) {
+        if (MapUtils.isEmpty(tasks)) {
+            return List.of();
+        }
+        return tasks.entrySet().stream()
+                .filter(entry -> entry.getValue() != null)
+                .map(entry -> toQueueTask(entry.getKey(), entry.getValue(), state))
+                .toList();
+    }
+
+    private QueueTask toQueueTask(String requestId, TaskInfo task, String state) {
+        return new QueueTask(
+                requestId,
+                state,
+                task.getInputLength(),
+                task.getPrefixLength(),
+                task.estimatePrefillTime(),
+                task.getWaitingTime());
     }
 
     /**
@@ -448,4 +561,5 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         long blockSize = workerStatus.getCacheStatus().getBlockSize();
         return blockSize * prefixMatchLength;
     }
+
 }

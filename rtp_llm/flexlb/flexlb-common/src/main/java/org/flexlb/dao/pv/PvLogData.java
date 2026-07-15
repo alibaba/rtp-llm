@@ -31,6 +31,8 @@ public class PvLogData {
     private int cacheMatchCount;
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     private List<BalanceContext.CacheMatchSelection> cacheMatchSelections;
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private List<ShortestTtftDecision> shortestTtftDecisions;
 
     public PvLogData(BalanceContext ctx) {
 
@@ -51,5 +53,8 @@ public class PvLogData {
         this.cacheMatchUs = ctx.getCacheMatchQueryTimeUs();
         this.cacheMatchCount = ctx.getCacheMatchQueryCount();
         this.cacheMatchSelections = List.copyOf(ctx.getCacheMatchSelectionByRole().values());
+        if (!ctx.getShortestTtftDecisionByRole().isEmpty()) {
+            this.shortestTtftDecisions = List.copyOf(ctx.getShortestTtftDecisionByRole().values());
+        }
     }
 }

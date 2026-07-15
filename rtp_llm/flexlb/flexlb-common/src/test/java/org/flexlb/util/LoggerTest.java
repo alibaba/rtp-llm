@@ -13,6 +13,7 @@ import java.util.Arrays;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class LoggerTest {
 
@@ -39,12 +40,14 @@ class LoggerTest {
     @Test
     void delegatesDebugFilteringToLoggingBackend() {
         backendLogger.setLevel(Level.INFO);
+        assertFalse(Logger.isDebugEnabled());
         Logger.debug("hidden debug");
         Logger.info("visible info");
         assertEquals(1, appender.list.size());
         assertEquals("visible info", appender.list.getFirst().getFormattedMessage());
 
         backendLogger.setLevel(Level.DEBUG);
+        assertTrue(Logger.isDebugEnabled());
         Logger.debug("visible debug");
         assertEquals(2, appender.list.size());
         assertEquals("visible debug", appender.list.get(1).getFormattedMessage());
