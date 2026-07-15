@@ -2,7 +2,15 @@ import threading
 from unittest import TestCase, main
 from unittest.mock import MagicMock, patch
 
-from rtp_llm.server.vit_proxy_server import LoadBalancer, WorkerConnectionPool
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    MultimodalInputsPB,
+)
+from rtp_llm.server.vit_proxy_server import (
+    LoadBalancer,
+    VitProxyRpcServer,
+    WorkerConnectionPool,
+    _resolve_rpc_timeout_seconds,
+)
 
 
 class LoadBalancerRoundRobinTest(TestCase):
@@ -21,6 +29,21 @@ class LoadBalancerRoundRobinTest(TestCase):
         lb = LoadBalancer([], strategy="round_robin")
         with self.assertRaises(RuntimeError):
             lb.get_worker()
+
+
+class RpcTimeoutTest(TestCase):
+    def test_uses_configured_default_when_request_timeout_is_unset(self):
+        request = MultimodalInputsPB()
+        request.multimodal_inputs.add().mm_preprocess_config.mm_timeout_ms = -1
+
+        self.assertEqual(_resolve_rpc_timeout_seconds(request, 123.0), 123.0)
+
+    def test_uses_largest_positive_request_timeout(self):
+        request = MultimodalInputsPB()
+        request.multimodal_inputs.add().mm_preprocess_config.mm_timeout_ms = 2000
+        request.multimodal_inputs.add().mm_preprocess_config.mm_timeout_ms = 3500
+
+        self.assertEqual(_resolve_rpc_timeout_seconds(request, 123.0), 3.5)
 
 
 class LoadBalancerLeastConnectionsTest(TestCase):
