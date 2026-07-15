@@ -317,6 +317,50 @@ class TopologyKvPolicyTest(unittest.TestCase):
         self.assertEqual(len(values), min(topk.size(1), int(lengths[0].item())))
         self.assertEqual(set(values), set(range(6)))
 
+    def test_topology_only_rejects_zero_structural_sources(self):
+        with self.assertRaisesRegex(
+            ValueError, "topology_only requires at least one structural block source"
+        ):
+            TopologyKvPolicyConfig(
+                policy="topology_only",
+                sink_blocks=0,
+                local_blocks=0,
+                witness_blocks=0,
+                block_size=4,
+            )
+
+    def test_topology_only_single_token_yields_valid_candidate(self):
+        topk = torch.tensor([[-1]], dtype=torch.int32)
+        lengths = torch.tensor([1], dtype=torch.int32)
+        config = TopologyKvPolicyConfig(
+            policy="topology_only",
+            sink_blocks=1,
+            local_blocks=0,
+            witness_blocks=0,
+            block_size=4,
+        )
+
+        result = apply_topology_kv_policy(topk, lengths, config=config)
+
+        self.assertEqual(result.topk_indices.tolist(), [[0]])
+        self.assertEqual(result.counters.raw_selected_tokens, 1)
+
+    def test_topology_only_rejects_nonempty_row_without_candidate_capacity(self):
+        topk = torch.empty((1, 0), dtype=torch.int32)
+        lengths = torch.tensor([1], dtype=torch.int32)
+        config = TopologyKvPolicyConfig(
+            policy="topology_only",
+            sink_blocks=1,
+            local_blocks=0,
+            witness_blocks=0,
+            block_size=4,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError, "topology_only produced no valid candidate"
+        ):
+            apply_topology_kv_policy(topk, lengths, config=config)
+
     def test_merge_output_satisfies_sparse_kernel_layout_contract(self):
         topk = torch.tensor(
             [

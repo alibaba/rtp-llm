@@ -93,6 +93,13 @@ class TopologyKvPolicyConfig:
             raise ValueError("local_blocks must be non-negative")
         if self.witness_blocks < 0:
             raise ValueError("witness_blocks must be non-negative")
+        if (
+            self.policy == "topology_only"
+            and self.sink_blocks + self.local_blocks + self.witness_blocks == 0
+        ):
+            raise ValueError(
+                "topology_only requires at least one structural block source"
+            )
         if self.max_policy_tokens < 0:
             raise ValueError("max_policy_tokens must be non-negative")
         if self.max_topk_elements < 0:
@@ -442,6 +449,12 @@ def apply_topology_kv_policy(
             row_length,
             1.0 if config.policy == "topology_only" else config.max_structural_fraction,
         )
+        if row_length > 0 and not any(value >= 0 for value in row_result.values):
+            raise RuntimeError(
+                f"{config.policy} produced no valid candidate for non-empty row: "
+                f"row={row_idx}, length={row_length}, "
+                f"candidate_width={topk_indices.size(1)}"
+            )
         rows.append(row_result.values)
         learned_kept_tokens += row_result.learned_kept_tokens
         learned_evicted_tokens += row_result.learned_evicted_tokens
