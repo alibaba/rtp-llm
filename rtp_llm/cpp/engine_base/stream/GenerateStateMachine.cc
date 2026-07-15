@@ -47,7 +47,7 @@ void GenerateStateMachine::handleWaiting() {
     }
     // LoadInitiated 未设置时，必须先执行 initKVBlock 和 asyncLoadCache
     if (!events_.has(StreamEvents::LoadInitiated)) {
-        auto result = stream_cache_resource_->initKVBlock(reserve_step_);
+        auto result = stream_cache_resource_->initKVBlock();
         if (!result.ok()) {
             error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
             status.store(StreamState::FINISHED, std::memory_order_release);
@@ -77,7 +77,7 @@ void GenerateStateMachine::handleWaiting() {
     }
 
     // 绕过incrKVBlock at prefill
-    auto result = stream_cache_resource_->incrKVBlock(reserve_step_);
+    auto result = stream_cache_resource_->incrKVBlock();
     if (!result.ok()) {
         error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
         status.store(StreamState::FINISHED, std::memory_order_release);
@@ -104,7 +104,7 @@ void GenerateStateMachine::handleRunning() {
     if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL) {
         return;
     }
-    auto result = stream_cache_resource_->incrKVBlock(reserve_step_);
+    auto result = stream_cache_resource_->incrKVBlock();
     if (!result.ok()) {
         // Report Error event so moveToNext() won't be called again on this stream
         reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "incrKVBlock failed: LACK MEM");

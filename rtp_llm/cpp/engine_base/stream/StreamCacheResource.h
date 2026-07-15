@@ -28,8 +28,8 @@ public:
     void                 init(int batch_size);
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
-    absl::Status         initKVBlock(size_t reserve_step = 0);
-    absl::Status         incrKVBlock(size_t reserve_step = 0);
+    absl::Status         initKVBlock();
+    absl::Status         incrKVBlock();
     void                 fakeInitKVBlock(size_t reserved_blocks = 0);
     int                  tryReleaseKVBlock(size_t nums);
     void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
@@ -42,6 +42,8 @@ public:
 
     // TODO, remove this after remove fallback
     int singleBatchNeedBlocks(int seq_len, int reserve_step) const;
+    int estimatePeakNeedBlocks(
+        int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, int target_batch_size) const;
 
     int curBlocksNum() const;
     int mallocFailedTimes() const;

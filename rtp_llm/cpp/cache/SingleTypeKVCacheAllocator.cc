@@ -75,7 +75,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     auto&       block_ids_0        = kv_resource->mutableBlockIds(0);
     int64_t     match_cost_time_us = 0;
 
-    const size_t reserve_blocks   = reserveBlockNum();
+    const size_t reserve_blocks   = reserveBlocksNum();
     const int    estimated_blocks = (reserve_blocks > 0) ? getNeedBlocks(malloc_info) : 0;
     int          reuse_blocks     = 0;
 
@@ -455,6 +455,29 @@ int SingleTypeKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResource
                                                       int                            seq_len,
                                                       int                            reserve_step) const {
     return full_kv_cache_group_->needBlocksNum(seq_len, 0, reserve_step);
+}
+
+int SingleTypeKVCacheAllocator::estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
+                                                       int                    seq_len,
+                                                       int                    remaining_tokens,
+                                                       int                    reserve_step,
+                                                       bool                   enable_reuse_cache) const {
+    return full_kv_cache_group_->estimatePeakNeedBlocks(
+        seq_len, kv_cache_resource.blocks(0), remaining_tokens, reserve_step, enable_reuse_cache);
+}
+
+int SingleTypeKVCacheAllocator::estimateInitialBatchPeakNeedBlocks(int  seq_len,
+                                                                   int  common_seq_len,
+                                                                   int  remaining_tokens,
+                                                                   int  reserve_step,
+                                                                   bool enable_reuse_cache,
+                                                                   int  target_batch_size) const {
+    return full_kv_cache_group_->estimateInitialBatchPeakNeedBlocks(seq_len,
+                                                                    common_seq_len,
+                                                                    remaining_tokens,
+                                                                    reserve_step,
+                                                                    enable_reuse_cache,
+                                                                    target_batch_size);
 }
 
 }  // namespace rtp_llm

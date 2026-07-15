@@ -49,6 +49,14 @@ public:
     int
     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;
 
+    int estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                               int                            seq_len,
+                               int                            common_seq_len,
+                               int                            remaining_tokens,
+                               int                            reserve_step,
+                               bool                           enable_reuse_cache,
+                               int                            target_batch_size) const;
+
     // 块操作相关
     void blockCopy(int src_block_index, int dest_block_index);
     void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
@@ -81,6 +89,7 @@ public:
     // 资源统计和信息查询
     size_t                  freeBlocksNum() const;
     size_t                  availableBlocksNum() const;
+    size_t                  reserveBlocksNum() const;
     size_t                  notInUseBlocksNum() const;
     BatchKVCacheResourcePtr popBlocksFromCache(size_t min_blocks_to_free);
     void                    blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource);

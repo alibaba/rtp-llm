@@ -49,7 +49,7 @@ public:
 protected:
     virtual const char* schedulerName() const                                            = 0;
     virtual bool        evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams,
-                                              const GenerateStreamPtr&            new_stream) const = 0;
+                                              const GenerateStreamPtr&            new_stream) = 0;
     virtual bool        waitPredicate()                                                  = 0;
     virtual void        onRunningStream(const GenerateStreamPtr& stream) {}
     virtual void        cancelExtraStreams() {}

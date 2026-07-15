@@ -59,6 +59,7 @@ protected:
 
         auto query             = std::make_shared<GenerateInput>();
         auto generate_config   = std::make_shared<GenerateConfig>();
+        generate_config->max_new_tokens = 1;
         query->input_ids       = torch::tensor(input_tokens, torch::kInt32);
         query->generate_config = generate_config;
         return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
