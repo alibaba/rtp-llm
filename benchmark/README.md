@@ -57,6 +57,12 @@ test set. Run them from the repository root with
 `bazel test //benchmark:topology_kv_candidate_schedule_cpu_test` or
 `python -m unittest benchmark.test_topology_kv_candidate_schedule`.
 
+The CPU target remains enabled under `--config=rocm`. Because every assertion
+uses CPU tensors, that configuration resolves the CPU Torch wheel for this
+target instead of adding an unnecessary ROCm runtime dependency. Verify the
+ROCm-configured target with
+`bazel test //benchmark:topology_kv_candidate_schedule_cpu_test --config=rocm`.
+
 The longer CUDA performance smoke remains opt-in so it does not add timing work
 to routine CI. Run it explicitly with
 `bazel test //benchmark:topology_kv_candidate_schedule_cuda_test --config=cuda12`.

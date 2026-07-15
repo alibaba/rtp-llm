@@ -1,3 +1,5 @@
+load("@pip_cpu_torch//:requirements.bzl", requirement_cpu = "requirement")
+
 py_test(
     name = "topology_kv_candidate_schedule_cpu_test",
     srcs = [
@@ -5,7 +7,10 @@ py_test(
         "topology_kv_candidate_schedule.py",
     ],
     main = "test_topology_kv_candidate_schedule.py",
-    deps = ["//rtp_llm:torch"],
+    deps = select({
+        "@rtp_llm//:using_rocm": [requirement_cpu("torch")],
+        "//conditions:default": ["//rtp_llm:torch"],
+    }),
 )
 
 py_test(
