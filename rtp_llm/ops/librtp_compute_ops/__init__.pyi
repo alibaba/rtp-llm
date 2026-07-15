@@ -24,11 +24,13 @@ __all__: list[str] = [
     "PyMultimodalInputs",
     "PyPrefillCudaGaphCopyParams",
     "TypeMeta",
+    "destroy_cpu_tp_broadcaster",
     "get_device_id",
     "preprocess_gemm_weight_by_key",
     "preprocess_weight_scale",
     "get_scalar_type",
     "get_typemeta",
+    "init_cpu_tp_broadcaster",
     "init_exec_ctx",
     "rtp_llm_ops",
 ]
@@ -450,6 +452,10 @@ def init_exec_ctx(
     enable_comm_overlap: bool,
     mla_ops_type: int,
 ) -> None: ...
+
+def init_cpu_tp_broadcaster(tp_rank: int, tp_size: int, base_path: str) -> None: ...
+
+def destroy_cpu_tp_broadcaster() -> None: ...
 
 def register_comm_ops(broadcast_fn: typing.Callable, allreduce_fn: typing.Callable, allgather_fn: typing.Callable) -> None: ...
 

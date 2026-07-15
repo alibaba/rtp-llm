@@ -1,6 +1,12 @@
 load("//:def.bzl", "rpm_library", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
+filegroup(
+    name = "exec_ops_source",
+    srcs = ["ExecOps.cc"],
+    visibility = ["//rtp_llm/models_py/bindings/core/test:__pkg__"],
+)
+
 cc_library(
     name = "types_hdr",
     hdrs = [

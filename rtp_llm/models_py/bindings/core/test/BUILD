@@ -63,3 +63,12 @@ cc_test_wrapper(
     ],
     copts = copts(),
 )
+
+py_test(
+    name = "exec_ops_stub_consistency_test",
+    srcs = ["exec_ops_stub_consistency_test.py"],
+    data = [
+        "//rtp_llm:librtp_compute_ops_stub",
+        "//rtp_llm/models_py/bindings/core:exec_ops_source",
+    ],
+)
