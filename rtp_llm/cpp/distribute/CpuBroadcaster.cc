@@ -24,7 +24,10 @@
 namespace rtp_llm {
 
 struct CpuBroadcastSharedState {
-    alignas(uint32_t) uint32_t decision = 0;
+    // Consecutive generations use alternating slots. A root cannot finish the
+    // next generation without every peer, so two slots preserve the committed
+    // decision for any peer that is still returning from the previous one.
+    alignas(uint32_t) uint32_t decisions[2] = {0, 0};
 };
 
 static_assert(__atomic_always_lock_free(sizeof(uint32_t), nullptr),
@@ -118,7 +121,9 @@ CpuBroadcastSharedState* createSharedState(const std::string& path) {
         validateSharedStateFd(fd, path);
         CpuBroadcastSharedState* state = mapSharedState(fd);
         closeFd(fd);
-        __atomic_store_n(&state->decision, uint32_t{0}, __ATOMIC_RELEASE);
+        for (uint32_t& decision : state->decisions) {
+            __atomic_store_n(&decision, uint32_t{0}, __ATOMIC_RELEASE);
+        }
         return state;
     } catch (...) {
         closeFd(fd);
@@ -149,17 +154,21 @@ void unmapSharedState(CpuBroadcastSharedState*& state) {
     }
 }
 
-uint32_t loadDecision(const CpuBroadcastSharedState* state) {
-    return __atomic_load_n(&state->decision, __ATOMIC_ACQUIRE);
+uint32_t* decisionSlot(CpuBroadcastSharedState* state, uint32_t generation) {
+    return &state->decisions[generation & 1U];
 }
 
-void wakeDecisionWaiters(CpuBroadcastSharedState* state) {
-    ::syscall(SYS_futex, &state->decision, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0);
+uint32_t loadDecision(const uint32_t* decision) {
+    return __atomic_load_n(decision, __ATOMIC_ACQUIRE);
 }
 
-bool publishDecision(CpuBroadcastSharedState* state, uint32_t expected, uint32_t desired) {
-    if (__atomic_compare_exchange_n(&state->decision, &expected, desired, false, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
-        wakeDecisionWaiters(state);
+void wakeDecisionWaiters(uint32_t* decision) {
+    ::syscall(SYS_futex, decision, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0);
+}
+
+bool publishDecision(uint32_t* decision, uint32_t expected, uint32_t desired) {
+    if (__atomic_compare_exchange_n(decision, &expected, desired, false, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
+        wakeDecisionWaiters(decision);
         return true;
     }
     return false;
@@ -203,15 +212,19 @@ bool rootConnectionClosed(int root_fd) {
     return false;
 }
 
-bool waitForDecision(
-    CpuBroadcastSharedState* state, uint32_t previous, int root_fd, int timeout_ms, uint32_t& decision) {
+bool waitForDecision(uint32_t* decision_slot,
+                     uint32_t  previous_decision,
+                     uint32_t  next_generation,
+                     int       root_fd,
+                     int       timeout_ms,
+                     uint32_t& decision) {
     const bool no_timeout = timeout_ms <= 0;
     const auto start      = std::chrono::steady_clock::now();
     const auto deadline =
         no_timeout ? std::chrono::steady_clock::time_point::max() : start + std::chrono::milliseconds(timeout_ms);
     auto next_warning = start + std::chrono::milliseconds(kBroadcastStallWarnMs);
 
-    while ((decision = loadDecision(state)) == previous) {
+    while ((decision = loadDecision(decision_slot)) == previous_decision) {
         if (rootConnectionClosed(root_fd)) {
             return false;
         }
@@ -235,7 +248,8 @@ bool waitForDecision(
         struct timespec wait_time {
             wait_ms / 1000, static_cast<long>(wait_ms % 1000) * 1000 * 1000
         };
-        int rc = static_cast<int>(::syscall(SYS_futex, &state->decision, FUTEX_WAIT, previous, &wait_time, nullptr, 0));
+        int rc = static_cast<int>(
+            ::syscall(SYS_futex, decision_slot, FUTEX_WAIT, previous_decision, &wait_time, nullptr, 0));
         if (rc == 0 || errno == EINTR || errno == EAGAIN) {
             continue;
         }
@@ -248,7 +262,7 @@ bool waitForDecision(
             RTP_LLM_LOG_WARNING("CpuBroadcaster commit decision still waiting after %lld ms "
                                 "(generation=%u timeout disabled)",
                                 static_cast<long long>(waited_ms),
-                                previous + 1);
+                                next_generation);
             next_warning = after_wait + std::chrono::milliseconds(kBroadcastStallWarnMs);
             continue;
         }
@@ -725,6 +739,8 @@ void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
     uint32_t                 previous_generation = 0;
     uint32_t                 next_generation     = 0;
     CpuBroadcastSharedState* shared_state        = nullptr;
+    uint32_t*                decision_slot       = nullptr;
+    uint32_t                 previous_decision   = 0;
     std::vector<int>         peer_fds;
 
     {
@@ -746,14 +762,20 @@ void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
                                 peer_fds_.size(),
                                 world_size_);
         RTP_LLM_CHECK_WITH_INFO(shared_state_ != nullptr, "CpuBroadcaster shared decision state is not mapped");
-        broadcast_in_progress_ = true;
-        rank                   = rank_;
-        world_size             = world_size_;
-        timeout_ms             = broadcast_timeout_ms_;
-        previous_generation    = broadcast_generation_;
-        next_generation        = cpu_broadcast_detail::nextGeneration(previous_generation);
-        shared_state           = shared_state_;
+        rank                = rank_;
+        world_size          = world_size_;
+        timeout_ms          = broadcast_timeout_ms_;
+        previous_generation = broadcast_generation_;
+        next_generation     = cpu_broadcast_detail::nextGeneration(previous_generation);
+        shared_state        = shared_state_;
+        decision_slot       = decisionSlot(shared_state, next_generation);
+        previous_decision   = loadDecision(decision_slot);
+        RTP_LLM_CHECK_WITH_INFO((previous_decision & kBroadcastFailedMask) == 0,
+                                "CpuBroadcaster generation %u found stale abort decision 0x%x",
+                                next_generation,
+                                previous_decision);
         peer_fds               = peer_fds_;
+        broadcast_in_progress_ = true;
     }
 
     auto finish_broadcast = [this, next_generation](bool failed) {
@@ -764,8 +786,8 @@ void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
         }
         broadcast_in_progress_ = false;
     };
-    auto fail_broadcast = [this, shared_state, previous_generation, next_generation]() {
-        publishDecision(shared_state, previous_generation, next_generation | kBroadcastFailedMask);
+    auto fail_broadcast = [this, decision_slot, previous_decision, next_generation]() {
+        publishDecision(decision_slot, previous_decision, next_generation | kBroadcastFailedMask);
         std::lock_guard<std::mutex> lock(mu_);
         markBroadcastFailedLocked();
     };
@@ -800,10 +822,10 @@ void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
             // This single shared-memory CAS is the commit point. Unlike a
             // per-peer success-token loop, it cannot let an earlier peer
             // return successfully before a later peer's notification fails.
-            RTP_LLM_CHECK_WITH_INFO(publishDecision(shared_state, previous_generation, next_generation),
+            RTP_LLM_CHECK_WITH_INFO(publishDecision(decision_slot, previous_decision, next_generation),
                                     "CpuBroadcaster commit for generation %u rejected by peer failure (decision=0x%x)",
                                     next_generation,
-                                    loadDecision(shared_state));
+                                    loadDecision(decision_slot));
         } else {
             BroadcastFrameHeader header{};
             ssize_t              n = readAllWithTimeout(peer_fds[0], &header, sizeof(header), timeout_ms);
@@ -829,11 +851,12 @@ void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
                                     "CpuBroadcaster ready token write to rank 0 failed after %d ms: %s",
                                     timeout_ms,
                                     std::strerror(errno));
-            uint32_t decision = previous_generation;
-            if (!waitForDecision(shared_state, previous_generation, peer_fds[0], timeout_ms, decision)) {
-                const int  saved_errno    = errno;
-                const auto timeout_result = cpu_broadcast_detail::abortOrObserveCommit(
-                    &shared_state->decision, previous_generation, next_generation);
+            uint32_t decision = previous_decision;
+            if (!waitForDecision(
+                    decision_slot, previous_decision, next_generation, peer_fds[0], timeout_ms, decision)) {
+                const int  saved_errno = errno;
+                const auto timeout_result =
+                    cpu_broadcast_detail::abortOrObserveCommit(decision_slot, previous_decision, next_generation);
                 if (timeout_result == cpu_broadcast_detail::AbortDecision::kCommitted) {
                     // Root's commit won the race with this peer's wait failure. The
                     // shared decision is authoritative, so this rank succeeds
