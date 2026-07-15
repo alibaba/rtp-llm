@@ -145,6 +145,10 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             feasible.add(ep);
         }
 
+        if (feasible.isEmpty()) {
+            return new FilterResult(feasible, rejections);
+        }
+
         long sumWaitMs = 0;
         long sumPendingCount = 0;
         for (PrefillEndpoint ep : feasible) {

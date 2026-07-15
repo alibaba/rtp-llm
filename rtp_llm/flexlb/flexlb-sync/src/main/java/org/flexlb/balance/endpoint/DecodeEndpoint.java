@@ -50,11 +50,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                            long latestAvailableKvCacheTokens) {
         this.reportedKvAvailable.set(latestAvailableKvCacheTokens);
 
-        logger.info("[DIAG] DecodeEndpoint.calibrate start: epId={}, inflightSize={}, runningTaskInfoSize={}, finishedTaskInfoSize={}",
-            ipPort(), inflightRequests.size(),
-            runningTaskInfo != null ? runningTaskInfo.size() : 0,
-            finishedTaskInfo != null ? finishedTaskInfo.size() : 0);
-
         // Phase 1: process running requests — KV_ALLOCATED or RUNNING means the engine
         // has taken ownership, so we can release our inflight reservation.
         //
@@ -88,12 +83,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (finishedTaskInfo != null) {
             for (TaskInfo task : finishedTaskInfo.values()) {
                 if (task.getErrorCode() != 0) {
-                    logger.info("[DIAG] calibrate Phase2: processing finishedTask requestId={}, errorCode={}, found in inflight={}",
-                        task.getRequestId(), task.getErrorCode(),
-                        inflightRequests.containsKey(task.getRequestId()));
                     RequestInflight removed = inflightRequests.remove(task.getRequestId());
-                    logger.info("[DIAG] calibrate Phase2: removed requestId={} from inflight, inflightSize after={}",
-                        task.getRequestId(), inflightRequests.size());
                     if (removed == null && !isCancelError(task)) {
                         logger.warn("Decode calibrate: finished failed request reqId={} not in inflight, error={}",
                                 task.getRequestId(), task.getErrorMessage());
@@ -104,12 +94,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // Phase 3: process finished success requests
             for (TaskInfo task : finishedTaskInfo.values()) {
                 if (task.getErrorCode() == 0) {
-                    logger.info("[DIAG] calibrate Phase3: processing finishedTask requestId={}, errorCode={}, found in inflight={}",
-                        task.getRequestId(), task.getErrorCode(),
-                        inflightRequests.containsKey(task.getRequestId()));
                     RequestInflight removed = inflightRequests.remove(task.getRequestId());
-                    logger.info("[DIAG] calibrate Phase3: removed requestId={} from inflight, inflightSize after={}",
-                        task.getRequestId(), inflightRequests.size());
                     if (removed != null) {
                         logger.debug("Decode calibrate: success request reqId={} still in inflight, " +
                                 "KV_ALLOCATED detection may have been skipped", task.getRequestId());
@@ -117,8 +102,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 }
             }
         }
-
-        logger.info("[DIAG] DecodeEndpoint.calibrate end: epId={}, inflightSize after={}", ipPort(), inflightRequests.size());
     }
 
     // ==================== KV Cache 三视图 ====================
