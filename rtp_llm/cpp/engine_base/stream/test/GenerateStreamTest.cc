@@ -156,6 +156,39 @@ TEST_F(GenerateStreamTest, testNonStreamingFinalOutputReturnsCachedAllHiddenStat
     ASSERT_TRUE(torch::equal(generate_output.all_hidden_states.value(), first_all_hidden_states));
 }
 
+TEST_F(GenerateStreamTest, testAllHiddenStatesCopiedToCpuOnceForMultipleOutputs) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2}));
+    ASSERT_NE(stream, nullptr);
+    stream->generate_input_->generate_config->return_all_hidden_states = true;
+    stream->iter_count_                                                = 1;
+
+    auto all_hidden_states =
+        torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}, torch::TensorOptions().device(torch::kCUDA)).reshape({2, 2});
+    StreamUpdateInfo update_info{torch::Tensor(),
+                                 0,
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 all_hidden_states,
+                                 false};
+
+    auto outputs = stream->prepareGenerateOutput(update_info);
+
+    ASSERT_EQ(outputs.generate_outputs.size(), 2);
+    const auto& first  = outputs.generate_outputs[0].all_hidden_states;
+    const auto& second = outputs.generate_outputs[1].all_hidden_states;
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+    ASSERT_FALSE(first->is_cuda());
+    ASSERT_EQ(first->data_ptr(), second->data_ptr());
+    ASSERT_TRUE(torch::equal(first.value(), all_hidden_states.cpu()));
+}
+
 TEST_F(GenerateStreamTest, testInputEmbeddingsDisableTokenOnlyReuseCache) {
     auto builder                                   = GenerateStreamBuilder();
     auto stream                                    = builder.createContextStream({1, 2, 3, 4, 5, 6});

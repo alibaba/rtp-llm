@@ -29,6 +29,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     size_t          output_len = seqLength() - last_output_pos_;
     GenerateOutputs generate_results;
     generate_results.request_id = request_id_;
+    torch::Tensor all_hidden_states_cpu;
 
     for (int i = 0; i < nextBatchSize(); i++) {
         GenerateOutput generate_output;
@@ -77,10 +78,17 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             }
         }
         if (generate_input_->generate_config->return_all_hidden_states) {
+            const torch::Tensor* all_hidden_states = nullptr;
             if (update_info.all_hidden_states.defined() && iter_count_ == 1) {
-                generate_output.all_hidden_states = update_info.all_hidden_states.cpu();
+                all_hidden_states = &update_info.all_hidden_states;
             } else if (!isStreaming() && generate_output.finished && all_hidden_states_.defined()) {
-                generate_output.all_hidden_states = all_hidden_states_.cpu();
+                all_hidden_states = &all_hidden_states_;
+            }
+            if (all_hidden_states != nullptr) {
+                if (!all_hidden_states_cpu.defined()) {
+                    all_hidden_states_cpu = all_hidden_states->cpu();
+                }
+                generate_output.all_hidden_states = all_hidden_states_cpu;
             }
         }
         if (loss_.defined()) {
