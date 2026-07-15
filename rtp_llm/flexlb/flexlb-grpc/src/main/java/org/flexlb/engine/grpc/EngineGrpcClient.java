@@ -77,9 +77,9 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
             GrpcStubWrapper stubWrapper = invoker.getRpcServiceStub()
                     .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
 
-            long startTime = System.nanoTime() / 1000;
+            long startTime = System.nanoTime();
             R response = grpcCall.apply(stubWrapper);
-            long endTime = System.nanoTime() / 1000;
+            long endTime = System.nanoTime();
 
             // Calculate response body size in bytes
             int responseSize = 0;
@@ -88,7 +88,7 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
             }
 
             // Record statistics
-            long duration = endTime - startTime;
+            long duration = TimeUnit.NANOSECONDS.toMillis(endTime - startTime);
             grpcReporter.reportCallMetrics(ip, ip + ":" + CommonUtils.toHttpPort(port), serviceType.getOperationName(), duration, responseSize, false);
 
             return response;
@@ -133,9 +133,9 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
         GrpcStubWrapper stubWrapper = newInvoker.getRpcServiceStub()
                 .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
 
-        long startTime = System.nanoTime() / 1000;
+        long startTime = System.nanoTime();
         R response = grpcCall.apply(stubWrapper);
-        long endTime = System.nanoTime() / 1000;
+        long endTime = System.nanoTime();
 
         // Calculate response body size in bytes
         int responseSize = 0;
@@ -144,7 +144,7 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
         }
 
         // Record retry statistics
-        long duration = endTime - startTime;
+        long duration = TimeUnit.NANOSECONDS.toMillis(endTime - startTime);
         grpcReporter.reportCallMetrics(ip, ip + ":" + CommonUtils.toHttpPort(port), serviceType.getOperationName(), duration, responseSize, true);
 
         return response;
