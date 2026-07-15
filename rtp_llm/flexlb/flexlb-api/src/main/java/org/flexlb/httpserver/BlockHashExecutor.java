@@ -74,10 +74,10 @@ public class BlockHashExecutor {
 
     @PostConstruct
     public void registerMetrics() {
-        monitor.register(BLOCK_HASH_QUEUE_WAIT_TIME_US, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
-        monitor.register(BLOCK_HASH_EXECUTION_TIME_US, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
-        monitor.register(BLOCK_HASH_RESULT, FlexMetricType.QPS);
-        monitor.register(BLOCK_HASH_THREAD_POOL_INFO, FlexMetricType.GAUGE);
+        monitor.register(BLOCK_HASH_QUEUE_WAIT_TIME_US, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY, FlexMetricTags.of());
+        monitor.register(BLOCK_HASH_EXECUTION_TIME_US, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY, FlexMetricTags.of());
+        monitor.register(BLOCK_HASH_RESULT, FlexMetricType.QPS, FlexMetricTags.of("status", ""));
+        monitor.register(BLOCK_HASH_THREAD_POOL_INFO, FlexMetricType.GAUGE, FlexMetricTags.of("type", ""));
     }
 
     public Mono<BlockHashCalculationResult> calculate(int[] inputIds, long blockSize) {

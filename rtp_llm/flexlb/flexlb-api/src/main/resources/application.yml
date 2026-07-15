@@ -11,9 +11,8 @@ spring:
     timeout-per-shutdown-phase: ${FLEXLB_SHUTDOWN_TIMEOUT:30s}
 
 flexlb:
-  # Internal KMonitor integration. Disable when the runtime has no local KMonitor agent.
   monitor:
-    enabled: ${FLEXLB_MONITOR_ENABLED:true}
+    provider: ${FLEXLB_MONITOR_PROVIDER:noop}
   log:
     path: ${FLEXLB_LOG_PATH:/home/admin/ai-whale/logs}
     async-queue-size: ${FLEXLB_LOG_ASYNC_QUEUE_SIZE:16384}

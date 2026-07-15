@@ -104,6 +104,10 @@ export MODEL_SERVICE_CONFIG='{
         }
     }]
 }'
+
+# Optional: prometheus, kmonitor, or noop (the default).
+# Missing or unsupported values fall back to the NoOp monitor.
+export FLEXLB_MONITOR_PROVIDER=prometheus
 ```
 
 Each endpoint must contain exactly one `discovery` object. Supported types are:
@@ -195,18 +199,16 @@ When KVCM is enabled, FlexLB stops polling `GetCacheStatus`. Engines must return
 
 ```bash
 java -jar flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar \
---server.port=7002 \
---management.server.port=8804 \
 --spring.profiles.active=test
 ```
 
-The service will start on port 7002 with management endpoints on port 8804.
+By default, the service starts on port 7001 with management endpoints on port 7002.
 
 ## API Documentation
 
 ### Health Check
 ```
-GET /actuator/health
+GET http://localhost:7002/health
 ```
 
 ### Load Balance Status Sync
@@ -239,14 +241,18 @@ FlexLB supports various configuration options through environment variables and 
 - **Load Balancing Strategy**: Configure through `FLEXLB_CONFIG`
 - **Backend Services**: Configure through `MODEL_SERVICE_CONFIG`
 - **ZooKeeper Settings**: Configure through `FLEXLB_SYNC_CONSISTENCY_CONFIG`
+- **Monitor Provider**: Configure through `FLEXLB_MONITOR_PROVIDER`. Supported providers are
+  `prometheus` and `kmonitor`; missing or unsupported values fall back to the NoOp monitor.
 
 ## Monitoring
 
 FlexLB provides comprehensive monitoring through:
 
-- Prometheus metrics endpoint: `/actuator/prometheus`
-- Health checks: `/actuator/health`
-- Application info: `/actuator/info`
+- Prometheus metrics endpoint: `http://localhost:7002/prometheus`
+- Health checks: `http://localhost:7002/health`
+- Application info: `http://localhost:7002/info`
+
+`FlexMonitor` metrics exported by the Prometheus provider use the `flexlb_` prefix.
 
 ## Contributing
 

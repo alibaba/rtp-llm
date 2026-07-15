@@ -36,7 +36,7 @@ public class ResourceMonitorReporter {
 
     @PostConstruct
     public void init() {
-        monitor.register(WORKER_PERMIT_CAPACITY, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(WORKER_PERMIT_CAPACITY, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, FlexMetricTags.of());
         log.info("ResourceMonitorReporter initialized and registered with KMonitor");
     }
 

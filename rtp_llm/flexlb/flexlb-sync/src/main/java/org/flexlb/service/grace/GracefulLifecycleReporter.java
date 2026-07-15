@@ -15,12 +15,13 @@ public class GracefulLifecycleReporter {
 
     private static final String TYPE_TAG = "type";
     private static final String DURATION_MS_TAG = "duration_ms";
+    private static final FlexMetricTags LIFECYCLE_TAGS = FlexMetricTags.of(TYPE_TAG, "", DURATION_MS_TAG, "");
 
     private final FlexMonitor monitor;
 
     public GracefulLifecycleReporter(FlexMonitor monitor) {
         this.monitor = monitor;
-        monitor.register(LIFECYCLE_EVENT_METRIC, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(LIFECYCLE_EVENT_METRIC, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, LIFECYCLE_TAGS);
     }
 
     public void reportHealthCheckOffline(long durationMs) {
@@ -40,7 +41,7 @@ public class GracefulLifecycleReporter {
     }
 
     public void reportProcessOk() {
-        monitor.report(LIFECYCLE_EVENT_METRIC, FlexMetricTags.of(TYPE_TAG, "process_ok"), 1);
+        monitor.report(LIFECYCLE_EVENT_METRIC, FlexMetricTags.of(TYPE_TAG, "process_ok", DURATION_MS_TAG, "0"), 1);
     }
 
     public void reportZkNodeOnline(long durationMs) {

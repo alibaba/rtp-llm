@@ -19,6 +19,17 @@ public interface FlexMonitor {
     void register(String metricName, FlexMetricType metricType);
 
     /**
+     * Register monitoring metric with its tag schema.
+     *
+     * @param metricName  Metric name
+     * @param metricType  Metric type
+     * @param metricsTags Tags object containing the metric's tag keys
+     */
+    default void register(String metricName, FlexMetricType metricType, FlexMetricTags metricsTags) {
+        register(metricName, metricType);
+    }
+
+    /**
      * Register monitoring metric
      *
      * @param metricName   Metric name
@@ -28,6 +39,22 @@ public interface FlexMonitor {
     void register(String metricName, FlexMetricType metricType, FlexPriorityType priorityType);
 
     /**
+     * Register monitoring metric with priority and its tag schema.
+     *
+     * @param metricName   Metric name
+     * @param metricType   Metric type
+     * @param priorityType Priority type
+     * @param metricsTags  Tags object containing the metric's tag keys
+     */
+    default void register(
+            String metricName,
+            FlexMetricType metricType,
+            FlexPriorityType priorityType,
+            FlexMetricTags metricsTags) {
+        register(metricName, metricType, priorityType);
+    }
+
+    /**
      * Register monitoring metric
      *
      * @param metricName     Metric name
@@ -35,6 +62,22 @@ public interface FlexMonitor {
      * @param statisticsType Statistics type
      */
     void register(String metricName, FlexMetricType metricType, int statisticsType);
+
+    /**
+     * Register monitoring metric with statistics and its tag schema.
+     *
+     * @param metricName     Metric name
+     * @param metricType     Metric type
+     * @param statisticsType Statistics type
+     * @param metricsTags    Tags object containing the metric's tag keys
+     */
+    default void register(
+            String metricName,
+            FlexMetricType metricType,
+            int statisticsType,
+            FlexMetricTags metricsTags) {
+        register(metricName, metricType, statisticsType);
+    }
 
     /**
      * Report monitoring data

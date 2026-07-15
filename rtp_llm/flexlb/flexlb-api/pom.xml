@@ -23,6 +23,10 @@
             <artifactId>flexlb-sync</artifactId>
         </dependency>
         <dependency>
+            <groupId>org.flexlb</groupId>
+            <artifactId>flexlb-prometheus-monitor</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webflux</artifactId>
         </dependency>

@@ -77,6 +77,20 @@ import static org.flexlb.constant.MetricConstant.ZK_MASTER_NODE;
 public class EngineHealthReporter {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
+    private static final FlexMetricTags EMPTY_TAGS = FlexMetricTags.of();
+    private static final FlexMetricTags MODEL_TAGS = FlexMetricTags.of("model", "");
+    private static final FlexMetricTags MODEL_ROLE_TAGS = FlexMetricTags.of("model", "", "role", "");
+    private static final FlexMetricTags MODEL_ENGINE_IP_ROLE_TAGS = FlexMetricTags.of("model", "", "engineIp", "", "role", "");
+    private static final FlexMetricTags MODEL_CODE_ENGINE_IP_ROLE_TAGS = FlexMetricTags.of("model", "", "code", "", "engineIp", "", "role", "");
+    private static final FlexMetricTags MODEL_ENGINE_IP_CODE_TAGS = FlexMetricTags.of("model", "", "engineIp", "", "code", "");
+    private static final FlexMetricTags ENGINE_IP_ROLE_TAGS = FlexMetricTags.of("engineIp", "", "role", "");
+    private static final FlexMetricTags THREAD_POOL_TYPE_TAGS = FlexMetricTags.of("threadPool", "", "type", "");
+    private static final FlexMetricTags NAME_TYPE_TAGS = FlexMetricTags.of("name", "", "type", "");
+    private static final FlexMetricTags CODE_TAGS = FlexMetricTags.of("code", "");
+    private static final FlexMetricTags ROLE_ENGINE_IP_SUCCESS_CODE_TAGS = FlexMetricTags.of("role", "", "engineIp", "", "success", "", "code", "");
+    private static final FlexMetricTags MASTER_NODE_TAGS = FlexMetricTags.of("masterNode", "");
+    private static final FlexMetricTags EVENT_TAGS = FlexMetricTags.of("event", "");
+    private static final FlexMetricTags TYPE_CODE_TAGS = FlexMetricTags.of("type", "", "code", "");
 
     private final FlexMonitor monitor;
 
@@ -105,44 +119,44 @@ public class EngineHealthReporter {
     @PostConstruct
     public void init() {
 
-        this.monitor.register(ENGINE_STATUS_CHECK_SUCCESS_PERIOD, FlexMetricType.GAUGE);
-        this.monitor.register(ENGINE_STATUS_AVAILABLE_CONCURRENCY, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(ENGINE_STATUS_VISITOR_RT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(ENGINE_STATUS_VISITOR_SUCCESS_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        this.monitor.register(ENGINE_WORKER_NUMBER, FlexMetricType.GAUGE);
-        this.monitor.register(ENGINE_PREFILL_WORKER_NUMBER, FlexMetricType.GAUGE);
-        this.monitor.register(ENGINE_DECODE_WORKER_NUMBER, FlexMetricType.GAUGE);
-        this.monitor.register(ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT, FlexMetricType.GAUGE);
-        this.monitor.register(ENGINE_STATUS_CHECK_FAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        this.monitor.register(ENGINE_BALANCING_THREAD_POOL_INFO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(ENGINE_FINISHED_TASK_LIST_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(ENGINE_RUNNING_TASK_INFO_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(CACHE_KEY_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_STATUS_CHECK_SUCCESS_PERIOD, FlexMetricType.GAUGE, MODEL_CODE_ENGINE_IP_ROLE_TAGS);
+        this.monitor.register(ENGINE_STATUS_AVAILABLE_CONCURRENCY, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, MODEL_CODE_ENGINE_IP_ROLE_TAGS);
+        this.monitor.register(ENGINE_STATUS_VISITOR_RT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, MODEL_ENGINE_IP_ROLE_TAGS);
+        this.monitor.register(ENGINE_STATUS_VISITOR_SUCCESS_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE, MODEL_ENGINE_IP_ROLE_TAGS);
+        this.monitor.register(ENGINE_WORKER_NUMBER, FlexMetricType.GAUGE, MODEL_TAGS);
+        this.monitor.register(ENGINE_PREFILL_WORKER_NUMBER, FlexMetricType.GAUGE, MODEL_TAGS);
+        this.monitor.register(ENGINE_DECODE_WORKER_NUMBER, FlexMetricType.GAUGE, MODEL_TAGS);
+        this.monitor.register(ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT, FlexMetricType.GAUGE, MODEL_ROLE_TAGS);
+        this.monitor.register(ENGINE_STATUS_CHECK_FAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE, MODEL_CODE_ENGINE_IP_ROLE_TAGS);
+        this.monitor.register(ENGINE_BALANCING_THREAD_POOL_INFO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, THREAD_POOL_TYPE_TAGS);
+        this.monitor.register(ENGINE_FINISHED_TASK_LIST_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, ENGINE_IP_ROLE_TAGS);
+        this.monitor.register(ENGINE_RUNNING_TASK_INFO_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, ENGINE_IP_ROLE_TAGS);
+        this.monitor.register(CACHE_KEY_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, MODEL_ENGINE_IP_ROLE_TAGS);
+        this.monitor.register(ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, NAME_TYPE_TAGS);
 
-        this.monitor.register(ENGINE_BALANCING_MASTER_ALL_QPS, FlexMetricType.QPS);
-        this.monitor.register(ENGINE_BALANCING_MASTER_SCHEDULE_RT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(ENGINE_BALANCING_MASTER_SELECT_DETAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_BALANCING_MASTER_ALL_QPS, FlexMetricType.QPS, CODE_TAGS);
+        this.monitor.register(ENGINE_BALANCING_MASTER_SCHEDULE_RT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, CODE_TAGS);
+        this.monitor.register(ENGINE_BALANCING_MASTER_SELECT_DETAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE, ROLE_ENGINE_IP_SUCCESS_CODE_TAGS);
 
-        this.monitor.register(ENGINE_RUNNING_QUEUE_TIME, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(ENGINE_LOCAL_TASK_MAP_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_RUNNING_QUEUE_TIME, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, MODEL_CODE_ENGINE_IP_ROLE_TAGS);
+        this.monitor.register(ENGINE_LOCAL_TASK_MAP_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, MODEL_CODE_ENGINE_IP_ROLE_TAGS);
 
-        this.monitor.register(ZK_MASTER_NODE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(ZK_MASTER_EVENT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(ZK_MASTER_NODE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, MASTER_NODE_TAGS);
+        this.monitor.register(ZK_MASTER_EVENT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, EVENT_TAGS);
 
-        this.monitor.register(ENGINE_WORKER_INFO_STEP_LATENCY_VAR, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
-        this.monitor.register(ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
-        this.monitor.register(CACHE_STATUS_CHECK_VISITOR_RT, FlexMetricType.GAUGE);
-        this.monitor.register(CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS, FlexMetricType.QPS);
-        this.monitor.register(CACHE_STATUS_CHECK_SUCCESS_PERIOD, FlexMetricType.GAUGE);
-        this.monitor.register(CACHE_STATUS_CHECK_FAIL, FlexMetricType.QPS);
-        this.monitor.register(CACHE_BLOCK_SIZE, FlexMetricType.GAUGE);
-        this.monitor.register(CACHE_USED_KV_CACHE_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(CACHE_AVAILABLE_KV_CACHE_TOKENS, FlexMetricType.GAUGE);
-        this.monitor.register(CACHE_TOTAL_KV_CACHE_TOKENS, FlexMetricType.GAUGE);
-        this.monitor.register(CACHE_USED_KV_CACHE_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(REQUEST_ARRIVAL_DELAY_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(FORWARD_TO_MASTER_RESULT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_WORKER_INFO_STEP_LATENCY_VAR, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY, MODEL_ROLE_TAGS);
+        this.monitor.register(ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY, MODEL_ROLE_TAGS);
+        this.monitor.register(CACHE_STATUS_CHECK_VISITOR_RT, FlexMetricType.GAUGE, MODEL_ENGINE_IP_ROLE_TAGS);
+        this.monitor.register(CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS, FlexMetricType.QPS, MODEL_ENGINE_IP_ROLE_TAGS);
+        this.monitor.register(CACHE_STATUS_CHECK_SUCCESS_PERIOD, FlexMetricType.GAUGE, MODEL_CODE_ENGINE_IP_ROLE_TAGS);
+        this.monitor.register(CACHE_STATUS_CHECK_FAIL, FlexMetricType.QPS, MODEL_ENGINE_IP_CODE_TAGS);
+        this.monitor.register(CACHE_BLOCK_SIZE, FlexMetricType.GAUGE, MODEL_ENGINE_IP_ROLE_TAGS);
+        this.monitor.register(CACHE_USED_KV_CACHE_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, MODEL_ENGINE_IP_ROLE_TAGS);
+        this.monitor.register(CACHE_AVAILABLE_KV_CACHE_TOKENS, FlexMetricType.GAUGE, MODEL_ENGINE_IP_ROLE_TAGS);
+        this.monitor.register(CACHE_TOTAL_KV_CACHE_TOKENS, FlexMetricType.GAUGE, MODEL_ENGINE_IP_ROLE_TAGS);
+        this.monitor.register(CACHE_USED_KV_CACHE_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, MODEL_ENGINE_IP_ROLE_TAGS);
+        this.monitor.register(REQUEST_ARRIVAL_DELAY_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, EMPTY_TAGS);
+        this.monitor.register(FORWARD_TO_MASTER_RESULT, FlexMetricType.QPS, FlexPriorityType.PRECISE, TYPE_CODE_TAGS);
     }
 
     public void reportLatencyMetric(String modelName, String role, double result, double result2) {
