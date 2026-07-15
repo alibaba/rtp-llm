@@ -17,6 +17,8 @@ py_library(
         "distribution_runner.py",
         "grid_runner.py",
         "hub_download.py",
+        "offline_bench_test.py",
+        "offline_runner.py",
         "perf_config.py",
         "perf_utils.py",
         "tps_runner.py",
@@ -36,10 +38,42 @@ py_library(
 py_test(
     name = "test_perf_config_and_runners",
     srcs = ["test_perf_config_and_runners.py"],
+    data = [
+        "//rtp_llm/test/tokenizer_test:testdata",
+    ],
     deps = [
         "//rtp_llm/test/perf_test:perf_test_lib",
     ],
 )
+
+# Offline throughput benchmark (new entry point).
+# Manual target: Qwen3.5 weights must be available locally or resolvable by perf path resolution.
+py_test(
+    name = "offline_bench_test",
+    main = "offline_bench_test.py",
+    srcs = ["offline_bench_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = [
+        "//rtp_llm:sdk",
+    ],
+    args = [
+        "--checkpoint_path", "Qwen/Qwen3.5-35B-A3B",
+        "--model_type", "qwen35_moe",
+        "--input_len_min", "128",
+        "--input_len_max", "512",
+        "--output_len_min", "64",
+        "--output_len_max", "256",
+        "--concurrency_limit", "256",
+        "--seq_size_per_block", "1024",
+    ],
+    tags = ["manual"],
+)
+
 
 # Distribution mode: sampling from dataset using model's parameters.
 py_test(
