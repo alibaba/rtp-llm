@@ -125,6 +125,40 @@ def rocm_oss_suites():
         ],
     )
 
+    # ROCm Qwen3.5 MTP: FP8 baseline, CUDA Graph, TP2, and PD coverage.
+    native.test_suite(
+        name = "smoke_rocm_qwen35_mtp",
+        tests = [
+            smoke_test(
+                name="rocm_qwen35_mtp_fp8_tp1",
+                task_info="data/model/qwen3_next/q_r_next_fp8_tp2_mtp.json",
+                smoke_args="--load_method scratch --warm_up 0 --act_type BF16 --seq_size_per_block 1024 --kernel_seq_size_per_block 16 --test_block_num 512 --max_seq_len 409600 --tp_size 1 --world_size 1 --reuse_cache 1 --use_asm_pa 0 --use_aiter_pa 1 --use_triton_pa 0 --reserver_runtime_mem_mb 40480 --quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/data2/ckpt/Qwen3.5-35B-A3B --sp_act_type bf16",
+                gpu_type=["MI308X-ROCM7"],
+            ),
+            smoke_test(
+                name="rocm_qwen35_mtp_fp8_tp1_cg",
+                task_info="data/model/qwen3_next/q_r_next_fp8_tp2_mtp_cudagraph.json",
+                smoke_args="--load_method scratch --warm_up 0 --act_type BF16 --seq_size_per_block 1024 --kernel_seq_size_per_block 16 --test_block_num 512 --max_seq_len 409600 --tp_size 1 --world_size 1 --reuse_cache 1 --use_asm_pa 0 --use_aiter_pa 1 --use_triton_pa 0 --reserver_runtime_mem_mb 40480 --quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/data2/ckpt/Qwen3.5-35B-A3B --sp_act_type bf16 --concurrency_limit 4 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 1 --decode_capture_config '1,2,3,4'",
+                gpu_type=["MI308X-ROCM7"],
+            ),
+            smoke_test(
+                name="rocm_qwen35_mtp_fp8_tp2_cg",
+                task_info="data/model/qwen3_next/q_r_next_fp8_tp2_mtp.json",
+                smoke_args="--load_method scratch --warm_up 0 --act_type BF16 --seq_size_per_block 1024 --kernel_seq_size_per_block 16 --test_block_num 512 --max_seq_len 409600 --tp_size 2 --world_size 2 --ep_size 1 --reuse_cache 1 --use_asm_pa 0 --use_aiter_pa 1 --use_triton_pa 0 --reserver_runtime_mem_mb 40480 --quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/data2/ckpt/Qwen3.5-35B-A3B --sp_act_type bf16 --concurrency_limit 4 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 1 --decode_capture_config '1,2,3,4'",
+                gpu_type=["MI308X-ROCM7"],
+            ),
+            smoke_test(
+                name="rocm_qwen35_mtp_fp8_pd_tp1x1_cg",
+                task_info="data/model/qwen3_next/q_r_next_fp8_tp2_mtp_pd.json",
+                smoke_args={
+                    "prefill": "--load_cache_timeout_ms 120000 --load_method scratch --warm_up 0 --act_type BF16 --seq_size_per_block 1024 --kernel_seq_size_per_block 16 --test_block_num 512 --max_seq_len 409600 --tp_size 1 --world_size 1 --reuse_cache 1 --use_asm_pa 0 --use_aiter_pa 1 --use_triton_pa 0 --reserver_runtime_mem_mb 40480 --quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/data2/ckpt/Qwen3.5-35B-A3B --sp_act_type bf16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL",
+                    "decode": "--load_cache_timeout_ms 120000 --load_method scratch --warm_up 0 --act_type BF16 --seq_size_per_block 1024 --kernel_seq_size_per_block 16 --test_block_num 512 --max_seq_len 409600 --tp_size 1 --world_size 1 --reuse_cache 1 --use_asm_pa 0 --use_aiter_pa 1 --use_triton_pa 0 --reserver_runtime_mem_mb 40480 --quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/data2/ckpt/Qwen3.5-35B-A3B --sp_act_type bf16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --concurrency_limit 4 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 1 --decode_capture_config '1,2,3,4'",
+                },
+                gpu_type=["MI308X-ROCM7"],
+            ),
+        ],
+    )
+
 
     # ROCm Eagle (Qwen2-14B + draft)
     native.test_suite(
