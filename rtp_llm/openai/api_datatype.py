@@ -208,12 +208,31 @@ class ChatCompletionRequest(BaseModel):
         return "messages" in request
 
     def get_chat_template_kwargs(self):
+        chat_template_kwargs = {}
+        if self.chat_template_kwargs is not None:
+            chat_template_kwargs.update(self.chat_template_kwargs)
         if (
             self.extra_configs is not None
             and self.extra_configs.chat_template_kwargs is not None
         ):
-            return self.extra_configs.chat_template_kwargs
-        return self.chat_template_kwargs
+            chat_template_kwargs.update(self.extra_configs.chat_template_kwargs)
+        return chat_template_kwargs or None
+
+    def get_resolved_chat_template_kwargs(self):
+        chat_template_kwargs = dict(self.get_chat_template_kwargs() or {})
+        thinking_mode = self.resolve_thinking_mode()
+        chat_template_kwargs["thinking_mode"] = {
+            ThinkingMode.ENABLED: "enabled",
+            ThinkingMode.DISABLED: "disabled",
+            ThinkingMode.ADAPTIVE: "adaptive",
+        }[thinking_mode]
+        if thinking_mode == ThinkingMode.ADAPTIVE:
+            chat_template_kwargs.pop("enable_thinking", None)
+        else:
+            chat_template_kwargs["enable_thinking"] = (
+                thinking_mode == ThinkingMode.ENABLED
+            )
+        return chat_template_kwargs
 
     def enable_thinking_requested(self):
         if self.enable_thinking is True:

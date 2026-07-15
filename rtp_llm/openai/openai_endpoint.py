@@ -423,6 +423,8 @@ class OpenaiEndpoint(object):
                             message=ChatMessage(
                                 role=choice.delta.role or RoleEnum.assistant,
                                 content=choice.delta.content or None,
+                                reasoning_content=choice.delta.reasoning_content
+                                or None,
                                 function_call=choice.delta.function_call or None,
                                 tool_calls=choice.delta.tool_calls or None,
                             ),

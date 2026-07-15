@@ -3,7 +3,6 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from rtp_llm.config.generate_config import ThinkingMode
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
@@ -126,23 +125,7 @@ class MiniMaxM3VLRenderer(BasicRenderer):
                     }
                 )
 
-        template_kwargs: Dict[str, Any] = {}
-        if request.chat_template_kwargs is not None:
-            template_kwargs.update(request.chat_template_kwargs)
-        if (
-            request.extra_configs is not None
-            and request.extra_configs.chat_template_kwargs is not None
-            and isinstance(request.extra_configs.chat_template_kwargs, dict)
-        ):
-            template_kwargs.update(request.extra_configs.chat_template_kwargs)
-
-        if "thinking_mode" not in template_kwargs:
-            resolved_mode = request.resolve_thinking_mode()
-            template_kwargs["thinking_mode"] = {
-                ThinkingMode.ENABLED: "enabled",
-                ThinkingMode.DISABLED: "disabled",
-                ThinkingMode.ADAPTIVE: "adaptive",
-            }[resolved_mode]
+        template_kwargs = request.get_resolved_chat_template_kwargs()
 
         apply_kwargs: Dict[str, Any] = dict(
             tokenize=False,
