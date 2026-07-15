@@ -49,14 +49,17 @@ struct BroadcastFrameHeader {
 
 int broadcastTimeoutMs() {
     const char* value = std::getenv("RTP_LLM_CPU_TP_BROADCASTER_BROADCAST_TIMEOUT_MS");
-    if (value == nullptr || *value == '\0') {
+    if (value == nullptr) {
         return kDefaultBroadcastTimeoutMs;
     }
+    errno        = 0;
     char* end    = nullptr;
     long  parsed = std::strtol(value, &end, 10);
-    if (end == value || *end != '\0' || parsed < 0 || parsed > 24L * 60 * 60 * 1000) {
-        return kDefaultBroadcastTimeoutMs;
-    }
+    RTP_LLM_CHECK_WITH_INFO(errno != ERANGE && end != value && *end == '\0' && parsed >= 0
+                                && parsed <= 24L * 60 * 60 * 1000,
+                            "CpuBroadcaster invalid RTP_LLM_CPU_TP_BROADCASTER_BROADCAST_TIMEOUT_MS='%s': "
+                            "expected an integer in [0, 86400000]",
+                            value);
     return static_cast<int>(parsed);
 }
 
@@ -428,6 +431,13 @@ ssize_t readAllWithTimeout(int fd, void* buf, std::size_t nbytes, int timeout_ms
 
 }  // namespace
 
+uint32_t cpu_broadcast_detail::nextGeneration(uint32_t previous_generation) {
+    RTP_LLM_CHECK_WITH_INFO((previous_generation & kBroadcastFailedMask) == 0,
+                            "CpuBroadcaster invalid committed generation 0x%x",
+                            previous_generation);
+    return (previous_generation + 1) & ~kBroadcastFailedMask;
+}
+
 cpu_broadcast_detail::AbortDecision
 cpu_broadcast_detail::abortOrObserveCommit(uint32_t* decision, uint32_t previous_generation, uint32_t next_generation) {
     uint32_t observed = previous_generation;
@@ -736,14 +746,12 @@ void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
                                 peer_fds_.size(),
                                 world_size_);
         RTP_LLM_CHECK_WITH_INFO(shared_state_ != nullptr, "CpuBroadcaster shared decision state is not mapped");
-        RTP_LLM_CHECK_WITH_INFO(broadcast_generation_ + 1 < kBroadcastFailedMask,
-                                "CpuBroadcaster broadcast generation exhausted");
         broadcast_in_progress_ = true;
         rank                   = rank_;
         world_size             = world_size_;
         timeout_ms             = broadcast_timeout_ms_;
         previous_generation    = broadcast_generation_;
-        next_generation        = previous_generation + 1;
+        next_generation        = cpu_broadcast_detail::nextGeneration(previous_generation);
         shared_state           = shared_state_;
         peer_fds               = peer_fds_;
     }

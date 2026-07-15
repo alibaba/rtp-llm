@@ -18,6 +18,10 @@ enum class AbortDecision {
     kAborted,
 };
 
+// Advance within the low 31-bit committed-generation space. Generation zero
+// is a valid wrapped commit; the high bit remains reserved for shared aborts.
+uint32_t nextGeneration(uint32_t previous_generation);
+
 // Linearize a peer-side wait failure against root's commit CAS. If abort loses
 // to an already-published commit, the peer must observe that commit as success
 // instead of diverging from the other ranks.

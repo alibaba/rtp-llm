@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <errno.h>
@@ -20,6 +21,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -41,6 +43,37 @@ struct BroadcastFrameHeader {
 
 struct TestSharedBroadcastState {
     alignas(uint32_t) uint32_t decision;
+};
+
+class ScopedChildSubreaper {
+public:
+    bool enable() {
+        if (::prctl(PR_GET_CHILD_SUBREAPER, &previous_) != 0) {
+            error_ = errno;
+            return false;
+        }
+        if (previous_ == 0 && ::prctl(PR_SET_CHILD_SUBREAPER, 1) != 0) {
+            error_ = errno;
+            return false;
+        }
+        restore_ = previous_ == 0;
+        return true;
+    }
+
+    ~ScopedChildSubreaper() {
+        if (restore_) {
+            (void)::prctl(PR_SET_CHILD_SUBREAPER, previous_);
+        }
+    }
+
+    int error() const {
+        return error_;
+    }
+
+private:
+    int  previous_ = 0;
+    int  error_    = 0;
+    bool restore_  = false;
 };
 
 std::string makeTempBase() {
@@ -72,6 +105,59 @@ void cleanupTempBase(const std::string& base, int max_rank = 4) {
         ::rmdir(base.substr(0, slash).c_str());
     }
 }
+
+void killAndReap(pid_t& pid) {
+    if (pid <= 0) {
+        return;
+    }
+    (void)::kill(pid, SIGKILL);
+    int   status = 0;
+    pid_t waited;
+    do {
+        waited = ::waitpid(pid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    pid = -1;
+}
+
+pid_t waitAndClear(pid_t& pid, int& status) {
+    const pid_t original = pid;
+    pid_t       waited;
+    do {
+        waited = ::waitpid(original, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited == original) {
+        pid = -1;
+    }
+    return waited;
+}
+
+class ScopedProcessTreeCleanup {
+public:
+    explicit ScopedProcessTreeCleanup(std::string base): base_(std::move(base)) {}
+
+    ~ScopedProcessTreeCleanup() {
+        for (int& fd : ready_pipe) {
+            if (fd >= 0) {
+                ::close(fd);
+                fd = -1;
+            }
+        }
+        killAndReap(root_pid);
+        for (pid_t& peer_pid : peer_pids) {
+            killAndReap(peer_pid);
+        }
+        killAndReap(exec_pid);
+        cleanupTempBase(base_);
+    }
+
+    int                ready_pipe[2] = {-1, -1};
+    pid_t              root_pid      = -1;
+    std::vector<pid_t> peer_pids;
+    pid_t              exec_pid = -1;
+
+private:
+    std::string base_;
+};
 
 ssize_t writeAllRaw(int fd, const void* buf, size_t nbytes) {
     const char* p    = static_cast<const char*>(buf);
@@ -115,6 +201,20 @@ ssize_t readAllRaw(int fd, void* buf, size_t nbytes) {
         left -= n;
     }
     return static_cast<ssize_t>(nbytes);
+}
+
+bool readPidWithTimeout(int fd, pid_t& pid, std::chrono::milliseconds timeout) {
+    struct pollfd pfd {};
+    pfd.fd     = fd;
+    pfd.events = POLLIN;
+    int rc;
+    do {
+        rc = ::poll(&pfd, 1, static_cast<int>(timeout.count()));
+    } while (rc < 0 && errno == EINTR);
+    if (rc != 1 || (pfd.revents & (POLLIN | POLLHUP)) == 0) {
+        return false;
+    }
+    return readAllRaw(fd, &pid, sizeof(pid)) == static_cast<ssize_t>(sizeof(pid)) && pid > 0;
 }
 
 TestSharedBroadcastState* mapTestSharedState(int fd) {
@@ -539,20 +639,20 @@ int fakeRootWaitAfterAllPeersReady(const std::string& base, int ready_fd) {
     }
 }
 
-int productionRootExecChildAndWait(const std::string& base, int ready_fd) {
+int productionRankExecChildAndWait(int rank, int world_size, const std::string& base, int ready_fd) {
     auto& bcast = CpuBroadcaster::instance();
     bcast.reset();
-    bcast.initialize(0, 3, base);
+    bcast.initialize(rank, world_size, base);
 
     int exec_pipe[2] = {-1, -1};
     if (::pipe2(exec_pipe, O_CLOEXEC) != 0) {
-        std::fprintf(stderr, "root exec status pipe failed: %s\n", std::strerror(errno));
+        std::fprintf(stderr, "rank %d exec status pipe failed: %s\n", rank, std::strerror(errno));
         return 1;
     }
 
     pid_t exec_pid = ::fork();
     if (exec_pid < 0) {
-        std::fprintf(stderr, "root fork for exec child failed: %s\n", std::strerror(errno));
+        std::fprintf(stderr, "rank %d fork for exec child failed: %s\n", rank, std::strerror(errno));
         ::close(exec_pipe[0]);
         ::close(exec_pipe[1]);
         return 1;
@@ -576,7 +676,8 @@ int productionRootExecChildAndWait(const std::string& base, int ready_fd) {
     ::close(exec_pipe[0]);
     if (n != 0) {
         std::fprintf(stderr,
-                     "root exec child failed before close-on-exec: %s\n",
+                     "rank %d exec child failed before close-on-exec: %s\n",
+                     rank,
                      n == static_cast<ssize_t>(sizeof(exec_error)) ? std::strerror(exec_error) : "short status read");
         ::kill(exec_pid, SIGKILL);
         ::waitpid(exec_pid, nullptr, 0);
@@ -584,16 +685,16 @@ int productionRootExecChildAndWait(const std::string& base, int ready_fd) {
     }
 
     if (::write(ready_fd, &exec_pid, sizeof(exec_pid)) != static_cast<ssize_t>(sizeof(exec_pid))) {
-        std::fprintf(stderr, "root exec child notification failed: %s\n", std::strerror(errno));
+        std::fprintf(stderr, "rank %d exec child notification failed: %s\n", rank, std::strerror(errno));
         ::kill(exec_pid, SIGKILL);
         ::waitpid(exec_pid, nullptr, 0);
         return 1;
     }
     ::close(ready_fd);
 
-    // The parent kills this root after /bin/sleep has successfully exec'd. If
-    // a production UDS fd lacks close-on-exec, sleep keeps the peer connection
-    // alive and the surviving ranks below remain blocked with timeout disabled.
+    // The parent kills this rank after /bin/sleep has successfully exec'd. If
+    // a production UDS fd lacks close-on-exec, sleep keeps the connection alive
+    // and the surviving production rank remains blocked with timeout disabled.
     while (true) {
         ::pause();
     }
@@ -748,6 +849,35 @@ TEST(CpuBroadcasterTest, WaitFailureAndCommitUseOneLinearizationPoint) {
     EXPECT_EQ(__atomic_load_n(&decision, __ATOMIC_ACQUIRE), next_generation);
 }
 
+TEST(CpuBroadcasterTest, GenerationWrapPreservesCommitAbortLinearization) {
+    constexpr uint32_t previous_generation = kExpectedBroadcastFailedMask - 1;
+    constexpr uint32_t next_generation     = 0;
+
+    EXPECT_EQ(cpu_broadcast_detail::nextGeneration(previous_generation - 1), previous_generation);
+    EXPECT_EQ(cpu_broadcast_detail::nextGeneration(previous_generation), next_generation);
+
+    // At the wrap boundary, a peer failure still wins with the reserved abort
+    // bit while root's competing zero-generation commit is rejected.
+    uint32_t decision = previous_generation;
+    EXPECT_EQ(cpu_broadcast_detail::abortOrObserveCommit(&decision, previous_generation, next_generation),
+              cpu_broadcast_detail::AbortDecision::kAborted);
+    EXPECT_EQ(__atomic_load_n(&decision, __ATOMIC_ACQUIRE), kExpectedBroadcastFailedMask);
+    uint32_t expected = previous_generation;
+    EXPECT_FALSE(
+        __atomic_compare_exchange_n(&decision, &expected, next_generation, false, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE));
+    EXPECT_EQ(expected, kExpectedBroadcastFailedMask);
+
+    // If root publishes the wrapped zero generation first, a late peer-side
+    // failure observes that authoritative commit instead of diverging.
+    __atomic_store_n(&decision, previous_generation, __ATOMIC_RELEASE);
+    expected = previous_generation;
+    ASSERT_TRUE(
+        __atomic_compare_exchange_n(&decision, &expected, next_generation, false, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE));
+    EXPECT_EQ(cpu_broadcast_detail::abortOrObserveCommit(&decision, previous_generation, next_generation),
+              cpu_broadcast_detail::AbortDecision::kCommitted);
+    EXPECT_EQ(__atomic_load_n(&decision, __ATOMIC_ACQUIRE), next_generation);
+}
+
 TEST(CpuBroadcasterTest, RootExitBeforeDecisionAbortsAllSurvivingRanks) {
     ::unsetenv("RTP_LLM_CPU_TP_BROADCASTER_BROADCAST_TIMEOUT_MS");
     const std::string base = makeTempBase();
@@ -838,23 +968,24 @@ TEST(CpuBroadcasterTest, RootExitBeforeDecisionAbortsAllSurvivingRanks) {
 
 TEST(CpuBroadcasterTest, ExecChildDoesNotKeepRootConnectionsAlive) {
     ::unsetenv("RTP_LLM_CPU_TP_BROADCASTER_BROADCAST_TIMEOUT_MS");
-    const std::string base = makeTempBase();
+    ScopedChildSubreaper subreaper;
+    ASSERT_TRUE(subreaper.enable()) << "failed to become a child subreaper: " << std::strerror(subreaper.error());
+    const std::string        base = makeTempBase();
+    ScopedProcessTreeCleanup cleanup(base);
 
-    int ready_pipe[2] = {-1, -1};
-    ASSERT_EQ(::pipe(ready_pipe), 0);
-    const int ready_write_fd = ready_pipe[1];
-    pid_t     root_pid       = spawnChild([base, ready_write_fd, ready_read_fd = ready_pipe[0]] {
+    ASSERT_EQ(::pipe(cleanup.ready_pipe), 0);
+    const int ready_write_fd = cleanup.ready_pipe[1];
+    cleanup.root_pid         = spawnChild([base, ready_write_fd, ready_read_fd = cleanup.ready_pipe[0]] {
         ::close(ready_read_fd);
-        return productionRootExecChildAndWait(base, ready_write_fd);
+        return productionRankExecChildAndWait(0, 3, base, ready_write_fd);
     });
-    ASSERT_GT(root_pid, 0);
-    ::close(ready_pipe[1]);
-    ready_pipe[1] = -1;
+    ASSERT_GT(cleanup.root_pid, 0);
+    ::close(cleanup.ready_pipe[1]);
+    cleanup.ready_pipe[1] = -1;
 
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    std::vector<pid_t> peer_pids;
     for (int rank = 1; rank < 3; ++rank) {
-        peer_pids.push_back(spawnChild([base, rank, ready_read_fd = ready_pipe[0]] {
+        cleanup.peer_pids.push_back(spawnChild([base, rank, ready_read_fd = cleanup.ready_pipe[0]] {
             ::close(ready_read_fd);
             auto& bcast = CpuBroadcaster::instance();
             bcast.reset();
@@ -865,40 +996,114 @@ TEST(CpuBroadcasterTest, ExecChildDoesNotKeepRootConnectionsAlive) {
             bcast.reset();
             return rc;
         }));
-        ASSERT_GT(peer_pids.back(), 0);
+        ASSERT_GT(cleanup.peer_pids.back(), 0);
     }
 
-    pid_t   exec_pid = -1;
-    ssize_t n        = readAllRaw(ready_pipe[0], &exec_pid, sizeof(exec_pid));
-    ::close(ready_pipe[0]);
-    ready_pipe[0] = -1;
-    ASSERT_EQ(n, static_cast<ssize_t>(sizeof(exec_pid)));
-    ASSERT_GT(exec_pid, 0);
+    ASSERT_TRUE(readPidWithTimeout(cleanup.ready_pipe[0], cleanup.exec_pid, std::chrono::seconds(5)))
+        << "root did not report a successfully exec'd child";
+    ::close(cleanup.ready_pipe[0]);
+    cleanup.ready_pipe[0] = -1;
     EXPECT_EQ(::access(socketPath(base).c_str(), F_OK), -1);
     EXPECT_EQ(errno, ENOENT) << "bootstrap listener pathname remained after initialization";
 
+    const pid_t root_pid = cleanup.root_pid;
     EXPECT_EQ(::kill(root_pid, SIGKILL), 0);
     int root_status = 0;
-    EXPECT_EQ(::waitpid(root_pid, &root_status, 0), root_pid);
+    EXPECT_EQ(waitAndClear(cleanup.root_pid, root_status), root_pid);
     EXPECT_TRUE(WIFSIGNALED(root_status));
     EXPECT_EQ(WTERMSIG(root_status), SIGKILL);
 
-    for (pid_t peer_pid : peer_pids) {
-        int  peer_status = 0;
-        bool exited      = waitChildWithTimeout(peer_pid, std::chrono::seconds(5), peer_status);
-        if (!exited) {
+    for (pid_t& peer_pid : cleanup.peer_pids) {
+        const pid_t original_peer_pid = peer_pid;
+        int         peer_status       = 0;
+        bool        exited            = waitChildWithTimeout(peer_pid, std::chrono::seconds(5), peer_status);
+        if (exited) {
+            peer_pid = -1;
+        } else {
             ::kill(peer_pid, SIGKILL);
-            ::waitpid(peer_pid, &peer_status, 0);
+            EXPECT_EQ(waitAndClear(peer_pid, peer_status), original_peer_pid);
         }
         EXPECT_TRUE(exited) << "exec child inherited a root UDS connection";
         if (exited) {
             EXPECT_TRUE(WIFEXITED(peer_status));
-            EXPECT_EQ(WEXITSTATUS(peer_status), 0);
+            EXPECT_EQ(WEXITSTATUS(peer_status), 0) << "peer " << original_peer_pid << " failed";
         }
     }
 
+    const pid_t exec_pid = cleanup.exec_pid;
     EXPECT_EQ(::kill(exec_pid, SIGKILL), 0);
-    cleanupTempBase(base, 3);
+    int exec_status = 0;
+    EXPECT_EQ(waitAndClear(cleanup.exec_pid, exec_status), exec_pid);
+    EXPECT_TRUE(WIFSIGNALED(exec_status));
+    EXPECT_EQ(WTERMSIG(exec_status), SIGKILL);
+}
+
+TEST(CpuBroadcasterTest, ExecChildDoesNotKeepPeerConnectionAlive) {
+    ::unsetenv("RTP_LLM_CPU_TP_BROADCASTER_BROADCAST_TIMEOUT_MS");
+    ScopedChildSubreaper subreaper;
+    ASSERT_TRUE(subreaper.enable()) << "failed to become a child subreaper: " << std::strerror(subreaper.error());
+    const std::string        base = makeTempBase();
+    ScopedProcessTreeCleanup cleanup(base);
+
+    ASSERT_EQ(::pipe(cleanup.ready_pipe), 0);
+    const int ready_read_fd  = cleanup.ready_pipe[0];
+    const int ready_write_fd = cleanup.ready_pipe[1];
+    cleanup.root_pid         = spawnChild([base, ready_read_fd, ready_write_fd] {
+        ::close(ready_read_fd);
+        ::close(ready_write_fd);
+        auto& bcast = CpuBroadcaster::instance();
+        bcast.reset();
+        bcast.initialize(0, 2, base);
+        int value = 0x1234;
+        int rc    = expectThrowContains([&] { bcast.broadcast(&value, sizeof(value), 0); }, "rank 1 failed");
+        bcast.reset();
+        return rc;
+    });
+    ASSERT_GT(cleanup.root_pid, 0);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    cleanup.peer_pids.push_back(spawnChild([base, ready_read_fd, ready_write_fd] {
+        ::close(ready_read_fd);
+        return productionRankExecChildAndWait(1, 2, base, ready_write_fd);
+    }));
+    ASSERT_GT(cleanup.peer_pids.back(), 0);
+    ::close(cleanup.ready_pipe[1]);
+    cleanup.ready_pipe[1] = -1;
+
+    ASSERT_TRUE(readPidWithTimeout(cleanup.ready_pipe[0], cleanup.exec_pid, std::chrono::seconds(5)))
+        << "peer did not report a successfully exec'd child";
+    ::close(cleanup.ready_pipe[0]);
+    cleanup.ready_pipe[0] = -1;
+
+    pid_t&      peer_pid          = cleanup.peer_pids.front();
+    const pid_t original_peer_pid = peer_pid;
+    EXPECT_EQ(::kill(peer_pid, SIGKILL), 0);
+    int peer_status = 0;
+    EXPECT_EQ(waitAndClear(peer_pid, peer_status), original_peer_pid);
+    EXPECT_TRUE(WIFSIGNALED(peer_status));
+    EXPECT_EQ(WTERMSIG(peer_status), SIGKILL);
+
+    const pid_t root_pid    = cleanup.root_pid;
+    int         root_status = 0;
+    bool        root_exited = waitChildWithTimeout(root_pid, std::chrono::seconds(5), root_status);
+    if (root_exited) {
+        cleanup.root_pid = -1;
+    } else {
+        ::kill(root_pid, SIGKILL);
+        EXPECT_EQ(waitAndClear(cleanup.root_pid, root_status), root_pid);
+    }
+    EXPECT_TRUE(root_exited) << "exec child inherited a non-root UDS connection";
+    if (root_exited) {
+        EXPECT_TRUE(WIFEXITED(root_status));
+        EXPECT_EQ(WEXITSTATUS(root_status), 0);
+    }
+
+    const pid_t exec_pid = cleanup.exec_pid;
+    EXPECT_EQ(::kill(exec_pid, SIGKILL), 0);
+    int exec_status = 0;
+    EXPECT_EQ(waitAndClear(cleanup.exec_pid, exec_status), exec_pid);
+    EXPECT_TRUE(WIFSIGNALED(exec_status));
+    EXPECT_EQ(WTERMSIG(exec_status), SIGKILL);
 }
 
 TEST(CpuBroadcasterTest, Rank0RejectsBadPeerRank) {
@@ -1360,6 +1565,26 @@ TEST(CpuBroadcasterTest, BroadcastTimeoutRequiresResetBeforeReuse) {
     EXPECT_NE(retry_error.find("reset and reinitialize before reuse"), std::string::npos) << retry_error;
 
     bcast.reset();
+    cleanupTempBase(base);
+}
+
+TEST(CpuBroadcasterTest, InvalidBroadcastTimeoutFailsInitialization) {
+    auto& bcast = CpuBroadcaster::instance();
+    bcast.reset();
+    const std::string base = makeTempBase();
+
+    const std::array<const char*, 6> invalid_values = {
+        "", "invalid", "-1", "86400001", "50ms", "999999999999999999999999"};
+    for (const char* value : invalid_values) {
+        ASSERT_EQ(::setenv("RTP_LLM_CPU_TP_BROADCASTER_BROADCAST_TIMEOUT_MS", value, 1), 0);
+        EXPECT_EQ(expectThrowContains([&] { bcast.initialize(1, 2, base); },
+                                      "invalid RTP_LLM_CPU_TP_BROADCASTER_BROADCAST_TIMEOUT_MS"),
+                  0)
+            << "value=" << value;
+        bcast.reset();
+    }
+
+    ::unsetenv("RTP_LLM_CPU_TP_BROADCASTER_BROADCAST_TIMEOUT_MS");
     cleanupTempBase(base);
 }
 
