@@ -333,6 +333,11 @@ class ModelFactory:
         finalize_scheduler_config(
             fifo_scheduler_config=engine_config.runtime_config.fifo_scheduler_config,
             max_seq_len=model_config.max_seq_len,
+            use_mla=model_config.attn_config.use_mla,
+            use_hybrid_attention=model_config.hybrid_attention_config.enable_hybrid_attention,
+            role_type=engine_config.pd_sep_config.role_type,
+            use_batch_decode_scheduler=engine_config.runtime_config.use_batch_decode_scheduler,
+            seq_size_per_block=model_config.attn_config.tokens_per_block,
         )
 
         # Set model_name to engine_config.runtime_config.model_name (for backward compatibility)

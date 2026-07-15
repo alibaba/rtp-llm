@@ -53,6 +53,11 @@ private:
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);
     WarmUpResult                    decodeWarmUp(const EngineInitParams& params);
+    absl::StatusOr<GenerateStreamPtr> runPrefillWarmupShape(const std::shared_ptr<GenerateInput>& generate_input,
+                                                            const ResourceContext& resource_context,
+                                                            int                    reuse_length,
+                                                            int64_t                token_budget);
+    std::shared_ptr<KVCacheManager> createWarmupCacheManager();
     void                            initLoadBalance();
     absl::Status                    trySaveStepError() const;
     void                            loop();

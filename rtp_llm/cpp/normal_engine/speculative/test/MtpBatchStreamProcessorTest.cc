@@ -443,8 +443,14 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
 
     GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
+    GenerateStreamPtr stream3 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 3);
+    GenerateStreamPtr middle_stream =
+        createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 4);
+    middle_stream->setChunkSize(2);
+    ASSERT_TRUE(middle_stream->isMiddleChunk());
 
-    auto stream_groups = StreamGroups({stream1, stream2});
+    std::list<GenerateStreamPtr> streams{stream1, stream2, stream3, middle_stream};
+    auto                         stream_groups = StreamGroups(streams);
 
     cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
@@ -452,20 +458,19 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     auto model_input_status = processor.gatherModelInput(stream_groups);
     EXPECT_TRUE(model_input_status.ok());
 
-    auto& model_input            = model_input_status.value();
-    model_input.sequence_lengths = torch::tensor({1, 2}, torch::kInt32);
+    auto& model_input = model_input_status.value();
 
     GptModelOutputs model_output;
-    model_output.all_hidden_states =
-        torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f}, torch::kFloat32).reshape({3, 2});
+    model_output.all_hidden_states = torch::zeros({7, 2}, torch::kFloat32);
 
     SamplerOutput sampler_output;
-    sampler_output.token_ids = torch::tensor({1, -2, 2, 1, 2, 3}, torch::kInt32).reshape({2, 3});
+    sampler_output.token_ids =
+        torch::tensor({1, -2, 2, 1, 2, 3, 3, 2, 1, 0, 1, 2}, torch::kInt32).reshape({4, 3});
 
-    processor.updatePrefillPostDraftModelInput(model_input, model_output, sampler_output);
+    processor.updatePrefillPostDraftModelInput(model_input, model_output, sampler_output, streams);
 
     auto        combo_tokens        = model_input.combo_tokens;
-    vector<int> expect_combo_tokens = {2, 2, 3};
+    vector<int> expect_combo_tokens = {2, 2, 3, 2, 1, 2, 3};
     EXPECT_EQ(expect_combo_tokens, toVec<int>(combo_tokens));
 }
 

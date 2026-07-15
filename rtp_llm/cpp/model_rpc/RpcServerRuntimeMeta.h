@@ -30,7 +30,7 @@ public:
     void enqueue(int64_t request_id, const GenerateStreamPtr& stream) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         running_streams_[request_id] = EngineScheduleInfo::TaskInfo(
-            {request_id, stream->prefixLength(), stream->inputLength(), stream->getTimeInfo().wait_time_us});
+            {request_id, stream->initialReuseLength(), stream->inputLength(), stream->getTimeInfo().wait_time_us});
     }
 
     void dequeue(int64_t request_id, const GenerateStreamPtr& stream) {
@@ -45,7 +45,7 @@ public:
         }
         int64_t current           = autil::TimeUtility::currentTimeInMilliSeconds();
         task_info.end_time_ms     = current;
-        task_info.prefix_length   = stream->prefixLength();
+        task_info.prefix_length   = stream->initialReuseLength();
         task_info.input_length    = stream->inputLength();
         task_info.waiting_time_ms = stream->getTimeInfo().wait_time_us / 1000;
         task_info.iterate_count   = stream->iterCount();

@@ -353,6 +353,9 @@ struct FIFOSchedulerConfig {
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".
     std::string decode_prefill_ratio = "1";
+    // Global real-context token budget per chunked-prefill forward; <=0 disables, >0 enables.
+    // Config injection floor-aligns it to seq_size_per_block, with a minimum of one block.
+    int64_t     prefill_chunk_size     = 0;
     std::string to_string() const;
 };
 

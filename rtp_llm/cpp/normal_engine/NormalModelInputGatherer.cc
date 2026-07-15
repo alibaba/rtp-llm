@@ -354,10 +354,11 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
             if (ctx.need_cal_position_id) {
                 auto context_pos_ids = stream->generateContextPositionIds();
-                int  reuse_offset    = stream->reuseLength() * config_.position_id_len_factor;
+                int begin_off = stream->prefixLength() * config_.position_id_len_factor;
+                int copy_len  = stream->contextLength() * config_.position_id_len_factor;
                 memcpy(ctx.combo_position_ids + ctx.token_idx * config_.position_id_len_factor,
-                       context_pos_ids.data_ptr<int>() + reuse_offset,
-                       (context_pos_ids.numel() - reuse_offset) * sizeof(int));
+                       context_pos_ids.data_ptr<int>() + begin_off,
+                       copy_len * sizeof(int));
             }
 
             if (ctx.has_mm_extra_input) {

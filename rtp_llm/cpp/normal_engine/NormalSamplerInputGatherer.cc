@@ -174,6 +174,7 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
                    cum_log_probs.numel() * sizeof(float));
         }
         for (int i = 0; i < sampler_batch_size; ++i) {
+            const bool no_sample_chunk = !score_batch && stream->isMiddleChunk();
             input_lengths[batch_idx]      = stream->inputLength();
             sequence_lengths[batch_idx]   = stream->seqLength() + propose_step;
             num_beams_in[batch_idx]       = stream->currentNumBeams();
@@ -184,14 +185,15 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
             repetition_penalty[batch_idx] = stream->generateConfig()->repetition_penalty;
             presence_penalty[batch_idx]   = stream->generateConfig()->presence_penalty;
             frequency_penalty[batch_idx]  = stream->generateConfig()->frequency_penalty;
-            do_sample[batch_idx]          = stream->generateConfig()->do_sample;
+            // Middle chunk output is discarded; avoid advancing the request RNG.
+            do_sample[batch_idx]          = stream->generateConfig()->do_sample && !no_sample_chunk;
             if (!do_sample[batch_idx]) {
                 top_k[batch_idx]       = 1;
                 top_p[batch_idx]       = 1;
                 temperature[batch_idx] = 1;
             }
             no_repeat_ngram_size[batch_idx]     = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
-            sampler_inputs.generator[batch_idx] = stream->getGenerator();
+            sampler_inputs.generator[batch_idx] = no_sample_chunk ? at::Generator() : stream->getGenerator();
             batch_idx += 1;
         }
     }

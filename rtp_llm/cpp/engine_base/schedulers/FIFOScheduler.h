@@ -37,8 +37,14 @@ private:
     void accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool waitPredicate() override;
     void onRunningStream(const GenerateStreamPtr& stream) override;
+    void cancelExtraStreams() override;
+    int64_t extraOnflightStreams() const override;
+    void fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const override;
+    void appendExtraRunningTaskList(std::vector<EngineScheduleInfo::TaskInfo>& task_list) const override;
+    bool partitionChunkContinuations();
 
     // TODO @wangyin support different beams run togather
+    std::list<GenerateStreamPtr> pending_decode_streams_;
 };
 
 }  // namespace rtp_llm

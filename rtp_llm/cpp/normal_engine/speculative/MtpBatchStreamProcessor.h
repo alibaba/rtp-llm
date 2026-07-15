@@ -41,7 +41,8 @@ public:
 
     void updatePrefillPostDraftModelInput(GptModelInputs&        model_input,
                                           const GptModelOutputs& model_output,
-                                          const SamplerOutput&   sampler_output);
+                                          const SamplerOutput&   sampler_output,
+                                          const std::list<GenerateStreamPtr>& streams);
 
     void updateDecodePostDraftModelInput(GptModelInputs&                              model_input,
                                          const GptModelOutputs&                       model_output,

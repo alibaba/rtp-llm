@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
+#include <algorithm>
 #include <chrono>
 #include <mutex>
 
@@ -42,7 +43,7 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
         }
     }
     // prefill and decode not mixed together
-    if (!running_streams_.empty()) {
+    if (!running_streams_.empty() || !pending_decode_streams_.empty()) {
         return false;
     }
     if (running_streams_.size() + streams.size() + 1 > max_generate_batch_size_) {
@@ -75,7 +76,28 @@ void FIFOScheduler::onRunningStream(const GenerateStreamPtr& stream) {
 bool FIFOScheduler::waitPredicate() {
     // Check streams directly without calling empty() which acquires lock_ (already held by schedule())
     return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !loading_cache_streams_.empty()
-           || !running_streams_.empty();
+           || !running_streams_.empty() || !pending_decode_streams_.empty();
+}
+
+bool FIFOScheduler::partitionChunkContinuations() {
+    refreshAndReapTerminalStreams(running_streams_);
+    const bool has_context = std::any_of(
+        running_streams_.begin(), running_streams_.end(), [](const auto& stream) { return stream->isContextStream(); });
+
+    if (has_context) {
+        for (auto it = running_streams_.begin(); it != running_streams_.end();) {
+            if (!(*it)->isContextStream()) {
+                auto current = it++;
+                pending_decode_streams_.splice(pending_decode_streams_.end(), running_streams_, current);
+            } else {
+                ++it;
+            }
+        }
+    } else if (!pending_decode_streams_.empty()) {
+        running_streams_.splice(running_streams_.begin(), pending_decode_streams_);
+        return true;
+    }
+    return false;
 }
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
@@ -89,9 +111,28 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     schedule_trigger_ = false;
 
     // LOADING_CACHE -> DONE/WAITING: error / load cache done
+    const size_t waiting_size_before_cache_update = waiting_streams_.size();
     evaluateAndUpdateStreams(loading_cache_streams_);
-    // RUNNING -> DONE: error / finished
-    evaluateAndUpdateStreams(running_streams_);
+    const bool has_requeued_prefill_stream =
+        waiting_streams_.size() > waiting_size_before_cache_update
+        && std::any_of(waiting_streams_.begin(), waiting_streams_.end(), [](const auto& stream) {
+               return stream->hasEvent(StreamEvents::CanRun) && stream->hasEvent(StreamEvents::LoadInitiated)
+                      && stream->chunkedPrefillEnabled() && stream->isContextStream();
+           });
+    // Release terminal deferred streams before any decode KV growth in this round.
+    refreshAndReapTerminalStreams(pending_decode_streams_);
+    if (has_requeued_prefill_stream) {
+        // Do not advance a live final-prefill stream until load-done context streams rejoin.
+        refreshAndReapTerminalStreams(running_streams_);
+    } else {
+        if (prefill_chunk_size_ > 0) {
+            // Park live final-prefill streams before advancing RUNNING state. If no context remains,
+            // deferred streams are restored and the following evaluation allocates their decode KV.
+            partitionChunkContinuations();
+        }
+        // RUNNING -> DONE: error / finished
+        evaluateAndUpdateStreams(running_streams_);
+    }
 
     // WAITING -> RUNNING: can run
     // WAITING -> LOADING_CACHE: load cache ok
@@ -114,9 +155,47 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
         schedule_trigger_ = true;
     }
 
+    if (has_requeued_prefill_stream) {
+        // Partition after load-done streams rejoin so final-prefill streams cannot grow decode KV
+        // or hide context streams behind a decode row.
+        partitionChunkContinuations();
+        if (!running_streams_.empty() && !running_streams_.front()->isContextStream()) {
+            evaluateAndUpdateStreams(running_streams_);
+        }
+    }
+
+    if (prefill_chunk_size_ > 0 && !running_streams_.empty() && running_streams_.front()->isContextStream()) {
+        auto prefill_batch = selectPrefillPrefix(running_streams_);
+        if (!prefill_batch.empty()) {
+            reportMetrics();
+            last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
+            return prefill_batch;
+        }
+        // All context candidates were terminal/invalid. Restore any deferred decode work now.
+        if (partitionChunkContinuations()) {
+            evaluateAndUpdateStreams(running_streams_);
+        }
+    }
+
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
     return running_streams_;
+}
+
+void FIFOScheduler::cancelExtraStreams() {
+    cancelStreams(pending_decode_streams_);
+}
+
+int64_t FIFOScheduler::extraOnflightStreams() const {
+    return pending_decode_streams_.size();
+}
+
+void FIFOScheduler::fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const {
+    collector.pending_decode_stream_size = pending_decode_streams_.size();
+}
+
+void FIFOScheduler::appendExtraRunningTaskList(std::vector<EngineScheduleInfo::TaskInfo>& task_list) const {
+    appendTaskInfos(task_list, pending_decode_streams_);
 }
 
 }  // namespace rtp_llm

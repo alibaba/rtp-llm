@@ -14,3 +14,13 @@ py_test(
     exec_properties = {'gpu':'H20'},
 )
 
+
+py_test(
+    name = "engine_config_test",
+    srcs = [
+        "engine_config_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)

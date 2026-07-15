@@ -18,6 +18,8 @@
 
 namespace rtp_llm {
 
+int64_t computeChunkGrant(int64_t budget, int64_t rows, int64_t remaining, int64_t block_size);
+
 class FIFOSchedulerBase: public SchedulerBase {
 public:
     explicit FIFOSchedulerBase(const RuntimeConfig&                   runtime_config,
@@ -53,19 +55,22 @@ protected:
     virtual bool        waitPredicate()                                                  = 0;
     virtual void        onRunningStream(const GenerateStreamPtr& stream) {}
     virtual void        cancelExtraStreams() {}
-    virtual bool        hasExtraStreams() const {
-        return false;
-    }
     virtual int64_t extraOnflightStreams() const {
         return 0;
     }
     virtual void fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const {}
+    virtual void appendExtraRunningTaskList(std::vector<EngineScheduleInfo::TaskInfo>& task_list) const {}
 
     bool   checkInputLength(const GenerateStreamPtr& stream);
+    absl::Status checkChunkedPrefillRequest(const GenerateStreamPtr& stream);
+    std::list<GenerateStreamPtr> selectPrefillPrefix(std::list<GenerateStreamPtr>& active_streams);
     void   cancelStreams(std::list<GenerateStreamPtr>& streams);
+    bool   refreshAndReapTerminalStreams(std::list<GenerateStreamPtr>& streams);
     size_t evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
     void   evaluateWaitingStreams(std::list<GenerateStreamPtr>& waiting_streams);
     void   addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
+    void   appendTaskInfos(std::vector<EngineScheduleInfo::TaskInfo>& task_list,
+                           const std::list<GenerateStreamPtr>&         streams) const;
 
 protected:
     PDSepConfig                     pd_sep_config_;
@@ -79,6 +84,7 @@ protected:
     size_t                          max_seq_len_             = 0;
     size_t                          max_batch_tokens_size_   = 0;
     size_t                          max_generate_batch_size_ = 1;
+    int64_t                         prefill_chunk_size_      = 0;
     bool                            need_fill_fake_stream_   = false;
     std::atomic<bool>               stop_                    = false;
     bool                            schedule_trigger_        = false;

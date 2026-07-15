@@ -48,15 +48,17 @@ private:
                                     const GenerateStreamPtr&            new_stream) const override;
     bool      waitPredicate() override;
     void      cancelExtraStreams() override;
-    bool      hasExtraStreams() const override;
     int64_t   extraOnflightStreams() const override;
     void      fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const override;
-    size_t    reapErroredWaitingStreams();
-    size_t    reapFinished(std::list<GenerateStreamPtr>& streams);
-    size_t    promotePendingDecodeStreams();
+    void      appendExtraRunningTaskList(std::vector<EngineScheduleInfo::TaskInfo>& task_list) const override;
+    bool      classifyActivePrefillBatch();
+    bool      promotePendingDecodeStreams();
     RoundType chooseRound();
 
 private:
+    // new_streams_ keeps the admitted prefill cohort across chunks. The flag marks that the cohort
+    // returned by the previous schedule round must be classified before it can be scheduled again.
+    bool                         has_unclassified_prefill_batch_ = false;
     std::list<GenerateStreamPtr> pending_decode_streams_;
     int64_t                      decode_prefill_step_  = 1;
     int64_t                      decode_since_prefill_ = 0;
