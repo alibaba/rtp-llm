@@ -699,6 +699,7 @@ TEST_F(NormalCacheStoreTest, testLoadContext_Success) {
     load_context->waitDone();
 
     ASSERT_TRUE(load_context->success());
+    EXPECT_TRUE(load_context->failedBlockDebugInfos().empty());
 
     verifyBlock(load_cache1->getBlock("a"), "a", block_size, true, '0');
     verifyBlock(load_cache2->getBlock("ab"), "ab", block_size, true, '1');
@@ -726,6 +727,13 @@ TEST_F(NormalCacheStoreTest, testLoadContext_loadTimeout) {
 
     ASSERT_FALSE(load_context->success());
     ASSERT_EQ(ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT, load_context->getErrorInfo().code());
+    const auto failure_debug_infos = load_context->failedBlockDebugInfos();
+    ASSERT_EQ(failure_debug_infos.size(), 2u);
+    EXPECT_NE(failure_debug_infos[0].find("block keys:"), std::string::npos);
+    EXPECT_NE(failure_debug_infos[1].find("block keys:"), std::string::npos);
+    const auto combined_debug = failure_debug_infos[0] + failure_debug_infos[1];
+    EXPECT_NE(combined_debug.find("a "), std::string::npos);
+    EXPECT_NE(combined_debug.find("ab "), std::string::npos);
 
     verifyBlock(load_cache1->getBlock("a"), "a", block_size, true, 'a');
     verifyBlock(load_cache2->getBlock("ab"), "ab", block_size, true, 'b');
@@ -759,6 +767,7 @@ TEST_F(NormalCacheStoreTest, testLoadContext_loadCancel) {
 
     ASSERT_FALSE(load_context->success());
     ASSERT_EQ(ErrorCode::CANCELLED, load_context->getErrorInfo().code());
+    EXPECT_TRUE(load_context->failedBlockDebugInfos().empty());
 
     verifyBlock(load_cache1->getBlock("a"), "a", block_size, true, 'a');
     verifyBlock(load_cache2->getBlock("ab"), "ab", block_size, true, 'b');

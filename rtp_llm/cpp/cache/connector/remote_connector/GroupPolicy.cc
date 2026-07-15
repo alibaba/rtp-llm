@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -70,9 +71,14 @@ bool DefaultLayerGroupPolicy::init() {
     }
     const auto  layer_layout       = allocator_->allLayerCacheBase();
     uint64_t    group_name_bithash = 1;
-    const auto& layer_to_groups    = layer_layout.layer_to_groups;
-    for (int layer = 0; layer < static_cast<int>(layer_to_groups.size()); ++layer) {
-        const int group_idx     = layer_to_groups.at(layer);
+    const auto& layer_to_group_ids = layer_layout.layer_to_group_ids;
+    for (int layer = 0; layer < static_cast<int>(layer_to_group_ids.size()); ++layer) {
+        const auto& group_ids = layer_to_group_ids.at(layer);
+        if (group_ids.empty()) {
+            RTP_LLM_LOG_ERROR("not find valid group id for layer [%d]", layer);
+            return false;
+        }
+        const int group_idx     = group_ids.front();
         bool      is_full_group = false;
         if (full_group_ids_.find(group_idx) != full_group_ids_.end()) {
             is_full_group = true;
@@ -210,6 +216,11 @@ bool FullLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResou
     return true;
 }
 
+std::vector<uint64_t> FullLayerGroupPolicy::reachableAggregateMasks() const {
+    RTP_LLM_CHECK_WITH_INFO(groups_.size() == 1, "FullLayerGroupPolicy must be initialized before reading masks");
+    return {groups_.begin()->second.group_name_bithash};
+}
+
 bool FullOtherGroupPolicy::init() {
     if (full_group_ids_.empty()) {
         RTP_LLM_LOG_ERROR("FullOtherLayerGroupPolicy: not support empty full groups");
@@ -318,6 +329,12 @@ bool FullOtherGroupPolicy::addSpecInfo(const std::string& spec_name, int32_t gro
     }
     full_other_spec_name_bithash_[spec_name] = group.group_name_bithash;
     return true;
+}
+
+std::vector<uint64_t> FullOtherGroupPolicy::reachableAggregateMasks() const {
+    RTP_LLM_CHECK_WITH_INFO(valid_full_bithash_ != 0 && valid_full_other_bithash_ != 0,
+                            "FullOtherGroupPolicy must be initialized before reading masks");
+    return {valid_full_bithash_, valid_full_other_bithash_};
 }
 
 std::string FullOtherGroupPolicy::debugString() const {

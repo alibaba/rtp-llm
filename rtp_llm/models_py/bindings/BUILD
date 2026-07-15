@@ -20,6 +20,15 @@ cc_library(
     alwayslink = 1,
 )
 
+py_test(
+    name = "py_model_inputs_compat_test",
+    srcs = ["py_model_inputs_compat_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
+
 cc_library(
     name = "register_ops_hdr",
     hdrs = [
