@@ -557,6 +557,17 @@ class OpenaiGenerateConfigTest(TestCase):
         config = self._extract_openai_generation_config(request, generate_env_config)
 
         self.assertEqual(config.max_thinking_tokens, -1)
+        config.validate()
+
+    def test_negative_thinking_budget_with_one_output_token_is_valid(self):
+        config = GenerateConfig(
+            max_new_tokens=1,
+            max_thinking_tokens=-1,
+            in_think_mode=True,
+            end_think_token_ids=[102],
+        )
+
+        config.validate()
 
     def test_openai_max_completion_tokens_respects_max_tokens_total_cap(self):
         generate_env_config = GenerateEnvConfig()
