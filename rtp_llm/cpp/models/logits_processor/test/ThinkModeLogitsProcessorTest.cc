@@ -278,6 +278,117 @@ TEST_F(SamplerTest, testNoThinkingMasksThinkBoundaryTokensBeforeSampling) {
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
 }
 
+TEST_F(SamplerTest, testDisabledThinkLogitsProcessorDoesNotCreateProcessor) {
+    auto generate_input                                            = std::make_shared<GenerateInput>();
+    generate_input->generate_config                                = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->thinking_mode                 = ThinkingMode::ENABLED;
+    generate_input->generate_config->enable_think_logits_processor = false;
+    generate_input->generate_config->max_thinking_tokens           = 32;
+    generate_input->generate_config->begin_think_token_ids         = {7};
+    generate_input->generate_config->end_think_token_ids           = {8};
+    generate_input->input_ids                                      = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    EXPECT_EQ(ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1), nullptr);
+}
+
+TEST_F(SamplerTest, testAdaptiveLeavesFirstTokenUnconstrainedThenSelectsNoThink) {
+    SamplerDataBuilder builder;
+
+    auto generate_input                                    = std::make_shared<GenerateInput>();
+    generate_input->generate_config                        = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->thinking_mode         = ThinkingMode::ADAPTIVE;
+    generate_input->generate_config->max_thinking_tokens   = 32;
+    generate_input->generate_config->begin_think_token_ids = {7};
+    generate_input->generate_config->end_think_token_ids   = {8};
+    generate_input->input_ids                              = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1);
+    ASSERT_NE(processor, nullptr);
+
+    SamplerInputs first_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
+    first_inputs.input_lengths    = torch::tensor({3}, torch::kInt32);
+    first_inputs.sequence_lengths = torch::tensor({3}, torch::kInt32);
+    processor->process(first_inputs, 0, 1);
+
+    EXPECT_EQ(0, first_inputs.logits[0][7].item<float>());
+    EXPECT_EQ(0, first_inputs.logits[0][8].item<float>());
+    EXPECT_EQ(0, first_inputs.logits[0][6].item<float>());
+
+    processor->updateStatus(torch::tensor({{6}}, torch::kInt32), 1);
+
+    SamplerInputs next_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
+    next_inputs.input_lengths    = torch::tensor({3}, torch::kInt32);
+    next_inputs.sequence_lengths = torch::tensor({4}, torch::kInt32);
+    processor->process(next_inputs, 0, 1);
+
+    float neg_inf = -std::numeric_limits<float>::max();
+    EXPECT_EQ(neg_inf, next_inputs.logits[0][7].item<float>());
+    EXPECT_EQ(neg_inf, next_inputs.logits[0][8].item<float>());
+    EXPECT_EQ(0, next_inputs.logits[0][6].item<float>());
+}
+
+TEST_F(SamplerTest, testAdaptiveStartTokenSelectsThinkMode) {
+    SamplerDataBuilder builder;
+
+    auto generate_input                                    = std::make_shared<GenerateInput>();
+    generate_input->generate_config                        = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->thinking_mode         = ThinkingMode::ADAPTIVE;
+    generate_input->generate_config->max_thinking_tokens   = 32;
+    generate_input->generate_config->begin_think_token_ids = {7};
+    generate_input->generate_config->end_think_token_ids   = {8};
+    generate_input->input_ids                              = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1);
+    ASSERT_NE(processor, nullptr);
+    processor->updateStatus(torch::tensor({{7}}, torch::kInt32), 1);
+
+    SamplerInputs sampler_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
+    sampler_inputs.input_lengths    = torch::tensor({3}, torch::kInt32);
+    sampler_inputs.sequence_lengths = torch::tensor({4}, torch::kInt32);
+    processor->process(sampler_inputs, 0, 1);
+
+    float neg_inf = -std::numeric_limits<float>::max();
+    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][7].item<float>());
+    EXPECT_EQ(0, sampler_inputs.logits[0][8].item<float>());
+    EXPECT_EQ(0, sampler_inputs.logits[0][6].item<float>());
+}
+
+TEST_F(SamplerTest, testAdaptiveForcesRemainingMultiTokenThinkStart) {
+    SamplerDataBuilder builder;
+
+    auto generate_input                                    = std::make_shared<GenerateInput>();
+    generate_input->generate_config                        = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->thinking_mode         = ThinkingMode::ADAPTIVE;
+    generate_input->generate_config->max_thinking_tokens   = 32;
+    generate_input->generate_config->begin_think_token_ids = {7, 9};
+    generate_input->generate_config->end_think_token_ids   = {8};
+    generate_input->input_ids                              = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1);
+    ASSERT_NE(processor, nullptr);
+    processor->updateStatus(torch::tensor({{7}}, torch::kInt32), 1);
+
+    SamplerInputs opening_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
+    opening_inputs.input_lengths    = torch::tensor({3}, torch::kInt32);
+    opening_inputs.sequence_lengths = torch::tensor({4}, torch::kInt32);
+    processor->process(opening_inputs, 0, 1);
+
+    float neg_inf = -std::numeric_limits<float>::max();
+    EXPECT_EQ(1, opening_inputs.logits[0][9].item<float>());
+    EXPECT_EQ(neg_inf, opening_inputs.logits[0][7].item<float>());
+    EXPECT_EQ(neg_inf, opening_inputs.logits[0][8].item<float>());
+
+    processor->updateStatus(torch::tensor({{9}}, torch::kInt32), 1);
+
+    SamplerInputs thinking_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
+    thinking_inputs.input_lengths    = torch::tensor({3}, torch::kInt32);
+    thinking_inputs.sequence_lengths = torch::tensor({5}, torch::kInt32);
+    processor->process(thinking_inputs, 0, 1);
+
+    EXPECT_EQ(neg_inf, thinking_inputs.logits[0][7].item<float>());
+    EXPECT_EQ(0, thinking_inputs.logits[0][8].item<float>());
+}
+
 TEST_F(SamplerTest, testZeroThinkBudgetMasksThinkBoundaryTokensBeforeSampling) {
     SamplerDataBuilder builder;
 

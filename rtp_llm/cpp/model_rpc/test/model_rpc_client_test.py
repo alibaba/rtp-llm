@@ -25,7 +25,7 @@ from unittest import TestCase, main
 
 import torch
 
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
@@ -38,7 +38,11 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateOutputsPB,
     TensorPB,
 )
-from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs, RequestInfo
+from rtp_llm.utils.base_model_datatypes import (
+    GenerateInput,
+    GenerateOutputs,
+    RequestInfo,
+)
 
 
 class FakeStub:
@@ -87,9 +91,9 @@ class FakeModelRpcClient(ModelRpcClient):
     def __init__(self):
         # Call parent __init__ with minimal required parameters
         super().__init__(
-            [],     # addresses: empty list for fake client
-            {},     # client_config: empty dict for fake client
-            0,      # max_rpc_timeout_ms
+            [],  # addresses: empty list for fake client
+            {},  # client_config: empty dict for fake client
+            0,  # max_rpc_timeout_ms
             False,  # decode_entrance
         )
         self.stub = FakeStub()
@@ -237,6 +241,30 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(
             input_pb.request_info.request_id, "4bf92f3577b34da6a3ce929d0e0e4736"
         )
+
+    def test_trans_input_thinking_control(self):
+        input_pb = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(
+                    thinking_mode=ThinkingMode.ADAPTIVE,
+                    enable_think_logits_processor=False,
+                    begin_think_token_ids=[7],
+                    end_think_token_ids=[8],
+                ),
+                request_id=123,
+                mm_inputs=[],
+            )
+        )
+
+        self.assertEqual(
+            input_pb.generate_config.thinking_mode,
+            input_pb.generate_config.THINKING_MODE_ADAPTIVE,
+        )
+        self.assertTrue(
+            input_pb.generate_config.HasField("enable_think_logits_processor")
+        )
+        self.assertFalse(input_pb.generate_config.enable_think_logits_processor.value)
 
 
 if __name__ == "__main__":

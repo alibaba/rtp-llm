@@ -369,6 +369,7 @@ class GenerateEnvConfig:
         self.think_end_tag: str = "</think>\n\n"
         self.think_end_token_id: int = -1
         self.think_mode: int = 0
+        self.enable_think_logits_processor: bool = True
         self.force_stop_words: bool = False
         self.stop_words_list: Optional[str] = None
         self.stop_words_str: Optional[str] = None
@@ -381,6 +382,7 @@ class GenerateEnvConfig:
             f"think_end_tag: {self.think_end_tag}\n"
             f"think_end_token_id: {self.think_end_token_id}\n"
             f"think_mode: {self.think_mode}\n"
+            f"enable_think_logits_processor: {self.enable_think_logits_processor}\n"
             f"force_stop_words: {self.force_stop_words}\n"
             f"stop_words_list: {self.stop_words_list}\n"
             f"stop_words_str: {self.stop_words_str}\n"

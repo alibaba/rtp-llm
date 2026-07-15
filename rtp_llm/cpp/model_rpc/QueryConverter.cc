@@ -92,7 +92,16 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(structural_tag);
     TRANS_OPTIONAL(response_format);
     TRANS_OPTIONAL(adapter_name);
-    generate_config->in_think_mode       = config_proto->in_think_mode();
+    generate_config->in_think_mode = config_proto->in_think_mode();
+    int thinking_mode              = static_cast<int>(config_proto->thinking_mode());
+    if (thinking_mode < static_cast<int>(ThinkingMode::UNSPECIFIED)
+        || thinking_mode > static_cast<int>(ThinkingMode::ENABLED)) {
+        thinking_mode = static_cast<int>(ThinkingMode::UNSPECIFIED);
+    }
+    generate_config->thinking_mode = static_cast<ThinkingMode>(thinking_mode);
+    if (config_proto->has_enable_think_logits_processor()) {
+        generate_config->enable_think_logits_processor = config_proto->enable_think_logits_processor().value();
+    }
     generate_config->max_thinking_tokens = config_proto->max_thinking_tokens();
     for (const auto& token_id : config_proto->begin_think_token_ids()) {
         generate_config->begin_think_token_ids.push_back(token_id);

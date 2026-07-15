@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+from enum import IntEnum
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
@@ -46,6 +47,13 @@ class ReturnAllProbsMode:
     ORIGINAL = 2
 
 
+class ThinkingMode(IntEnum):
+    UNSPECIFIED = 0
+    DISABLED = 1
+    ADAPTIVE = 2
+    ENABLED = 3
+
+
 class RoleAddr(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -81,6 +89,8 @@ class GenerateConfig(BaseModel):
     in_think_mode: bool = (
         False  # same as `enable_thinking` in chat_template_kwargs, discard one in the future
     )
+    thinking_mode: ThinkingMode = ThinkingMode.UNSPECIFIED
+    enable_think_logits_processor: Optional[bool] = None
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     begin_think_token_ids: List[int] = []
     end_think_token_ids: List[int] = []
@@ -281,15 +291,18 @@ class GenerateConfig(BaseModel):
             generate_env_config: GenerateEnvConfig object.
         """
 
+        if tokenizer and not self.begin_think_token_ids:
+            think_start_tag: str = generate_env_config.think_start_tag.encode(
+                "utf-8"
+            ).decode("unicode_escape")
+            self.begin_think_token_ids = tokenizer.encode(
+                think_start_tag, add_special_tokens=False
+            )
+
         end_think_token_id = generate_env_config.think_end_token_id
-        self.end_think_token_ids = (
-            [end_think_token_id] if end_think_token_id != -1 else []
-        )
-        if (
-            bool(generate_env_config.think_mode)
-            and tokenizer
-            and end_think_token_id == -1
-        ):
+        if end_think_token_id != -1:
+            self.end_think_token_ids = [end_think_token_id]
+        elif tokenizer and not self.end_think_token_ids:
             think_end_tag: str = generate_env_config.think_end_tag.encode(
                 "utf-8"
             ).decode("unicode_escape")
@@ -297,9 +310,13 @@ class GenerateConfig(BaseModel):
                 think_end_tag, add_special_tokens=False
             )
             self.end_think_token_ids = tokenized_result
-        self.in_think_mode = (
-            bool(generate_env_config.think_mode) and len(self.end_think_token_ids) >= 0
-        )
+
+        if self.thinking_mode == ThinkingMode.UNSPECIFIED:
+            self.in_think_mode = bool(generate_env_config.think_mode)
+        if self.enable_think_logits_processor is None:
+            self.enable_think_logits_processor = bool(
+                getattr(generate_env_config, "enable_think_logits_processor", True)
+            )
 
     def add_stop_ids_from_str(self, tokenizer):
         ids_list = []
@@ -410,7 +427,17 @@ class GenerateConfig(BaseModel):
                 is_list_positive_integer(self.begin_think_token_ids),
                 f"begin_think_token_ids {self.begin_think_token_ids} is wrong data type",
             )
-            if self.in_think_mode:
+            resolved_thinking_mode = self.thinking_mode
+            if resolved_thinking_mode == ThinkingMode.UNSPECIFIED:
+                resolved_thinking_mode = (
+                    ThinkingMode.ENABLED
+                    if self.in_think_mode
+                    else ThinkingMode.DISABLED
+                )
+            if self.enable_think_logits_processor and resolved_thinking_mode in (
+                ThinkingMode.ADAPTIVE,
+                ThinkingMode.ENABLED,
+            ):
                 check_with_info(
                     is_positive_integer(self.max_thinking_tokens),
                     f"max_thinking_tokens {self.max_thinking_tokens} is wrong data type",
@@ -418,6 +445,14 @@ class GenerateConfig(BaseModel):
                 check_with_info(
                     is_list_positive_integer(self.end_think_token_ids),
                     f"end_think_token_ids {self.end_think_token_ids} is wrong data type",
+                )
+            if (
+                self.enable_think_logits_processor
+                and resolved_thinking_mode == ThinkingMode.ADAPTIVE
+            ):
+                check_with_info(
+                    is_list_positive_integer(self.begin_think_token_ids),
+                    f"begin_think_token_ids {self.begin_think_token_ids} is wrong data type",
                 )
             calculate_loss_list = [0, 1, 2]
             check_with_info(

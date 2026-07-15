@@ -9,7 +9,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
 
 import torch
 
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
@@ -251,6 +251,7 @@ class OutputDelta:
     reuse_length: int
     multimodal_lengths: Optional[Dict[int, int]] = None
     extra_outputs: Optional[ChatCompletionExtraOutputs] = None
+    output_ids: List[int] = field(default_factory=list)
 
 
 @dataclass
@@ -260,6 +261,9 @@ class ThinkStatus:
     think_buffer: str = ""
     think_tokens: int = 0
     is_streaming: bool = False
+    thinking_mode: ThinkingMode = ThinkingMode.DISABLED
+    begin_think_token_ids: List[int] = field(default_factory=list)
+    decision_made: bool = True
 
 
 class RenderedInputs:
@@ -722,6 +726,7 @@ class CustomChatRenderer:
 
         # Build delta output
         if len(status.delta_output_string) > 0:
+            delta_output_ids = status.output_ids[len(status.last_output_ids) :]
             status.update_result()
             delta = OutputDelta(
                 output_str=status.delta_output_string,
@@ -729,6 +734,7 @@ class CustomChatRenderer:
                 input_length=output.aux_info.input_len,
                 output_length=output.aux_info.output_len,
                 reuse_length=output.aux_info.reuse_len,
+                output_ids=delta_output_ids,
             )
             status.delta_output_string = ""
             return delta
@@ -759,6 +765,32 @@ class CustomChatRenderer:
                 return DeltaMessage(content="")
 
             reasoning_text, content = "", ""
+            if not think_status.decision_made:
+                decision_text = think_status.think_buffer + item.output_str
+                first_token_id = item.output_ids[0] if item.output_ids else None
+                begin_token_id = (
+                    think_status.begin_think_token_ids[0]
+                    if think_status.begin_think_token_ids
+                    else None
+                )
+                if first_token_id is not None and begin_token_id is not None:
+                    think_status.decision_made = True
+                    think_status.in_think_mode = first_token_id == begin_token_id
+                    think_status.enable_think_mode = think_status.in_think_mode
+                elif decision_text.startswith(self.think_start_tag):
+                    think_status.decision_made = True
+                    think_status.in_think_mode = True
+                    think_status.enable_think_mode = True
+                elif not self.think_start_tag.startswith(decision_text):
+                    think_status.decision_made = True
+                    think_status.in_think_mode = False
+
+                if not think_status.decision_made:
+                    think_status.think_buffer = decision_text
+                    return DeltaMessage(content="")
+                item.output_str = decision_text
+                think_status.think_buffer = ""
+                output_len = len(item.output_str)
             update_think_tokens = think_status.in_think_mode
             while processing_index < output_len:
                 if think_status.in_think_mode:
@@ -1000,13 +1032,25 @@ class CustomChatRenderer:
         nums_output = last_num_beams if last_num_beams != 1 else nums_output
         status_list = await self._create_status_list(nums_output, request)
         index = 0
+        resolved_thinking_mode = generate_config.thinking_mode
+        initial_in_think_mode = resolved_thinking_mode == ThinkingMode.ENABLED
+        if resolved_thinking_mode == ThinkingMode.UNSPECIFIED:
+            resolved_thinking_mode = (
+                ThinkingMode.ENABLED
+                if self.in_think_mode(request)
+                else ThinkingMode.DISABLED
+            )
+            initial_in_think_mode = bool(self.should_process_think(request))
         think_status_list = [
             ThinkStatus(
-                enable_think_mode=bool(self.in_think_mode(request)),
-                in_think_mode=bool(self.should_process_think(request)),
+                enable_think_mode=resolved_thinking_mode == ThinkingMode.ENABLED,
+                in_think_mode=initial_in_think_mode,
                 think_buffer="",
                 think_tokens=0,
                 is_streaming=generate_config.is_streaming,
+                thinking_mode=resolved_thinking_mode,
+                begin_think_token_ids=list(generate_config.begin_think_token_ids),
+                decision_made=resolved_thinking_mode != ThinkingMode.ADAPTIVE,
             )
             for _ in range(nums_output)
         ]

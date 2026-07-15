@@ -430,6 +430,7 @@ class OtherParams:
 
     return_input_ids: bool = False
     enable_thinking: bool | None = None
+    thinking_mode: str | None = None
     max_new_think_tokens: int | None = None
     timeout_ms: int | None = None
     traffic_reject_priority: int | None = None
@@ -703,6 +704,20 @@ def parse_other_params(request) -> OtherParams:
     if enable_thinking is None:
         enable_thinking = _parse_optional_parameter_bool(request, "enable_thinking")
 
+    thinking_mode = _parse_optional_parameter_string(request, "thinking_mode")
+    if thinking_mode is None:
+        thinking_mode = _normalize_non_empty_str(
+            _lookup_ds_request_control(ds_attrs, "x-ds-llm-thinking-mode")
+        )
+    if thinking_mode is None:
+        thinking_mode = _normalize_non_empty_str(
+            _lookup_ds_request_control(ds_attrs, "thinking_mode")
+        )
+    if thinking_mode is not None:
+        thinking_mode = thinking_mode.strip().lower()
+        if thinking_mode not in ("disabled", "adaptive", "enabled"):
+            thinking_mode = None
+
     max_new_think_tokens = _parse_optional_scalar_int(request, "max_new_think_tokens")
     if max_new_think_tokens is None:
         max_new_think_tokens = _parse_optional_parameter_int(
@@ -745,6 +760,7 @@ def parse_other_params(request) -> OtherParams:
     return OtherParams(
         return_input_ids=return_input_ids,
         enable_thinking=enable_thinking,
+        thinking_mode=thinking_mode,
         max_new_think_tokens=max_new_think_tokens,
         timeout_ms=timeout_ms,
         traffic_reject_priority=traffic_reject_priority,

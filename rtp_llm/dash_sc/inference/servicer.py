@@ -23,6 +23,7 @@ from typing import Any, AsyncIterator, Callable, Iterator, Optional
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.generate_config import ThinkingMode
 from rtp_llm.dash_sc.codec import (
     FINISH_REASON_ABORT,
     FINISH_REASON_LENGTH,
@@ -479,25 +480,33 @@ def _apply_request_overrides(
     if request_max_think is not None:
         max_think = int(request_max_think)
         generate_config.max_thinking_tokens = _INT32_MAX if max_think < 0 else max_think
-    # Only the selected budget disables thinking; ``max_think_length`` may
-    # intentionally override a zero ``max_new_think_tokens`` alias.
-    disable_by_budget = request_max_think == 0
-    # DashLLM/sglang-compatible Dash requests stay in chat mode unless the
-    # caller explicitly asks for thinking or a request-scoped think budget.
-    disable_by_default = other.enable_thinking is None and request_max_think is None
-    if other.enable_thinking is False or disable_by_budget or disable_by_default:
-        generate_config.in_think_mode = False
+    requested_mode = other.thinking_mode
+    if request_max_think == 0 or other.enable_thinking is False:
+        thinking_mode = ThinkingMode.DISABLED
+    elif other.enable_thinking is True:
+        thinking_mode = ThinkingMode.ENABLED
+    elif requested_mode == "disabled":
+        thinking_mode = ThinkingMode.DISABLED
+    elif requested_mode == "enabled":
+        thinking_mode = ThinkingMode.ENABLED
+    else:
+        thinking_mode = ThinkingMode.ADAPTIVE
+
+    generate_config.thinking_mode = thinking_mode
+    generate_config.in_think_mode = thinking_mode == ThinkingMode.ENABLED
+    if thinking_mode == ThinkingMode.DISABLED:
         generate_config.max_thinking_tokens = 0
         if hasattr(generate_config, "thinking"):
             generate_config.thinking = False
-    elif (other.enable_thinking is True or request_max_think is not None) and (
+    elif thinking_mode == ThinkingMode.ENABLED and (
         getattr(generate_config, "end_think_token_ids", None) or runtime.eos_tokens
     ):
-        generate_config.in_think_mode = True
         if not getattr(generate_config, "end_think_token_ids", None):
             generate_config.end_think_token_ids = list(runtime.eos_tokens)
         if hasattr(generate_config, "thinking"):
             generate_config.thinking = True
+    elif hasattr(generate_config, "thinking"):
+        generate_config.thinking = False
     if other.timeout_ms is not None:
         # Subtract a margin so the engine times out BEFORE the upstream gateway
         # sends RST_STREAM. This ensures the timeout surfaces as a normal
@@ -709,6 +718,22 @@ async def iter_real_model_stream_infer(
         ):
             generate_config.end_think_token_ids = list(runtime.eos_tokens)
         _apply_request_overrides(generate_config, sampling, other, runtime)
+        configured_thinking_mode = getattr(
+            generate_config, "thinking_mode", ThinkingMode.UNSPECIFIED
+        )
+        matched_configured_think_bos_ids = _matched_echo_prefix_ids(
+            input_ids_list,
+            list(getattr(generate_config, "begin_think_token_ids", ()) or ()),
+        )
+        if (
+            configured_thinking_mode == ThinkingMode.ADAPTIVE
+            and matched_configured_think_bos_ids
+        ):
+            # A caller-provided think BOS is equivalent to the model selecting
+            # the adaptive thinking branch as its first output.
+            generate_config.thinking_mode = ThinkingMode.ENABLED
+            generate_config.in_think_mode = True
+            configured_thinking_mode = ThinkingMode.ENABLED
         debug_score_token_ids = _debug_score_token_ids_from_request(request)
         debug_score_label = _debug_score_label_from_request(request)
         if debug_score_token_ids:
@@ -741,8 +766,11 @@ async def iter_real_model_stream_infer(
         # ``runtime.phase2_enabled`` is the init-time gate (model_type + empty_tokens
         # availability). ``in_think_mode`` is per-request — ``add_thinking_params``
         # sets it from generate_config and a request can override it.
-        phase2_enabled = runtime.phase2_enabled and bool(
-            getattr(generate_config, "in_think_mode", False)
+        phase2_enabled = runtime.phase2_enabled and (
+            configured_thinking_mode == ThinkingMode.ENABLED
+        )
+        adaptive_phase2_pending = runtime.phase2_enabled and (
+            configured_thinking_mode == ThinkingMode.ADAPTIVE
         )
         cumulative_sent_ids: list[int] = []
         generate_think_token_num: Optional[int] = None
@@ -775,6 +803,15 @@ async def iter_real_model_stream_infer(
                 raise ValueError("empty generate_outputs in backend chunk")
             out_py = go.generate_outputs[0]
             generated_ids = _token_ids_list_from_generate_output(out_py)
+            if adaptive_phase2_pending and generated_ids:
+                begin_think_token_ids = list(
+                    getattr(generate_config, "begin_think_token_ids", ()) or ()
+                )
+                phase2_enabled = bool(
+                    begin_think_token_ids
+                    and generated_ids[0] == begin_think_token_ids[0]
+                )
+                adaptive_phase2_pending = False
             _log_debug_token_scores(
                 tag=tag,
                 case_label=debug_score_label,
@@ -978,6 +1015,8 @@ async def iter_real_model_stream_infer(
         if phase2_needed:
             phase2_config = _clone_generate_config(generate_config)
             phase2_config.in_think_mode = False
+            phase2_config.thinking_mode = ThinkingMode.DISABLED
+            phase2_config.max_thinking_tokens = 0
             if hasattr(phase2_config, "thinking"):
                 phase2_config.thinking = False
             if sampling.max_new_tokens_from_completion_alias:

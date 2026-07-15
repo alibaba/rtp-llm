@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, model_validator
 
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
 from rtp_llm.utils.base_model_datatypes import AuxInfo
 
 
@@ -241,6 +241,31 @@ class ChatCompletionRequest(BaseModel):
         ):
             return True
         return False
+
+    def resolve_thinking_mode(self) -> ThinkingMode:
+        if self.disable_thinking():
+            return ThinkingMode.DISABLED
+        if self.enable_thinking is True:
+            return ThinkingMode.ENABLED
+
+        if (
+            self.extra_configs is not None
+            and "thinking_mode" in self.extra_configs.model_fields_set
+            and self.extra_configs.thinking_mode != ThinkingMode.UNSPECIFIED
+        ):
+            return self.extra_configs.thinking_mode
+
+        chat_template_kwargs = self.get_chat_template_kwargs() or {}
+        requested_mode = chat_template_kwargs.get("thinking_mode")
+        if requested_mode == "enabled":
+            return ThinkingMode.ENABLED
+        if requested_mode == "disabled":
+            return ThinkingMode.DISABLED
+        if requested_mode == "adaptive":
+            return ThinkingMode.ADAPTIVE
+        if chat_template_kwargs.get("enable_thinking") is True:
+            return ThinkingMode.ENABLED
+        return ThinkingMode.ADAPTIVE
 
 
 class CompletionTokensDetails(BaseModel):

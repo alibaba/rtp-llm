@@ -5,6 +5,7 @@ from unittest import TestCase, main
 
 from transformers import AutoTokenizer
 
+from rtp_llm.config.generate_config import ThinkingMode
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
@@ -407,8 +408,38 @@ class OpenaiGenerateConfigTest(TestCase):
         config = self._extract_openai_generation_config(request, generate_env_config)
 
         self.assertFalse(config.in_think_mode)
+        self.assertEqual(config.thinking_mode, ThinkingMode.DISABLED)
         self.assertEqual(config.max_thinking_tokens, 0)
         self.assertEqual(config.end_think_token_ids, [102])
+
+    def test_unspecified_request_defaults_to_adaptive(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_start_tag = "<think>"
+        generate_env_config.think_end_token_id = 102
+        request = ChatCompletionRequest(messages=[])
+
+        config = self._extract_openai_generation_config(request, generate_env_config)
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.ADAPTIVE)
+        self.assertFalse(config.in_think_mode)
+        self.assertTrue(config.enable_think_logits_processor)
+        self.assertEqual(
+            config.begin_think_token_ids,
+            self.tokenizer.encode("<think>", add_special_tokens=False),
+        )
+        self.assertEqual(config.end_think_token_ids, [102])
+
+    def test_extra_config_explicit_thinking_mode_is_preserved(self):
+        request = ChatCompletionRequest(
+            messages=[],
+            extra_configs=GenerateConfig(thinking_mode=ThinkingMode.ENABLED),
+        )
+
+        config = self._extract_openai_generation_config(request)
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertTrue(config.in_think_mode)
 
     def test_openai_max_completion_tokens_thinking_budget_keeps_backend_limit(self):
         generate_env_config = GenerateEnvConfig()

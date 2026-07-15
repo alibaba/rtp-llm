@@ -22,11 +22,27 @@ public:
 
     ReasoningGrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher,
                                     int64_t                            eos_token_id,
+                                    ThinkingMode                       thinking_mode,
                                     int                                max_thinking_tokens,
                                     std::vector<int>                   begin_think_token_ids,
                                     std::vector<int>                   end_think_token_ids,
                                     int32_t                            input_length,
                                     ErrorReporter                      error_reporter = nullptr);
+    ReasoningGrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher,
+                                    int64_t                            eos_token_id,
+                                    int                                max_thinking_tokens,
+                                    std::vector<int>                   begin_think_token_ids,
+                                    std::vector<int>                   end_think_token_ids,
+                                    int32_t                            input_length,
+                                    ErrorReporter                      error_reporter = nullptr):
+        ReasoningGrammarLogitsProcessor(std::move(matcher),
+                                        eos_token_id,
+                                        ThinkingMode::ENABLED,
+                                        max_thinking_tokens,
+                                        std::move(begin_think_token_ids),
+                                        std::move(end_think_token_ids),
+                                        input_length,
+                                        std::move(error_reporter)) {}
     ~ReasoningGrammarLogitsProcessor() override = default;
 
     void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
