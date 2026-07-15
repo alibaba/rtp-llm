@@ -452,7 +452,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.enqueue_called, 1)
         gc = visitor.last_generate_input.generate_config
         self.assertTrue(gc.in_think_mode)
-        self.assertEqual(gc.max_thinking_tokens, 2_147_483_647)
+        self.assertEqual(gc.max_thinking_tokens, -1)
         self.assertEqual(gc.end_think_token_ids, [128822, 271])
 
     async def test_budget_zero_disables_thinking_even_if_add_thinking_params_fails(

@@ -8,6 +8,7 @@ from unittest import TestCase, main
 
 import torch
 
+from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
     FINISH_REASON_USE_PARAMETER_STATUS,
@@ -700,9 +701,9 @@ class DashScGrpcRequestTest(TestCase):
         _add_tensor(req, "max_new_think_tokens", "INT32", [1], struct.pack("<i", 0))
         _add_tensor(req, "max_think_length", "INT32", [1], struct.pack("<i", -1))
         sp = parse_sampling_params(req)
-        # raw value stored; to_generate_config maps negative → INT32_MAX
+        # Negative sentinel values are preserved through the conversion layer.
         self.assertEqual(sp.max_new_think_tokens, -1)
-        self.assertEqual(sp.to_generate_config().max_thinking_tokens, 2_147_483_647)
+        self.assertEqual(sp.to_generate_config().max_thinking_tokens, -1)
 
     def test_build_request_writes_thinking_controls(self) -> None:
         req = build_model_infer_request(
@@ -843,6 +844,28 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(gc.max_thinking_tokens, 128)
         self.assertEqual(gc.stop_words_list, [[42]])
         self.assertTrue(gc.return_input_ids)
+
+    def test_stream_response_preserves_negative_thinking_budget(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([7], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=1),
+        )
+        config = GenerateConfig(max_thinking_tokens=-1)
+        resp = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="req-negative-budget",
+            model_name="mdl",
+            go=GenerateOutputs(generate_outputs=[out]),
+            request_log_tag=stream_log_tag(
+                request_id_numeric=1, trace_id="req-negative-budget"
+            ),
+            generate_config=config,
+        )
+
+        self.assertEqual(
+            resp.infer_response.parameters["max_new_think_tokens"].int64_param,
+            -1,
+        )
 
 
 class BuildStreamResponseFromGenerateOutputsTest(TestCase):

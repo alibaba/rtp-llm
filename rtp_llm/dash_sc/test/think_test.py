@@ -147,6 +147,11 @@ class PlanDashScThinkingGuardsTest(unittest.TestCase):
         self.assertFalse(plan.thinking)
         self.assertEqual(plan.reason, "max_new_think_tokens_non_positive")
 
+    def test_negative_max_new_think_tokens_is_preserved(self) -> None:
+        plan = _plan([1, 2] + list(_BOS), max_new_think_tokens=-1)
+        self.assertTrue(plan.thinking)
+        self.assertEqual(plan.max_thinking_tokens, -1)
+
     def test_disabled_config_returns_disabled_plan(self) -> None:
         plan = plan_dash_sc_thinking(
             [1, 2, 3],
