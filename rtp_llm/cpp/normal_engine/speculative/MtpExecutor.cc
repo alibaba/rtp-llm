@@ -83,12 +83,13 @@ GenerateStreamPtr MtpExecutor::createMinFakePrefillStream(int                   
 GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    max_new_tokens,
                                                          const ModelConfig&     model_config,
                                                          const RuntimeConfig&   runtime_config,
-                                                         const ResourceContext& resource_context) {
+                                                         const ResourceContext& resource_context,
+                                                         int                    vocab_size) {
     auto fake_stream =
         makeFakeStream(max_new_tokens, 1 + max_new_tokens, model_config, runtime_config, resource_context);
 
-    auto sp_buffer = makeFakeSPOutputBuffer(
-        model_config.data_type, model_config.hidden_size, model_config.vocab_size, max_new_tokens);
+    auto sp_buffer =
+        makeFakeSPOutputBuffer(model_config.data_type, model_config.hidden_size, vocab_size, max_new_tokens);
 
     auto new_tokens = torch::zeros({1, 1}, torch::kInt32);
 
@@ -119,15 +120,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     Executor(),
     cache_manager_(cache_manager),
     metrics_reporter_(params.metrics_reporter),
-    speculative_sampler_(new speculative::SpeculativeSampler(propose_params->gen_num_per_circle)),
-    fast_topk_sampler_(new speculative::FastTopKSampler()),
     warm_up_(warm_up),
     role_type_(params.pd_sep_config.role_type) {
-    data_type_          = params.model_config_.data_type;
-    hidden_size_        = params.model_config_.hidden_size;
-    propose_step_       = propose_params->gen_num_per_circle;
-    vocab_size_         = params.model_config_.vocab_size;
-    propose_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
+    data_type_        = params.model_config_.data_type;
+    hidden_size_      = params.model_config_.hidden_size;
+    propose_step_     = propose_params->gen_num_per_circle;
+    vocab_size_       = params.model_config_.vocab_size;
+    draft_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
+
+    RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
 
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
@@ -266,6 +267,13 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     memcpy(draft_kv_cache_layer_to_group.data_ptr<int>(),
            draft_cache_layer_layout.layer_to_groups.data(),
            draft_cache_layer_layout.layer_to_groups.size() * sizeof(int));
+
+    const auto& draft_weights = propose_params->getEngineInitParams().gpt_weights;
+    d2t_map_                  = draft_model_ ? draft_model_->weights_.d2t_map : draft_weights.d2t_map;
+    speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
+    fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_));
+
+    RTP_LLM_LOG_INFO("[speculative decoding] d2t_map size: %ld", d2t_map_.defined() ? d2t_map_.numel() : 0);
 }
 
 /*
@@ -750,7 +758,8 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
         } else {
             stream->setScoreLen(propose_step_ + 1);
             if (stream->getSPOutputBuffer() == nullptr && stream->isPerfTest()) {
-                auto sp_output_buffer = makeFakeSPOutputBuffer(data_type_, hidden_size_, vocab_size_, propose_step_);
+                auto sp_output_buffer =
+                    makeFakeSPOutputBuffer(data_type_, hidden_size_, draft_vocab_size_, propose_step_);
                 stream->setSPOutputBuffer(sp_output_buffer);
             }
             decode_streams.push_back(stream);

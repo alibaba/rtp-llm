@@ -382,4 +382,12 @@ struct SpeculativeSamplingParams {
         output_emitted_token_num_d(output_emitted_token_num_d) {}
 };
 
+struct MappingDraft2TargetParams {
+    torch::Tensor tokens;
+    torch::Tensor d2t_map;
+    int           batch_size;
+    int           token_offset;
+    int           token_stride;
+};
+
 }  // namespace rtp_llm

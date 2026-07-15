@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
+#include <algorithm>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 
@@ -17,6 +18,9 @@ FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int 
     }
 
     output.token_ids = std::get<1>(sample_res);
+
+    int batch_size = output.token_ids.size(0);
+    execMappingDraft2Target({output.token_ids, d2t_map_, batch_size, 0, 1});
 
     return output;
 }
@@ -78,6 +82,35 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         torch::zeros({(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32));
     torch::Tensor output_emitted_token_num_d =
         torch::zeros({(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32));
+
+    if (draft_token_probs_d_t.size(2) != target_token_probs_d_t.size(2)) {
+        const int64_t target_vocab_size = target_token_probs_d_t.size(2);
+        const int64_t num_spec          = draft_token_probs_d_t.size(1);
+
+        // Reuse pre-allocated padding buffer to avoid per-forward GPU allocation.
+        // Grow-only along batch / num_spec dims; vocab dim must match exactly.
+        const bool need_realloc = !draft_probs_padding_buffer_.defined()
+                                  || draft_probs_padding_buffer_.size(0) < (int64_t)batch_size
+                                  || draft_probs_padding_buffer_.size(1) < num_spec
+                                  || draft_probs_padding_buffer_.size(2) != target_vocab_size
+                                  || draft_probs_padding_buffer_.dtype() != draft_token_probs_d_t.dtype()
+                                  || draft_probs_padding_buffer_.device() != draft_token_probs_d_t.device();
+        if (need_realloc) {
+            const int64_t cap_b =
+                std::max((int64_t)batch_size,
+                         draft_probs_padding_buffer_.defined() ? draft_probs_padding_buffer_.size(0) : (int64_t)0);
+            const int64_t cap_s = std::max(
+                num_spec, draft_probs_padding_buffer_.defined() ? draft_probs_padding_buffer_.size(1) : (int64_t)0);
+            draft_probs_padding_buffer_ =
+                torch::zeros({cap_b, cap_s, target_vocab_size}, draft_token_probs_d_t.options());
+        }
+
+        auto draft_probs_padding = draft_probs_padding_buffer_.narrow(0, 0, (int64_t)batch_size).narrow(1, 0, num_spec);
+        draft_probs_padding.zero_();
+        draft_probs_padding.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), d2t_map_},
+                                       draft_token_probs_d_t);
+        draft_token_probs_d_t = draft_probs_padding;
+    }
 
     execChainSpeculativeSampling({draft_token_probs_d_t,
                                   draft_token_ids_d_t,

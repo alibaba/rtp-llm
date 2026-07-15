@@ -405,6 +405,12 @@ def h20_oss_suites():
                 gpu_type=["H20"]
             ),
             smoke_test(
+                name="eagle_mtp_vocab_prune",
+                task_info="data/model/qwen2_14b/q_r_mtp_vocab_prune.json",
+                smoke_args="--max_seq_len 16384 --ft_disable_custom_ar 1 --sp_type eagle --gen_num_per_cycle 4 --act_type FP16 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp/vocab_prune/qwen2.5_14b_draft/ --warm_up 0 --reserver_runtime_mem_mb 20000 --tp_size 2 --enable_cuda_graph 1",
+                gpu_type=["H20"]
+            ),
+            smoke_test(
                 name="eagle_mtp_reuse",
                 task_info="data/model/qwen2_14b/q_r_mtp_reuse_cache.json",
                 smoke_args="--reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --write_cache_sync 1 --max_seq_len 16384 --ft_disable_custom_ar 1 --sp_type eagle --gen_num_per_cycle 4 --act_type FP16 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/  --warm_up 0 --reserver_runtime_mem_mb 21954 --tp_size 2",
