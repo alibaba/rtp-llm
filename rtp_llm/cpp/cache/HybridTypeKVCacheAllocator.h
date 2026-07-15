@@ -57,8 +57,6 @@ private:
     std::vector<int> full_group_ids_;
     std::vector<int> linear_group_ids_;
 
-    // global layer id -> group id
-    std::vector<int> layer_to_group_id_;
     // global layer id -> local layer id
     std::vector<int> global_layer_to_local_id_;
 };

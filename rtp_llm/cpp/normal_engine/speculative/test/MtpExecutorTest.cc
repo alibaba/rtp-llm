@@ -3,6 +3,7 @@
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
 #define private public
@@ -24,12 +25,12 @@ using namespace std;
 namespace spec = speculative;
 
 struct MtpExecutorTestConfig {
-    size_t max_seq_len         = 2048;
-    size_t vocab_size          = 4;
-    size_t num_layers          = 1;
-    size_t gen_num_per_cycle   = 4;
-    size_t vocab_size_override = 0;  // 0 means use vocab_size
-    int64_t mm_position_ids_style = 0;
+    size_t  max_seq_len            = 2048;
+    size_t  vocab_size             = 4;
+    size_t  num_layers             = 1;
+    size_t  gen_num_per_cycle      = 4;
+    size_t  vocab_size_override    = 0;  // 0 means use vocab_size
+    int64_t mm_position_ids_style  = 0;
     int     position_id_len_factor = 1;
 };
 
@@ -121,7 +122,12 @@ public:
 
     GptModelOutputs forward(const GptModelInputs& inputs) override {
         checkInputs(inputs);
+        ++forward_count_;
         return output_holder.get();
+    }
+
+    size_t forwardCount() const {
+        return forward_count_;
     }
 
     void checkTensorField(const char* name, const torch::Tensor& actual, const torch::Tensor& expected) {
@@ -151,6 +157,7 @@ public:
 private:
     TestDataHolder<GptModelInputs>  input_holder;
     TestDataHolder<GptModelOutputs> output_holder;
+    size_t                          forward_count_ = 0;
 };
 
 class FakeFastTopKSampler: public spec::FastTopKSampler {
@@ -319,12 +326,12 @@ public:
         ResourceContext            resource_context;
         SpeculativeExecutionConfig sp_config;
 
-        model_config.max_seq_len    = test_config.max_seq_len;
-        model_config.vocab_size     = test_config.vocab_size;
-        model_config.num_layers     = test_config.num_layers;
+        model_config.max_seq_len                           = test_config.max_seq_len;
+        model_config.vocab_size                            = test_config.vocab_size;
+        model_config.num_layers                            = test_config.num_layers;
         model_config.mm_model_config.mm_position_ids_style = test_config.mm_position_ids_style;
         model_config.attn_config.rope_config.index_factor  = test_config.position_id_len_factor;
-        sp_config.gen_num_per_cycle = test_config.gen_num_per_cycle;
+        sp_config.gen_num_per_cycle                        = test_config.gen_num_per_cycle;
 
         resource_context.cache_manager =
             std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
@@ -334,26 +341,45 @@ public:
                                                                             /*local_head_num_kv=*/128,
                                                                             /*size_per_head=*/256));
 
-        auto cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
-                                                           /*block_num=*/10,
-                                                           /*tokens_per_block=*/2,
-                                                           rtp_llm::TYPE_INT8,
-                                                           /*local_head_num_kv=*/128,
-                                                           /*size_per_head=*/256);
-
-        auto mtp_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
-                                                         /*block_num=*/10,
-                                                         /*tokens_per_block=*/2,
-                                                         rtp_llm::TYPE_INT8,
-                                                         /*local_head_num_kv=*/128,
-                                                         /*size_per_head=*/256);
-        cache_config.mtp_sub_configs.push_back(std::make_shared<CacheConfig>(mtp_config));
-
         EngineInitParams params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
         params.sp_config        = sp_config;
         if (test_config.vocab_size_override > 0) {
             params.model_config_.vocab_size = test_config.vocab_size_override;
         }
+
+        ModelConfig score_cache_model_config   = params.model_config_;
+        ModelConfig propose_cache_model_config = params.model_config_;
+        score_cache_model_config.num_layers    = 1;
+        propose_cache_model_config.num_layers  = 1;
+        setDefaultMhaKVCacheSpecDescs(score_cache_model_config);
+        setDefaultMhaKVCacheSpecDescs(propose_cache_model_config);
+
+        KVCacheConfig test_kv_cache_config;
+        test_kv_cache_config.test_block_num            = 10;
+        test_kv_cache_config.seq_size_per_block        = 2;
+        test_kv_cache_config.kernel_seq_size_per_block = 2;
+
+        auto configure_cache_model = [](ModelConfig& cache_model_config) {
+            cache_model_config.data_type                    = rtp_llm::TYPE_INT8;
+            cache_model_config.attn_config.kv_head_num      = 128;
+            cache_model_config.attn_config.size_per_head    = 256;
+            cache_model_config.attn_config.tokens_per_block = 2;
+            cache_model_config.attn_config.kv_cache_dtype   = KvCacheDataType::BASE;
+        };
+        configure_cache_model(score_cache_model_config);
+        configure_cache_model(propose_cache_model_config);
+
+        auto cache_sp_config              = sp_config;
+        cache_sp_config.gen_num_per_cycle = 1;
+        auto cache_config                 = CacheConfigCreator::createSpConfig(score_cache_model_config,
+                                                               propose_cache_model_config,
+                                                               params.parallelism_config,
+                                                               params.runtime_config,
+                                                               test_kv_cache_config,
+                                                               cache_sp_config,
+                                                               /*warm_up_result=*/std::nullopt,
+                                                               /*is_mtp=*/true,
+                                                               /*is_eagle=*/false);
 
         // Create propose model engine init params
         auto mtp_model_params   = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
@@ -712,6 +738,10 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     components.fake_speculative_sampler->setInputs({draft_spec_sample_input, target_spec_sample_input});
     components.fake_speculative_sampler->setOutputs({speculative_sampler_output});
 
+    // A single active draft model must execute every proposal step, even
+    // though the init plan retains one physical slot per configured module.
+    auto* active_draft_model = components.fake_draft_model.get();
+
     // Replace models with fake models
     setupFakeModels(components.executor.get(),
                     std::move(components.fake_target_model),
@@ -723,6 +753,7 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     // Verify executor was created successfully
     auto status = components.executor->process({stream1});
     ASSERT_TRUE(status.ok());
+    EXPECT_EQ(active_draft_model->forwardCount(), propose_step);
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 2, 0}, {0, 1}, {0.0, 1.0, 0.0, 0.0}, {0.3, 0.33});
@@ -918,11 +949,11 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
     test_config.position_id_len_factor = 3;
     auto components                    = createMtpExecutorComponents(test_config);
 
-    auto stream_model_config = components.model_config;
+    auto stream_model_config                                  = components.model_config;
     stream_model_config.mm_model_config.mm_position_ids_style = MROPE;
     stream_model_config.attn_config.rope_config.index_factor  = 3;
-    auto stream1 =
-        createContextStream(stream_model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3, 0, 1});
+    auto stream1                                              = createContextStream(
+        stream_model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3, 0, 1});
     auto stream2 = createContextStream(
         stream_model_config, components.runtime_config, components.resource_context, {1, 2, 3, 0, 1, 2, 3, 0});
     stream1->setContextPositionIds(torch::tensor({0, 0, 0}, torch::kInt32));
@@ -975,24 +1006,20 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
 
     spec::FastTopKSamplerOutput draft_sampler_output_1;
     draft_sampler_output_1.token_ids = torch::tensor({12, 22}, torch::kInt32).reshape({(int64_t)batch_size, 1});
-    draft_sampler_output_1.all_probs =
-        torch::tensor({0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f}, torch::kFloat32)
-            .reshape({(int64_t)batch_size, (int64_t)vocab_size});
+    draft_sampler_output_1.all_probs = torch::tensor({0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f}, torch::kFloat32)
+                                           .reshape({(int64_t)batch_size, (int64_t)vocab_size});
 
     spec::FastTopKSamplerOutput draft_sampler_output_2;
     draft_sampler_output_2.token_ids = torch::tensor({13, 23}, torch::kInt32).reshape({(int64_t)batch_size, 1});
-    draft_sampler_output_2.all_probs =
-        torch::tensor({0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f}, torch::kFloat32)
-            .reshape({(int64_t)batch_size, (int64_t)vocab_size});
+    draft_sampler_output_2.all_probs = torch::tensor({0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f}, torch::kFloat32)
+                                           .reshape({(int64_t)batch_size, (int64_t)vocab_size});
 
     spec::FastTopKSamplerOutput draft_sampler_output_3;
     draft_sampler_output_3.token_ids = torch::tensor({14, 24}, torch::kInt32).reshape({(int64_t)batch_size, 1});
-    draft_sampler_output_3.all_probs =
-        torch::tensor({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f}, torch::kFloat32)
-            .reshape({(int64_t)batch_size, (int64_t)vocab_size});
+    draft_sampler_output_3.all_probs = torch::tensor({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f}, torch::kFloat32)
+                                           .reshape({(int64_t)batch_size, (int64_t)vocab_size});
 
-    components.fake_fast_topk_sampler->setInputs(
-        {draft_output_1.logits, draft_output_2.logits, draft_output_3.logits});
+    components.fake_fast_topk_sampler->setInputs({draft_output_1.logits, draft_output_2.logits, draft_output_3.logits});
     components.fake_fast_topk_sampler->setOutputs(
         {draft_sampler_output_1, draft_sampler_output_2, draft_sampler_output_3});
 
@@ -1003,43 +1030,14 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
     torch::Tensor              draft_token_ids_t;
     components.executor->draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t);
 
-    EXPECT_EQ((std::vector<int>{10, 11, 12, 13, 14, 20, 21, 22, 23, 24}),
-              toVec<int>(model_input.combo_tokens));
+    EXPECT_EQ((std::vector<int>{10, 11, 12, 13, 14, 20, 21, 22, 23, 24}), toVec<int>(model_input.combo_tokens));
     EXPECT_EQ((std::vector<int>{5, 5}), toVec<int>(model_input.input_lengths));
     EXPECT_EQ((std::vector<int>{5, 7}), toVec<int>(model_input.prefix_lengths));
     EXPECT_EQ(0, model_input.sequence_lengths.numel());
     EXPECT_EQ((std::vector<int>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}), toVec<int>(model_input.lm_output_indexes));
 
-    EXPECT_EQ((std::vector<int>{5,
-                                5,
-                                5,
-                                6,
-                                6,
-                                6,
-                                7,
-                                7,
-                                7,
-                                8,
-                                8,
-                                8,
-                                9,
-                                9,
-                                9,
-                                7,
-                                7,
-                                7,
-                                8,
-                                8,
-                                8,
-                                9,
-                                9,
-                                9,
-                                10,
-                                10,
-                                10,
-                                11,
-                                11,
-                                11}),
+    EXPECT_EQ((std::vector<int>{5, 5, 5, 6, 6, 6, 7, 7, 7, 8,  8,  8,  9,  9,  9,
+                                7, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10, 10, 11, 11, 11}),
               toVec<int>(model_input.combo_position_ids));
 }
 

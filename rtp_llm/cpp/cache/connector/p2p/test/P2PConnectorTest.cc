@@ -7,6 +7,7 @@
 
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/MockGenerateStream.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
@@ -79,11 +80,11 @@ protected:
     // 创建有效的 KVCacheResource（使用 initGroups + groupBlocks/blocks/cacheKeys 公开 API）
     KVCacheResourcePtr createValidKVCacheResource(int num_layers = 2, int blocks_per_layer = 2) {
         auto             resource = std::make_shared<KVCacheResource>();
-        std::vector<int> layer_to_group(num_layers);
+        std::vector<std::vector<int>> layer_to_group_ids(num_layers);
         for (int i = 0; i < num_layers; ++i) {
-            layer_to_group[i] = i;
+            layer_to_group_ids[i] = {i};
         }
-        resource->initGroups(num_layers, num_layers, layer_to_group);
+        resource->initGroups(num_layers, num_layers, layer_to_group_ids);
 
         for (int layer_id = 0; layer_id < num_layers; ++layer_id) {
             for (int i = 0; i < blocks_per_layer; ++i) {
@@ -202,6 +203,18 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnCancelled_WhenWaitResourceEntryCancell
 
     EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
     EXPECT_NE(response.error_message().find("cancelled"), std::string::npos);
+}
+
+TEST_F(P2PConnectorTest, AsyncMatchContext_MatchedBlockCountSupportsHybridGroups) {
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->cacheKeys() = {1000, 1001, 1002};
+    resource->initGroups(/*group_num=*/4, /*layer_num=*/2, {{1}, {3}});
+    resource->mutableBlockIds(1).assign({10, 11, 12});
+    resource->mutableBlockIds(3).assign({30, 31, 32});
+    ASSERT_GT(resource->groupNums(), 1);
+
+    P2PConnectorAsyncMatchContext ctx(resource);
+    EXPECT_EQ(ctx.matchedBlockCount(), 3u);
 }
 
 // 测试: scheduler_->sendKVCache 失败，返回 INTERNAL 错误

@@ -29,6 +29,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/cache/connector/memory/test/mock:mock_memory_connector_lib",
         "//rtp_llm/cpp/cache/connector/memory/test/mock:test_rpc_service_lib",
     ],

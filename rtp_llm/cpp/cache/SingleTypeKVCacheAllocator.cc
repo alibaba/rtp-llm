@@ -34,12 +34,15 @@ SingleTypeKVCacheAllocator::SingleTypeKVCacheAllocator(const CacheConfig&       
     KVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio) {}
 
 bool SingleTypeKVCacheAllocator::doInit() {
-    RTP_LLM_CHECK_WITH_INFO(!config_.cache_specs.empty(), "cache specs must not be empty");
-    auto& spec = config_.cache_specs[0];
+    RTP_LLM_CHECK_WITH_INFO(config_.groupNums() == 1,
+                            "SingleTypeKVCacheAllocator requires exactly one cache group, got %d",
+                            config_.groupNums());
+    auto& spec = config_.specForGroup(0);
     RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache spec[0] is null");
-    RTP_LLM_CHECK_WITH_INFO(spec->type == rtp_llm::KVCacheSpecType::MultiHeadAttention
-                                || spec->type == rtp_llm::KVCacheSpecType::MultiHeadLatentAttention,
-                            "SingleTypeKVCacheAllocator only support Full Attention");
+    const bool is_full_attention = config_.typeForGroup(0) == CacheGroupType::FULL
+                                   && (spec->type == rtp_llm::KVCacheSpecType::MultiHeadAttention
+                                       || spec->type == rtp_llm::KVCacheSpecType::MultiHeadLatentAttention);
+    RTP_LLM_CHECK_WITH_INFO(is_full_attention, "SingleTypeKVCacheAllocator requires one FULL MHA/MLA cache group");
 
     BlockPoolConfig pool_config;
 
@@ -50,7 +53,7 @@ bool SingleTypeKVCacheAllocator::doInit() {
         return false;
     }
 
-    std::vector<int> layer_ids(config_.global_layer_ids[0]);
+    std::vector<int> layer_ids(config_.layerIdsForGroup(0));
     full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(layer_ids, spec, block_pool_, 0);
 
     if (!full_kv_cache_group_->init()) {
@@ -215,21 +218,52 @@ CacheLayerLayout SingleTypeKVCacheAllocator::allLayerCacheBase() const {
     auto             layer_tensors = full_kv_cache_group_->allLayerCacheBase();
     auto             scale_tensors = full_kv_cache_group_->allLayerScaleCacheBase();
 
+    layout.layer_to_group_ids    = config_.layerGroupIdsSnapshot();
+    layout.group_types           = config_.groupTypesSnapshot();
+    layout.group_tags            = config_.groupTagsSnapshot();
+    layout.layer_tag_to_group_id = config_.layerTagToGroupIdSnapshot();
+    const auto group_num         = static_cast<size_t>(config_.groupNums());
     layout.layers_to_kv_buffer_ptrs.resize(config_.layer_all_num);
     layout.layers_to_scale_buffer_ptrs.resize(config_.layer_all_num);
+    layout.layer_attn_types.resize(config_.layer_all_num, CacheGroupType::FULL);
+    layout.layers_to_kv_buffer_ptrs_by_group.resize(config_.layer_all_num);
+    layout.layers_to_scale_buffer_ptrs_by_group.resize(config_.layer_all_num);
 
     for (int layer_id = 0; layer_id < config_.layer_all_num; ++layer_id) {
-        if (layer_tensors[layer_id].defined() && layer_tensors[layer_id].numel() > 0) {
-            layout.layers_to_kv_buffer_ptrs[layer_id] = layer_tensors[layer_id];
+        const auto layer = static_cast<size_t>(layer_id);
+        layout.layers_to_kv_buffer_ptrs_by_group[layer].resize(group_num);
+        layout.layers_to_scale_buffer_ptrs_by_group[layer].resize(group_num);
+
+        torch::Tensor kv_tensor;
+        const auto    kv_it = layer_tensors.find(layer_id);
+        if (kv_it != layer_tensors.end() && kv_it->second.defined() && kv_it->second.numel() > 0) {
+            kv_tensor                              = kv_it->second;
+            layout.layers_to_kv_buffer_ptrs[layer] = kv_tensor;
         }
-        if (scale_tensors[layer_id].defined() && scale_tensors[layer_id].numel() > 0) {
-            layout.layers_to_scale_buffer_ptrs[layer_id] = scale_tensors[layer_id];
+
+        torch::Tensor scale_tensor;
+        const auto    scale_it = scale_tensors.find(layer_id);
+        if (scale_it != scale_tensors.end() && scale_it->second.defined() && scale_it->second.numel() > 0) {
+            scale_tensor                              = scale_it->second;
+            layout.layers_to_scale_buffer_ptrs[layer] = scale_tensor;
         }
-    }
-    layout.layer_to_groups.reserve(config_.layer_all_num);
-    int group_id = full_kv_cache_group_->group_id();
-    for (int layed_id = 0; layed_id < config_.layer_all_num; layed_id++) {
-        layout.layer_to_groups.push_back(group_id);
+
+        RTP_LLM_CHECK_WITH_INFO(
+            layer < layout.layer_to_group_ids.size(), "missing cache group route for layer %d", layer_id);
+        for (int gid : layout.layer_to_group_ids[layer]) {
+            RTP_LLM_CHECK_WITH_INFO(
+                gid >= 0 && static_cast<size_t>(gid) < group_num, "invalid cache group %d for layer %d", gid, layer_id);
+            if (kv_tensor.defined()) {
+                layout.layers_to_kv_buffer_ptrs_by_group[layer][static_cast<size_t>(gid)] = kv_tensor;
+            }
+            if (scale_tensor.defined()) {
+                layout.layers_to_scale_buffer_ptrs_by_group[layer][static_cast<size_t>(gid)] = scale_tensor;
+            }
+        }
+        if (!layout.layer_to_group_ids[layer].empty()) {
+            layout.layer_attn_types[layer] =
+                config_.typeForGroup(static_cast<size_t>(layout.layer_to_group_ids[layer].front()));
+        }
     }
     return layout;
 }
@@ -273,7 +307,7 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
     };
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
     selected_resource->initGroups(
-        1, config_.layer_all_num, config_.layer_to_group_id, config_.kernelBlocksPerKvBlock());
+        1, config_.layer_all_num, config_.layerGroupIdsSnapshot(), config_.kernelBlocksPerKvBlock());
 
     CacheKeysType    selected_cache_keys;
     BlockIndicesType selected_blocks;
@@ -381,7 +415,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
 
     // init for all batch
     kv_cache_resource->initGroups(
-        1, config_.layer_all_num, config_.layer_to_group_id, config_.kernelBlocksPerKvBlock());
+        1, config_.layer_all_num, config_.layerGroupIdsSnapshot(), config_.kernelBlocksPerKvBlock());
 
     for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
         const int old_batch_idx = block_src_batch[new_batch_idx];

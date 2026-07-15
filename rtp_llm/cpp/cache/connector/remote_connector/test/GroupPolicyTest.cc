@@ -33,12 +33,12 @@ public:
         KVCacheAllocator(config) {
         for (int32_t full_group_id : full_group_ids) {
             for (int i = 0; i < per_group_layer_num; i++) {
-                fake_layout_.layer_to_groups.push_back(full_group_id);
+                fake_layout_.layer_to_group_ids.push_back({full_group_id});
             }
         }
         for (int32_t other_group_id : other_group_ids) {
             for (int i = 0; i < per_group_layer_num; i++) {
-                fake_layout_.layer_to_groups.push_back(other_group_id);
+                fake_layout_.layer_to_group_ids.push_back({other_group_id});
             }
         }
     }
@@ -218,21 +218,34 @@ public:
                 ASSERT_TRUE(group_policy_->addSpecInfo(location_spec_name, entry.first, r));
             }
         }
-        for (int sub_group = 2; sub_group <= group_size; ++sub_group) {
-            std::string bitmask(sub_group, 1);
-            bitmask.resize(group_size, 0);
-            do {
+        if (group_mode == RemoteConnectorGroupMode::RCGM_LAYER_DEFAULT) {
+            // DefaultLayerGroupPolicy is only a generic test policy. Populate every
+            // combination so its arbitrary-subset behavior remains covered.
+            for (int sub_group = 2; sub_group <= group_size; ++sub_group) {
+                std::string bitmask(sub_group, 1);
+                bitmask.resize(group_size, 0);
+                do {
+                    std::stringstream ss_group_name;
+                    uint64_t          groups_name_bithash = 0;
+                    for (int i = 0; i < group_size; ++i) {
+                        if (static_cast<bool>(bitmask[i])) {
+                            ss_group_name << all_group_names[i];
+                            groups_name_bithash |= all_group_name_bithashs[i];
+                        }
+                    }
+                    group_policy_->addLocationSpecGroup(groups_name_bithash, ss_group_name.str());
+                } while (std::prev_permutation(bitmask.begin(), bitmask.end()));
+            }
+        } else {
+            for (const auto aggregate_mask : group_policy_->reachableAggregateMasks()) {
                 std::stringstream ss_group_name;
-                uint64_t          groups_name_bithash = 0;
-                for (int i = 0; i < group_size; ++i) {
-                    if (static_cast<bool>(bitmask[i])) {
+                for (size_t i = 0; i < group_size; ++i) {
+                    if ((aggregate_mask & all_group_name_bithashs[i]) != 0) {
                         ss_group_name << all_group_names[i];
-                        groups_name_bithash |= all_group_name_bithashs[i];
                     }
                 }
-                std::string groups_name = ss_group_name.str();
-                group_policy_->addLocationSpecGroup(groups_name_bithash, groups_name);
-            } while (std::prev_permutation(bitmask.begin(), bitmask.end()));
+                group_policy_->addLocationSpecGroup(aggregate_mask, ss_group_name.str());
+            }
         }
         RTP_LLM_LOG_INFO("initGroupPolicy debug info\n [%s]", group_policy_->debugString().c_str());
     }
@@ -588,14 +601,10 @@ TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_success_single_tp) 
     auto cast_group_policy = std::dynamic_pointer_cast<FullLinearLayerGroupPolicy>(group_policy_);
     ASSERT_EQ(GroupPolicy::GroupIdMap({{0, {true, 0b001, "F0"}}, {1, {false, 0b010, "L1"}}, {2, {false, 0b100, "L2"}}}),
               cast_group_policy->groups_);
-    ASSERT_EQ((std::unordered_map<uint64_t, std::string>({{0b111, "F0L1L2"},
-                                                          {0b110, "L1L2"},
-                                                          {0b101, "F0L2"},
-                                                          {0b011, "F0L1"},
-                                                          {0b001, "F0"},
-                                                          {0b010, "L1"},
-                                                          {0b100, "L2"}})),
-              cast_group_policy->location_spec_group_map_);
+    ASSERT_EQ(
+        (std::unordered_map<uint64_t, std::string>({{0b111, "F0L1L2"}, {0b001, "F0"}, {0b010, "L1"}, {0b100, "L2"}})),
+        cast_group_policy->location_spec_group_map_);
+    EXPECT_EQ(cast_group_policy->reachableAggregateMasks(), (std::vector<uint64_t>{0b001, 0b111}));
     ASSERT_EQ(GroupPolicy::SpecInfoMap({{"tp0_F0", {0, 0}}, {"tp0_L1", {1, 0}}, {"tp0_L2", {2, 0}}}),
               cast_group_policy->spec_name_to_info_);
     ASSERT_EQ((std::map<int32_t, std::vector<int>>({{0, {0, 1, 2, 3}}, {1, {4, 5, 6, 7}}, {2, {8, 9, 10, 11}}})),
@@ -612,14 +621,9 @@ TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_success_two_tp) {
     auto cast_group_policy = std::dynamic_pointer_cast<FullLinearLayerGroupPolicy>(group_policy_);
     ASSERT_EQ(GroupPolicy::GroupIdMap({{0, {true, 0b001, "F0"}}, {1, {false, 0b010, "L1"}}, {2, {false, 0b100, "L2"}}}),
               cast_group_policy->groups_);
-    ASSERT_EQ((std::unordered_map<uint64_t, std::string>({{0b111, "F0L1L2"},
-                                                          {0b110, "L1L2"},
-                                                          {0b101, "F0L2"},
-                                                          {0b011, "F0L1"},
-                                                          {0b001, "F0"},
-                                                          {0b010, "L1"},
-                                                          {0b100, "L2"}})),
-              cast_group_policy->location_spec_group_map_);
+    ASSERT_EQ(
+        (std::unordered_map<uint64_t, std::string>({{0b111, "F0L1L2"}, {0b001, "F0"}, {0b010, "L1"}, {0b100, "L2"}})),
+        cast_group_policy->location_spec_group_map_);
     ASSERT_EQ(GroupPolicy::SpecInfoMap({{"tp0_F0", {0, 0}},
                                         {"tp0_L1", {1, 0}},
                                         {"tp0_L2", {2, 0}},
@@ -650,22 +654,11 @@ TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_success_two_full_gr
                                        {2, {false, 0b0100, "L2"}},
                                        {3, {false, 0b1000, "L3"}}}),
               cast_group_policy->groups_);
-    EXPECT_EQ((std::unordered_map<uint64_t, std::string>({{0b1111, "F0F1L2L3"},
-                                                          {0b1110, "F1L2L3"},
-                                                          {0b0001, "F0"},
-                                                          {0b0010, "F1"},
-                                                          {0b0100, "L2"},
-                                                          {0b1000, "L3"},
-                                                          {0b0011, "F0F1"},
-                                                          {0b0101, "F0L2"},
-                                                          {0b1001, "F0L3"},
-                                                          {0b0110, "F1L2"},
-                                                          {0b1010, "F1L3"},
-                                                          {0b1100, "L2L3"},
-                                                          {0b0111, "F0F1L2"},
-                                                          {0b1011, "F0F1L3"},
-                                                          {0b1101, "F0L2L3"}})),
-              cast_group_policy->location_spec_group_map_);
+    EXPECT_EQ(
+        (std::unordered_map<uint64_t, std::string>(
+            {{0b1111, "F0F1L2L3"}, {0b0001, "F0"}, {0b0010, "F1"}, {0b0100, "L2"}, {0b1000, "L3"}, {0b0011, "F0F1"}})),
+        cast_group_policy->location_spec_group_map_);
+    EXPECT_EQ(cast_group_policy->reachableAggregateMasks(), (std::vector<uint64_t>{0b0011, 0b1111}));
     EXPECT_EQ(GroupPolicy::SpecInfoMap({
                   {"tp0_F0", {0, 0}},
                   {"tp0_F1", {1, 0}},
@@ -994,6 +987,8 @@ TEST_F(GroupPolicyTest, test_FullLayerGroupPolicy_filterNeedLoadLocations_succes
                     full_group_ids,
                     other_group_ids,
                     linear_attention_write_interval);
+    EXPECT_EQ(group_policy_->reachableAggregateMasks(), (std::vector<uint64_t>{0b1}));
+    EXPECT_EQ(group_policy_->location_spec_group_map_.size(), 1u);
     {
         Locations     locations = genFullLinearLocations(tp_size, full_group_ids, other_group_ids, 4, {});
         LocationsView locations_view;

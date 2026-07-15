@@ -856,6 +856,29 @@ class MlaOpsType:
     @property
     def value(self) -> int:
         ...
+class KVCacheSpecType:
+    MHA: typing.ClassVar[KVCacheSpecType]
+    MLA: typing.ClassVar[KVCacheSpecType]
+    LINEAR: typing.ClassVar[KVCacheSpecType]
+
+    @property
+    def name(self) -> str:
+        ...
+
+    @property
+    def value(self) -> int:
+        ...
+
+
+class KVCacheSpecDesc:
+    tag: str
+    cache_type: KVCacheSpecType
+    dtype: DataType
+
+    def __init__(self) -> None:
+        ...
+
+
 class ModelConfig:
     add_bias_linear: bool
     attn_config: AttentionConfigs
@@ -864,6 +887,7 @@ class ModelConfig:
     deepseek_rope_mscale: float
     embedding_size: int
     eplb_config: EPLBConfig
+    kv_cache_spec_descs: list[list[KVCacheSpecDesc]]
     expert_num: int
     extra_data_path: str
     has_lm_head: bool
