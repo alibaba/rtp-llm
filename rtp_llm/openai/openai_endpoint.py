@@ -7,7 +7,11 @@ from typing import Any, AsyncGenerator, List, Optional
 from fastapi import Request
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import GenerateConfig, ReturnAllProbsMode
+from rtp_llm.config.generate_config import (
+    GenerateConfig,
+    ReturnAllProbsMode,
+    ThinkingMode,
+)
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
@@ -217,19 +221,25 @@ class OpenaiEndpoint(object):
                 f"unknown response_format.type: {rf.type!r}",
             )
 
-    def _ensure_think_end_token_ids(self, config: GenerateConfig) -> None:
-        if config.end_think_token_ids:
-            return
-        end_token_id = self.generate_env_config.think_end_token_id
-        if end_token_id != -1:
-            config.end_think_token_ids = [end_token_id]
-            return
-        think_end_tag = self.generate_env_config.think_end_tag.encode("utf-8").decode(
-            "unicode_escape"
-        )
-        config.end_think_token_ids = self.tokenizer.encode(
-            think_end_tag, add_special_tokens=False
-        )
+    def _ensure_think_boundary_token_ids(self, config: GenerateConfig) -> None:
+        if not config.begin_think_token_ids:
+            think_start_tag = self.generate_env_config.think_start_tag.encode(
+                "utf-8"
+            ).decode("unicode_escape")
+            config.begin_think_token_ids = self.tokenizer.encode(
+                think_start_tag, add_special_tokens=False
+            )
+        if not config.end_think_token_ids:
+            end_token_id = self.generate_env_config.think_end_token_id
+            if end_token_id != -1:
+                config.end_think_token_ids = [end_token_id]
+            else:
+                think_end_tag = self.generate_env_config.think_end_tag.encode(
+                    "utf-8"
+                ).decode("unicode_escape")
+                config.end_think_token_ids = self.tokenizer.encode(
+                    think_end_tag, add_special_tokens=False
+                )
 
     def _extract_generation_config(
         self, request: ChatCompletionRequest
@@ -297,11 +307,16 @@ class OpenaiEndpoint(object):
         if request.thinking_budget is not None:
             budget = int(request.thinking_budget)
             config.max_thinking_tokens = _INT32_MAX if budget < 0 else budget
-        if request.enable_thinking_requested() and config.max_thinking_tokens != 0:
-            config.in_think_mode = True
-            self._ensure_think_end_token_ids(config)
-        if request.disable_thinking():
-            config.in_think_mode = False
+
+        config.thinking_mode = request.resolve_thinking_mode()
+        config.in_think_mode = config.thinking_mode == ThinkingMode.ENABLED
+        if config.enable_think_logits_processor is None:
+            config.enable_think_logits_processor = bool(
+                getattr(self.generate_env_config, "enable_think_logits_processor", True)
+            )
+        if config.enable_think_logits_processor:
+            self._ensure_think_boundary_token_ids(config)
+        if config.thinking_mode == ThinkingMode.DISABLED:
             config.max_thinking_tokens = 0
         max_completion_tokens = _positive_int_or_none(request.max_completion_tokens)
         max_tokens_cap = _positive_int_or_none(request.max_tokens)

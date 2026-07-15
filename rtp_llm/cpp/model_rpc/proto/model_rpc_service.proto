@@ -40,6 +40,12 @@ message RoleAddrPB {
 }
 
 message GenerateConfigPB {
+    enum ThinkingModePB {
+        THINKING_MODE_UNSPECIFIED = 0;
+        THINKING_MODE_DISABLED = 1;
+        THINKING_MODE_ADAPTIVE = 2;
+        THINKING_MODE_ENABLED = 3;
+    }
     int32 max_new_tokens = 1;
     int32 num_beams = 2;
     int32 num_return_sequences = 3;
@@ -111,6 +117,8 @@ message GenerateConfigPB {
     IntMatrix banned_combo_token_ids = 65;
     // 0=unset(fallback to bool return_all_probs), 1=NONE, 2=DEFAULT, 3=ORIGINAL
     int32 return_all_probs_mode = 66;
+    ThinkingModePB thinking_mode = 67;
+    google.protobuf.BoolValue enable_think_logits_processor = 68;
 }
 
 message MMPreprocessConfigPB {

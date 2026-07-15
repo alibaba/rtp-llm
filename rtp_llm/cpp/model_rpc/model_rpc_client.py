@@ -118,6 +118,15 @@ def trans_input(input_py: GenerateInput):
             input_py.generate_config.end_think_token_ids
         )
     generate_config_pb.in_think_mode = input_py.generate_config.in_think_mode
+    if hasattr(generate_config_pb, "thinking_mode"):
+        generate_config_pb.thinking_mode = int(input_py.generate_config.thinking_mode)
+    if (
+        hasattr(generate_config_pb, "enable_think_logits_processor")
+        and input_py.generate_config.enable_think_logits_processor is not None
+    ):
+        generate_config_pb.enable_think_logits_processor.value = bool(
+            input_py.generate_config.enable_think_logits_processor
+        )
     generate_config_pb.num_beams = input_py.generate_config.num_beams
     generate_config_pb.variable_num_beams.extend(
         input_py.generate_config.variable_num_beams

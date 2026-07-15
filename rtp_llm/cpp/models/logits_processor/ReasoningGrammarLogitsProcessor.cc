@@ -22,6 +22,38 @@ bool isActiveThinkState(const StreamThinkInfo& info) {
     return info.process_state == ThinkProcessState::IN_THINK || info.process_state == ThinkProcessState::CLOSING_THINK;
 }
 
+bool advanceAdaptiveStart(StreamThinkInfo& info, int32_t token_id) {
+    if (info.process_state == ThinkProcessState::UNDECIDED) {
+        if (info.begin_think_token_ids.empty() || token_id != info.begin_think_token_ids.front()) {
+            info.process_state = ThinkProcessState::NO_THINK;
+            return true;
+        }
+        info.begin_think_token_index = 1;
+        if (info.begin_think_token_index == info.begin_think_token_ids.size()) {
+            info.process_state             = ThinkProcessState::IN_THINK;
+            info.think_start_output_length = info.current_output_length;
+        } else {
+            info.process_state = ThinkProcessState::OPENING_THINK;
+        }
+        return true;
+    }
+    if (info.process_state != ThinkProcessState::OPENING_THINK) {
+        return false;
+    }
+    const auto expected = info.begin_think_token_ids[info.begin_think_token_index];
+    if (token_id != expected) {
+        RTP_LLM_LOG_WARNING("adaptive grammar think start token mismatch, expected=%d actual=%d", expected, token_id);
+        info.process_state = ThinkProcessState::NO_THINK;
+        return true;
+    }
+    ++info.begin_think_token_index;
+    if (info.begin_think_token_index == info.begin_think_token_ids.size()) {
+        info.process_state             = ThinkProcessState::IN_THINK;
+        info.think_start_output_length = info.current_output_length;
+    }
+    return true;
+}
+
 bool transitionToAfterThinkIfClosed(StreamThinkInfo& info) {
     if (!info.dfa_ptr || !info.dfa_ptr->isFinished()) {
         return false;
@@ -49,12 +81,12 @@ bool thinkBudgetExhausted(const SamplerInputs& inputs, size_t batch_idx, const S
     }
 
     const int observed_output_tokens = std::max(generatedTokens(inputs, batch_idx), info.current_output_length);
-    return observed_output_tokens >= info.max_thinking_tokens;
+    return observed_output_tokens - info.think_start_output_length >= info.max_thinking_tokens;
 }
 
 bool specThinkBudgetExhausted(const StreamThinkInfo& info) {
     return info.dfa_ptr && !info.end_think_token_ids.empty() && info.max_thinking_tokens > 0
-           && info.current_output_length >= info.max_thinking_tokens;
+           && info.current_output_length - info.think_start_output_length >= info.max_thinking_tokens;
 }
 
 bool consumePendingForcedThinkEndToken(StreamThinkInfo& info, int32_t current_token_id) {
@@ -101,6 +133,13 @@ void clearTokenFromBitmask(int32_t* bitmask, size_t words, int64_t token_id) {
     bitmask[token_id / 32] &= ~(1u << (token_id % 32));
 }
 
+void allowTokenInBitmask(int32_t* bitmask, size_t words, int64_t token_id) {
+    if (token_id < 0 || static_cast<size_t>(token_id / 32) >= words) {
+        return;
+    }
+    bitmask[token_id / 32] |= (1u << (token_id % 32));
+}
+
 void forceTokenInBitmask(int32_t* bitmask, size_t words, int64_t token_id) {
     std::fill_n(bitmask, words, 0);
     if (token_id < 0 || static_cast<size_t>(token_id / 32) >= words) {
@@ -134,6 +173,13 @@ void applyThinkSpecRowMask(int32_t* row, size_t words, StreamThinkInfo& info, in
     std::fill_n(row, words, SpecLogitsProcessor::kBitmaskAllowAll);
 
     switch (info.process_state) {
+        case ThinkProcessState::UNDECIDED:
+            return;
+        case ThinkProcessState::OPENING_THINK:
+            if (info.begin_think_token_index < info.begin_think_token_ids.size()) {
+                forceTokenInBitmask(row, words, info.begin_think_token_ids[info.begin_think_token_index]);
+            }
+            return;
         case ThinkProcessState::NO_THINK:
         case ThinkProcessState::AFTER_THINK:
             return;
@@ -171,6 +217,9 @@ void advanceThinkStateForSpec(StreamThinkInfo& info, int32_t token_id) {
     }
 
     info.current_output_length += 1;
+    if (advanceAdaptiveStart(info, token_id)) {
+        return;
+    }
     if (!isActiveThinkState(info) || !info.dfa_ptr) {
         return;
     }
@@ -189,13 +238,15 @@ void advanceThinkStateForSpec(StreamThinkInfo& info, int32_t token_id) {
 
 ReasoningGrammarLogitsProcessor::ReasoningGrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher,
                                                                  int64_t                            eos_token_id,
+                                                                 ThinkingMode                       thinking_mode,
                                                                  int                                max_thinking_tokens,
                                                                  std::vector<int> begin_think_token_ids,
                                                                  std::vector<int> end_think_token_ids,
                                                                  int32_t          input_length,
                                                                  ErrorReporter    error_reporter):
     matcher_(std::move(matcher)), eos_token_id_(eos_token_id), error_reporter_(std::move(error_reporter)) {
-    think_info_.in_think_mode         = true;
+    think_info_.in_think_mode         = thinking_mode == ThinkingMode::ENABLED;
+    think_info_.thinking_mode         = thinking_mode;
     think_info_.max_thinking_tokens   = max_thinking_tokens;
     think_info_.begin_think_token_ids = std::move(begin_think_token_ids);
     think_info_.end_think_token_ids   = end_think_token_ids;
@@ -205,7 +256,11 @@ ReasoningGrammarLogitsProcessor::ReasoningGrammarLogitsProcessor(std::shared_ptr
     if (!end_think_token_ids.empty()) {
         think_info_.dfa_ptr = std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids);
     }
-    think_info_.process_state = think_info_.dfa_ptr ? ThinkProcessState::IN_THINK : ThinkProcessState::NO_THINK;
+    if (thinking_mode == ThinkingMode::ADAPTIVE) {
+        think_info_.process_state = ThinkProcessState::UNDECIDED;
+    } else {
+        think_info_.process_state = think_info_.dfa_ptr ? ThinkProcessState::IN_THINK : ThinkProcessState::NO_THINK;
+    }
 }
 
 void ReasoningGrammarLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
@@ -275,6 +330,17 @@ void ReasoningGrammarLogitsProcessor::updateStatus(const torch::Tensor& new_toke
         }
 
         think_info_.current_output_length += 1;
+        const auto state_before = think_info_.process_state;
+        if (advanceAdaptiveStart(think_info_, token_id)) {
+            if (state_before == ThinkProcessState::UNDECIDED
+                && think_info_.process_state == ThinkProcessState::NO_THINK) {
+                acceptCommittedGrammarTokenLocked(token_id);
+            }
+            if (reported_error_.load(std::memory_order_relaxed)) {
+                return;
+            }
+            continue;
+        }
         if (isActiveThinkState(think_info_)) {
             if (think_info_.dfa_ptr) {
                 think_info_.dfa_ptr->next(token_id);
@@ -337,6 +403,11 @@ int ReasoningGrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsPro
     };
 
     auto fill_row = [&](int32_t* row) {
+        if (think_state.process_state == ThinkProcessState::UNDECIDED) {
+            fill_grammar_row(row);
+            allowTokenInBitmask(row, W, firstTokenOrInvalid(think_state.begin_think_token_ids));
+            return;
+        }
         applyThinkSpecRowMask(row, W, think_state, eos_token_id_);
         if (think_state.process_state == ThinkProcessState::AFTER_THINK
             || think_state.process_state == ThinkProcessState::NO_THINK) {
@@ -356,6 +427,23 @@ int ReasoningGrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsPro
             || !bitmaskAllowsToken(row, W, draft_token)) {
             cap = offset;
             break;
+        }
+
+        if (think_state.process_state == ThinkProcessState::UNDECIDED) {
+            ++think_state.current_output_length;
+            const bool starts_thinking =
+                !think_state.begin_think_token_ids.empty() && draft_token == think_state.begin_think_token_ids.front();
+            if (starts_thinking) {
+                advanceAdaptiveStart(think_state, draft_token);
+            } else {
+                think_state.process_state = ThinkProcessState::NO_THINK;
+                if (!matcher_->acceptToken(draft_token)) {
+                    cap = offset;
+                    break;
+                }
+                ++grammar_accepted_prefix;
+            }
+            continue;
         }
 
         const bool token_belongs_to_grammar = think_state.process_state == ThinkProcessState::AFTER_THINK
@@ -385,6 +473,21 @@ bool ReasoningGrammarLogitsProcessor::applyReasoningOrGrammarMaskLocked(const Sa
     auto logits = inputs.logits[batch_idx];
 
     switch (think_info_.process_state) {
+        case ThinkProcessState::UNDECIDED: {
+            const auto start_token_id = firstTokenOrInvalid(think_info_.begin_think_token_ids);
+            if (start_token_id < 0 || start_token_id >= logits.size(0)) {
+                return applyGrammarMaskLocked(logits);
+            }
+            auto start_logit = logits[start_token_id].clone();
+            auto applied     = applyGrammarMaskLocked(logits);
+            logits[start_token_id].copy_(start_logit);
+            return applied;
+        }
+        case ThinkProcessState::OPENING_THINK:
+            if (think_info_.begin_think_token_index < think_info_.begin_think_token_ids.size()) {
+                forceToken(logits, think_info_.begin_think_token_ids[think_info_.begin_think_token_index]);
+            }
+            return true;
         case ThinkProcessState::NO_THINK:
         case ThinkProcessState::AFTER_THINK:
             return applyGrammarMaskLocked(logits);

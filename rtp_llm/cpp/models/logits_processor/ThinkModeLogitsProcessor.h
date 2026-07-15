@@ -10,6 +10,8 @@
 namespace rtp_llm {
 
 enum class ThinkProcessState {
+    UNDECIDED,
+    OPENING_THINK,
     NO_THINK,
     IN_THINK,
     CLOSING_THINK,
@@ -18,6 +20,7 @@ enum class ThinkProcessState {
 
 struct StreamThinkInfo {
     bool                                           in_think_mode;
+    ThinkingMode                                   thinking_mode = ThinkingMode::UNSPECIFIED;
     int                                            max_thinking_tokens;
     std::vector<int>                               begin_think_token_ids;
     std::vector<int>                               end_think_token_ids;
@@ -26,7 +29,9 @@ struct StreamThinkInfo {
     bool                                           is_beam_search;
     std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr;
     std::vector<int>                               pending_forced_think_end_token_ids;
-    ThinkProcessState                              process_state = ThinkProcessState::NO_THINK;
+    size_t                                         begin_think_token_index   = 0;
+    int32_t                                        think_start_output_length = 0;
+    ThinkProcessState                              process_state             = ThinkProcessState::NO_THINK;
 
     StreamThinkInfo() = default;
 
@@ -38,15 +43,35 @@ struct StreamThinkInfo {
                     int32_t                                        output_length,
                     bool                                           is_beam_search,
                     std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr):
-        in_think_mode(think_mode),
+        StreamThinkInfo(think_mode ? ThinkingMode::ENABLED : ThinkingMode::DISABLED,
+                        max_thinking_tokens,
+                        std::move(begin_think_token_ids),
+                        std::move(end_think_token_ids),
+                        input_length,
+                        output_length,
+                        is_beam_search,
+                        std::move(dfa_ptr)) {}
+
+    StreamThinkInfo(ThinkingMode                                   mode,
+                    int                                            max_thinking_tokens,
+                    std::vector<int>                               begin_think_token_ids,
+                    std::vector<int>                               end_think_token_ids,
+                    int32_t                                        input_length,
+                    int32_t                                        output_length,
+                    bool                                           is_beam_search,
+                    std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr):
+        in_think_mode(mode == ThinkingMode::ENABLED),
+        thinking_mode(mode),
         max_thinking_tokens(max_thinking_tokens),
-        begin_think_token_ids(begin_think_token_ids),
-        end_think_token_ids(end_think_token_ids),
+        begin_think_token_ids(std::move(begin_think_token_ids)),
+        end_think_token_ids(std::move(end_think_token_ids)),
         input_length(input_length),
         current_output_length(output_length),
         is_beam_search(is_beam_search),
-        dfa_ptr(dfa_ptr) {
-        if (think_mode && max_thinking_tokens > 0 && dfa_ptr) {
+        dfa_ptr(std::move(dfa_ptr)) {
+        if (mode == ThinkingMode::ADAPTIVE) {
+            process_state = ThinkProcessState::UNDECIDED;
+        } else if (mode == ThinkingMode::ENABLED && max_thinking_tokens > 0 && this->dfa_ptr) {
             process_state = ThinkProcessState::IN_THINK;
         }
     }
@@ -54,6 +79,7 @@ struct StreamThinkInfo {
     StreamThinkInfo copy() const {
         StreamThinkInfo think_info;
         think_info.in_think_mode                      = in_think_mode;
+        think_info.thinking_mode                      = thinking_mode;
         think_info.max_thinking_tokens                = max_thinking_tokens;
         think_info.begin_think_token_ids              = begin_think_token_ids;
         think_info.end_think_token_ids                = end_think_token_ids;
@@ -61,6 +87,8 @@ struct StreamThinkInfo {
         think_info.current_output_length              = current_output_length;
         think_info.is_beam_search                     = is_beam_search;
         think_info.pending_forced_think_end_token_ids = pending_forced_think_end_token_ids;
+        think_info.begin_think_token_index            = begin_think_token_index;
+        think_info.think_start_output_length          = think_start_output_length;
         think_info.process_state                      = process_state;
         if (dfa_ptr) {
             think_info.dfa_ptr = std::make_shared<StringContainDFA<size_t, int>>(*dfa_ptr);
@@ -86,12 +114,12 @@ public:
                                                                        int32_t                        num);
 
 public:
-    void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
-    void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
-    void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
-    bool isSpecVerifyEligible() const override;
-    int  tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
-    bool isStateful() const override;
+    void    process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
+    void    updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
+    void    updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
+    bool    isSpecVerifyEligible() const override;
+    int     tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
+    bool    isStateful() const override;
     int64_t acceptedTokenLen() const override;
 
 private:

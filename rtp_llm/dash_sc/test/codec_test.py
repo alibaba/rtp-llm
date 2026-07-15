@@ -508,6 +508,20 @@ class DashScGrpcRequestTest(TestCase):
             op.request_headers, {"user_id": "u1", "x-dashscope-apikeyid": "ak1"}
         )
 
+    def test_parse_other_params_thinking_mode(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["thinking_mode"].string_param = "adaptive"
+        self.assertEqual(parse_other_params(req).thinking_mode, "adaptive")
+
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"x-ds-llm-thinking-mode": "enabled"}
+        )
+        self.assertEqual(parse_other_params(req).thinking_mode, "enabled")
+
+        req.parameters["thinking_mode"].string_param = "invalid"
+        self.assertIsNone(parse_other_params(req).thinking_mode)
+
     def test_parse_other_params_reasoning_effort_max_alias(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["reasoning_effort"].string_param = "max"
