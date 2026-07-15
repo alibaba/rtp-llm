@@ -398,6 +398,9 @@ struct FIFOSchedulerConfig {
     bool        cp_force_single_prefill        = true;
     int64_t     max_inited_kv_cache_streams    = 0;
     int64_t     max_batch_tokens_without_cache = 0;
+    // Global real-context token budget per chunked-prefill forward; <=0 disables, >0 enables.
+    // Config injection floor-aligns it to seq_size_per_block, with a minimum of one block.
+    int64_t     prefill_chunk_size = 0;
     std::string to_string() const;
 };
 

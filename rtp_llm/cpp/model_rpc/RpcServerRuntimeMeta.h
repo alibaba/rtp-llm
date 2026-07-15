@@ -85,7 +85,7 @@ public:
         const auto                          batch_id        = resolveBatchId(identity, stream_batch_id);
         auto                                new_task        = makeTaskInfo(
             TaskIdentity{identity.request_id, batch_id},
-            stream->prefixLength(),
+            stream->initialReuseLength(),
             stream->inputLength(),
             stream->getTimeInfo().wait_time_us);
         running_streams_[identity.request_id] = RunningEntry{std::move(new_task), stream};
@@ -146,7 +146,7 @@ public:
             if (stream) {
                 const int64_t current = autil::TimeUtility::currentTimeInMilliSeconds();
                 task_info.end_time_ms       = current;
-                task_info.prefix_length     = stream->prefixLength();
+                task_info.prefix_length     = stream->initialReuseLength();
                 task_info.input_length      = stream->inputLength();
                 task_info.waiting_time_ms   = stream->getTimeInfo().wait_time_us / 1000;
                 task_info.iterate_count     = stream->iterCount();
@@ -178,7 +178,7 @@ public:
         auto& task_info = ptr->second.task_info;
         int64_t current             = autil::TimeUtility::currentTimeInMilliSeconds();
         task_info.end_time_ms       = current;
-        task_info.prefix_length     = stream->prefixLength();
+        task_info.prefix_length     = stream->initialReuseLength();
         task_info.input_length      = stream->inputLength();
         task_info.waiting_time_ms   = stream->getTimeInfo().wait_time_us / 1000;
         task_info.iterate_count     = stream->iterCount();

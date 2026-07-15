@@ -60,20 +60,27 @@ void FIFOScheduler::cancelGroups(StreamGroupQueue& group_queue) {
 void FIFOScheduler::cancelExtraStreams() {
     cancelGroups(waiting_group_queue_);
     cancelGroups(loading_cache_group_queue_);
+    cancelStreams(pending_decode_streams_);
 }
 
 bool FIFOScheduler::hasExtraStreams() const {
-    return !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty();
+    return !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty() || !pending_decode_streams_.empty();
 }
 
 int64_t FIFOScheduler::extraOnflightStreams() const {
-    return groupQueueStreamsSize(waiting_group_queue_) + groupQueueStreamsSize(loading_cache_group_queue_);
+    return groupQueueStreamsSize(waiting_group_queue_) + groupQueueStreamsSize(loading_cache_group_queue_)
+           + pending_decode_streams_.size();
 }
 
 void FIFOScheduler::fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const {
     collector.wait_stream_size += groupQueueStreamsSize(waiting_group_queue_);
     collector.loading_cache_stream_size += groupQueueStreamsSize(loading_cache_group_queue_);
-    collector.group_fallback_count = pending_group_fallback_count_.exchange(0, std::memory_order_relaxed);
+    collector.pending_decode_stream_size = pending_decode_streams_.size();
+    collector.group_fallback_count       = pending_group_fallback_count_.exchange(0, std::memory_order_relaxed);
+}
+
+void FIFOScheduler::appendExtraRunningTaskList(std::vector<EngineScheduleInfo::TaskInfo>& task_list) const {
+    appendTaskInfos(task_list, pending_decode_streams_);
 }
 
 std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
@@ -84,7 +91,7 @@ FIFOScheduler::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
     std::vector<GenerateStreamPtr> valid_streams;
     valid_streams.reserve(streams.size());
     for (const auto& stream : streams) {
-        const bool success = checkInputLength(stream);
+        const bool success = checkInputLength(stream) && checkChunkedPrefillRequest(stream).ok();
         enqueue_successes.push_back(success);
         if (success) {
             valid_streams.push_back(stream);
@@ -136,8 +143,12 @@ bool FIFOScheduler::evaluateRunningBatch(const ScheduleRuntime&   schedule_runti
             return true;
         }
     }
-    // prefill and decode not mixed together
-    if (!running_streams_.empty()) {
+    // Prefill and active decode rows are never returned together. A parked decode
+    // row, however, may coexist with a chunked context round because it lives in
+    // pending_decode_streams_ and is excluded from the returned prefill batch.
+    if (!running_streams_.empty()
+        || (!pending_decode_streams_.empty()
+            && !(new_stream->chunkedPrefillEnabled() && new_stream->isContextStream()))) {
         return false;
     }
     // Conservative CP prefill mode: cap at one stream per round unless
@@ -145,7 +156,8 @@ bool FIFOScheduler::evaluateRunningBatch(const ScheduleRuntime&   schedule_runti
     if (cp_force_single_prefill_ && admitted_running_stream_count > 0) {
         return false;
     }
-    if (running_streams_.size() + admitted_running_stream_count + 1 > max_generate_batch_size_) {
+    if (running_streams_.size() + pending_decode_streams_.size() + admitted_running_stream_count + 1
+        > max_generate_batch_size_) {
         return false;
     }
 
@@ -300,7 +312,8 @@ void FIFOScheduler::onRunningStream(const GenerateStreamPtr& stream) {
 bool FIFOScheduler::waitPredicate() {
     // Check streams directly without calling empty() which acquires lock_ (already held by schedule())
     return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !loading_cache_streams_.empty()
-           || !running_streams_.empty() || !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty();
+           || !running_streams_.empty() || !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty()
+           || !pending_decode_streams_.empty();
 }
 
 void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_streams,
@@ -471,7 +484,7 @@ void FIFOScheduler::evaluateLoadingCacheGroupQueue() {
         })) {
         return;
     }
-    if (!running_streams_.empty()) {
+    if (!running_streams_.empty() || !new_streams_.empty()) {
         return;
     }
 
@@ -566,6 +579,27 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
     }
 }
 
+bool FIFOScheduler::partitionChunkContinuations() {
+    refreshAndReapTerminalStreams(running_streams_);
+    const bool has_context = std::any_of(
+        running_streams_.begin(), running_streams_.end(), [](const auto& stream) { return stream->isContextStream(); });
+
+    if (has_context) {
+        for (auto it = running_streams_.begin(); it != running_streams_.end();) {
+            if (!(*it)->isContextStream()) {
+                auto current = it++;
+                pending_decode_streams_.splice(pending_decode_streams_.end(), running_streams_, current);
+            } else {
+                ++it;
+            }
+        }
+    } else if (!pending_decode_streams_.empty()) {
+        running_streams_.splice(running_streams_.begin(), pending_decode_streams_);
+        return true;
+    }
+    return false;
+}
+
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
     if (need_fill_fake_stream_) {
@@ -579,7 +613,44 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
 
-    evaluateAndUpdateStreams(running_streams_);
+    // LOADING_CACHE -> DONE/WAITING: error / load cache done
+    const size_t waiting_size_before_cache_update = waiting_streams_.size();
+    // A running explicit group owns the current execution boundary. Keep
+    // ordinary cache completions in LOADING_CACHE until that group drains.
+    if (running_streams_.empty() || active_admission_lane_ != AdmissionLane::GROUP) {
+        evaluateAndUpdateStreams(loading_cache_streams_);
+    }
+    const bool has_requeued_prefill_stream =
+        waiting_streams_.size() > waiting_size_before_cache_update
+        && std::any_of(waiting_streams_.begin(), waiting_streams_.end(), [](const auto& stream) {
+               return stream->hasEvent(StreamEvents::CanRun) && stream->hasEvent(StreamEvents::LoadInitiated)
+                      && stream->chunkedPrefillEnabled() && stream->isContextStream();
+           });
+    // Release terminal deferred streams before any decode KV growth in this round.
+    refreshAndReapTerminalStreams(pending_decode_streams_);
+    if (has_requeued_prefill_stream) {
+        // Do not advance a live final-prefill stream until load-done context streams rejoin.
+        // Park decode-ready rows now so the requeued context stream can own this prefill round.
+        refreshAndReapTerminalStreams(running_streams_);
+        for (auto it = running_streams_.begin(); it != running_streams_.end();) {
+            if (!(*it)->isContextStream()) {
+                auto current = it++;
+                pending_decode_streams_.splice(pending_decode_streams_.end(), running_streams_, current);
+            } else {
+                ++it;
+            }
+        }
+    } else {
+        if (prefill_chunk_size_ > 0) {
+            // Park live final-prefill streams before advancing RUNNING state. If no context remains,
+            // deferred streams are restored and the following evaluation allocates their decode KV.
+            partitionChunkContinuations();
+        }
+        // RUNNING -> DONE: error / finished
+        evaluateAndUpdateStreams(running_streams_);
+    }
+
+    const size_t waiting_size_before_admission = waiting_streams_.size();
 
     if (running_streams_.empty()) {
         active_admission_lane_ = AdmissionLane::NONE;
@@ -674,6 +745,33 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
     new_streams_.clear();
 
+    // If streams were scheduled, trigger next scheduling round
+    if (waiting_streams_.size() < waiting_size_before_admission) {
+        schedule_trigger_ = true;
+    }
+
+    if (has_requeued_prefill_stream) {
+        // Partition after load-done streams rejoin so final-prefill streams cannot grow decode KV
+        // or hide context streams behind a decode row.
+        partitionChunkContinuations();
+        if (!running_streams_.empty() && !running_streams_.front()->isContextStream()) {
+            evaluateAndUpdateStreams(running_streams_);
+        }
+    }
+
+    if (prefill_chunk_size_ > 0 && !running_streams_.empty() && running_streams_.front()->isContextStream()) {
+        auto prefill_batch = selectPrefillPrefix(running_streams_);
+        if (!prefill_batch.empty()) {
+            reportMetrics();
+            last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
+            return prefill_batch;
+        }
+        // All context candidates were terminal/invalid. Restore any deferred decode work now.
+        if (partitionChunkContinuations()) {
+            evaluateAndUpdateStreams(running_streams_);
+        }
+    }
+
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
     return running_streams_;
@@ -688,23 +786,9 @@ std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::waitingTaskList() {
     std::lock_guard<mutex> lock(lock_);
     waiting_task_list_.clear();
     waiting_task_list_.reserve(waiting_streams_.size() + groupQueueStreamsSize(waiting_group_queue_));
-    for (const auto& stream : waiting_streams_) {
-        EngineScheduleInfo::TaskInfo task_info;
-        task_info.request_id    = stream->streamId();
-        task_info.prefix_length = stream->prefixLength();
-        task_info.input_length  = stream->inputLength();
-        task_info.batch_id      = stream->groupId();
-        waiting_task_list_.push_back(task_info);
-    }
+    appendTaskInfos(waiting_task_list_, waiting_streams_);
     for (const auto& group : waiting_group_queue_) {
-        for (const auto& stream : group) {
-            EngineScheduleInfo::TaskInfo task_info;
-            task_info.request_id    = stream->streamId();
-            task_info.prefix_length = stream->prefixLength();
-            task_info.input_length  = stream->inputLength();
-            task_info.batch_id      = stream->groupId();
-            waiting_task_list_.push_back(task_info);
-        }
+        appendTaskInfos(waiting_task_list_, group);
     }
     return waiting_task_list_;
 }
