@@ -37,6 +37,7 @@ filegroup(
         ],
         "@//:rocm_gfx950": [
             ":aiter_copy",
+            ":aiter_copy_moe_ck2stages",
             ":deep_ep_rocm_copy",
         ],
         "@//:using_rocm": [
@@ -185,7 +186,16 @@ genrule(
         cp external/aiter/aiter/jit/module_gemm_a8w8_blockscale.so $(location module_gemm_a8w8_blockscale.so);
         cp external/aiter/aiter/jit/module_quant.so $(location module_quant.so);
         cp external/aiter/aiter/jit/module_smoothquant.so $(location module_smoothquant.so);
-        cp external/aiter/aiter/jit/module_pa.so $(location module_pa.so);
+        if [[ -f external/aiter/aiter/jit/module_pa.so ]]; then
+            cp external/aiter/aiter/jit/module_pa.so $(location module_pa.so);
+        elif [[ "$${GPU_ARCHS:-}" == *gfx950* ]]; then
+            # The gfx950 wheel uses module_attention_asm and has no module_pa.
+            # Keep the declared output valid without weakening other ROCm builds.
+            echo "void rtp_llm_unused_module_pa() {}" | gcc -shared -fPIC -x c - -o $(location module_pa.so);
+        else
+            echo "AITER wheel is missing required module_pa.so for GPU_ARCHS=$${GPU_ARCHS:-unknown}" >&2;
+            exit 1;
+        fi;
         cp external/aiter/aiter/jit/module_activation.so $(location module_activation.so);
         cp external/aiter/aiter/jit/module_attention_asm.so $(location module_attention_asm.so);
         cp external/aiter/aiter/jit/module_mha_fwd.so $(location module_mha_fwd.so);
@@ -209,7 +219,18 @@ genrule(
     name = "aiter_copy_moe_ck2stages",
     srcs = ["@aiter//:aiter_so"],
     outs = ["module_moe_ck2stages.so"],
-    cmd = "cp external/aiter/aiter/jit/module_moe_ck2stages.so $(location module_moe_ck2stages.so)",
+    cmd = """
+        if [[ -f external/aiter/aiter/jit/module_moe_ck2stages.so ]]; then
+            cp external/aiter/aiter/jit/module_moe_ck2stages.so $(location module_moe_ck2stages.so);
+        elif [[ "$${GPU_ARCHS:-}" == *gfx950* ]]; then
+            # gfx950 uses other MoE implementations, but some RTP-LLM shared
+            # libraries retain a DT_NEEDED entry for this optional AITER DSO.
+            echo "void rtp_llm_unused_module_moe_ck2stages() {}" | gcc -shared -fPIC -x c - -o $(location module_moe_ck2stages.so);
+        else
+            echo "AITER wheel is missing required module_moe_ck2stages.so for GPU_ARCHS=$${GPU_ARCHS:-unknown}" >&2;
+            exit 1;
+        fi
+    """,
     tags = [
         "local",
         "rocm",
