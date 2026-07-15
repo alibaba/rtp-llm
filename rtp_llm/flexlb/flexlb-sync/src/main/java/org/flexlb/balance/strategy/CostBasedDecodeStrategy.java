@@ -181,59 +181,48 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
     }
 
     private DecodeEndpoint weightedRandomSelection(List<DecodeEndpoint> candidateEndpoints) {
-        int workerCount = candidateEndpoints.size();
-        if (workerCount == 0) {
+        if (candidateEndpoints.isEmpty()) {
             return null;
         }
 
+        int workerCount = candidateEndpoints.size();
         long totalCacheUsed = 0;
         for (DecodeEndpoint ep : candidateEndpoints) {
             totalCacheUsed += ep.realKvUsed();
         }
         double avgCacheUsed = (double) totalCacheUsed / workerCount;
-
         List<WeightedWorker> weightedEndpoints = new ArrayList<>();
         boolean allSameUsage = true;
         double totalWeight = 0;
         Long firstCacheUsed = null;
-
         for (DecodeEndpoint ep : candidateEndpoints) {
             long cacheUsed = ep.realKvUsed();
             double normalizedValue = cacheUsed - avgCacheUsed;
-
             if (firstCacheUsed == null) {
                 firstCacheUsed = cacheUsed;
             } else if (cacheUsed != firstCacheUsed) {
                 allSameUsage = false;
             }
-
             double weight = Math.exp(-decayFactor * normalizedValue);
-
             weightedEndpoints.add(new WeightedWorker(ep, (long) normalizedValue, weight));
             totalWeight += weight;
         }
-
         if (totalWeight <= 0) {
-            Logger.warn("Total weight is zero or negative: {}, using uniform random selection", totalWeight);
             int randomIndex = ThreadLocalRandom.current().nextInt(workerCount);
             return candidateEndpoints.get(randomIndex);
         }
-
         if (allSameUsage) {
-            int randomIndex = ThreadLocalRandom.current().nextInt(workerCount);
+            int randomIndex = ThreadLocalRandom.current().nextInt(candidateEndpoints.size());
             return candidateEndpoints.get(randomIndex);
         }
-
         double randomValue = ThreadLocalRandom.current().nextDouble() * totalWeight;
         double cumulativeWeight = 0;
-
         for (WeightedWorker weightedEndpoint : weightedEndpoints) {
             cumulativeWeight += weightedEndpoint.weight;
             if (Double.compare(randomValue, cumulativeWeight) <= 0) {
                 return weightedEndpoint.endpoint;
             }
         }
-
         return weightedEndpoints.stream()
                 .min(Comparator.comparingLong(w -> w.endpoint.realKvUsed()))
                 .map(w -> w.endpoint)
@@ -243,19 +232,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
     private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen, long prefixLength, RoleType roleType, long requestId, ScheduleModeEnum scheduleMode) {
         ServerStatus result = new ServerStatus();
         try {
-            // Skip KV reservation for DIRECT and QUEUE paths.
-            //
-            // These paths do not track request lifecycle after routing succeeds:
-            //   - DIRECT: Master returns the response immediately, no inflight tracking.
-            //   - QUEUE:  RequestScheduler completes the future after routing, no release() on success/cancel.
-            //
-            // Reserved KV would only be cleaned by calibrate (~20ms cycle) or TTL eviction (300s).
-            // When the engine is overloaded and calibrate stalls, reservations pile up and drive
-            // available KV to zero, causing NO_AVAILABLE_WORKER cascade failures.
-            // The engine's own KV admission control serves as backstop.
-            //
-            // BATCH path keeps reserve because FlexlbBatchScheduler tracks lifecycle and calls
-            // de.release() on cancel/failure/expiry.
+            // DIRECT/QUEUE: no lifecycle tracking after routing — skip reserve entirely.
             boolean skipReserve = scheduleMode == ScheduleModeEnum.DIRECT
                     || scheduleMode == ScheduleModeEnum.QUEUE;
             if (!skipReserve) {

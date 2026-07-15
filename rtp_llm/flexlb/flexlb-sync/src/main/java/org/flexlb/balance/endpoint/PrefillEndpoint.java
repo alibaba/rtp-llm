@@ -84,7 +84,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     public long batcherWaitMs() {
-        return batcher.queueWaitMs();
+        return batcher.headWaitMs();
     }
 
     private static PrefillTimePredictor createPredictor(FlexlbConfig cfg) {

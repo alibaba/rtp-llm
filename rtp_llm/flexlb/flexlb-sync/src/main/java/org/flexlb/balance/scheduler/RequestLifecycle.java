@@ -40,6 +40,7 @@ final class RequestLifecycle {
     private long updatedAtMs;
     private String detail = "queued";
     private long batchId;
+    private long dispatchedAtMs;
 
     RequestLifecycle(long requestId) {
         this.requestId = requestId;
@@ -58,6 +59,21 @@ final class RequestLifecycle {
             batchId = assignedBatchId;
         }
         transition(RequestLifecycleState.DISPATCHING, "dispatch started");
+    }
+
+    /**
+     * Record the timestamp when the request is dispatched to the engine via gRPC.
+     * Used together with {@link #getDispatchedAtMs()} to compute dispatch-to-ACK latency.
+     */
+    synchronized void markDispatched() {
+        dispatchedAtMs = System.currentTimeMillis();
+    }
+
+    /**
+     * @return the dispatch timestamp set by {@link #markDispatched()}, or 0 if not yet dispatched.
+     */
+    synchronized long getDispatchedAtMs() {
+        return dispatchedAtMs;
     }
 
     synchronized RequestLifecycleSnapshot acknowledge() {

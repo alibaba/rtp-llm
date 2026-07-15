@@ -97,7 +97,7 @@ public abstract class WorkerEndpoint {
 
     /**
      * EP-authoritative local task count, replacing raw gRPC fields.
-     * @deprecated No longer reported after ENGINE_LOCAL_TASK_MAP_SIZE removal.
+     * @deprecated No longer reported after the former per-engine local inflight size metric removal.
      *             Retained for potential future use.
      */
     @Deprecated
