@@ -1,6 +1,6 @@
 {
     "model_type": "qwen35_moe",
-    "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+    "model_path": "/mnt/data2/ckpt/Qwen3.5-35B-A3B",
     "query_result": [
         {
             "query": {

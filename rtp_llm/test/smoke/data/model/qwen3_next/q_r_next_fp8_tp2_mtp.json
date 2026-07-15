@@ -1,6 +1,6 @@
 {
     "model_type": "qwen35_moe",
-    "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+    "model_path": "/mnt/data2/ckpt/Qwen3.5-35B-A3B",
     "query_result": [
         {
             "endpoint": "/v1/chat/completions",
@@ -11,11 +11,13 @@
                         "content": "$prompt:s2"
                     }
                 ],
-                "max_tokens": 100,
+                "max_tokens": 8,
                 "temperature": 0.0,
                 "top_p": 0,
-                "top_k": 1,
-                "random_seed": 42
+                "seed": 42,
+                "extra_configs": {
+                    "top_k": 1
+                }
             },
             "result": {
                 "id": "chat-",
@@ -27,53 +29,21 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "Here's a thinking process that leads to the suggested questions about English listening methods:\n\n1.  **Analyze the Request:**\n    *   **Topic:** English Listening Methods (英语听力方法).\n    *   **Task:** Propose several questions (提出几个问题).\n    *   **Language:** The user asked in Chinese, so the output should be in Chinese (with English terms where appropriate for clarity).\n    *   **Goal:** The questions should be thought-prov",
-                            "reasoning_content": null,
-                            "function_call": null,
-                            "tool_calls": null,
-                            "partial": false,
-                            "tool_call_id": null
+                            "content": "Here's a thinking process that leads to",
+                            "partial": false
                         },
-                        "finish_reason": "length",
-                        "logprobs": null
+                        "finish_reason": "length"
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 18,
-                    "total_tokens": 118,
-                    "completion_tokens": 100,
+                    "total_tokens": 26,
+                    "completion_tokens": 8,
                     "completion_tokens_details": null,
                     "prompt_tokens_details": null
                 },
                 "debug_info": null,
-                "aux_info": {
-                    "cost_time": 3143.197,
-                    "iter_count": 25,
-                    "prefix_len": 0,
-                    "input_len": 18,
-                    "output_len": 100,
-                    "step_output_len": 100,
-                    "first_token_cost_time": 264.576,
-                    "wait_time": 0.0,
-                    "pd_sep": false,
-                    "cum_log_probs": [],
-                    "beam_responses": [],
-                    "softmax_probs": [],
-                    "reuse_len": 0,
-                    "local_reuse_len": 0,
-                    "remote_reuse_len": 0,
-                    "memory_reuse_len": 0,
-                    "prefill_total_reuse_len": 0,
-                    "prefill_local_reuse_len": 0,
-                    "prefill_remote_reuse_len": 0,
-                    "prefill_memory_reuse_len": 0,
-                    "decode_total_reuse_len": 0,
-                    "decode_local_reuse_len": 0,
-                    "decode_remote_reuse_len": 0,
-                    "decode_memory_reuse_len": 0,
-                    "role_addrs": [],
-                    "aux_string": ""
-                },
+                "aux_info": null,
                 "extra_outputs": null
             }
         },
@@ -86,11 +56,13 @@
                         "content": "$prompt:l2"
                     }
                 ],
-                "max_tokens": 20,
+                "max_tokens": 8,
                 "temperature": 0.0,
                 "top_p": 0,
-                "top_k": 1,
-                "random_seed": 42
+                "seed": 42,
+                "extra_configs": {
+                    "top_k": 1
+                }
             },
             "result": {
                 "id": "chat-",
@@ -102,53 +74,21 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "Here's a thinking process that leads to the suggested revisions:\n\n1.  **Analyze the",
-                            "reasoning_content": null,
-                            "function_call": null,
-                            "tool_calls": null,
-                            "partial": false,
-                            "tool_call_id": null
+                            "content": "Here's a thinking process that leads to",
+                            "partial": false
                         },
-                        "finish_reason": "length",
-                        "logprobs": null
+                        "finish_reason": "length"
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 467,
-                    "total_tokens": 487,
-                    "completion_tokens": 20,
+                    "total_tokens": 475,
+                    "completion_tokens": 8,
                     "completion_tokens_details": null,
                     "prompt_tokens_details": null
                 },
                 "debug_info": null,
-                "aux_info": {
-                    "cost_time": 684.577,
-                    "iter_count": 5,
-                    "prefix_len": 0,
-                    "input_len": 467,
-                    "output_len": 20,
-                    "step_output_len": 20,
-                    "first_token_cost_time": 243.41,
-                    "wait_time": 0.0,
-                    "pd_sep": false,
-                    "cum_log_probs": [],
-                    "beam_responses": [],
-                    "softmax_probs": [],
-                    "reuse_len": 0,
-                    "local_reuse_len": 0,
-                    "remote_reuse_len": 0,
-                    "memory_reuse_len": 0,
-                    "prefill_total_reuse_len": 0,
-                    "prefill_local_reuse_len": 0,
-                    "prefill_remote_reuse_len": 0,
-                    "prefill_memory_reuse_len": 0,
-                    "decode_total_reuse_len": 0,
-                    "decode_local_reuse_len": 0,
-                    "decode_remote_reuse_len": 0,
-                    "decode_memory_reuse_len": 0,
-                    "role_addrs": [],
-                    "aux_string": ""
-                },
+                "aux_info": null,
                 "extra_outputs": null
             }
         },
@@ -169,36 +109,16 @@
                 "_prompt_source": "chat-template wrapping $prompt:l2"
             },
             "result": {
-                "response": "<think>\nHere's a thinking process that leads to the suggested revisions:\n\n1.  **An",
-                "response_alternatives": null,
+                "response": "<think>\nHere's a thinking process that leads to the suggested revision of the user's prompt:\n\n",
+                "response_alternatives": [
+                    "<think>\nHere's a thinking process that leads to the suggested revision of the user's text:\n\n"
+                ],
                 "hidden_states": null,
                 "logits": null,
                 "loss": null,
                 "input_ids": null,
                 "output_ids": null,
-                "aux_info": {
-                    "input_len": 465,
-                    "prefix_len": 0,
-                    "reuse_len": 0,
-                    "local_reuse_len": 0,
-                    "remote_reuse_len": 0,
-                    "memory_reuse_len": 0,
-                    "prefill_total_reuse_len": 0,
-                    "prefill_local_reuse_len": 0,
-                    "prefill_remote_reuse_len": 0,
-                    "prefill_memory_reuse_len": 0,
-                    "decode_total_reuse_len": 0,
-                    "decode_local_reuse_len": 0,
-                    "decode_remote_reuse_len": 0,
-                    "decode_memory_reuse_len": 0,
-                    "output_len": 20,
-                    "step_output_len": 20,
-                    "iter_count": 6,
-                    "cum_log_probs": [],
-                    "beam_responses": [],
-                    "pd_sep": false,
-                    "softmax_probs": []
-                }
+                "aux_info": null
             }
         }
     ]
