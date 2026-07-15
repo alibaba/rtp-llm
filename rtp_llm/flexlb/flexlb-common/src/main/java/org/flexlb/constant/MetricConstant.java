@@ -103,17 +103,23 @@ public class MetricConstant {
     public static final String BATCH_PREDICT_GAP_MS = "app.flexlb.batch.predict.gap.ms";
 
     /**
+     * Dispatch-to-ACK time (from gRPC dispatch to engine EnqueueBatch acknowledgment) in milliseconds.
+     * Reflects the latency of the engine accepting a batch into its queue.
+     */
+    public static final String DISPATCH_ACK_TIME_MS = "app.flexlb.dispatch.ack.time.ms";
+
+    /**
      * Engine running queue time (from EP authoritative value)
      */
     public static final String ENGINE_RUNNING_QUEUE_TIME = "app.engine.health.check.running.queue.time";
 
     /**
-     * FlexLB scheduler local task map size — the scheduler's own inflight task map size.
+     * FlexLB scheduler inflight size — the scheduler's own inflight request count.
      * <p>Reported by BatchSchedulerReporter using role=PREFILL + engineIp="scheduler" tags.
-     * Formerly kept as a separate name from the now-removed ENGINE_LOCAL_TASK_MAP_SIZE
+     * Formerly kept as a separate name from the now-removed per-engine local inflight size metric
      * to avoid tag schema conflict (per-engine vs scheduler-level).
      */
-    public static final String SCHEDULER_LOCAL_TASK_MAP_SIZE = "app.flexlb.scheduler.local.task.map.size";
+    public static final String SCHEDULER_INFLIGHT_SIZE = "app.flexlb.scheduler.inflight.size";
 
     /**
      * Engine finished task list size

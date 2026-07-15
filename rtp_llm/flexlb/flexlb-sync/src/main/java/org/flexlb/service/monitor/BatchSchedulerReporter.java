@@ -25,7 +25,6 @@ import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_T
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATCH_REASON;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_BATCH_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT;
-import static org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_PEAK;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
@@ -68,8 +67,6 @@ public class BatchSchedulerReporter {
         // Inflight — batch count and request count per worker (FlexLB scheduler view, tagged by role)
         monitor.register(INFLIGHT_BATCH_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(INFLIGHT_REQUEST_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        // Peak inflight request count since last report — captures transient spikes between snapshots
-        monitor.register(INFLIGHT_REQUEST_PEAK, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         // Scheduler-level inflight size — uses scheduler-level tags (role=PREFILL, engineIp="scheduler")
         // Note: the former per-engine app.engine.health.check.local.inflight.size has been removed.
         monitor.register(SCHEDULER_INFLIGHT_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -86,7 +83,7 @@ public class BatchSchedulerReporter {
         // Dispatch-to-ACK time — latency from gRPC dispatch to engine EnqueueBatch acknowledgment
         monitor.register(DISPATCH_ACK_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (15 metrics)");
+        log.info("BatchSchedulerReporter initialized (14 metrics)");
     }
 
     // ==================== Queue metrics ====================
@@ -205,17 +202,6 @@ public class BatchSchedulerReporter {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
                 "role", role);
         monitor.report(INFLIGHT_REQUEST_COUNT, tags, count);
-    }
-
-    /**
-     * Report the peak inflight request count since the last report cycle.
-     * <p>Tracks the maximum inflight request count observed between two
-     * periodic snapshots, then the caller resets it to zero.
-     */
-    public void reportInflightRequestPeak(String role, String engineIp, String engineIpPort, long peakCount) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
-                "role", role);
-        monitor.report(INFLIGHT_REQUEST_PEAK, tags, peakCount);
     }
 
     // ==================== Decode inflight metrics ====================

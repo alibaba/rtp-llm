@@ -24,7 +24,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
@@ -38,12 +37,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private volatile WorkerBatcher batcher;
     private final InflightEvictor<Long, BatchInflight> batchEvictor;
     private final BatchSchedulerReporter reporter;
-
-    /**
-     * Tracks the peak inflight request count between two metric reports.
-     * Updated on every commitBatch, reset after each reportBatchMetrics call.
-     */
-    private final AtomicLong peakInflightSinceReport = new AtomicLong(0);
 
     /**
      * Engine-reported waiting queue length from the latest WorkerStatus update.
@@ -103,7 +96,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     public void commitBatch(long batchId, long predictMs, List<BatchItem> requests) {
         inflightBatches.put(batchId, new BatchInflight(batchId, predictMs, requests));
-        peakInflightSinceReport.accumulateAndGet(getInflightRequestCount(), Math::max);
         refreshEstimatedWaitingTime();
     }
 
@@ -377,7 +369,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
         reporter.reportBatcherQueueDepth(RoleType.PREFILL.name(), getIp(), ipPort(), getBatcherQueueSize());
         reporter.reportInflightBatchCount(RoleType.PREFILL.name(), getIp(), ipPort(), getInflightBatchCount());
         reporter.reportInflightRequestCount(RoleType.PREFILL.name(), getIp(), ipPort(), getInflightRequestCount());
-        reporter.reportInflightRequestPeak(RoleType.PREFILL.name(), getIp(), ipPort(), peakInflightSinceReport.getAndSet(0));
     }
 
     /**
