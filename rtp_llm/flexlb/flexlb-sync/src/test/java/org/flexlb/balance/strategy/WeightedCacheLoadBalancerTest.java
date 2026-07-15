@@ -11,6 +11,7 @@ import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -21,6 +22,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @Slf4j
@@ -114,6 +116,7 @@ class WeightedCacheLoadBalancerTest {
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertNotNull(status.getServerIp());
+        Assertions.assertEquals("LOCAL", balanceContext.getCacheMatchSource());
     }
 
     @Test
@@ -189,6 +192,47 @@ class WeightedCacheLoadBalancerTest {
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertEquals("127.0.0.1", status.getServerIp());
+    }
+
+    @Test
+    void should_record_selected_worker_kvcm_hit_in_context() {
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
+        WorkerStatus worker = createWorkerStatus("127.0.0.1");
+        CacheStatus cacheStatus = new CacheStatus();
+        cacheStatus.setBlockSize(256);
+        worker.setCacheStatus(cacheStatus);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap()
+                .put("127.0.0.1:8080", worker);
+
+        Mockito.when(cacheAwareService.findMatchingEngines(
+                        Mockito.anyList(), Mockito.eq(RoleType.DECODE), Mockito.isNull()))
+                .thenReturn(new CacheMatchResult(
+                        Map.of("127.0.0.1:8080", 4), CacheMatchSource.KVCM, 321));
+
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
+        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
+        WeightedCacheLoadBalancer loadBalancer = new WeightedCacheLoadBalancer(
+                configService, engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
+
+        Request request = new Request();
+        request.setRequestId("request-kvcm");
+        request.setSeqLen(2048);
+        request.setBlockCacheKeys(List.of(1L));
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setConfig(configService.loadBalanceConfig());
+
+        ServerStatus status = loadBalancer.select(context, RoleType.DECODE, null);
+
+        Assertions.assertTrue(status.isSuccess());
+        Assertions.assertEquals("KVCM", context.getCacheMatchSource());
+        Assertions.assertEquals(321, context.getCacheMatchQueryTimeUs());
+        BalanceContext.CacheMatchSelection selection =
+                context.getCacheMatchSelectionByRole().get(RoleType.DECODE);
+        Assertions.assertEquals("127.0.0.1", selection.selectedIp());
+        Assertions.assertEquals(1024, selection.hitCacheTokens());
     }
 
     @Test

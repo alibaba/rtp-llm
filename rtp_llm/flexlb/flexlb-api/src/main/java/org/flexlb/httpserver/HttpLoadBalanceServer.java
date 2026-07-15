@@ -349,6 +349,7 @@ public class HttpLoadBalanceServer {
      * @param ctx the balance context to finalize
      */
     private void finalizeRequestContext(BalanceContext ctx) {
+        ctx.finishRequestTiming();
         engineHealthReporter.reportBalancingService(ctx);
         logPvRecord(ctx);
     }

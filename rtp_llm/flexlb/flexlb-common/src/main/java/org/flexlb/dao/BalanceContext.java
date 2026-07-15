@@ -5,7 +5,10 @@ import lombok.ToString;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.route.RoleType;
 
+import java.util.EnumMap;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -39,6 +42,10 @@ public class BalanceContext {
 
     private long startTime = System.currentTimeMillis();
 
+    private final long startTimeNs = System.nanoTime();
+
+    private long totalTimeUs;
+
     private long enqueueTime;
 
     private long dequeueTime;
@@ -53,9 +60,13 @@ public class BalanceContext {
 
     private long blockHashExecutionTimeUs;
 
-    private long kvcmQueryTimeUs;
+    private long cacheMatchQueryTimeUs;
 
-    private int kvcmQueryCount;
+    private int cacheMatchQueryCount;
+
+    private String cacheMatchSource;
+
+    private final Map<RoleType, CacheMatchSelection> cacheMatchSelectionByRole = new EnumMap<>(RoleType.class);
 
     private boolean success = true;
 
@@ -103,13 +114,28 @@ public class BalanceContext {
         this.requestBodyReadAndDeserializeTimeUs = bodyReadAndDeserializeTimeUs;
     }
 
+    public void finishRequestTiming() {
+        this.totalTimeUs = (System.nanoTime() - startTimeNs) / 1_000;
+    }
+
     public void recordBlockHashTiming(long queueWaitTimeUs, long executionTimeUs) {
         this.blockHashQueueWaitTimeUs = queueWaitTimeUs;
         this.blockHashExecutionTimeUs = executionTimeUs;
     }
 
-    public void recordKvcmQuery(long queryTimeUs) {
-        this.kvcmQueryTimeUs += queryTimeUs;
-        this.kvcmQueryCount++;
+    public void recordCacheMatch(
+            String source,
+            long queryTimeUs,
+            RoleType role,
+            String selectedIp,
+            long hitCacheTokens) {
+        this.cacheMatchSource = source;
+        this.cacheMatchQueryTimeUs += queryTimeUs;
+        this.cacheMatchQueryCount++;
+        this.cacheMatchSelectionByRole.put(
+                role, new CacheMatchSelection(role, selectedIp, hitCacheTokens));
+    }
+
+    public record CacheMatchSelection(RoleType role, String selectedIp, long hitCacheTokens) {
     }
 }

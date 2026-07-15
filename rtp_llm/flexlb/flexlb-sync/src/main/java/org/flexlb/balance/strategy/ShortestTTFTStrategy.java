@@ -6,7 +6,6 @@ import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.CacheMatchResult;
-import org.flexlb.cache.service.CacheMatchSource;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -123,15 +122,23 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         }
 
         // Calculate cache match results for each engine
-        Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
+        CacheMatchResult cacheMatchResult = cacheAwareService.findMatchingEngines(
+                balanceContext.getRequest().getBlockCacheKeys(), roleType, group);
 
-        List<ScoredWorker> scoredWorkers = scoreWorkers(availableWorkers, cacheMatchResults, seqLen);
+        List<ScoredWorker> scoredWorkers = scoreWorkers(availableWorkers, cacheMatchResult.matches(), seqLen);
 
         ScoredWorker bestWorker = selectBestWorker(scoredWorkers);
         if (bestWorker == null) {
             Logger.warn("Failed to find best worker for role: {}", roleType);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
+
+        balanceContext.recordCacheMatch(
+                cacheMatchResult.source().name(),
+                cacheMatchResult.queryTimeUs(),
+                roleType,
+                bestWorker.worker().getIp(),
+                bestWorker.hitCacheTokens());
 
         return finalizeWorkerSelection(bestWorker, balanceContext, roleType, requestId, seqLen);
     }
@@ -161,25 +168,6 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 .filter(WorkerStatus::isAlive)
                 .filter(resourceMeasure::isResourceAvailable)
                 .toList();
-    }
-
-    /**
-     * Get cache match results
-     *
-     * @param balanceContext Load balancing context
-     * @param roleType Worker role type
-     * @param group Worker group
-     * @return Cache match results: key: engineIpPort, value: prefixMatchLength
-     */
-    private Map<String /*engineIpPort*/, Integer /*prefixMatchLength*/> getCacheMatchResults(BalanceContext balanceContext,
-                                                                                             RoleType roleType,
-                                                                                             String group) {
-        List<Long> blockCacheKeys = balanceContext.getRequest().getBlockCacheKeys();
-        CacheMatchResult result = cacheAwareService.findMatchingEngines(blockCacheKeys, roleType, group);
-        if (result.source() == CacheMatchSource.KVCM) {
-            balanceContext.recordKvcmQuery(result.queryTimeUs());
-        }
-        return result.matches();
     }
 
     /**

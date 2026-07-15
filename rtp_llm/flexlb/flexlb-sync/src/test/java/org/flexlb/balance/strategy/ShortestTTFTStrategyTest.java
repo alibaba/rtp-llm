@@ -69,7 +69,8 @@ class ShortestTTFTStrategyTest {
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
         Mockito.when(cacheAwareService.findMatchingEngines(Mockito.anyList(), Mockito.any(), Mockito.any()))
-                .thenReturn(new CacheMatchResult(new HashMap<>(), CacheMatchSource.KVCM, 123));
+                .thenReturn(new CacheMatchResult(
+                        Map.of("127.0.0.2:8080", 3), CacheMatchSource.KVCM, 123));
 
         ShortestTTFTStrategy staticCacheLoadBalancer =
                 new ShortestTTFTStrategy(engineWorkerStatus, engineHealthReporter, cacheAwareService, resourceMeasureFactory);
@@ -84,8 +85,13 @@ class ShortestTTFTStrategyTest {
         Assertions.assertTrue(result.isSuccess(), "Result should be successful but got: " + result.getMessage());
         Assertions.assertEquals("127.0.0.2", result.getServerIp());
         Assertions.assertEquals("request-12345", result.getRequestId());
-        Assertions.assertEquals(123, balanceContext.getKvcmQueryTimeUs());
-        Assertions.assertEquals(1, balanceContext.getKvcmQueryCount());
+        Assertions.assertEquals("KVCM", balanceContext.getCacheMatchSource());
+        Assertions.assertEquals(123, balanceContext.getCacheMatchQueryTimeUs());
+        Assertions.assertEquals(1, balanceContext.getCacheMatchQueryCount());
+        BalanceContext.CacheMatchSelection selection =
+                balanceContext.getCacheMatchSelectionByRole().get(RoleType.PREFILL);
+        Assertions.assertEquals("127.0.0.2", selection.selectedIp());
+        Assertions.assertEquals(768, selection.hitCacheTokens());
     }
 
     WorkerStatus createWorkerStatus(String ip,

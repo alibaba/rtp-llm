@@ -6,7 +6,6 @@ import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.CacheMatchResult;
-import org.flexlb.cache.service.CacheMatchSource;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -89,10 +88,13 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         if (selectedWorker != null) {
             CacheMatchResult cacheMatchResult = cacheAwareService.findMatchingEngines(
                     balanceContext.getRequest().getBlockCacheKeys(), roleType, group);
-            if (cacheMatchResult.source() == CacheMatchSource.KVCM) {
-                balanceContext.recordKvcmQuery(cacheMatchResult.queryTimeUs());
-            }
             long prefixLength = calcPrefixMatchLength(selectedWorker, cacheMatchResult.matches());
+            balanceContext.recordCacheMatch(
+                    cacheMatchResult.source().name(),
+                    cacheMatchResult.queryTimeUs(),
+                    roleType,
+                    selectedWorker.getIp(),
+                    prefixLength);
             // Update local task state
             return buildServerStatus(selectedWorker, seqLen, prefixLength, roleType, balanceContext.getRequestId());
         }
