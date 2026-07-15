@@ -5,7 +5,6 @@
 #include <cassert>
 #include <functional>
 #include <mutex>
-#include <shared_mutex>
 #include <type_traits>
 #include <unordered_map>
 
@@ -602,11 +601,15 @@ void calc_launch_parameter_by_occupancy(IdxT k, int* block_size, int* min_grid_s
     // Cache occupancy-derived launch parameters per k. The occupancy API is expensive
     // and the result only depends on k for a given template instantiation.
     // Protected by a mutex because this function can be called concurrently from
-    // multiple host threads.
-    static std::shared_mutex cache_mutex;
+    // multiple host threads. Uses std::mutex (not std::shared_mutex): the ROCm
+    // clang bundled with ROCm 7.2 cannot parse gcc-toolset-12's <shared_mutex>
+    // (unqualified `chrono` in try_lock_until) when this host-side header is
+    // pulled into a HIP translation unit. The occupancy cache is looked up rarely
+    // so an exclusive lock on the read path is negligible.
+    static std::mutex cache_mutex;
     static std::unordered_map<IdxT, std::pair<int, int>> occupancy_cache;
     {
-        std::shared_lock<std::shared_mutex> lock(cache_mutex);
+        std::lock_guard<std::mutex> lock(cache_mutex);
         auto it = occupancy_cache.find(k);
         if (it != occupancy_cache.end()) {
             *block_size    = it->second.first;
@@ -621,7 +624,7 @@ void calc_launch_parameter_by_occupancy(IdxT k, int* block_size, int* min_grid_s
     };
     HIP_CHECK(hipOccupancyMaxPotentialBlockSizeVariableSMem(min_grid_size, block_size, func, calc_smem));
     {
-        std::unique_lock<std::shared_mutex> lock(cache_mutex);
+        std::lock_guard<std::mutex> lock(cache_mutex);
         occupancy_cache.emplace(k, std::make_pair(*block_size, *min_grid_size));
     }
 }
