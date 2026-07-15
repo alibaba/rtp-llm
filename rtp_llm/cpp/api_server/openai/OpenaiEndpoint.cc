@@ -1,3 +1,5 @@
+#include <stdexcept>
+
 #include "autil/StringUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/api_server/openai/OpenaiEndpoint.h"
@@ -74,9 +76,30 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
     config.stop_words_str.insert(config.stop_words_str.begin(), stop_words_list_.begin(), stop_words_list_.end());
     config.stop_words_list.insert(
         config.stop_words_list.begin(), stop_word_ids_list_.begin(), stop_word_ids_list_.end());
-    auto request_stop_words_list_ids = chat_render_->tokenize_words(request_stop_words_list);
-    config.stop_words_list.insert(
-        config.stop_words_list.begin(), request_stop_words_list_ids.begin(), request_stop_words_list_ids.end());
+    if (!request_stop_words_list.empty()) {
+        std::vector<std::vector<int>> request_stop_words_list_ids;
+        if (chat_render_) {
+            request_stop_words_list_ids = chat_render_->tokenize_words(request_stop_words_list);
+        } else if (tokenizer_) {
+            // No renderer available: fall back to the tokenizer for an equivalent
+            // token-id encoding so the request-level stop constraint still applies
+            // instead of being silently dropped.
+            request_stop_words_list_ids.reserve(request_stop_words_list.size());
+            for (const auto& word : request_stop_words_list) {
+                request_stop_words_list_ids.push_back(tokenizer_->encode(word));
+            }
+        } else {
+            // Neither renderer nor tokenizer can encode stop words; fail fast so the
+            // caller learns the constraint was rejected rather than silently ignored.
+            // std::runtime_error (not HttpApiServerException) avoids a cross-layer
+            // dependency from this low-level library; HttpApiServer maps it to an error.
+            throw std::runtime_error(
+                "request stop words provided but both chat_render and tokenizer are null; "
+                "cannot tokenize stop words");
+        }
+        config.stop_words_list.insert(
+            config.stop_words_list.begin(), request_stop_words_list_ids.begin(), request_stop_words_list_ids.end());
+    }
     // if (req.chat_id.has_value()) {
     //     config.chat_id = req.chat_id.value();
     // }
@@ -91,10 +114,17 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
     }
     config.addSpecialTokens(model_config_.special_tokens);
 
-    auto select_tokens_id = tokenizer_->convertSelectTokens(config.select_tokens_str, model_config_.vocab_size);
-    config.select_tokens_id.insert(config.select_tokens_id.begin(), select_tokens_id.begin(), select_tokens_id.end());
-    if (config.sp_advice_prompt.empty() == false) {
-        config.sp_advice_prompt_token_ids = tokenizer_->encode(config.sp_advice_prompt);
+    if (tokenizer_) {
+        auto select_tokens_id = tokenizer_->convertSelectTokens(config.select_tokens_str, model_config_.vocab_size);
+        config.select_tokens_id.insert(config.select_tokens_id.begin(), select_tokens_id.begin(), select_tokens_id.end());
+        if (config.sp_advice_prompt.empty() == false) {
+            config.sp_advice_prompt_token_ids = tokenizer_->encode(config.sp_advice_prompt);
+        }
+    } else if (config.select_tokens_str.empty() == false || config.sp_advice_prompt.empty() == false) {
+        // select_tokens / sp_advice_prompt require token ids and have no non-tokenizer
+        // equivalent; fail fast rather than silently dropping the constraint.
+        throw std::runtime_error(
+            "select_tokens/sp_advice_prompt provided but tokenizer is null; cannot encode");
     }
     return std::make_shared<GenerateConfig>(config);
 }
@@ -108,22 +138,24 @@ std::string OpenaiEndpoint::getDebugInfo(const ChatCompletionRequest& chat_reque
     });
 
     std::string prompt;
-    if (rendered_input.rendered_prompt.empty()) {
+    if (!rendered_input.rendered_prompt.empty()) {
+        prompt = rendered_input.rendered_prompt;
+    } else if (tokenizer_) {
         prompt = tokenizer_->decode(rendered_input.input_ids);
     } else {
-        prompt = rendered_input.rendered_prompt;
+        RTP_LLM_LOG_WARNING("tokenizer is null and rendered_prompt is empty, skip decoding prompt");
     }
 
     DebugInfo debug_info;
     debug_info.input_prompt       = prompt;
     debug_info.input_ids          = rendered_input.input_ids;
     debug_info.input_urls         = input_urls;
-    debug_info.tokenizer_info     = tokenizer_->toString();
+    debug_info.tokenizer_info     = tokenizer_ ? tokenizer_->toString() : "";
     debug_info.max_seq_len        = max_seq_len_;
     debug_info.eos_token_id       = eos_token_id_;
     debug_info.stop_word_ids_list = stop_word_ids_list_;
     debug_info.stop_words_list    = stop_words_list_;
-    debug_info.renderer_info      = chat_render_->toString();
+    debug_info.renderer_info      = chat_render_ ? chat_render_->toString() : "";
     debug_info.generate_config    = *(extract_generation_config(chat_request));
 
     return ToJsonString(debug_info, true);

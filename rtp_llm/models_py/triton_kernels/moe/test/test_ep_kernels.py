@@ -7,7 +7,7 @@ short batches before allgather:
 - out-of-range expert ids collapse to -1 the same way
 
 Run with bazel:
-    bazel test //rtp_llm/models_py/triton_kernels/moe/test:test_ep_kernels --config=cuda12
+    bazel test //rtp_llm/models_py/triton_kernels/moe/test:test_ep_kernels --config=cuda12_9
 """
 
 import unittest

@@ -34,7 +34,7 @@ _DEFAULT_VIDEO_PLACEHOLDER = "<|kimi_k25_video_placeholder|>"
 def _read_top_config(ckpt_path: str) -> Dict[str, Any]:
     config_path = os.path.join(ckpt_path, "config.json")
     if not os.path.exists(config_path):
-        return {}
+        raise FileNotFoundError(f"config.json not found in {ckpt_path}")
     with open(config_path, "r") as f:
         return json.load(f)
 

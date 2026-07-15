@@ -61,8 +61,13 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 ```bash
 # Install rtp-llm
 cd rtp-llm
-# For cuda12 environment, please use requirements_torch_gpu_cuda12.txt
-pip3 install -r ./deps/requirements_torch_gpu_cuda12.txt
+# For a cuda12_9 (CUDA 12.9) environment, install the lockfile: it pins exact
+# versions and hashes and carries the package indexes (aliyun PyPI mirror,
+# download.pytorch.org/whl/cu129, and the rtp-opensource OSS bucket) needed to
+# resolve torch/torchvision and the custom wheels in a clean environment. The
+# bare requirements_torch_gpu_cuda12_9.txt has no index directives and will not
+# resolve on its own.
+pip3 install -r ./deps/requirements_lock_torch_gpu_cuda12_9.txt
 # Use the corresponding whl from the release version, here's an example for the cuda11 version 0.1.0, for the cuda12 whl package please check the release page.
 pip3 install rtp_llm-0.1.9+cuda118-cp310-cp310-manylinux1_x86_64.whl
 # start http service

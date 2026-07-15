@@ -142,4 +142,62 @@ TEST_F(OpenaiEndpointTest, GetChatRender) {
     }
 }
 
+// When chat_render_ is null but a tokenizer is available, request stop words must
+// still be encoded (via the tokenizer) instead of being silently dropped.
+TEST_F(OpenaiEndpointTest, ExtractGenerationConfig_NullRender_UsesTokenizerForStopWords) {
+    EXPECT_CALL(*mock_tokenizer_, isPreTrainedTokenizer).WillOnce(Return(false));
+
+    ModelConfig model_config;
+    auto        openai_endpoint = std::make_shared<OpenaiEndpoint>(tokenizer_, nullptr, model_config);
+
+    ChatCompletionRequest req;
+    req.stop = "foo";
+
+    std::vector<int> foo_ids = {1, 2, 3};
+    EXPECT_CALL(*mock_tokenizer_, encode(std::string("foo"))).WillOnce(Return(foo_ids));
+
+    auto config = openai_endpoint->extract_generation_config(req);
+    ASSERT_TRUE(config != nullptr);
+    // stop constraint preserved through the tokenizer fallback, not silently dropped.
+    EXPECT_EQ(config->stop_words_str, std::vector<std::string>{"foo"});
+    EXPECT_EQ(config->stop_words_list, std::vector<std::vector<int>>{foo_ids});
+}
+
+// Stop words requested but neither renderer nor tokenizer available: fail fast.
+TEST_F(OpenaiEndpointTest, ExtractGenerationConfig_NullRenderAndTokenizer_StopWords_Throws) {
+    ModelConfig model_config;
+    auto        openai_endpoint = std::make_shared<OpenaiEndpoint>(nullptr, nullptr, model_config);
+
+    ChatCompletionRequest req;
+    req.stop = "foo";
+
+    EXPECT_THROW(openai_endpoint->extract_generation_config(req), std::runtime_error);
+}
+
+// select_tokens_str requested but tokenizer is null: fail fast (no equivalent path).
+TEST_F(OpenaiEndpointTest, ExtractGenerationConfig_NullTokenizer_SelectTokens_Throws) {
+    ModelConfig model_config;
+    auto        openai_endpoint = std::make_shared<OpenaiEndpoint>(nullptr, nullptr, model_config);
+
+    GenerateConfig gc;
+    gc.select_tokens_str = {"a"};
+    ChatCompletionRequest req;
+    req.extra_configs = gc;
+
+    EXPECT_THROW(openai_endpoint->extract_generation_config(req), std::runtime_error);
+}
+
+// sp_advice_prompt requested but tokenizer is null: fail fast (no equivalent path).
+TEST_F(OpenaiEndpointTest, ExtractGenerationConfig_NullTokenizer_SpAdvice_Throws) {
+    ModelConfig model_config;
+    auto        openai_endpoint = std::make_shared<OpenaiEndpoint>(nullptr, nullptr, model_config);
+
+    GenerateConfig gc;
+    gc.sp_advice_prompt = "hint";
+    ChatCompletionRequest req;
+    req.extra_configs = gc;
+
+    EXPECT_THROW(openai_endpoint->extract_generation_config(req), std::runtime_error);
+}
+
 }  // namespace rtp_llm

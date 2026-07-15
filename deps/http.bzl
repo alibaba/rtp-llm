@@ -1,5 +1,13 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
 
+# TODO(pip_unify Phase 5): shared http_archive entries (rules_pkg, bazel_skylib,
+# io_bazel_rules_closure, torch_2.8_py310_cuda, torch_rocm, aiter,
+# arm_compute, hedron_compile_commands) are also declared in
+# internal_source/deps/http.bzl with matching sha256 but different URL sources.
+# Consolidate here as multi-URL lists (artlab mirror first, public URL fallback);
+# requires per-config `bazel build` verification before landing to catch URL
+# availability regressions.
+
 def clean_dep(dep):
     return str(Label(dep))
 
@@ -29,26 +37,6 @@ def http_deps():
     )
 
     http_archive(
-        name = "torch_2.1_py310_cpu",
-        sha256 = "bf3ca897f8c7c218dd6c4b1cc5eec57b4f4e71106b0b8120e92f5fdaf4acf6cd",
-        urls = [
-            "https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.6.0%2Bcpu-cp310-cp310-linux_x86_64.whl",
-        ],
-        type = "zip",
-        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
-    )
-
-    http_archive(
-        name = "torch_2.6_py310_cuda",
-        sha256 = "c55280b4da58e565d8a25e0e844dc27d0c96aaada7b90b4de70a45397faf604e",
-        urls = [
-            "https://mirrors.aliyun.com/pytorch-wheels/cu126/torch-2.6.0%2Bcu126-cp310-cp310-manylinux_2_28_x86_64.whl",
-        ],
-        type = "zip",
-        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
-    )
-
-    http_archive(
         name = "torch_2.8_py310_cuda",
         sha256 = "54d240b5d3b1f9075d4ee6179675a22c1974f7bef1885d134c582678d5180cd3",
         urls = [
@@ -69,13 +57,13 @@ def http_deps():
     )
 
     http_archive(
-        name = "aiter",
-        sha256 = "23c2fd22ea8130aa70750dee3fb3dfe08a0bcb60592188a26d64d84b0b6caa25",
+        name = "torch_2.9_py310_cuda_arm",
+        sha256 = "37780eb80e4319d6e004ea9597353da0b3947681866d7adff4757ece164a5cd9",
         urls = [
-            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/aiter-0.1.17.dev79%2Bg2570b35f9.d20260623-cp310-cp310-linux_x86_64.whl",
+            "https://download.pytorch.org/whl/cu129/torch-2.9.0%2Bcu129-cp310-cp310-manylinux_2_28_aarch64.whl",
         ],
         type = "zip",
-        build_file = clean_dep("@rtp_llm//:BUILD.aiter"),
+        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
     )
 
     http_archive(
@@ -86,6 +74,18 @@ def http_deps():
         ],
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
+    )
+
+    # aiter C++ headers/runtime archive is kept in lock-step with the Python wheel
+    # in requirements_rocm.txt (0.1.17.dev79) to avoid ABI mismatch.
+    http_archive(
+        name = "aiter",
+        sha256 = "23c2fd22ea8130aa70750dee3fb3dfe08a0bcb60592188a26d64d84b0b6caa25",
+        urls = [
+            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/aiter-0.1.17.dev79%2Bg2570b35f9.d20260623-cp310-cp310-linux_x86_64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.aiter"),
     )
 
     http_archive(
