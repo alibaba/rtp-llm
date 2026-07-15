@@ -34,11 +34,6 @@ void CopyEngine::buildGroupLayouts(const std::vector<ComponentGroupPtr>& compone
     for (size_t group_index = 0; group_index < component_groups.size(); ++group_index) {
         const auto&         group = component_groups[group_index];
         ResolvedGroupLayout layout;
-        if (!group) {
-            RTP_LLM_LOG_WARNING("null component group at index %zu", group_index);
-            group_layouts_.push_back(std::move(layout));
-            continue;
-        }
 
         layout.component_group_id = group->component_group_id;
         // Nullable: device-only / host-disabled configs are legal. Per-path pool checks happen at submit.

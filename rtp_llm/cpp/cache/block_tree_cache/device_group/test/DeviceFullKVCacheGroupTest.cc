@@ -152,7 +152,7 @@ TEST_F(DeviceFullKVCacheGroupTest, MallocFreeTest) {
 
 // Single-count co-hold: a block held by both a request (via group malloc) and a cache
 // holder (extra incRef) must survive the request release and only free on the final
-// releaseRef.
+// decRef.
 TEST_F(DeviceFullKVCacheGroupTest, RequestReleaseKeepsCacheHeldBlock) {
     auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
@@ -175,7 +175,7 @@ TEST_F(DeviceFullKVCacheGroupTest, RequestReleaseKeepsCacheHeldBlock) {
     EXPECT_TRUE(block_pool->isAllocated(block));
     EXPECT_EQ(block_pool->refCount(block), 1u);
 
-    block_pool->releaseRef(block);  // release cache holder
+    block_pool->decRef(block);  // release cache holder
     EXPECT_FALSE(block_pool->isAllocated(block));
 }
 

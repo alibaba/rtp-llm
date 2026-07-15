@@ -33,7 +33,7 @@ std::string resolveDiskMountPath(const std::string& disk_paths_csv, int64_t loca
 // This function:
 // 1. Creates a BlockTree with group_slot_count = cache_config.groupNums()
 // 2. Creates a ComponentGroup for each group based on CacheGroupType (FULL/SWA/LINEAR)
-// 3. Optionally creates Host BlockPool if kv_cache_config.enable_memory_cache
+// 3. Optionally creates HostBlockPool if kv_cache_config.enable_memory_cache
 // 4. Optionally creates DiskBlockPool if kv_cache_config.enable_memory_cache_disk
 // 5. Assembles and returns a BlockTreeCache
 //

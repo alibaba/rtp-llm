@@ -121,36 +121,28 @@ cc_library(
 )
 
 cc_library(
-    name = "block_pool",
-    srcs = [
-        "BlockPool.cc",
-        "MemoryLayoutStrategy.cc",
-    ],
+    name = "memory_layout_strategy",
+    srcs = ["MemoryLayoutStrategy.cc"],
     hdrs = [
-        "BlockPool.h",
-        "BlockPoolConfig.h",
-        "BlockPoolConfigHelper.h",
-        "BlockRefCounter.h",
-        "MemoryLayoutStrategy.h",
         "MemoryLayoutConfig.h",
+        "MemoryLayoutStrategy.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
         ":cache_types",
-        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
-        "//rtp_llm/cpp/utils:kv_cache_utils",
-        "//rtp_llm/cpp/utils:lru_cache",
-        "//rtp_llm/cpp/utils:profiling_scope",
-        "//rtp_llm/models_py/bindings/core:type_convert",
-    ] + select({
-        "@//:using_cuda": [
-            "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
-            "@local_config_cuda//cuda:cuda_headers",
-            "@local_config_cuda//cuda:cudart",
-        ],
-        "//conditions:default": [],
-    }),
+    ] + torch_deps(),
+)
+
+cc_library(
+    name = "device_block_pool_config_helper",
+    hdrs = ["DeviceBlockPoolConfigHelper.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_types",
+        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
+    ],
 )
 
 cc_library(
@@ -176,7 +168,6 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
-        ":block_pool",
         ":cache_types",
         "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
         "//rtp_llm/cpp/metrics:metrics",
@@ -202,6 +193,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":device_block_pool_config_helper",
         ":kv_cache_allocator_hdr",
         "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",

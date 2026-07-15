@@ -325,7 +325,7 @@ void BlockTreeCache::insert(TreeNode*                                  parent,
             if (gid >= node->group_slots.size())
                 continue;
             auto& slot = node->group_slots[gid];
-            if (slot.has_device_value()) {
+            if (slot.has_value(Tier::DEVICE)) {
                 auto blocks = group->getBlocks(slot, Tier::DEVICE);
                 group->referenceBlocks(GroupBlockSet{group->component_group_id, Tier::DEVICE, {blocks}});
             }
@@ -422,7 +422,7 @@ size_t BlockTreeCache::evictableBlocksNum(int component_group_id) const {
             continue;
         }
         const auto& slot = node->group_slots[gid];
-        if (slot.has_device_value() && group->isSlotEvictable(slot, Tier::DEVICE)) {
+        if (slot.has_value(Tier::DEVICE) && group->isSlotEvictable(slot, Tier::DEVICE)) {
             ++count;
         }
     }
@@ -519,9 +519,8 @@ void BlockTreeCache::prepareMatchedBlocks(const std::vector<TreeNode*>& matched_
             if (component_group_index >= path_node->group_slots.size()) {
                 continue;
             }
-
             GroupSlot& group_slot = path_node->group_slots[component_group_index];
-            if (group_slot.has_device_value()) {
+            if (group_slot.has_value(Tier::DEVICE)) {
                 const std::vector<BlockIdxType> device_blocks = component_group->getBlocks(group_slot, Tier::DEVICE);
                 bool                            collected_device_block = false;
                 if (aggregated_) {
@@ -563,9 +562,9 @@ void BlockTreeCache::prepareMatchedBlocks(const std::vector<TreeNode*>& matched_
             }
 
             Tier source_tier = Tier::NONE;
-            if (group_slot.has_host_value()) {
+            if (group_slot.has_value(Tier::HOST)) {
                 source_tier = Tier::HOST;
-            } else if (group_slot.has_disk_value()) {
+            } else if (group_slot.has_value(Tier::DISK)) {
                 source_tier = Tier::DISK;
             }
             if (source_tier == Tier::NONE) {

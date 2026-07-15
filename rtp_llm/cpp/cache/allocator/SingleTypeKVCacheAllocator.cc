@@ -5,7 +5,7 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
@@ -78,14 +78,8 @@ bool SingleTypeKVCacheAllocator::doInit() {
                                 || spec->type == rtp_llm::KVCacheSpecType::MultiHeadLatentAttention,
                             "SingleTypeKVCacheAllocator only support Full Attention");
 
-    BlockPoolConfig pool_config = BlockPoolConfigHelper::createConfig(config_);
-
-    auto device_config                     = std::make_shared<DeviceBlockPoolConfig>();
-    device_config->pool_type               = BlockPoolType::DEVICE;
-    device_config->pool_name               = pool_config.pool_name;
-    device_config->physical_block_count    = pool_config.block_num;
-    device_config->total_size_bytes        = pool_config.total_size_bytes;
-    device_config->memory_layouts          = pool_config.memory_layouts;
+    auto device_config =
+        std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfig(config_));
     device_config->allocation_type         = allocation_type_;
     device_config->use_cuda_malloc_backing = use_cuda_malloc_block_pool_;
 
@@ -464,7 +458,7 @@ void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_r
     if (!blocks_to_free.empty()) {
         // Single-count pool: both request and connector releases decrement one holder.
         (void)is_connector;
-        block_pool_->releaseRef(blocks_to_free);
+        block_pool_->decRef(blocks_to_free);
     }
 }
 

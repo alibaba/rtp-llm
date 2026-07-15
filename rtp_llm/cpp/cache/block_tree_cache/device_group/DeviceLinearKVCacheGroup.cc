@@ -127,12 +127,10 @@ bool DeviceLinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool ena
     BlockIndicesType allocated_blocks;
     if (need_alloc_blocks > 0) {
         auto allocated_opt = block_pool_->malloc(static_cast<size_t>(need_alloc_blocks));
-        // malloc(n) is atomic: it returns exactly n blocks or nullopt.
         if (!allocated_opt.has_value() || allocated_opt->size() != static_cast<size_t>(need_alloc_blocks)) {
             return false;
         }
         allocated_blocks = std::move(*allocated_opt);
-        // malloc() only reserves capacity at refCount 0; take the request holder ref to hold the blocks.
         block_pool_->incRef(allocated_blocks);
     }
 
@@ -182,7 +180,7 @@ void DeviceLinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool ena
         pos_to_remove.push_back(static_cast<size_t>(i));
     }
     if (!blocks_to_free.empty()) {
-        block_pool_->releaseRef(blocks_to_free);
+        block_pool_->decRef(blocks_to_free);
         block_ids.remove(pos_to_remove);  // null-out by position, updates kernel slots incrementally
     }
 }
@@ -196,7 +194,7 @@ void DeviceLinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
     if (valid.empty()) {
         return;
     }
-    block_pool_->releaseRef(valid);
+    block_pool_->decRef(valid);
 }
 
 void DeviceLinearKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {

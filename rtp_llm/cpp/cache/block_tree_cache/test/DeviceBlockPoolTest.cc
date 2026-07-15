@@ -1,19 +1,24 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 
 #include <memory>
+#include <type_traits>
 
 #include "gtest/gtest.h"
 
 // Build the device pool config from the lightweight cache-config test helpers
-// (cache_config_test_utils + BlockPoolConfigHelper) rather than BlockPoolTestHelper,
+// (cache_config_test_utils + DeviceBlockPoolConfigHelper) rather than BlockPoolTestHelper,
 // which drags in the heavy //rtp_llm/cpp/cache monolith (and its CUDA-13 prebuilt
 // remote_kv_cache_manager dependency that does not link in the CUDA-12 toolchain).
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm {
 namespace {
+
+static_assert(std::is_same_v<
+              decltype(DeviceBlockPoolConfigHelper::createConfig(std::declval<const CacheConfig&>())),
+              DeviceBlockPoolConfig>);
 
 std::shared_ptr<DeviceBlockPoolConfig> makeConfig() {
     constexpr int    kLayerNum       = 4;
@@ -25,14 +30,9 @@ std::shared_ptr<DeviceBlockPoolConfig> makeConfig() {
                                                                                rtp_llm::TYPE_FP16,
                                                                                /*local_head_num_kv=*/1,
                                                                                /*size_per_head=*/64);
-    rtp_llm::BlockPoolConfig old_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_config);
-
-    auto config                     = std::make_shared<DeviceBlockPoolConfig>();
-    config->pool_type               = BlockPoolType::DEVICE;
+    auto config =
+        std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfig(cache_config));
     config->pool_name               = "device";
-    config->physical_block_count    = old_cfg.block_num;
-    config->total_size_bytes        = old_cfg.total_size_bytes;
-    config->memory_layouts          = old_cfg.memory_layouts;
     config->allocation_type         = AllocationType::DEVICE;
     config->use_cuda_malloc_backing = false;
     return config;
@@ -47,8 +47,8 @@ std::shared_ptr<DeviceBlockPoolConfig> makeMixedScaleConfig() {
     rtp_llm::CacheConfig plain_cfg = rtp_llm::test::makeSimpleMhaCacheConfig(
         3, kBlockNum, kTokensPerBlock, rtp_llm::TYPE_FP16, 1, 64);
 
-    rtp_llm::BlockPoolConfig scaled_pool = rtp_llm::BlockPoolConfigHelper::createConfig(scaled_cfg);
-    rtp_llm::BlockPoolConfig plain_pool  = rtp_llm::BlockPoolConfigHelper::createConfig(plain_cfg);
+    DeviceBlockPoolConfig scaled_pool = DeviceBlockPoolConfigHelper::createConfig(scaled_cfg);
+    DeviceBlockPoolConfig plain_pool  = DeviceBlockPoolConfigHelper::createConfig(plain_cfg);
 
     MemoryLayoutConfig l0    = scaled_pool.memory_layouts[0];
     MemoryLayoutConfig l1    = plain_pool.memory_layouts[0];
@@ -129,10 +129,6 @@ TEST(DeviceBlockPoolTest, LifecycleStartsAllocatedBlockWithZeroRefCount) {
 
     pool.incRef(*block);
     pool.decRef(*block);
-    EXPECT_EQ(pool.refCount(*block), 0u);
-    EXPECT_TRUE(pool.isAllocated(*block));
-
-    pool.free(*block);
     EXPECT_FALSE(pool.isAllocated(*block));
 }
 
@@ -149,9 +145,6 @@ TEST(DeviceBlockPoolTest, LifecycleUsesIBlockPoolSemantics) {
     pool.incRef(*block);
     EXPECT_EQ(pool.refCount(*block), 1u);
     pool.decRef(*block);
-    EXPECT_EQ(pool.refCount(*block), 0u);
-
-    pool.free(*block);
     EXPECT_FALSE(pool.isAllocated(*block));
 }
 

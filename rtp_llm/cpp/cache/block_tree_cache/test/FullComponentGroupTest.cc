@@ -109,7 +109,7 @@ TEST_F(FullComponentGroupTest, EvictFromTierDevice) {
     group_->evictFromTier(a, a->group_slots[0], Tier::DEVICE);
 
     // Device blocks should be cleared
-    EXPECT_FALSE(a->group_slots[0].has_device_value());
+    EXPECT_FALSE(a->group_slots[0].has_value(Tier::DEVICE));
     EXPECT_FALSE(a->group_slots[0].in_device_heap);
 
     delete a;
@@ -121,7 +121,7 @@ TEST_F(FullComponentGroupTest, EvictFromTierHost) {
 
     group_->evictFromTier(a, a->group_slots[0], Tier::HOST);
 
-    EXPECT_FALSE(a->group_slots[0].has_host_value());
+    EXPECT_FALSE(a->group_slots[0].has_value(Tier::HOST));
     EXPECT_FALSE(a->group_slots[0].in_host_heap);
 
     delete a;
@@ -133,7 +133,7 @@ TEST_F(FullComponentGroupTest, EvictFromTierDisk) {
 
     group_->evictFromTier(a, a->group_slots[0], Tier::DISK);
 
-    EXPECT_FALSE(a->group_slots[0].has_disk_value());
+    EXPECT_FALSE(a->group_slots[0].has_value(Tier::DISK));
     EXPECT_FALSE(a->group_slots[0].in_disk_heap);
 
     delete a;

@@ -133,20 +133,6 @@ cc_library(
 )
 
 cc_test(
-    name = "block_pool_test",
-    srcs = [
-        "BlockPoolTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        ":block_pool_test_helper",
-    ],
-    env = {},
-    exec_properties = {'gpu':'H20'},
-)
-
-cc_test(
     name = "memory_layout_strategy_test",
     srcs = [
         "MemoryLayoutStrategyTest.cc",

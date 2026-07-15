@@ -122,7 +122,6 @@ public:
     bool hasActiveConnectors() const;
     bool hasP2PConnector() const;
 
-    // BlockTreeCache access (replaces coordinator for tier management)
     BlockTreeCachePtr blockTreeCache() const {
         return block_tree_cache_;
     }

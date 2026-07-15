@@ -469,7 +469,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     auto blocks = blocks_opt.value();
     ASSERT_EQ(blocks.size(), 4u);
     // Single-count pool: malloc() reserves at refCount 0; take the request holder ref
-    // (legacy BlockPool::malloc did this implicitly). Does not change freeBlocksNum.
+    // (legacy DeviceBlockPool::malloc did this implicitly). Does not change freeBlocksNum.
     block_pool->incRef(blocks);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 4);
 
@@ -493,7 +493,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     ASSERT_EQ(ref->blocks(0).size(), 2u);
     ASSERT_EQ(ref->blocks(1).size(), 2u);
 
-    block_pool->releaseRef(blocks);
+    block_pool->decRef(blocks);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 2) << "Only blocks[1] and blocks[3] should remain referenced";
 
     ref.reset();
@@ -539,7 +539,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
     EXPECT_TRUE(isNullBlockIdx(ref->blocks(0)[2]));
     EXPECT_TRUE(isNullBlockIdx(ref->blocks(1)[2]));
 
-    block_pool->releaseRef(blocks);
+    block_pool->decRef(blocks);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 2);
 
     ref.reset();
@@ -669,7 +669,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     EXPECT_EQ(block_pool->freeBlocksNum(), 1u);
 
     // Cleanup.
-    block_pool->releaseRef(keep);
+    block_pool->decRef(keep);
 }
 #endif
 

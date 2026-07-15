@@ -125,7 +125,7 @@ TEST_F(SWAComponentGroupTest, WindowValidatorMultitierNoReset) {
     setDeviceBlock(c, 0, 30);
 
     EXPECT_TRUE(validator->validate(a, a->group_slots[0]));
-    // B has host data → has_any_value() is true → no reset
+    // B has host data → !is_empty() is true → no reset
     EXPECT_TRUE(validator->validate(b, b->group_slots[0]));
     EXPECT_TRUE(validator->validate(c, c->group_slots[0]));
 
@@ -172,9 +172,9 @@ TEST_F(SWAComponentGroupTest, IndependentEvictionDoesNotAffectFull) {
     group_->evictFromTier(node, node->group_slots[1], Tier::DEVICE);
 
     // SWA data cleared
-    EXPECT_FALSE(node->group_slots[1].has_device_value());
+    EXPECT_FALSE(node->group_slots[1].has_value(Tier::DEVICE));
     // Full data intact
-    EXPECT_TRUE(node->group_slots[0].has_device_value());
+    EXPECT_TRUE(node->group_slots[0].has_value(Tier::DEVICE));
     EXPECT_EQ(node->group_slots[0].device_blocks[0], 42);
 
     delete node;

@@ -114,7 +114,7 @@ TEST(IBlockPoolTest, AscendingOrderReturnsSortedBlockIds) {
     EXPECT_EQ(*afterMerge, (BlockIdList{1, 2}));
 }
 
-TEST(IBlockPoolTest, ReleaseRefDoesNotFreeWhileAnotherHolderExists) {
+TEST(IBlockPoolTest, DecRefDoesNotFreeWhileAnotherHolderExists) {
     auto pool  = makeInitializedPool(/*physical_block_count=*/4);
     auto block = pool->malloc();
     ASSERT_TRUE(block.has_value());
@@ -124,26 +124,26 @@ TEST(IBlockPoolTest, ReleaseRefDoesNotFreeWhileAnotherHolderExists) {
     pool->incRef(*block);  // request holder
     EXPECT_EQ(pool->refCount(*block), 2u);
 
-    pool->releaseRef(*block);
+    pool->decRef(*block);
     EXPECT_TRUE(pool->isAllocated(*block));
     EXPECT_EQ(pool->refCount(*block), 1u);
 
-    pool->releaseRef(*block);
+    pool->decRef(*block);
     EXPECT_FALSE(pool->isAllocated(*block));
 }
 
-TEST(IBlockPoolTest, ReleaseRefFreesSingleRequestHolder) {
+TEST(IBlockPoolTest, DecRefFreesSingleRequestHolder) {
     auto pool  = makeInitializedPool(/*physical_block_count=*/4);
     auto block = pool->malloc();
     ASSERT_TRUE(block.has_value());
 
     pool->incRef(*block);  // request holder
-    pool->releaseRef(*block);
+    pool->decRef(*block);
 
     EXPECT_FALSE(pool->isAllocated(*block));
 }
 
-TEST(IBlockPoolTest, ReleaseRefRejectsUnheldAllocatedBlock) {
+TEST(IBlockPoolTest, DecRefRejectsUnheldAllocatedBlock) {
     auto pool  = makeInitializedPool(/*physical_block_count=*/4);
     auto block = pool->malloc();
     ASSERT_TRUE(block.has_value());
@@ -153,7 +153,7 @@ TEST(IBlockPoolTest, ReleaseRefRejectsUnheldAllocatedBlock) {
     // guard is observable as a throw in this test env.
     const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
     StaticConfig::user_ft_core_dump_on_exception = false;
-    EXPECT_ANY_THROW(pool->releaseRef(*block));
+    EXPECT_ANY_THROW(pool->decRef(*block));
     StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
 
     EXPECT_TRUE(pool->isAllocated(*block));

@@ -48,18 +48,15 @@ public:
     void free(BlockIdxType block);
     void free(const BlockIdList& blocks);
 
-    void     incRef(BlockIdxType block);
-    void     incRef(const BlockIdList& blocks);
-    bool     tryIncRefIf(BlockIdxType block, uint32_t expected_refcount);
-    void     decRef(BlockIdxType block);
-    void     decRef(const BlockIdList& blocks);
-    uint32_t refCount(BlockIdxType block) const;
+    void incRef(BlockIdxType block);
+    void incRef(const BlockIdList& blocks);
 
     // Release one holder: decrement one reference and, only when the refcount reaches 0,
     // return the block's capacity to the free list. Category releases must use this rather
     // than free() directly. Requires refcount > 0.
-    void releaseRef(BlockIdxType block);
-    void releaseRef(const BlockIdList& blocks);
+    void     decRef(BlockIdxType block);
+    void     decRef(const BlockIdList& blocks);
+    uint32_t refCount(BlockIdxType block) const;
 
     bool validBlock(BlockIdxType block) const;
     bool isAllocated(BlockIdxType block) const;
@@ -94,9 +91,9 @@ private:
     BlockIdxType popFreeBlockNoLock();
     void         pushFreeBlockNoLock(BlockIdxType block);
 
-    // Single-block primitives shared by decRef/free/releaseRef (one source of truth for
-    // refcount and metrics). Callers must hold mutex_ and have validated the block is
-    // allocated (and, for decRefOneNoLock, that refcount > 0).
+    // Single-block primitives shared by decRef/free (one source of truth for refcount and
+    // metrics). Callers must hold mutex_ and have validated the block is allocated (and, for
+    // decRefOneNoLock, that refcount > 0).
     void decRefOneNoLock(BlockIdxType block);
     void freeAllocatedBlockNoLock(BlockIdxType block);
 

@@ -6,7 +6,7 @@
 #include <thread>
 #include <unordered_map>
 
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
@@ -238,14 +238,9 @@ static DeviceBlockPoolPtr makeDevicePool() {
                                                               TYPE_FP16,
                                                               /*local_head_num_kv=*/1,
                                                               /*size_per_head=*/64);
-    BlockPoolConfig  old_cfg         = BlockPoolConfigHelper::createConfig(cache_config);
-
-    auto config                     = std::make_shared<DeviceBlockPoolConfig>();
-    config->pool_type               = BlockPoolType::DEVICE;
+    auto config =
+        std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfig(cache_config));
     config->pool_name               = "block_tree_cache_device";
-    config->physical_block_count    = old_cfg.block_num;
-    config->total_size_bytes        = old_cfg.total_size_bytes;
-    config->memory_layouts          = old_cfg.memory_layouts;
     config->allocation_type         = AllocationType::DEVICE;
     config->use_cuda_malloc_backing = false;
 
@@ -310,7 +305,7 @@ static BlockIdxType poolMalloc(IBlockPool& pool) {
 }
 
 // referenceDeviceBlocks() must add exactly one cache-category holder (incRef) and
-// releaseDeviceBlocks() must release it (releaseRef), returning capacity at refcount 0.
+// releaseDeviceBlocks() must release it (decRef), returning capacity at refcount 0.
 TEST(BlockTreeCacheComponentGroupTest, DevicePoolLifecycleUsesSingleCountRefcount) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
@@ -338,7 +333,7 @@ TEST(BlockTreeCacheComponentGroupTest, DevicePoolLifecycleUsesSingleCountRefcoun
     EXPECT_EQ(pool->refCount(block), 1u);
     EXPECT_TRUE(pool->isAllocated(block));
 
-    // Cache holder released via ComponentGroup -> pool releaseRef; at 0 the block is freed.
+    // Cache holder released via ComponentGroup -> pool decRef; at 0 the block is freed.
     group.releaseDeviceBlocks({block});
     EXPECT_FALSE(pool->isAllocated(block));
 }
@@ -1001,8 +996,8 @@ TEST_F(BlockTreeCacheTest, WatermarkDemotionCopyFailureRollsBack) {
 
     auto find = cache->tree()->findNode({100});
     ASSERT_NE(find.matched_node, nullptr);
-    EXPECT_TRUE(find.matched_node->group_slots[0].has_device_value());
-    EXPECT_FALSE(find.matched_node->group_slots[0].has_host_value());
+    EXPECT_TRUE(find.matched_node->group_slots[0].has_value(Tier::DEVICE));
+    EXPECT_FALSE(find.matched_node->group_slots[0].has_value(Tier::HOST));
     EXPECT_EQ(host_pool->freeBlocksNum(), 8u);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
 }
@@ -1047,8 +1042,8 @@ TEST_F(BlockTreeCacheTest, WatermarkDemotionCopiesHostBlockToDisk) {
     auto find = cache->tree()->findNode({100});
     ASSERT_NE(find.matched_node, nullptr);
     const auto& slot = find.matched_node->group_slots[0];
-    EXPECT_FALSE(slot.has_host_value());
-    EXPECT_TRUE(slot.has_disk_value());
+    EXPECT_FALSE(slot.has_value(Tier::HOST));
+    EXPECT_TRUE(slot.has_value(Tier::DISK));
     EXPECT_NE(slot.disk_slot, NULL_BLOCK_IDX);
     EXPECT_EQ(host_pool->freeBlocksNum(), 8u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 7u);
@@ -1317,7 +1312,7 @@ TEST_F(BlockTreeCacheTest, BroadcastHostLoadBackCommitsDeviceSlot) {
     cache->performLoadBack({item}, /*ctx=*/nullptr);
 
     const GroupSlot& slot = find_result.matched_node->group_slots[0];
-    EXPECT_FALSE(slot.has_host_value());
+    EXPECT_FALSE(slot.has_value(Tier::HOST));
     EXPECT_EQ(slot.device_blocks, (std::vector<BlockIdxType>{7}));
     EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
 
@@ -1370,9 +1365,9 @@ TEST_F(BlockTreeCacheTest, BroadcastHostLoadBackFailureKeepsSourceSlot) {
     cache->performLoadBack({item}, /*ctx=*/nullptr);
 
     const GroupSlot& slot = find_result.matched_node->group_slots[0];
-    EXPECT_TRUE(slot.has_host_value());
+    EXPECT_TRUE(slot.has_value(Tier::HOST));
     EXPECT_EQ(slot.host_block, host_block);
-    EXPECT_FALSE(slot.has_device_value());
+    EXPECT_FALSE(slot.has_value(Tier::DEVICE));
     EXPECT_EQ(host_pool->freeBlocksNum(), 3u);
 
     std::lock_guard<std::mutex> lock(state->mutex);
@@ -1426,7 +1421,7 @@ TEST_F(BlockTreeCacheTest, BroadcastDiskLoadBackUsesTwoTransferStages) {
     cache->performLoadBack({item}, /*ctx=*/nullptr);
 
     const GroupSlot& slot = find_result.matched_node->group_slots[0];
-    EXPECT_FALSE(slot.has_disk_value());
+    EXPECT_FALSE(slot.has_value(Tier::DISK));
     EXPECT_EQ(slot.device_blocks, (std::vector<BlockIdxType>{7}));
     EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 4u);
@@ -1527,8 +1522,8 @@ TEST_F(BlockTreeCacheTest, BroadcastEvictionSuccessCommitsPlan) {
     BlockTreeFindResult after = cache->tree()->findNode({100});
     ASSERT_NE(after.matched_node, nullptr);
     const GroupSlot& slot = after.matched_node->group_slots[0];
-    EXPECT_FALSE(slot.has_host_value());
-    EXPECT_TRUE(slot.has_disk_value());
+    EXPECT_FALSE(slot.has_value(Tier::HOST));
+    EXPECT_TRUE(slot.has_value(Tier::DISK));
     const BlockIdxType disk_slot = slot.disk_slot;
     EXPECT_EQ(host_pool->freeBlocksNum(), 8u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 7u);
@@ -1588,8 +1583,8 @@ TEST_F(BlockTreeCacheTest, BroadcastEvictionFailureRollsBackPlan) {
     BlockTreeFindResult after = cache->tree()->findNode({100});
     ASSERT_NE(after.matched_node, nullptr);
     const GroupSlot& slot = after.matched_node->group_slots[0];
-    EXPECT_TRUE(slot.has_host_value());
-    EXPECT_FALSE(slot.has_disk_value());
+    EXPECT_TRUE(slot.has_value(Tier::HOST));
+    EXPECT_FALSE(slot.has_value(Tier::DISK));
     EXPECT_EQ(slot.host_block, host_block);
     EXPECT_EQ(host_pool->freeBlocksNum(), 7u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 8u);
@@ -1680,7 +1675,7 @@ TEST_F(BlockTreeCacheTest, LoadBackDeviceAllocationFailureRollsBackAllItems) {
 
     first_group->releaseSingleBlock(Tier::HOST, first_host_block);
     second_group->releaseSingleBlock(Tier::HOST, second_host_block);
-    exhausted_device_pool->releaseRef(exhausted_device_block);
+    exhausted_device_pool->decRef(exhausted_device_block);
 }
 
 // Deferred load_back: match() plans (references the source blocks) but does NOT execute

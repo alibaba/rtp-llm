@@ -48,7 +48,7 @@ void DeviceFullKVCacheGroup::free(const BlockIndicesType& block_indices) {
         return;
     }
 
-    block_pool_->releaseRef(block_indices);
+    block_pool_->decRef(block_indices);
     RTP_LLM_LOG_DEBUG("Freed %zu blocks", block_indices.size());
 }
 

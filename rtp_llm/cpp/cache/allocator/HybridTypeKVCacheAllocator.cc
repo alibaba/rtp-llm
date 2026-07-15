@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <utility>
 
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -18,14 +18,8 @@ HybridTypeKVCacheAllocator::HybridTypeKVCacheAllocator(const CacheConfig&       
 bool HybridTypeKVCacheAllocator::doInit() {
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "no cache groups found in CacheConfig");
 
-    BlockPoolConfig pool_config = BlockPoolConfigHelper::createConfig(config_);
-
-    auto device_config                     = std::make_shared<DeviceBlockPoolConfig>();
-    device_config->pool_type               = BlockPoolType::DEVICE;
-    device_config->pool_name               = pool_config.pool_name;
-    device_config->physical_block_count    = pool_config.block_num;
-    device_config->total_size_bytes        = pool_config.total_size_bytes;
-    device_config->memory_layouts          = pool_config.memory_layouts;
+    auto device_config =
+        std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfig(config_));
     device_config->allocation_type         = allocation_type_;
     device_config->use_cuda_malloc_backing = use_cuda_malloc_block_pool_;
 
@@ -76,7 +70,7 @@ void HybridTypeKVCacheAllocator::referenceBlocksInGroup(int                     
 void HybridTypeKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector) {
     (void)gid;
     (void)is_connector;
-    block_pool_->releaseRef(blocks);
+    block_pool_->decRef(blocks);
 }
 
 CacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {

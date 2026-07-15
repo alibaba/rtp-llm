@@ -485,7 +485,7 @@ TEST_F(DeviceSWAKVCacheGroupTest, RemoveSkippedBlocks_WithStep_FreesNonStepBlock
     DeviceSWAKVCacheGroup group({}, spec, block_pool, 0, 2);
 
     // Start with 6 allocated blocks (no NULLs). malloc() reserves capacity with refCount 0;
-    // incRef gives each a single holder so removeSkippedBlocks' releaseRef can free them.
+    // incRef gives each a single holder so removeSkippedBlocks' decRef can free them.
     auto allocated = block_pool->malloc(6).value();
     ASSERT_EQ(allocated.size(), 6u);
     block_pool->incRef(allocated);
@@ -689,14 +689,14 @@ TEST_F(DeviceSWAKVCacheGroupTest, Malloc_FailsAtomicallyWithoutLeak) {
     // No partial state should have leaked into block_ids either.
     EXPECT_EQ(block_ids.blocksNum(), 0u);
 
-    // The pre-allocated blocks must still be releasable, proving that BlockPool ref
+    // The pre-allocated blocks must still be releasable, proving that DeviceBlockPool ref
     // counters were not corrupted by the failed malloc path.
-    block_pool_->releaseRef(pre_alloc);
+    block_pool_->decRef(pre_alloc);
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
 }
 
 // Verifies the new behavior: DeviceSWAKVCacheGroup::malloc reserves all required physical blocks
-// via a single batch BlockPool::malloc(N) call instead of N individual malloc(1) calls.
+// via a single batch DeviceBlockPool::malloc(N) call instead of N individual malloc(1) calls.
 TEST_F(DeviceSWAKVCacheGroupTest, Malloc_AllocatesAtomicallyAsBatch) {
     auto         group       = makeGroupWithStep(4, 2);
     const size_t free_before = block_pool_->freeBlocksNum();
@@ -735,7 +735,7 @@ TEST_F(DeviceSWAKVCacheGroupTest, Malloc_BatchPlacementMatchesShouldAllocate) {
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[4]));
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[5]));
 
-    // All 4 real blocks must be distinct (the batch BlockPool::malloc returns unique ids).
+    // All 4 real blocks must be distinct (the batch DeviceBlockPool::malloc returns unique ids).
     std::vector<BlockIdxType> reals = {
         block_ids.blocks()[1], block_ids.blocks()[3], block_ids.blocks()[4], block_ids.blocks()[5]};
     std::sort(reals.begin(), reals.end());

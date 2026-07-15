@@ -70,9 +70,6 @@ public:
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
 
-    // Device-copy view over the same (layer, block) layout, backed by DeviceBlockPool.
-    // Unlike convertIndexToBuffer() (torch-free BlockInfo for transfer paths) this returns
-    // DeviceBlockBuffer for the allocator/device-copy fast path.
     std::vector<DeviceBlockBuffer> blockBuffers(int layer_id, int block_id) const;
     std::vector<DeviceBlockBuffer>
     blockBuffers(int layer_id, int block_id, int partition_count, int partition_id) const;

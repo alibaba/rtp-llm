@@ -7,7 +7,7 @@ namespace rtp_llm {
 
 namespace {
 
-// old_rc/new_rc always differ by exactly 1 (a single incRef/decRef/tryIncRefIf step),
+// old_rc/new_rc always differ by exactly 1 (a single incRef/decRef step),
 // so it is enough to detect the two threshold crossings independently:
 //   - refcount 0  <-> refcount >= 1 : unreferenced/tree-cached membership
 //   - refcount 1  <-> refcount >= 2 : active-tree-cached membership
@@ -143,21 +143,6 @@ void IBlockPool::incRef(const BlockIdList& blocks) {
     }
 }
 
-bool IBlockPool::tryIncRefIf(BlockIdxType block, uint32_t expected_refcount) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    checkInitializedNoLock();
-    checkAllocatedNoLock(block);
-    if (refcounts_[block] != expected_refcount) {
-        return false;
-    }
-    const uint32_t old_rc = refcounts_[block];
-    const uint32_t new_rc = old_rc + 1;
-    refcounts_[block]     = new_rc;
-    adjustRefCountMetricsNoLock(
-        old_rc, new_rc, unreferenced_blocks_num_, tree_cached_blocks_num_, active_tree_cached_blocks_num_);
-    return true;
-}
-
 void IBlockPool::decRef(BlockIdxType block) {
     decRef(BlockIdList{block});
 }
@@ -173,29 +158,6 @@ void IBlockPool::decRef(const BlockIdList& blocks) {
         checkAllocatedNoLock(block);
         RTP_LLM_CHECK_WITH_INFO(refcounts_[block] > 0,
                                  "cannot decRef block [%d] of pool [%s] with refcount 0",
-                                 block,
-                                 config_->pool_name.c_str());
-    }
-    for (const auto block : blocks) {
-        decRefOneNoLock(block);
-    }
-}
-
-void IBlockPool::releaseRef(BlockIdxType block) {
-    releaseRef(BlockIdList{block});
-}
-
-void IBlockPool::releaseRef(const BlockIdList& blocks) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    checkInitializedNoLock();
-    if (blocks.empty()) {
-        return;
-    }
-    checkUniqueBlocksNoLock(blocks);
-    for (const auto block : blocks) {
-        checkAllocatedNoLock(block);
-        RTP_LLM_CHECK_WITH_INFO(refcounts_[block] > 0,
-                                 "cannot releaseRef block [%d] of pool [%s] with refcount 0",
                                  block,
                                  config_->pool_name.c_str());
     }

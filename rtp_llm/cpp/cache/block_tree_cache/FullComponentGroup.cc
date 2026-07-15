@@ -74,7 +74,7 @@ void FullComponentGroup::tryAddToDiskHeap(TreeNode* node) {
 
 // FullMatchValidator
 bool FullMatchValidator::validate(const TreeNode* node, const GroupSlot& slot) {
-    return slot.has_any_value();
+    return !slot.is_empty();
 }
 
 }  // namespace rtp_llm

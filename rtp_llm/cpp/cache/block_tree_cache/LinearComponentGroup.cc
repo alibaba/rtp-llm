@@ -24,14 +24,14 @@ void LinearComponentGroup::tryAddToDeviceHeap(TreeNode* node) {
         return;
     // LINEAR: any node with device data can enter heap (no Leaf requirement)
     auto& slot = node->group_slots[static_cast<size_t>(component_group_id)];
-    if (slot.has_device_value() && !slot.in_device_heap) {
+    if (slot.has_value(Tier::DEVICE) && !slot.in_device_heap) {
         device_heap->push(node, component_group_id);
         slot.in_device_heap = true;
     }
 }
 
 bool LinearMatchValidator::validate(const TreeNode* node, const GroupSlot& slot) {
-    return slot.has_any_value();
+    return !slot.is_empty();
 }
 
 }  // namespace rtp_llm

@@ -1,13 +1,13 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/BlockPoolConfig.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 
 #include <string>
 
 namespace rtp_llm {
 
-class BlockPoolConfigHelper {
+class DeviceBlockPoolConfigHelper {
 public:
     /**
      * Create block pool config from CacheConfig.
@@ -17,11 +17,12 @@ public:
      *
      * @param cache_config The CacheConfig containing main model and optional MTP modules
      */
-    static BlockPoolConfig createConfig(const CacheConfig& cache_config) {
+    static DeviceBlockPoolConfig createConfig(const CacheConfig& cache_config) {
         RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() > 0, "cache groups must not be empty");
-        BlockPoolConfig config;
-        config.pool_name      = "default";
-        config.block_num      = cache_config.block_num;
+        DeviceBlockPoolConfig config;
+        config.pool_type            = BlockPoolType::DEVICE;
+        config.pool_name            = "default";
+        config.physical_block_count = cache_config.block_num;
         const bool  is_hybrid = cache_config.groupNums() > 1;
         auto        layer_num = is_hybrid ? cache_config.group_layer_num : cache_config.layer_num;
         const auto& main_spec = cache_config.specForGroup(0);
@@ -86,13 +87,13 @@ public:
 
         config.total_size_bytes = current_offset;
 
-        RTP_LLM_LOG_INFO("BlockPoolConfig(memory_layouts=%zu): total_size=%zu bytes",
+        RTP_LLM_LOG_INFO("DeviceBlockPoolConfig(memory_layouts=%zu): total_size=%zu bytes",
                          config.memory_layouts.size(),
                          config.total_size_bytes);
         return config;
     }
 
-    static BlockPoolConfig createConfigForGroup(const CacheConfig& cache_config, size_t group_id) {
+    static DeviceBlockPoolConfig createConfigForGroup(const CacheConfig& cache_config, size_t group_id) {
         RTP_LLM_CHECK_WITH_INFO(group_id < static_cast<size_t>(cache_config.groupNums()),
                                 "group_id %zu out of range, groupNums=%d",
                                 group_id,
@@ -100,19 +101,20 @@ public:
         const auto& spec = cache_config.specForGroup(group_id);
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", group_id);
 
-        BlockPoolConfig config;
+        DeviceBlockPoolConfig config;
+        config.pool_type = BlockPoolType::DEVICE;
         config.pool_name = "group_" + std::to_string(group_id);
         const auto& tag = cache_config.tagForGroup(group_id);
         if (!tag.empty()) {
             config.pool_name = tag;
         }
-        config.block_num = cache_config.blockNumForGroup(group_id);
-        const bool has_group_blocks = config.block_num != cache_config.block_num;
-        RTP_LLM_LOG_INFO("createConfigForGroup: pool_name=%s gid=%zu block_num=%d (has_group_blocks=%d, "
+        config.physical_block_count = cache_config.blockNumForGroup(group_id);
+        const bool has_group_blocks = config.physical_block_count != cache_config.block_num;
+        RTP_LLM_LOG_INFO("createConfigForGroup: pool_name=%s gid=%zu block_num=%zu (has_group_blocks=%d, "
                          "groupNums=%d, global_block_num=%d)",
                          config.pool_name.c_str(),
                          group_id,
-                         config.block_num,
+                         config.physical_block_count,
                          has_group_blocks,
                          cache_config.groupNums(),
                          cache_config.block_num);
@@ -124,7 +126,7 @@ public:
         const size_t scale_stride = cache_config.kvScaleStrideBytesForGroup(group_id);
 
         CacheConfig group_cache_config = cache_config;
-        group_cache_config.block_num   = config.block_num;
+        group_cache_config.block_num   = static_cast<uint32_t>(config.physical_block_count);
         if (group_id < cache_config.group_seq_size_per_block.size()
             && cache_config.group_seq_size_per_block[group_id] > 0) {
             group_cache_config.seq_size_per_block = cache_config.group_seq_size_per_block[group_id];
@@ -143,11 +145,12 @@ public:
     }
 
     // for memory connector
-    static BlockPoolConfig
+    static DeviceBlockPoolConfig
     createConfig(uint32_t layer_num, uint32_t block_num, size_t block_stride_bytes, rtp_llm::DataType dtype) {
-        BlockPoolConfig config;
-        config.pool_name = "memory_connector";
-        config.block_num = block_num;
+        DeviceBlockPoolConfig config;
+        config.pool_type            = BlockPoolType::DEVICE;
+        config.pool_name            = "memory_connector";
+        config.physical_block_count = block_num;
 
         MemoryLayoutConfig layout_cfg;
         layout_cfg.layer_num = layer_num;

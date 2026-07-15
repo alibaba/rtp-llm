@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/config_creator/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/config_creator/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/allocator/HybridPoolKVCacheAllocator.h"
@@ -535,8 +535,8 @@ TEST(HybridPoolConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGrou
     EXPECT_EQ(config.kvBlockStrideBytesForGroup(gidForTag(config, "swa_kv")),
               config.specForGroup(gidForTag(config, "swa_kv"))->block_size_bytes());
 
-    auto full_pool = BlockPoolConfigHelper::createConfigForGroup(config, gidForTag(config, "csa_kv"));
-    auto swa_pool  = BlockPoolConfigHelper::createConfigForGroup(config, gidForTag(config, "swa_kv"));
+    auto full_pool = DeviceBlockPoolConfigHelper::createConfigForGroup(config, gidForTag(config, "csa_kv"));
+    auto swa_pool  = DeviceBlockPoolConfigHelper::createConfigForGroup(config, gidForTag(config, "swa_kv"));
     ASSERT_EQ(full_pool.memory_layouts.size(), 1u);
     ASSERT_EQ(swa_pool.memory_layouts.size(), 1u);
     EXPECT_EQ(full_pool.memory_layouts[0].kernel_blocks_per_kv_block, 128u);
@@ -1692,7 +1692,7 @@ TEST_F(DSV4AllocatorTest, MallocAndFreeBlocks) {
     ASSERT_EQ(blocks.size(), 3u);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 3);
 
-    block_pool->releaseRef(blocks);
+    block_pool->decRef(blocks);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
@@ -1841,7 +1841,7 @@ TEST_F(DSV4AllocatorTest, FlashMallocAndFree) {
     ASSERT_EQ(blocks.size(), 5u);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 5);
 
-    block_pool->releaseRef(blocks);
+    block_pool->decRef(blocks);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
@@ -1906,7 +1906,7 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
     // Free all blocks
     for (int gid = 0; gid < 7; gid++) {
         const auto& blocks = batch_res->blocks(0, gid);
-        block_pool->releaseRef(blocks);
+        block_pool->decRef(blocks);
     }
 }
 #endif
@@ -1966,7 +1966,7 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     }
 
     for (int gid = 0; gid < 7; gid++) {
-        block_pool->releaseRef(batch_res->blocks(0, gid));
+        block_pool->decRef(batch_res->blocks(0, gid));
     }
 }
 #endif
@@ -2000,7 +2000,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
             shared_cache->put(cached_keys[i], group_slots, true);
         }
         cached_blocks[gid] = blocks;
-        block_pool->releaseRef(blocks);
+        block_pool->decRef(blocks);
     }
 
     // Now do a malloc with reuse enabled — keys {100,101,102,103}
@@ -2071,7 +2071,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
             shared_cache->put(cached_keys[i], group_slots, true);
         }
         cached_blocks[gid] = blocks;
-        block_pool->releaseRef(blocks);
+        block_pool->decRef(blocks);
     }
 
     auto batch_res = std::make_shared<BatchKVCacheResource>();
@@ -2130,7 +2130,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseDoesNotRequireHCAStateHit) {
             shared_cache->put(cached_keys[i], group_slots, true);
         }
         cached_blocks[gid] = blocks;
-        block_pool->releaseRef(blocks);
+        block_pool->decRef(blocks);
     }
 
     auto batch_res = std::make_shared<BatchKVCacheResource>();
@@ -2187,7 +2187,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseAcceptsSingleLatestSWATailHit) {
             group_slots[gid] = blocks[i];
             shared_cache->put(cached_keys[i], group_slots, true);
         }
-        block_pool->releaseRef(blocks);
+        block_pool->decRef(blocks);
     }
 
     auto batch_res = std::make_shared<BatchKVCacheResource>();
@@ -2239,7 +2239,7 @@ TEST_F(DSV4AllocatorTest, FlashPrefixCacheReusePagedGroupsOnly) {
             shared_cache->put(cached_keys[i], group_slots, true);
         }
         cached_blocks[gid] = blocks;
-        block_pool->releaseRef(blocks);
+        block_pool->decRef(blocks);
     }
 
     auto batch_res = std::make_shared<BatchKVCacheResource>();
@@ -2387,7 +2387,7 @@ TEST_F(DSV4AllocatorTest, SWAGroupParticipatesInPrefixCacheReuse) {
             shared_cache->put(cached_keys[i], group_slots, true);
         }
         csa_blocks = blocks;
-        block_pool->releaseRef(blocks);
+        block_pool->decRef(blocks);
     }
     // Group 6 (SWA KV)
     {
@@ -2399,7 +2399,7 @@ TEST_F(DSV4AllocatorTest, SWAGroupParticipatesInPrefixCacheReuse) {
             shared_cache->put(cached_keys[i], group_slots, true);
         }
         swa_blocks = blocks;
-        block_pool->releaseRef(blocks);
+        block_pool->decRef(blocks);
     }
 
     // Verify both groups have cache entries
@@ -2444,7 +2444,7 @@ TEST_F(DSV4AllocatorTest, SWAPrefixCacheRestoresTailReuse) {
             shared_cache->put(cached_keys[i], group_slots, true);
         }
         cached_blocks[gid] = blocks;
-        block_pool->releaseRef(blocks);
+        block_pool->decRef(blocks);
     }
 
     // Malloc with reuse — keys {800, 801, 802}

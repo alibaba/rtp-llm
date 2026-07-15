@@ -47,7 +47,7 @@ struct MemoryBlockLayerTagSlot {
 // Per-ComponentGroup data location across storage tiers.
 // Each GroupSlot corresponds to one ComponentGroup on one TreeNode.
 struct GroupSlot {
-    // L1: GPU Device — one block per independent Device BlockPool
+    // L1: GPU Device — one block per independent DeviceBlockPool
     std::vector<BlockIdxType> device_blocks;
     // L2: CPU Host — one packed block
     BlockIdxType host_block{NULL_BLOCK_IDX};
@@ -59,21 +59,21 @@ struct GroupSlot {
     bool in_host_heap{false};
     bool in_disk_heap{false};
 
-    bool has_device_value() const {
-        return std::any_of(
-            device_blocks.begin(), device_blocks.end(), [](BlockIdxType b) { return b != NULL_BLOCK_IDX; });
-    }
-    bool has_host_value() const {
-        return host_block != NULL_BLOCK_IDX;
-    }
-    bool has_disk_value() const {
-        return disk_slot != NULL_BLOCK_IDX;
-    }
-    bool has_any_value() const {
-        return has_device_value() || has_host_value() || has_disk_value();
+    bool has_value(Tier tier) const {
+        switch (tier) {
+            case Tier::DEVICE:
+                return std::any_of(
+                    device_blocks.begin(), device_blocks.end(), [](BlockIdxType b) { return b != NULL_BLOCK_IDX; });
+            case Tier::HOST:
+                return host_block != NULL_BLOCK_IDX;
+            case Tier::DISK:
+                return disk_slot != NULL_BLOCK_IDX;
+            default:
+                return false;
+        }
     }
     bool is_empty() const {
-        return !has_device_value() && !has_host_value() && !has_disk_value();
+        return !has_value(Tier::DEVICE) && !has_value(Tier::HOST) && !has_value(Tier::DISK);
     }
 };
 

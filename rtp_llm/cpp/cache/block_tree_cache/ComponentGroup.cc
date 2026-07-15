@@ -160,13 +160,13 @@ bool ComponentGroup::isLeafAtTier(const TreeNode* node, int group_id, Tier tier)
     bool has_value = false;
     switch (tier) {
         case Tier::DEVICE:
-            has_value = slot.has_device_value();
+            has_value = slot.has_value(Tier::DEVICE);
             break;
         case Tier::HOST:
-            has_value = slot.has_host_value();
+            has_value = slot.has_value(Tier::HOST);
             break;
         case Tier::DISK:
-            has_value = slot.has_disk_value();
+            has_value = slot.has_value(Tier::DISK);
             break;
         default:
             return false;
@@ -178,15 +178,15 @@ bool ComponentGroup::isLeafAtTier(const TreeNode* node, int group_id, Tier tier)
         auto& child_slot = child->group_slots[static_cast<size_t>(group_id)];
         switch (tier) {
             case Tier::DEVICE:
-                if (child_slot.has_device_value())
+                if (child_slot.has_value(Tier::DEVICE))
                     return false;
                 break;
             case Tier::HOST:
-                if (child_slot.has_host_value())
+                if (child_slot.has_value(Tier::HOST))
                     return false;
                 break;
             case Tier::DISK:
-                if (child_slot.has_disk_value())
+                if (child_slot.has_value(Tier::DISK))
                     return false;
                 break;
             default:
@@ -203,7 +203,7 @@ void ComponentGroup::tryAddToHostHeap(TreeNode* node) {
     if (gid >= node->group_slots.size())
         return;
     auto& slot = node->group_slots[gid];
-    if (!slot.has_device_value() && slot.has_host_value() && !slot.in_host_heap) {
+    if (!slot.has_value(Tier::DEVICE) && slot.has_value(Tier::HOST) && !slot.in_host_heap) {
         host_heap->push(node, component_group_id);
         slot.in_host_heap = true;
     }
@@ -216,7 +216,7 @@ void ComponentGroup::tryAddToDiskHeap(TreeNode* node) {
     if (gid >= node->group_slots.size())
         return;
     auto& slot = node->group_slots[gid];
-    if (!slot.has_device_value() && !slot.has_host_value() && slot.has_disk_value() && !slot.in_disk_heap) {
+    if (!slot.has_value(Tier::DEVICE) && !slot.has_value(Tier::HOST) && slot.has_value(Tier::DISK) && !slot.in_disk_heap) {
         disk_heap->push(node, component_group_id);
         slot.in_disk_heap = true;
     }
@@ -265,7 +265,7 @@ void ComponentGroup::releaseBlocks(const GroupBlockSet& set) const {
             for (const auto& node_blocks : set.per_node) {
                 for (size_t p = 0; p < node_blocks.size() && p < device_pools_.size(); ++p) {
                     if (device_pools_[p] && !isNullBlockIdx(node_blocks[p])) {
-                        device_pools_[p]->releaseRef(node_blocks[p]);
+                        device_pools_[p]->decRef(node_blocks[p]);
                     }
                 }
             }
@@ -275,7 +275,7 @@ void ComponentGroup::releaseBlocks(const GroupBlockSet& set) const {
                 for (const auto& node_blocks : set.per_node)
                     for (auto b : node_blocks)
                         if (!isNullBlockIdx(b))
-                            host_pool_->releaseRef(b);
+                            host_pool_->decRef(b);
             }
             break;
         case Tier::DISK:
@@ -283,7 +283,7 @@ void ComponentGroup::releaseBlocks(const GroupBlockSet& set) const {
                 for (const auto& node_blocks : set.per_node)
                     for (auto b : node_blocks)
                         if (!isNullBlockIdx(b))
-                            disk_pool_->releaseRef(b);
+                            disk_pool_->decRef(b);
             }
             break;
         default:
@@ -349,10 +349,10 @@ void ComponentGroup::releaseSingleBlock(Tier tier, BlockIdxType block) const {
         return;
     if (tier == Tier::HOST) {
         if (host_pool_)
-            host_pool_->releaseRef(block);
+            host_pool_->decRef(block);
     } else if (tier == Tier::DISK) {
         if (disk_pool_)
-            disk_pool_->releaseRef(block);
+            disk_pool_->decRef(block);
     }
 }
 
@@ -361,9 +361,9 @@ std::vector<BlockIdxType> ComponentGroup::getBlocks(const GroupSlot& slot, Tier 
         case Tier::DEVICE:
             return slot.device_blocks;
         case Tier::HOST:
-            return slot.has_host_value() ? std::vector<BlockIdxType>{slot.host_block} : std::vector<BlockIdxType>{};
+            return slot.has_value(Tier::HOST) ? std::vector<BlockIdxType>{slot.host_block} : std::vector<BlockIdxType>{};
         case Tier::DISK:
-            return slot.has_disk_value() ? std::vector<BlockIdxType>{slot.disk_slot} : std::vector<BlockIdxType>{};
+            return slot.has_value(Tier::DISK) ? std::vector<BlockIdxType>{slot.disk_slot} : std::vector<BlockIdxType>{};
         default:
             return {};
     }
@@ -405,9 +405,9 @@ bool ComponentGroup::isSlotEvictable(const GroupSlot& slot, Tier tier) const {
             }
             return true;
         case Tier::HOST:
-            return !slot.has_host_value() || pool_evictable(host_pool_, slot.host_block);
+            return !slot.has_value(Tier::HOST) || pool_evictable(host_pool_, slot.host_block);
         case Tier::DISK:
-            return !slot.has_disk_value() || pool_evictable(disk_pool_, slot.disk_slot);
+            return !slot.has_value(Tier::DISK) || pool_evictable(disk_pool_, slot.disk_slot);
         default:
             return false;
     }

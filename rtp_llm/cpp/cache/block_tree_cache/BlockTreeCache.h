@@ -118,7 +118,7 @@ struct BlockTreeCacheConfig {
 };
 
 // BlockTreeCache: eviction workflow coordinator.
-// Owns BlockTree, ComponentGroups, BlockPool-HOST (L2), DiskBlockPool (L3),
+// Owns BlockTree, ComponentGroups, HostBlockPool (L2), DiskBlockPool (L3),
 // CopyEngine (schema-aware data-movement utility), StorageBackend, thread pool.
 // Each storage tier (Device/Host/Disk/Remote) can be independently enabled/disabled.
 class BlockTreeCache {

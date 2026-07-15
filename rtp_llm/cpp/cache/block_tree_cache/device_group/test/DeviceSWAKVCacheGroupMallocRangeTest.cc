@@ -5,7 +5,6 @@
 #include <memory>
 #include <string>
 
-#include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/device_group/DeviceSWAKVCacheGroup.h"
 
@@ -38,7 +37,7 @@ private:
     bool        had_value_ = false;
 };
 
-BlockPoolConfig makeHostBlockPoolConfig() {
+DeviceBlockPoolConfig makeDeviceBlockPoolConfig() {
     constexpr uint32_t kLayerNum        = 1;
     constexpr uint32_t kBlockNum        = 4;
     constexpr size_t   kKvBlockStride   = 1024;
@@ -47,7 +46,7 @@ BlockPoolConfig makeHostBlockPoolConfig() {
     MemoryLayoutConfig layout;
     layout.layer_num                = kLayerNum;
     layout.block_num                = kBlockNum;
-    layout.dtype                    = rtp_llm::DataType::TYPE_FP16;
+    layout.dtype                    = DataType::TYPE_FP16;
     layout.kv_cache_offset_bytes    = 0;
     layout.kv_scale_offset_bytes    = kLayerNum * kBlockNum * kKvBlockStride;
     layout.kv_block_stride_bytes    = kKvBlockStride;
@@ -57,10 +56,13 @@ BlockPoolConfig makeHostBlockPoolConfig() {
     layout.kv_scale_pool_size_bytes = 0;
     layout.total_size_bytes         = layout.kv_block_pool_size_bytes;
 
-    BlockPoolConfig config;
-    config.block_num        = kBlockNum;
-    config.total_size_bytes = layout.total_size_bytes;
-    config.memory_layouts   = {layout};
+    DeviceBlockPoolConfig config;
+    config.pool_type            = BlockPoolType::DEVICE;
+    config.pool_name            = "swa_malloc_range_test";
+    config.physical_block_count = kBlockNum;
+    config.total_size_bytes     = layout.total_size_bytes;
+    config.memory_layouts       = {layout};
+    config.allocation_type      = AllocationType::DEVICE;
     return config;
 }
 
@@ -68,15 +70,7 @@ BlockPoolConfig makeHostBlockPoolConfig() {
 // allocation_type other than DEVICE. This test exercises only the SWA tail-block placement
 // pattern (which slots are NULL vs REAL) and the free path, both memory-medium-agnostic.
 DeviceBlockPoolPtr createHostBlockPool() {
-    auto pool_config = makeHostBlockPoolConfig();
-
-    auto device_config                     = std::make_shared<DeviceBlockPoolConfig>();
-    device_config->pool_type               = BlockPoolType::DEVICE;
-    device_config->pool_name               = pool_config.pool_name;
-    device_config->physical_block_count    = pool_config.block_num;
-    device_config->total_size_bytes        = pool_config.total_size_bytes;
-    device_config->memory_layouts          = pool_config.memory_layouts;
-    device_config->allocation_type         = AllocationType::DEVICE;
+    auto device_config = std::make_shared<DeviceBlockPoolConfig>(makeDeviceBlockPoolConfig());
     device_config->use_cuda_malloc_backing = false;
 
     std::shared_ptr<const DeviceBlockPoolConfig> const_config = device_config;

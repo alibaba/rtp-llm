@@ -19,7 +19,7 @@
 namespace rtp_llm {
 
 // Physical signature used to determine whether two KVCacheSpec instances can
-// share the same KVCacheGroup and BlockPool. Two specs with identical tags AND
+// share the same KVCacheGroup and DeviceBlockPool. Two specs with identical tags AND
 // identical SpecPhysicalSignature are merged into a single group; different tags
 // always produce different groups regardless of physical equality.
 struct SpecPhysicalSignature {

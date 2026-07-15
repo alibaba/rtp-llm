@@ -16,7 +16,7 @@ namespace rtp_llm {
 
 namespace {
 
-// Exclude the host block pool backing from core dumps (mirrors the legacy BlockPool
+// Exclude the host block pool backing from core dumps (mirrors the removed legacy pool
 // behavior). Best-effort: failures and the absence of MADV_DONTDUMP only warn and never
 // fail initialization.
 void markHostBlockPoolDontDump(const char* pool_name, void* ptr, size_t size) {

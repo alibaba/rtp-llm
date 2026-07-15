@@ -20,9 +20,9 @@ bool DeviceKVCacheGroup::init() {
 
     for (int i = 0; i < static_cast<int>(layer_ids_.size()); ++i) {
         const int global_layer_id = layer_ids_[i];
-        // - For non-hybrid (single-model) layout, BlockPool exposes per-layer tensors indexed by global layer id,
+        // - For non-hybrid (single-model) layout, DeviceBlockPool exposes per-layer tensors indexed by global layer id,
         //   and typically global_layer_id == i.
-        // - For hybrid layout, BlockPool exposes per-group "physical layer slot" tensors sized by
+        // - For hybrid layout, DeviceBlockPool exposes per-group "physical layer slot" tensors sized by
         //   CacheConfig.group_layer_num, while layer_ids_ still stores global model layer ids.
         //   In that case, we must bind global_layer_id -> layer_tensors[local_slot=i].
 

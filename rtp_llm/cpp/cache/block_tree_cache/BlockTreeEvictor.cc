@@ -352,15 +352,15 @@ EvictionMove BlockTreeEvictor::makeMove(TreeNode* node,
     const auto& slot = node->group_slots[gid];
     switch (source_tier) {
         case Tier::DEVICE:
-            if (slot.has_device_value())
+            if (slot.has_value(Tier::DEVICE))
                 eviction_move.source_blocks = slot.device_blocks;
             break;
         case Tier::HOST:
-            if (slot.has_host_value())
+            if (slot.has_value(Tier::HOST))
                 eviction_move.source_blocks = {slot.host_block};
             break;
         case Tier::DISK:
-            if (slot.has_disk_value())
+            if (slot.has_value(Tier::DISK))
                 eviction_move.source_blocks = {slot.disk_slot};
             break;
         default:

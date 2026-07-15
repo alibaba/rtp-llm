@@ -10,7 +10,6 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/spec/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
@@ -340,7 +339,7 @@ seedNonResidentCacheItem(const HybridPoolKVCacheAllocatorPtr& allocator, int gid
     auto blocks = pool->malloc(1).value();
     EXPECT_EQ(blocks.size(), 1u);
     // Replicate the legacy malloc request ref (single-count malloc leaves refCount 0);
-    // the subsequent releaseRef must have a prior holder or it aborts.
+    // the subsequent decRef must have a prior holder or it aborts.
     pool->incRef(blocks);
     auto                      shared_cache = allocator->sharedBlockCache();
     std::vector<BlockIdxType> group_slots(allocator->groupBlockPools().size(), NULL_BLOCK_IDX);
@@ -348,7 +347,7 @@ seedNonResidentCacheItem(const HybridPoolKVCacheAllocatorPtr& allocator, int gid
     shared_cache->put(key, group_slots, false);
     // SharedBlockCache::put() internally calls pool->incRef() (the cache holder), so after
     // releasing the request holder the block stays allocated with refCount 1 (cache-held).
-    pool->releaseRef(blocks);
+    pool->decRef(blocks);
     return blocks[0];
 }
 
@@ -417,7 +416,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, SwaDefaultRegionGroupPoolUsesGpuBacking) 
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, GetBlockPoolReturnsNullptrInHybridPoolMode) {
-    // HybridPoolKVCacheAllocator owns one BlockPool per group and does not
+    // HybridPoolKVCacheAllocator owns one DeviceBlockPool per group and does not
     // expose a single canonical block_pool_; getBlockPool() must return nullptr.
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);
@@ -521,8 +520,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, RequestAndConnectorRefAggregateAcrossGrou
     EXPECT_EQ(allocator->connectorRefBlocksNum(), 0u);
 
     // Release the first (request) holder on every block.
-    pool0->releaseRef(g0_blocks);
-    pool1->releaseRef(g1_blocks);
+    pool0->decRef(g0_blocks);
+    pool1->decRef(g1_blocks);
     EXPECT_EQ(allocator->requestRefBlocksNum(), 0u);
 
     // The two doubly-held blocks stay allocated (refCount drops to 1); the rest are freed.
@@ -535,8 +534,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, RequestAndConnectorRefAggregateAcrossGrou
     EXPECT_EQ(allocator->notInUseBlocksNum(), free_total_before - 2u);
 
     // Release the second holder → blocks are fully freed and availability is restored.
-    pool0->releaseRef(g0_blocks[0]);
-    pool1->releaseRef(g1_blocks[0]);
+    pool0->decRef(g0_blocks[0]);
+    pool1->decRef(g1_blocks[0]);
     EXPECT_FALSE(pool0->isAllocated(g0_blocks[0]));
     EXPECT_FALSE(pool1->isAllocated(g1_blocks[0]));
     EXPECT_EQ(allocator->freeBlocksNum(), free_total_before);
@@ -800,7 +799,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, BlockCacheFreeIgnoresDuplicateAndNullBloc
     auto batch = std::make_shared<BatchKVCacheResource>();
     batch->resetBatchSize(1);
     batch->initGroups(config.groupNums(), static_cast<int>(config.layer_all_num), config.layerGroupIdsSnapshot());
-    // Same block listed twice in the same group should only be released once (releaseRef
+    // Same block listed twice in the same group should only be released once (decRef
     // aborts at refCount 0); NULL_BLOCK_IDX entries should be skipped.
     batch->mutableBlockIds(0, /*gid=*/1).assign(BlockIndicesType{seeded, seeded, NULL_BLOCK_IDX});
     EXPECT_NO_THROW(allocator->blockCacheFree(batch));
@@ -1318,7 +1317,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4SharedBlockCacheIsUnifiedAcrossGroups
     auto blocks = pool0->malloc(1).value();
     ASSERT_EQ(blocks.size(), 1u);
     // Single-count malloc reserves capacity only; take the request holder before put()'s
-    // cache holder, so the later releaseRef has a prior holder.
+    // cache holder, so the later decRef has a prior holder.
     pool0->incRef(blocks);
     std::vector<BlockIdxType> group_slots(allocator->groupBlockPools().size(), NULL_BLOCK_IDX);
     group_slots[0] = blocks[0];
@@ -1329,7 +1328,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4SharedBlockCacheIsUnifiedAcrossGroups
     EXPECT_EQ(allocator->sharedBlockCache(), shared_cache);
 
     // Clean up: release the request holder (the cache holder from put() keeps the block).
-    pool0->releaseRef(blocks);
+    pool0->decRef(blocks);
 }
 #endif
 
@@ -1344,10 +1343,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, RequestReleaseDoesNotFreeCachedBlock) {
     pool->incRef(block);  // cache holder
     pool->incRef(block);  // request holder
     EXPECT_EQ(pool->refCount(block), 2u);
-    pool->releaseRef(block);  // release request holder
+    pool->decRef(block);  // release request holder
     EXPECT_TRUE(pool->isAllocated(block));
     EXPECT_EQ(pool->refCount(block), 1u);
-    pool->releaseRef(block);  // release cache holder
+    pool->decRef(block);  // release cache holder
     EXPECT_FALSE(pool->isAllocated(block));
 }
 

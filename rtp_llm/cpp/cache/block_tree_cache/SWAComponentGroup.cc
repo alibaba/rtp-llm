@@ -25,7 +25,7 @@ void SWAComponentGroup::tryAddToDeviceHeap(TreeNode* node) {
     // SWA: any node with device data can enter heap (no Leaf requirement)
     const size_t group_id = component_group_id;
     GroupSlot&   slot     = node->group_slots[group_id];
-    if (slot.has_device_value() && !slot.in_device_heap) {
+    if (slot.has_value(Tier::DEVICE) && !slot.in_device_heap) {
         device_heap->push(node, component_group_id);
         slot.in_device_heap = true;
     }
@@ -40,7 +40,7 @@ size_t SWAComponentGroup::computeReferenceCount(size_t matched_block_count, cons
     size_t       accumulated = 0;
     for (size_t i = matched_block_count; i > 0; --i) {
         const TreeNode* node = path[i - 1];
-        if (group_id < node->group_slots.size() && node->group_slots[group_id].has_any_value()) {
+        if (group_id < node->group_slots.size() && !node->group_slots[group_id].is_empty()) {
             count++;
             accumulated += seq_size_per_block_;
             if (accumulated >= sliding_window_size_) {
@@ -56,7 +56,7 @@ SWAMatchValidator::SWAMatchValidator(size_t sliding_window_size, size_t seq_size
     sliding_window_size_(sliding_window_size), seq_size_per_block_(seq_size_per_block) {}
 
 bool SWAMatchValidator::validate(const TreeNode* node, const GroupSlot& slot) {
-    const bool has_swa_data = slot.has_any_value();
+    const bool has_swa_data = !slot.is_empty();
 
     if (!has_swa_data) {
         connected_to_root_  = false;

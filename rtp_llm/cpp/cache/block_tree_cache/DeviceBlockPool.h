@@ -52,40 +52,27 @@ public:
     // the global-layer -> (layout, local layer) mapping. Invariants enforced via RTP_LLM_CHECK.
     bool init();
 
-    MemoryType where() const;
-
+    
     // Stable CUDA device index of the backing buffer. Returns -1 for non-CUDA builds.
     int deviceIndex() const;
-
-    // Per-(global) layer KV / KV-scale backing tensors for the allocator path, by global layer id.
+    
+    MemoryType where() const;
     std::vector<torch::Tensor> allLayerCacheBase() const;
     std::vector<torch::Tensor> allLayerScaleCacheBase() const;
 
-    // Address of one (layer, block) for the allocator/device-copy fast path.
-    BlockAddrInfo convertIndexToAddr(int layer_id, BlockIdxType block) const;
-
-    // Backing buffer(s) for one (layer, block), including externally assigned valid block IDs.
-    // CHECK-fails if the pool is uninitialized or the block is out of range.
-    std::vector<DeviceBlockBuffer> blockBuffers(int layer_id, BlockIdxType block) const;
-    std::vector<DeviceBlockBuffer>
-    blockBuffers(int layer_id, BlockIdxType block, int partition_count, int partition_id) const;
-
-    // Transfer-facing (PD/P2P/RDMA/Remote/Memory) BlockInfo view over the same layout;
-    // retained because those paths need torch-free is_cuda/device_index/scalar_type descriptors.
-    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, BlockIdxType block) const;
-    std::vector<BlockInfo>
-    convertIndexToBuffer(int layer_id, BlockIdxType block, int partition_count, int partition_id) const;
-
-    // RDMA user-memory registration of the backing GPU buffer for PD separation / remote KV
-    // transfer. Idempotent (guarded by kvcache_reg_mr_); model_id kept for call-site parity.
     void    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
     void    deregUserMr();
     int64_t getMrCostTimeMs() const {
         return mr_cost_time_ms_;
     }
+    BlockAddrInfo convertIndexToAddr(int layer_id, BlockIdxType block) const;
+    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, BlockIdxType block) const;
+    std::vector<BlockInfo>
+    convertIndexToBuffer(int layer_id, BlockIdxType block, int partition_count, int partition_id) const;
+    std::vector<DeviceBlockBuffer> blockBuffers(int layer_id, BlockIdxType block) const;
+    std::vector<DeviceBlockBuffer>
+    blockBuffers(int layer_id, BlockIdxType block, int partition_count, int partition_id) const;
 
-    // Contiguous backing-buffer accessors for the PD / Remote KV transfer periphery (bulk MR
-    // registration of the whole pool buffer); the only raw byte-level accessors on this pool.
     void* getBaseAddress() const {
         return cache_base_ptr_;
     }
@@ -94,17 +81,20 @@ public:
     std::string debugString() const override;
 
 private:
-    // Computes physical_block_count from memory_layouts[*].block_num BEFORE the IBlockPool
-    // base ctor runs (it needs physical_block_count > 1 to seed the free list).
-    static std::shared_ptr<const DeviceBlockPoolConfig> normalizeConfig(const std::shared_ptr<const DeviceBlockPoolConfig>& config);
-
     const DeviceBlockPoolConfig& config() const;
+    // global_layer_id -> {layout_index, local_layer_id}
+    std::pair<int, int> mapGlobalLayerIdToLocal(int global_layer_id) const;
+    void                checkLayoutValidity(int layout_id) const;
 
-    // init() helpers: backing allocation + layout-strategy setup.
+    // Helper functions for init()
+    static std::shared_ptr<const DeviceBlockPoolConfig>
+         normalizeConfig(const std::shared_ptr<const DeviceBlockPoolConfig>& config);
     void initializeCacheBuffer();
     void initializeCudaMallocBuffer();
     void initializeLayerMappings();
     void initializeLayoutStrategies();
+
+    // Helper functions for initializeLayoutStrategies()
     void processMemoryLayout(size_t layout_idx, const torch::Tensor& full_tensor, size_t& global_layer_begin);
     torch::Tensor createTensor(const torch::Tensor& full_tensor,
                                int64_t              offset,
@@ -117,10 +107,9 @@ private:
                                   torch::Tensor&            kv_scale_tensor);
     void processLayerTensors(size_t layout_idx, const MemoryLayoutConfig& layout_cfg, size_t& global_layer_begin);
 
-    std::pair<int, int> mapGlobalLayerIdToLocal(int global_layer_id) const;
-    void                checkLayoutValidity(int layout_id) const;
     std::vector<DeviceBlockBuffer> toDeviceBlockBuffers(const std::vector<BlockInfo>& infos, BlockIdxType block) const;
 
+    // Helper functions for regUserMr/deregUserMr
     void registerUserMrForBuffer(std::shared_ptr<MemoryUtil> memory_util,
                                  size_t                      layout_idx,
                                  size_t                      offset_bytes,
@@ -143,11 +132,9 @@ private:
     std::shared_ptr<CacheStore> cache_store_;
 
     std::vector<std::unique_ptr<MemoryLayoutStrategy>> layout_strategies_;
-    // global_layer_id -> {layout_index, local_layer_id}
-    std::vector<std::pair<int, int>> global_layer_to_local_;
-
-    std::vector<torch::Tensor> global_layer_kv_tensors_;
-    std::vector<torch::Tensor> global_layer_kv_scale_tensors_;
+    std::vector<std::pair<int, int>>                   global_layer_to_local_;
+    std::vector<torch::Tensor>                         global_layer_kv_tensors_;
+    std::vector<torch::Tensor>                         global_layer_kv_scale_tensors_;
 };
 
 }  // namespace rtp_llm

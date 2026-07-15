@@ -81,9 +81,6 @@ CacheConfig HybridConfigCreator::initializeConfig(const ModelConfig&      model_
 KVCacheSpecPtr HybridConfigCreator::getSpecFromLayers(const LayerKVCacheSpecs& runtime_specs,
                                                       const std::vector<int>&  layer_ids,
                                                       const char*              spec_role) {
-    // When layer_ids is empty, the model has no layers of this type (e.g. propose model
-    // with only full-attention layers and no linear-attention layers). Return nullptr so
-    // callers can skip spec preparation for the absent type.
     if (layer_ids.empty()) {
         return nullptr;
     }
@@ -292,8 +289,6 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
         HybridConfigCreator::createLayerGroups(linear_layers, full_layers, group_layer_num);
     config.group_layer_num = group_layer_num;
 
-    // full_spec / linear_spec may be nullptr when the model has no layers of that type
-    // (e.g. a propose/MTP sub-model with only full-attention layers).
     if (full_spec) {
         HybridConfigCreator::prepareFullAttentionSpec(
             full_spec, model_config, parallelism_config, dtype, static_cast<uint32_t>(full_layers.size()));

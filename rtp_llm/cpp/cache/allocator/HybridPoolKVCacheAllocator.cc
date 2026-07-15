@@ -10,7 +10,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
@@ -32,12 +32,12 @@ cpEffectiveSeqLenForReserve(const std::shared_ptr<CPSlotMapper>& mapper, CacheGr
     return cpShardThisGroupForReserve(mapper, group_type) ? mapper->effectiveSeqLenForAlloc(seq_len) : seq_len;
 }
 
-void appendPoolSummary(std::ostringstream&    os,
-                       bool&                  has_any,
-                       int                    gid,
-                       const std::string&     tag,
-                       CacheGroupType         group_type,
-                       const BlockPoolConfig& pool_config) {
+void appendPoolSummary(std::ostringstream&          os,
+                       bool&                        has_any,
+                       int                          gid,
+                       const std::string&           tag,
+                       CacheGroupType               group_type,
+                       const DeviceBlockPoolConfig& pool_config) {
     static constexpr double kBytesPerMB = 1024.0 * 1024.0;
     if (has_any) {
         os << "; ";
@@ -47,7 +47,7 @@ void appendPoolSummary(std::ostringstream&    os,
        << ", type=" << cacheGroupTypeName(group_type) << ", size=" << pool_config.total_size_bytes << " bytes("
        << std::fixed << std::setprecision(2) << static_cast<double>(pool_config.total_size_bytes) / kBytesPerMB
        << " MB)"
-       << ", blocks=" << pool_config.block_num;
+       << ", blocks=" << pool_config.physical_block_count;
 }
 
 }  // namespace
@@ -71,15 +71,15 @@ bool HybridPoolKVCacheAllocator::doInit() {
     size_t                  pool_total_blocks = 0;
     bool                    has_pool          = false;
 
-    std::vector<BlockPoolConfig> group_pool_configs;
+    std::vector<DeviceBlockPoolConfig> group_pool_configs;
     group_pool_configs.reserve(static_cast<size_t>(group_nums));
     for (int gid = 0; gid < group_nums; ++gid) {
-        auto       pool_config = BlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(gid));
+        auto       pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(gid));
         const auto tag         = config_.tagForGroup(static_cast<size_t>(gid));
         const auto group_type  = config_.typeForGroup(static_cast<size_t>(gid));
         appendPoolSummary(pool_summary, has_pool, gid, tag, group_type, pool_config);
         pool_total_bytes += pool_config.total_size_bytes;
-        pool_total_blocks += pool_config.block_num;
+        pool_total_blocks += pool_config.physical_block_count;
         group_pool_configs.push_back(std::move(pool_config));
     }
 
@@ -97,12 +97,7 @@ bool HybridPoolKVCacheAllocator::doInit() {
         const auto& pool_config = group_pool_configs[static_cast<size_t>(gid)];
         const auto  group_type  = config_.typeForGroup(static_cast<size_t>(gid));
 
-        auto device_config                     = std::make_shared<DeviceBlockPoolConfig>();
-        device_config->pool_type               = BlockPoolType::DEVICE;
-        device_config->pool_name               = pool_config.pool_name;
-        device_config->physical_block_count    = pool_config.block_num;
-        device_config->total_size_bytes        = pool_config.total_size_bytes;
-        device_config->memory_layouts          = pool_config.memory_layouts;
+        auto device_config                     = std::make_shared<DeviceBlockPoolConfig>(pool_config);
         device_config->allocation_type         = allocation_type_;
         device_config->use_cuda_malloc_backing = use_cuda_malloc_block_pool_;
 
@@ -165,7 +160,7 @@ void HybridPoolKVCacheAllocator::referenceBlocksInGroup(int                     
 
 void HybridPoolKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector) {
     (void)is_connector;
-    group_block_pools_[static_cast<size_t>(gid)]->releaseRef(blocks);
+    group_block_pools_[static_cast<size_t>(gid)]->decRef(blocks);
 }
 
 CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
@@ -395,7 +390,7 @@ void HybridPoolKVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& b
                 blocks_to_free.push_back(block_idx);
             }
             if (!blocks_to_free.empty()) {
-                group_block_pools_[static_cast<size_t>(gid)]->releaseRef(blocks_to_free);
+                group_block_pools_[static_cast<size_t>(gid)]->decRef(blocks_to_free);
             }
         }
     }

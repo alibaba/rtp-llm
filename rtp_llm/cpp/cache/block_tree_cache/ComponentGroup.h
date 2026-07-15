@@ -293,7 +293,7 @@ public:
     }
 
     // ---- Device block reference counting via pools ----
-    // A cache-category holder is added with incRef() and released with releaseRef(), which
+    // A cache-category holder is added with incRef() and released with decRef(), which
     // returns capacity only when the refcount reaches 0.
     void referenceDeviceBlocks(const std::vector<BlockIdxType>& device_blocks) const {
         for (size_t i = 0; i < device_blocks.size() && i < device_pools_.size(); ++i) {
@@ -305,7 +305,7 @@ public:
     void releaseDeviceBlocks(const std::vector<BlockIdxType>& device_blocks) const {
         for (size_t i = 0; i < device_blocks.size() && i < device_pools_.size(); ++i) {
             if (device_pools_[i] && !isNullBlockIdx(device_blocks[i])) {
-                device_pools_[i]->releaseRef(device_blocks[i]);
+                device_pools_[i]->decRef(device_blocks[i]);
             }
         }
     }

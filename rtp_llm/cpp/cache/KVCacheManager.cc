@@ -199,10 +199,6 @@ bool KVCacheManager::init() {
         }
     }
 
-    // Create BlockTreeCache (unified tier management, replaces coordinator).
-    // It depends on the device pools produced by allocator_->init(), so it must be
-    // built after init(); the allocator (and its owned groups) then receives the
-    // BlockTreeCache pointer via setBlockTreeCache for all match/insert/evict calls.
     block_tree_cache_ = createBlockTreeCache(
         config_, kv_cache_config_, allocator_, parallelism_config_, /*storage_backend=*/nullptr, broadcast_manager);
     if (!block_tree_cache_) {
@@ -609,7 +605,6 @@ std::shared_ptr<CacheStore> KVCacheManager::getCacheStore() const {
 }
 
 bool KVCacheManager::hasActiveConnectors() const {
-    // BlockTreeCache tier checks: active when memory/disk/remote tiers are enabled.
     return block_tree_cache_
            && (block_tree_cache_->isMemoryCacheEnabled() || block_tree_cache_->isDiskCacheEnabled()
                || block_tree_cache_->isRemoteCacheEnabled());
@@ -680,12 +675,6 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
     return true;
 }
 
-void KVCacheManager::handleRead(const P2PConnectorStartLoadRequestPB& request,
-                                P2PConnectorStartLoadResponsePB&      response,
-                                std::function<bool()>                 is_cancelled) {
-    // Remote/P2P connectors not yet migrated to BlockTreeCache.
-}
-
 void KVCacheManager::allocateAndSync() {
     RTP_LLM_LOG_INFO("allocateAndSync start, block_num=%d", config_.block_num);
     size_t world_size = parallelism_config_.tp_size * parallelism_config_.dp_size;
@@ -737,6 +726,12 @@ void KVCacheManager::reportMetricsLoop() {
 
         std::this_thread::sleep_for(std::chrono::seconds(1));  // 1s
     }
+}
+
+void KVCacheManager::handleRead(const P2PConnectorStartLoadRequestPB& request,
+                                P2PConnectorStartLoadResponsePB&      response,
+                                std::function<bool()>                 is_cancelled) {
+    // Remote/P2P connectors not yet migrated to BlockTreeCache.
 }
 
 // Write one KV block (optionally per-layer) from host/device tensors for test

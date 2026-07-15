@@ -56,7 +56,7 @@ TEST_F(LinearComponentGroupTest, EvictFromTierDevice) {
     group_->tryAddToDeviceHeap(node);
     group_->evictFromTier(node, node->group_slots[0], Tier::DEVICE);
 
-    EXPECT_FALSE(node->group_slots[0].has_device_value());
+    EXPECT_FALSE(node->group_slots[0].has_value(Tier::DEVICE));
     EXPECT_FALSE(node->group_slots[0].in_device_heap);
 
     delete node;

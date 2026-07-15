@@ -177,9 +177,6 @@ TEST(HostBlockPoolTest, LifecycleComesFromIBlockPool) {
     pool.incRef(*block);
     EXPECT_EQ(pool.refCount(*block), 1u);
     pool.decRef(*block);
-    EXPECT_EQ(pool.refCount(*block), 0u);
-
-    pool.free(*block);
     EXPECT_FALSE(pool.isAllocated(*block));
 }
 

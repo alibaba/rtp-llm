@@ -84,7 +84,6 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache/block_tree_cache",
-        "//rtp_llm/cpp/cache:block_pool",
         "//rtp_llm/cpp/cache:cache_types",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
