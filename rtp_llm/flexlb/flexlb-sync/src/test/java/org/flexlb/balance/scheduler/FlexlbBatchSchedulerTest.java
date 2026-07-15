@@ -97,12 +97,12 @@ class FlexlbBatchSchedulerTest {
         WorkerStatus ws = new WorkerStatus();
         ws.setIp("10.0.0.1");
         ws.setPort(8080);
-        ws.setGrpcPort(9080);
+        ws.setGrpcPort(8081);
         PrefillEndpoint endpoint = new PrefillEndpoint(ws, config, scheduler, reporter);
         ServerStatus prefill = new ServerStatus();
         prefill.setServerIp("10.0.0.1");
         prefill.setHttpPort(8080);
-        prefill.setGrpcPort(9080);
+        prefill.setGrpcPort(8081);
         prefill.setRole(RoleType.PREFILL);
         endpointRegistry.putPrefill(ipPort, endpoint);
     }
@@ -242,7 +242,7 @@ class FlexlbBatchSchedulerTest {
         WorkerStatus unsyncedDp0 = new WorkerStatus();
         unsyncedDp0.setIp("10.0.0.9");
         unsyncedDp0.setPort(8090);
-        unsyncedDp0.setGrpcPort(9090);
+        unsyncedDp0.setGrpcPort(8091);
         unsyncedDp0.setDpRank(0);
         PrefillEndpoint unsyncedEp = new PrefillEndpoint(unsyncedDp0, config, scheduler, reporter);
         when(engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, "g1"))
@@ -251,7 +251,7 @@ class FlexlbBatchSchedulerTest {
         Response response = scheduler.submit(context(92)).get(2, TimeUnit.SECONDS);
 
         assertTrue(response.isSuccess());
-        assertEquals("10.0.0.1:9080", sentEndpoints.getFirst());
+        assertEquals("10.0.0.1:8081", sentEndpoints.getFirst());
         assertEquals(1, sentBatches.getFirst().getDpSlots(0).getDpRank());
     }
 
@@ -495,7 +495,7 @@ class FlexlbBatchSchedulerTest {
         WorkerStatus decodeStatus = new WorkerStatus();
         decodeStatus.setIp("10.0.0.2");
         decodeStatus.setPort(8081);
-        decodeStatus.setGrpcPort(9081);
+        decodeStatus.setGrpcPort(8082);
         DecodeEndpoint decodeEp = scheduler.endpointRegistry.ensureDecodeEndpoint(
                 "10.0.0.2:8081", decodeStatus);
 
@@ -637,8 +637,8 @@ class FlexlbBatchSchedulerTest {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(List.of(
-                server(RoleType.PREFILL, "10.0.0.1", 8080, 9080, requestId, dpRank),
-                server(RoleType.DECODE, "10.0.0.2", 8081, 9081, requestId)
+                server(RoleType.PREFILL, "10.0.0.1", 8080, 8081, requestId, dpRank),
+                server(RoleType.DECODE, "10.0.0.2", 8081, 8082, requestId)
         ));
         return response;
     }
