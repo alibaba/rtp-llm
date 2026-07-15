@@ -43,8 +43,8 @@ protected:
 //   Before reclaimBlocks(1, DEVICE):
 //   root → [100] F:{10} S:{20} L:{30}
 //          → [200] F:{10} S:{20} L:{30} ←leaf
-//   Full heap: {[200]}  SWA heap: {[200]}  Linear heap: {[200]}
-//   Total: 3
+//   Full heap: {[200]}  SWA heap: {[100],[200]}  Linear heap: {[100],[200]}
+//   Total: 5
 //
 //   After reclaimBlocks(1, DEVICE) + wait:
 //   root → [100] F:{10} S:{20} L:{30}
@@ -57,7 +57,7 @@ TEST_F(FullSWALinearEvictionTest, FullReclaimCascadesToBothSWAAndLinear) {
 
     auto stats0 = cache_->getStats();
     EXPECT_EQ(stats0.tree_node_count, 2u);
-    EXPECT_EQ(stats0.device_heap_total_size, 3u);  // 1 Full + 1 SWA + 1 Linear (leaf)
+    EXPECT_EQ(stats0.device_heap_total_size, 5u);  // 1 Full + 2 SWA + 2 Linear
 
     cache_->reclaimBlocks(1, Tier::DEVICE);
     cache_->waitForPendingTasks();
@@ -87,7 +87,7 @@ TEST_F(FullSWALinearEvictionTest, SingleNodeAllGroupsCleared) {
 // Test: Sequential reclaim with 3 groups drains all.
 //
 //   root → [100] → [200] → [300], all with F+S+L data.
-//   Only [300] in all heaps (leaf).
+//   FULL contains only [300]; SWA and LINEAR contain every node.
 //
 //   Step 1: reclaim Full[300] → cascade S+L → [300] deleted
 //   Step 2: reclaim Full[200] → cascade S+L → [200] deleted
@@ -111,21 +111,21 @@ TEST_F(FullSWALinearEvictionTest, SequentialReclaimDrainsAllGroups) {
 }
 
 // ---------------------------------------------------------------------------
-// Test: Heap composition — only leaf in each heap.
+// Test: Heap composition — FULL is leaf-only; SWA/LINEAR include interior nodes.
 //
 //   root → [100] → [200] → [300] F:{10} S:{20} L:{30}
 //
-//   Full device heap:   {[300]} (1 leaf)
-//   SWA device heap:    {[300]} (1 leaf)
-//   Linear device heap: {[300]} (1 leaf)
-//   Total: 3
+//   Full device heap:   {[300]}
+//   SWA device heap:    {[100],[200],[300]}
+//   Linear device heap: {[100],[200],[300]}
+//   Total: 7
 // ---------------------------------------------------------------------------
 TEST_F(FullSWALinearEvictionTest, HeapCompositionVerification) {
     insertPath({100, 200, 300}, 10, 20, 30);
 
     auto stats = cache_->getStats();
     EXPECT_EQ(stats.tree_node_count, 3u);
-    EXPECT_EQ(stats.device_heap_total_size, 3u);  // 1 per group (leaf only)
+    EXPECT_EQ(stats.device_heap_total_size, 7u);  // 1 Full + 3 SWA + 3 Linear
 }
 
 // ---------------------------------------------------------------------------
@@ -134,8 +134,9 @@ TEST_F(FullSWALinearEvictionTest, HeapCompositionVerification) {
 //   root → [100] → [200] F:{10} S:{20} L:{30}  ← leaf
 //                → [300] F:{40} S:{50} L:{60}  ← leaf
 //
-//   Full heap: {[200],[300]}  SWA heap: {[200],[300]}  Linear heap: {[200],[300]}
-//   Total: 6
+//   Full heap: {[200],[300]}
+//   SWA heap: {[100],[200],[300]}  Linear heap: {[100],[200],[300]}
+//   Total: 8
 //
 //   Sequential reclaim: 2 leaves + parent = 3 reclaims total.
 // ---------------------------------------------------------------------------
@@ -145,7 +146,7 @@ TEST_F(FullSWALinearEvictionTest, ForkBothBranchesEvictable) {
 
     auto stats0 = cache_->getStats();
     EXPECT_EQ(stats0.tree_node_count, 3u);
-    EXPECT_EQ(stats0.device_heap_total_size, 6u);  // 2 per group (2 leaves)
+    EXPECT_EQ(stats0.device_heap_total_size, 8u);  // 2 Full + 3 SWA + 3 Linear
 
     // Reclaim first leaf
     cache_->reclaimBlocks(1, Tier::DEVICE);
@@ -168,13 +169,13 @@ TEST_F(FullSWALinearEvictionTest, ForkBothBranchesEvictable) {
 //
 //   SWA+LINEAR only (no Full). SWA(gid=0), LINEAR(gid=1).
 //
-//   Before:                                   After SWA reclaim + wait:
-//   root → [100] S:{20} L:{30}                root → [100] S:{20} L:_{30}
-//          → [200] S:{20} L:{30} ←SWA leaf           → [200] S:_{20} L:_{30}
-//   SWA heap: {[200]}  LINEAR heap: {[200]}
+//   Before:
+//   root → [100] S:{20} L:{30}
+//          → [200] S:{21} L:{31}
+//   SWA heap: {[100],[200]}  LINEAR heap: {[100],[200]}
 //
-//   SWA[200] reclaimed → cascadeEviction: LINEAR below SWA → clears LINEAR[200].
-//   [200] all groups empty → deleted. [100] survives.
+//   LRU first reclaims SWA[100] and cascades LINEAR[100]; [100] remains because it has a child.
+//   Reclaiming SWA[200] cascades LINEAR[200], deletes [200], then prunes empty [100].
 // ---------------------------------------------------------------------------
 TEST_F(FullSWALinearEvictionTest, SWAReclaimCascadesToLinear) {
     std::unique_ptr<BlockTree> tree        = std::make_unique<BlockTree>(2);
@@ -197,20 +198,25 @@ TEST_F(FullSWALinearEvictionTest, SWAReclaimCascadesToLinear) {
     swa_lin_cache->insert(nullptr, {100, 200}, slots);
 
     EXPECT_EQ(swa_lin_cache->getStats().tree_node_count, 2u);
-    // SWA heap: {[200]}, LINEAR heap: {[200]}
-    EXPECT_EQ(swa_lin_cache->getStats().device_heap_total_size, 2u);
+    EXPECT_EQ(swa_lin_cache->getStats().device_heap_total_size, 4u);
 
-    // Reclaim SWA[200] → cascade clears LINEAR[200] → deleted
+    // Reclaim SWA[100] first (LRU); the empty internal node remains.
     swa_lin_cache->reclaimBlocks(1, Tier::DEVICE);
     swa_lin_cache->waitForPendingTasks();
-    EXPECT_EQ(swa_lin_cache->getStats().tree_node_count, 1u);  // [100] survives
+    EXPECT_EQ(swa_lin_cache->getStats().tree_node_count, 2u);
+    EXPECT_EQ(swa_lin_cache->getStats().device_heap_total_size, 2u);
+
+    // Reclaim SWA[200], then delete the leaf and prune empty [100].
+    swa_lin_cache->reclaimBlocks(1, Tier::DEVICE);
+    swa_lin_cache->waitForPendingTasks();
+    EXPECT_EQ(swa_lin_cache->getStats().tree_node_count, 0u);
 }
 
 // ---------------------------------------------------------------------------
 // Test: Multi-node ancestor chain cleanup (design doc section 2.7).
 //
 //   root → [100] → [200] → [300] → [400] F:{10} S:{20} L:{30}
-//   Only [400] in heaps (leaf). All nodes have data from insert.
+//   FULL contains only [400]; SWA/LINEAR contain all four nodes.
 //
 //   After reclaim [400]: cascade S+L → [400] deleted → [300] promoted
 //   After reclaim [300]: cascade S+L → [300] deleted → [200] promoted

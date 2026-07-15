@@ -44,6 +44,21 @@ struct MemoryBlockLayerTagSlot {
     size_t      stride_bytes{0};  // bytes this slot occupies in the memory block
 };
 
+// Sorting metadata for a candidate node. A single copy per GroupSlot follows the
+// data to its current serving tier (steady-state single-tier-service invariant).
+struct CandidateMeta {
+    uint64_t last_access_seq{0};  // LRU: logical clock of the last real match
+    uint64_t admission_seq{0};    // FIFO: logical clock of entering the current tier
+    uint64_t hit_count{0};        // LFU: cumulative real hit count
+};
+
+// Real data-transfer state; a slot is excluded from all heaps while != IDLE.
+enum class SlotTransferState : uint8_t {
+    IDLE,
+    DEMOTING,     // Device -> Host, or Host -> Disk
+    LOADING_BACK  // Host/Disk -> Device
+};
+
 // Per-ComponentGroup data location across storage tiers.
 // Each GroupSlot corresponds to one ComponentGroup on one TreeNode.
 struct GroupSlot {
@@ -54,10 +69,9 @@ struct GroupSlot {
     // L3: Disk — one disk slot
     BlockIdxType disk_slot{NULL_BLOCK_IDX};
 
-    // Heap membership flags (per-group, eviction is group-granular)
-    bool in_device_heap{false};
-    bool in_host_heap{false};
-    bool in_disk_heap{false};
+    // Async migration state and the single sorting-metadata copy (current serving tier).
+    SlotTransferState transfer_state{SlotTransferState::IDLE};
+    CandidateMeta     candidate_meta;
 
     bool has_value(Tier tier) const {
         switch (tier) {

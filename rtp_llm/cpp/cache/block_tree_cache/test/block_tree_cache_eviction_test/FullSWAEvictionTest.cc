@@ -40,8 +40,8 @@ protected:
 //   Before reclaimBlocks(1, DEVICE):              After reclaim + wait:
 //   root → [100] F:{10} S:{20}            root → [100] F:{10} S:{20}
 //          → [200] F:{10} S:{20} ←leaf
-//   Full heap: {[200]}  SWA heap: {[200]}
-//   Total device heap: 2
+//   Full heap: {[200]}  SWA heap: {[100],[200]}
+//   Total device heap: 3
 //
 //   Full[200] reclaimed → cascade clears SWA[200] device.
 //   Both REUSABLE groups empty → [200] deleted.
@@ -52,7 +52,7 @@ TEST_F(FullSWAEvictionTest, FullReclaimCascadesToSWA) {
 
     auto stats_before = cache_->getStats();
     EXPECT_EQ(stats_before.tree_node_count, 2u);
-    EXPECT_EQ(stats_before.device_heap_total_size, 2u);  // 1 Full + 1 SWA
+    EXPECT_EQ(stats_before.device_heap_total_size, 3u);  // 1 Full + 2 SWA
 
     int reclaimed = cache_->reclaimBlocks(1, Tier::DEVICE);
     EXPECT_EQ(reclaimed, 1);
@@ -65,11 +65,10 @@ TEST_F(FullSWAEvictionTest, FullReclaimCascadesToSWA) {
 // Test: SWA-only cache — sequential reclaim drains chain.
 //
 //   SWA-only: root → [100] → [200] → [300]
-//   SWA heap: {[300]} (insert-leaf only)
+//   SWA heap: {[100],[200],[300]}
 //
-//   After reclaim [300]: [200] promoted to heap (all groups now promote parents).
-//   After reclaim [200]: [100] promoted.
-//   After reclaim [100]: empty tree.
+//   LRU reclaims [100], then [200]. Both remain as empty internal nodes.
+//   Reclaiming [300] deletes the leaf and prunes both empty ancestors.
 // ---------------------------------------------------------------------------
 TEST_F(FullSWAEvictionTest, SWAOnlySequentialDrain) {
     std::unique_ptr<BlockTree> tree        = std::make_unique<BlockTree>(1);
@@ -88,19 +87,21 @@ TEST_F(FullSWAEvictionTest, SWAOnlySequentialDrain) {
     slots[2][0].device_blocks = {22};
     swa_cache->insert(nullptr, {100, 200, 300}, slots);
 
-    EXPECT_EQ(swa_cache->getStats().device_heap_total_size, 1u);  // [300]
+    EXPECT_EQ(swa_cache->getStats().device_heap_total_size, 3u);
 
-    // Reclaim [300] → [200] promoted
+    // Reclaim [100]; it stays as an empty internal node.
     swa_cache->reclaimBlocks(1, Tier::DEVICE);
     swa_cache->waitForPendingTasks();
-    EXPECT_EQ(swa_cache->getStats().tree_node_count, 2u);
+    EXPECT_EQ(swa_cache->getStats().tree_node_count, 3u);
+    EXPECT_EQ(swa_cache->getStats().device_heap_total_size, 2u);
 
-    // Reclaim [200] → [100] promoted
+    // Reclaim [200]; it also stays until its child is removed.
     swa_cache->reclaimBlocks(1, Tier::DEVICE);
     swa_cache->waitForPendingTasks();
-    EXPECT_EQ(swa_cache->getStats().tree_node_count, 1u);
+    EXPECT_EQ(swa_cache->getStats().tree_node_count, 3u);
+    EXPECT_EQ(swa_cache->getStats().device_heap_total_size, 1u);
 
-    // Reclaim [100] → empty
+    // Reclaim [300] and prune [200] and [100].
     swa_cache->reclaimBlocks(1, Tier::DEVICE);
     swa_cache->waitForPendingTasks();
     EXPECT_EQ(swa_cache->getStats().tree_node_count, 0u);
@@ -129,7 +130,7 @@ TEST_F(FullSWAEvictionTest, SequentialFullReclaimClearsBothGroups) {
 //
 //   root → [100] → [200] F:{10} S:{20} ← leaf
 //                → [300] F:{40} S:{50} ← leaf
-//   Full heap: {[200],[300]}  SWA heap: {[200],[300]}
+//   Full heap: {[200],[300]}  SWA heap: {[100],[200],[300]}
 //
 //   After reclaiming both leaves, [100] becomes Full leaf → 3rd reclaim needed.
 // ---------------------------------------------------------------------------
@@ -138,7 +139,7 @@ TEST_F(FullSWAEvictionTest, ForkBothBranchesEvictable) {
     insertPath({100, 300}, 40, 50);
 
     EXPECT_EQ(cache_->getStats().tree_node_count, 3u);
-    EXPECT_EQ(cache_->getStats().device_heap_total_size, 4u);  // 2 Full + 2 SWA
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 5u);  // 2 Full + 3 SWA
 
     cache_->reclaimBlocks(1, Tier::DEVICE);
     cache_->waitForPendingTasks();

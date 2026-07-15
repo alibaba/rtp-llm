@@ -9,15 +9,10 @@ namespace rtp_llm {
 // Uses Any-node heaps like SWA.
 class LinearComponentGroup: public ComponentGroup {
 public:
-    explicit LinearComponentGroup(EvictionPolicy device_policy = EvictionPolicy::LRU,
-                                  EvictionPolicy host_policy   = EvictionPolicy::LRU,
-                                  EvictionPolicy disk_policy   = EvictionPolicy::FIFO);
+    LinearComponentGroup();
 
     std::unique_ptr<MatchValidator> createMatchValidator() override;
     size_t computeReuseBlockCount(size_t matched_block_count, const std::vector<TreeNode*>& path) const override;
-
-    // LINEAR: any node with data can enter heap.
-    void tryAddToDeviceHeap(TreeNode* node) override;
 };
 
 class LinearMatchValidator: public MatchValidator {

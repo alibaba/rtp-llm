@@ -32,8 +32,8 @@ protected:
     std::shared_ptr<SWAComponentGroup> group_;
 };
 
-TEST_F(SWAComponentGroupTest, AnyNodeHeapMiddleNode) {
-    // SWA allows any node with data to be in heap (not just leaves)
+TEST_F(SWAComponentGroupTest, AnyNodeWithDataIsSlotEvictable) {
+    // SWA allows any node holding data at the tier to be a candidate (not just leaves).
     auto* a          = makeNode(100);
     auto* b          = makeNode(200);
     a->children[200] = b;
@@ -42,13 +42,9 @@ TEST_F(SWAComponentGroupTest, AnyNodeHeapMiddleNode) {
     setDeviceBlock(a, 0, 10);
     setDeviceBlock(b, 0, 20);
 
-    // Both A and B can be added to heap (even though A has child B)
-    group_->tryAddToDeviceHeap(a);
-    group_->tryAddToDeviceHeap(b);
-
-    EXPECT_TRUE(a->group_slots[0].in_device_heap);
-    EXPECT_TRUE(b->group_slots[0].in_device_heap);
-    EXPECT_EQ(group_->device_heap->size(), 2u);
+    // Both A and B are candidate-eligible even though A has a child holding data.
+    EXPECT_TRUE(group_->isSlotEvictable(*a, Tier::DEVICE));
+    EXPECT_TRUE(group_->isSlotEvictable(*b, Tier::DEVICE));
 
     delete a;
     delete b;
@@ -58,7 +54,7 @@ TEST_F(SWAComponentGroupTest, WindowValidatorConnectedPath) {
     auto  validator     = group_->createMatchValidator();
     auto* swa_validator = dynamic_cast<SWAMatchValidator*>(validator.get());
 
-    // Path: root → A (has data) → B (has data) → C (has data)
+    // Path: root -> A (has data) -> B (has data) -> C (has data)
     auto* a = makeNode(100);
     auto* b = makeNode(200);
     auto* c = makeNode(300);
@@ -114,7 +110,7 @@ TEST_F(SWAComponentGroupTest, WindowValidatorGapRequiresEnoughWindowAfterReset) 
 TEST_F(SWAComponentGroupTest, WindowValidatorMultitierNoReset) {
     auto validator = group_->createMatchValidator();
 
-    // B has no device data but has host data → should not reset
+    // B has no device data but has host data -> should not reset
     auto* a = makeNode(100);
     auto* b = makeNode(200);
     auto* c = makeNode(300);
@@ -125,7 +121,7 @@ TEST_F(SWAComponentGroupTest, WindowValidatorMultitierNoReset) {
     setDeviceBlock(c, 0, 30);
 
     EXPECT_TRUE(validator->validate(a, a->group_slots[0]));
-    // B has host data → !is_empty() is true → no reset
+    // B has host data -> !is_empty() is true -> no reset
     EXPECT_TRUE(validator->validate(b, b->group_slots[0]));
     EXPECT_TRUE(validator->validate(c, c->group_slots[0]));
 
@@ -180,23 +176,16 @@ TEST_F(SWAComponentGroupTest, IndependentEvictionDoesNotAffectFull) {
     delete node;
 }
 
-TEST_F(SWAComponentGroupTest, DriveEvictionFromAnyNode) {
+TEST_F(SWAComponentGroupTest, SlotEvictabilityRequiresTierDataButNotLeafTopology) {
     auto* a          = makeNode(100);
     auto* b          = makeNode(200);
     a->children[200] = b;
     b->parent        = a;
-
     setDeviceBlock(a, 0, 10);
-    setDeviceBlock(b, 0, 20);
 
-    group_->tryAddToDeviceHeap(a);
-    group_->tryAddToDeviceHeap(b);
-
-    // Both nodes are candidates (not just leaves)
-    auto result = group_->driveEviction(1, Tier::DEVICE);
-    ASSERT_TRUE(result.has_value());
-    // Either A or B could be popped (depends on LRU ordering)
-    EXPECT_NE(result->node, nullptr);
+    EXPECT_TRUE(group_->isSlotEvictable(*a, Tier::DEVICE));
+    EXPECT_FALSE(group_->isSlotEvictable(*a, Tier::HOST));
+    EXPECT_FALSE(group_->isSlotEvictable(*b, Tier::DEVICE));
 
     delete a;
     delete b;

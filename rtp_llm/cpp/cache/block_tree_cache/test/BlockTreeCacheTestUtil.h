@@ -61,6 +61,7 @@ public:
             return false;
         }
         const BlockTreeInsertResult insert_result = tree->insertNode(parent, cache_keys, slots);
+        cache.evictor_.onInsertCommitted(insert_result);
         return insert_result.leaf != nullptr;
     }
 

@@ -129,22 +129,14 @@ TEST(BlockTreeTest, RemoveEmptyAncestors) {
     TreeNode* leaf = tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 42)).leaf;
     EXPECT_EQ(tree.nodeCount(), 3u);
 
-    // Remove the leaf
+    TreeNode* first_empty_ancestor = leaf->parent;
+
+    // Remove the leaf, then let removeEmptyAncestors prune 200 and 100.
     tree.removeNode(leaf);
     EXPECT_EQ(tree.nodeCount(), 2u);
 
-    // Find and remove 200 (now has no children after 300 was removed)
-    auto      result  = tree.findNode({100, 200});
-    TreeNode* node200 = result.matched_node;
-    ASSERT_NE(node200, nullptr);
-    tree.removeNode(node200);
-    EXPECT_EQ(tree.nodeCount(), 1u);
-
-    // Find and remove 100 (now has no children)
-    auto      result100 = tree.findNode({100});
-    TreeNode* node100   = result100.matched_node;
-    ASSERT_NE(node100, nullptr);
-    tree.removeNode(node100);
+    TreeNode* surviving_ancestor = tree.removeEmptyAncestors(first_empty_ancestor, {0});
+    EXPECT_EQ(surviving_ancestor, tree.root());
     EXPECT_EQ(tree.nodeCount(), 0u);
 }
 
@@ -159,14 +151,32 @@ TEST(BlockTreeTest, RemoveEmptyAncestorsStopsAtData) {
     tree.removeNode(leaf);
 
     // removeEmptyAncestors from 100's position: 100 has data → stops
-    auto             result          = tree.findNode({100});
+    auto             result = tree.findNode({100});
     std::vector<int> reusable_groups = {0};
-    tree.removeEmptyAncestors(result.matched_node, reusable_groups);
+    TreeNode*        surviving_ancestor = tree.removeEmptyAncestors(result.matched_node, reusable_groups);
 
     // 100 should still be in the tree (it has data in group 0)
+    EXPECT_EQ(surviving_ancestor, result.matched_node);
     EXPECT_EQ(tree.nodeCount(), 1u);
     auto check = tree.findNode({100});
     EXPECT_EQ(check.matched_blocks, 1u);
+}
+
+TEST(BlockTreeTest, RemoveEmptyAncestorsReturnsFirstSurvivorAfterPruning) {
+    BlockTree tree(1);
+    tree.insertNode(nullptr, {100}, make2DSlots(1, 1, 10));
+    TreeNode* leaf = tree.insertNode(nullptr, {100, 200, 300}, makeEmpty2DSlots(3)).leaf;
+    ASSERT_NE(leaf, nullptr);
+    TreeNode* first_empty_ancestor = leaf->parent;
+
+    tree.removeNode(leaf);
+    TreeNode* surviving_ancestor = tree.removeEmptyAncestors(first_empty_ancestor, {0});
+
+    auto node100 = tree.findNode({100});
+    ASSERT_NE(node100.matched_node, nullptr);
+    EXPECT_EQ(surviving_ancestor, node100.matched_node);
+    EXPECT_EQ(surviving_ancestor->cache_key, 100);
+    EXPECT_EQ(tree.nodeCount(), 1u);
 }
 
 TEST(BlockTreeTest, RepeatedInsertDoesNotDuplicate) {

@@ -49,6 +49,14 @@ cc_test(
 )
 
 cc_test(
+    name = "block_tree_evictor_test",
+    srcs = ["BlockTreeEvictorTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+)
+
+cc_test(
     name = "full_component_group_test",
     srcs = ["FullComponentGroupTest.cc"],
     copts = test_copts,

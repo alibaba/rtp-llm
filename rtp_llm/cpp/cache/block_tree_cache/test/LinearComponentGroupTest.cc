@@ -26,7 +26,7 @@ protected:
     std::shared_ptr<LinearComponentGroup> group_;
 };
 
-TEST_F(LinearComponentGroupTest, DriveEvictionAnyNode) {
+TEST_F(LinearComponentGroupTest, AnyNodeWithDataIsSlotEvictable) {
     auto* a          = makeNode(100);
     auto* b          = makeNode(200);
     a->children[200] = b;
@@ -35,15 +35,9 @@ TEST_F(LinearComponentGroupTest, DriveEvictionAnyNode) {
     setDeviceBlock(a, 0, 10);
     setDeviceBlock(b, 0, 20);
 
-    // Both nodes can be added (Any-node heap)
-    group_->tryAddToDeviceHeap(a);
-    group_->tryAddToDeviceHeap(b);
-    EXPECT_EQ(group_->device_heap->size(), 2u);
-
-    auto result = group_->driveEviction(1, Tier::DEVICE);
-    ASSERT_TRUE(result.has_value());
-    EXPECT_NE(result->node, nullptr);
-    EXPECT_EQ(result->source_tier, Tier::DEVICE);
+    // LINEAR has no leaf/topology requirement; both nodes are eligible.
+    EXPECT_TRUE(group_->isSlotEvictable(*a, Tier::DEVICE));
+    EXPECT_TRUE(group_->isSlotEvictable(*b, Tier::DEVICE));
 
     delete a;
     delete b;
@@ -53,11 +47,10 @@ TEST_F(LinearComponentGroupTest, EvictFromTierDevice) {
     auto* node = makeNode(100);
     setDeviceBlock(node, 0, 42);
 
-    group_->tryAddToDeviceHeap(node);
     group_->evictFromTier(node, node->group_slots[0], Tier::DEVICE);
 
+    // Device blocks are cleared; heap ownership no longer lives on the group.
     EXPECT_FALSE(node->group_slots[0].has_value(Tier::DEVICE));
-    EXPECT_FALSE(node->group_slots[0].in_device_heap);
 
     delete node;
 }
@@ -76,9 +69,11 @@ TEST_F(LinearComponentGroupTest, MatchValidatorHasData) {
     delete node_empty;
 }
 
-TEST_F(LinearComponentGroupTest, DriveEvictionEmptyHeap) {
-    auto result = group_->driveEviction(1, Tier::DEVICE);
-    EXPECT_FALSE(result.has_value());
+TEST_F(LinearComponentGroupTest, EmptySlotIsNotEvictable) {
+    auto* node = makeNode(100);
+    EXPECT_FALSE(group_->isSlotEvictable(*node, Tier::DEVICE));
+    EXPECT_FALSE(group_->isSlotEvictable(*node, Tier::HOST));
+    delete node;
 }
 
 }  // namespace

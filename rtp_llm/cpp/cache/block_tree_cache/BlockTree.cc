@@ -115,7 +115,7 @@ void BlockTree::removeNode(TreeNode* node) {
     }
 }
 
-void BlockTree::removeEmptyAncestors(TreeNode* start_node, const std::vector<int>& reusable_group_ids) {
+TreeNode* BlockTree::removeEmptyAncestors(TreeNode* start_node, const std::vector<int>& reusable_group_ids) {
     TreeNode* current       = start_node;
     int       removed_count = 0;
 
@@ -149,6 +149,7 @@ void BlockTree::removeEmptyAncestors(TreeNode* start_node, const std::vector<int
     if (removed_count > 0) {
         RTP_LLM_LOG_DEBUG("BlockTree::removeEmptyAncestors: removed %d empty ancestors", removed_count);
     }
+    return current;
 }
 
 }  // namespace rtp_llm

@@ -534,6 +534,25 @@ TEST_F(BlockTreeCacheTest, MultiGroupConstruction) {
     EXPECT_EQ(multi_cache->tree()->groupSlotCount(), 3);
 }
 
+TEST(BlockTreeCacheConstructionTest, OutOfRangeComponentGroupIdFailsInitializationWithoutThrowing) {
+    auto tree                             = std::make_unique<BlockTree>(1);
+    auto full                             = std::make_shared<FullComponentGroup>();
+    full->component_group_id              = 1;
+    std::vector<ComponentGroupPtr> groups = {full};
+    std::vector<Component>         components;
+
+    auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
+                                                  std::move(groups),
+                                                  std::move(components),
+                                                  BlockTreeCacheConfig{},
+                                                  nullptr,
+                                                  nullptr,
+                                                  std::vector<DeviceKVCacheGroupPtr>{nullptr},
+                                                  std::vector<BlockTreeCache::PerTagMapping>{{0, 0}});
+    EXPECT_FALSE(cache->init());
+    EXPECT_FALSE(cache->isInitialized());
+}
+
 TEST_F(BlockTreeCacheTest, MatchEmptyKeys) {
     auto result = cache_->match({});
     EXPECT_EQ(result.matched_node, nullptr);
@@ -824,20 +843,6 @@ TEST_F(BlockTreeCacheTest, SWABuildTransferSupportsHostToDisk) {
     EXPECT_EQ(desc.source_tier, Tier::HOST);
     EXPECT_EQ(desc.target_tier, Tier::DISK);
     EXPECT_EQ(desc.host_block, 7);
-
-    // Verify driveEviction(HOST) produces a valid transfer
-    swa->device_heap->invalidate(find.matched_node);
-    find.matched_node->group_slots[0].device_blocks  = {NULL_BLOCK_IDX};
-    find.matched_node->group_slots[0].in_device_heap = false;
-    swa->host_heap->push(find.matched_node, 0);
-    find.matched_node->group_slots[0].in_host_heap = true;
-
-    auto eviction_move = swa->driveEviction(1, Tier::HOST);
-    ASSERT_TRUE(eviction_move.has_value());
-    EXPECT_EQ(eviction_move->source_tier, Tier::HOST);
-    EXPECT_EQ(eviction_move->target_tier, Tier::DISK);
-    ASSERT_EQ(eviction_move->source_blocks.size(), 1u);
-    EXPECT_EQ(eviction_move->source_blocks[0], 7);
 }
 
 TEST_F(BlockTreeCacheTest, MatchCollectsBlocksSelectedByGroupPolicy) {
@@ -988,10 +993,15 @@ TEST_F(BlockTreeCacheTest, WatermarkDemotionCopyFailureRollsBack) {
 
     auto find = cache->tree()->findNode({100});
     ASSERT_NE(find.matched_node, nullptr);
-    EXPECT_TRUE(find.matched_node->group_slots[0].has_value(Tier::DEVICE));
-    EXPECT_FALSE(find.matched_node->group_slots[0].has_value(Tier::HOST));
+    const auto& slot = find.matched_node->group_slots[0];
+    EXPECT_EQ(slot.transfer_state, SlotTransferState::IDLE);
+    EXPECT_EQ(slot.device_blocks, (std::vector<BlockIdxType>{device_block}));
+    EXPECT_FALSE(slot.has_value(Tier::HOST));
+    EXPECT_TRUE(device_pool->isAllocated(device_block));
+    EXPECT_EQ(device_pool->refCount(device_block), 1u);
     EXPECT_EQ(host_pool->freeBlocksNum(), 8u);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
+    EXPECT_EQ(cache->getStats().host_heap_total_size, 0u);
 }
 
 TEST_F(BlockTreeCacheTest, WatermarkDemotionCopiesHostBlockToDisk) {
@@ -1013,7 +1023,6 @@ TEST_F(BlockTreeCacheTest, WatermarkDemotionCopiesHostBlockToDisk) {
     cfg.enable_device_cache = false;
     cfg.enable_memory_cache = true;
     cfg.enable_disk_cache   = true;
-    cfg.watermark_host      = {0.01, 0};
 
     std::unique_ptr<BlockTreeCache> cache = BlockTreeCacheTestUtil::makeBlockTreeCache(
         std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg));
@@ -1024,9 +1033,11 @@ TEST_F(BlockTreeCacheTest, WatermarkDemotionCopiesHostBlockToDisk) {
 
     auto before = cache->tree()->findNode({100});
     ASSERT_NE(before.matched_node, nullptr);
-    full->tryAddToHostHeap(before.matched_node);
+    // The host-only leaf is registered in the host candidate heap automatically
+    // by onInsertCommitted.
     ASSERT_EQ(cache->getStats().host_heap_total_size, 1u);
 
+    cache->setTierWatermark(Tier::HOST, 0.01, 0);
     std::vector<std::vector<GroupSlot>> trigger_slots(1, std::vector<GroupSlot>(1));
     cache->insert(nullptr, {200}, trigger_slots);
     cache->waitForPendingTasks();
@@ -1034,9 +1045,13 @@ TEST_F(BlockTreeCacheTest, WatermarkDemotionCopiesHostBlockToDisk) {
     auto find = cache->tree()->findNode({100});
     ASSERT_NE(find.matched_node, nullptr);
     const auto& slot = find.matched_node->group_slots[0];
+    EXPECT_EQ(slot.transfer_state, SlotTransferState::IDLE);
     EXPECT_FALSE(slot.has_value(Tier::HOST));
     EXPECT_TRUE(slot.has_value(Tier::DISK));
     EXPECT_NE(slot.disk_slot, NULL_BLOCK_IDX);
+    EXPECT_FALSE(host_pool->isAllocated(host_block));
+    EXPECT_TRUE(disk_pool->isAllocated(slot.disk_slot));
+    EXPECT_EQ(disk_pool->refCount(slot.disk_slot), 1u);
     EXPECT_EQ(host_pool->freeBlocksNum(), 8u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 7u);
     EXPECT_EQ(cache->getStats().host_heap_total_size, 0u);
@@ -1302,13 +1317,17 @@ TEST_F(BlockTreeCacheTest, BroadcastHostLoadBackCommitsDeviceSlot) {
     ASSERT_NE(find_result.matched_node, nullptr);
 
     group->referenceBlocks(GroupBlockSet{0, Tier::HOST, {{host_block}}});
+    ASSERT_TRUE(cache->evictor_.beginLoadBack(find_result.matched_node, 0, Tier::HOST));
     BlockTreeCache::LoadBackItem item{find_result.matched_node, 0, Tier::HOST, {host_block}, {7}};
     cache->performLoadBack({item}, /*ctx=*/nullptr);
 
     const GroupSlot& slot = find_result.matched_node->group_slots[0];
+    EXPECT_EQ(slot.transfer_state, SlotTransferState::IDLE);
     EXPECT_FALSE(slot.has_value(Tier::HOST));
     EXPECT_EQ(slot.device_blocks, (std::vector<BlockIdxType>{7}));
     EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
+    EXPECT_EQ(cache->getStats().host_heap_total_size, 0u);
+    EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
 
     std::lock_guard<std::mutex> lock(state->mutex);
     ASSERT_EQ(state->requests.size(), 2u);
@@ -1355,14 +1374,18 @@ TEST_F(BlockTreeCacheTest, BroadcastHostLoadBackFailureKeepsSourceSlot) {
     ASSERT_NE(find_result.matched_node, nullptr);
 
     group->referenceBlocks(GroupBlockSet{0, Tier::HOST, {{host_block}}});
+    ASSERT_TRUE(cache->evictor_.beginLoadBack(find_result.matched_node, 0, Tier::HOST));
     BlockTreeCache::LoadBackItem item{find_result.matched_node, 0, Tier::HOST, {host_block}, {7}};
     cache->performLoadBack({item}, /*ctx=*/nullptr);
 
     const GroupSlot& slot = find_result.matched_node->group_slots[0];
+    EXPECT_EQ(slot.transfer_state, SlotTransferState::IDLE);
     EXPECT_TRUE(slot.has_value(Tier::HOST));
     EXPECT_EQ(slot.host_block, host_block);
     EXPECT_FALSE(slot.has_value(Tier::DEVICE));
     EXPECT_EQ(host_pool->freeBlocksNum(), 3u);
+    EXPECT_EQ(cache->getStats().host_heap_total_size, 1u);
+    EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
 
     std::lock_guard<std::mutex> lock(state->mutex);
     ASSERT_EQ(state->requests.size(), 2u);
@@ -1411,14 +1434,18 @@ TEST_F(BlockTreeCacheTest, BroadcastDiskLoadBackUsesTwoTransferStages) {
     ASSERT_NE(find_result.matched_node, nullptr);
 
     group->referenceBlocks(GroupBlockSet{0, Tier::DISK, {{disk_block}}});
+    ASSERT_TRUE(cache->evictor_.beginLoadBack(find_result.matched_node, 0, Tier::DISK));
     BlockTreeCache::LoadBackItem item{find_result.matched_node, 0, Tier::DISK, {disk_block}, {7}};
     cache->performLoadBack({item}, /*ctx=*/nullptr);
 
     const GroupSlot& slot = find_result.matched_node->group_slots[0];
+    EXPECT_EQ(slot.transfer_state, SlotTransferState::IDLE);
     EXPECT_FALSE(slot.has_value(Tier::DISK));
     EXPECT_EQ(slot.device_blocks, (std::vector<BlockIdxType>{7}));
     EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 4u);
+    EXPECT_EQ(cache->getStats().disk_heap_total_size, 0u);
+    EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
 
     std::lock_guard<std::mutex> lock(state->mutex);
     ASSERT_EQ(state->requests.size(), 4u);
@@ -1494,7 +1521,6 @@ TEST_F(BlockTreeCacheTest, BroadcastEvictionSuccessCommitsPlan) {
     config.enable_device_cache             = false;
     config.enable_memory_cache             = true;
     config.enable_disk_cache               = true;
-    config.watermark_host                  = {0.01, 0};
     std::vector<ComponentGroupPtr>  groups = {full};
     std::unique_ptr<BlockTreeCache> cache  = BlockTreeCacheTestUtil::makeBlockTreeCache(std::make_unique<BlockTree>(1),
                                                                                        std::move(groups),
@@ -1508,19 +1534,22 @@ TEST_F(BlockTreeCacheTest, BroadcastEvictionSuccessCommitsPlan) {
     ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
     BlockTreeFindResult before = cache->tree()->findNode({100});
     ASSERT_NE(before.matched_node, nullptr);
-    full->tryAddToHostHeap(before.matched_node);
-
+    ASSERT_EQ(cache->getStats().host_heap_total_size, 1u);
+    cache->setTierWatermark(Tier::HOST, 0.01, 0);
     cache->insert(nullptr, {200}, std::vector<std::vector<GroupSlot>>(1, std::vector<GroupSlot>(1)));
     cache->waitForPendingTasks();
 
     BlockTreeFindResult after = cache->tree()->findNode({100});
     ASSERT_NE(after.matched_node, nullptr);
     const GroupSlot& slot = after.matched_node->group_slots[0];
+    EXPECT_EQ(slot.transfer_state, SlotTransferState::IDLE);
     EXPECT_FALSE(slot.has_value(Tier::HOST));
     EXPECT_TRUE(slot.has_value(Tier::DISK));
     const BlockIdxType disk_slot = slot.disk_slot;
     EXPECT_EQ(host_pool->freeBlocksNum(), 8u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 7u);
+    EXPECT_EQ(cache->getStats().host_heap_total_size, 0u);
+    EXPECT_EQ(cache->getStats().disk_heap_total_size, 1u);
 
     std::lock_guard<std::mutex> lock(state->mutex);
     ASSERT_EQ(state->requests.size(), 2u);
@@ -1555,7 +1584,6 @@ TEST_F(BlockTreeCacheTest, BroadcastEvictionFailureRollsBackPlan) {
     config.enable_device_cache             = false;
     config.enable_memory_cache             = true;
     config.enable_disk_cache               = true;
-    config.watermark_host                  = {0.01, 0};
     std::vector<ComponentGroupPtr>  groups = {full};
     std::unique_ptr<BlockTreeCache> cache  = BlockTreeCacheTestUtil::makeBlockTreeCache(std::make_unique<BlockTree>(1),
                                                                                        std::move(groups),
@@ -1569,20 +1597,22 @@ TEST_F(BlockTreeCacheTest, BroadcastEvictionFailureRollsBackPlan) {
     ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
     BlockTreeFindResult before = cache->tree()->findNode({100});
     ASSERT_NE(before.matched_node, nullptr);
-    full->tryAddToHostHeap(before.matched_node);
-
+    ASSERT_EQ(cache->getStats().host_heap_total_size, 1u);
+    cache->setTierWatermark(Tier::HOST, 0.01, 0);
     cache->insert(nullptr, {200}, std::vector<std::vector<GroupSlot>>(1, std::vector<GroupSlot>(1)));
     cache->waitForPendingTasks();
 
     BlockTreeFindResult after = cache->tree()->findNode({100});
     ASSERT_NE(after.matched_node, nullptr);
     const GroupSlot& slot = after.matched_node->group_slots[0];
+    EXPECT_EQ(slot.transfer_state, SlotTransferState::IDLE);
     EXPECT_TRUE(slot.has_value(Tier::HOST));
     EXPECT_FALSE(slot.has_value(Tier::DISK));
     EXPECT_EQ(slot.host_block, host_block);
     EXPECT_EQ(host_pool->freeBlocksNum(), 7u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 8u);
     EXPECT_EQ(cache->getStats().host_heap_total_size, 1u);
+    EXPECT_EQ(cache->getStats().disk_heap_total_size, 0u);
 }
 
 // ---------------------------------------------------------------------------

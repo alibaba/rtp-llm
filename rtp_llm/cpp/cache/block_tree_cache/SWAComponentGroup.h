@@ -8,16 +8,9 @@ namespace rtp_llm {
 // Uses Any-node heaps: any node with data can be evicted.
 class SWAComponentGroup: public ComponentGroup {
 public:
-    explicit SWAComponentGroup(size_t         sliding_window_size = 0,
-                               size_t         seq_size_per_block  = 1,
-                               EvictionPolicy device_policy       = EvictionPolicy::LRU,
-                               EvictionPolicy host_policy         = EvictionPolicy::LRU,
-                               EvictionPolicy disk_policy         = EvictionPolicy::FIFO);
+    explicit SWAComponentGroup(size_t sliding_window_size = 0, size_t seq_size_per_block = 1);
 
     std::unique_ptr<MatchValidator> createMatchValidator() override;
-
-    // SWA: any node with data can enter heap.
-    void tryAddToDeviceHeap(TreeNode* node) override;
 
     // SWA window lock: only lock nodes within sliding_window_size from path tail.
     size_t computeReuseBlockCount(size_t matched_block_count, const std::vector<TreeNode*>& path) const override;

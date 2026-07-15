@@ -40,8 +40,8 @@ protected:
 //   Before reclaimBlocks(1, DEVICE):             After reclaim + wait:
 //   root → [100] F:{10} L:{30}           root → [100] F:{10} L:{30}
 //          → [200] F:{10} L:{30} ←leaf
-//   Full heap: {[200]}  Linear heap: {[200]}
-//   Total: 2
+//   Full heap: {[200]}  Linear heap: {[100],[200]}
+//   Total: 3
 //
 //   Reclaim Full[200] → cascade clears Linear[200] device.
 //   [200] both groups empty → deleted. [100] survives.
@@ -51,7 +51,7 @@ TEST_F(FullLinearEvictionTest, FullReclaimCascadesToLinear) {
 
     auto stats0 = cache_->getStats();
     EXPECT_EQ(stats0.tree_node_count, 2u);
-    EXPECT_EQ(stats0.device_heap_total_size, 2u);  // 1 Full + 1 Linear (leaf only)
+    EXPECT_EQ(stats0.device_heap_total_size, 3u);  // 1 Full + 2 Linear
 
     cache_->reclaimBlocks(1, Tier::DEVICE);
     cache_->waitForPendingTasks();
@@ -63,11 +63,10 @@ TEST_F(FullLinearEvictionTest, FullReclaimCascadesToLinear) {
 // Test: Linear-only cache — sequential reclaim drains chain.
 //
 //   Linear-only: root → [100] → [200] → [300]
-//   Linear heap: {[300]} (insert-leaf only)
+//   Linear heap: {[100],[200],[300]}
 //
-//   After reclaim [300]: [200] promoted (all groups promote parents).
-//   After reclaim [200]: [100] promoted.
-//   After reclaim [100]: empty tree.
+//   LRU reclaims [100], then [200]. Both remain as empty internal nodes.
+//   Reclaiming [300] deletes the leaf and prunes both empty ancestors.
 // ---------------------------------------------------------------------------
 TEST_F(FullLinearEvictionTest, LinearOnlySequentialDrain) {
     std::unique_ptr<BlockTree> tree        = std::make_unique<BlockTree>(1);
@@ -86,15 +85,17 @@ TEST_F(FullLinearEvictionTest, LinearOnlySequentialDrain) {
     slots[2][0].device_blocks = {32};
     lin_cache->insert(nullptr, {100, 200, 300}, slots);
 
-    EXPECT_EQ(lin_cache->getStats().device_heap_total_size, 1u);  // [300]
+    EXPECT_EQ(lin_cache->getStats().device_heap_total_size, 3u);
 
     lin_cache->reclaimBlocks(1, Tier::DEVICE);
     lin_cache->waitForPendingTasks();
-    EXPECT_EQ(lin_cache->getStats().tree_node_count, 2u);
+    EXPECT_EQ(lin_cache->getStats().tree_node_count, 3u);
+    EXPECT_EQ(lin_cache->getStats().device_heap_total_size, 2u);
 
     lin_cache->reclaimBlocks(1, Tier::DEVICE);
     lin_cache->waitForPendingTasks();
-    EXPECT_EQ(lin_cache->getStats().tree_node_count, 1u);
+    EXPECT_EQ(lin_cache->getStats().tree_node_count, 3u);
+    EXPECT_EQ(lin_cache->getStats().device_heap_total_size, 1u);
 
     lin_cache->reclaimBlocks(1, Tier::DEVICE);
     lin_cache->waitForPendingTasks();

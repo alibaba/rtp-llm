@@ -6,9 +6,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/EvictionHeap.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/TransferTypes.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
@@ -80,6 +78,9 @@ struct GroupBlockSet {
     int                                    component_group_id{-1};
     Tier                                   tier{Tier::DEVICE};
     std::vector<std::vector<BlockIdxType>> per_node;
+    // Optional: tree nodes aligned with per_node, populated for match-protection
+    // sets so release can drive candidate refresh. Empty when not needed.
+    std::vector<TreeNode*> nodes;
 };
 
 struct BlockTreeMatchResult {
@@ -134,40 +135,15 @@ public:
     std::vector<int> component_indices;
     size_t           host_block_size{0};
 
-    std::unique_ptr<EvictionHeap> device_heap;
-    std::unique_ptr<EvictionHeap> host_heap;
-    std::unique_ptr<EvictionHeap> disk_heap;
-
     virtual std::unique_ptr<MatchValidator> createMatchValidator() = 0;
 
-    virtual void updateOnInsertOverlap(TreeNode* node, GroupSlot& slot);
-
-    virtual void                        evictFromTier(TreeNode* node, GroupSlot& slot, Tier tier);
-    virtual std::optional<EvictionMove> driveEviction(int num_blocks, Tier tier);
+    virtual void evictFromTier(TreeNode* node, GroupSlot& slot, Tier tier);
 
     virtual TransferDescriptor buildTransfer(TreeNode* node, TransferType type);
-
-    virtual void tryAddToDeviceHeap(TreeNode* node) = 0;
-
-    virtual void tryAddToHostHeap(TreeNode* node);
-    virtual void tryAddToDiskHeap(TreeNode* node);
 
     bool isLeafAtTier(const TreeNode* node, int group_id, Tier tier) const;
 
     virtual size_t computeReuseBlockCount(size_t matched_block_count, const std::vector<TreeNode*>& path) const = 0;
-
-    EvictionHeap* heapForTier(Tier tier) {
-        switch (tier) {
-            case Tier::DEVICE:
-                return device_heap.get();
-            case Tier::HOST:
-                return host_heap.get();
-            case Tier::DISK:
-                return disk_heap.get();
-            default:
-                return nullptr;
-        }
-    }
 
     void setDevicePools(std::vector<DeviceBlockPoolPtr> pools) {
         device_pools_ = std::move(pools);
@@ -261,12 +237,10 @@ public:
 
     std::vector<BlockIdxType> getBlocks(const GroupSlot& slot, Tier tier) const;
     void                      setBlocks(GroupSlot& slot, Tier tier, const std::vector<BlockIdxType>& blocks);
+    // Highest tier (DEVICE > HOST > DISK) holding this slot's data, else NONE.
+    Tier                      getTopTier(const GroupSlot& slot) const;
 
-    bool isSlotEvictable(const GroupSlot& slot, Tier tier) const;
-
-    void tryAddToHeap(TreeNode* node, Tier tier);
-    void invalidateHeap(TreeNode* node, Tier tier);
-    void clearHeapFlag(GroupSlot& slot, Tier tier);
+    virtual bool isSlotEvictable(const TreeNode& node, Tier tier) const;
 
 protected:
     std::vector<DeviceBlockPoolPtr> device_pools_;

@@ -2,7 +2,7 @@
 
 #include <cstdint>
 #include <optional>
-#include <queue>
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -11,44 +11,46 @@
 namespace rtp_llm {
 
 enum class EvictionPolicy : int8_t {
-    LRU,
-    LFU,
-    FIFO,
+    LRU,   // Least recently used (by last_access_seq ascending)
+    LFU,   // Least frequently used (by hit_count ascending)
+    FIFO,  // First in first out (by admission_seq ascending)
 };
 
 struct EvictionEntry {
-    TreeNode* node{nullptr};
-    int       component_group_id{-1};
-
-    uint64_t last_access_time{0};
-    uint64_t hit_count{0};
-    uint64_t insert_seq{0};
+    TreeNode*    node{nullptr};
+    uint64_t     primary_key{0};
+    uint64_t     secondary_key{0};
+    CacheKeyType cache_key{0};
 };
 
+// Exact-update eviction heap backed by std::set + node->iterator index.
+// At most one entry per node; physical size equals the current ready-candidate
+// count. upsert/erase/takeBest/contains are all O(log N) with no stale entries.
 class EvictionHeap {
 public:
     explicit EvictionHeap(EvictionPolicy policy);
 
-    void push(TreeNode* node, int group_id);
+    // Insert or replace a node's ordered entry from its candidate meta.
+    void upsert(TreeNode* node, const CandidateMeta& meta);
+    // Remove a node's entry if present. Idempotent.
+    void erase(TreeNode* node);
+    // Pop the best victim (smallest key); removes it from both containers.
+    std::optional<EvictionEntry> takeBest();
 
-    std::optional<EvictionEntry> pop();
-
-    void invalidate(TreeNode* node);
-
-    void onAccess(TreeNode* node);
-
-    bool contains(TreeNode* node) const;
-
+    // Collect all current nodes. Used for read-only capacity queries.
     std::vector<TreeNode*> nodes() const {
         std::vector<TreeNode*> out;
-        out.reserve(entry_map_.size());
-        for (const auto& kv : entry_map_) {
+        out.reserve(index_.size());
+        for (const auto& kv : index_) {
             out.push_back(kv.first);
         }
         return out;
     }
 
-    bool   empty() const;
+    bool   contains(TreeNode* node) const;
+    bool   empty() const {
+        return ordered_.empty();
+    }
     size_t size() const;
 
     EvictionPolicy policy() const {
@@ -56,17 +58,17 @@ public:
     }
 
 private:
-    struct EntryComparator {
-        EvictionPolicy policy;
-        bool           operator()(const EvictionEntry& a, const EvictionEntry& b) const;
+    struct EntryLess {
+        bool operator()(const EvictionEntry& a, const EvictionEntry& b) const;
     };
+    using OrderedSet = std::set<EvictionEntry, EntryLess>;
 
-    using PriorityQueue = std::priority_queue<EvictionEntry, std::vector<EvictionEntry>, EntryComparator>;
+    // Build the ordered entry (primary/secondary keys) from meta per policy.
+    EvictionEntry makeEntry(TreeNode* node, const CandidateMeta& meta) const;
 
-    EvictionPolicy                               policy_;
-    PriorityQueue                                heap_;
-    std::unordered_map<TreeNode*, EvictionEntry> entry_map_;
-    uint64_t                                     insert_seq_counter_{0};
+    EvictionPolicy                                      policy_;
+    OrderedSet                                          ordered_;
+    std::unordered_map<TreeNode*, OrderedSet::iterator> index_;
 };
 
 }  // namespace rtp_llm

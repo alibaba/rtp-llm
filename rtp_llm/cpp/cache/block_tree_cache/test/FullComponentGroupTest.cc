@@ -35,7 +35,7 @@ protected:
 };
 
 TEST_F(FullComponentGroupTest, DeviceLeafDetection) {
-    // Create: root → A → B → C (C is leaf)
+    // Create: root -> A -> B -> C (C is leaf)
     auto* a          = makeNode(100);
     auto* b          = makeNode(200);
     auto* c          = makeNode(300);
@@ -81,36 +81,31 @@ TEST_F(FullComponentGroupTest, DeviceLeafAfterChildEviction) {
     delete b;
 }
 
-TEST_F(FullComponentGroupTest, DriveEvictionDevice) {
-    auto* a = makeNode(100);
-    setDeviceBlock(a, 0, 42);
+TEST_F(FullComponentGroupTest, DeviceCandidateEligibility) {
+    // FULL: only a leaf holding device data is candidate-eligible; a parent whose
+    // child still holds device data is not (evicting it would break the prefix).
+    auto* a          = makeNode(100);
+    auto* b          = makeNode(200);
+    a->children[200] = b;
+    b->parent        = a;
+    setDeviceBlock(a, 0, 10);
+    setDeviceBlock(b, 0, 20);
 
-    // A is a DeviceLeaf (no children)
-    group_->tryAddToDeviceHeap(a);
-    EXPECT_TRUE(a->group_slots[0].in_device_heap);
-    EXPECT_EQ(group_->device_heap->size(), 1u);
-
-    auto result = group_->driveEviction(1, Tier::DEVICE);
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result->node, a);
-    EXPECT_EQ(result->source_tier, Tier::DEVICE);
-    EXPECT_EQ(result->target_tier, Tier::HOST);  // REUSABLE → demote to host
-    EXPECT_EQ(result->source_blocks.size(), 1u);
-    EXPECT_EQ(result->source_blocks[0], 42);
+    EXPECT_TRUE(group_->isSlotEvictable(*b, Tier::DEVICE));
+    EXPECT_FALSE(group_->isSlotEvictable(*a, Tier::DEVICE));
 
     delete a;
+    delete b;
 }
 
 TEST_F(FullComponentGroupTest, EvictFromTierDevice) {
     auto* a = makeNode(100);
     setDeviceBlock(a, 0, 42);
-    group_->tryAddToDeviceHeap(a);
 
     group_->evictFromTier(a, a->group_slots[0], Tier::DEVICE);
 
     // Device blocks should be cleared
     EXPECT_FALSE(a->group_slots[0].has_value(Tier::DEVICE));
-    EXPECT_FALSE(a->group_slots[0].in_device_heap);
 
     delete a;
 }
@@ -122,7 +117,6 @@ TEST_F(FullComponentGroupTest, EvictFromTierHost) {
     group_->evictFromTier(a, a->group_slots[0], Tier::HOST);
 
     EXPECT_FALSE(a->group_slots[0].has_value(Tier::HOST));
-    EXPECT_FALSE(a->group_slots[0].in_host_heap);
 
     delete a;
 }
@@ -134,7 +128,6 @@ TEST_F(FullComponentGroupTest, EvictFromTierDisk) {
     group_->evictFromTier(a, a->group_slots[0], Tier::DISK);
 
     EXPECT_FALSE(a->group_slots[0].has_value(Tier::DISK));
-    EXPECT_FALSE(a->group_slots[0].in_disk_heap);
 
     delete a;
 }
@@ -206,34 +199,38 @@ TEST_F(FullComponentGroupTest, HostLeafDetection) {
     delete b;
 }
 
-TEST_F(FullComponentGroupTest, TryAddToHostHeap) {
+TEST_F(FullComponentGroupTest, HostCandidateEligibility) {
     auto* a = makeNode(100);
     // Evicted from device, has host data
     setHostBlock(a, 0, 15);
 
-    group_->tryAddToHostHeap(a);
-    EXPECT_TRUE(a->group_slots[0].in_host_heap);
-    EXPECT_EQ(group_->host_heap->size(), 1u);
+    // A host-leaf holding host data is candidate-eligible.
+    EXPECT_TRUE(group_->isSlotEvictable(*a, Tier::HOST));
 
     delete a;
 }
 
-TEST_F(FullComponentGroupTest, DriveEvictionHost) {
-    auto* a = makeNode(100);
+TEST_F(FullComponentGroupTest, HostCandidateNotEligibleWhenNonLeaf) {
+    auto* a          = makeNode(100);
+    auto* b          = makeNode(200);
+    a->children[200] = b;
+    b->parent        = a;
     setHostBlock(a, 0, 15);
+    setHostBlock(b, 0, 25);
 
-    group_->tryAddToHostHeap(a);
-    auto result = group_->driveEviction(1, Tier::HOST);
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result->source_tier, Tier::HOST);
-    EXPECT_EQ(result->target_tier, Tier::DISK);
+    // A has a child still holding host data, so it is not a host-leaf.
+    EXPECT_FALSE(group_->isSlotEvictable(*a, Tier::HOST));
+    EXPECT_TRUE(group_->isSlotEvictable(*b, Tier::HOST));
 
     delete a;
+    delete b;
 }
 
-TEST_F(FullComponentGroupTest, DriveEvictionEmptyHeap) {
-    auto result = group_->driveEviction(1, Tier::DEVICE);
-    EXPECT_FALSE(result.has_value());
+TEST_F(FullComponentGroupTest, NoDataNotEligible) {
+    auto* a = makeNode(100);
+    // No data at any tier -> not a leaf at that tier -> not eligible.
+    EXPECT_FALSE(group_->isSlotEvictable(*a, Tier::DEVICE));
+    delete a;
 }
 
 }  // namespace

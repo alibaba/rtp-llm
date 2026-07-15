@@ -48,6 +48,18 @@ TEST_F(FullEvictionTest, OnlyLeafEntersDeviceHeap) {
     EXPECT_EQ(stats.device_heap_total_size, 1u);  // Only insert-leaf [300]
 }
 
+// Extending an existing FULL leaf creates only the suffix node in inserted_nodes.
+// The old leaf must be refreshed separately and removed from the FULL heap.
+TEST_F(FullEvictionTest, ExtendingExistingLeafRefreshesDirectParent) {
+    insertPath({100}, 10);
+    ASSERT_EQ(cache_->getStats().device_heap_total_size, 1u);
+
+    insertPath({100, 200}, 20);
+
+    EXPECT_EQ(cache_->getStats().tree_node_count, 2u);
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 1u);  // only [200]
+}
+
 // ---------------------------------------------------------------------------
 // Test: Reclaim single leaf — node deleted, parent becomes leaf.
 //
@@ -55,7 +67,7 @@ TEST_F(FullEvictionTest, OnlyLeafEntersDeviceHeap) {
 //   root → [100] → [200] → [300] ←heap   root → [100] → [200] ←new leaf, in heap
 //
 //   [300] reclaimed: D cleared → empty → deleted.
-//   [200] becomes leaf → tryAddToDeviceHeap → enters heap.
+//   [200] becomes leaf -> refreshCandidate re-admits it as a device candidate.
 // ---------------------------------------------------------------------------
 TEST_F(FullEvictionTest, ReclaimSingleLeafDeletesNodeAndPromotesParent) {
     insertPath({100, 200, 300}, 10);
@@ -177,6 +189,61 @@ TEST_F(FullEvictionTest, LRUReclaimsOldestLeafFirst) {
 
     auto result = cache_->match({200});
     EXPECT_EQ(result.matched_blocks, 1u);
+}
+
+// A real match is the only event that advances LRU heat. Matching the oldest
+// leaf makes it newer than a leaf inserted later, so the latter is reclaimed.
+TEST_F(FullEvictionTest, MatchRefreshesLruOrder) {
+    insertPath({100}, 10);
+    insertPath({200}, 20);
+
+    auto match = cache_->match({100});
+    ASSERT_EQ(match.matched_blocks, 1u);
+    cache_->releaseMatchedBlocks(match.matched_block_sets);
+
+    EXPECT_EQ(cache_->reclaimBlocks(1, Tier::DEVICE), 1);
+    cache_->waitForPendingTasks();
+
+    EXPECT_EQ(cache_->match({100}).matched_blocks, 1u);
+    EXPECT_EQ(cache_->match({200}).matched_blocks, 0u);
+}
+
+// Releasing match-protection references only restores candidate eligibility;
+// it must not count as another access or change the ordering metadata.
+TEST_F(FullEvictionTest, MatchReleaseDoesNotMutateHeat) {
+    insertPath({100}, 10);
+
+    auto match = cache_->match({100});
+    ASSERT_EQ(match.matched_blocks, 1u);
+    auto found = cache_->tree()->findNode({100});
+    ASSERT_NE(found.matched_node, nullptr);
+    const CandidateMeta meta_after_match = found.matched_node->group_slots[0].candidate_meta;
+    ASSERT_EQ(meta_after_match.hit_count, 1u);
+
+    cache_->releaseMatchedBlocks(match.matched_block_sets);
+
+    const CandidateMeta meta_after_release = found.matched_node->group_slots[0].candidate_meta;
+    EXPECT_EQ(meta_after_release.last_access_seq, meta_after_match.last_access_seq);
+    EXPECT_EQ(meta_after_release.admission_seq, meta_after_match.admission_seq);
+    EXPECT_EQ(meta_after_release.hit_count, meta_after_match.hit_count);
+}
+
+// An insert that completely overlaps an existing path creates no inserted_nodes.
+// It must neither overwrite the existing block nor make that node artificially hot.
+TEST_F(FullEvictionTest, OverlappingInsertDoesNotOverwriteOrRefreshLru) {
+    insertPath({100}, 10);
+    insertPath({200}, 20);
+    insertPath({100}, 99);
+
+    auto before = cache_->tree()->findNode({100});
+    ASSERT_NE(before.matched_node, nullptr);
+    ASSERT_EQ(before.matched_node->group_slots[0].device_blocks, std::vector<BlockIdxType>({10}));
+
+    EXPECT_EQ(cache_->reclaimBlocks(1, Tier::DEVICE), 1);
+    cache_->waitForPendingTasks();
+
+    EXPECT_EQ(cache_->match({100}).matched_blocks, 0u);
+    EXPECT_EQ(cache_->match({200}).matched_blocks, 1u);
 }
 
 }  // namespace

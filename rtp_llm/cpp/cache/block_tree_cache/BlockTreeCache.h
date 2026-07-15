@@ -58,6 +58,11 @@ struct BlockTreeCacheConfig {
     // regardless of group priority.
     bool enable_reverse_eviction{false};
 
+    // ---- Per-tier eviction policy ----
+    EvictionPolicy device_eviction_policy{EvictionPolicy::LRU};
+    EvictionPolicy host_eviction_policy{EvictionPolicy::LRU};
+    EvictionPolicy disk_eviction_policy{EvictionPolicy::FIFO};
+
     // ---- Eviction thread pool ----
     int eviction_thread_pool_size{2};
 
@@ -213,6 +218,9 @@ public:
     bool isRemoteCacheEnabled() const {
         return config_.enable_remote_cache;
     }
+    bool isInitialized() const {
+        return initialized_;
+    }
 
     const BlockTreeCacheConfig& config() const {
         return config_;
@@ -272,6 +280,7 @@ private:
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
     std::shared_ptr<BroadcastManager>          broadcast_manager_;
     BlockTreeEvictor                           evictor_;
+    bool                                       initialized_{false};
 
     std::atomic<int>        pending_tasks_{0};
     std::mutex              wait_mutex_;
