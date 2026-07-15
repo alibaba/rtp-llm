@@ -15,10 +15,6 @@ std::unique_ptr<MatchValidator> FullComponentGroup::createMatchValidator() {
     return std::make_unique<FullMatchValidator>();
 }
 
-void FullComponentGroup::finalizeMatchResult(BlockTreeMatchResult& result) {
-    // Handled at BlockTreeCache level.
-}
-
 size_t FullComponentGroup::computeReferenceCount(size_t matched_block_count, const std::vector<TreeNode*>&) const {
     return matched_block_count;
 }

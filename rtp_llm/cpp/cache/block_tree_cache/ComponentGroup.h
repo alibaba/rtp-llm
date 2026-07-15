@@ -19,12 +19,8 @@
 namespace rtp_llm {
 
 class AsyncContext;
-class BlockTreeCache;
 
-// A single matched host/disk block that is a candidate for load_back. Planned inside
-// match() (which only references the source-tier blocks to keep the node alive across
-// the lock-release gap) and carried by LoadBackTicket. Device blocks are NOT allocated
-// until the ticket is committed by the allocator after its own malloc succeeds.
+// A matched host/disk block kept alive until deferred load_back is committed or aborted.
 struct PendingLoadBackItem {
     TreeNode*                 node{nullptr};
     int                       group_id{-1};
@@ -32,25 +28,35 @@ struct PendingLoadBackItem {
     std::vector<BlockIdxType> source_blocks;
 };
 
-// Deferred load_back handle returned by match(). It owns the planned (source-referenced)
-// load_back items but performs NO device allocation or copy until commit() is called.
-// RAII: if destroyed without committing, it aborts (unreferences the source blocks), so
-// any allocator early-return path automatically avoids wasting load_back. Non-copyable,
-// non-movable; held via std::shared_ptr on BlockTreeMatchResult (which stays copyable).
+// Deferred load_back handle. An uncommitted ticket releases its source references on destruction.
 class LoadBackTicket {
 public:
-    explicit LoadBackTicket(BlockTreeCache* cache): cache_(cache) {}
-    ~LoadBackTicket();
+    using CommitCallback = std::function<std::shared_ptr<AsyncContext>(const std::vector<PendingLoadBackItem>& items)>;
+    using AbortCallback  = std::function<void(const std::vector<PendingLoadBackItem>& items)>;
+
+    LoadBackTicket(CommitCallback commit_callback, AbortCallback abort_callback):
+        commit_callback_(std::move(commit_callback)), abort_callback_(std::move(abort_callback)) {}
+    ~LoadBackTicket() {
+        if (!committed_ && !items_.empty() && abort_callback_) {
+            abort_callback_(items_);
+        }
+    }
 
     LoadBackTicket(const LoadBackTicket&)            = delete;
     LoadBackTicket& operator=(const LoadBackTicket&) = delete;
     LoadBackTicket(LoadBackTicket&&)                 = delete;
     LoadBackTicket& operator=(LoadBackTicket&&)      = delete;
 
-    // Allocate device blocks + submit async H2D/D2H copies for the planned items.
-    // Returns the load_back AsyncContext (null when there is nothing to load back).
-    // Idempotent: a second call is a no-op returning null.
-    std::shared_ptr<AsyncContext> commit();
+    // Allocates every target before submitting copies; any allocation failure rolls back all items.
+    // Returns null on synchronous failure and on repeated or empty commits.
+    std::shared_ptr<AsyncContext> commit() {
+        if (committed_ || items_.empty() || !commit_callback_) {
+            committed_ = true;
+            return nullptr;
+        }
+        committed_ = true;
+        return commit_callback_(items_);
+    }
 
     bool empty() const {
         return items_.empty();
@@ -61,7 +67,8 @@ public:
     }
 
 private:
-    BlockTreeCache*                  cache_{nullptr};
+    CommitCallback                   commit_callback_;
+    AbortCallback                    abort_callback_;
     std::vector<PendingLoadBackItem> items_;
     bool                             committed_{false};
 };
@@ -88,15 +95,11 @@ struct GroupBlockSet {
 
 // Match result returned by BlockTreeCache::match().
 struct BlockTreeMatchResult {
-    TreeNode*        matched_node{nullptr};
-    size_t           matched_blocks{0};
-    BlockIndicesType block_indices;
+    TreeNode* matched_node{nullptr};
+    size_t    matched_blocks{0};
 
-    // Per-component-group device block indices along the matched prefix.
-    // key = component_group_id, value = the group's device blocks in match order
-    // (NULL_BLOCK_IDX dropped). Whole-sequence consumers (allocators) pick reuse
-    // blocks per group from here; block_indices keeps the FULL aggregate for the
-    // legacy load_back path.
+    // Device blocks selected by each component group's reuse rule, in match order.
+    // The key is the tag group id in aggregated mode and component group id otherwise.
     std::unordered_map<int, BlockIndicesType> group_block_indices;
 
     // Structured match-protection references, one entry per group. Release basis.
@@ -162,7 +165,6 @@ public:
 
     // ---- Match ----
     virtual std::unique_ptr<MatchValidator> createMatchValidator() = 0;
-    virtual void                            finalizeMatchResult(BlockTreeMatchResult& result) {}
 
     // ---- Insert (base class provides default; subclasses may override) ----
     virtual void commitInsertData(TreeNode* node, GroupSlot& slot, const std::vector<BlockIdxType>& block_indices);

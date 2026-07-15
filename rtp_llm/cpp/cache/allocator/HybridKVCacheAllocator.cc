@@ -280,7 +280,14 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     // All allocations and the reserve post-check passed: commit the deferred load_back
     // (allocate device targets and submit async copies). Any earlier return above leaves
     // the ticket uncommitted, so its destructor aborts the planned load_back.
-    async_ctx = load_back_ticket ? load_back_ticket->commit() : nullptr;
+    if (load_back_ticket != nullptr && !load_back_ticket->empty()) {
+        async_ctx = load_back_ticket->commit();
+        if (async_ctx == nullptr) {
+            rollbackInitMalloc(*kv_resource, referenced_blocks, original_sizes);
+            RTP_LLM_LOG_WARNING("Hybrid initMalloc failed because load_back target allocation was not atomic");
+            return {false, 0};
+        }
+    }
 
     return {true, reuse_blocks * reuse_unit_tokens, match_cost_time_us, async_ctx};
 }

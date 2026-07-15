@@ -212,7 +212,15 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
 
     // All allocations succeeded: commit the deferred load_back (allocate device targets
     // and submit the async copies). Returns the async context for the scheduler to await.
-    async_ctx = load_back_ticket ? load_back_ticket->commit() : nullptr;
+    if (load_back_ticket != nullptr && !load_back_ticket->empty()) {
+        async_ctx = load_back_ticket->commit();
+        if (async_ctx == nullptr) {
+            FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
+            free(free_info);
+            RTP_LLM_LOG_WARNING("SingleType initMalloc failed because load_back target allocation was not atomic");
+            return {false, 0};
+        }
+    }
 
     return {true, reuse_len, match_cost_time_us, async_ctx};
 }
