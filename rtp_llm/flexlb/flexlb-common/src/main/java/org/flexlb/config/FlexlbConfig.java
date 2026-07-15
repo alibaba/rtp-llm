@@ -311,6 +311,32 @@ public class FlexlbConfig {
 
     private double costImbalanceMultiplier = 3.0;
 
+    /**
+     * Whether to enable score-tie randomization among near-equal prefill candidates.
+     * When enabled (default), endpoints within a threshold of the minimum score are
+     * randomly selected to avoid deterministic routing bias.
+     * When disabled, only endpoints with exactly the minimum score are considered.
+     * Environment variable: SCORE_TIE_RANDOM_ENABLED.
+     */
+    private boolean scoreTieRandomEnabled = true;
+
+    /**
+     * Percentage threshold for score-tie randomization.
+     * Endpoints whose score is within (minScore * scoreTieThresholdPct) of the
+     * minimum score are considered "tied" and randomly selected.
+     * Default 0.1 means 10% of the minimum score.
+     * Environment variable: SCORE_TIE_THRESHOLD_PCT.
+     */
+    private double scoreTieThresholdPct = 0.1;
+
+    /**
+     * Minimum absolute threshold (in milliseconds) for score-tie randomization.
+     * The effective threshold is max(minScore * scoreTieThresholdPct, scoreTieThresholdMs).
+     * Default 20ms.
+     * Environment variable: SCORE_TIE_THRESHOLD_MS.
+     */
+    private long scoreTieThresholdMs = 20;
+
     // ========== ShortestTTFT Strategy Configuration ==========
 
     /** Candidate pool mode: "RATIO" (floor(workerCount * ratio)) or "FIXED" (absolute size). */

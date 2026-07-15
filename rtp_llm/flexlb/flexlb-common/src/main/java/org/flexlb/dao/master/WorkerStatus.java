@@ -72,7 +72,10 @@ public class WorkerStatus {
         }
         this.runningTaskList = resp.getRunningTaskInfo();
         this.statusVersion.set(resp.getStatusVersion());
-        this.latestFinishedTaskVersion.set(resp.getLatestFinishedVersion());
+        // NOTE: latestFinishedTaskVersion is NOT set here. It is advanced only after
+        // calibrate has processed finished tasks, in GrpcWorkerStatusRunner.handleStatusResponse().
+        // Setting it here would advance the version before calibrate runs, causing the engine
+        // to filter out unprocessed finished tasks on the next poll — leaking inflight entries.
 
         long nowUs = System.nanoTime() / 1000;
         long prev = this.statusLastUpdateTime.get();

@@ -78,13 +78,46 @@ class CostBasedPrefillStrategyTest {
     @Test
     void selectsWorkerWithLowestCostScore() {
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
-        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 100));
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 500));
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 50));
 
         ServerStatus result = strategy.select(buildContext(1000, 1L), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
+    }
+
+    @Test
+    void scoreTieRandomDisabledSelectsExactMinimum() {
+        Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 500));
+        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 50));
+
+        FlexlbConfig config = new FlexlbConfig();
+        config.setCostSloMs(50000L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setScoreTieRandomEnabled(false);
+
+        ServerStatus result = strategy.select(buildContext(1000, 11L, config), RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.2", result.getServerIp());
+    }
+
+    @Test
+    void scoreTieRandomDisabledWithExactTieStillSelects() {
+        Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
+
+        FlexlbConfig config = new FlexlbConfig();
+        config.setCostSloMs(50000L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setScoreTieRandomEnabled(false);
+
+        ServerStatus result = strategy.select(buildContext(1000, 12L, config), RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
     }
 
     @Test
@@ -159,7 +192,7 @@ class CostBasedPrefillStrategyTest {
     @Test
     void hotspotFilterExcludesBatcherOverloadedWorker() {
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
-        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 500));
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
         prefillMap.put("10.0.0.3:8080", createWorker("10.0.0.3", 0));
 

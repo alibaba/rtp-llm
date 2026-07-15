@@ -94,11 +94,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // Phase 3: process finished success requests
             for (TaskInfo task : finishedTaskInfo.values()) {
                 if (task.getErrorCode() == 0) {
-                    RequestInflight removed = inflightRequests.remove(task.getRequestId());
-                    if (removed != null) {
-                        logger.debug("Decode calibrate: success request reqId={} still in inflight, " +
-                                "KV_ALLOCATED detection may have been skipped", task.getRequestId());
-                    }
+                    inflightRequests.remove(task.getRequestId());
                 }
             }
         }

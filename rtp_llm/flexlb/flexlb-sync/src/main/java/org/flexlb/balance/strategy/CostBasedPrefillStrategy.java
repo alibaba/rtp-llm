@@ -27,6 +27,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ThreadLocalRandom;
 
 @Component("costBasedPrefillStrategy")
 public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
@@ -88,15 +89,36 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         long bestScore = Long.MAX_VALUE;
         long bestCacheHit = 0;
 
+        // First pass: find minScore
+        long minScore = Long.MAX_VALUE;
         for (PrefillEndpoint ep : survivors) {
             long cacheHit = calculateCacheHit(ep, cacheMatchResults, seqLen);
             long score = computeScore(ep, cacheHit, seqLen);
-
-            if (score < bestScore) {
-                bestScore = score;
-                best = ep;
-                bestCacheHit = cacheHit;
+            if (score < minScore) {
+                minScore = score;
             }
+        }
+
+        // Second pass: collect all endpoints within threshold of minScore
+        long tieThreshold = 0;
+        if (minScore != Long.MAX_VALUE) {
+            if (config.isScoreTieRandomEnabled()) {
+                tieThreshold = Math.max((long) (minScore * config.getScoreTieThresholdPct()), config.getScoreTieThresholdMs());
+            }
+            long scoreCutoff = minScore + tieThreshold;
+            List<PrefillEndpoint> tied = new ArrayList<>();
+            for (PrefillEndpoint ep : survivors) {
+                long cacheHit = calculateCacheHit(ep, cacheMatchResults, seqLen);
+                long score = computeScore(ep, cacheHit, seqLen);
+                if (score <= scoreCutoff) {
+                    tied.add(ep);
+                }
+            }
+
+            // Random selection among threshold-eligible endpoints to avoid deterministic bias
+            best = tied.get(ThreadLocalRandom.current().nextInt(tied.size()));
+            bestScore = minScore;
+            bestCacheHit = calculateCacheHit(best, cacheMatchResults, seqLen);
         }
 
         if (best == null) {

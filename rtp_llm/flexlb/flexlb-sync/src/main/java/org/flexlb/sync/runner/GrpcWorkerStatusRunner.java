@@ -6,7 +6,6 @@ import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.master.WorkerStatusResponse;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
@@ -120,24 +119,9 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.setSite(site);
             workerStatus.setGroup(group);
 
-            // Debug: log received finished tasks details
-            Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
-            if (finishedTaskInfo != null && !finishedTaskInfo.isEmpty()) {
-                StringBuilder taskDetails = new StringBuilder();
-                for (TaskInfo task : finishedTaskInfo.values()) {
-                    taskDetails.append("  req_id=").append(task.getRequestId())
-                             .append(" batch_id=").append(task.getBatchId())
-                             .append(" error_code=").append(task.getErrorCode())
-                             .append("\n");
-                }
-                logger.info("GetWorkerStatus received: latestFinishedVersion={}, finishedTasksCount={}\n{}",
-                        newWorkerStatus.getLatestFinishedVersion(),
-                        finishedTaskInfo.size(),
-                        taskDetails);
-            }
-
             long currentVersion = workerStatus.getStatusVersion().get();
             WorkerEndpoint ep = endpointRegistry != null ? endpointRegistry.get(ipPort) : null;
+
             if (currentVersion < responseVersion) {
                 // 1. WorkerStatusResponse directly updates WorkerStatus
                 workerStatus.updateFromResponse(newWorkerStatus);
@@ -152,19 +136,16 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     batchScheduler.onWorkerStatusUpdate(workerStatus, newWorkerStatus);
                 }
 
+                Long latestFinishedVersion = newWorkerStatus.getLatestFinishedVersion();
+
                 // 4. Advance latestFinishedVersion only after calibrate has processed finished tasks.
                 // If this is done outside the version guard, a skipped calibrate (version not
                 // advanced) would still consume the incremental version, causing the engine to
                 // filter out those finished tasks on the next poll — leaking inflight entries.
-                Long latestFinishedVersion = newWorkerStatus.getLatestFinishedVersion();
                 if (latestFinishedVersion != null
                         && latestFinishedVersion > workerStatus.getLatestFinishedTaskVersion().get()) {
                     workerStatus.getLatestFinishedTaskVersion().set(latestFinishedVersion);
                 }
-            } else {
-                logger.info("query engine worker status via gRPC, version is not updated, "
-                                + "currentVersion: {}, responseVersion: {}",
-                        currentVersion, responseVersion);
             }
 
             engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus, ep,

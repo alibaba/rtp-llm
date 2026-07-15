@@ -24,7 +24,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 public class PrefillEndpoint extends WorkerEndpoint {
@@ -33,7 +32,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     private volatile PrefillTimePredictor predictor;
     private final ConcurrentHashMap<Long, BatchInflight> inflightBatches = new ConcurrentHashMap<>();
-    private final AtomicReference<Long> estimatedWaitingTimeMs = new AtomicReference<>(0L);
     private volatile WorkerBatcher batcher;
     private final InflightEvictor<Long, BatchInflight> batchEvictor;
     private final BatchSchedulerReporter reporter;
@@ -52,8 +50,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.reporter = reporter;
         this.predictor = createPredictor(config);
         this.batcher = createBatcher(config, handler, reporter);
-        this.batchEvictor = new InflightEvictor<>(inflightBatches,
-                batch -> refreshEstimatedWaitingTime());
+        this.batchEvictor = new InflightEvictor<>(inflightBatches, null);
         this.batcher.start();
     }
 
@@ -96,14 +93,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     public void commitBatch(long batchId, long predictMs, List<BatchItem> requests) {
         inflightBatches.put(batchId, new BatchInflight(batchId, predictMs, requests));
-        refreshEstimatedWaitingTime();
     }
 
     public void releaseBatch(long batchId) {
-        BatchInflight removed = inflightBatches.remove(batchId);
-        if (removed != null) {
-            refreshEstimatedWaitingTime();
-        }
+        inflightBatches.remove(batchId);
     }
 
     /**
@@ -122,7 +115,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
             long newPredMs = predictor != null ? predictor.predictBatchMs(survivors) : 0;
             return old.repack(newPredMs, survivors);
         });
-        refreshEstimatedWaitingTime();
         return result;
     }
 
@@ -287,9 +279,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 }
             }
         }
-
-        // Phase 6: refresh waiting time snapshot
-        refreshEstimatedWaitingTime();
     }
 
     // ==================== Pending Count ====================
@@ -310,7 +299,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     public long realWaitTimeMs() {
         long waitMs = estimateWaitingTimeMs(System.currentTimeMillis());
-        estimatedWaitingTimeMs.set(waitMs);
         return waitMs;
     }
 
@@ -333,11 +321,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * @return number of batches evicted
      */
     public int evictExpiredBatches(long ttlMs) {
-        int evicted = batchEvictor.evictExpired(ttlMs);
-        if (evicted > 0) {
-            refreshEstimatedWaitingTime();
-        }
-        return evicted;
+        return batchEvictor.evictExpired(ttlMs);
     }
 
     @Override
@@ -403,10 +387,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
             reporter.reportBatchActualTimeMs(RoleType.PREFILL.name(), getIp(), ipPort(), actualMs);
             reporter.reportBatchPredictGapMs(RoleType.PREFILL.name(), getIp(), ipPort(), gapMs);
         }
-    }
-
-    private void refreshEstimatedWaitingTime() {
-        estimatedWaitingTimeMs.set(estimateWaitingTimeMs(System.currentTimeMillis()));
     }
 
     private long estimateWaitingTimeMs(long nowMs) {
