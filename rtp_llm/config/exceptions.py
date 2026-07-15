@@ -178,3 +178,6 @@ class FtRuntimeException(Exception):
         self.message = message
         self.admission_reject_reason = AdmissionRejectReason(admission_reject_reason)
         super().__init__(self.message)
+
+    def __reduce__(self):
+        return self.__class__, (self.exception_type, self.message)
