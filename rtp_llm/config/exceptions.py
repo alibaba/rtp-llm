@@ -104,3 +104,6 @@ class FtRuntimeException(Exception):
         self.exception_type = exception_type
         self.message = message
         super().__init__(self.message)
+
+    def __reduce__(self):
+        return self.__class__, (self.exception_type, self.message)
