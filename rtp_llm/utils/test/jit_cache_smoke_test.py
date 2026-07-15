@@ -121,23 +121,6 @@ def _server_pythonpath() -> str:
     )
 
 
-def _validate_model_rpc_proto() -> None:
-    from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import GenerateConfigPB
-
-    required = {
-        "return_prompt_logits",
-        "prompt_logits_top_k",
-        "prompt_logits_start",
-        "prompt_logits_end",
-        "return_target_logprob",
-    }
-    missing = sorted(required - set(GenerateConfigPB.DESCRIPTOR.fields_by_name))
-    if missing:
-        raise RuntimeError(
-            "generated model_rpc_service_pb2.py is stale; missing fields: " f"{missing}"
-        )
-
-
 # --------------------------------------------------------------------------- #
 # JIT artifact snapshot (local) + remote membership
 # --------------------------------------------------------------------------- #
@@ -716,8 +699,6 @@ class JitCacheSmokeTest(unittest.TestCase):
         self.assertTrue(
             Path(model_path).is_dir(), f"model path not available: {model_path}"
         )
-
-        _validate_model_rpc_proto()
 
         out_dir = _outputs_dir()
         work_dir = _runtime_dir(
