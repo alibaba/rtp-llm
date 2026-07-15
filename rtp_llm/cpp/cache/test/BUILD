@@ -47,6 +47,25 @@ cc_library(
 )
 
 cc_library(
+    name = "cache_config_creator_py_test_lib",
+    srcs = ["CacheConfigCreatorPyTest.cc"],
+    alwayslink = True,
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/cpp/pybind:py_utils",
+        "//rtp_llm/cpp/pybind:th_compute_lib",
+    ] + torch_deps(),
+)
+
+cc_binary(
+    name = "cache_config_creator_py_test",
+    linkshared = 1,
+    visibility = ["//visibility:public"],
+    deps = [":cache_config_creator_py_test_lib"],
+)
+
+cc_library(
     name = "block_pool_test_helper",
     hdrs = [
         "BlockPoolTestHelper.h"

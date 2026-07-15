@@ -8,8 +8,8 @@ std::vector<std::shared_ptr<LayerCacheBuffer>>
 LayerCacheBufferUtil::convert(KVCacheResource& resource, int batch_id, int start_block_idx, int block_count) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
 
-    const auto& layer_block_ids = resource.layerBlocks();
-    for (size_t i = 0; i < layer_block_ids.size(); ++i) {
+    const auto& layer_group_block_ids = resource.layerGroupBlocks();
+    for (size_t i = 0; i < layer_group_block_ids.size(); ++i) {
         auto layer_cache_buffer = convertLayer(resource, batch_id, i, start_block_idx, block_count);
         if (layer_cache_buffer) {
             layer_cache_buffers.push_back(layer_cache_buffer);
@@ -20,11 +20,11 @@ LayerCacheBufferUtil::convert(KVCacheResource& resource, int batch_id, int start
 
 std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(
     KVCacheResource& resource, int batch_id, int layer_id, int start_block_idx, int block_count) {
-    const auto& layer_block_ids = resource.layerBlocks();
-    const auto& cache_keys      = resource.cacheKeys();
+    const auto& layer_group_block_ids = resource.layerGroupBlocks();
+    const auto& cache_keys            = resource.cacheKeys();
 
-    if (layer_id < 0 || static_cast<size_t>(layer_id) >= layer_block_ids.size()) {
-        RTP_LLM_LOG_WARNING("invalid layer_id %d, total layers: %zu", layer_id, layer_block_ids.size());
+    if (layer_id < 0 || static_cast<size_t>(layer_id) >= layer_group_block_ids.size()) {
+        RTP_LLM_LOG_WARNING("invalid layer_id %d, total layers: %zu", layer_id, layer_group_block_ids.size());
         return nullptr;
     }
 
@@ -34,7 +34,20 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(
         return nullptr;
     }
 
-    const auto& block_ids = layer_block_ids[layer_id]->blocks();
+    const auto& group_block_ids = layer_group_block_ids[static_cast<size_t>(layer_id)];
+    std::shared_ptr<BlockIds> block_id_holder;
+    for (const auto& candidate : group_block_ids) {
+        if (candidate) {
+            block_id_holder = candidate;
+            break;
+        }
+    }
+    if (!block_id_holder) {
+        RTP_LLM_LOG_WARNING("no block ids found for layer_id %d", layer_id);
+        return nullptr;
+    }
+
+    const auto& block_ids = block_id_holder->blocks();
     // Use signed arithmetic throughout to avoid unsigned underflow when start_block_idx >= actual_block_count
     int actual_block_count = static_cast<int>(std::min(block_ids.size(), cache_keys.size()));
     if (start_block_idx >= actual_block_count) {

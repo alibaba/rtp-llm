@@ -181,18 +181,20 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                             register_buffer_size};
     init_params_ = std::make_shared<RemoteConnector::InitParams>(std::move(init_params));
     std::vector<int32_t> full_group_ids, linear_group_ids;
-    if (cache_config.linear_group_num == 0) {
-        full_group_ids.push_back(0);
+    for (int32_t group_id = 0; group_id < cache_config.groupNums(); group_id++) {
+        if (cache_config.typeForGroup(static_cast<size_t>(group_id)) == CacheGroupType::FULL) {
+            full_group_ids.push_back(group_id);
+        } else {
+            linear_group_ids.push_back(group_id);
+        }
+    }
+    if (linear_group_ids.empty()) {
+        if (full_group_ids.empty()) {
+            full_group_ids.push_back(0);
+        }
         group_policy_ =
             std::make_unique<remote_connector::FullLayerGroupPolicy>(allocator, full_group_ids, linear_group_ids);
     } else {
-        for (int32_t group_id = 0; static_cast<size_t>(group_id) < cache_config.group_types.size(); group_id++) {
-            if (cache_config.group_types[group_id] == CacheGroupType::FULL) {
-                full_group_ids.push_back(group_id);
-            } else {
-                linear_group_ids.push_back(group_id);
-            }
-        }
         group_policy_ = std::make_unique<remote_connector::FullLinearLayerGroupPolicy>(
             allocator, full_group_ids, linear_group_ids, std::max(1, cache_config.linear_step));
     }
@@ -210,19 +212,13 @@ RemoteConnector::~RemoteConnector() {
 std::pair<std::shared_ptr<RemoteConnectorConfig::LocationSpecInfoMap>,
           std::shared_ptr<RemoteConnectorConfig::LocationSpecGroups>>
 RemoteConnector::genLocationSpecInfoMapAndGroups(int64_t tp_size) {
-    auto   location_spec_groups_ptr = std::make_shared<RemoteConnectorConfig::LocationSpecGroups>();
-    size_t group_size               = group_policy_->groups().size();
-    assert(group_size > 0);
+    auto location_spec_groups_ptr = std::make_shared<RemoteConnectorConfig::LocationSpecGroups>();
+    assert(!group_policy_->groups().empty());
     auto location_spec_info_map_ptr = std::make_shared<RemoteConnectorConfig::LocationSpecInfoMap>();
     // TODO : support different byte_size_per_block (transfer client not support now)
-    size_t                   byte_size_per_block = init_params_->cache_config.block_size_bytes;
-    std::vector<std::string> all_group_names;
-    std::vector<uint64_t>    all_group_name_bithashs;
-    all_group_names.reserve(group_size);
+    size_t byte_size_per_block = init_params_->cache_config.block_size_bytes;
     for (const auto& entry : group_policy_->groups()) {
-        const auto& group = entry.second;
-        all_group_names.push_back(group.group_name);
-        all_group_name_bithashs.push_back(group.group_name_bithash);
+        const auto& group    = entry.second;
         auto [iter, success] = location_spec_groups_ptr->insert({group.group_name, {}});
         assert(success);
         group_policy_->addLocationSpecGroup(group.group_name_bithash, group.group_name);
@@ -233,44 +229,28 @@ RemoteConnector::genLocationSpecInfoMapAndGroups(int64_t tp_size) {
             group_policy_->addSpecInfo(location_spec_name, entry.first, r);
         }
     }
-    for (int sub_group = 2; sub_group <= group_size; ++sub_group) {
-        std::string bitmask(sub_group, 1);
-        bitmask.resize(group_size, 0);
-        do {
-            std::stringstream        ss_group_name;
-            std::vector<std::string> spec_names;
-            uint64_t                 groups_name_bithash = 0;
-            for (int i = 0; i < group_size; ++i) {
-                if (static_cast<bool>(bitmask[i])) {
-                    ss_group_name << all_group_names[i];
-                    groups_name_bithash |= all_group_name_bithashs[i];
-                    const auto& sub_group_names = location_spec_groups_ptr->at(all_group_names[i]);
-                    spec_names.insert(spec_names.end(), sub_group_names.begin(), sub_group_names.end());
-                }
+    for (const auto aggregate_mask : group_policy_->reachableAggregateMasks()) {
+        std::stringstream        group_name_stream;
+        std::vector<std::string> spec_names;
+        uint64_t                 matched_mask = 0;
+        for (const auto& entry : group_policy_->groups()) {
+            const auto& group = entry.second;
+            if ((aggregate_mask & group.group_name_bithash) == 0) {
+                continue;
             }
-            std::string groups_name = ss_group_name.str();
-            group_policy_->addLocationSpecGroup(groups_name_bithash, groups_name);
-            location_spec_groups_ptr->insert({groups_name, std::move(spec_names)});
-        } while (std::prev_permutation(bitmask.begin(), bitmask.end()));
-    }
-    /*
-        location_spec_groups has all combinations of groups, which means:
-        location_spec_groups.size() == Sum(Comb(group_size, i)), i = [1, 2, ..., group_size]
-
-        example:
-        tp_size = 2, one full attn group F0, two linear attn groups L1, L2;
-        location_spec_groups.size() == Comb(3, 1) +  Comb(3, 2) +  Comb(3, 3) == 7
-        location_spec_groups ==
-        {
-            "F0" : ["tp0_F0", "tp1_F0"],
-            "L1" : ["tp0_L1", "tp1_L1"],
-            "L2" : ["tp0_L2", "tp1_L2"],
-            "F0L1" : ["tp0_F0", "tp1_F0", "tp0_L1", "tp1_L1"],
-            "F0L2" : ["tp0_F0", "tp1_F0", "tp0_L2", "tp1_L2"],
-            "L1L2" : ["tp0_L1", "tp1_L1", "tp0_L2", "tp1_L2"],
-            "F0L1L2" : ["tp0_F0", "tp1_F0", "tp0_L1", "tp1_L1", "tp0_L2", "tp1_L2"]
+            matched_mask |= group.group_name_bithash;
+            group_name_stream << group.group_name;
+            const auto& singleton_specs = location_spec_groups_ptr->at(group.group_name);
+            spec_names.insert(spec_names.end(), singleton_specs.begin(), singleton_specs.end());
         }
-    */
+        RTP_LLM_CHECK_WITH_INFO(aggregate_mask != 0 && matched_mask == aggregate_mask,
+                                "invalid reachable aggregate mask %lu (matched %lu)",
+                                aggregate_mask,
+                                matched_mask);
+        const auto group_name = group_name_stream.str();
+        group_policy_->addLocationSpecGroup(aggregate_mask, group_name);
+        location_spec_groups_ptr->emplace(group_name, std::move(spec_names));
+    }
     return {location_spec_info_map_ptr, location_spec_groups_ptr};
 }
 
