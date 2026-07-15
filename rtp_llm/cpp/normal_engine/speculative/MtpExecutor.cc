@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/TimeUtility.h"
+#include <algorithm>
 #include <memory>
 #include <thread>
 #include <random>
@@ -157,7 +158,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                              params.eplb_config);
     }
 
-    sampler_.reset(new Sampler(SamplerInitParams{}));
+    const auto initial_sampler_batch_size =
+        (propose_params->gen_num_per_circle + 1)
+        * static_cast<size_t>(std::max(1, params.concurrency_config.concurrency_limit));
+    // Speculative decoding preallocates the expected fanout, but request-level return sequences or
+    // variable beams may still increase sampler rows. Keep the safe dynamic growth path enabled.
+    sampler_.reset(new Sampler(SamplerInitParams{initial_sampler_batch_size, false}));
 
     // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
     std::optional<CacheLayerLayout> kv_cache_layer_layout = std::nullopt;
@@ -377,7 +383,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             CHECK_AND_RETURN_REF(sampler_input,
                                  batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
             sampler_output = std::move(sampler_->forward(sampler_input));
-            batch_stream_processor_->updatePrefillPostDraftModelInput(model_input, model_output, sampler_output);
+            batch_stream_processor_->updatePrefillPostDraftModelInput(
+                stream_groups, model_input, model_output, sampler_output);
         }
     }
 
@@ -679,6 +686,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
         // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_
         if (sp_prefill_draft_model_) {
+            // All currently supported draft models are non-MRoPE and do not use
+            // model_input.combo_position_ids, so the draft prefill CUDA graph does not need to copy it.
             draft_prefill_model_output = std::move(sp_prefill_draft_model_->forward(model_input));
         } else {
             draft_prefill_model_output = std::move(draft_model_->forward(model_input));
@@ -907,6 +916,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         model_input.lm_output_indexes = std::move(lm_output_indexes);
         model_input.prefix_lengths    = spec_prefix_lengths;
         model_input.combo_tokens      = draft_token_ids_t.reshape({(int64_t)(batch_size * (propose_step_ + 1))});
+        batch_stream_processor_->expandTargetVerifyPositionIds(stream_groups, model_input);
         model_input.sequence_lengths =
             torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
         model_input.last_hidden_states = torch::Tensor();
@@ -914,7 +924,11 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         // Since other tp ranks don't have streams, its combo_tokens' first token is not correct.
         // Thus, we need to broadcast the combo_tokens to other tp ranks.
         if (parallelism_config_.tp_size > 1) {
-            execBroadcast({{model_input.combo_tokens}, 0});
+            std::vector<torch::Tensor> broadcast_tensors{model_input.combo_tokens};
+            if (model_input.combo_position_ids.defined()) {
+                broadcast_tensors.push_back(model_input.combo_position_ids);
+            }
+            execBroadcast({broadcast_tensors, 0});
         }
 
         const auto& cache_cfg             = cache_manager_->cacheConfig();

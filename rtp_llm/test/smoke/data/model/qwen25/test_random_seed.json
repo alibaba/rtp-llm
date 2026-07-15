@@ -18,10 +18,10 @@
             "result": {
                 "response_batch": [
                     {
-                        "response": " In Django, I would use `nav`, in"
+                        "response": " In Python's Flask framework, Django North and its"
                     },
                     {
-                        "response": " In Django, I would use `nav`, in"
+                        "response": " In Python's Flask framework, Django North and its"
                     }
                 ]
             }
@@ -39,8 +39,8 @@
             },
             "result": {
                 "response": [
-                    " In my project, I have two models:\n\nIn",
-                    " Provide examples of both, including their advantages and disadvantages"
+                    " In Flask, I have a view called `default",
+                    " Flask has its own syntax, but Flask-Django"
                 ],
                 "iter_count": 10,
                 "finished": true

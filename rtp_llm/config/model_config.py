@@ -34,9 +34,7 @@ def kv_cache_dtype_to_torch_dtype(
     Returns:
         torch.dtype value
     """
-    if kv_cache_dtype == KvCacheDataType.INT8:
-        return torch.int8
-    elif kv_cache_dtype == KvCacheDataType.FP8:
+    if kv_cache_dtype == KvCacheDataType.FP8:
         return torch.float8_e4m3fn
     else:  # BASE
         return data_type.to_torch_dtype()
@@ -51,6 +49,7 @@ def ssm_state_dtype_str_to_data_type(ssm_state_dtype: str) -> DataType:
     if ssm_state_dtype == "fp32":
         return DataType.TYPE_FP32
     raise ValueError(f"Unsupported ssm_state_dtype: {ssm_state_dtype}")
+
 
 class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
@@ -239,11 +238,7 @@ class ModelConfig(CppModelConfig):
             return 0
         # Get kv_cache_dtype from attn_config
         kv_cache_dtype_enum = self.attn_config.kv_cache_dtype
-        kv_cache_bytes = (
-            1
-            if kv_cache_dtype_enum in [KvCacheDataType.FP8, KvCacheDataType.INT8]
-            else 2
-        )
+        kv_cache_bytes = 1 if kv_cache_dtype_enum == KvCacheDataType.FP8 else 2
         kv_cache_size = (
             2
             * self.num_layers
@@ -649,12 +644,7 @@ class ModelConfig(CppModelConfig):
 
         # Set attn_config.kv_cache_dtype based on kv_cache_config
         if kv_cache_config is not None:
-            if kv_cache_config.int8_kv_cache:
-                self.attn_config.kv_cache_dtype = KvCacheDataType.INT8
-                logging.info(
-                    "Setting attn_config.kv_cache_dtype to INT8 based on kv_cache_config.int8_kv_cache"
-                )
-            elif kv_cache_config.fp8_kv_cache:
+            if kv_cache_config.fp8_kv_cache:
                 self.attn_config.kv_cache_dtype = KvCacheDataType.FP8
                 logging.info(
                     "Setting attn_config.kv_cache_dtype to FP8 based on kv_cache_config.fp8_kv_cache"
@@ -662,7 +652,7 @@ class ModelConfig(CppModelConfig):
             else:
                 self.attn_config.kv_cache_dtype = KvCacheDataType.BASE
                 logging.info(
-                    "Setting attn_config.kv_cache_dtype to BASE (default, no int8/fp8 kv_cache specified)"
+                    "Setting attn_config.kv_cache_dtype to BASE (default, no fp8 kv_cache specified)"
                 )
 
         if quant_config and quant_config.get_method().lower() == "fp8":

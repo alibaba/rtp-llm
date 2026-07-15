@@ -105,6 +105,15 @@ message GenerateConfigPB {
     IntMatrix banned_combo_token_ids = 59;
     // 0=unset(fallback to bool return_all_probs), 1=NONE, 2=DEFAULT, 3=ORIGINAL
     int32 return_all_probs_mode = 60;
+    // 跨序列 combo 去重开关
+    bool enable_cross_sequence_ban = 61;
+    // 跨序列分叉起始商品位置
+    int32 cross_seq_diverge_start_combo = 62;
+    bool return_prompt_logits = 63;
+    int32 prompt_logits_top_k = 64;
+    int32 prompt_logits_start = 65;
+    int32 prompt_logits_end = 66;
+    bool return_target_logprob = 67;
 }
 
 message MMPreprocessConfigPB {
@@ -177,6 +186,14 @@ message AuxInfoPB {
     map<int32, int32> multimodal_lengths = 27;
 }
 
+message PromptLogitsOutputPB {
+    TensorPB topk_logprobs = 1;
+    TensorPB topk_token_ids = 2;
+    TensorPB target_logprobs = 3;
+    int32 start_pos = 4;
+    int32 end_pos = 5;
+}
+
 message FlattenOutputPB {
     repeated bool finished = 1;
     repeated AuxInfoPB aux_info = 2;
@@ -186,6 +203,7 @@ message FlattenOutputPB {
     TensorPB logits = 6;
     TensorPB all_probs = 7;
     TensorPB all_hidden_states = 8;
+    PromptLogitsOutputPB prompt_logits = 9;
 }
 
 message GenerateOutputsPB {
@@ -426,6 +444,9 @@ message EmbeddingInputPB {
     int64 request_id = 4;
     repeated MultimodalInputPB multimodal_features = 5;
     string vit_role_addr = 6;
+    bool gen_timeline = 7;
+    int32 profile_step = 8;
+    string profile_trace_name = 9;
 }
 
 message EmbeddingHealthRequestPB {

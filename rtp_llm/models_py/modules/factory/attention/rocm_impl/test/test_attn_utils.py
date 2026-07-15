@@ -201,11 +201,12 @@ class TestSplitRawQkv(unittest.TestCase):
             v, v_ref.view(token_num, head_num_kv, head_dim)[:token_kv_num].contiguous()
         )
 
-        # Outputs must be contiguous — flash_attn_varlen_func expects packed
-        # row-major K/V; non-contiguous strides would crash the kernel.
-        self.assertTrue(q.is_contiguous())
-        self.assertTrue(k.is_contiguous())
-        self.assertTrue(v.is_contiguous())
+        # flash_attn_varlen_func only requires the innermost head_dim to be
+        # contiguous. split_raw_qkv intentionally returns views to avoid three
+        # redundant direct_copy kernels per layer.
+        self.assertEqual(q.stride(-1), 1)
+        self.assertEqual(k.stride(-1), 1)
+        self.assertEqual(v.stride(-1), 1)
 
     def test_full_token_count(self):
         self._check(token_num=10, head_num=4, head_num_kv=4, head_dim=32)
