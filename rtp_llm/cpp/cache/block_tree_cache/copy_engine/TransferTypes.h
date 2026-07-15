@@ -31,6 +31,8 @@ class TransferHandle {
 public:
     TransferHandle() = default;
 
+    static TransferHandle completed(CopyStatus status, uint64_t request_id = 0);
+
     uint64_t   requestId() const;
     void       wait() const;
     bool       done() const;

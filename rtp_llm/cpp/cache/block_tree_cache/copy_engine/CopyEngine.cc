@@ -109,6 +109,13 @@ struct TransferHandle::State {
     std::condition_variable cv;
 };
 
+TransferHandle TransferHandle::completed(CopyStatus status, uint64_t request_id) {
+    auto state    = std::make_shared<TransferHandle::State>(request_id);
+    state->status = status;
+    state->done   = true;
+    return TransferHandle(std::move(state));
+}
+
 uint64_t TransferHandle::requestId() const {
     return state_ ? state_->request_id : 0;
 }
@@ -172,26 +179,7 @@ void TransferHandle::onComplete(CopyCompletionCallback callback) const {
 
 TransferHandle CopyEngine::submit(const TransferDescriptor& desc) {
     const uint64_t request_id = next_request_id_.fetch_add(1);
-    auto           state      = std::make_shared<TransferHandle::State>(request_id);
-
-    completeRequest(state, execute(desc));
-    return TransferHandle(std::move(state));
-}
-
-void CopyEngine::completeRequest(const std::shared_ptr<TransferHandle::State>& state, CopyStatus status) {
-    std::vector<CopyCompletionCallback> callbacks;
-    {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        state->status = status;
-        state->done   = true;
-        callbacks.swap(state->callbacks);
-    }
-
-    state->cv.notify_all();
-
-    for (const auto& callback : callbacks) {
-        callback(status);
-    }
+    return TransferHandle::completed(execute(desc), request_id);
 }
 
 CopyStatus CopyEngine::execute(const TransferDescriptor& desc) {

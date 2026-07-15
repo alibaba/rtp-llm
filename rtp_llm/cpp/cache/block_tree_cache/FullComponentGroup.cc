@@ -26,7 +26,8 @@ bool FullComponentGroup::isSlotEvictable(const TreeNode& node, Tier tier) const 
 
 // FullMatchValidator
 bool FullMatchValidator::validate(const TreeNode* node, const GroupSlot& slot) {
-    return !slot.is_empty();
+    prefix_valid_ = prefix_valid_ && !slot.is_empty();
+    return prefix_valid_;
 }
 
 }  // namespace rtp_llm

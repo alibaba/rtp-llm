@@ -213,21 +213,6 @@ public:
         return disk_pool_ ? disk_pool_->totalBlocksNum() : 0;
     }
 
-    void referenceDeviceBlocks(const std::vector<BlockIdxType>& device_blocks) const {
-        for (size_t i = 0; i < device_blocks.size() && i < device_pools_.size(); ++i) {
-            if (device_pools_[i] && !isNullBlockIdx(device_blocks[i])) {
-                device_pools_[i]->incRef(device_blocks[i]);
-            }
-        }
-    }
-    void releaseDeviceBlocks(const std::vector<BlockIdxType>& device_blocks) const {
-        for (size_t i = 0; i < device_blocks.size() && i < device_pools_.size(); ++i) {
-            if (device_pools_[i] && !isNullBlockIdx(device_blocks[i])) {
-                device_pools_[i]->decRef(device_blocks[i]);
-            }
-        }
-    }
-
     GroupBlockSet allocateBlocks(Tier tier, size_t count);
     void          referenceBlocks(const GroupBlockSet& set) const;
     void          unreferenceBlocks(const GroupBlockSet& set) const;

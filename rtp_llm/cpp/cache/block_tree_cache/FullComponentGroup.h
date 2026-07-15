@@ -21,6 +21,9 @@ public:
 class FullMatchValidator: public MatchValidator {
 public:
     bool validate(const TreeNode* node, const GroupSlot& slot) override;
+
+private:
+    bool prefix_valid_{true};
 };
 
 }  // namespace rtp_llm

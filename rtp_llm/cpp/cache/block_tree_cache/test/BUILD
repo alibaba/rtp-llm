@@ -82,16 +82,54 @@ cc_test(
 
 cc_test(
     name = "block_tree_cache_test",
+    testonly = True,
     srcs = ["BlockTreeCacheTest.cc"],
     copts = test_copts,
     deps = test_deps + [
         ":block_tree_cache_test_util",
-        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
-        "//rtp_llm/cpp/cache:device_block_pool_config_helper",
-        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        ":block_tree_cache_test_utils",
+    ],
+    env = {},
+)
+
+cc_test(
+    name = "block_tree_cache_integration_test",
+    testonly = True,
+    srcs = ["BlockTreeCacheIntegrationTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_tree_cache_test_util",
+        ":block_tree_cache_test_utils",
+    ],
+    env = {},
+)
+
+cc_test(
+    name = "block_tree_cache_broadcast_test",
+    testonly = True,
+    srcs = ["BlockTreeCacheBroadcastTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_tree_cache_test_util",
+        ":block_tree_cache_test_utils",
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
     ],
     env = {},
+)
+
+cc_library(
+    name = "block_tree_cache_test_utils",
+    testonly = True,
+    srcs = ["BlockTreeCacheTestUtils.cc"],
+    hdrs = ["BlockTreeCacheTestUtils.h"],
+    copts = test_copts,
+    deps = [
+        ":block_tree_cache_test_util",
+        ":copy_engine_test_utils",
+        "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
+        "@com_google_googletest//:gtest",
+    ] + torch_deps(),
 )
 
 cc_library(
@@ -174,9 +212,14 @@ cc_test(
 
 cc_test(
     name = "block_tree_cache_factory_test",
+    testonly = True,
     srcs = ["BlockTreeCacheFactoryTest.cc"],
     copts = pool_test_copts,
-    deps = pool_test_deps,
+    deps = pool_test_deps + [
+        ":block_tree_cache_test_utils",
+        ":copy_engine_test_utils",
+        "//rtp_llm/cpp/cache:kv_cache_allocator",
+    ],
     env = {},
 )
 

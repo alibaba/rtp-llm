@@ -22,18 +22,16 @@ public:
                const std::vector<Component>&         components,
                DeviceHostCopyOptions                 device_host_options = {});
     CopyEngine() = delete;
-    ~CopyEngine();
+    virtual ~CopyEngine();
 
     // Descriptor-based facade. Executes synchronously, returns completed handle.
     // TODO: change to async later
-    TransferHandle submit(const TransferDescriptor& desc);
+    virtual TransferHandle submit(const TransferDescriptor& desc);
 
     static size_t computeHostBlockSize(const std::vector<MemoryBlockLayerTagSlot>& slots);
 
 private:
     CopyStatus execute(const TransferDescriptor& desc);
-
-    void completeRequest(const std::shared_ptr<TransferHandle::State>& state, CopyStatus status);
 
     void buildGroupLayouts(const std::vector<ComponentGroupPtr>& component_groups,
                            const std::vector<Component>&         components);
