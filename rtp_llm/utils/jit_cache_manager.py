@@ -16,7 +16,8 @@ from watchdog.observers import Observer
 
 from rtp_llm.utils.jit_cache_store import RemoteSnapshotStore
 
-LOCAL_JIT_DIR = ".jit_cache"
+LOCAL_JIT_DIR = "/tmp/rtp_llm/.jit_cache"
+_DEFAULT_ROOT = Path(LOCAL_JIT_DIR).expanduser().absolute()
 SYNC_POLL_S = 60.0
 
 
@@ -61,8 +62,6 @@ def _cute_dsl_scope() -> str:
     )
 
 
-# Exclude non-relocatable Ninja metadata: build files embed sandbox paths, while
-# logs and binary dependency databases contain sandbox-specific build state.
 @dataclass(frozen=True)
 class Component:
     name: str
@@ -93,9 +92,10 @@ COMPONENTS = (
     Component(
         "flashinfer",
         "FLASHINFER_WORKSPACE_BASE",
-        (".so", ".o", ".cu", ".inc", ".h"),
+        (".so", ".o", "build.ninja", ".ninja_log", ".ninja_deps")
+        + (".cu", ".inc", ".h"),
         frozenset({"closed", "moved"}),
-        _cuda_scope,
+        _torch_extensions_scope,
     ),
     Component(
         "deep_gemm",
@@ -114,7 +114,9 @@ COMPONENTS = (
     Component(
         "torch_extensions",
         "TORCH_EXTENSIONS_DIR",
-        (".so", ".o"),
+        # Ship source: torch re-emits main.cpp/cuda.cu on reuse, else ninja recompiles.
+        # (No-recompile also needs torch headers baked into the image, not reinstalled.)
+        (".so", ".o", "build.ninja", ".ninja_log", ".ninja_deps") + (".cpp", ".cu"),
         frozenset({"closed", "moved"}),
         _torch_extensions_scope,
     ),
@@ -191,6 +193,13 @@ class JitCacheManager:
         remote = resolve_remote_root(jit_config.remote_jit_dir)
         self.local_root = Path(LOCAL_JIT_DIR).expanduser().absolute()
         self.store = RemoteSnapshotStore(remote) if remote else None
+        if self.store and self.local_root != _DEFAULT_ROOT:
+            logging.warning(
+                "JIT remote disabled: local root %s != %s",
+                self.local_root,
+                _DEFAULT_ROOT,
+            )
+            self.store = None
         self.components = tuple(c.resolve(self.local_root) for c in COMPONENTS)
         self.events = queue.SimpleQueue()
         self._stop = threading.Event()
@@ -248,7 +257,8 @@ class JitCacheManager:
             )
         except Exception:
             for comp, rel in pending.values():
-                self.events.put((comp, rel))
+                if (comp.local_dir / rel).is_file():
+                    self.events.put((comp, rel))
             raise
 
     def _sync_loop(self) -> None:

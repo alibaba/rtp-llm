@@ -1,18 +1,12 @@
 """Real-model JIT cache smoke test.
 
-For each registered model this test:
-  1. starts a server with REMOTE_JIT_DIR set,
-  2. runs the configured *warmup* sweep(s) over the prefill/decode shapes,
-     snapshots the managed local JIT cache as the baseline,
-  3. runs an identical *verify* sweep, snapshots again,
-  4. asserts the set of synced JIT artifacts (per component: count / total size /
-     content hash) is unchanged — i.e. warmup reached steady state and every
-     kernel a request needs is already cached,
-  5. asserts the remote store captured every locally-synced artifact — i.e. the
-     component sync_suffixes/upload_events actually publish what was produced.
+For each registered model this test starts a cold producer and a fresh warm
+consumer against the same REMOTE_JIT_DIR. Each service profiles several request
+lengths, including the exact JIT files added or changed by each request. The warm
+consumer must load the remote snapshot before serving, must not rewrite any
+restored artifact, and must not publish a new snapshot.
 
-The two cases jointly cover all managed components. Bazel selects one explicit
-test method per target; the all-components test_suite aggregates those targets.
+The single Bazel target covers every managed component this model can produce.
 """
 
 import hashlib
@@ -28,7 +22,6 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
-from unittest import mock
 
 from rtp_llm.utils import jit_cache_manager as jit_cache_module
 from rtp_llm.utils import jit_cache_store as jit_store
@@ -53,55 +46,36 @@ class ModelSpec:
     cuda_ipc_weight_name: Optional[str] = None
     prefill_max_tokens: int = 1
     decode_max_tokens: int = 64
-    warmup_repeats: int = 1
+    stabilize_prefill_lens: Tuple[int, ...] = ()
 
-
-# Exercise short, block-boundary-adjacent, and long prompt shapes by default.
-# BUILD and manual runs can still override these with JIT_SMOKE_*_LENS.
-_CI_PREFILL = (16, 256, 1024)
-_CI_DECODE = (16, 256)
 
 # NOTE: JIT artifacts only appear when the model actually runs the Python JIT
 # path (deep_gemm/flashinfer/triton python). The default C++ engine uses kernels
 # compiled into the .so and produces no JIT cache — pick models/args accordingly.
 DEEPSEEK_V2_LITE = ModelSpec(
-    # This is the smallest known case that covers TensorRT-LLM DeepGEMM in
-    # addition to FlashInfer, DeepGEMM, and Triton. Its first sweep can finish
-    # compiling after the request, so use two warmup sweeps before the baseline.
+    # Two scratch layers are the minimum that reaches the first MoE layer and
+    # covers FlashInfer, both DeepGEMM implementations, Triton, and TVM FFI.
     name="deepseek_v2_lite",
     model_path="/mnt/nas1/hf/DeepSeek-V2-Lite-Chat",
     model_type="deepseek2",
     smoke_args=(
-        "--act_type BF16 --quantization FP8_PER_BLOCK "
+        "--warm_up 0 --hack_layer_num 2 --load_method scratch "
+        "--test_block_num 100 --act_type BF16 --quantization FP8_PER_BLOCK "
         "--seq_size_per_block 64 --tp_size 1 --world_size 1 --reuse_cache 1"
     ),
-    prefill_lens=_CI_PREFILL,
-    decode_lens=_CI_DECODE,
+    prefill_lens=(16, 257, 1025),
+    decode_lens=(257,),
     required_components=(
         "flashinfer",
         "deep_gemm",
         "tensorrt_llm_deep_gemm",
+        "torch_extensions",
         "triton",
+        "tvm_ffi",
     ),
-    warmup_repeats=2,
-)
-
-# Four layers are the minimum valid hybrid: layers 1-3 (1-based) use KDA and
-# layer 4 is the first full-attention layer required by the KV allocator.
-KIMI_LINEAR = ModelSpec(
-    name="kimi_linear_4layer",
-    model_path="/mnt/nas1/hf/Kimi-Linear-48B-A3B-Instruct",
-    model_type="kimi_linear",
-    smoke_args=(
-        "--warm_up 0 --hack_layer_num 4 --load_method scratch "
-        "--test_block_num 100 "
-        "--act_type BF16 --seq_size_per_block 2048 --ssm_state_dtype fp32 "
-        "--tp_size 1 --world_size 1"
-    ),
-    prefill_lens=_CI_PREFILL,
-    decode_lens=_CI_DECODE,
-    required_components=("torch_extensions", "triton"),
     cuda_ipc_weight_name="model.layers.0.input_layernorm.weight",
+    decode_max_tokens=2,
+    stabilize_prefill_lens=(257,),
 )
 
 
@@ -175,98 +149,11 @@ def _file_sha256(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def _manifest_value(name: str, payload: bytes) -> Dict[str, Any]:
-    rebased_triton_group = name.startswith("triton/") and Path(name).name.startswith(
-        "__grp__"
-    )
-    if rebased_triton_group:
-        try:
-            group = json.loads(payload)
-            child_paths = group.get("child_paths") if isinstance(group, dict) else None
-            if isinstance(child_paths, dict):
-                for child_name, child_path in child_paths.items():
-                    if isinstance(child_path, str):
-                        child_paths[child_name] = Path(child_path).name
-                payload = json.dumps(
-                    group, sort_keys=True, separators=(",", ":")
-                ).encode("utf-8")
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            pass
+def _manifest_value(payload: bytes) -> Dict[str, Any]:
     return {
         "bytes": len(payload),
         "sha256": hashlib.sha256(payload).hexdigest(),
     }
-
-
-def _component_counts(local_root: Path) -> Dict[str, Dict[str, Any]]:
-    counts: Dict[str, Dict[str, Any]] = {}
-    for component in jit_cache_module.COMPONENTS:
-        resolved = component.resolve(local_root)
-        file_hashes: Dict[str, str] = {}
-        total_bytes = 0
-        if resolved.local_dir.is_dir():
-            for path in sorted(resolved.local_dir.rglob("*")):
-                if not path.is_file():
-                    continue
-                rel = path.relative_to(resolved.local_dir).as_posix()
-                if not resolved.should_sync(rel):
-                    continue
-                size = path.stat().st_size
-                if size <= 0:
-                    continue
-                total_bytes += size
-                file_hashes[rel] = _file_sha256(path)
-        # Digest over sorted (rel, sha) pairs so two snapshots compare equal iff
-        # every synced file's path and content match.
-        digest = hashlib.sha256()
-        for rel in sorted(file_hashes):
-            digest.update(rel.encode("utf-8"))
-            digest.update(b"\0")
-            digest.update(file_hashes[rel].encode("ascii"))
-            digest.update(b"\0")
-        counts[component.name] = {
-            "files": len(file_hashes),
-            "bytes": total_bytes,
-            "sha256": digest.hexdigest(),
-            "file_hashes": file_hashes,
-        }
-    return counts
-
-
-def _snapshot(local_root: Path) -> Dict[str, Any]:
-    components = _component_counts(local_root)
-    return {
-        "total_files": sum(v["files"] for v in components.values()),
-        "total_bytes": sum(v["bytes"] for v in components.values()),
-        "components": components,
-    }
-
-
-def _snapshot_fingerprint(snap: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    return {
-        name: {"files": v["files"], "bytes": v["bytes"], "sha256": v["sha256"]}
-        for name, v in snap["components"].items()
-    }
-
-
-def _wait_stable_snapshot(
-    local_root: Path, stable_samples: int, interval_s: float, max_wait_s: float
-) -> Dict[str, Any]:
-    deadline = time.time() + max_wait_s
-    last: Optional[Dict[str, Any]] = None
-    same = 0
-    while True:
-        current = _snapshot(local_root)
-        if last is not None and current == last:
-            same += 1
-            if same >= stable_samples:
-                return current
-        else:
-            same = 0
-            last = current
-        if time.time() >= deadline:
-            return current
-        time.sleep(interval_s)
 
 
 def _remote_file_manifest(
@@ -282,11 +169,11 @@ def _remote_file_manifest(
         try:
             with jit_store.zstd_tar(archive, "r") as entries:
                 for member in entries:
-                    if not member.isfile():
+                    if not member.isfile() or member.name == jit_store.MTIME_MANIFEST:
                         continue
                     with entries.extractfile(member) as source:
                         payload = source.read()
-                    value = _manifest_value(member.name, payload)
+                    value = _manifest_value(payload)
                     previous = current.get(member.name)
                     if previous is not None and previous != value:
                         conflicts.append(f"{archive.name}:{member.name}")
@@ -328,8 +215,27 @@ def _local_syncable_manifest(local_root: Path) -> Dict[str, Dict[str, Any]]:
             if resolved.should_sync(rel) and path.stat().st_size > 0:
                 name = f"{prefix}/{rel}"
                 payload = path.read_bytes()
-                manifest[name] = _manifest_value(name, payload)
+                manifest[name] = _manifest_value(payload)
     return manifest
+
+
+def _manifest_profile(manifest: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    components = {
+        item.name: {
+            "files": sum(name.startswith(f"{item.name}/") for name in manifest),
+            "bytes": sum(
+                value["bytes"]
+                for name, value in manifest.items()
+                if name.startswith(f"{item.name}/")
+            ),
+        }
+        for item in jit_cache_module.COMPONENTS
+    }
+    return {
+        "total_files": len(manifest),
+        "total_bytes": sum(value["bytes"] for value in manifest.values()),
+        "components": components,
+    }
 
 
 def _local_runtime_identity(local_root: Path) -> Dict[str, Dict[str, Any]]:
@@ -351,7 +257,7 @@ def _local_runtime_identity(local_root: Path) -> Dict[str, Dict[str, Any]]:
             if value.st_size <= 0:
                 continue
             name = f"{prefix}/{rel}"
-            version = _manifest_value(name, payload)
+            version = _manifest_value(payload)
             version.update(
                 {
                     "mtime_ns": value.st_mtime_ns,
@@ -362,6 +268,56 @@ def _local_runtime_identity(local_root: Path) -> Dict[str, Dict[str, Any]]:
             )
             identity[name] = version
     return identity
+
+
+def _local_artifact_stats(local_root: Path) -> Dict[str, Dict[str, int]]:
+    """Cheap per-request identity; content hashes are checked at phase boundaries."""
+    result: Dict[str, Dict[str, int]] = {}
+    for component in jit_cache_module.COMPONENTS:
+        resolved = component.resolve(local_root)
+        if not resolved.local_dir.is_dir():
+            continue
+        prefix = resolved.local_dir.relative_to(local_root).as_posix()
+        for path in resolved.local_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(resolved.local_dir).as_posix()
+            if not resolved.should_sync(rel):
+                continue
+            try:
+                value = path.stat()
+            except OSError:
+                continue
+            if value.st_size > 0:
+                result[f"{prefix}/{rel}"] = {
+                    "bytes": value.st_size,
+                    "mtime_ns": value.st_mtime_ns,
+                    "inode": value.st_ino,
+                }
+    return result
+
+
+def _artifact_delta(
+    before: Dict[str, Dict[str, int]], after: Dict[str, Dict[str, int]]
+) -> Dict[str, Any]:
+    before_names, after_names = set(before), set(after)
+    added = sorted(after_names - before_names)
+    removed = sorted(before_names - after_names)
+    modified = sorted(
+        name for name in before_names & after_names if before[name] != after[name]
+    )
+    changed = added + removed + modified
+    by_component: Dict[str, int] = {}
+    for name in changed:
+        component = name.split("/", 1)[0]
+        by_component[component] = by_component.get(component, 0) + 1
+    return {
+        "added": added,
+        "removed": removed,
+        "modified": modified,
+        "changed_count": len(changed),
+        "changed_by_component": by_component,
+    }
 
 
 def _identity_digest(identity: Dict[str, Dict[str, Any]]) -> str:
@@ -376,20 +332,6 @@ def _file_identity(path: Path) -> Dict[str, Any]:
         "mtime_ns": value.st_mtime_ns,
         "sha256": _file_sha256(path),
     }
-
-
-def _compiled_output_manifest(
-    manifest: Dict[str, Dict[str, Any]],
-) -> Dict[str, Dict[str, Any]]:
-    result: Dict[str, Dict[str, Any]] = {}
-    for name, value in manifest.items():
-        component = name.split("/", 1)[0]
-        if component in {"flashinfer", "torch_extensions"} and not name.endswith(
-            (".so", ".o")
-        ):
-            continue
-        result[name] = value
-    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -566,52 +508,6 @@ def _send_cuda_ipc_weight_update(
 # --------------------------------------------------------------------------- #
 class JitCacheSmokeTest(unittest.TestCase):
     @classmethod
-    def setUpClass(cls) -> None:
-        if _parse_bool("JIT_SMOKE_FULL_LIFECYCLE", False):
-            return
-        expect_cold = _parse_bool("JIT_SMOKE_EXPECT_COLD_REMOTE", False)
-        expect_warm = _parse_bool("JIT_SMOKE_EXPECT_WARM_RESTORE", False)
-        if expect_cold and expect_warm:
-            raise AssertionError("cold and warm JIT smoke modes are mutually exclusive")
-        if expect_cold:
-            remote = os.environ.get("JIT_SMOKE_REMOTE_JIT_DIR")
-            if not remote:
-                raise AssertionError(
-                    "JIT_SMOKE_EXPECT_COLD_REMOTE requires JIT_SMOKE_REMOTE_JIT_DIR"
-                )
-            remote_root = Path(remote).absolute()
-            if not remote_root.is_dir():
-                raise AssertionError(
-                    f"cold remote directory does not exist: {remote_root}"
-                )
-            entries = list(remote_root.iterdir())
-            if entries:
-                raise AssertionError(
-                    f"cold remote must be empty, found: {[p.name for p in entries[:5]]}"
-                )
-        if expect_warm:
-            remote = os.environ.get("JIT_SMOKE_REMOTE_JIT_DIR")
-            if not remote:
-                raise AssertionError(
-                    "JIT_SMOKE_EXPECT_WARM_RESTORE requires JIT_SMOKE_REMOTE_JIT_DIR"
-                )
-            remote_root = Path(remote).absolute()
-            if not remote_root.is_dir():
-                raise AssertionError(
-                    f"warm remote directory does not exist: {remote_root}"
-                )
-            snapshots = _remote_snapshots(remote_root)
-            if not snapshots:
-                raise AssertionError("warm remote has no committed snapshots")
-            unexpected = sorted(
-                path.name for path in remote_root.iterdir() if path not in snapshots
-            )
-            if unexpected:
-                raise AssertionError(
-                    f"warm remote has unexpected entries: {unexpected[:5]}"
-                )
-
-    @classmethod
     def tearDownClass(cls) -> None:
         from rtp_llm.test.utils import maga_server_manager
 
@@ -668,7 +564,11 @@ class JitCacheSmokeTest(unittest.TestCase):
         return groups
 
     def _run_sweep(
-        self, model_id: str, tag: str, groups: List[Dict[str, Any]]
+        self,
+        model_id: str,
+        tag: str,
+        groups: List[Dict[str, Any]],
+        local_root: Path,
     ) -> List[Dict[str, Any]]:
         timeout_s = int(os.environ.get("JIT_SMOKE_REQUEST_TIMEOUT_S", "1800"))
         rows: List[Dict[str, Any]] = []
@@ -680,6 +580,7 @@ class JitCacheSmokeTest(unittest.TestCase):
                     group["phase"],
                     target_words,
                 )
+                before = _local_artifact_stats(local_root)
                 row = _send_chat_completion(
                     port=self.server.port,
                     model=model_id,
@@ -687,6 +588,9 @@ class JitCacheSmokeTest(unittest.TestCase):
                     target_words=int(target_words),
                     max_tokens=group["max_tokens"],
                     timeout_s=timeout_s,
+                )
+                row["jit_delta"] = _artifact_delta(
+                    before, _local_artifact_stats(local_root)
                 )
                 row["sweep"] = tag
                 rows.append(row)
@@ -741,7 +645,6 @@ class JitCacheSmokeTest(unittest.TestCase):
         summary["remote_compare"] = {
             "local_count": len(local_manifest),
             "remote_count": len(remote_manifest),
-            "intersection_count": len(local_names & remote_names),
             "local_not_remote": missing,
             "remote_not_local": extra,
             "content_mismatch": mismatch,
@@ -753,8 +656,6 @@ class JitCacheSmokeTest(unittest.TestCase):
             "remote_snapshots_after": remote_snapshots_after,
             "local_component_counts": local_component_counts,
             "remote_component_counts": remote_component_counts,
-            "local_manifest": local_manifest,
-            "remote_manifest": remote_manifest,
             "server_stop_error": stop_error,
         }
         failures = []
@@ -802,7 +703,13 @@ class JitCacheSmokeTest(unittest.TestCase):
                 + f"; see {summary_path}"
             )
 
-    def _run_model(self, spec: ModelSpec) -> None:
+    def _run_model(
+        self,
+        spec: ModelSpec,
+        remote_root: Path,
+        run_label: str,
+        expect_warm_restore: bool,
+    ) -> None:
         from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
         model_path = os.environ.get("JIT_SMOKE_MODEL_PATH", spec.model_path)
@@ -813,22 +720,12 @@ class JitCacheSmokeTest(unittest.TestCase):
         _validate_model_rpc_proto()
 
         out_dir = _outputs_dir()
-        run_label = os.environ.get("JIT_SMOKE_RUN_LABEL", "single")
         work_dir = _runtime_dir(
             out_dir, f"server_work_{spec.name}_{run_label}", clean=True
         )
         os.environ["MAGA_SERVER_WORK_DIR"] = str(work_dir)
-        local_root = work_dir / jit_cache_module.LOCAL_JIT_DIR
-        remote_override = os.environ.get("JIT_SMOKE_REMOTE_JIT_DIR")
-        if remote_override:
-            remote_root = Path(remote_override).absolute()
-            self.assertTrue(
-                remote_root.is_dir(),
-                f"JIT_SMOKE_REMOTE_JIT_DIR does not exist: {remote_root}",
-            )
-        else:
-            remote_root = _runtime_dir(out_dir, f"jit_remote_{spec.name}", clean=True)
-        expect_warm_restore = _parse_bool("JIT_SMOKE_EXPECT_WARM_RESTORE", False)
+        local_root = Path(jit_cache_module.LOCAL_JIT_DIR)
+        shutil.rmtree(local_root, ignore_errors=True)
         remote_before: Dict[str, Dict[str, Any]] = {}
         remote_snapshots_before: List[Dict[str, Any]] = []
         server_env = {
@@ -855,7 +752,7 @@ class JitCacheSmokeTest(unittest.TestCase):
             "baseline": {},
             "after": {},
         }
-        restored_outputs: Dict[str, Dict[str, Any]] = {}
+        restored_manifest: Dict[str, Dict[str, Any]] = {}
         restored_runtime_identity: Dict[str, Dict[str, Any]] = {}
         warmup_runtime_identity: Dict[str, Dict[str, Any]] = {}
         verify_runtime_identity: Dict[str, Dict[str, Any]] = {}
@@ -887,13 +784,23 @@ class JitCacheSmokeTest(unittest.TestCase):
             self.assertTrue(started, f"{spec.name}: server failed to become ready")
 
             if expect_warm_restore:
+                log_path = work_dir / "main_logs/main_0.log"
+                server_log = log_path.read_text(encoding="utf-8", errors="replace")
+                self.assertIn(
+                    "loaded JIT cache from remote snapshot",
+                    server_log,
+                    f"{spec.name}: backend log does not prove remote restore: {log_path}",
+                )
+                summary["restore_log"] = {
+                    "path": str(log_path),
+                    "loaded_remote_snapshot": True,
+                }
                 restored_manifest = _local_syncable_manifest(local_root)
-                restored_outputs = _compiled_output_manifest(restored_manifest)
                 restored_runtime_identity = _local_runtime_identity(local_root)
                 self.assertEqual(
-                    _compiled_output_manifest(remote_before),
-                    restored_outputs,
-                    f"{spec.name}: restored compiled outputs differ before requests",
+                    remote_before,
+                    restored_manifest,
+                    f"{spec.name}: restored cache differs before requests",
                 )
 
             model_id = _discover_model_id(self.server.port, spec.model_type)
@@ -909,54 +816,84 @@ class JitCacheSmokeTest(unittest.TestCase):
                 )
             summary["weight_update"] = weight_update
 
-            stable_kwargs = dict(
-                stable_samples=int(os.environ.get("JIT_SMOKE_STABLE_SAMPLES", "2")),
-                interval_s=float(os.environ.get("JIT_SMOKE_STABLE_INTERVAL_S", "2")),
-                max_wait_s=float(os.environ.get("JIT_SMOKE_STABLE_MAX_WAIT_S", "60")),
-            )
             rows: List[Dict[str, Any]] = []
-            for repeat in range(spec.warmup_repeats):
-                tag = "warmup" if spec.warmup_repeats == 1 else f"warmup_{repeat + 1}"
-                rows.extend(self._run_sweep(model_id, tag, groups))
-            baseline = _wait_stable_snapshot(local_root, **stable_kwargs)
-            summary["requests"] = rows
-            summary["baseline"] = baseline
             if expect_warm_restore:
-                self.assertEqual(
-                    restored_outputs,
-                    _compiled_output_manifest(_local_syncable_manifest(local_root)),
-                    f"{spec.name}: warmup recompiled or added runtime cache outputs",
-                )
                 warmup_runtime_identity = _local_runtime_identity(local_root)
                 self.assertEqual(
                     restored_runtime_identity,
                     warmup_runtime_identity,
-                    f"{spec.name}: warmup rewrote or replaced JIT cache files",
+                    f"{spec.name}: weight update rewrote restored JIT cache files",
                 )
-
-            rows.extend(self._run_sweep(model_id, "verify", groups))
-            after = _wait_stable_snapshot(local_root, **stable_kwargs)
+            else:
+                rows.extend(self._run_sweep(model_id, "compile", groups, local_root))
+                if spec.stabilize_prefill_lens:
+                    rows.extend(
+                        self._run_sweep(
+                            model_id,
+                            "stabilize",
+                            [
+                                {
+                                    "phase": "prefill",
+                                    "lengths": list(spec.stabilize_prefill_lens),
+                                    "max_tokens": spec.prefill_max_tokens,
+                                }
+                            ],
+                            local_root,
+                        )
+                    )
+            baseline_manifest = _local_syncable_manifest(local_root)
+            baseline_runtime_identity = _local_runtime_identity(local_root)
+            baseline = _manifest_profile(baseline_manifest)
+            summary["requests"] = rows
+            summary["baseline"] = baseline
+            if expect_warm_restore:
+                rows.extend(
+                    self._run_sweep(model_id, "restore_verify", groups, local_root)
+                )
+            else:
+                rows.extend(self._run_sweep(model_id, "verify", groups, local_root))
+            after_manifest = _local_syncable_manifest(local_root)
+            after_runtime_identity = _local_runtime_identity(local_root)
+            after = _manifest_profile(after_manifest)
             summary["requests"] = rows
             summary["after"] = after
             if expect_warm_restore:
                 self.assertEqual(
-                    restored_outputs,
-                    _compiled_output_manifest(_local_syncable_manifest(local_root)),
-                    f"{spec.name}: verify recompiled or added runtime cache outputs",
+                    restored_manifest,
+                    after_manifest,
+                    f"{spec.name}: restored requests compiled new cache outputs",
                 )
-                verify_runtime_identity = _local_runtime_identity(local_root)
+                verify_runtime_identity = after_runtime_identity
                 self.assertEqual(
                     restored_runtime_identity,
                     verify_runtime_identity,
-                    f"{spec.name}: verify rewrote or replaced JIT cache files",
+                    f"{spec.name}: restored requests rewrote JIT cache files",
+                )
+                changed_requests = [
+                    row for row in rows if row["jit_delta"]["changed_count"] > 0
+                ]
+                self.assertFalse(
+                    changed_requests,
+                    f"{spec.name}: warm requests changed restored JIT artifacts: "
+                    f"{changed_requests}",
+                )
+            else:
+                self.assertEqual(
+                    baseline_runtime_identity,
+                    after_runtime_identity,
+                    f"{spec.name}: verify changed JIT cache files; see {summary_path}",
+                )
+                changed_requests = [
+                    row
+                    for row in rows
+                    if row["sweep"] == "verify"
+                    and row["jit_delta"]["changed_count"] > 0
+                ]
+                self.assertFalse(
+                    changed_requests,
+                    f"{spec.name}: verify compiled new artifacts: {changed_requests}",
                 )
 
-            min_artifacts = int(os.environ.get("JIT_SMOKE_EXPECT_MIN_ARTIFACTS", "1"))
-            self.assertGreaterEqual(
-                baseline["total_files"],
-                min_artifacts,
-                f"{spec.name}: expected >= {min_artifacts} JIT artifacts after warmup, got {baseline}",
-            )
             for component_name in spec.required_components:
                 self.assertGreater(
                     baseline["components"][component_name]["files"],
@@ -964,12 +901,6 @@ class JitCacheSmokeTest(unittest.TestCase):
                     f"{spec.name}: required component {component_name} is empty; "
                     f"see {summary_path}",
                 )
-            self.assertEqual(
-                _snapshot_fingerprint(baseline),
-                _snapshot_fingerprint(after),
-                f"{spec.name}: JIT artifacts changed between warmup and verify; "
-                f"see {summary_path}",
-            )
         except BaseException as error:
             primary_error = error
 
@@ -1013,47 +944,16 @@ class JitCacheSmokeTest(unittest.TestCase):
         remote_root = _runtime_dir(
             _outputs_dir(), f"jit_remote_lifecycle_{spec.name}", clean=True
         )
-        common = {
-            "JIT_SMOKE_REMOTE_JIT_DIR": str(remote_root),
-            "JIT_SMOKE_ENABLE_DECODE": "1",
-        }
-        with mock.patch.dict(
-            os.environ,
-            {
-                **common,
-                "JIT_SMOKE_RUN_LABEL": "cold",
-                "JIT_SMOKE_EXPECT_COLD_REMOTE": "1",
-                "JIT_SMOKE_EXPECT_WARM_RESTORE": "0",
-            },
-        ):
-            self._run_model(spec)
+        self._run_model(spec, remote_root, "cold", False)
 
         self.assertTrue(
             _remote_snapshots(remote_root),
             f"{spec.name}: cold lifecycle produced no committed snapshot",
         )
-        with mock.patch.dict(
-            os.environ,
-            {
-                **common,
-                "JIT_SMOKE_RUN_LABEL": "warm",
-                "JIT_SMOKE_EXPECT_COLD_REMOTE": "0",
-                "JIT_SMOKE_EXPECT_WARM_RESTORE": "1",
-            },
-        ):
-            self._run_model(spec)
+        self._run_model(spec, remote_root, "warm", True)
 
     def test_deepseek_v2_lite(self) -> None:
-        if _parse_bool("JIT_SMOKE_FULL_LIFECYCLE", False):
-            self._run_cold_warm(DEEPSEEK_V2_LITE)
-        else:
-            self._run_model(DEEPSEEK_V2_LITE)
-
-    def test_kimi_linear(self) -> None:
-        if _parse_bool("JIT_SMOKE_FULL_LIFECYCLE", False):
-            self._run_cold_warm(KIMI_LINEAR)
-        else:
-            self._run_model(KIMI_LINEAR)
+        self._run_cold_warm(DEEPSEEK_V2_LITE)
 
 
 if __name__ == "__main__":

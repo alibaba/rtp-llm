@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import socket
 import tarfile
 import tempfile
 import time
@@ -12,6 +13,14 @@ from typing import Iterator
 SNAPSHOT_SUFFIX = ".jit_snapshot.tar.zst"
 SNAPSHOT_KEEP = 100
 REMOTE_READY_TIMEOUT_S = 120.0
+MTIME_MANIFEST = ".jit_mtime_ns.json"
+
+
+def _needs_exact_mtime(name: str) -> bool:
+    # Ninja rebuilds on mtime; keep exact ns for the ninja caches' sources/objects.
+    return name.startswith(("flashinfer/", "torch_extensions/")) and name.endswith(
+        (".so", ".o", ".cu", ".cpp", ".inc", ".h")
+    )
 
 
 @contextmanager
@@ -26,27 +35,34 @@ def zstd_tar(path: Path, mode: str) -> Iterator[tarfile.TarFile]:
 
 
 def pack_zstd_tar(archive: Path, source: Path) -> None:
-    with zstd_tar(archive, "w") as output:
-        output.add(source, arcname="")
+    mtimes = {
+        name: path.stat().st_mtime_ns
+        for path in source.rglob("*")
+        if path.is_file()
+        and _needs_exact_mtime(name := path.relative_to(source).as_posix())
+    }
+    manifest = source / MTIME_MANIFEST
+    manifest.write_text(json.dumps(mtimes), encoding="utf-8")
+    try:
+        with zstd_tar(archive, "w") as output:
+            output.add(source, arcname="")
+    finally:
+        manifest.unlink(missing_ok=True)
 
 
 def extract_zstd_tar(archive: Path, target: Path) -> None:
     with zstd_tar(archive, "r") as source_archive:
         source_archive.extractall(target)
-
-
-def _rebase_triton_paths(root: Path, restored_root: Path) -> None:
-    for manifest in (root / "triton").rglob("__grp__*.json"):
-        with suppress(OSError, json.JSONDecodeError):
-            group = json.loads(manifest.read_text("utf-8"))
-            paths = group.get("child_paths") if isinstance(group, dict) else None
-            if not isinstance(paths, dict):
-                continue
-            restored_dir = restored_root / manifest.parent.relative_to(root)
-            for name in paths:
-                if name not in ("", ".", "..") and Path(name).name == name:
-                    paths[name] = str(restored_dir / name)
-            manifest.write_text(json.dumps(group), "utf-8")
+    manifest = target / MTIME_MANIFEST
+    if not manifest.exists():
+        return
+    mtimes = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest.unlink()
+    for name, mtime_ns in mtimes.items():
+        path = Path(name)
+        if path.is_absolute() or ".." in path.parts or not _needs_exact_mtime(name):
+            raise ValueError(f"invalid mtime manifest path: {name}")
+        os.utime(target / path, ns=(mtime_ns, mtime_ns), follow_symlinks=False)
 
 
 class RemoteSnapshotStore:
@@ -85,20 +101,13 @@ class RemoteSnapshotStore:
         snapshots = sorted(self.remote_root.glob(f"*{SNAPSHOT_SUFFIX}"))
         if not snapshots:
             return False
-        for snapshot in reversed(snapshots):
-            with tempfile.TemporaryDirectory(
-                prefix=f"{target.name}.restore.", dir=target.parent
-            ) as tmp_name:
-                staging = Path(tmp_name)
-                try:
-                    extract_zstd_tar(snapshot, staging)
-                    _rebase_triton_paths(staging, target)
-                except Exception:
-                    if snapshot == snapshots[0]:
-                        raise
-                    continue
-                shutil.copytree(staging, target, dirs_exist_ok=True)
-                return True
+        with tempfile.TemporaryDirectory(
+            prefix=f"{target.name}.restore.", dir=target.parent
+        ) as tmp_name:
+            staging = Path(tmp_name)
+            extract_zstd_tar(snapshots[-1], staging)
+            shutil.copytree(staging, target, dirs_exist_ok=True)
+        return True
 
     def _build_candidate(
         self, workspace: Path, base: Path | None, files: dict[str, Path]
@@ -126,10 +135,10 @@ class RemoteSnapshotStore:
         base = snapshots[-1] if snapshots else None
         with tempfile.TemporaryDirectory(prefix=".jit_snapshot.") as tmp_name:
             archive = self._build_candidate(Path(tmp_name), base, files)
-            # FUSE-safe lock-free commit to a unique target. Concurrent publishes
+            # FUSE-safe lock-free commit to a fresh target. Concurrent publishes
             # may miss each other's artifacts; they will recompile and republish.
             committed = self.remote_root / (
-                f"{time.time_ns():020d}-{uuid.uuid4().hex}{SNAPSHOT_SUFFIX}"
+                f"{time.time_ns():020d}-{socket.gethostname()}{SNAPSHOT_SUFFIX}"
             )
             remote_tmp = self.remote_root / f".upload.{uuid.uuid4().hex}.tmp"
             try:
