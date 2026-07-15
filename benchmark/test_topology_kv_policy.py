@@ -1,5 +1,4 @@
 import importlib.util
-import os
 import sys
 import types
 import unittest
@@ -8,14 +7,6 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import torch
-
-try:
-    import benchmark.topology_kv_candidate_schedule as topology_kv_candidate_schedule
-except ModuleNotFoundError as exc:
-    if exc.name not in {"benchmark", "benchmark.topology_kv_candidate_schedule"}:
-        raise
-    import topology_kv_candidate_schedule
-
 
 MODULE_PATH = (
     Path(__file__).resolve().parents[1]
@@ -26,6 +17,10 @@ MODULE_PATH = (
     / "topology_kv_policy.py"
 )
 INDEXER_PATH = MODULE_PATH.with_name("indexer.py")
+CUDA_INTEGRATION_PATH = (
+    MODULE_PATH.parent / "test" / "topology_kv_cuda_integration_test.py"
+)
+HYBRID_TEST_BUILD_PATH = MODULE_PATH.parent / "test" / "BUILD"
 
 spec = importlib.util.spec_from_file_location("topology_kv_policy", MODULE_PATH)
 topology_kv_policy = importlib.util.module_from_spec(spec)
@@ -34,11 +29,6 @@ spec.loader.exec_module(topology_kv_policy)
 
 TopologyKvPolicyConfig = topology_kv_policy.TopologyKvPolicyConfig
 apply_topology_kv_policy = topology_kv_policy.apply_topology_kv_policy
-dense_decode_attention = topology_kv_candidate_schedule.dense_decode_attention
-sparse_decode_attention = topology_kv_candidate_schedule.sparse_decode_attention
-_RUN_MANUAL_BENCHMARK_TESTS = (
-    os.environ.get("RTP_LLM_RUN_MANUAL_BENCHMARK_TESTS") == "1"
-)
 
 
 def _load_indexer_for_unit_test():
@@ -142,7 +132,7 @@ def _make_indexer(topk_result, *, cp_enabled=False):
     indexer.topology_local_blocks = 1
     indexer.topology_witness_blocks = 0
     indexer.topology_max_policy_tokens = 8192
-    indexer.topology_max_topk_elements = 131072
+    indexer.topology_max_topk_elements = 262144
     indexer.topology_max_topk_width = 8192
     indexer.topology_max_structural_fraction = 0.5
     indexer.topology_coordinate_mismatch_action = "fallback_disabled"
@@ -506,6 +496,41 @@ class TopologyKvPolicyTest(unittest.TestCase):
 
         self.assertIs(result.topk_indices, topk)
         self.assertEqual(result.counters.policy_bypassed, 1)
+        self.assertEqual(result.bypass_reasons, ("topk_elements_limit",))
+
+    def test_default_limits_apply_65_row_production_width_prefill(self):
+        topk = torch.full((65, 2048), -1, dtype=torch.int32)
+        lengths = torch.arange(1, 66, dtype=torch.int32)
+        config = TopologyKvPolicyConfig(
+            policy="topology_only",
+            sink_blocks=1,
+            local_blocks=1,
+            witness_blocks=1,
+            block_size=64,
+        )
+
+        result = apply_topology_kv_policy(topk, lengths, config=config)
+
+        self.assertEqual(result.counters.policy_bypassed, 0)
+        self.assertIsNot(result.topk_indices, topk)
+        self.assertTrue(torch.all((result.topk_indices >= 0).any(dim=1)))
+
+    def test_default_limits_apply_128_row_production_width_prefill(self):
+        topk = torch.full((128, 2048), -1, dtype=torch.int32)
+        lengths = torch.arange(1, 129, dtype=torch.int32)
+        config = TopologyKvPolicyConfig(
+            policy="topology_only",
+            sink_blocks=1,
+            local_blocks=1,
+            witness_blocks=1,
+            block_size=64,
+        )
+
+        result = apply_topology_kv_policy(topk, lengths, config=config)
+
+        self.assertEqual(result.counters.policy_bypassed, 0)
+        self.assertIsNot(result.topk_indices, topk)
+        self.assertTrue(torch.all((result.topk_indices >= 0).any(dim=1)))
 
     def test_bypasses_python_policy_when_topk_width_exceeds_limit(self):
         topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)
@@ -523,6 +548,7 @@ class TopologyKvPolicyTest(unittest.TestCase):
 
         self.assertIs(result.topk_indices, topk)
         self.assertEqual(result.counters.policy_bypassed, 1)
+        self.assertEqual(result.bypass_reasons, ("topk_width_limit",))
 
     def test_detaches_block_drift_scores_before_structural_selection(self):
         topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)
@@ -653,6 +679,8 @@ class TopologyKvPolicyTest(unittest.TestCase):
 
         self.assertIs(result.topk_indices, topk)
         self.assertEqual(result.counters.policy_bypassed, 1)
+        self.assertEqual(result.bypass_reasons, ("sequence_length_limit",))
+        self.assertEqual(result.max_sequence_length, 8)
 
     def test_rejects_row_start_shape_mismatch(self):
         topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)
@@ -814,12 +842,49 @@ class TopologyKvPolicyTest(unittest.TestCase):
         self.assertIs(second, topk)
         warning.assert_called_once()
 
+    def test_indexer_warns_once_when_long_prefix_exceeds_policy_limit(self):
+        topk = torch.arange(2048, dtype=torch.int32).view(1, -1)
+        indexer = _make_indexer(topk)
+        indexer_module._TOPOLOGY_KV_BYPASS_WARNED_REASONS = set()
+
+        with mock.patch.object(indexer_module.logging, "warning") as warning:
+            first = indexer._apply_topology_kv_policy(
+                topk, torch.tensor([8193], dtype=torch.int32)
+            )
+            second = indexer._apply_topology_kv_policy(
+                topk, torch.tensor([8193], dtype=torch.int32)
+            )
+
+        self.assertIs(first, topk)
+        self.assertIs(second, topk)
+        warning.assert_called_once()
+        self.assertIn("sequence_length_limit", warning.call_args.args[0])
+        self.assertIn("RTP_LLM_TOPOLOGY_MAX_POLICY_TOKENS", warning.call_args.args[0])
+
     def test_indexer_has_disabled_by_default_topology_kv_gate(self):
         source = INDEXER_PATH.read_text(encoding="utf-8")
 
         self.assertIn("RTP_LLM_TOPOLOGY_KV_POLICY", source)
         self.assertIn("_apply_topology_kv_policy", source)
         self.assertIn("apply_topology_kv_policy", source)
+
+    def test_cuda_production_boundary_target_is_ci_discoverable(self):
+        self.assertTrue(CUDA_INTEGRATION_PATH.is_file())
+        source = CUDA_INTEGRATION_PATH.read_text(encoding="utf-8")
+        for production_symbol in (
+            "Indexer",
+            "SparseMlaOp",
+            "SparseMlaImpl",
+            "SparseMlaCpImpl",
+            "RTP_LLM_TOPOLOGY_KV_ALLOW_CUDA_SYNC",
+        ):
+            with self.subTest(production_symbol=production_symbol):
+                self.assertIn(production_symbol, source)
+
+        build = HYBRID_TEST_BUILD_PATH.read_text(encoding="utf-8")
+        self.assertIn('name = "topology_kv_cuda_integration_test"', build)
+        self.assertIn('"topology_kv_cuda_integration_test.py"', build)
+        self.assertIn('tags = ["open_skip", "H20"]', build)
 
     def test_indexer_topology_env_int_reports_bad_value(self):
         with mock.patch.dict("os.environ", {"RTP_LLM_TOPOLOGY_SINK_BLOCKS": "true"}):
@@ -837,50 +902,6 @@ class TopologyKvPolicyTest(unittest.TestCase):
                 "RTP_LLM_TOPOLOGY_MAX_STRUCTURAL_FRACTION must be a float",
             ):
                 _topology_env_float("RTP_LLM_TOPOLOGY_MAX_STRUCTURAL_FRACTION", 0.5)
-
-    @unittest.skipUnless(
-        _RUN_MANUAL_BENCHMARK_TESTS and torch.cuda.is_available(),
-        "CUDA manual benchmark tests are disabled",
-    )
-    def test_cuda_policy_output_runs_sparse_decode_attention_e2e(self):
-        device = torch.device("cuda")
-        seq_len = 64
-        query = torch.randn(1, 2, 1, 16, device=device, dtype=torch.float16)
-        key = torch.randn(1, 2, seq_len, 16, device=device, dtype=torch.float16)
-        value = torch.randn(1, 2, seq_len, 16, device=device, dtype=torch.float16)
-        learned_topk = torch.arange(
-            seq_len - 1, -1, -1, device=device, dtype=torch.int32
-        ).view(1, seq_len)
-        lengths = torch.tensor([seq_len], device=device, dtype=torch.int32)
-        config = TopologyKvPolicyConfig(
-            policy="topology_compress_sparse",
-            sink_blocks=1,
-            local_blocks=2,
-            witness_blocks=2,
-            block_size=8,
-        )
-
-        result = apply_topology_kv_policy(
-            learned_topk,
-            lengths,
-            config=config,
-            stable_scaffold="system policy + tool schema",
-            output_contract="json tool result",
-        )
-
-        self.assertEqual(result.topk_indices.device.type, "cuda")
-        self.assertEqual(result.topk_indices.shape, learned_topk.shape)
-        selected = result.topk_indices[result.topk_indices >= 0]
-        self.assertEqual(selected.numel(), seq_len)
-        self.assertEqual(torch.unique(selected).numel(), seq_len)
-        self.assertEqual(result.counters.raw_selected_tokens, seq_len)
-        self.assertGreaterEqual(result.counters.schedule_ms, 0.0)
-        torch.testing.assert_close(
-            sparse_decode_attention(query, key, value, result.topk_indices),
-            dense_decode_attention(query, key, value),
-            rtol=1e-3,
-            atol=1e-3,
-        )
 
 
 if __name__ == "__main__":

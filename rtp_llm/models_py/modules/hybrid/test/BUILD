@@ -92,3 +92,16 @@ py_test (
    tags = ["open_skip", "H20"],
    exec_properties = {'gpu':'H20'},
 )
+
+py_test (
+   name = "topology_kv_cuda_integration_test",
+   srcs = ["topology_kv_cuda_integration_test.py"],
+   deps = py_test_deps + [
+        "//rtp_llm:testlib",
+   ],
+   env = {
+       "RTP_LLM_TOPOLOGY_KV_ALLOW_CUDA_SYNC": "1",
+   },
+   tags = ["open_skip", "H20"],
+   exec_properties = {'gpu':'H20'},
+)

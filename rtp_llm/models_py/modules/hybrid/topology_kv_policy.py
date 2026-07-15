@@ -72,8 +72,10 @@ class TopologyKvPolicyConfig:
     local_blocks: int
     witness_blocks: int
     block_size: int
+    # Per-row sequence bound. Causal prefill lengths repeat prior tokens across
+    # rows, so summing them would reject ordinary batches quadratically.
     max_policy_tokens: int = 8192
-    max_topk_elements: int = 131072
+    max_topk_elements: int = 262144
     max_topk_width: int = 8192
     max_structural_fraction: float = 0.5
     coordinate_mismatch_action: CoordinateMismatchAction = "raise"
@@ -128,6 +130,8 @@ class TopologyKvPolicyResult:
     topk_indices: torch.Tensor
     counters: TopologyKvCounters
     stable_fingerprint: str
+    bypass_reasons: tuple[str, ...] = ()
+    max_sequence_length: int = 0
 
 
 @dataclass(frozen=True)
@@ -327,6 +331,8 @@ def _passthrough_result(
     *,
     coordinate_mismatch_fallbacks: int = 0,
     policy_bypassed: int = 0,
+    bypass_reasons: tuple[str, ...] = (),
+    max_sequence_length: int = 0,
 ) -> TopologyKvPolicyResult:
     counters = _zero_counters(topk_indices)
     counters = TopologyKvCounters(
@@ -340,7 +346,13 @@ def _passthrough_result(
         policy_bypassed=policy_bypassed,
         schedule_ms=0.0,
     )
-    return TopologyKvPolicyResult(topk_indices, counters, fingerprint)
+    return TopologyKvPolicyResult(
+        topk_indices,
+        counters,
+        fingerprint,
+        bypass_reasons,
+        max_sequence_length,
+    )
 
 
 def apply_topology_kv_policy(
@@ -381,12 +393,24 @@ def apply_topology_kv_policy(
 
     lengths_cpu = lengths.detach().cpu()
     total_policy_tokens = int(lengths_cpu.sum().item())
-    if (
-        total_policy_tokens > config.max_policy_tokens
-        or topk_indices.numel() > config.max_topk_elements
-        or topk_indices.size(1) > config.max_topk_width
-    ):
-        return _passthrough_result(topk_indices, fingerprint, policy_bypassed=1)
+    max_sequence_length = (
+        int(lengths_cpu.max().item()) if lengths_cpu.numel() > 0 else 0
+    )
+    bypass_reasons: list[str] = []
+    if max_sequence_length > config.max_policy_tokens:
+        bypass_reasons.append("sequence_length_limit")
+    if topk_indices.numel() > config.max_topk_elements:
+        bypass_reasons.append("topk_elements_limit")
+    if topk_indices.size(1) > config.max_topk_width:
+        bypass_reasons.append("topk_width_limit")
+    if bypass_reasons:
+        return _passthrough_result(
+            topk_indices,
+            fingerprint,
+            policy_bypassed=1,
+            bypass_reasons=tuple(bypass_reasons),
+            max_sequence_length=max_sequence_length,
+        )
 
     topk_cpu = topk_indices.detach().cpu()
     drift_scores_cpu = (
@@ -472,4 +496,9 @@ def apply_topology_kv_policy(
         policy_bypassed=0,
         schedule_ms=(time.perf_counter() - started) * 1000,
     )
-    return TopologyKvPolicyResult(merged, counters, fingerprint)
+    return TopologyKvPolicyResult(
+        merged,
+        counters,
+        fingerprint,
+        max_sequence_length=max_sequence_length,
+    )

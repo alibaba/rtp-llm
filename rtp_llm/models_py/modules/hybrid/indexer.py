@@ -17,6 +17,7 @@ from rtp_llm.ops.compute_ops import KVCache
 from rtp_llm.utils.model_weight import W
 
 _TOPOLOGY_KV_CUDA_SYNC_WARNING_EMITTED = False
+_TOPOLOGY_KV_BYPASS_WARNED_REASONS: set[str] = set()
 
 
 def _topology_env_int(name: str, default: int) -> int:
@@ -85,7 +86,9 @@ class Indexer(nn.Module):
             "RTP_LLM_TOPOLOGY_MAX_POLICY_TOKENS", 8192
         )
         self.topology_max_topk_elements = _topology_env_int(
-            "RTP_LLM_TOPOLOGY_MAX_TOPK_ELEMENTS", 131072
+            # Production top-k width is 2048; keep 128-row prefill eligible.
+            "RTP_LLM_TOPOLOGY_MAX_TOPK_ELEMENTS",
+            262144,
         )
         self.topology_max_topk_width = _topology_env_int(
             "RTP_LLM_TOPOLOGY_MAX_TOPK_WIDTH", 8192
@@ -266,6 +269,29 @@ class Indexer(nn.Module):
             stable_scaffold=self.topology_stable_scaffold,
             output_contract=self.topology_output_contract,
         )
+        if result.counters.policy_bypassed:
+            for reason in result.bypass_reasons or ("unknown_limit",):
+                if reason in _TOPOLOGY_KV_BYPASS_WARNED_REASONS:
+                    continue
+                # Claim the reason before logging so concurrent requests cannot
+                # emit duplicate warnings while logging temporarily releases the GIL.
+                _TOPOLOGY_KV_BYPASS_WARNED_REASONS.add(reason)
+                logging.warning(
+                    f"Topology KV policy bypassed ({reason}): "
+                    "policy=%s, rows=%d, max_sequence_length=%d, "
+                    "topk_width=%d, topk_elements=%d; limits: "
+                    "RTP_LLM_TOPOLOGY_MAX_POLICY_TOKENS=%d, "
+                    "RTP_LLM_TOPOLOGY_MAX_TOPK_WIDTH=%d, "
+                    "RTP_LLM_TOPOLOGY_MAX_TOPK_ELEMENTS=%d.",
+                    self.topology_kv_policy,
+                    topk_result.size(0),
+                    result.max_sequence_length,
+                    topk_result.size(1),
+                    topk_result.numel(),
+                    self.topology_max_policy_tokens,
+                    self.topology_max_topk_width,
+                    self.topology_max_topk_elements,
+                )
         return result.topk_indices
 
     def _compute_topk(
