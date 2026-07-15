@@ -59,6 +59,9 @@ public class WorkerStatusResponse {
     @JsonProperty("tpSize")
     private long tpSize;
 
+    @JsonProperty("block_hash_lookahead_tokens")
+    private int blockHashLookaheadTokens;
+
     @JsonProperty("alive")
     private boolean alive;
 

@@ -53,7 +53,7 @@ class HttpLoadBalanceServerTest {
     @Mock
     private QueueManager queueManager;
     @Mock
-    private WorkerBlockSizeResolver blockSizeResolver;
+    private WorkerBlockHashConfigResolver blockHashConfigResolver;
     @Mock
     private FlexlbLogLevelManager logLevelManager;
 
@@ -70,7 +70,7 @@ class HttpLoadBalanceServerTest {
                 engineHealthReporter,
                 queueManager,
                 new ActiveRequestCounter(),
-                new ScheduleRequestPreprocessor(blockSizeResolver, blockHashExecutor),
+                new ScheduleRequestPreprocessor(blockHashConfigResolver, blockHashExecutor),
                 logLevelManager);
         webTestClient = WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();
     }
@@ -85,7 +85,8 @@ class HttpLoadBalanceServerTest {
         Response response = new Response();
         response.setSuccess(true);
         when(routeService.route(any())).thenReturn(Mono.just(response));
-        when(blockSizeResolver.resolve()).thenReturn(4L);
+        when(blockHashConfigResolver.resolve()).thenReturn(
+                new WorkerBlockHashConfigResolver.BlockHashConfig(4L, 0));
 
         webTestClient.post()
                 .uri("/rtp_llm/schedule")
@@ -146,7 +147,7 @@ class HttpLoadBalanceServerTest {
         assertArrayEquals(new int[]{1, 2, 3, 4}, requestCaptor.getValue().getInputIds());
         assertNull(requestCaptor.getValue().getBlockCacheKeys());
         verify(routeService, never()).route(any());
-        verify(blockSizeResolver, never()).resolve();
+        verify(blockHashConfigResolver, never()).resolve();
     }
 
     @Test
@@ -183,6 +184,8 @@ class HttpLoadBalanceServerTest {
 
     @Test
     void rejectsRequestWhenBlockHashExecutorIsSaturated() throws Exception {
+        when(blockHashConfigResolver.resolve()).thenReturn(
+                new WorkerBlockHashConfigResolver.BlockHashConfig(4L, 0));
         CountDownLatch runningTaskStarted = new CountDownLatch(1);
         CountDownLatch releaseRunningTask = new CountDownLatch(1);
         Disposable runningTask = blockHashExecutor.submit(() -> {

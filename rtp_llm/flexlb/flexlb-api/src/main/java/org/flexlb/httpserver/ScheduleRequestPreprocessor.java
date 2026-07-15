@@ -13,13 +13,13 @@ import java.util.List;
 @Component
 public class ScheduleRequestPreprocessor {
 
-    private final WorkerBlockSizeResolver blockSizeResolver;
+    private final WorkerBlockHashConfigResolver blockHashConfigResolver;
     private final BlockHashExecutor blockHashExecutor;
 
     public ScheduleRequestPreprocessor(
-            WorkerBlockSizeResolver blockSizeResolver,
+            WorkerBlockHashConfigResolver blockHashConfigResolver,
             BlockHashExecutor blockHashExecutor) {
-        this.blockSizeResolver = blockSizeResolver;
+        this.blockHashConfigResolver = blockHashConfigResolver;
         this.blockHashExecutor = blockHashExecutor;
     }
 
@@ -47,12 +47,13 @@ public class ScheduleRequestPreprocessor {
                     "block_cache_keys and input_ids must not both be empty"));
         }
 
-        long blockSize = request.getBlockSize();
-        if (blockSize <= 0) {
-            blockSize = blockSizeResolver.resolve();
-        }
+        WorkerBlockHashConfigResolver.BlockHashConfig hashConfig =
+                blockHashConfigResolver.resolve();
+        long blockSize = request.getBlockSize() > 0
+                ? request.getBlockSize()
+                : hashConfig.blockSize();
 
-        return blockHashExecutor.calculate(inputIds, blockSize)
+        return blockHashExecutor.calculate(inputIds, blockSize, hashConfig.lookaheadTokens())
                 .doOnNext(result -> {
                     request.setBlockCacheKeys(result.blockCacheKeys());
                     request.setInputIds(null);

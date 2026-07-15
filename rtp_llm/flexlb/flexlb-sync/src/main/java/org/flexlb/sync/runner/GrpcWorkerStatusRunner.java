@@ -110,6 +110,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.setSite(site);
             workerStatus.setGroup(group);
             workerStatus.setRole(newWorkerStatus.getRole());
+            workerStatus.setBlockHashLookaheadTokens(newWorkerStatus.getBlockHashLookaheadTokens());
             updateCacheStatus(newWorkerStatus.getCacheStatus());
 
             long currentVersion = workerStatus.getStatusVersion().get();

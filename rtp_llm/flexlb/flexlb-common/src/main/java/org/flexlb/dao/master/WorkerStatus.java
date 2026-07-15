@@ -41,6 +41,7 @@ public class WorkerStatus {
     private long iterateCount;
     private long dpSize;
     private long tpSize;
+    private int blockHashLookaheadTokens;
 
     private AtomicLong statusLastUpdateTime = new AtomicLong(-1); // Last status update time (microseconds)
     private AtomicLong statusUpdateIntervalUs = new AtomicLong(0); // Actual interval between last two status updates (microseconds)

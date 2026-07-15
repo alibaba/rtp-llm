@@ -30,6 +30,7 @@ public class EngineStatusConverter {
         response.setIterateCount(workerStatusPB.getIterateCount());
         response.setDpSize(workerStatusPB.getDpSize());
         response.setTpSize(workerStatusPB.getTpSize());
+        response.setBlockHashLookaheadTokens(workerStatusPB.getBlockHashLookaheadTokens());
         response.setStatusVersion(workerStatusPB.getStatusVersion());
         response.setLatestFinishedVersion(workerStatusPB.getLatestFinishedVersion());
         response.setAlive(workerStatusPB.getAlive());

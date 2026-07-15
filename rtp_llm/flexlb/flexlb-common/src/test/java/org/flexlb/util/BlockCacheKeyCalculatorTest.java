@@ -79,6 +79,15 @@ class BlockCacheKeyCalculatorTest {
     }
 
     @Test
+    void matchesVllmEagleHashesWithOneLookaheadToken() {
+        int[] inputIds = IntStream.rangeClosed(1, 9).toArray();
+
+        assertEquals(
+                List.of(2771287707320467766L, -4525836348354197114L),
+                BlockCacheKeyCalculator.calculate(inputIds, 4, 1));
+    }
+
+    @Test
     void dropsFinalPartialBlock() {
         int[] inputIds = IntStream.range(0, 130).toArray();
 
@@ -100,6 +109,9 @@ class BlockCacheKeyCalculatorTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () -> BlockCacheKeyCalculator.calculate(new int[]{1}, 0));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> BlockCacheKeyCalculator.calculate(new int[]{1}, 1, -1));
     }
 
     private static byte[] hashBlock(

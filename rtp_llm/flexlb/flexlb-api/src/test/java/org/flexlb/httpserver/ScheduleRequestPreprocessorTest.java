@@ -18,10 +18,11 @@ import static org.mockito.Mockito.when;
 
 class ScheduleRequestPreprocessorTest {
 
-    private final WorkerBlockSizeResolver blockSizeResolver = mock(WorkerBlockSizeResolver.class);
+    private final WorkerBlockHashConfigResolver blockHashConfigResolver =
+            mock(WorkerBlockHashConfigResolver.class);
     private final BlockHashExecutor blockHashExecutor = mock(BlockHashExecutor.class);
     private final ScheduleRequestPreprocessor preprocessor =
-            new ScheduleRequestPreprocessor(blockSizeResolver, blockHashExecutor);
+            new ScheduleRequestPreprocessor(blockHashConfigResolver, blockHashExecutor);
 
     @Test
     void prefersProvidedBlockCacheKeys() {
@@ -35,7 +36,7 @@ class ScheduleRequestPreprocessorTest {
 
         assertSame(providedKeys, request.getBlockCacheKeys());
         assertNull(request.getInputIds());
-        verifyNoInteractions(blockSizeResolver);
+        verifyNoInteractions(blockHashConfigResolver);
         verifyNoInteractions(blockHashExecutor);
     }
 
@@ -45,8 +46,9 @@ class ScheduleRequestPreprocessorTest {
         request.setBlockCacheKeys(List.of());
         request.setInputIds(new int[]{1, 2, 3, 4, 5});
         BalanceContext context = contextFor(request);
-        when(blockSizeResolver.resolve()).thenReturn(4L);
-        when(blockHashExecutor.calculate(request.getInputIds(), 4L))
+        when(blockHashConfigResolver.resolve()).thenReturn(
+                new WorkerBlockHashConfigResolver.BlockHashConfig(4L, 0));
+        when(blockHashExecutor.calculate(request.getInputIds(), 4L, 0))
                 .thenReturn(Mono.just(new BlockHashCalculationResult(
                         List.of(2164874634404590027L), 12, 34)));
 
@@ -64,14 +66,15 @@ class ScheduleRequestPreprocessorTest {
         request.setInputIds(new int[]{1, 2});
         request.setBlockSize(4);
         BalanceContext context = contextFor(request);
-        when(blockHashExecutor.calculate(request.getInputIds(), 4L))
+        when(blockHashConfigResolver.resolve()).thenReturn(
+                new WorkerBlockHashConfigResolver.BlockHashConfig(64L, 1));
+        when(blockHashExecutor.calculate(request.getInputIds(), 4L, 1))
                 .thenReturn(Mono.just(new BlockHashCalculationResult(List.of(), 5, 8)));
 
         preprocessor.prepare(context).block();
 
         assertEquals(List.of(), request.getBlockCacheKeys());
         assertNull(request.getInputIds());
-        verifyNoInteractions(blockSizeResolver);
     }
 
     @Test
@@ -82,11 +85,11 @@ class ScheduleRequestPreprocessorTest {
     }
 
     @Test
-    void failsWhenWorkerBlockSizeIsUnavailable() {
+    void failsWhenWorkerBlockHashConfigIsUnavailable() {
         Request request = new Request();
         request.setInputIds(new int[]{1});
-        when(blockSizeResolver.resolve()).thenThrow(
-                new IllegalStateException("block_size is unavailable"));
+        when(blockHashConfigResolver.resolve()).thenThrow(
+                new IllegalStateException("block hash configuration is unavailable"));
 
         assertThrows(IllegalStateException.class, () -> preprocessor.prepare(contextFor(request)).block());
     }

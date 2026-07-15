@@ -424,6 +424,10 @@ message WorkerStatusPB {
     int64 available_kv_cache = 16;
     int64 total_kv_cache = 17;
     int64 block_size = 18;
+    reserved 19, 20;
+    reserved "free_gpu_memory_bytes", "total_gpu_memory_bytes";
+    // Number of tokens after each full block included in its cache hash.
+    int32 block_hash_lookahead_tokens = 21;
 }
 
 message EmbeddingInputPB {

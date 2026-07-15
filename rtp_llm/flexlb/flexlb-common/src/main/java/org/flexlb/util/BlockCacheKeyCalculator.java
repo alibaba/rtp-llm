@@ -36,20 +36,34 @@ public final class BlockCacheKeyCalculator {
      * Hashes complete token blocks and drops the final partial block.
      */
     public static List<Long> calculate(int[] inputIds, long blockSize) {
+        return calculate(inputIds, blockSize, 0);
+    }
+
+    /**
+     * Hashes complete token blocks with the configured number of lookahead tokens.
+     * The block stride remains {@code blockSize}.
+     */
+    public static List<Long> calculate(int[] inputIds, long blockSize, int lookaheadTokens) {
         if (inputIds == null) {
             throw new IllegalArgumentException("input_ids must not be null");
         }
         if (blockSize <= 0) {
             throw new IllegalArgumentException("block_size must be greater than 0");
         }
+        if (lookaheadTokens < 0) {
+            throw new IllegalArgumentException("block_hash_lookahead_tokens must not be negative");
+        }
         if (inputIds.length == 0 || blockSize > inputIds.length) {
             return Collections.emptyList();
         }
 
-        return calculateBlockCacheKeys(inputIds, (int) blockSize);
+        return calculateBlockCacheKeys(inputIds, (int) blockSize, lookaheadTokens);
     }
 
-    private static List<Long> calculateBlockCacheKeys(int[] inputIds, int blockSize) {
+    private static List<Long> calculateBlockCacheKeys(
+            int[] inputIds,
+            int blockSize,
+            int lookaheadTokens) {
         int fullBlockCount = inputIds.length / blockSize;
         List<Long> blockCacheKeys = new ArrayList<>(fullBlockCount);
         byte[] parentHash = NONE_HASH;
@@ -61,7 +75,9 @@ public final class BlockCacheKeyCalculator {
         try (CBORGenerator generator = newCborGenerator(digestOutput)) {
             for (int blockIndex = 0; blockIndex < fullBlockCount; blockIndex++) {
                 digest.reset();
-                writeBlock(generator, parentHash, inputIds, tokenIndex, blockSize);
+                int remainingTokens = inputIds.length - tokenIndex - blockSize;
+                int tokenCount = blockSize + Math.min(lookaheadTokens, remainingTokens);
+                writeBlock(generator, parentHash, inputIds, tokenIndex, tokenCount);
                 generator.flush();
 
                 parentHash = digest.digest();

@@ -81,7 +81,15 @@ public class BlockHashExecutor {
     }
 
     public Mono<BlockHashCalculationResult> calculate(int[] inputIds, long blockSize) {
-        return submitTimed(() -> BlockCacheKeyCalculator.calculate(inputIds, blockSize))
+        return calculate(inputIds, blockSize, 0);
+    }
+
+    public Mono<BlockHashCalculationResult> calculate(
+            int[] inputIds,
+            long blockSize,
+            int lookaheadTokens) {
+        return submitTimed(() -> BlockCacheKeyCalculator.calculate(
+                        inputIds, blockSize, lookaheadTokens))
                 .map(result -> new BlockHashCalculationResult(
                         result.value(),
                         result.queueWaitTimeUs(),

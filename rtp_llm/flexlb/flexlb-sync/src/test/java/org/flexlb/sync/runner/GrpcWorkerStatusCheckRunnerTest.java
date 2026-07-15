@@ -49,6 +49,7 @@ class GrpcWorkerStatusCheckRunnerTest {
                 .setAvailableKvCache(800)
                 .setTotalKvCache(1000)
                 .setBlockSize(64)
+                .setBlockHashLookaheadTokens(1)
                 .build();
 
         when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(), org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(workerStatusPB);
@@ -65,5 +66,6 @@ class GrpcWorkerStatusCheckRunnerTest {
         assertEquals(64, workerStatus.getCacheStatus().getBlockSize());
         assertEquals(800, workerStatus.getAvailableKvCacheTokens().get());
         assertEquals(200, workerStatus.getUsedKvCacheTokens().get());
+        assertEquals(1, workerStatus.getBlockHashLookaheadTokens());
     }
 }
