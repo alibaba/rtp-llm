@@ -113,13 +113,17 @@ class RemoteSnapshotStore:
                     tmp.unlink()
 
     @staticmethod
-    def _copy_stable_file(source: Path, destination: Path) -> None:
+    def _copy_stable_file(source: Path, destination: Path) -> bool:
         """Copy one closed artifact and reject concurrent in-place writes."""
-        with source.open("rb", buffering=0) as source_file:
-            before = os.fstat(source_file.fileno())
-            with destination.open("wb", buffering=0) as output:
-                shutil.copyfileobj(source_file, output, length=1024 * 1024)
-            after = os.fstat(source_file.fileno())
+        try:
+            with source.open("rb", buffering=0) as source_file:
+                before = os.fstat(source_file.fileno())
+                with destination.open("wb", buffering=0) as output:
+                    shutil.copyfileobj(source_file, output, length=1024 * 1024)
+                after = os.fstat(source_file.fileno())
+        except FileNotFoundError:
+            destination.unlink(missing_ok=True)
+            return False
 
         identity_before = (before.st_size, before.st_mtime_ns)
         identity_after = (after.st_size, after.st_mtime_ns)
@@ -137,13 +141,16 @@ class RemoteSnapshotStore:
             ns=(before.st_atime_ns, before.st_mtime_ns),
             follow_symlinks=False,
         )
+        return True
 
     @classmethod
-    def _overlay_files(cls, staging: Path, files: dict[str, Path]) -> None:
+    def _overlay_files(cls, staging: Path, files: dict[str, Path]) -> int:
+        copied = 0
         for name, source in files.items():
             destination = staging / name
             destination.parent.mkdir(parents=True, exist_ok=True)
-            cls._copy_stable_file(source, destination)
+            copied += int(cls._copy_stable_file(source, destination))
+        return copied
 
     @staticmethod
     def _sha256(path: Path) -> str:
@@ -223,7 +230,7 @@ class RemoteSnapshotStore:
 
     def _build_candidate(
         self, workspace: Path, bases: list[Path], files: dict[str, Path]
-    ) -> Path:
+    ) -> Path | None:
         staging = workspace / "staging"
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir()
@@ -236,7 +243,8 @@ class RemoteSnapshotStore:
                     base,
                     exc_info=True,
                 )
-        self._overlay_files(staging, files)
+        if not self._overlay_files(staging, files):
+            return None
         archive = workspace / "candidate.tar.zst"
         pack_zstd_tar(archive, staging)
         return archive
@@ -253,6 +261,8 @@ class RemoteSnapshotStore:
         snapshots = sorted(self.remote_root.glob(f"*{SNAPSHOT_SUFFIX}"))
         with tempfile.TemporaryDirectory(prefix=".jit_snapshot.") as tmp_name:
             archive = self._build_candidate(Path(tmp_name), snapshots, files)
+            if archive is None:
+                return False
             archive_sha256 = self._sha256(archive)
             # FUSE-safe lock-free commit to a fresh target. Each publisher merges
             # every branch it can see; unseen concurrent branches remain immutable

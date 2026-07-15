@@ -201,7 +201,11 @@ class JitCacheManagerTest(unittest.TestCase):
                     "hash/params.pkl",
                     "autotuner/hash/best_config.json",
                 ),
-                "no": ("tmp/123_uuid", "hash/lock"),
+                "no": (
+                    "tmp/123_uuid",
+                    ".staging/uuid/device_kernel.cu",
+                    "hash/lock",
+                ),
             },
         }
         for name, contract in cases.items():
@@ -315,6 +319,40 @@ class JitCacheManagerTest(unittest.TestCase):
                 jit_store.RemoteSnapshotStore(remote).publish_snapshot(
                     {"triton/kernel.cubin": source}
                 )
+        self.assertEqual(snapshots(remote), [])
+
+    def test_publish_skips_vanished_artifact_and_keeps_stable_peer(self):
+        remote = self.root / "remote"
+        remote.mkdir()
+        stable = self.root / "stable.cubin"
+        stable.write_bytes(b"stable")
+        vanished = self.root / "vanished.cu"
+
+        store = jit_store.RemoteSnapshotStore(remote)
+        self.assertTrue(
+            store.publish_snapshot(
+                {
+                    "deep_gemm/stable.cubin": stable,
+                    "tilelang/vanished.cu": vanished,
+                }
+            )
+        )
+
+        consumer = self.root / "consumer"
+        self.assertTrue(store.restore(consumer))
+        self.assertEqual(
+            (consumer / "deep_gemm/stable.cubin").read_bytes(), b"stable"
+        )
+        self.assertFalse((consumer / "tilelang/vanished.cu").exists())
+
+    def test_publish_with_only_vanished_artifacts_is_noop(self):
+        remote = self.root / "remote"
+        remote.mkdir()
+        store = jit_store.RemoteSnapshotStore(remote)
+
+        self.assertFalse(
+            store.publish_snapshot({"tilelang/vanished.cu": self.root / "missing"})
+        )
         self.assertEqual(snapshots(remote), [])
 
     def test_restore_rejects_snapshot_path_traversal(self):

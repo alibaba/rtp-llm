@@ -91,7 +91,10 @@ class Component:
             and not (self.name == "triton" and rel.endswith(".autotune.json"))
             and rel == rel.lstrip("/")
             and ".." not in parts
-            and not any(p == "tmp" or p.startswith("tmp.pid_") for p in parts)
+            and not any(
+                p == "tmp" or p.startswith("tmp.pid_") or p.startswith(".staging")
+                for p in parts
+            )
         )
 
 
