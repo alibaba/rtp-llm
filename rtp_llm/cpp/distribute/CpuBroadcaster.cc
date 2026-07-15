@@ -327,7 +327,7 @@ bool waitWritableUntil(int fd, std::chrono::steady_clock::time_point deadline) {
 int acceptWithTimeout(int listen_fd, int timeout_ms) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (waitReadableUntil(listen_fd, deadline)) {
-        int fd = ::accept(listen_fd, nullptr, nullptr);
+        int fd = ::accept4(listen_fd, nullptr, nullptr, SOCK_CLOEXEC);
         if (fd >= 0) {
             return fd;
         }
@@ -549,7 +549,7 @@ void CpuBroadcaster::initialize(int rank, int world_size, const std::string& bas
             // Remove any stale socket left by a previous crashed run.
             ::unlink(path.c_str());
 
-            listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
+            listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
             RTP_LLM_CHECK_WITH_INFO(listen_fd_ >= 0, "CpuBroadcaster socket: %s", std::strerror(errno));
 
             struct sockaddr_un addr {};
@@ -603,6 +603,12 @@ void CpuBroadcaster::initialize(int rank, int world_size, const std::string& bas
                     throw;
                 }
             }
+            // Bootstrap is complete once every rank has connected. Drop the
+            // listener and its pathname before request-time broadcasts so no
+            // later fork/exec can keep the rendezvous endpoint alive.
+            closeFd(listen_fd_);
+            ::unlink(my_uds_path_.c_str());
+            my_uds_path_.clear();
             for (int peer_rank = 1; peer_rank < world_size; ++peer_rank) {
                 ssize_t n = writeAllWithTimeout(
                     peer_fds_[peer_rank], &kLinkProbeToken, sizeof(kLinkProbeToken), kInitTimeoutMs);
@@ -646,7 +652,7 @@ void CpuBroadcaster::initialize(int rank, int world_size, const std::string& bas
         constexpr int kMaxAttempts = kInitTimeoutMs / kSleepMs;
         int           fd           = -1;
         for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
-            fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+            fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
             RTP_LLM_CHECK_WITH_INFO(fd >= 0, "CpuBroadcaster socket: %s", std::strerror(errno));
             int rc = ::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
             if (rc == 0) {

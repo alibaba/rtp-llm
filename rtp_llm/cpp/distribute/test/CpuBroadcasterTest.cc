@@ -539,6 +539,66 @@ int fakeRootWaitAfterAllPeersReady(const std::string& base, int ready_fd) {
     }
 }
 
+int productionRootExecChildAndWait(const std::string& base, int ready_fd) {
+    auto& bcast = CpuBroadcaster::instance();
+    bcast.reset();
+    bcast.initialize(0, 3, base);
+
+    int exec_pipe[2] = {-1, -1};
+    if (::pipe2(exec_pipe, O_CLOEXEC) != 0) {
+        std::fprintf(stderr, "root exec status pipe failed: %s\n", std::strerror(errno));
+        return 1;
+    }
+
+    pid_t exec_pid = ::fork();
+    if (exec_pid < 0) {
+        std::fprintf(stderr, "root fork for exec child failed: %s\n", std::strerror(errno));
+        ::close(exec_pipe[0]);
+        ::close(exec_pipe[1]);
+        return 1;
+    }
+    if (exec_pid == 0) {
+        ::close(exec_pipe[0]);
+        ::close(ready_fd);
+        ::execl("/bin/sleep", "sleep", "30", static_cast<char*>(nullptr));
+        const int     saved   = errno;
+        const ssize_t ignored = ::write(exec_pipe[1], &saved, sizeof(saved));
+        (void)ignored;
+        ::_exit(127);
+    }
+
+    ::close(exec_pipe[1]);
+    int     exec_error = 0;
+    ssize_t n;
+    do {
+        n = ::read(exec_pipe[0], &exec_error, sizeof(exec_error));
+    } while (n < 0 && errno == EINTR);
+    ::close(exec_pipe[0]);
+    if (n != 0) {
+        std::fprintf(stderr,
+                     "root exec child failed before close-on-exec: %s\n",
+                     n == static_cast<ssize_t>(sizeof(exec_error)) ? std::strerror(exec_error) : "short status read");
+        ::kill(exec_pid, SIGKILL);
+        ::waitpid(exec_pid, nullptr, 0);
+        return 1;
+    }
+
+    if (::write(ready_fd, &exec_pid, sizeof(exec_pid)) != static_cast<ssize_t>(sizeof(exec_pid))) {
+        std::fprintf(stderr, "root exec child notification failed: %s\n", std::strerror(errno));
+        ::kill(exec_pid, SIGKILL);
+        ::waitpid(exec_pid, nullptr, 0);
+        return 1;
+    }
+    ::close(ready_fd);
+
+    // The parent kills this root after /bin/sleep has successfully exec'd. If
+    // a production UDS fd lacks close-on-exec, sleep keeps the peer connection
+    // alive and the surviving ranks below remain blocked with timeout disabled.
+    while (true) {
+        ::pause();
+    }
+}
+
 int expectThrowContains(const std::function<void()>& fn, const std::string& needle) {
     try {
         fn();
@@ -773,6 +833,71 @@ TEST(CpuBroadcasterTest, RootExitBeforeDecisionAbortsAllSurvivingRanks) {
         }
     }
 
+    cleanupTempBase(base, 3);
+}
+
+TEST(CpuBroadcasterTest, ExecChildDoesNotKeepRootConnectionsAlive) {
+    ::unsetenv("RTP_LLM_CPU_TP_BROADCASTER_BROADCAST_TIMEOUT_MS");
+    const std::string base = makeTempBase();
+
+    int ready_pipe[2] = {-1, -1};
+    ASSERT_EQ(::pipe(ready_pipe), 0);
+    const int ready_write_fd = ready_pipe[1];
+    pid_t     root_pid       = spawnChild([base, ready_write_fd, ready_read_fd = ready_pipe[0]] {
+        ::close(ready_read_fd);
+        return productionRootExecChildAndWait(base, ready_write_fd);
+    });
+    ASSERT_GT(root_pid, 0);
+    ::close(ready_pipe[1]);
+    ready_pipe[1] = -1;
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    std::vector<pid_t> peer_pids;
+    for (int rank = 1; rank < 3; ++rank) {
+        peer_pids.push_back(spawnChild([base, rank, ready_read_fd = ready_pipe[0]] {
+            ::close(ready_read_fd);
+            auto& bcast = CpuBroadcaster::instance();
+            bcast.reset();
+            bcast.initialize(rank, 3, base);
+            int value = 0;
+            int rc    = expectThrowContains([&] { bcast.broadcast(&value, sizeof(value), 0); },
+                                         "frame header read from rank 0 failed");
+            bcast.reset();
+            return rc;
+        }));
+        ASSERT_GT(peer_pids.back(), 0);
+    }
+
+    pid_t   exec_pid = -1;
+    ssize_t n        = readAllRaw(ready_pipe[0], &exec_pid, sizeof(exec_pid));
+    ::close(ready_pipe[0]);
+    ready_pipe[0] = -1;
+    ASSERT_EQ(n, static_cast<ssize_t>(sizeof(exec_pid)));
+    ASSERT_GT(exec_pid, 0);
+    EXPECT_EQ(::access(socketPath(base).c_str(), F_OK), -1);
+    EXPECT_EQ(errno, ENOENT) << "bootstrap listener pathname remained after initialization";
+
+    EXPECT_EQ(::kill(root_pid, SIGKILL), 0);
+    int root_status = 0;
+    EXPECT_EQ(::waitpid(root_pid, &root_status, 0), root_pid);
+    EXPECT_TRUE(WIFSIGNALED(root_status));
+    EXPECT_EQ(WTERMSIG(root_status), SIGKILL);
+
+    for (pid_t peer_pid : peer_pids) {
+        int  peer_status = 0;
+        bool exited      = waitChildWithTimeout(peer_pid, std::chrono::seconds(5), peer_status);
+        if (!exited) {
+            ::kill(peer_pid, SIGKILL);
+            ::waitpid(peer_pid, &peer_status, 0);
+        }
+        EXPECT_TRUE(exited) << "exec child inherited a root UDS connection";
+        if (exited) {
+            EXPECT_TRUE(WIFEXITED(peer_status));
+            EXPECT_EQ(WEXITSTATUS(peer_status), 0);
+        }
+    }
+
+    EXPECT_EQ(::kill(exec_pid, SIGKILL), 0);
     cleanupTempBase(base, 3);
 }
 
