@@ -66,14 +66,18 @@ def _weights():
 class FoundationLoaderTest(unittest.TestCase):
     def _loader(self, model_path, **kwargs):
         config = types.SimpleNamespace(model_type="foundation_test_model")
-        load_config = NewLoaderConfig(device="cpu", compute_dtype=torch.float32, **kwargs)
+        load_config = NewLoaderConfig(
+            device="cpu", compute_dtype=torch.float32, **kwargs
+        )
         return NewModelLoader(config, load_config, model_path=model_path)
 
     def test_real_safetensors_stream_load_and_postprocess(self):
         with tempfile.TemporaryDirectory() as model_path:
             save_file(_weights(), os.path.join(model_path, "model.safetensors"))
             model = self._loader(model_path).load()
-        self.assertTrue(torch.equal(model.layers[0].weight, _weights()["layers.0.weight"]))
+        self.assertTrue(
+            torch.equal(model.layers[0].weight, _weights()["layers.0.weight"])
+        )
         self.assertTrue(torch.equal(model.final, _weights()["final"]))
         self.assertEqual(model.post_device, "cpu")
         self.assertEqual(model.post_count, 1)
@@ -81,7 +85,8 @@ class FoundationLoaderTest(unittest.TestCase):
     def test_wrapped_pytorch_state_dict(self):
         with tempfile.TemporaryDirectory() as model_path:
             torch.save(
-                {"state_dict": _weights()}, os.path.join(model_path, "pytorch_model.bin")
+                {"state_dict": _weights()},
+                os.path.join(model_path, "pytorch_model.bin"),
             )
             model = self._loader(model_path).load()
         self.assertTrue(torch.equal(model.layers[0].bias, _weights()["layers.0.bias"]))
@@ -154,7 +159,9 @@ class FoundationLoaderTest(unittest.TestCase):
         register_model("foundation_unsafe_model")(UnsafeModel)
         config = types.SimpleNamespace(model_type="foundation_unsafe_model")
         with tempfile.TemporaryDirectory() as model_path:
-            save_file({"weight": torch.ones(1)}, os.path.join(model_path, "model.safetensors"))
+            save_file(
+                {"weight": torch.ones(1)}, os.path.join(model_path, "model.safetensors")
+            )
             with self.assertRaisesRegex(TypeError, "must inherit RtpModule"):
                 NewModelLoader(
                     config,
@@ -183,7 +190,9 @@ class FoundationLoaderTest(unittest.TestCase):
                 {"leaf.weight": torch.ones(1)},
                 os.path.join(model_path, "model.safetensors"),
             )
-            with self.assertRaisesRegex(TypeError, "must define validate_weights_loaded"):
+            with self.assertRaisesRegex(
+                TypeError, "must define validate_weights_loaded"
+            ):
                 NewModelLoader(
                     config,
                     NewLoaderConfig(device="cpu"),
@@ -274,7 +283,9 @@ class FoundationLoaderTest(unittest.TestCase):
         expected = torch.arange(4, dtype=torch.float32).reshape(2, 2)
         for alias in ("embed.weight", "head.weight"):
             with self.subTest(alias=alias), tempfile.TemporaryDirectory() as model_path:
-                save_file({alias: expected}, os.path.join(model_path, "model.safetensors"))
+                save_file(
+                    {alias: expected}, os.path.join(model_path, "model.safetensors")
+                )
                 model = NewModelLoader(
                     config,
                     NewLoaderConfig(device="cpu", compute_dtype=torch.float32),
@@ -322,7 +333,9 @@ class FoundationLoaderTest(unittest.TestCase):
     def test_invalid_load_method_is_rejected(self):
         with tempfile.TemporaryDirectory() as model_path:
             save_file(_weights(), os.path.join(model_path, "model.safetensors"))
-            with self.assertRaisesRegex(ValueError, "Unsupported newloader load method"):
+            with self.assertRaisesRegex(
+                ValueError, "Unsupported newloader load method"
+            ):
                 self._loader(model_path, load_method="typo")
 
     def test_non_string_load_method_is_rejected(self):
@@ -335,7 +348,9 @@ class FoundationLoaderTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as model_path:
             torch.save({}, os.path.join(model_path, "optimizer.bin"))
             torch.save(_weights(), os.path.join(model_path, "model.pt"))
-            self.assertEqual(discover_ckpt_files(model_path), [os.path.join(model_path, "model.pt")])
+            self.assertEqual(
+                discover_ckpt_files(model_path), [os.path.join(model_path, "model.pt")]
+            )
 
     def test_safetensors_index_selects_only_referenced_shards(self):
         with tempfile.TemporaryDirectory() as model_path:
@@ -343,9 +358,17 @@ class FoundationLoaderTest(unittest.TestCase):
             shard2 = os.path.join(model_path, "model-00002-of-00002.safetensors")
             save_file({"first": torch.ones(1)}, shard1)
             save_file({"second": torch.ones(1)}, shard2)
-            save_file({"duplicate": torch.ones(1)}, os.path.join(model_path, "consolidated.safetensors"))
-            save_file({"adapter": torch.ones(1)}, os.path.join(model_path, "adapter_model.safetensors"))
-            with open(os.path.join(model_path, "model.safetensors.index.json"), "w") as handle:
+            save_file(
+                {"duplicate": torch.ones(1)},
+                os.path.join(model_path, "consolidated.safetensors"),
+            )
+            save_file(
+                {"adapter": torch.ones(1)},
+                os.path.join(model_path, "adapter_model.safetensors"),
+            )
+            with open(
+                os.path.join(model_path, "model.safetensors.index.json"), "w"
+            ) as handle:
                 json.dump(
                     {
                         "weight_map": {
@@ -355,7 +378,10 @@ class FoundationLoaderTest(unittest.TestCase):
                     },
                     handle,
                 )
-            self.assertEqual(discover_ckpt_files(model_path), [shard1, shard2])
+            self.assertEqual(
+                discover_ckpt_files(model_path),
+                [os.path.realpath(shard1), os.path.realpath(shard2)],
+            )
 
     def test_pytorch_index_excludes_training_and_adapter_files(self):
         with tempfile.TemporaryDirectory() as model_path:
@@ -363,16 +389,54 @@ class FoundationLoaderTest(unittest.TestCase):
             torch.save({"weight": torch.ones(1)}, shard)
             torch.save({}, os.path.join(model_path, "training_args.bin"))
             torch.save({}, os.path.join(model_path, "adapter_model.bin"))
-            with open(os.path.join(model_path, "pytorch_model.bin.index.json"), "w") as handle:
+            with open(
+                os.path.join(model_path, "pytorch_model.bin.index.json"), "w"
+            ) as handle:
                 json.dump({"weight_map": {"weight": os.path.basename(shard)}}, handle)
-            self.assertEqual(discover_ckpt_files(model_path), [shard])
+            self.assertEqual(
+                discover_ckpt_files(model_path),
+                [os.path.realpath(shard)],
+            )
+
+    def test_index_discovery_canonicalizes_symlink_model_root(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            real_model_path = os.path.join(temp_root, "real_model")
+            linked_model_path = os.path.join(temp_root, "linked_model")
+            os.mkdir(real_model_path)
+            os.symlink(real_model_path, linked_model_path)
+
+            shard = os.path.join(
+                real_model_path,
+                "model-00001-of-00001.safetensors",
+            )
+            save_file({"weight": torch.ones(1)}, shard)
+            index_path = os.path.join(
+                real_model_path,
+                "model.safetensors.index.json",
+            )
+            with open(index_path, "w") as handle:
+                json.dump(
+                    {"weight_map": {"weight": os.path.basename(shard)}},
+                    handle,
+                )
+
+            self.assertEqual(
+                discover_ckpt_files(linked_model_path),
+                [os.path.realpath(shard)],
+            )
 
     def test_unindexed_discovery_excludes_non_model_files(self):
         with tempfile.TemporaryDirectory() as model_path:
             model_file = os.path.join(model_path, "model.safetensors")
             save_file({"weight": torch.ones(1)}, model_file)
-            save_file({"other": torch.ones(1)}, os.path.join(model_path, "consolidated.safetensors"))
-            save_file({"adapter": torch.ones(1)}, os.path.join(model_path, "adapter_model.safetensors"))
+            save_file(
+                {"other": torch.ones(1)},
+                os.path.join(model_path, "consolidated.safetensors"),
+            )
+            save_file(
+                {"adapter": torch.ones(1)},
+                os.path.join(model_path, "adapter_model.safetensors"),
+            )
             torch.save({}, os.path.join(model_path, "training_args.bin"))
             self.assertEqual(discover_ckpt_files(model_path), [model_file])
 
@@ -469,7 +533,9 @@ class FoundationLoaderTest(unittest.TestCase):
             os.mkdir(model_path)
             outside = os.path.join(parent, "outside.safetensors")
             save_file({"weight": torch.ones(1)}, outside)
-            with open(os.path.join(model_path, "model.safetensors.index.json"), "w") as handle:
+            with open(
+                os.path.join(model_path, "model.safetensors.index.json"), "w"
+            ) as handle:
                 json.dump({"weight_map": {"weight": "../outside.safetensors"}}, handle)
             with self.assertRaisesRegex(ValueError, "outside model directory"):
                 discover_ckpt_files(model_path)
@@ -478,10 +544,10 @@ class FoundationLoaderTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as model_path:
             adapter = os.path.join(model_path, "adapter_model.safetensors")
             save_file({"weight": torch.ones(1)}, adapter)
-            with open(os.path.join(model_path, "model.safetensors.index.json"), "w") as handle:
-                json.dump(
-                    {"weight_map": {"weight": os.path.basename(adapter)}}, handle
-                )
+            with open(
+                os.path.join(model_path, "model.safetensors.index.json"), "w"
+            ) as handle:
+                json.dump({"weight_map": {"weight": os.path.basename(adapter)}}, handle)
             with self.assertRaisesRegex(ValueError, "non-model file"):
                 discover_ckpt_files(model_path)
 
@@ -533,7 +599,9 @@ class FoundationLoaderTest(unittest.TestCase):
         config = types.SimpleNamespace(model_type="foundation_test_model")
         for invalid in (False, {}, types.SimpleNamespace()):
             with self.subTest(invalid=invalid):
-                with self.assertRaisesRegex(TypeError, "load_config must be NewLoaderConfig"):
+                with self.assertRaisesRegex(
+                    TypeError, "load_config must be NewLoaderConfig"
+                ):
                     NewModelLoader(config, invalid)
 
     def test_load_config_is_immutable(self):
@@ -613,7 +681,9 @@ class FoundationLoaderTest(unittest.TestCase):
         register_model("foundation_inference_model")(InferenceModel)
         config = types.SimpleNamespace(model_type="foundation_inference_model")
         with tempfile.TemporaryDirectory() as model_path:
-            save_file({"weight": torch.ones(1)}, os.path.join(model_path, "model.safetensors"))
+            save_file(
+                {"weight": torch.ones(1)}, os.path.join(model_path, "model.safetensors")
+            )
             model = NewModelLoader(
                 config,
                 NewLoaderConfig(device="cpu"),

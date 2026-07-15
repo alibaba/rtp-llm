@@ -6,7 +6,6 @@ from typing import Dict, Iterator, List, Mapping, Optional, Tuple
 
 import torch
 
-
 _SAFETENSORS_INDEX = "model.safetensors.index.json"
 _PYTORCH_INDEX = "pytorch_model.bin.index.json"
 _EXCLUDED_WEIGHT_FILES = {
@@ -29,7 +28,9 @@ class WeightsMapper:
         self.exact_mapping = exact_mapping or {}
         self.prefix_mapping = dict(
             sorted(
-                (prefix_mapping or {}).items(), key=lambda item: len(item[0]), reverse=True
+                (prefix_mapping or {}).items(),
+                key=lambda item: len(item[0]),
+                reverse=True,
             )
         )
         self.regex_mapping = regex_mapping or []
@@ -63,7 +64,9 @@ class WeightsFilter:
         self.exclude_patterns = [re.compile(p) for p in (exclude_patterns or [])]
 
     def should_load(self, name: str) -> bool:
-        if self.include_patterns and not any(p.search(name) for p in self.include_patterns):
+        if self.include_patterns and not any(
+            p.search(name) for p in self.include_patterns
+        ):
             return False
         return not any(p.search(name) for p in self.exclude_patterns)
 
@@ -131,7 +134,9 @@ def _files_from_index(model_path: str, index_name: str) -> Optional[List[str]]:
         with open(index_path, encoding="utf-8") as handle:
             payload = json.load(handle)
     except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"Failed to read checkpoint index {index_path}: {exc}") from exc
+        raise ValueError(
+            f"Failed to read checkpoint index {index_path}: {exc}"
+        ) from exc
     weight_map = payload.get("weight_map") if isinstance(payload, dict) else None
     if not isinstance(weight_map, dict) or not weight_map:
         raise ValueError(f"Checkpoint index {index_path} has no non-empty weight_map")
@@ -251,11 +256,7 @@ def discover_ckpt_files(
     consolidated_by_format = []
     for pattern in ("*.safetensors", "*.bin", "*.pt", "*.pth"):
         candidates = sorted(glob.glob(os.path.join(model_path, pattern)))
-        files = [
-            path
-            for path in candidates
-            if _is_model_weight_file(path)
-        ]
+        files = [path for path in candidates if _is_model_weight_file(path)]
         if files:
             return files
         consolidated = [

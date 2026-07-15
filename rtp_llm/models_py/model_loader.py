@@ -24,7 +24,9 @@ def _validate_runtime_device(device: str, label: str) -> None:
     except (RuntimeError, ValueError) as exc:
         raise ValueError(f"Invalid {label} {device!r}") from exc
     if parsed.type == "meta":
-        raise ValueError(f"{label} cannot be meta; newloader requires materialized weights")
+        raise ValueError(
+            f"{label} cannot be meta; newloader requires materialized weights"
+        )
 
 
 class NewLoaderLoadMethod(str, Enum):
@@ -52,7 +54,9 @@ class NewLoaderConfig:
                     NewLoaderLoadMethod(self.load_method.strip().lower()),
                 )
             except ValueError as exc:
-                raise ValueError(f"Unsupported newloader load method {self.load_method!r}") from exc
+                raise ValueError(
+                    f"Unsupported newloader load method {self.load_method!r}"
+                ) from exc
         elif not isinstance(self.load_method, NewLoaderLoadMethod):
             raise TypeError(
                 f"load_method must be NewLoaderLoadMethod or str, got "
@@ -174,7 +178,9 @@ class NewModelLoader:
             source = inspect.getfile(model_cls)
         except (TypeError, OSError):
             source = "<unknown>"
-        logger.info("Created newloader model %s from %s", model_cls.__qualname__, source)
+        logger.info(
+            "Created newloader model %s from %s", model_cls.__qualname__, source
+        )
         return model
 
     @staticmethod
@@ -191,7 +197,10 @@ class NewModelLoader:
             if module is model:
                 continue
             custom_loader = getattr(type(module), "load_weights", None)
-            if custom_loader is not None and custom_loader is not RtpModule.load_weights:
+            if (
+                custom_loader is not None
+                and custom_loader is not RtpModule.load_weights
+            ):
                 validator = getattr(module, "validate_weights_loaded", None)
                 if not callable(validator):
                     raise TypeError(

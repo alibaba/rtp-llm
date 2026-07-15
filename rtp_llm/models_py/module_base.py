@@ -38,7 +38,9 @@ def collect_loaded_tensor_ids(module: nn.Module) -> set:
         ):
             if name in loaded_names:
                 loaded_tensor_ids.add(id(param))
-        for name, buffer in current.named_buffers(recurse=False, remove_duplicate=False):
+        for name, buffer in current.named_buffers(
+            recurse=False, remove_duplicate=False
+        ):
             if name in loaded_names and buffer is not None:
                 loaded_tensor_ids.add(id(buffer))
     return loaded_tensor_ids
@@ -57,12 +59,16 @@ def _collect_tensor_alias_groups(module: nn.Module, recurse: bool = True):
         ):
             if tensor is not None:
                 aliases.setdefault(id(tensor), []).append(("buffer", current, name))
-    return [registrations for registrations in aliases.values() if len(registrations) > 1]
+    return [
+        registrations for registrations in aliases.values() if len(registrations) > 1
+    ]
 
 
 def _restore_tensor_aliases(alias_groups) -> None:
     for registrations in alias_groups:
-        parameter_registrations = [item for item in registrations if item[0] == "parameter"]
+        parameter_registrations = [
+            item for item in registrations if item[0] == "parameter"
+        ]
         for _, module, name in parameter_registrations:
             if not isinstance(module._parameters[name], nn.Parameter):
                 raise RuntimeError(
@@ -100,7 +106,9 @@ class RtpModule(nn.Module):
         _restore_tensor_aliases(alias_groups)
         return result
 
-    def _assign_weight(self, module: nn.Module, name: str, tensor: torch.Tensor) -> bool:
+    def _assign_weight(
+        self, module: nn.Module, name: str, tensor: torch.Tensor
+    ) -> bool:
         if "." in name:
             prefix, rest = name.split(".", 1)
             child = module._modules.get(prefix)
@@ -183,7 +191,11 @@ class RtpModule(nn.Module):
         unexpected = [name for name in dropped if not _is_allowed_dropped_weight(name)]
         if unexpected:
             sample = unexpected[:10]
-            suffix = f" (+{len(unexpected) - len(sample)} more)" if len(unexpected) > 10 else ""
+            suffix = (
+                f" (+{len(unexpected) - len(sample)} more)"
+                if len(unexpected) > 10
+                else ""
+            )
             raise RuntimeError(
                 f"{self.__class__.__name__} could not dispatch checkpoint tensors "
                 f"{sample}{suffix}"
@@ -212,14 +224,19 @@ class RtpModule(nn.Module):
             for name, child in module.named_children():
                 child_prefix = f"{prefix}{name}."
                 child_loader = getattr(type(child), "load_weights", None)
-                if child_loader is not None and child_loader is not RtpModule.load_weights:
+                if (
+                    child_loader is not None
+                    and child_loader is not RtpModule.load_weights
+                ):
                     continue
                 visit(child, child_prefix)
 
         visit(self, "")
         if missing:
             sample = missing[:10]
-            suffix = f" (+{len(missing) - len(sample)} more)" if len(missing) > 10 else ""
+            suffix = (
+                f" (+{len(missing) - len(sample)} more)" if len(missing) > 10 else ""
+            )
             raise RuntimeError(
                 f"{self.__class__.__name__} is missing required checkpoint parameters: "
                 f"{sample}{suffix}"
