@@ -1,5 +1,5 @@
 import logging
-from typing import Any, List
+from typing import Any, Callable, Dict, List
 
 import torch
 import torch.nn as nn
@@ -92,6 +92,20 @@ def _restore_tensor_aliases(alias_groups) -> None:
             storage[name] = shared
 
 
+def _memoize_tensor_apply(
+    fn: Callable[[torch.Tensor], torch.Tensor],
+) -> Callable[[torch.Tensor], torch.Tensor]:
+    converted: Dict[int, torch.Tensor] = {}
+
+    def apply_once(tensor: torch.Tensor) -> torch.Tensor:
+        tensor_id = id(tensor)
+        if tensor_id not in converted:
+            converted[tensor_id] = fn(tensor)
+        return converted[tensor_id]
+
+    return apply_once
+
+
 class RtpModule(nn.Module):
     """Streaming checkpoint dispatcher for newloader model trees.
 
@@ -102,7 +116,8 @@ class RtpModule(nn.Module):
 
     def _apply(self, fn, recurse=True):
         alias_groups = _collect_tensor_alias_groups(self, recurse=recurse)
-        result = super()._apply(fn, recurse=recurse)
+        apply_once = _memoize_tensor_apply(fn)
+        result = super()._apply(apply_once, recurse=recurse)
         _restore_tensor_aliases(alias_groups)
         return result
 

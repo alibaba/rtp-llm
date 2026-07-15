@@ -264,6 +264,35 @@ class FoundationLoaderTest(unittest.TestCase):
         self.assertEqual(model.child.child_weight.dtype, torch.float64)
         self.assertIs(model.parent_weight, model.child.child_weight)
 
+    def test_recursive_apply_converts_shared_tensor_once(self):
+        class TiedTree(RtpModule):
+            def __init__(self):
+                super().__init__()
+                self.embed = RtpModule()
+                self.head = RtpModule()
+                shared = nn.Parameter(torch.ones(2, dtype=torch.float32))
+                self.embed.weight = shared
+                self.head.weight = shared
+                self.register_buffer("weight_alias", shared, persistent=True)
+
+        model = TiedTree()
+        source_id = id(model.embed.weight)
+        calls = {}
+
+        def convert(tensor):
+            tensor_id = id(tensor)
+            calls[tensor_id] = calls.get(tensor_id, 0) + 1
+            return tensor.to(dtype=torch.float64)
+
+        with torch.no_grad():
+            model._apply(convert)
+
+        self.assertEqual(calls[source_id], 1)
+        self.assertIs(model.embed.weight, model.head.weight)
+        self.assertIs(model.embed.weight, model.weight_alias)
+        self.assertIsInstance(model.embed.weight, nn.Parameter)
+        self.assertEqual(model.embed.weight.dtype, torch.float64)
+
     def test_shared_parameter_crosses_custom_loader_boundary_both_directions(self):
         class CustomLeaf(RtpModule):
             def load_weights(self, weights):

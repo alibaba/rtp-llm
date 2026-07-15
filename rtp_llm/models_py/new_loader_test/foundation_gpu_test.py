@@ -124,6 +124,33 @@ class FoundationGpuTest(unittest.TestCase):
         extra_peak = torch.cuda.max_memory_allocated() - baseline
         self.assertLess(extra_peak, 8 * 1024 * 1024)
 
+    def test_shared_weight_migration_allocates_one_gpu_copy(self):
+        class LargeTiedModel(RtpModule):
+            def __init__(self):
+                super().__init__()
+                self.embed = RtpModule()
+                self.head = RtpModule()
+                shared = nn.Parameter(torch.empty(16 * 1024 * 1024))
+                self.embed.weight = shared
+                self.head.weight = shared
+                self.register_buffer("weight_alias", shared, persistent=True)
+
+        model = LargeTiedModel()
+        weight_bytes = model.embed.weight.numel() * model.embed.weight.element_size()
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        baseline = torch.cuda.memory_allocated()
+
+        with torch.inference_mode():
+            model.to("cuda")
+
+        torch.cuda.synchronize()
+        extra_peak = torch.cuda.max_memory_allocated() - baseline
+        self.assertLess(extra_peak, weight_bytes * 2)
+        self.assertIs(model.embed.weight, model.head.weight)
+        self.assertIs(model.embed.weight, model.weight_alias)
+        self.assertIsInstance(model.embed.weight, nn.Parameter)
+
 
 if __name__ == "__main__":
     unittest.main()
