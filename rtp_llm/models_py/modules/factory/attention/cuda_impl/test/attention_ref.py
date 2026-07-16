@@ -5,6 +5,7 @@ single_prefill_with_kv_cache and single_decode_with_kv_cache functions.
 These can be used as ground truth for testing custom attention implementations.
 """
 
+import math
 from typing import List
 
 import torch
@@ -185,3 +186,62 @@ def compute_flashinfer_decode_reference(
     ref_output_stacked = torch.stack(ref_outputs, dim=0)
 
     return ref_output_stacked
+
+
+def compute_dense_attention_reference(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    input_lengths: List[int],
+    prefix_lengths: List[int],
+    causal: bool,
+) -> torch.Tensor:
+    """Pure-PyTorch dense attention reference (independent of FlashInfer).
+
+    Per sequence i, the query block (``input_lengths[i]`` new tokens) attends
+    over its whole KV segment (``prefix_lengths[i] + input_lengths[i]``
+    tokens).  causal=True: query at block offset j sees kv[0 : prefix+j+1].
+    causal=False: every query sees the entire segment (full visibility) --
+    the DFlash draft-block semantics (feature prefix fully visible + full
+    bidirectional visibility inside the block).
+
+    Args:
+        q: [total_q_tokens, num_q_heads, head_dim]
+        k: [total_kv_tokens, num_kv_heads, head_dim]
+        v: [total_kv_tokens, num_kv_heads, head_dim]
+        input_lengths: new-token count per sequence (sum == total_q_tokens)
+        prefix_lengths: cached-prefix count per sequence
+        causal: mask mode
+
+    Returns:
+        [total_q_tokens, num_q_heads, head_dim], same dtype as q
+    """
+    num_q_heads, head_dim = q.shape[1], q.shape[2]
+    num_kv_heads = k.shape[1]
+    group = num_q_heads // num_kv_heads
+    scale = 1.0 / math.sqrt(head_dim)
+
+    outs = []
+    q_off = 0
+    kv_off = 0
+    for p_len, i_len in zip(prefix_lengths, input_lengths):
+        s_len = p_len + i_len
+        qi = q[q_off : q_off + i_len].float()
+        ki = k[kv_off : kv_off + s_len].float()
+        vi = v[kv_off : kv_off + s_len].float()
+        if group > 1:
+            ki = ki.repeat_interleave(group, dim=1)
+            vi = vi.repeat_interleave(group, dim=1)
+        # [H, i_len, s_len]
+        logits = torch.einsum("qhd,khd->hqk", qi, ki) * scale
+        if causal:
+            q_pos = p_len + torch.arange(i_len, device=q.device).unsqueeze(1)
+            kv_pos = torch.arange(s_len, device=q.device).unsqueeze(0)
+            visible = kv_pos <= q_pos  # [i_len, s_len]
+            logits = logits.masked_fill(~visible.unsqueeze(0), float("-inf"))
+        attn = torch.softmax(logits, dim=-1)
+        out = torch.einsum("hqk,khd->qhd", attn, vi)
+        outs.append(out)
+        q_off += i_len
+        kv_off += s_len
+    return torch.cat(outs, dim=0).to(q.dtype)

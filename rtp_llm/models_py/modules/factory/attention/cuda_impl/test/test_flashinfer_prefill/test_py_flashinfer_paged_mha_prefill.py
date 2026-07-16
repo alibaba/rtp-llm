@@ -8,6 +8,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha imp
     PyFlashinferPrefillPagedAttnOp,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.attention_ref import (
+    compute_dense_attention_reference,
     compute_flashinfer_prefill_reference,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_test import (
@@ -29,137 +30,6 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
 
         # Call parent setUp for common initialization
         super().setUp()
-
-    def _create_chunked_prefill_attention_inputs(
-        self,
-        batch_size: int,
-        prefix_lengths: List[int],
-        input_lengths: List[int],
-        seq_size_per_block: int,
-    ) -> PyAttentionInputs:
-        """Helper to create PyAttentionInputs for chunked prefill mode
-
-        Args:
-            batch_size: Number of sequences in the batch
-            prefix_lengths: List of prefix lengths (existing KV cache) for each batch
-            input_lengths: List of input lengths (new Q tokens) for each batch
-            seq_size_per_block: Number of tokens per block (page size)
-
-        Returns:
-            PyAttentionInputs configured for chunked prefill mode
-        """
-        attn_inputs = PyAttentionInputs()
-
-        # Prefill mode
-        attn_inputs.is_prefill = True
-
-        # input_lengths is the length of new Q tokens
-        attn_inputs.input_lengths = torch.tensor(
-            input_lengths, dtype=torch.int32, device="cpu"
-        ).pin_memory()
-
-        # prefix_lengths is the length of existing KV cache
-        attn_inputs.prefix_lengths = torch.tensor(
-            prefix_lengths, dtype=torch.int32, device="cpu"
-        ).pin_memory()
-
-        # sequence_lengths is prefix + input (total KV length)
-        sequence_lengths = [p + i for p, i in zip(prefix_lengths, input_lengths)]
-        attn_inputs.sequence_lengths = torch.tensor(
-            sequence_lengths, dtype=torch.int32, device="cpu"
-        ).pin_memory()
-
-        # Create KV cache block IDs for total sequence
-        kv_cache_block_id = self._create_kv_cache_block_ids(
-            batch_size, sequence_lengths, seq_size_per_block
-        )
-        attn_inputs.kv_cache_block_id_host = kv_cache_block_id
-        attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
-        attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
-        attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
-
-        # Create cu_seqlens (cumulative input lengths, NOT sequence lengths!)
-        cu_seqlens = [0]
-        for input_len in input_lengths:
-            cu_seqlens.append(cu_seqlens[-1] + input_len)
-        attn_inputs.cu_seqlens = torch.tensor(
-            cu_seqlens, dtype=torch.int32, device=self.device
-        )
-
-        return attn_inputs
-
-    def _create_paged_kv_cache(
-        self,
-        k_ragged: torch.Tensor,
-        v_ragged: torch.Tensor,
-        sequence_lengths: List[int],
-        page_size: int,
-        num_kv_heads: int,
-        head_dim: int,
-    ) -> LayerKVCache:
-        """
-        Convert ragged K, V to paged KV cache format (HND layout)
-
-        Args:
-            k_ragged: [total_tokens, num_kv_heads, head_dim]
-            v_ragged: [total_tokens, num_kv_heads, head_dim]
-            sequence_lengths: List of sequence lengths
-            page_size: Page size
-            num_kv_heads: Number of KV heads
-            head_dim: Head dimension
-
-        Returns:
-            paged_kv_cache: [num_layers, num_pages, 2, num_kv_heads, page_size, head_dim] (HND layout)
-        """
-        total_pages = sum(
-            (seq_len + page_size - 1) // page_size for seq_len in sequence_lengths
-        )
-
-        # single layer for testing
-        # Allocate paged KV cache in HND format: [num_layers, num_pages, 2, num_kv_heads, page_size, head_dim]
-        paged_kv_cache = torch.zeros(
-            total_pages,
-            2,
-            num_kv_heads,
-            page_size,
-            head_dim,
-            dtype=k_ragged.dtype,
-            device=self.device,
-        )
-
-        page_idx = 0
-        token_offset = 0
-
-        for seq_len in sequence_lengths:
-            num_pages = (seq_len + page_size - 1) // page_size
-
-            # Fill pages with K, V data
-            for i in range(num_pages):
-                start_token = i * page_size
-                end_token = min(start_token + page_size, seq_len)
-                num_tokens_in_page = end_token - start_token
-
-                # Copy K, V to page (layer 0) in HND layout
-                # k_ragged/v_ragged shape: [total_tokens, num_kv_heads, head_dim]
-                # paged_kv_cache shape: [num_layers, num_pages, 2, num_kv_heads, page_size, head_dim]
-                paged_kv_cache[page_idx, 0, :, :num_tokens_in_page, :] = k_ragged[
-                    token_offset + start_token : token_offset + end_token
-                ].transpose(
-                    0, 1
-                )  # [num_tokens, H, D] -> [H, num_tokens, D]
-
-                paged_kv_cache[page_idx, 1, :, :num_tokens_in_page, :] = v_ragged[
-                    token_offset + start_token : token_offset + end_token
-                ].transpose(
-                    0, 1
-                )  # [num_tokens, H, D] -> [H, num_tokens, D]
-
-                page_idx += 1
-
-            token_offset += seq_len
-        kv_cache = LayerKVCache()
-        kv_cache.kv_cache_base = paged_kv_cache
-        return kv_cache
 
     def _test_prefill_correctness(
         self,
@@ -563,6 +433,114 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
             head_num_kv=8,  # 32/8 = 4 queries per KV
             size_per_head=128,
             page_size=64,
+        )
+
+
+
+class TestPyFlashinferNonCausalPagedPrefill(BaseAttentionTest):
+    """Non-causal x paged prefix -- the DFlash draft-block visibility semantics.
+
+    The reference is a pure-PyTorch dense implementation
+    (compute_dense_attention_reference), NOT FlashInfer itself.  This
+    combination (causal=False + prefix_lengths>0) was never exercised in this
+    repo before: BERT/ViT are non-causal but have no paged prefix, MTP verify
+    has a prefix but is causal.  Validation gate for DSpark phase-1 G2, see
+    docs/dspark-phase1-design-2026-07-14.md.
+    """
+
+    def setUp(self):
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA not available - this test requires CUDA")
+        super().setUp()
+
+    def _run_paged_case(
+        self,
+        prefix_lengths: List[int],
+        input_lengths: List[int],
+        is_causal: bool,
+        head_num: int = 32,
+        head_num_kv: int = 8,
+        size_per_head: int = 128,
+        page_size: int = 64,
+    ):
+        batch_size = len(input_lengths)
+        config = self._create_config(
+            head_num=head_num,
+            head_num_kv=head_num_kv,
+            size_per_head=size_per_head,
+            seq_size_per_block=page_size,
+            is_causal=is_causal,
+        )
+        attn_inputs = self._create_chunked_prefill_attention_inputs(
+            batch_size, prefix_lengths, input_lengths, config.seq_size_per_block
+        )
+        attn_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, attn_inputs)
+        self.assertTrue(attn_op.support(attn_inputs))
+        attn_op.prepare(attn_inputs)
+
+        torch.manual_seed(42)
+        total_q = sum(input_lengths)
+        sequence_lengths = [p + i for p, i in zip(prefix_lengths, input_lengths)]
+        total_kv = sum(sequence_lengths)
+        q = torch.randn(
+            total_q, head_num, size_per_head, dtype=torch.float16, device=self.device
+        )
+        k = torch.randn(
+            total_kv,
+            head_num_kv,
+            size_per_head,
+            dtype=torch.float16,
+            device=self.device,
+        )
+        v = torch.randn(
+            total_kv,
+            head_num_kv,
+            size_per_head,
+            dtype=torch.float16,
+            device=self.device,
+        )
+        paged_kv_cache = self._create_paged_kv_cache(
+            k, v, sequence_lengths, page_size, head_num_kv, size_per_head
+        )
+
+        output = attn_op.forward(q, paged_kv_cache)
+        ref = compute_dense_attention_reference(
+            q, k, v, input_lengths, prefix_lengths, causal=is_causal
+        )
+        compare_tensors(output, ref, rtol=1e-2, atol=5e-3, name="paged prefill")
+
+    # -- Reference self-check: pin the reference against the known-good
+    # -- causal production path first.
+
+    def test_dense_reference_matches_causal_path(self):
+        """Causal x prefix: existing production path vs dense reference."""
+        self._run_paged_case(prefix_lengths=[200], input_lengths=[5], is_causal=True)
+
+    # -- Non-causal x paged prefix (the validation gate of this PR) --
+
+    def test_noncausal_with_prefix_single(self):
+        """DFlash shape: prefix=200 feature prefix + 8-wide query block."""
+        self._run_paged_case(prefix_lengths=[200], input_lengths=[8], is_causal=False)
+
+    def test_noncausal_with_prefix_multi_batch_varied(self):
+        """Multiple requests, ragged prefixes (incl. page boundary 64/65)."""
+        self._run_paged_case(
+            prefix_lengths=[0, 64, 65, 300],
+            input_lengths=[8, 8, 8, 8],
+            is_causal=False,
+        )
+
+    def test_noncausal_no_prefix(self):
+        """prefix=0 degenerate case: pure intra-block bidirectional."""
+        self._run_paged_case(prefix_lengths=[0], input_lengths=[8], is_causal=False)
+
+    def test_noncausal_block_wider_than_page(self):
+        """Block wider than page_size: intra- and cross-page addressing."""
+        self._run_paged_case(
+            prefix_lengths=[100],
+            input_lengths=[40],
+            is_causal=False,
+            page_size=16,
         )
 
 
