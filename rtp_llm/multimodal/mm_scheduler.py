@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import gc
 import logging
 import queue
 import threading
 import time
+import traceback
 from concurrent.futures import Future, InvalidStateError
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import AbstractContextManager, nullcontext
@@ -35,13 +37,23 @@ class MMSchedulerError(RuntimeError):
 class OutputCountMismatchError(MMSchedulerError):
     """batched_embedding returned a number of outputs != number of inputs.
 
-    A distinct type so callers can tell a count mismatch apart from a forward
-    (device) error.
+    A distinct worker-side type so the lightweight caller error can retain an
+    unambiguous source_type without retaining this exception's traceback.
     """
 
 
 class MMSchedulerExecutionError(MMSchedulerError):
     """A claimed batch failed while executing on the scheduler worker."""
+
+    def __init__(
+        self, source_type: str, source_message: str, is_oom: bool = False
+    ) -> None:
+        self.source_type = source_type
+        self.source_message = source_message
+        self.is_oom = is_oom
+        super().__init__(
+            f"batch embedding failed: {source_type}: {source_message}"
+        )
 
 
 class MMSchedulerOverloadError(MMSchedulerError):
@@ -116,8 +128,9 @@ class _EmbeddingRequest:
                   resolves it once, from the executor thread; the caller blocks
                   on future.result(timeout). The Future gives the happens-before
                   between set_* and result() for free. On failure each request
-                  gets its OWN wrapper (see _fail) so concurrent callers never
-                  share one exception instance. Cancellation uses future.cancel()
+                  gets its OWN lightweight wrapper (see _fail), containing only
+                  type/message metadata rather than the worker exception and its
+                  GPU-tensor-retaining traceback. Cancellation uses future.cancel()
                   + set_running_or_notify_cancel() (see _claim_batch), whose
                   shared lock resolves the cancel-vs-start race.
     """
@@ -283,8 +296,15 @@ class MMScheduler:
 
         try:
             # Blocks until the executor resolves the future; re-raises the
-            # per-request wrapper (with its cause chain) on failure.
+            # per-request lightweight wrapper on failure.
             req.future.result(timeout=timeout_s)
+        except MMSchedulerExecutionError:
+            # Future.result() adds this frame to the stored exception traceback.
+            # Detach request inputs so retaining the public exception cannot retain
+            # the failed request's preprocessed tensors through this frame/Future.
+            req.work_items = []
+            work_items = []
+            raise
         except FutureTimeoutError:
             # PENDING -> CANCELLED so the executor skips it; if it is already
             # RUNNING, cancel() is a no-op and the forward's result is discarded.
@@ -324,19 +344,38 @@ class MMScheduler:
         return drained
 
     @staticmethod
-    def _fail(req: _EmbeddingRequest, cause: BaseException) -> None:
-        """Fail req's future with its OWN wrapper around `cause`.
+    def _fail(
+        req: _EmbeddingRequest,
+        source_type: str,
+        source_message: str,
+        is_oom: bool = False,
+    ) -> None:
+        """Fail one request without storing the worker exception in its Future."""
+        req.future.set_exception(
+            MMSchedulerExecutionError(source_type, source_message, is_oom)
+        )
 
-        future.result() re-raises the stored instance in the caller's thread, so
-        a shared instance would let N callers concurrently mutate one exception's
-        traceback. A fresh wrapper per request avoids that; `cause` is chained
-        (read-only) for debugging.
+    @staticmethod
+    def _failure_details(cause: BaseException) -> tuple[str, str, bool]:
+        return (
+            type(cause).__name__,
+            str(cause),
+            isinstance(cause, torch.cuda.OutOfMemoryError),
+        )
+
+    @staticmethod
+    def _clear_exception_references(cause: BaseException) -> None:
+        """Drop traceback chains after they have been logged.
+
+        Model-forward frames can retain device tensors through their locals. They
+        must not survive in a Future or remain live when empty_cache() runs.
         """
-        wrapped = MMSchedulerExecutionError(f"batch embedding failed: {cause}")
-        # Mimic `raise ... from cause` for the later re-raise in result().
-        wrapped.__cause__ = cause
-        wrapped.__suppress_context__ = True
-        req.future.set_exception(wrapped)
+        tb = cause.__traceback__
+        if tb is not None:
+            traceback.clear_frames(tb)
+        cause.__traceback__ = None
+        cause.__context__ = None
+        cause.__cause__ = None
 
     def _reject_batch(self, batch: List[_EmbeddingRequest]) -> None:
         """Fail every not-yet-started request in `batch` because close() fired.
@@ -346,13 +385,14 @@ class MMScheduler:
         must resolve them itself or their callers block until their submit
         timeout. Uses the same cause as close()'s drain for a consistent error.
         """
-        exc = RuntimeError("MMScheduler closed before request completed")
+        source_type = "RuntimeError"
+        source_message = "MMScheduler closed before request completed"
         for req in batch:
             # done() skips already-resolved/cancelled requests; the try guards the
             # TOCTOU where a caller cancels a still-PENDING request concurrently.
             if not req.future.done():
                 try:
-                    self._fail(req, exc)
+                    self._fail(req, source_type, source_message)
                 except InvalidStateError:
                     pass
 
@@ -396,9 +436,15 @@ class MMScheduler:
                     batch = claimed_batch
                     self._execute_batch(batch)
                 except Exception as e:
+                    source_type, source_message, is_oom = self._failure_details(e)
                     logging.error(
                         f"MMScheduler: executor loop error: {e}", exc_info=True
                     )
+                    self._clear_exception_references(e)
+                    e = None
+                    if is_oom:
+                        gc.collect()
+                        torch.cuda.empty_cache()
                     # Something unexpected escaped _execute_batch/_collect_batch
                     # before the future was resolved. Fail any unresolved request so
                     # its caller gets the error now; the loop keeps running.
@@ -408,7 +454,9 @@ class MMScheduler:
                             # TOCTOU where a caller cancels a still-PENDING request.
                             if not req.future.done():
                                 try:
-                                    self._fail(req, e)
+                                    self._fail(
+                                        req, source_type, source_message, is_oom
+                                    )
                                 except InvalidStateError:
                                     pass
         finally:
@@ -425,7 +473,8 @@ class MMScheduler:
         Runs on the executor thread once the loop has stopped, so _pending /
         _waiting have no concurrent producer or consumer and need no lock.
         """
-        exc = RuntimeError("MMScheduler closed before request completed")
+        source_type = "RuntimeError"
+        source_message = "MMScheduler closed before request completed"
         queued = [self._pending] if self._pending else []
         self._pending = None
         queued.extend(self._drain(self._waiting))
@@ -433,7 +482,7 @@ class MMScheduler:
             # Guard set_exception: a caller may cancel concurrently (its submit
             # timing out); a dropped delivery is then fine.
             try:
-                self._fail(req, exc)
+                self._fail(req, source_type, source_message)
             except InvalidStateError:
                 pass
 
@@ -558,17 +607,26 @@ class MMScheduler:
                 ):
                     _run_embedding(self._mm_part, items)
         except Exception as e:
-            # On OOM, reset the allocator so the next batch starts clean. The
-            # typed exception is chained as each request's wrapper cause.
-            if isinstance(e, torch.cuda.OutOfMemoryError):
-                torch.cuda.empty_cache()
+            source_type, source_message, is_oom = self._failure_details(e)
             logging.error(
                 f"MMScheduler: batch forward failed, discarding {len(batch)} "
                 f"request(s): {type(e).__name__}: {e}",
                 exc_info=True,
             )
+            # Keep the complete traceback only for the log above. Clear model
+            # frames and forward locals before allocator recovery; otherwise the
+            # traceback can keep failed-batch device tensors alive and make
+            # empty_cache() ineffective.
+            self._clear_exception_references(e)
+            e = None
+            items.clear()
+            profiler_cm = None
+            if is_oom:
+                gc.collect()
+                torch.cuda.empty_cache()
             for req in batch:
-                self._fail(req, e)
+                self._fail(req, source_type, source_message, is_oom)
+            batch.clear()
             return
 
         for req in batch:
