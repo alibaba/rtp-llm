@@ -41,23 +41,27 @@ public class LearningPredictor implements PrefillTimePredictor {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final AtomicReference<double[]> weightsRef;
-    private final int param_count;
+    private final int linear_param_count;
+    private final int total_param_count;
     private final double[] adamMoment1;
     private final double[] adamMoment2;
     private final double beta1 = 0.9;
     private final double beta2 = 0.95;
     private final double epsilon = 1e-20;
     private final double alpha = 0.005;
+    private double coff1 = 0.55;
+    private double coff2 = 1.2;
+    private double coff3 = 1700.0;
     private long t = 1;
     private int batchSize = 4;
     private List<BatchUpdateItem> itemBatch;
 
     public LearningPredictor() {
-        this.weightsRef = new AtomicReference<>(new double[] { 300, -5,
-                0, 5, 0, 0 });
-        this.param_count = this.weightsRef.get().length;
-        this.adamMoment1 = new double[this.param_count];
-        this.adamMoment2 = new double[this.param_count];
+        this.weightsRef = new AtomicReference<>(new double[] { 0, 0, 0, 0, 0, 0, 0, 0 });
+        this.linear_param_count = 6;
+        this.total_param_count = this.weightsRef.get().length;
+        this.adamMoment1 = new double[this.total_param_count];
+        this.adamMoment2 = new double[this.total_param_count];
         this.itemBatch = new ArrayList<>();
         logger.warn("learn predictor created, t: {}, init param: {}, beta1: {}, beta2: {}, alpha: {}, batchSize: {}",
                 this.t, formulaStringParam(this.weightsRef.get()), this.beta1, this.beta2, this.alpha, this.batchSize);
@@ -81,7 +85,7 @@ public class LearningPredictor implements PrefillTimePredictor {
     }
 
     @Override
-    public long predictBatchMs(List<BatchItem> items) {
+    public double predictBatchMs(List<BatchItem> items) {
         logger.info("t: {}, learn predictor predictBatchMs: {}, items count: {}",
                 this.t, formulaStringParam(this.weightsRef.get()), items.size());
         if (items.isEmpty()) {
@@ -89,15 +93,21 @@ public class LearningPredictor implements PrefillTimePredictor {
         }
         double[] inputs = this.collectInput(items);
         double[] weights = this.weightsRef.get();
-        return (long) calcOutput(inputs, weights);
+        double linearExp = calcLinearExp(inputs, weights);
+        return calcOutput(weights, linearExp);
     }
 
-    private double calcOutput(double[] inputs, double[] weights) {
+    private double calcLinearExp(double[] inputs, double[] weights) {
         double sum = 0.0;
-        for (int i = 0; i < weights.length; i++) {
+        for (int i = 0; i < inputs.length; i++) {
             sum += inputs[i] * weights[i];
         }
-        return sum;
+        return Math.exp(sum / this.coff3);
+    }
+
+    private double calcOutput(double[] weights, double linearExp) {
+        return weights[this.linear_param_count] / this.coff1 +
+                weights[this.linear_param_count + 1] / this.coff2 * linearExp;
     }
 
     private double[] collectInput(List<BatchItem> items) {
@@ -115,7 +125,7 @@ public class LearningPredictor implements PrefillTimePredictor {
             compute_square += thisCompute * thisCompute;
             reuse_mul_compute += thisReuse * thisCompute;
         }
-        double[] inputs = new double[this.param_count];
+        double[] inputs = new double[this.total_param_count];
         inputs[0] = 1.0;
         inputs[1] = (double) items.size();
         inputs[2] = reuse;
@@ -126,7 +136,7 @@ public class LearningPredictor implements PrefillTimePredictor {
     }
 
     @Override
-    public synchronized void learn(List<BatchItem> items, long predictedMs, long actualMs) {
+    public void learn(List<BatchItem> items, long predictedMs, long actualMs) {
         // logger.debug("learn sample: batchSize={} predictedMs={} actualMs={}", items
         // != null ? items.size() : 0, predictedMs, actualMs);
         BatchUpdateItem item = new BatchUpdateItem();
@@ -138,40 +148,47 @@ public class LearningPredictor implements PrefillTimePredictor {
             return;
         }
         this.weightsRef.updateAndGet(oldWeights -> {
-            double[] newWeights = oldWeights.clone();
-            double[] gradient = new double[this.param_count];
+            double[] gradient = new double[this.total_param_count];
             for (BatchUpdateItem batchItem : this.itemBatch) {
                 double[] inputs = this.collectInput(batchItem.getItem());
-                double predict = calcOutput(inputs, newWeights);
+                double linearExp = calcLinearExp(inputs, oldWeights);
+                double predict = calcOutput(oldWeights, linearExp);
                 double diff = predict - batchItem.getActualMs();
-                for (int i = 0; i < newWeights.length; i++) {
-                    gradient[i] += diff * inputs[i];
+                gradient[this.linear_param_count] += diff / this.coff1;
+                gradient[this.linear_param_count + 1] += diff / this.coff2 * linearExp;
+                double linearGrad = diff * oldWeights[this.linear_param_count + 1] / this.coff2 * linearExp
+                        / this.coff3;
+                gradient[0] = linearGrad;
+                for (int i = 1; i < oldWeights.length; i++) {
+                    gradient[i] += linearGrad * inputs[i];
                 }
             }
-            for (int i = 0; i < newWeights.length; i++) {
+            for (int i = 0; i < oldWeights.length; i++) {
                 gradient[i] = gradient[i] / this.batchSize;
             }
-            for (int i = 0; i < newWeights.length; i++) {
+            for (int i = 0; i < oldWeights.length; i++) {
                 this.adamMoment1[i] = this.adamMoment1[i] * this.beta1 + (1 - this.beta1) * gradient[i];
                 this.adamMoment2[i] = this.adamMoment2[i] * this.beta2 + (1 - this.beta2) * gradient[i] * gradient[i];
             }
+            double[] newWeights = oldWeights.clone();
             for (int i = 0; i < newWeights.length; i++) {
                 newWeights[i] -= this.alpha * Math.sqrt(1.0 - Math.pow(this.beta2, this.t))
                         / (1.0 - Math.pow(this.beta1, this.t))
                         * this.adamMoment1[i] / (Math.sqrt(this.adamMoment2[i] + this.epsilon));
             }
-            // System.out.println("gradient: " + formulaStringParam(gradient));
-            // System.out.println("old: " + formulaStringParam(oldWeights));
-            // System.out.println("new: " + formulaStringParam(newWeights));
-            // System.out.println("moment1: " + formulaStringParam(this.adamMoment1));
-            // System.out.println("moment2: " + formulaStringParam(this.adamMoment2));
+            /*
+             * System.out.println("t: " + this.t);
+             * System.out.println("gradient: " + formulaStringParam(gradient));
+             * System.out.println("old: " + formulaStringParam(oldWeights));
+             * System.out.println("new: " + formulaStringParam(newWeights));
+             * System.out.println("moment1: " + formulaStringParam(this.adamMoment1));
+             * System.out.println("moment2: " + formulaStringParam(this.adamMoment2));
+             */
             return newWeights;
         });
         this.t = this.t + 1;
         this.itemBatch.clear();
-        if (this.t % 10 == 0) {
-            logger.info("t: {}, learn predictor param: {}", this.t, formulaStringParam(this.weightsRef.get()));
-        }
+        logger.info("t: {}, learn predictor param: {}", this.t, formulaStringParam(this.weightsRef.get()));
     }
 
     // ---- parameter management ----
@@ -188,6 +205,12 @@ public class LearningPredictor implements PrefillTimePredictor {
             updated[idx] = value;
             return updated;
         });
+    }
+
+    public void setCoff(double coff1, double coff2, double coff3) {
+        this.coff1 = coff1;
+        this.coff2 = coff2;
+        this.coff3 = coff3;
     }
 
     public Set<String> parameterNames() {

@@ -50,13 +50,13 @@ public class FormulaPredictor implements PrefillTimePredictor {
     }
 
     @Override
-    public long predictBatchMs(List<BatchItem> items) {
+    public double predictBatchMs(List<BatchItem> items) {
         if (items.isEmpty()) {
-            return 0;
+            return 0.0;
         }
         PrefillTimeVariableBindings.EvaluationVariables vars =
                 PrefillTimeVariableBindings.batchVariables(items);
-        return formula.evaluate(vars.topLevelVars(), vars.itemVars());
+        return (double) formula.evaluate(vars.topLevelVars(), vars.itemVars());
     }
 
     @Override

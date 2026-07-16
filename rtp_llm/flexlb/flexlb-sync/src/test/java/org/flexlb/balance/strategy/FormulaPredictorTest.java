@@ -150,7 +150,7 @@ class FormulaPredictorTest {
     @Test
     void predictBatchMsEmptyListReturnsZero() {
         FormulaPredictor p = new FormulaPredictor("10 + sum(computeTokens) + 5*batchSize");
-        assertEquals(0, p.predictBatchMs(List.of()));
+        assertEquals(0, (long) p.predictBatchMs(List.of()));
     }
 
     @Test
@@ -164,7 +164,7 @@ class FormulaPredictorTest {
         long single = p.estimateMs(500, 200);
 
         BatchItem item = batchItem(500, 200);
-        long batch = p.predictBatchMs(List.of(item));
+        long batch = (long) p.predictBatchMs(List.of(item));
 
         assertEquals(single, batch);
     }
@@ -186,7 +186,7 @@ class FormulaPredictorTest {
 
         BatchItem item1 = batchItem(500, 200);
         BatchItem item2 = batchItem(300, 100);
-        long result = p.predictBatchMs(List.of(item1, item2));
+        long result = (long) p.predictBatchMs(List.of(item1, item2));
 
         assertEquals(1600, result);
     }
@@ -199,7 +199,7 @@ class FormulaPredictorTest {
         BatchItem item1 = batchItem(500, 200);
         BatchItem item2 = batchItem(300, 0);
         BatchItem item3 = batchItem(400, 400);
-        long result = p.predictBatchMs(List.of(item1, item2, item3));
+        long result = (long) p.predictBatchMs(List.of(item1, item2, item3));
 
         assertEquals(800, result);
     }
@@ -212,7 +212,7 @@ class FormulaPredictorTest {
 
         BatchItem item1 = batchItem(30000, 1000); // computeTokens=29000, positive parts=(26952,4424)
         BatchItem item2 = batchItem(4096, 0);     // computeTokens=4096, positive parts=(2048,0)
-        long result = p.predictBatchMs(List.of(item1, item2));
+        long result = (long) p.predictBatchMs(List.of(item1, item2));
 
         assertEquals(37848, result);
     }
@@ -288,7 +288,7 @@ class FormulaPredictorTest {
         for (int i = 0; i < 100; i++) {
             items.add(batchItem(1000, 200));
         }
-        long result = p.predictBatchMs(items);
+        long result = (long) p.predictBatchMs(items);
         assertTrue(result > 0, "Large batch should produce positive prediction");
     }
 

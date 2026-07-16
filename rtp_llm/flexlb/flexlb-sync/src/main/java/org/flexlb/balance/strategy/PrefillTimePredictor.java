@@ -32,7 +32,7 @@ public interface PrefillTimePredictor {
      * @param items batch items (may be empty)
      * @return predicted time in milliseconds (0 for an empty batch)
      */
-    long predictBatchMs(List<BatchItem> items);
+    double predictBatchMs(List<BatchItem> items);
 
     /**
      * Learn from a completed batch's actual execution time.

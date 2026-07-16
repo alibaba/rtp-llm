@@ -275,7 +275,7 @@ class CostBasedPrefillStrategyTest {
         // Single request: inputTokens=1000, hitCacheTokens=200, computeTokens=800, batchSize=1
         // = 10 + 0.5*800 + 0.001*640000 + 0.0005*160000 + 0.2*200 + 5*1
         // = 10 + 400 + 640 + 80 + 40 + 5 = 1175
-        long single = predictor.predictBatchMs(List.of(batchItem(0, 1000, 200)));
+        long single = (long) predictor.predictBatchMs(List.of(batchItem(0, 1000, 200)));
         assertEquals(1175, single);
 
         // Batch of 2: req1=(1000,200) req2=(500,100)
@@ -284,12 +284,12 @@ class CostBasedPrefillStrategyTest {
         // sum(computeTokens * hitCacheTokens)=200000, sum(hitCacheTokens)=300
         // = 10 + 0.5*1200 + 0.001*800000 + 0.0005*200000 + 0.2*300 + 5*2
         // = 10 + 600 + 800 + 100 + 60 + 10 = 1580
-        long batch = predictor.predictBatchMs(List.of(
+        long batch = (long) predictor.predictBatchMs(List.of(
                 batchItem(0, 1000, 200),
                 batchItem(1, 500, 100)));
         assertEquals(1580, batch);
 
-        assertEquals(0, predictor.predictBatchMs(List.of()));
+        assertEquals(0, (long) predictor.predictBatchMs(List.of()));
     }
 
     private WorkerStatus createWorker(String ip, long estimatedWaitMs) {

@@ -145,7 +145,7 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
         picked.add(head);
 
         long sumTokens = head.seqLen();
-        long headPredMs = Math.max(0, predictor.predictBatchMs(picked));
+        long headPredMs = Math.max(0, (long) predictor.predictBatchMs(picked));
         long maxPredMs = headPredMs + Math.max(0, budgetMs);
         int scanned = 0;
 
@@ -166,13 +166,13 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
             List<BatchItem> trial = new ArrayList<>(picked.size() + 1);
             trial.addAll(picked);
             trial.add(c);
-            long trialPredMs = Math.max(0, predictor.predictBatchMs(trial));
+            long trialPredMs = Math.max(0, (long) predictor.predictBatchMs(trial));
             if (trialPredMs <= maxPredMs) {
                 picked.add(c);
                 sumTokens = nextTokens;
             }
         }
-        return new BatchPick(picked, headPredMs, Math.max(headPredMs, predictor.predictBatchMs(picked)));
+        return new BatchPick(picked, headPredMs, Math.max(headPredMs, (long) predictor.predictBatchMs(picked)));
     }
 
     // ==================== Target batch size ====================

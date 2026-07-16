@@ -425,7 +425,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         }
         if (prefillEp != null) {
             PrefillTimePredictor predictor = prefillEp.getPredictor();
-            predMs = predictor.predictBatchMs(dispatchable);
+            predMs = (long) predictor.predictBatchMs(dispatchable);
             prefillEp.commitBatch(batchId, predMs, dispatchable);
         }
 

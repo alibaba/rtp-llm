@@ -112,7 +112,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             if (survivors.isEmpty()) {
                 return null; // removes entry from map
             }
-            long newPredMs = predictor != null ? predictor.predictBatchMs(survivors) : 0;
+            long newPredMs = predictor != null ? (long) predictor.predictBatchMs(survivors) : 0;
             return old.repack(newPredMs, survivors);
         });
         return result;
@@ -168,10 +168,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
 
         // Phase 2: any success request → remove entire batch, report predicted vs actual timing
+        logger.debug("batchesWithSuccess size: {}", batchesWithSuccess.size());
         for (long batchId : batchesWithSuccess) {
             BatchInflight batch = inflightBatches.get(batchId);
             if (batch == null) {
-                logger.warn("batch is null, batchId: {}", batchId);
+                logger.debug("batch is null, batchId: {}", batchId);
                 continue;
             }
             // Defense-in-depth: verify that at least one success task's requestId
@@ -360,6 +361,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * then log and emit prediction-accuracy metrics.
      */
     private void reportBatchCompletion(long batchId, BatchInflight batch, Map<String, TaskInfo> finishedTaskInfo) {
+        logger.debug("run reportBatchCompletion, batchId: {}, finishedTaskInfo size: {}",
+                batchId, finishedTaskInfo.size());
         long actualMs = -1;
         if (finishedTaskInfo != null) {
             for (TaskInfo task : finishedTaskInfo.values()) {
@@ -369,7 +372,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             }
         }
         if (actualMs < 0) {
-            logger.warn("actualMs < 0: {}", actualMs);
+            logger.debug("actualMs < 0: {}", actualMs);
             return;
         }
 
