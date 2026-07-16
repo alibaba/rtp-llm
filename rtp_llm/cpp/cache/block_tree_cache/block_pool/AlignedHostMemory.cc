@@ -15,8 +15,10 @@
 #include <linux/memfd.h>
 #endif
 
+#include "rtp_llm/cpp/cache/NumaMemoryPolicy.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostMemoryRegistration.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 #if USING_CUDA
 #include <ATen/Context.h>
@@ -57,6 +59,18 @@ HostPinMode hostPinMode() {
                                 + "', expected 'register', 'memfd_register', or 'allocator'");
 }
 
+bool shouldInterleaveRegisteredHostBlockPool() {
+    const char* value = std::getenv("RTP_LLM_HOST_BLOCK_POOL_NUMA_POLICY");
+    if (value == nullptr || std::string(value) == "interleave") {
+        return true;
+    }
+    if (std::string(value) == "none") {
+        return false;
+    }
+    throw std::invalid_argument(std::string("invalid RTP_LLM_HOST_BLOCK_POOL_NUMA_POLICY='") + value
+                                + "', expected 'interleave' or 'none'");
+}
+
 void releaseRegisteredCpuMapping(void* ptr, size_t size_bytes) noexcept {
     if (ptr == nullptr) {
         return;
@@ -68,7 +82,8 @@ void releaseRegisteredCpuMapping(void* ptr, size_t size_bytes) noexcept {
     (void)munmap(ptr, size_bytes);
 }
 
-torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool use_memfd, int* shared_memory_fd) {
+torch::Tensor
+allocateRegisteredCpuTensor(size_t size_bytes, bool use_memfd, bool interleave_numa_nodes, int* shared_memory_fd) {
     RTP_LLM_CHECK(shared_memory_fd != nullptr);
     *shared_memory_fd = -1;
     int fd            = -1;
@@ -94,6 +109,30 @@ torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool use_memfd, int
             (void)::close(fd);
         }
         throw std::runtime_error(std::string("host pool mmap failed: ") + std::strerror(errno));
+    }
+    if (interleave_numa_nodes) {
+        const auto numa_result = applyAllowedNumaInterleavePolicy(ptr, size_bytes);
+        if (!numa_result.success) {
+            (void)munmap(ptr, size_bytes);
+            if (fd >= 0) {
+                (void)::close(fd);
+            }
+            throw std::runtime_error("failed to set NUMA policy for registered host block pool: "
+                                     + numa_result.error_message);
+        }
+        std::string nodes;
+        for (const auto node : numa_result.allowed_nodes) {
+            if (!nodes.empty()) {
+                nodes += ",";
+            }
+            nodes += std::to_string(node);
+        }
+        RTP_LLM_LOG_INFO("registered host block pool NUMA policy: applied=%d policy=interleave nodes=%s "
+                         "ptr=%p size=%zu",
+                         numa_result.applied,
+                         nodes.c_str(),
+                         ptr,
+                         size_bytes);
     }
     std::string error_message;
     if (!registerHostMemory(ptr, size_bytes, error_message)) {
@@ -155,8 +194,10 @@ AlignedHostMemory::AlignedHostMemory(size_t usable_bytes, size_t alignment, cons
             if (!hostMemoryRegistrationSupported()) {
                 throw std::runtime_error("registered host block pool is not supported by this device backend");
             }
-            backing_ =
-                allocateRegisteredCpuTensor(backing_bytes_, mode == HostPinMode::MEMFD_REGISTER, &shared_memory_fd_);
+            backing_    = allocateRegisteredCpuTensor(backing_bytes_,
+                                                   mode == HostPinMode::MEMFD_REGISTER,
+                                                   shouldInterleaveRegisteredHostBlockPool(),
+                                                   &shared_memory_fd_);
             registered_ = true;
         }
     } catch (const std::exception& e) {
