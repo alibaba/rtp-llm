@@ -44,6 +44,10 @@ class NewLoaderConfig:
     compute_dtype: torch.dtype = torch.float16
     device: str = "cuda"
     load_method: NewLoaderLoadMethod = NewLoaderLoadMethod.AUTO
+    quant_config: Any = None
+    parallelism_config: Any = None
+    fmha_config: Any = None
+    device_resource_config: Any = None
 
     def __post_init__(self) -> None:
         if isinstance(self.load_method, str):
@@ -79,6 +83,28 @@ class NewLoaderConfig:
         if not isinstance(self.compute_dtype, torch.dtype):
             raise TypeError("compute_dtype must be a torch.dtype")
         _validate_runtime_device(self.device, "device")
+        if self.parallelism_config is not None:
+            for prefix in ("tp", "ep"):
+                configured_size = getattr(
+                    self.parallelism_config, f"{prefix}_size", None
+                )
+                configured_rank = getattr(
+                    self.parallelism_config, f"{prefix}_rank", None
+                )
+                if configured_size is None and configured_rank is None:
+                    continue
+                expected = (
+                    (self.tp_size, self.tp_rank)
+                    if prefix == "tp"
+                    else (self.ep_size, self.ep_rank)
+                )
+                if (configured_size, configured_rank) != expected:
+                    raise ValueError(
+                        f"parallelism_config {prefix.upper()} partition does not "
+                        f"match NewLoaderConfig: parallelism="
+                        f"({configured_rank}, {configured_size}) loader="
+                        f"({expected[1]}, {expected[0]})"
+                    )
 
 
 class NewModelLoader:

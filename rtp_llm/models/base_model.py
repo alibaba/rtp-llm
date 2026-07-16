@@ -20,11 +20,11 @@ from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import (
-    KVCacheSpecType,
     DeviceResourceConfig,
     FMHAConfig,
     HWKernelConfig,
     KVCacheSpecDesc,
+    KVCacheSpecType,
     MlaOpsType,
     MoeConfig,
     ParallelismConfig,
@@ -135,6 +135,12 @@ class BaseModel(object):
             and self.support_cuda_graph() is False
         ):
             raise Exception("current model can't support cuda graph in py model mode")
+
+        if self._use_new_loader():
+            if skip_python_model:
+                raise ValueError("newloader requires the Python model runtime")
+            self._load_with_new_loader()
+            return
 
         self.custom_module = self._init_custom_module()
         self.model_weights_loader = self.create_model_loader()
@@ -311,6 +317,98 @@ class BaseModel(object):
     def _load_custom_module(self):
         if self.custom_module is not None:
             self.custom_module.init(self.weight)
+
+    def _use_new_loader(self) -> bool:
+        return os.environ.get("USE_NEW_LOADER", "0") == "1" or bool(
+            getattr(self.model_config, "use_new_loader", False)
+        )
+
+    def _new_loader_quant_type(self) -> str:
+        quant_config = getattr(self.model_config, "quant_config", None)
+        if quant_config is None:
+            return "none"
+        method = getattr(quant_config, "get_runtime_method_key", None)
+        if not callable(method):
+            method = getattr(quant_config, "get_method", None)
+        if not callable(method):
+            raise TypeError(
+                "model_config.quant_config must define get_method() or "
+                "get_runtime_method_key()"
+            )
+        return method() or "none"
+
+    def _load_with_new_loader(self) -> None:
+        from rtp_llm.models_py.model_loader import (
+            NewLoaderConfig,
+            NewLoaderLoadMethod,
+            NewModelLoader,
+        )
+        from rtp_llm.models_py.quant_methods import QuantizationConfig
+
+        if self.force_cpu_load_weights:
+            raise ValueError(
+                "force_cpu_load_weights is not supported by the Qwen dense "
+                "newloader slice"
+            )
+        if getattr(self.model_config, "lora_infos", None):
+            raise ValueError("LoRA loading is not supported by this newloader slice")
+
+        self.custom_module = self._init_custom_module()
+        if self.custom_module is not None:
+            raise ValueError(
+                "Custom downstream modules are not supported by this newloader slice"
+            )
+
+        configured_method = getattr(self.load_method, "value", self.load_method)
+        load_method = NewLoaderLoadMethod(str(configured_method).lower())
+        device = self._get_device_str()
+        load_config = NewLoaderConfig(
+            tp_size=self.parallelism_config.tp_size,
+            tp_rank=self.parallelism_config.tp_rank,
+            ep_size=getattr(self.parallelism_config, "ep_size", 1),
+            ep_rank=getattr(self.parallelism_config, "ep_rank", 0),
+            compute_dtype=self.model_config.compute_dtype,
+            device=device,
+            load_method=load_method,
+            quant_config=QuantizationConfig(self._new_loader_quant_type()),
+            parallelism_config=self.parallelism_config,
+            fmha_config=self.fmha_config,
+            device_resource_config=self.device_resource_config,
+        )
+        loader = NewModelLoader(
+            model_config=self.model_config,
+            load_config=load_config,
+            model_path=self.model_config.ckpt_path,
+        )
+        self.device = device
+        self.py_model = loader.load()
+        self.weight = self._build_new_loader_weight_view(self.py_model)
+        self.model_weights_loader = loader
+        self.weight_manager = None
+        self.py_eplb = None
+        logging.info("NewModelLoader: Qwen dense model loaded successfully")
+
+    def _build_new_loader_weight_view(self, module: torch.nn.Module) -> ModelWeights:
+        export = getattr(module, "runtime_weight_view", None)
+        if not callable(export):
+            raise TypeError(
+                f"{type(module).__name__} must define runtime_weight_view()"
+            )
+        runtime_weights = export()
+        if not isinstance(runtime_weights, dict) or not runtime_weights:
+            raise TypeError("runtime_weight_view() must return a non-empty dict")
+        weights = ModelWeights(
+            self.model_config.num_layers,
+            self.device,
+            self.model_config.compute_dtype,
+        )
+        for name, tensor in runtime_weights.items():
+            if not isinstance(name, str) or not name:
+                raise TypeError("Runtime weight names must be non-empty strings")
+            if not isinstance(tensor, torch.Tensor):
+                raise TypeError(f"Runtime weight {name!r} must be a torch.Tensor")
+            weights.set_global_weight(name, tensor)
+        return weights
 
     def create_model_loader(self) -> ModelLoader:
         # Create database locally, only used for model loading
