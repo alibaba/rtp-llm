@@ -15,6 +15,7 @@ public interface CacheMatchProvider {
     CacheMatchSource source();
 
     Map<String, Integer> findMatchingEngines(
+            String requestId,
             List<Long> blockCacheKeys,
             RoleType roleType,
             String group);

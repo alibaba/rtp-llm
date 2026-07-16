@@ -37,10 +37,10 @@ class WeightedCacheLoadBalancerTest {
         configService = new ConfigService();
         cacheAwareService = Mockito.mock(CacheAwareService.class);
         Mockito.when(cacheAwareService.findMatchingEngines(
-                        Mockito.anyList(), Mockito.any(), Mockito.nullable(String.class)))
+                        Mockito.anyString(), Mockito.anyList(), Mockito.any(), Mockito.nullable(String.class)))
                 .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL));
         Mockito.when(cacheAwareService.findMatchingEngines(
-                        Mockito.isNull(), Mockito.any(), Mockito.nullable(String.class)))
+                        Mockito.anyString(), Mockito.isNull(), Mockito.any(), Mockito.nullable(String.class)))
                 .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL));
     }
 
@@ -206,7 +206,7 @@ class WeightedCacheLoadBalancerTest {
                 .put("127.0.0.1:8080", worker);
 
         Mockito.when(cacheAwareService.findMatchingEngines(
-                        Mockito.anyList(), Mockito.eq(RoleType.DECODE), Mockito.isNull()))
+                        Mockito.anyString(), Mockito.anyList(), Mockito.eq(RoleType.DECODE), Mockito.isNull()))
                 .thenReturn(new CacheMatchResult(
                         Map.of("127.0.0.1:8080", 4), CacheMatchSource.KVCM, 321));
 

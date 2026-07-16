@@ -91,7 +91,8 @@ class ShortestTTFTStrategyTest {
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.anyList(), Mockito.any(), Mockito.any()))
+        Mockito.when(cacheAwareService.findMatchingEngines(
+                        Mockito.anyString(), Mockito.anyList(), Mockito.any(), Mockito.any()))
                 .thenReturn(new CacheMatchResult(
                         Map.of("127.0.0.2:8080", 3), CacheMatchSource.KVCM, 123));
 

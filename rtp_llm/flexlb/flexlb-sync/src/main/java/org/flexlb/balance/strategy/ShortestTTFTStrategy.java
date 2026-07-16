@@ -126,7 +126,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
 
         // Calculate cache match results for each engine
         CacheMatchResult cacheMatchResult = cacheAwareService.findMatchingEngines(
-                balanceContext.getRequest().getBlockCacheKeys(), roleType, group);
+                requestId, balanceContext.getRequest().getBlockCacheKeys(), roleType, group);
 
         List<ScoredWorker> scoredWorkers = scoreWorkers(availableWorkers, cacheMatchResult.matches(), seqLen);
 

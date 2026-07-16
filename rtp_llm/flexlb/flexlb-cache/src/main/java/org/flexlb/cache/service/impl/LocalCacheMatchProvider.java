@@ -36,6 +36,7 @@ public class LocalCacheMatchProvider implements CacheMatchProvider {
 
     @Override
     public Map<String, Integer> findMatchingEngines(
+            String requestId,
             List<Long> blockCacheKeys,
             RoleType roleType,
             String group) {

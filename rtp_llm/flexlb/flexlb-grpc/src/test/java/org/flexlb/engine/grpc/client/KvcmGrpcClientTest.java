@@ -88,9 +88,9 @@ class KvcmGrpcClientTest {
         assertEquals(List.of(11L, 22L, 33L), request.getBlockCacheKeysList());
         assertEquals(0, request.getMediumCount());
         assertTrue(client.findMatchingEngines(
-                List.of(11L, 22L, 33L), RoleType.PDFUSION, null).isEmpty());
+                "request-null-group", List.of(11L, 22L, 33L), RoleType.PDFUSION, null).isEmpty());
         assertTrue(client.findMatchingEngines(
-                List.of(11L, 22L, 33L), RoleType.PDFUSION, "").isEmpty());
+                "request-empty-group", List.of(11L, 22L, 33L), RoleType.PDFUSION, "").isEmpty());
     }
 
     @Test
@@ -117,7 +117,7 @@ class KvcmGrpcClientTest {
         long deadline = System.currentTimeMillis() + 3000L;
         while (System.currentTimeMillis() < deadline) {
             Map<String, Integer> result = client.findMatchingEngines(
-                    List.of(11L, 22L, 33L), roleType, group);
+                    "request-1", List.of(11L, 22L, 33L), roleType, group);
             if (!result.isEmpty()) {
                 return result;
             }

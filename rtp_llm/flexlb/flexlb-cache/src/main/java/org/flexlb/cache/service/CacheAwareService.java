@@ -17,12 +17,17 @@ public interface CacheAwareService {
     /**
      * Find matching engines
      *
+     * @param requestId      Request ID used to correlate cache queries
      * @param blockCacheKeys List of cache block IDs to query
      * @param roleType       Engine role to query
      * @param group          Engine group to query
      * @return Cache matching result and provider query time
      */
-    CacheMatchResult findMatchingEngines(List<Long> blockCacheKeys, RoleType roleType, String group);
+    CacheMatchResult findMatchingEngines(
+            String requestId,
+            List<Long> blockCacheKeys,
+            RoleType roleType,
+            String group);
     
     /**
      * Update engine block KV cache status

@@ -94,15 +94,18 @@ public class KvcmGrpcClient {
     }
 
     public Map<String, Integer> findMatchingEngines(
+            String requestId,
             List<Long> blockCacheKeys,
             RoleType roleType,
             String group) {
         if (!enabled) {
-            log.warn("Skipping KVCM cache query because the KVCM client is disabled, role={}, group={}",
-                    roleType, group);
+            log.warn("Skipping KVCM cache query because the KVCM client is disabled, "
+                            + "requestId={}, role={}, group={}",
+                    requestId, roleType, group);
             return Collections.emptyMap();
         }
         if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
+            log.debug("Skipping KVCM cache query because blockCacheKeys is empty, requestId={}", requestId);
             return Collections.emptyMap();
         }
 
@@ -113,27 +116,36 @@ public class KvcmGrpcClient {
             namespace = namespaceByRole == null ? null : namespaceByRole.get(roleType);
         }
         if (StringUtils.isBlank(namespace)) {
-            log.warn("Skipping KVCM cache query because namespace is unavailable, role={}, group={}",
-                    roleType, group);
+            log.warn("Skipping KVCM cache query because namespace is unavailable, "
+                            + "requestId={}, role={}, group={}",
+                    requestId, roleType, group);
             requestImmediateRefresh();
             return Collections.emptyMap();
         }
         GrpcTarget currentLeader = leader.get();
         if (currentLeader == null) {
-            log.warn("Skipping KVCM cache query because leader is unavailable, role={}, group={}",
-                    roleType, group);
+            log.warn("Skipping KVCM cache query because leader is unavailable, "
+                            + "requestId={}, role={}, group={}",
+                    requestId, roleType, group);
             requestImmediateRefresh();
             return Collections.emptyMap();
         }
 
+        String traceId = IdUtils.fastUuid();
         GetHostCacheStateRequest request = GetHostCacheStateRequest.newBuilder()
-                .setTraceId(IdUtils.fastUuid())
+                .setTraceId(traceId)
                 // KVCM exposes the cache namespace as instance_id in its protocol.
                 .setInstanceId(namespace)
                 .addAllBlockCacheKeys(blockCacheKeys)
                 .build();
 
         try {
+            if (log.isDebugEnabled()) {
+                log.debug("KVCM GetHostCacheState request: requestId={}, traceId={}, namespace={}, "
+                                + "leader={}, role={}, group={}, blockCount={}, blockCacheKeys={}",
+                        requestId, traceId, namespace, currentLeader, roleType, group,
+                        blockCacheKeys.size(), blockCacheKeys);
+            }
             GetHostCacheStateResponse response = MetaServiceGrpc.newBlockingStub(channelFor(currentLeader))
                     .withDeadlineAfter(config.getRequestTimeoutMs(), TimeUnit.MILLISECONDS)
                     .getHostCacheState(request);
@@ -146,7 +158,12 @@ public class KvcmGrpcClient {
                         "KVCM GetHostCacheState failed, code=" + code
                                 + ", message=" + response.getHeader().getStatus().getMessage());
             }
-            return toPrefixMatchBlocksByHost(response.getHostsList());
+            Map<String, Integer> matches = toPrefixMatchBlocksByHost(response.getHostsList());
+            if (log.isDebugEnabled()) {
+                log.debug("KVCM GetHostCacheState response: requestId={}, traceId={}, matches={}",
+                        requestId, traceId, matches);
+            }
+            return matches;
         } catch (StatusRuntimeException e) {
             requestImmediateRefresh();
             throw e;

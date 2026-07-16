@@ -35,10 +35,11 @@ public class KvcmCacheMatchProvider implements CacheMatchProvider {
 
     @Override
     public Map<String, Integer> findMatchingEngines(
+            String requestId,
             List<Long> blockCacheKeys,
             RoleType roleType,
             String group) {
-        return kvcmGrpcClient.findMatchingEngines(blockCacheKeys, roleType, group);
+        return kvcmGrpcClient.findMatchingEngines(requestId, blockCacheKeys, roleType, group);
     }
 
     @Override

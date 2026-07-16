@@ -55,8 +55,11 @@ public class DefaultCacheAwareService implements CacheAwareService {
     }
     
     @Override
-    public CacheMatchResult findMatchingEngines(List<Long> blockCacheKeys,
-        RoleType roleType, String group) {
+    public CacheMatchResult findMatchingEngines(
+            String requestId,
+            List<Long> blockCacheKeys,
+            RoleType roleType,
+            String group) {
         CacheMatchSource source = cacheMatchProvider.source();
         if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
             return CacheMatchResult.empty(source);
@@ -65,14 +68,14 @@ public class DefaultCacheAwareService implements CacheAwareService {
         long startTime = System.nanoTime();
         try {
             Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> resultMap
-                = cacheMatchProvider.findMatchingEngines(blockCacheKeys, roleType, group);
+                = cacheMatchProvider.findMatchingEngines(requestId, blockCacheKeys, roleType, group);
             long queryTimeUs = (System.nanoTime() - startTime) / 1_000;
             cacheMetricsReporter.reportFindMatchingEnginesRT(roleType, startTime / 1_000, "0");
             return new CacheMatchResult(resultMap, source, queryTimeUs);
         } catch (Exception e) {
             long queryTimeUs = (System.nanoTime() - startTime) / 1_000;
             cacheMetricsReporter.reportFindMatchingEnginesRT(roleType, startTime / 1_000, "1");
-            log.error("Error finding matching engines for role: {}", roleType, e);
+            log.error("Error finding matching engines, requestId={}, role={}", requestId, roleType, e);
             return new CacheMatchResult(Collections.emptyMap(), source, queryTimeUs);
         }
     }
