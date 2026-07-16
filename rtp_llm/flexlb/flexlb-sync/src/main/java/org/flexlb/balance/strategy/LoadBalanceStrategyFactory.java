@@ -20,4 +20,13 @@ public class LoadBalanceStrategyFactory {
         }
         return loadBalancer;
     }
+
+    /**
+     * Test-only: clears the global registry so a test starts from a known-empty state and
+     * neither inherits nor leaks strategy registrations across classes (the map is process-wide
+     * static, so registration order would otherwise make tests order-dependent).
+     */
+    public static void resetForTesting() {
+        loadBalancerFactory.clear();
+    }
 }
