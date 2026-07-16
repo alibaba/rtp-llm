@@ -29,7 +29,8 @@ cc_library(
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
     ] + select({
         "@//:using_rocm": [
-            "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+            "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+            "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
         ],
         "//conditions:default": [
             "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",

@@ -14,7 +14,6 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"

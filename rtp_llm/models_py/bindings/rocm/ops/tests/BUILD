@@ -4,7 +4,8 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 cc_test = cc_test_wrapper
 
 test_deps = [
-    "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+    "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+    "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
     "//rtp_llm/cpp/testing:device_test_utils",
     "//rtp_llm/cpp/testing:base_tests",
 ] + torch_deps()

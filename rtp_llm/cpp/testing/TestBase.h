@@ -13,7 +13,7 @@
 #include <cuda_fp8.h>
 #endif
 
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"

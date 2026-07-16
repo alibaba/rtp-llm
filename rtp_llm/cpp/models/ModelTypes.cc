@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
-
+#include "rtp_llm/cpp/comm/CollectiveBackend.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 namespace rtp_llm {
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config) {

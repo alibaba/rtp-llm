@@ -9,7 +9,6 @@
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "autil/EnvUtil.h"
 
 using namespace rtp_llm;

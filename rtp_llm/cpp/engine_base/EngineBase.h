@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/model_utils/MlaConfig.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 

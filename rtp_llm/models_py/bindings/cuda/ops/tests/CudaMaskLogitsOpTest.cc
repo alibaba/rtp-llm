@@ -1,4 +1,4 @@
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/core/CopyOps.h"
 #include "rtp_llm/models_py/bindings/cuda/ops/tests/CudaTestUtils.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"

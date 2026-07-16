@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/embedding_engine/EmbeddingEngine.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"

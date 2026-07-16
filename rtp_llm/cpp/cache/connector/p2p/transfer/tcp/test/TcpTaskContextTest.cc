@@ -13,7 +13,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpTaskContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/proto/tcp_service.pb.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <torch/torch.h>
 #include <c10/cuda/CUDAStream.h>

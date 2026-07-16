@@ -1,5 +1,10 @@
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/common/WriteCacheStoreOp.h"
+#include "rtp_llm/cpp/core/CopyOps.h"
+#include "rtp_llm/cpp/cache/CacheStoreWriter.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
+#include "rtp_llm/cpp/models/SamplingOps.h"
+#include "rtp_llm/cpp/comm/CollectiveBackend.h"
+#include "rtp_llm/cpp/runtime/Bootstrap.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
@@ -232,10 +237,11 @@ protected:
 };
 
 TEST_F(ExecOpsTest, testInitRuntimeIdempotent) {
-    // Second call should be a no-op (already initialized).
-    auto mla = initRuntime(0, false, false, MlaOpsType::AUTO);
+    auto mla = initRuntime(1, false, true, MlaOpsType::AUTO);
     (void)mla;
     ASSERT_TRUE(isRuntimeInitialized());
+    EXPECT_EQ(getDeviceId(), 0);
+    EXPECT_FALSE(getEnableCommOverlap());
 }
 
 TEST_F(ExecOpsTest, testGetEnableCommOverlap) {

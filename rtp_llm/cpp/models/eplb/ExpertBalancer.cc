@@ -3,8 +3,7 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
-
+#include "rtp_llm/cpp/comm/CollectiveBackend.h"
 using namespace std;
 
 namespace rtp_llm {

@@ -19,7 +19,8 @@
 #endif
 #include "rtp_llm/cpp/models/context_parallel/ContextParallelProcessorBase.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/core/CopyOps.h"
+#include "rtp_llm/cpp/models/eplb/stats/MoeExpertStats.h"
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 
 namespace py = pybind11;

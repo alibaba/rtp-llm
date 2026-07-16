@@ -8,8 +8,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreLoadServiceClosure.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpMessager.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/test/CacheStoreTestBase.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
-
 namespace rtp_llm {
 class MockCacheLoadServiceClosure: public RPCClosure {
 public:
