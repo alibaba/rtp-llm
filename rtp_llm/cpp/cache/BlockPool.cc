@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -27,6 +28,7 @@ namespace rtp_llm {
 namespace {
 
 bool shouldPinHostBlockPool();
+bool shouldRegisterHostBlockPool();
 
 const bool kShouldPinHostBlockPool = []() {
     const char* value = std::getenv("RTP_LLM_PIN_HOST_BLOCK_POOL");
@@ -62,7 +64,11 @@ const char* memoryTypeName(MemoryType memory_type) {
 const char*
 requestedBackingName(AllocationType allocation_type, bool use_pinned_cpu_backing, bool use_cuda_malloc_backing) {
     if (allocation_type == AllocationType::HOST) {
-        return shouldPinHostBlockPool() ? "CPU_PINNED_OR_CPU_FALLBACK" : "CPU";
+        if (!shouldPinHostBlockPool()) {
+            return "CPU";
+        }
+        return shouldRegisterHostBlockPool() ? "CPU_REGISTERED_PRIVATE_OR_CPU_FALLBACK" :
+                                               "CPU_PINNED_ALLOCATOR_OR_CPU_FALLBACK";
     }
     if (use_cuda_malloc_backing) {
         return "GPU_CUDA_MALLOC";
@@ -72,6 +78,44 @@ requestedBackingName(AllocationType allocation_type, bool use_pinned_cpu_backing
 
 bool shouldPinHostBlockPool() {
     return kShouldPinHostBlockPool;
+}
+
+bool shouldRegisterHostBlockPool() {
+    const char* value = std::getenv("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE");
+    if (value == nullptr || std::string(value) == "register") {
+        return true;
+    }
+    if (std::string(value) == "allocator") {
+        return false;
+    }
+    throw std::invalid_argument(std::string("invalid RTP_LLM_HOST_BLOCK_POOL_PIN_MODE='") + value
+                                + "', expected 'register' or 'allocator'");
+}
+
+torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes) {
+#if USING_CUDA
+    void* ptr = mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (ptr == MAP_FAILED) {
+        throw std::runtime_error(std::string("anonymous mmap failed: ") + std::strerror(errno));
+    }
+    const auto err = cudaHostRegister(ptr, size_bytes, cudaHostRegisterDefault);
+    if (err != cudaSuccess) {
+        (void)munmap(ptr, size_bytes);
+        throw std::runtime_error(std::string("cudaHostRegister failed: ") + cudaGetErrorString(err));
+    }
+    auto deleter = [size_bytes](void* registered_ptr) {
+        if (registered_ptr != nullptr) {
+            (void)cudaHostUnregister(registered_ptr);
+            (void)munmap(registered_ptr, size_bytes);
+        }
+    };
+    return torch::from_blob(ptr,
+                            {static_cast<int64_t>(size_bytes)},
+                            std::move(deleter),
+                            torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
+#else
+    throw std::runtime_error("registered CPU block pool requested but this binary was not built with CUDA");
+#endif
 }
 
 void markHostBlockPoolDontDump(void* ptr, size_t size) {
@@ -146,23 +190,35 @@ void BlockPool::validateConfig() const {
 }
 
 void BlockPool::initializeCacheBuffer() {
+    cache_buffer_registered_host_ = false;
     if (allocation_type_ == AllocationType::HOST) {
-        auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
-                                       torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
         if (shouldPinHostBlockPool()) {
+            // Parse the mode outside the allocation fallback. Invalid configuration
+            // must fail fast instead of silently changing pinned memory to pageable.
+            const bool use_registered_host = shouldRegisterHostBlockPool();
             try {
-                cache_aligned_buffer_ = cpu_buffer.pin_memory();
+                if (use_registered_host) {
+                    cache_aligned_buffer_         = allocateRegisteredCpuTensor(config_.total_size_bytes);
+                    cache_buffer_registered_host_ = true;
+                } else {
+                    cache_aligned_buffer_ =
+                        torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
+                                     torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU))
+                            .pin_memory();
+                }
             } catch (const std::exception& e) {
                 RTP_LLM_LOG_WARNING(
                     "pin host block pool failed, fallback to pageable CPU memory, total_size=%zu bytes, error=%s",
                     config_.total_size_bytes,
                     e.what());
-                cache_aligned_buffer_ = std::move(cpu_buffer);
+                cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
+                                                     torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
             }
         } else {
             RTP_LLM_LOG_INFO("host block pool uses pageable CPU memory, total_size=%zu bytes",
                              config_.total_size_bytes);
-            cache_aligned_buffer_ = std::move(cpu_buffer);
+            cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
+                                                 torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
         }
         RTP_LLM_LOG_INFO("mark host block pool dont dump, ptr=%p, size=%zu",
                          cache_aligned_buffer_.data_ptr(),
@@ -179,7 +235,7 @@ void BlockPool::initializeCacheBuffer() {
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
     const bool is_cuda   = cache_aligned_buffer_.is_cuda();
-    const bool is_pinned = !is_cuda && cache_aligned_buffer_.is_pinned();
+    const bool is_pinned = !is_cuda && (cache_buffer_registered_host_ || cache_aligned_buffer_.is_pinned());
     // REBASE CONFLICT CONTEXT(2413e8e03): keep the new base's pool-name/MB diagnostics
     // and include the source branch's cudaMalloc backing in requestedBackingName().
     static constexpr double kBytesPerMB = 1024.0 * 1024.0;
@@ -722,6 +778,9 @@ BlockPool::convertIndexToBuffer(int layer_id, int block_id, int partition_count,
 MemoryType BlockPool::where() const {
     if (cache_aligned_buffer_.is_cuda()) {
         return MemoryType::MEMORY_GPU;
+    }
+    if (cache_buffer_registered_host_) {
+        return MemoryType::MEMORY_CPU_PINNED;
     }
     return cache_aligned_buffer_.is_pinned() ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_CPU;
 }

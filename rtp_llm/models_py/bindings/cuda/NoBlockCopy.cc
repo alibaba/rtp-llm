@@ -4,7 +4,9 @@
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <limits>
 #include <cuda_runtime.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -127,6 +129,31 @@ void releaseMetadataScratch(StagedMemoryCopyScratch& scratch) {
     scratch.meta_capacity = 0;
 }
 
+size_t nextHostScratchCapacity(size_t current_capacity, size_t required_capacity) {
+    constexpr size_t kMiB            = 1024ULL * 1024ULL;
+    constexpr size_t kMaxGrowthBytes = 64ULL * kMiB;
+    constexpr size_t kMinGrowthBytes = 1ULL * kMiB;
+    constexpr size_t kCapacityAlign  = 1ULL * kMiB;
+
+    if (required_capacity <= current_capacity) {
+        return current_capacity;
+    }
+
+    size_t target_capacity = required_capacity;
+    if (current_capacity == 0) {
+        target_capacity = std::max(target_capacity, kMinGrowthBytes);
+    } else {
+        const size_t growth = std::clamp(current_capacity / 2, kMinGrowthBytes, kMaxGrowthBytes);
+        if (current_capacity <= std::numeric_limits<size_t>::max() - growth) {
+            target_capacity = std::max(target_capacity, current_capacity + growth);
+        }
+    }
+    if (target_capacity > std::numeric_limits<size_t>::max() - (kCapacityAlign - 1)) {
+        return required_capacity;
+    }
+    return (target_capacity + kCapacityAlign - 1) / kCapacityAlign * kCapacityAlign;
+}
+
 bool ensureStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch,
                                    int                      device_index,
                                    size_t                   host_bytes,
@@ -138,18 +165,46 @@ bool ensureStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch,
     scratch.device_index = device_index;
 
     if (scratch.host_capacity < host_bytes) {
-        if (scratch.host_staging != nullptr) {
-            (void)cudaFreeHost(scratch.host_staging);
-            scratch.host_staging = nullptr;
-            scratch.host_capacity = 0;
-        }
-        auto err = cudaHostAlloc(&scratch.host_staging, host_bytes, cudaHostAllocDefault);
+        const size_t new_capacity = nextHostScratchCapacity(scratch.host_capacity, host_bytes);
+        void*        new_staging  = nullptr;
+        const auto   alloc_begin  = std::chrono::steady_clock::now();
+        auto         err          = cudaHostAlloc(&new_staging, new_capacity, cudaHostAllocDefault);
+        const auto   alloc_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - alloc_begin)
+                .count();
         if (err != cudaSuccess) {
-            RTP_LLM_LOG_WARNING("execStagedMemoryCopy failed to allocate pinned host staging: %s",
-                                cudaGetErrorString(err));
+            RTP_LLM_LOG_WARNING(
+                "execStagedMemoryCopy failed to grow pinned host staging, requested=%zu old_capacity=%zu "
+                "target_capacity=%zu cost_us=%ld error=%s",
+                host_bytes,
+                scratch.host_capacity,
+                new_capacity,
+                alloc_us,
+                cudaGetErrorString(err));
             return false;
         }
-        scratch.host_capacity = host_bytes;
+        void*        old_staging  = scratch.host_staging;
+        const size_t old_capacity = scratch.host_capacity;
+        scratch.host_staging      = new_staging;
+        scratch.host_capacity     = new_capacity;
+        ++scratch.host_allocation_count;
+        if (old_staging != nullptr) {
+            const auto free_err = cudaFreeHost(old_staging);
+            if (free_err != cudaSuccess) {
+                RTP_LLM_LOG_WARNING(
+                    "execStagedMemoryCopy failed to release old pinned host staging, old_capacity=%zu error=%s",
+                    old_capacity,
+                    cudaGetErrorString(free_err));
+            }
+        }
+        RTP_LLM_LOG_INFO(
+            "execStagedMemoryCopy grew pinned host staging, requested=%zu old_capacity=%zu new_capacity=%zu "
+            "allocation_count=%zu cost_us=%ld",
+            host_bytes,
+            old_capacity,
+            new_capacity,
+            scratch.host_allocation_count,
+            alloc_us);
     }
 
     if (scratch.device_capacity < host_bytes) {
@@ -157,8 +212,7 @@ bool ensureStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch,
         auto err = cudaMalloc(&scratch.device_staging, host_bytes);
         if (err != cudaSuccess) {
             scratch.device_capacity = 0;
-            RTP_LLM_LOG_WARNING("execStagedMemoryCopy failed to allocate device staging: %s",
-                                cudaGetErrorString(err));
+            RTP_LLM_LOG_WARNING("execStagedMemoryCopy failed to allocate device staging: %s", cudaGetErrorString(err));
             return false;
         }
         scratch.device_capacity = host_bytes;
@@ -175,8 +229,7 @@ bool ensureStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch,
         }
         if (err != cudaSuccess) {
             releaseMetadataScratch(scratch);
-            RTP_LLM_LOG_WARNING("execStagedMemoryCopy failed to allocate device metadata: %s",
-                                cudaGetErrorString(err));
+            RTP_LLM_LOG_WARNING("execStagedMemoryCopy failed to allocate device metadata: %s", cudaGetErrorString(err));
             return false;
         }
         scratch.meta_capacity = tile_num;
@@ -195,10 +248,11 @@ void releaseStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch) {
     }
     releaseDevicePointer(scratch.device_staging);
     releaseMetadataScratch(scratch);
-    scratch.host_staging    = nullptr;
-    scratch.host_capacity   = 0;
-    scratch.device_capacity = 0;
-    scratch.device_index    = -1;
+    scratch.host_staging          = nullptr;
+    scratch.host_capacity         = 0;
+    scratch.host_allocation_count = 0;
+    scratch.device_capacity       = 0;
+    scratch.device_index          = -1;
 }
 
 void execNoBlockCopy(const MultiCopyParams& params) {
@@ -258,7 +312,7 @@ bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
     check_cuda_value(cudaSetDevice(params.device_index));
     auto stream = getNoBlockCopyStream().stream();
 
-    const size_t tile_num = params.tiles.size();
+    const size_t             tile_num = params.tiles.size();
     std::vector<void*>       dsts;
     std::vector<const void*> srcs;
     std::vector<size_t>      sizes;
@@ -289,7 +343,7 @@ bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
         mutable_srcs.push_back(const_cast<void*>(src));
     }
     size_t fail_idx = 0;
-    auto   err = cudaMemcpyBatchAsync(
+    auto   err      = cudaMemcpyBatchAsync(
         dsts.data(), mutable_srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, &fail_idx, stream);
 #endif
     if (err == cudaSuccess) {
@@ -356,8 +410,8 @@ bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopy
     }
 
     StagedMemoryCopyScratch local_scratch;
-    auto*                   work_scratch = scratch != nullptr ? scratch : &local_scratch;
-    auto cleanup_local_scratch = [&]() {
+    auto*                   work_scratch          = scratch != nullptr ? scratch : &local_scratch;
+    auto                    cleanup_local_scratch = [&]() {
         if (scratch == nullptr) {
             releaseStagedMemoryCopyScratch(local_scratch);
         }
@@ -372,11 +426,8 @@ bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopy
     auto err = cudaMemcpyAsync(
         work_scratch->device_ptrs, h_ptrs.data(), tile_num * sizeof(void*), cudaMemcpyHostToDevice, stream);
     if (err == cudaSuccess) {
-        err = cudaMemcpyAsync(work_scratch->device_offsets,
-                              h_offsets.data(),
-                              tile_num * sizeof(size_t),
-                              cudaMemcpyHostToDevice,
-                              stream);
+        err = cudaMemcpyAsync(
+            work_scratch->device_offsets, h_offsets.data(), tile_num * sizeof(size_t), cudaMemcpyHostToDevice, stream);
     }
     if (err == cudaSuccess) {
         err = cudaMemcpyAsync(
