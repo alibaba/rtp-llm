@@ -5,7 +5,6 @@ import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.io.buffer.DataBuffer;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.client.reactive.ClientHttpRequest;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.BodyInserter;
@@ -17,32 +16,11 @@ import reactor.core.publisher.Mono;
 
 import java.net.URI;
 import java.time.Duration;
-import java.util.Set;
-import java.util.TreeSet;
 
 @Component
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
 public class PassthroughClient {
 
-    /**
-     * Hop-by-hop headers from RFC 7230 §6.1 plus framing headers WebClient must compute itself
-     * for the outbound connection. Forwarding any of these from the inbound request — or back on
-     * the response — corrupts the new connection: an inbound {@code Transfer-Encoding: chunked}
-     * double-frames the body WebClient is already about to chunk-encode; an inbound {@code Host}
-     * routes to whatever the original client put there; {@code Proxy-Authorization} would be
-     * relayed downstream against the original intent. Comparison is case-insensitive.
-     */
-    private static final Set<String> HOP_BY_HOP = caseInsensitiveSet(
-            "connection",
-            "keep-alive",
-            "proxy-authenticate",
-            "proxy-authorization",
-            "te",
-            "trailer",
-            "transfer-encoding",
-            "upgrade",
-            "host",
-            "content-length");
 
     /**
      * SSE body-stream inactivity cap: {@code Flux#timeout(Duration)} bounds the gap between
@@ -117,7 +95,8 @@ public class PassthroughClient {
                     URI target = URI.create(feBaseUrl + pathAndQuery);
                     return webClient.method(request.method())
                             .uri(target)
-                            .headers(h -> copyEndToEndHeaders(request.headers().asHttpHeaders(), h))
+                            .headers(h -> DispatcherHeaders.copyEndToEnd(
+                                    request.headers().asHttpHeaders(), h, DispatcherHeaders.HOP_BY_HOP))
                             .body(bodyInserter)
                             .exchange()
                             .timeout(headersTimeout)
@@ -128,7 +107,8 @@ public class PassthroughClient {
                                 metricsReporter.reportRequest("passthrough", metricPathTag(fePath),
                                         status, pv.getCostMs());
                                 return ServerResponse.status(status)
-                                        .headers(h -> copyEndToEndHeaders(clientResponse.headers().asHttpHeaders(), h))
+                                        .headers(h -> DispatcherHeaders.copyEndToEnd(
+                                                clientResponse.headers().asHttpHeaders(), h, DispatcherHeaders.HOP_BY_HOP))
                                         .body(BodyInserters.fromDataBuffers(
                                                 clientResponse.bodyToFlux(DataBuffer.class)
                                                         .timeout(Duration.ofMillis(STREAM_TIMEOUT_MS))))
@@ -143,8 +123,10 @@ public class PassthroughClient {
                     pv.emit();
                     metricsReporter.reportRequest("passthrough", metricPathTag(fePath), 502, pv.getCostMs());
                 })
+                // Stable, non-revealing text: the exception message can carry the FE address the
+                // client has no business learning. Full reason is in the WARN above and pv.log.
                 .onErrorResume(e -> DispatcherResponses.error(
-                        502, "passthrough_failed", String.valueOf(e.getMessage())));
+                        502, "passthrough_failed", "upstream request failed"));
     }
 
     /**
@@ -168,18 +150,4 @@ public class PassthroughClient {
         return BatchEndpointSpec.BY_PATH.containsKey(fePath) ? fePath : "other";
     }
 
-    private static void copyEndToEndHeaders(HttpHeaders source, HttpHeaders sink) {
-        source.forEach((name, values) -> {
-            if (!HOP_BY_HOP.contains(name)) {
-                sink.addAll(name, values);
-            }
-        });
-    }
-
-    /** Case-insensitive membership without the per-header {@code toLowerCase} allocation. */
-    private static Set<String> caseInsensitiveSet(String... names) {
-        Set<String> set = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-        set.addAll(java.util.Arrays.asList(names));
-        return java.util.Collections.unmodifiableSet(set);
-    }
 }

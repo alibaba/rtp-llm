@@ -7,6 +7,7 @@ import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.route.Endpoint;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.service.address.WorkerAddressService;
@@ -18,6 +19,7 @@ import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.util.IdUtils;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
+import org.flexlb.util.RateLimitedWarn;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -38,6 +40,10 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
     private final List<String> modelNames = new ArrayList<>();
     /** Last successful discovery time per {@code model/role}, shared across this bean's per-round runners. */
     private final Map<String, Long> lastDiscoverySuccessUs = new ConcurrentHashMap<>();
+    /** One in-flight sync round per {@code model/role} — see {@link #submitRound}. */
+    private final SingleFlightGate syncGate = new SingleFlightGate();
+    /** Ticks are 20ms apart; a slow-discovery deployment would otherwise flood the log. */
+    private final RateLimitedWarn slowRoundWarn = new RateLimitedWarn(1, TimeUnit.SECONDS);
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService localKvCacheAwareManager;
     private final long syncRequestTimeoutMs;
@@ -105,24 +111,47 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
 
                 for (RoleType roleType : roleTypes) {
                     List<Endpoint> roleEndpoints = serviceRoute.getRoleEndpoints(roleType);
-                    if (roleEndpoints != null) {
-                        engineSyncExecutor.submit(new EngineSyncRunner(
-                                modelName, modelWorkerStatus.getRoleStatusMap(roleType),
-                                workerAddressService, statusCheckExecutor, engineHealthReporter,
-                                engineGrpcService, roleType, localKvCacheAwareManager,
-                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
-                                flexlbConfig.getEngineType(), flexlbConfig.getDiscoveryFailureGraceMs(),
-                                lastDiscoverySuccessUs
-                        ));
-                    } else {
+                    if (roleEndpoints == null) {
                         logger.error("roleEndpoints is null, by roleType : {}", roleType);
+                        continue;
                     }
+                    submitRound(modelName, roleType, modelWorkerStatus.getRoleStatusMap(roleType));
                 }
             }
         } catch (Throwable e) {
             // Throwable, not Exception: an Error escaping a scheduleAtFixedRate task cancels
             // all future executions silently — the sync loop must survive anything.
             logger.error("sync engine prefill status error", e);
+        }
+    }
+
+    /**
+     * Submit one sync round for {@code model/role}, but only if the previous round for that key has
+     * finished.
+     *
+     * <p>The scheduler ticks every {@code syncEngineStatusInterval} (default 20ms) and this method
+     * only hands work to {@link #engineSyncExecutor} before returning, so without this gate the
+     * rounds themselves overlap: a discovery lookup is bounded at 500ms, which is 25 ticks. Rounds
+     * are not commutative — each applies its own snapshot as the truth (for EMBEDDING it marks
+     * workers dead/alive purely from discovery presence), so a slow round finishing after a fast
+     * one silently reverts the newer membership. Skipping the tick keeps exactly one round in
+     * flight per key, which is what {@code scheduleWithFixedDelay} would give us if the work were
+     * done inline.
+     */
+    private void submitRound(String modelName, RoleType roleType, Map<String, WorkerStatus> roleStatusMap) {
+        String key = modelName + "/" + roleType;
+        boolean submitted = syncGate.submit(key, engineSyncExecutor, () -> new EngineSyncRunner(
+                modelName, roleStatusMap,
+                workerAddressService, statusCheckExecutor, engineHealthReporter,
+                engineGrpcService, roleType, localKvCacheAwareManager,
+                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                flexlbConfig.getEngineType(), flexlbConfig.getDiscoveryFailureGraceMs(),
+                lastDiscoverySuccessUs
+        ).run());
+        if (!submitted) {
+            // Discovery is slower than the tick — worth surfacing, but at 20ms ticks it must not
+            // flood the log.
+            slowRoundWarn.warn("sync round still in flight, skipping tick: key={}", key);
         }
     }
 }

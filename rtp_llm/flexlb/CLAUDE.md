@@ -360,7 +360,7 @@ A non-blank `fePoolServiceId` is the enable signal (there is no separate `enable
 - `batchTimeoutMs`: per sub-call wait for FE response headers (default 30000). For non-streaming generation endpoints FE sends headers only after the whole chunk finishes generating, so this must cover one chunk's full generation time; tune down for embedding-only deployments. The body read is separately capped at `batchTimeoutMs + bodyReadMarginMs`, and the passthrough path bounds its headers wait with the same knob (its body stream has its own 10-min inactivity cap). The headers window starts at subscribe, so it also includes connection acquisition and inbound request-body upload time — relevant on the passthrough path, whose catch-all traffic can carry large bodies. A non-streaming passthrough request whose TTFB exceeds `batchTimeoutMs` (e.g. a single long generation) gets a 502: deployments with such traffic must raise `batchTimeoutMs` or have those clients hit FE directly. For the same reason, before tuning down for an embedding-only deployment, verify the passthrough traffic's TTFB also fits the lower value.
 - `bodyReadMarginMs`: extra budget past `batchTimeoutMs` for reading the FE response body (default 30000). `batchTimeoutMs` only bounds time-to-headers; this caps the whole call so an FE that sends headers and then stalls mid-body cannot pin the request and its pooled connection forever. Raise it for FE fleets on slow links.
 - `probePath`: FE liveness probe path (`/frontend_health` for rtp_llm, `/health` for vLLM).
-- `preAssignBe`: BE pre-assignment toggle (see Known limits below).
+- `preAssignBe`: BE pre-assignment toggle (see Known limits below). Note `/dispatcher/_dryrun` ignores this default and never pre-assigns unless called with `?pre_assign=true`: resolving BE targets advances master's round-robin cursor, and a diagnostic must not perturb live distribution.
 
 **FE pool and empty discovery:** an empty discovery snapshot never displaces a non-empty FE pool — it is indistinguishable from a swallowed lookup failure, and accepting it would drop every FE at once and fail 100% of batch traffic. Liveness is not discovery's job here: `FeHealthChecker` probes the known FEs directly, so a fleet that genuinely went away is taken out of rotation by the probe. A cold pool (nothing known yet) still accepts an empty snapshot, and any non-empty answer replaces the retained one.
 
@@ -375,6 +375,10 @@ Loading order: defaults → `DISPATCH_CONFIG` JSON → per-field `DISPATCH_*` en
 | `/v1/batch/chat/completions` | `requests` | `responses` | `{index, error: {code, message}}` | — |
 | `/v1/embeddings` | `input` (when list) | `data` | `{index, embedding: null, error: <reason>}` | `data[i].index` renumbered to absolute offset; `usage.{prompt_tokens, total_tokens}` summed across successful sub-bodies |
 
+**Header & query relay:** both paths relay the caller's end-to-end headers (hop-by-hop filtered per RFC 7230 §6.1, shared via `DispatcherHeaders`) and the original query string, so a request does not lose its `Authorization`/tenant/tracing context merely because it was batch-shaped and took the split path. The fanout path additionally drops `accept-encoding` (it parses each FE body, so a gzipped response would break the parse) and `content-type` (each chunk body is re-serialized as JSON).
+
+**Client-facing error text:** failure reasons in the response body are a bounded set — `fe_client_error`, `fe_server_error`, `fe_unavailable`, `malformed_sub_batch` — never the raw exception text, which embeds the FE address. Full detail goes to the rate-limited WARN and `pv.log`.
+
 **Partial-failure contract:**
 - HTTP 200 on full success or any partial success.
 - HTTP 500 only when **every** sub-batch failed — except when every FE-reachable sub-batch failed with the *same* FE 4xx (a client error), in which case that shared 4xx is returned instead of masking it as 500. Transport/pick failures carry no HTTP status and don't vote, so they can't hide a 4xx the reachable chunks agreed on.
@@ -388,7 +392,6 @@ Loading order: defaults → `DISPATCH_CONFIG` JSON → per-field `DISPATCH_*` en
 - Direct-to-FE remains the bypass for any client that can't change URLs.
 
 **Known limits (deferred):**
-- Query strings are not forwarded on the split fanout path (chunk sub-calls hit `spec.path` only); the passthrough path forwards them verbatim.
 - Bare `POST /dispatcher` (no trailing slash) does not match the root batch route; it is passthrough-forwarded with the path normalized to `/`, i.e. it reaches one FE unsplit.
 - Bare `POST /` aliases `/batch_infer`: it batches only when the body carries `prompt_batch` (rtp_llm FE historically exposes batch generation on the root path with the same wire shape). The `prompt: [...]` variant is NOT batched (known FE-side footgun) — such requests fall through to passthrough-forward to a single FE.
 - `request_id` set by `frontend_server.py` overwrites any upstream id — dispatcher to FE trace linkage is broken. Tracked in `project_frontend_request_id_overwrite.md`.

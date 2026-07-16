@@ -122,8 +122,26 @@ public final class ResponseMerger {
         return common == -1 ? 500 : common;
     }
 
+    /**
+     * Client-facing failure reason: a stable, bounded code — never the raw exception text.
+     * {@code SubBatchResult#reason} carries the underlying {@code SimpleName: message}, which for a
+     * transport failure embeds the FE address reactor-netty was talking to; echoing it would hand
+     * an external caller the internal FE topology and would drift with the HTTP client library.
+     * Operators get the full detail from the rate-limited WARN in {@link FanoutService}, keyed by
+     * the same chunk.
+     */
     private static String reasonFor(SubBatchResult s) {
-        return s.success() ? "malformed_sub_batch" : s.reason();
+        if (s.success()) {
+            return "malformed_sub_batch";
+        }
+        int st = s.feStatus();
+        if (st >= 400 && st < 500) {
+            return "fe_client_error";
+        }
+        if (st >= 500) {
+            return "fe_server_error";
+        }
+        return "fe_unavailable";
     }
 
     static boolean wellFormed(SubBatchResult s, BatchEndpointSpec spec) {

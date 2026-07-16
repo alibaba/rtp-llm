@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -51,6 +52,12 @@ class BatchHandlerPvTest {
         when(cfg.isPreAssignBe()).thenReturn(false);
         lenient().when(batchScheduleClient.requestTargets(org.mockito.ArgumentMatchers.anyInt()))
                 .thenReturn(Mono.just(List.of()));
+        // BatchHandler now relays the caller's end-to-end headers + query to each chunk.
+        ServerRequest.Headers headers = mock(ServerRequest.Headers.class);
+        lenient().when(headers.asHttpHeaders()).thenReturn(new org.springframework.http.HttpHeaders());
+        lenient().when(serverRequest.headers()).thenReturn(headers);
+        lenient().when(serverRequest.uri()).thenReturn(java.net.URI.create("http://master/dispatcher/batch_infer"));
+
 
         pvLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");
         originalPvLevel = pvLogger.getLevel();
@@ -80,7 +87,7 @@ class BatchHandlerPvTest {
         okArr.add("r2");
         okBody.put(spec.getResponseArrayField(), okArr);
 
-        when(fanoutService.dispatchChunks(anyString(), anyList(), any()))
+        when(fanoutService.dispatchChunks(anyString(), anyList(), any(), any(), any()))
                 .thenReturn(Mono.just(List.of(
                         SubBatchResult.ok(okBody, 3, 0),
                         SubBatchResult.failed(2, 3, "fe_http_500"))));

@@ -43,7 +43,7 @@ class EmbeddingMergerTest {
         assertEquals(1, data.getJSONObject(1).getIntValue("index"));
         assertEquals(2, data.getJSONObject(2).getIntValue("index"));
         assertEquals(3, data.getJSONObject(3).getIntValue("index"));
-        assertEquals("no_route", data.getJSONObject(2).getString("error"));
+        assertEquals("fe_unavailable", data.getJSONObject(2).getString("error"));
         JSONObject usage = merged.body().getJSONObject("usage");
         assertEquals(3, usage.getLongValue("prompt_tokens"));
         assertEquals(5, usage.getLongValue("total_tokens"));

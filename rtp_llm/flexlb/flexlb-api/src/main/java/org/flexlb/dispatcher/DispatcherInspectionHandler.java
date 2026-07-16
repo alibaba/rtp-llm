@@ -23,11 +23,12 @@ import java.util.Optional;
  *       counts. No FE traffic, no master traffic, no side effects.</li>
  *   <li><b>{@link #dryRun}</b> — {@code POST /dispatcher/_dryrun/<spec.path>}. Runs the real
  *       chunk-assembly pipeline ({@link BatchChunkAssembler}) against the request body and
- *       returns the resulting sub-batch bodies as JSON instead of fanning out. With
- *       {@code ?pre_assign=true} (or with config default true) it does call
- *       {@link BatchScheduleClient} for real BE resolution — advancing master's batch RR cursor
- *       just like a production request would, intentional so the dry-run reflects production wire
- *       shape rather than a fake-target reconstruction.</li>
+ *       returns the resulting sub-batch bodies as JSON instead of fanning out. Side-effect-free
+ *       by default: BE resolution is skipped, so no master traffic and no RR-cursor movement.
+ *       Only an explicit {@code ?pre_assign=true} calls {@link BatchScheduleClient} for real BE
+ *       resolution — which <em>does</em> advance master's batch RR cursor exactly like a
+ *       production request, so use it only when you need the production wire shape and can
+ *       accept perturbing live distribution.</li>
  * </ul>
  *
  * <p>Both endpoints share the dispatcher's enable gate ({@code dispatch.fe-pool-service-id}).
@@ -101,9 +102,9 @@ public class DispatcherInspectionHandler {
     }
 
     private Mono<ServerResponse> handleDryRunException(Throwable e) {
-        String reason = DispatcherResponses.briefReason(e);
-        Logger.warn("dispatcher dry-run unexpected error: {}", reason);
-        return DispatcherResponses.error(500, "dryrun_internal_error", reason);
+        // Detail to the log only — the exception text can name internal hosts.
+        Logger.warn("dispatcher dry-run unexpected error: {}", DispatcherResponses.briefReason(e));
+        return DispatcherResponses.error(500, "dryrun_internal_error", "dry-run failed");
     }
 
     private String extractFePath(ServerRequest request) {
@@ -112,17 +113,17 @@ public class DispatcherInspectionHandler {
         return tail.isEmpty() ? null : tail;
     }
 
+    /**
+     * Dry-run is side-effect-free by default: resolving BE targets calls master {@code
+     * /batch_schedule}, which advances the round-robin cursor and so perturbs the distribution of
+     * real traffic. A diagnostic must not do that unless the caller explicitly asks — hence the
+     * default is {@code false} regardless of {@link DispatchConfig#isPreAssignBe()}, and only an
+     * explicit {@code ?pre_assign=true} opts into the production-accurate (state-advancing) run.
+     */
     private boolean resolvePreAssign(ServerRequest request) {
-        Optional<String> q = request.queryParam("pre_assign");
-        if (q.isEmpty()) {
-            return cfg.isPreAssignBe();
-        }
-        String v = q.get().trim().toLowerCase();
-        return switch (v) {
-            case "true" -> true;
-            case "false" -> false;
-            default -> cfg.isPreAssignBe();
-        };
+        return request.queryParam("pre_assign")
+                .map(v -> "true".equals(v.trim().toLowerCase()))
+                .orElse(false);
     }
 
     private Mono<ServerResponse> buildDryRunResponse(BatchEndpointSpec spec, JSONObject envelope,
