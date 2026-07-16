@@ -1,9 +1,11 @@
+import gc
 import json
 import os
 import sys
 import tempfile
 import threading
 import time
+import weakref
 from concurrent.futures import Future
 from typing import Any, List, Optional
 from unittest import TestCase, main, mock
@@ -14,6 +16,7 @@ from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.multimodal.mm_profiler import MMProfiler
 from rtp_llm.multimodal.mm_scheduler import (
     MMScheduler,
+    MMSchedulerExecutionError,
     MMSchedulerOverloadError,
     OutputCountMismatchError,
 )
@@ -72,6 +75,29 @@ class _FakeMMPart:
         if self.short_over is not None and len(data_list) > self.short_over:
             n = len(data_list) - 1
         return [torch.zeros(1) for _ in range(n)]
+
+
+class _OOMOnceMMPart(_FakeMMPart):
+    """First forward OOMs with a tensor reachable only from its traceback."""
+
+    def __init__(self):
+        super().__init__()
+        self._fail_next = True
+        self.failed_intermediate_ref = None
+
+    def batched_embedding(
+        self, data_list: List[Any], mm_types: List[MMUrlType], **kwargs
+    ) -> List[torch.Tensor]:
+        with self._lock:
+            self.calls.append(len(data_list))
+        self.forward_entered.set()
+        if self._fail_next:
+            self._fail_next = False
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            failed_intermediate = torch.zeros(1, device=device)
+            self.failed_intermediate_ref = weakref.ref(failed_intermediate)
+            raise torch.cuda.OutOfMemoryError("fake first-batch CUDA OOM")
+        return [torch.zeros(1) for _ in data_list]
 
 
 class _FakeWorkItem:
@@ -281,14 +307,71 @@ class MMSchedulerTest(TestCase):
             sched.close()
 
         # All-or-nothing: the combined forward OOMs and the whole batch is
-        # discarded — no per-request retry runs. submit_and_wait wraps the cause
-        # in a RuntimeError, with the typed OOM preserved as __cause__.
-        self.assertTrue(all(isinstance(e, RuntimeError) for e in errors), errors)
+        # discarded — no per-request retry runs. Futures retain only lightweight
+        # failure metadata, never the original OOM or its traceback.
         self.assertTrue(
-            all(isinstance(e.__cause__, torch.cuda.OutOfMemoryError) for e in errors),
+            all(isinstance(e, MMSchedulerExecutionError) for e in errors), errors
+        )
+        self.assertTrue(
+            all(
+                e.source_type == torch.cuda.OutOfMemoryError.__name__
+                for e in errors
+            ),
             errors,
         )
+        self.assertTrue(all(e.is_oom for e in errors), errors)
+        self.assertTrue(all(e.__cause__ is None for e in errors), errors)
         self.assertEqual(fake.calls, [3])  # the failed combined forward only
+
+    def test_oom_releases_failed_forward_before_smaller_batch(self):
+        """An OOM traceback must not retain its tensor into the next forward."""
+        fake = _OOMOnceMMPart()
+        sched = MMScheduler(
+            fake, batch_wait_ms=300, max_batch_size=8, max_batch_images=10**9
+        )
+        cleanup_order = []
+        real_gc_collect = gc.collect
+
+        def collect():
+            cleanup_order.append("gc")
+            return real_gc_collect()
+
+        def empty_cache():
+            cleanup_order.append("empty_cache")
+
+        try:
+            with mock.patch(
+                "rtp_llm.multimodal.mm_scheduler.gc.collect", side_effect=collect
+            ), mock.patch(
+                "rtp_llm.multimodal.mm_scheduler.torch.cuda.empty_cache",
+                side_effect=empty_cache,
+            ):
+                barrier = threading.Barrier(3)
+                errors = _submit_concurrently(
+                    sched,
+                    [[_FakeWorkItem()] for _ in range(3)],
+                    barrier=barrier,
+                )
+
+                self.assertTrue(
+                    all(isinstance(e, MMSchedulerExecutionError) for e in errors),
+                    errors,
+                )
+                self.assertTrue(all(e.is_oom for e in errors), errors)
+                self.assertIsNotNone(fake.failed_intermediate_ref)
+                self.assertIsNone(
+                    fake.failed_intermediate_ref(),
+                    "failed forward tensor is still retained by an exception",
+                )
+                self.assertEqual(cleanup_order, ["gc", "empty_cache"])
+
+                # The same worker must remain usable after recovery. A smaller
+                # second batch succeeds instead of inheriting the first OOM.
+                sched.submit_and_wait([_FakeWorkItem()])
+        finally:
+            sched.close()
+
+        self.assertEqual(fake.calls, [3, 1])
 
     def test_count_mismatch_fails_whole_batch(self):
         """A short combined return fails the whole batch; there is no retry."""
@@ -301,13 +384,17 @@ class MMSchedulerTest(TestCase):
         finally:
             sched.close()
 
-        # Every request gets a wrapped RuntimeError whose __cause__ is the typed
-        # OutputCountMismatchError.
-        self.assertTrue(all(isinstance(e, RuntimeError) for e in errors), errors)
+        # The original mismatch traceback is logged on the worker and discarded;
+        # callers receive only its type/message metadata.
         self.assertTrue(
-            all(isinstance(e.__cause__, OutputCountMismatchError) for e in errors),
+            all(isinstance(e, MMSchedulerExecutionError) for e in errors), errors
+        )
+        self.assertTrue(
+            all(e.source_type == OutputCountMismatchError.__name__ for e in errors),
             errors,
         )
+        self.assertTrue(all(not e.is_oom for e in errors), errors)
+        self.assertTrue(all(e.__cause__ is None for e in errors), errors)
         self.assertEqual(fake.calls, [3])
 
     def test_executor_loop_error_unblocks_caller(self):
@@ -329,8 +416,9 @@ class MMSchedulerTest(TestCase):
         finally:
             sched.close()
 
-        self.assertIsInstance(ctx.exception.__cause__, RuntimeError)
-        self.assertIn("unexpected executor error", str(ctx.exception.__cause__))
+        self.assertEqual(ctx.exception.source_type, "RuntimeError")
+        self.assertIn("unexpected executor error", ctx.exception.source_message)
+        self.assertIsNone(ctx.exception.__cause__)
 
     def test_close_during_collection_window_rejects_promptly(self):
         """close() while a request sits in the collection window (before any

@@ -554,8 +554,10 @@ class MMProcessEngine:
 
             return result
         except MMSchedulerError as e:
-            # Overload, timeout, and request-policy errors are expected scheduler
-            # control flow, not CUDA allocator failures.
+            # Expected control flow is propagated directly. Execution failures are
+            # also lightweight here: the scheduler worker has already logged the
+            # original traceback and completed any OOM allocator recovery before
+            # resolving the request Future.
             if not self.is_proxy_mode:
                 kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
             self._access_logger.log_exception_access(mm_inputs, e)
