@@ -82,6 +82,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.page_size = attn_configs.kernel_tokens_per_block
         self.datatype = attn_configs.dtype
         self.max_seq_len = attn_configs.max_seq_len
+        self.is_causal = attn_configs.is_causal
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
         self.prefill_cuda_graph_copy_params = None
@@ -200,7 +201,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.local_kv_head_num,
             self.head_dim_qk,
             self.page_size,
-            causal=True,
+            causal=self.is_causal,
             q_data_type=self.datatype,
             kv_data_type=self.datatype,
         )
@@ -336,6 +337,7 @@ class PyFlashinferPrefillAttnOp(object):
             backend=backend,
         )
         self.datatype = attn_configs.dtype
+        self.is_causal = attn_configs.is_causal
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
     def __del__(self):
@@ -371,7 +373,7 @@ class PyFlashinferPrefillAttnOp(object):
             self.local_kv_head_num,
             self.head_dim_qk,
             self.head_dim_vo,
-            causal=True,
+            causal=self.is_causal,
             q_data_type=get_scalar_type(attn_inputs.dtype),
         )
         return self.fmha_params
