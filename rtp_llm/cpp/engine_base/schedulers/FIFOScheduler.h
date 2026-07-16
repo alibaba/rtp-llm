@@ -5,6 +5,7 @@
 #include <vector>
 #include <atomic>
 #include <unordered_map>
+#include <unordered_set>
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
@@ -43,11 +44,12 @@ public:
 
 public:
     // for test
-    int64_t                                   waitingStreamsSize();
-    int64_t                                   runningStreamsSize();
-    std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList();
-    std::vector<EngineScheduleInfo::TaskInfo> runningTaskList();
-    int64_t                                   onflightStreams() override;
+    int64_t                                            waitingStreamsSize();
+    int64_t                                            runningStreamsSize();
+    std::vector<EngineScheduleInfo::TaskInfo>          waitingTaskList();
+    std::vector<EngineScheduleInfo::TaskInfo>          runningTaskList();
+    std::shared_ptr<const std::unordered_set<int64_t>> workerStatusRunningTaskIdsSnapshot() const override;
+    int64_t                                            onflightStreams() override;
 
 private:
     int64_t lastScheduleTime() override;
@@ -61,7 +63,8 @@ private:
     bool   checkInputLength(const GenerateStreamPtr& stream);
 
 protected:
-    void evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
+    bool evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
+    void publishWorkerStatusSnapshotLocked();
 
 protected:
     PDSepConfig                     pd_sep_config_;
@@ -80,15 +83,17 @@ protected:
     // Optional guard for Context-Parallel prefill: when enabled, force prefill
     // to one stream per round. This remains the conservative default while
     // newer dsv4 CP paths can opt in to batched prefill through runtime config.
-    const bool                   cp_force_single_prefill_ = false;
-    std::atomic<bool>            stop_                    = false;
-    bool                         schedule_trigger_        = false;
+    const bool                   cp_force_single_prefill_        = false;
+    const bool                   worker_status_snapshot_enabled_ = false;
+    std::atomic<bool>            stop_                           = false;
+    bool                         schedule_trigger_               = false;
     std::mutex                   lock_;
     std::condition_variable      cond_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
 
-    std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;
-    std::vector<EngineScheduleInfo::TaskInfo> running_task_list_;
+    std::vector<EngineScheduleInfo::TaskInfo>          waiting_task_list_;
+    std::vector<EngineScheduleInfo::TaskInfo>          running_task_list_;
+    std::shared_ptr<const std::unordered_set<int64_t>> worker_status_running_task_ids_snapshot_;
 
     // TODO @wangyin support different beams run togather
 };

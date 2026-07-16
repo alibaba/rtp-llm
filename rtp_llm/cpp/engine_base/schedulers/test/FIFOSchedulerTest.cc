@@ -1,4 +1,6 @@
 #include <memory>
+#include <cstdlib>
+#include <string>
 #include "torch/all.h"
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
@@ -14,10 +16,108 @@ using namespace std;
 
 namespace rtp_llm {
 
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* name, const char* value): name_(name) {
+        const char* old_value = std::getenv(name);
+        if (old_value != nullptr) {
+            had_old_value_ = true;
+            old_value_     = old_value;
+        }
+        setenv(name, value, 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (had_old_value_) {
+            setenv(name_.c_str(), old_value_.c_str(), 1);
+        } else {
+            unsetenv(name_.c_str());
+        }
+    }
+
+private:
+    std::string name_;
+    std::string old_value_;
+    bool        had_old_value_ = false;
+};
+
 class FIFOSchedulerTest: public DeviceTestBase {
 public:
     FIFOSchedulerTest() {}
 };
+
+TEST_F(FIFOSchedulerTest, testWorkerStatusSnapshotDisabledByDefault) {
+    ScopedEnvVar snapshot_env("RTP_LLM_WORKER_STATUS_SNAPSHOT", "0");
+
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    EXPECT_EQ(scheduler.workerStatusRunningTaskIdsSnapshot(), nullptr);
+}
+
+TEST_F(FIFOSchedulerTest, testWorkerStatusSnapshotTracksRunningMembershipWithoutSchedulerLock) {
+    ScopedEnvVar snapshot_env("RTP_LLM_WORKER_STATUS_SNAPSHOT", "1");
+
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto initial_snapshot = scheduler.workerStatusRunningTaskIdsSnapshot();
+    ASSERT_NE(initial_snapshot, nullptr);
+    EXPECT_TRUE(initial_snapshot->empty());
+
+    auto query             = std::make_shared<GenerateInput>();
+    query->input_ids       = torch::tensor({1}, torch::kInt32);
+    query->generate_config = std::make_shared<GenerateConfig>();
+    auto stream =
+        std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+
+    auto streams_status = scheduler.schedule();
+    ASSERT_TRUE(streams_status.ok());
+    ASSERT_EQ(streams_status->size(), 1);
+
+    {
+        std::lock_guard<std::mutex> scheduler_lock(scheduler.lock_);
+        auto                        running_snapshot = scheduler.workerStatusRunningTaskIdsSnapshot();
+        ASSERT_NE(running_snapshot, nullptr);
+        EXPECT_EQ(running_snapshot->count(stream->streamId()), 1);
+    }
+
+    stream->reportEvent(StreamEvents::GenerateDone);
+    auto finished_status = scheduler.schedule();
+    ASSERT_TRUE(finished_status.ok());
+    ASSERT_TRUE(finished_status->empty());
+
+    auto finished_snapshot = scheduler.workerStatusRunningTaskIdsSnapshot();
+    ASSERT_NE(finished_snapshot, nullptr);
+    EXPECT_TRUE(finished_snapshot->empty());
+}
 
 TEST_F(FIFOSchedulerTest, testSimple) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
