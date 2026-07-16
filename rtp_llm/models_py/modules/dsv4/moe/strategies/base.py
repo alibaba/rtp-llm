@@ -226,24 +226,41 @@ def select_strategy(
     ``DSV4_MOE_STRATEGY``), fail loudly if ``forced`` can't handle cfg.
     When False (legacy env toggle), fall through silently to auto-pick.
     """
-    # ``DSV4_USE_MEGA_MOE_FUSED=1`` opts the EP routed path into the fused
-    # Mega kernel. It is a Mega variant, so it only kicks in where the
-    # non-fused Mega would (ep_size > 1) and replaces an unspecified/"mega"
-    # selection. Strict so an unavailable fused kernel fails loudly rather
-    # than silently downgrading to non-fused (which would invalidate tests).
-    if cfg.ep_size > 1 and forced in (None, "mega"):
-        from rtp_llm.models_py.modules.dsv4.moe.mega_fused_buf import (
-            mega_moe_fused_requested,
-        )
+    # Both variants are strict opt-ins. NVFP4 changes the checkpoint scale
+    # contract, so it can never silently downgrade to the default FP8 path.
+    from rtp_llm.models_py.modules.dsv4.moe.mega_fused_buf import (
+        mega_moe_fused_requested,
+    )
+    from rtp_llm.models_py.modules.dsv4.moe.mega_nvfp4_buf import (
+        mega_moe_nvfp4_requested,
+    )
 
-        if mega_moe_fused_requested():
-            forced, strict = "mega_fused", True
+    nvfp4_requested = mega_moe_nvfp4_requested()
+    fused_requested = mega_moe_fused_requested()
+    if nvfp4_requested and fused_requested:
+        raise RuntimeError(
+            "DSV4_USE_MEGA_MOE_NVFP4=1 conflicts with "
+            "DSV4_USE_MEGA_MOE_FUSED=1; NVFP4 has no shared-expert fused API."
+        )
+    if nvfp4_requested:
+        if forced not in (None, "mega", "mega_nvfp4"):
+            raise RuntimeError(
+                "DSV4_USE_MEGA_MOE_NVFP4=1 conflicts with requested MoE "
+                f"strategy {forced!r}."
+            )
+        forced, strict = "mega_nvfp4", True
+    elif cfg.ep_size > 1 and forced in (None, "mega") and fused_requested:
+        forced, strict = "mega_fused", True
 
     if forced is not None:
         for cls in _STRATEGY_PRIORITY:
             if cls.name == forced:
                 if cls.can_handle(cfg):
-                    if cfg.ep_size > 1 and cls.name not in ("mega", "mega_fused"):
+                    if cfg.ep_size > 1 and cls.name not in (
+                        "mega",
+                        "mega_fused",
+                        "mega_nvfp4",
+                    ):
                         raise RuntimeError(
                             "DSV4 EP MoE requires MegaMoEStrategy. "
                             f"Requested strategy {forced!r} would bypass Mega "
@@ -251,10 +268,18 @@ def select_strategy(
                         )
                     return cls
                 if strict:
+                    if cls.name == "mega_nvfp4":
+                        from rtp_llm.models_py.modules.dsv4.moe.mega_nvfp4_buf import (
+                            _mega_moe_nvfp4_disabled_or_unavailable_reason,
+                        )
+
+                        reason = _mega_moe_nvfp4_disabled_or_unavailable_reason()
+                    else:
+                        reason = "Check env / kernel availability."
                     raise RuntimeError(
                         f"Forced MoE strategy {forced!r} cannot handle cfg "
                         f"(layer_id={cfg.layer_id}, ep_size={cfg.ep_size}). "
-                        "Check env / kernel availability."
+                        f"Reason: {reason}"
                     )
                 # Non-strict (legacy toggle) → fall through to auto-pick.
                 break

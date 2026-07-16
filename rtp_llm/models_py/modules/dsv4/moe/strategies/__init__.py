@@ -28,6 +28,7 @@ from .base import (
 # the class into the priority list as the import lands. Order here = priority
 # (high→low):
 from .mega import MegaMoEStrategy  # noqa: F401  ep_size>1 + SM100 + dist
+from .mega_nvfp4 import MegaNVFP4MoEStrategy  # noqa: F401  explicit NVFP4 opt-in
 from .mega_fused import MegaMoEFusedStrategy  # noqa: F401  ep_size>1 + fused opt-in
 from .grouped_fp4 import (  # noqa: F401  ep_size==1 + kernel
     GroupedFP4Strategy,

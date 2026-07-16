@@ -1420,13 +1420,15 @@ class W:
     v4_shared_w3_s = "v4.shared.w3.scale"
     v4_shared_w13_w = "v4.shared.w13.weight"
     v4_shared_w13_s = "v4.shared.w13.scale"
-    # routed experts (FP4 packed int8 + UE8M0 group=32 scale, per-expert)
+    # routed experts (packed FP4 + block scale, per-expert)
     v4_routed_w1_w = "v4.routed.w1.weight"
     v4_routed_w1_s = "v4.routed.w1.scale"
+    v4_routed_w1_s2 = "v4.routed.w1.scale_2"
     v4_routed_w2_w = "v4.routed.w2.weight"
     v4_routed_w2_s = "v4.routed.w2.scale"
     v4_routed_w3_w = "v4.routed.w3.weight"
     v4_routed_w3_s = "v4.routed.w3.scale"
+    v4_routed_w3_s2 = "v4.routed.w3.scale_2"
 
     # DSV4 MTP-only per-block extras. The draft block reuses the normal
     # v4_attn/v4_ffn/v4_hc/v4_router/v4_expert tags with `mtp.{i}` ckpt
@@ -1610,10 +1612,12 @@ class W:
         v4_shared_w13_s: sp_id,
         v4_routed_w1_w: sp_id,
         v4_routed_w1_s: sp_id,
+        v4_routed_w1_s2: sp_id,
         v4_routed_w2_w: sp_id,
         v4_routed_w2_s: sp_id,
         v4_routed_w3_w: sp_id,
         v4_routed_w3_s: sp_id,
+        v4_routed_w3_s2: sp_id,
         v4_mtp_enorm: sp_id,
         v4_mtp_hnorm: sp_id,
         v4_mtp_norm: sp_id,
