@@ -59,6 +59,38 @@ SCORING_FUNC_SIGMOID = 1
 SCORING_FUNC_SQRT_SOFTPLUS = 2  # DeepSeek-V4
 
 
+def _mega_moe_nvfp4_requested() -> bool:
+    return os.environ.get("DSV4_USE_MEGA_MOE_NVFP4", "0") == "1"
+
+
+def _validate_mega_moe_nvfp4_checkpoint(config_json: dict) -> None:
+    if not _mega_moe_nvfp4_requested():
+        return
+    quant = config_json.get("quantization_config", {})
+    expected = {
+        "expert_l1_dtype": "nvfp4",
+        "expert_l1_block_size": 16,
+        "expert_l1_scale_fmt": "ue4m3_packed",
+        "expert_l2_dtype": "mxfp4",
+        "expert_l2_block_size": 32,
+        "expert_l2_scale_fmt": "ue8m0",
+    }
+    mismatches = {
+        key: (quant.get(key), value)
+        for key, value in expected.items()
+        if quant.get(key) != value
+    }
+    if mismatches:
+        details = ", ".join(
+            f"{key}={actual!r} (expected {expected_value!r})"
+            for key, (actual, expected_value) in mismatches.items()
+        )
+        raise ValueError(
+            "DSV4_USE_MEGA_MOE_NVFP4=1 requires the mixed NVFP4-L1/MXFP4-L2 "
+            f"checkpoint contract; mismatches: {details}"
+        )
+
+
 class DeepSeekV4Weight(DeepSeekV2Weight):
     """DeepSeek-V4 weight info.
 
@@ -318,8 +350,10 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
             expert_num=self.expert_num_,
             align_size=self._moe_align_size,
         )
-        # V4 routed experts ship as I8-packed FP4 (e2m1) + UE8M0 group-32
-        # scale, both consumed natively by DeepGEMM's fp8_fp4_gemm_nt.  The
+        # The default V4 path uses MXFP4 UE8M0 group-32 scales. The explicit
+        # NVFP4 Mega path keeps w1/w3's packed UE4M3 group-16 scale bits as
+        # int32; w2 remains MXFP4 UE8M0. Both formats are consumed natively by
+        # their respective DeepGEMM Mega kernels. The
         # framework's quant_config (Fp8BlockWiseQuantConfig from ckpt's
         # quantization_config.quant_method=fp8) doesn't describe this FP4
         # routed-expert scheme — there's no ModelOptFp4Config to trigger
@@ -364,7 +398,11 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                     ],
                     stack_,
                     config=moe_cfg,
-                    data_type=torch.float8_e8m0fnu,
+                    data_type=(
+                        torch.int32
+                        if _mega_moe_nvfp4_requested() and sub in ("w1", "w3")
+                        else torch.float8_e8m0fnu
+                    ),
                 )
             )
         return out
@@ -528,6 +566,8 @@ class DeepSeekV4(DeepSeekV2):
 
         with open(config_path) as reader:
             config_json = json.loads(reader.read())
+
+        _validate_mega_moe_nvfp4_checkpoint(config_json)
 
         # ---- basic geometry ----
         config.num_layers = config_json["num_hidden_layers"]

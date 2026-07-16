@@ -184,6 +184,17 @@ py_test(
 )
 
 py_test(
+    name = "test_mega_nvfp4_input_packer",
+    srcs = ["test_mega_nvfp4_input_packer.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_mega_moe_gate_pack",
     srcs = ["test_mega_moe_gate_pack.py"],
     deps = ["//rtp_llm/models_py:dsv4_fused_kernel_sources"],
