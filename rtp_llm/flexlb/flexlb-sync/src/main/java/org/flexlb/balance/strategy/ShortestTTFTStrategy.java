@@ -23,6 +23,7 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -56,6 +57,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     private static final double CANDIDATE_PERCENTAGE = 0.3;
     private static final double STDDEV_THRESHOLD_FACTOR = 0.5;
 
+    @Autowired
     public ShortestTTFTStrategy(EngineWorkerStatus engineWorkerStatus,
                                 EngineHealthReporter engineHealthReporter,
                                 CacheAwareService cacheAwareService,
