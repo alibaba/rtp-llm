@@ -1,6 +1,8 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.BatchScheduleRequest;
+import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.Response;
 
 /**
@@ -23,5 +25,11 @@ public interface Router {
      * @return Response containing selected worker node information
      */
     Response route(BalanceContext balanceContext);
+
+    /**
+     * Resolve {@code batch_count} worker targets in one shot for {@code /batch_schedule}.
+     * Single-role deployments only; implementations reject multi-role configurations.
+     */
+    BatchScheduleResponse batchSchedule(BatchScheduleRequest batchScheduleRequest);
 
 }

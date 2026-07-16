@@ -29,10 +29,15 @@ public class Response {
     private Integer queueLength;
 
     public static Response error(StrategyErrorType strategyErrorType) {
+        return error(strategyErrorType, strategyErrorType.getErrorMsg());
+    }
+
+    /** Variant carrying a caller-supplied message, mirroring {@code BatchScheduleResponse.error}. */
+    public static Response error(StrategyErrorType strategyErrorType, String errorMessage) {
         Response result = new Response();
         result.setSuccess(false);
         result.setCode(strategyErrorType.getErrorCode());
-        result.setErrorMessage(strategyErrorType.getErrorMsg());
+        result.setErrorMessage(errorMessage);
         return result;
     }
 }

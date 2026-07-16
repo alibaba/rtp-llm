@@ -19,6 +19,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.dao.netty.HttpNettyChannelContext;
 import org.flexlb.enums.StatusEnum;
 import org.flexlb.exception.FlexLBException;
+import org.flexlb.exception.HttpErrorResponseException;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.NettyUtils;
 import org.springframework.stereotype.Component;
@@ -175,9 +176,14 @@ public class GeneralHttpNettyService {
         // If status code is not 200, indicates abnormal situation, parse chunk and return error
         if (httpStatusCode != StatusEnum.SUCCESS.getCode()) {
             NettyUtils.cacheBuffer(nettyCtx, obj);
+            // Wait for the whole error body before failing; a chunked non-200 response would
+            // otherwise be truncated to its first chunk, corrupting upstream business-error JSON.
+            if (!(obj instanceof LastHttpContent)) {
+                return;
+            }
             String body = NettyUtils.readBody(nettyCtx);
             NettyUtils.finishNettyWithException(nettyCtx,
-                    new RuntimeException("http error, httpStatusCode=" + httpStatusCode + ", body=" + body));
+                    new HttpErrorResponseException(httpStatusCode, body));
             return;
         }
 
