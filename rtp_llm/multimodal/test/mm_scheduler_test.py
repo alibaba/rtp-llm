@@ -475,47 +475,53 @@ class MMSchedulerTest(TestCase):
     def test_close_between_collect_and_execute_starts_no_forward(self):
         """close() landing after a batch is collected but before it is claimed
         must reject it under the shared lock — no NEW forward starts (TOCTOU)."""
-        fake = _FakeMMPart()
-        sched = MMScheduler(fake, batch_wait_ms=0, max_batch_size=1)
-
         collected = threading.Event()
         release = threading.Event()
-        orig_collect = sched._collect_batch
+        orig_collect = MMScheduler._collect_batch
 
-        def slow_collect():
-            batch = orig_collect()
+        def slow_collect(scheduler):
+            batch = orig_collect(scheduler)
             if batch is not None:
                 # Park AFTER collecting, BEFORE the loop's stopped-check, so the
                 # test can force close() into exactly that window.
                 collected.set()
-                release.wait(2.0)
+                release.wait()
             return batch
 
-        sched._collect_batch = slow_collect
-
+        fake = _FakeMMPart()
         errors: List[Optional[Exception]] = [None]
 
-        def submit():
+        with mock.patch.object(MMScheduler, "_collect_batch", slow_collect):
+            # Patch the class before construction so the worker cannot enter the
+            # original method before the test installs its collection barrier.
+            sched = MMScheduler(fake, batch_wait_ms=0, max_batch_size=1)
+
+            def submit():
+                try:
+                    sched.submit_and_wait([_FakeWorkItem(timeout_ms=30000)])
+                except Exception as e:  # noqa: BLE001 - recorded for assertions
+                    errors[0] = e
+
+            t = threading.Thread(target=submit)
+            close_thread = threading.Thread(target=sched.close)
             try:
-                sched.submit_and_wait([_FakeWorkItem(timeout_ms=30000)])
-            except Exception as e:  # noqa: BLE001 - recorded for assertions
-                errors[0] = e
+                t.start()
+                self.assertTrue(collected.wait(2.0))
 
-        t = threading.Thread(target=submit)
-        t.start()
-        self.assertTrue(collected.wait(2.0))
-
-        # close() sets _stopped under the lock while the executor is parked between
-        # collect and the stopped-check.
-        close_thread = threading.Thread(target=sched.close)
-        close_thread.start()
-        time.sleep(0.1)  # ensure _stopped is set before we let the executor proceed
-        release.set()
-
-        close_thread.join(3.0)
-        t.join(3.0)
+                # close() wins the scheduler lock while the executor is parked
+                # after collection but before _claim_batch.
+                close_thread.start()
+                self.assertTrue(sched._stopped.wait(2.0))
+                release.set()
+            finally:
+                release.set()
+                sched.close(timeout=5.0)
+                if close_thread.ident is not None:
+                    close_thread.join(3.0)
+                t.join(3.0)
 
         self.assertFalse(t.is_alive())
+        self.assertFalse(close_thread.is_alive())
         # The forward never ran and was never registered in-flight: the under-lock
         # check saw stopped and rejected.
         self.assertEqual(fake.calls, [])
