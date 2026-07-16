@@ -28,6 +28,11 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
+from rtp_llm.multimodal.mm_scheduler import (
+    MMSchedulerOverloadError,
+    MMSchedulerRequestTooLargeError,
+    MMSchedulerTimeoutError,
+)
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
@@ -138,6 +143,35 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             )
             _report_output_metrics(output_pb, tags)
             return output_pb
+        except MMSchedulerOverloadError as e:
+            # Backpressure, not a server fault: map to a defined, ret/backoff-able
+            # status instead of a generic error. abort() raises to end the call.
+            # NOTE: overload is returned directly to the client here; forwarding to
+            # another (untried) worker in the proxy is intentionally NOT done for
+            # now — the client/caller decides whether to retry or back off.
+            kmonitor.report(
+                AccMetrics.VIT_RPC_SERVER_ERROR_QPS_METRIC,
+                1,
+                {"source": "vit_server", "reason": "overload"},
+            )
+            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(e))
+        except MMSchedulerTimeoutError as e:
+            # Scheduler wait exceeded its embedding timeout.
+            kmonitor.report(
+                AccMetrics.VIT_RPC_SERVER_ERROR_QPS_METRIC,
+                1,
+                {"source": "vit_server", "reason": "timeout"},
+            )
+            context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, str(e))
+        except MMSchedulerRequestTooLargeError as e:
+            # Client asked for more than a single request may carry -> a caller
+            # error, so INVALID_ARGUMENT rather than UNKNOWN.
+            kmonitor.report(
+                AccMetrics.VIT_RPC_SERVER_ERROR_QPS_METRIC,
+                1,
+                {"source": "vit_server", "reason": "request_too_large"},
+            )
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
         except Exception:
             kmonitor.report(
                 AccMetrics.VIT_RPC_SERVER_ERROR_QPS_METRIC,

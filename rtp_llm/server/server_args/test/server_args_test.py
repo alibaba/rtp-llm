@@ -297,6 +297,21 @@ class ServerArgsSetTest(TestCase):
         with self.assertRaises(SystemExit):
             rtp_llm.server.server_args.server_args.setup_args()
 
+    def test_gpu_batch_vit_args_parse(self):
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.server_args.server_args import (
+            EnvArgumentParser,
+            init_all_group_args,
+        )
+
+        parser = EnvArgumentParser(description="test")
+        cfg = PyEnvConfigs()
+        parser.set_root_config(cfg)
+        init_all_group_args(parser, cfg)
+        parser.parse_args(["--gpu_batch_wait_ms", "500", "--gpu_max_batch_size", "8"])
+        self.assertEqual(cfg.vit_config.gpu_max_batch_size, 8)
+        self.assertEqual(cfg.vit_config.gpu_batch_wait_ms, 500)
+
 
 if __name__ == "__main__":
     main()

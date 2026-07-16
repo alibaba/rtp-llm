@@ -48,6 +48,15 @@ py_library(
 )
 
 py_test(
+    name = "maga_server_manager_test",
+    srcs = ["maga_server_manager_test.py"],
+    deps = [
+        ":maga_server_manager",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "port_util_test",
     srcs = ["port_util_test.py"],
     deps = [

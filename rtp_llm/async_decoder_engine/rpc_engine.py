@@ -90,4 +90,10 @@ class LanguageCppEngine(BaseEngine):
 
     @override
     def _stop(self) -> None:
+        # Stop the C++ request entry first so no more embedding calls are issued,
+        # then close the local MMProcessEngine (stops its MMScheduler thread and
+        # preprocessing executor).
         self.rtp_llm_op_.stop()
+        if self.mm_process_engine is not None:
+            self.mm_process_engine.stop()
+            self.mm_process_engine = None

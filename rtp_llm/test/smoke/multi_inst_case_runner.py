@@ -1,6 +1,9 @@
+import logging
+import re
 from typing import Dict, List, Union
 
 from smoke.case_runner import CaseRunner
+from smoke.common_def import QueryStatus, Tracer
 from smoke.task_info import TaskInfo, TaskStates
 
 from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
@@ -512,6 +515,44 @@ class VitSeperationCaseRunner(CaseRunner):
             return vit_task_states
         assert vit_server_manager is not None, "vit server manager should not be None"
         task_states = self.curl_server(llm_server_manager)
+        self._assert_vit_gpu_batching(vit_server_manager, task_states)
         vit_server_manager.stop_server()
         llm_server_manager.stop_server()
         return task_states
+
+    def _assert_vit_gpu_batching(
+        self, vit_server_manager: MagaServerManager, task_states: TaskStates
+    ) -> None:
+        vit_args = (
+            self.smoke_args.get(VIT_ROLE_NAME, "")
+            if isinstance(self.smoke_args, dict)
+            else ""
+        )
+        if self._extract_int_arg(vit_args, "--gpu_max_batch_size", default=1) <= 1:
+            return
+
+        batches = []
+        for log_path in vit_server_manager.application_log_file_paths:
+            try:
+                with open(log_path, "r", errors="ignore") as f:
+                    batches.extend(
+                        re.findall(r"MMScheduler: forward batch=(\d+)", f.read())
+                    )
+            except OSError as e:
+                # A rotated file may disappear between glob() and open(). The
+                # current main_<rank>.log remains available for the assertion.
+                logging.warning(
+                    "failed to read VIT application log %s: %s", log_path, e
+                )
+        max_batch = max((int(n) for n in batches), default=0)
+        logging.info("[VIT_GPU_BATCH] max observed forward batch=%d", max_batch)
+        if max_batch <= 1:
+            task_states.ret = False
+            task_states.query_status.append(
+                (
+                    QueryStatus.OTHERS,
+                    f"VIT GPU batching not observed: max forward batch={max_batch} "
+                    f"(expected > 1)",
+                    Tracer(),
+                )
+            )
