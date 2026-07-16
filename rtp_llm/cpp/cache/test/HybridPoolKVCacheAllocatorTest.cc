@@ -143,7 +143,7 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
     mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
-    config.block_num         = block_num;
+    config.finalizeBlockNums(block_num, RuntimeConfig{});
     return config;
 }
 
