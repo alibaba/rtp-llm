@@ -195,6 +195,14 @@ class CASClient:
         for h in list(missing):
             if h in result.dir_blobs:
                 data = result.dir_blobs[h]
+                # Flush BEFORE appending so a batch's payload never exceeds
+                # MAX_BATCH_SIZE. The old check-after-append let a batch overshoot
+                # by one whole blob, pushing a single BatchUpdateBlobs request past
+                # the CAS server's 4 MiB gRPC message limit (StatusCode.OUT_OF_RANGE
+                # "decoded message length too large").
+                if small_batch and small_batch_size + len(data) > MAX_BATCH_SIZE:
+                    all_batches.append(small_batch)
+                    small_batch, small_batch_size = [], 0
                 small_batch.append(
                     re_pb2.BatchUpdateBlobsRequest.Request(
                         digest=re_pb2.Digest(hash=h, size_bytes=len(data)), data=data
@@ -202,9 +210,6 @@ class CASClient:
                 )
                 small_batch_size += len(data)
                 missing.discard(h)
-                if small_batch_size > MAX_BATCH_SIZE:
-                    all_batches.append(small_batch)
-                    small_batch, small_batch_size = [], 0
         if small_batch:
             all_batches.append(small_batch)
 
@@ -224,15 +229,16 @@ class CASClient:
         file_batch_size = 0
         for h, path, size in small_files:
             data = path.read_bytes()
+            # Flush before appending — see the dir-blob loop above for rationale.
+            if file_batch and file_batch_size + len(data) > MAX_BATCH_SIZE:
+                all_batches.append(file_batch)
+                file_batch, file_batch_size = [], 0
             file_batch.append(
                 re_pb2.BatchUpdateBlobsRequest.Request(
                     digest=re_pb2.Digest(hash=h, size_bytes=size), data=data
                 )
             )
             file_batch_size += len(data)
-            if file_batch_size > MAX_BATCH_SIZE:
-                all_batches.append(file_batch)
-                file_batch, file_batch_size = [], 0
         if file_batch:
             all_batches.append(file_batch)
 
