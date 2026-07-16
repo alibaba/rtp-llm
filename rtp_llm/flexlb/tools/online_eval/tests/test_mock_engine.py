@@ -9,7 +9,12 @@ TOOL_DIR = Path(__file__).resolve().parents[1]
 if str(TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(TOOL_DIR))
 
-from online_eval.mock_engine import LruBlockCache, MockEngineCluster, encode_unique_key
+from online_eval.mock_engine import (
+    LruBlockCache,
+    MockEngineCluster,
+    encode_unique_key,
+    generate_aggregated_prometheus_metrics,
+)
 from online_eval.proto_utils import ensure_proto_modules
 from online_eval.rt_model import PerformanceModel
 
@@ -128,6 +133,215 @@ class MockEngineGrpcTest(unittest.IsolatedAsyncioTestCase):
             client_id="mock_engine_test",
             start_time=0,
         )
+
+
+class TestAggregatedMetrics(unittest.TestCase):
+    """Unit tests for generate_aggregated_prometheus_metrics."""
+
+    def _make_snapshot(
+        self,
+        role="prefill",
+        stopped=False,
+        running=0,
+        waiting=0,
+        accepted=0,
+        completed=0,
+        cancelled_count=0,
+        cache_keys=0,
+        cache_evictions=0,
+        active_kv_tokens=0,
+        available_kv_tokens=0,
+        rpc_counts=None,
+        prefill_ms_avg=0.0,
+        prefill_ms_p99=0.0,
+        prefill_ms_count=0,
+        decode_ms_avg=0.0,
+        decode_ms_p99=0.0,
+        decode_ms_count=0,
+    ) -> dict:
+        return {
+            "role": role,
+            "stopped": stopped,
+            "running": running,
+            "waiting": waiting,
+            "accepted": accepted,
+            "completed": completed,
+            "cancelled_count": cancelled_count,
+            "cache_keys": cache_keys,
+            "cache_evictions": cache_evictions,
+            "active_kv_tokens": active_kv_tokens,
+            "available_kv_tokens": available_kv_tokens,
+            "rpc_counts": rpc_counts or {},
+            "prefill_ms_avg": prefill_ms_avg,
+            "prefill_ms_p99": prefill_ms_p99,
+            "prefill_ms_count": prefill_ms_count,
+            "decode_ms_avg": decode_ms_avg,
+            "decode_ms_p99": decode_ms_p99,
+            "decode_ms_count": decode_ms_count,
+        }
+
+    def _extract_value(
+        self, text: str, metric_name: str, label_fragment: str
+    ) -> str | None:
+        """Extract the numeric value from a Prometheus metric data line.
+
+        Skips comment lines (HELP/TYPE).  Returns the value as a string,
+        or None if no matching data line is found.
+        """
+        for line in text.splitlines():
+            if line.startswith("#"):
+                continue
+            if metric_name in line and label_fragment in line:
+                return line.rsplit(None, 1)[-1]
+        return None
+
+    # ------------------------------------------------------------------
+    # 1. Basic structure
+    # ------------------------------------------------------------------
+    def test_aggregated_basic(self) -> None:
+        """Output contains role labels, no engine_name, and HELP/TYPE."""
+        engines = [
+            self._make_snapshot(role="prefill"),
+            self._make_snapshot(role="prefill"),
+            self._make_snapshot(role="decode"),
+            self._make_snapshot(role="decode"),
+        ]
+        output = generate_aggregated_prometheus_metrics(engines)
+
+        self.assertIn('role="prefill"', output)
+        self.assertIn('role="decode"', output)
+        self.assertNotIn("engine_name", output)
+        self.assertIn("# HELP", output)
+        self.assertIn("# TYPE", output)
+
+    # ------------------------------------------------------------------
+    # 2. Summation of counters
+    # ------------------------------------------------------------------
+    def test_aggregated_sum(self) -> None:
+        """Counter metrics are summed across engines of the same role."""
+        engines = [
+            self._make_snapshot(role="prefill", accepted=100, completed=50),
+            self._make_snapshot(role="prefill", accepted=200, completed=150),
+        ]
+        output = generate_aggregated_prometheus_metrics(engines)
+
+        accepted_val = self._extract_value(
+            output, "mock_engine_accepted_total", 'role="prefill"'
+        )
+        self.assertEqual("300", accepted_val)
+
+        completed_val = self._extract_value(
+            output, "mock_engine_completed_total", 'role="prefill"'
+        )
+        self.assertEqual("200", completed_val)
+
+    # ------------------------------------------------------------------
+    # 3. Weighted average for latency
+    # ------------------------------------------------------------------
+    def test_aggregated_weighted_avg(self) -> None:
+        """Latency avg uses weighted average sum(avg*count)/sum(count)."""
+        # (100*10 + 200*30) / (10+30) = 7000 / 40 = 175.0
+        engines = [
+            self._make_snapshot(
+                role="prefill", prefill_ms_avg=100.0, prefill_ms_count=10
+            ),
+            self._make_snapshot(
+                role="prefill", prefill_ms_avg=200.0, prefill_ms_count=30
+            ),
+        ]
+        output = generate_aggregated_prometheus_metrics(engines)
+
+        val = self._extract_value(
+            output, "mock_engine_prefill_ms_avg", 'role="prefill"'
+        )
+        self.assertEqual("175.0", val)
+
+    # ------------------------------------------------------------------
+    # 4. Max for p99
+    # ------------------------------------------------------------------
+    def test_aggregated_p99_max(self) -> None:
+        """Latency p99 takes the max across engines."""
+        engines = [
+            self._make_snapshot(role="prefill", prefill_ms_p99=150.0),
+            self._make_snapshot(role="prefill", prefill_ms_p99=250.0),
+        ]
+        output = generate_aggregated_prometheus_metrics(engines)
+
+        val = self._extract_value(
+            output, "mock_engine_prefill_ms_p99", 'role="prefill"'
+        )
+        self.assertEqual("250.0", val)
+
+    # ------------------------------------------------------------------
+    # 5. Empty engine list
+    # ------------------------------------------------------------------
+    def test_aggregated_empty(self) -> None:
+        """Empty engine list produces only HELP/TYPE declarations."""
+        output = generate_aggregated_prometheus_metrics([])
+
+        self.assertIn("# HELP", output)
+        self.assertIn("# TYPE", output)
+
+        # No data lines should be present (only comments)
+        for line in output.splitlines():
+            if line and not line.startswith("#"):
+                self.fail(f"Expected no data lines for empty engine list, got: {line}")
+
+    # ------------------------------------------------------------------
+    # 6. No cluster counters
+    # ------------------------------------------------------------------
+    def test_aggregated_no_cluster_counters(self) -> None:
+        """When cluster_counters is None, no cluster-level data lines."""
+        engines = [self._make_snapshot(role="prefill", accepted=1)]
+        output = generate_aggregated_prometheus_metrics(engines, cluster_counters=None)
+
+        # HELP/TYPE lines always exist for cluster metrics, but no *data* lines
+        self.assertIsNone(
+            self._extract_value(output, "flexlb_mock_grpc_error_count", "")
+        )
+        self.assertIsNone(
+            self._extract_value(output, "flexlb_mock_grpc_retry_count", "")
+        )
+        self.assertIsNone(
+            self._extract_value(output, "flexlb_mock_grpc_cancel_forward_count", "")
+        )
+
+    # ------------------------------------------------------------------
+    # 7. With cluster counters
+    # ------------------------------------------------------------------
+    def test_aggregated_cluster_counters(self) -> None:
+        """cluster_counters produce cluster-level metric data lines."""
+        engines = [self._make_snapshot(role="prefill")]
+        cluster_counters = {
+            "grpc_error_count": 42,
+            "grpc_retry_count": 10,
+            "grpc_cancel_forward_count": 5,
+        }
+        output = generate_aggregated_prometheus_metrics(engines, cluster_counters)
+
+        self.assertIn("flexlb_mock_grpc_error_count 42", output)
+        self.assertIn("flexlb_mock_grpc_retry_count 10", output)
+        self.assertIn("flexlb_mock_grpc_cancel_forward_count 5", output)
+
+    # ------------------------------------------------------------------
+    # 8. Zero-count latency (no divide-by-zero)
+    # ------------------------------------------------------------------
+    def test_aggregated_zero_count_latency(self) -> None:
+        """Zero latency count produces 0.0 avg without exception."""
+        engines = [
+            self._make_snapshot(role="prefill", prefill_ms_count=0, decode_ms_count=0),
+        ]
+        output = generate_aggregated_prometheus_metrics(engines)
+
+        prefill_avg = self._extract_value(
+            output, "mock_engine_prefill_ms_avg", 'role="prefill"'
+        )
+        self.assertEqual("0.0", prefill_avg)
+
+        decode_avg = self._extract_value(
+            output, "mock_engine_decode_ms_avg", 'role="prefill"'
+        )
+        self.assertEqual("0.0", decode_avg)
 
 
 if __name__ == "__main__":

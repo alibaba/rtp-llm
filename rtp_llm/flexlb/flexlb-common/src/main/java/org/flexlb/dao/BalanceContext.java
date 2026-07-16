@@ -45,6 +45,14 @@ public class BalanceContext {
 
     private long startTime = System.currentTimeMillis();
 
+    /**
+     * Timestamp (ms) when the request entered the gRPC server pipeline,
+     * recorded by {@code GrpcServerTimingInterceptor}. Used to split the
+     * total arrival delay into network delay and gRPC server processing time.
+     * Remains 0 if the interceptor did not set it (e.g. non-gRPC code path).
+     */
+    private long grpcEntryTime;
+
     private long enqueueTime;
 
     private long dequeueTime;

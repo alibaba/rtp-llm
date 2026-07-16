@@ -1,6 +1,7 @@
 package org.flexlb.httpserver;
 
 import io.grpc.Server;
+import io.grpc.ServerInterceptors;
 import io.grpc.netty.NettyServerBuilder;
 import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.Gauge;
@@ -11,6 +12,7 @@ import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.constant.MetricConstant;
+import org.flexlb.interceptor.GrpcServerTimingInterceptor;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -58,6 +60,7 @@ public class FlexlbGrpcServer {
     private final Environment environment;
     private final EventLoopGroup grpcServerEventLoopGroup;
     private final MeterRegistry meterRegistry;
+    private final GrpcServerTimingInterceptor grpcServerTimingInterceptor;
 
     private Server server;
     private NioEventLoopGroup bossGroup;
@@ -68,12 +71,14 @@ public class FlexlbGrpcServer {
                             ConfigService configService,
                             Environment environment,
                             @Qualifier("grpcServerEventLoopGroup") EventLoopGroup grpcServerEventLoopGroup,
-                            @Autowired(required = false) MeterRegistry meterRegistry) {
+                            @Autowired(required = false) MeterRegistry meterRegistry,
+                            GrpcServerTimingInterceptor grpcServerTimingInterceptor) {
         this.flexlbServiceImpl = flexlbServiceImpl;
         this.configService = configService;
         this.environment = environment;
         this.grpcServerEventLoopGroup = grpcServerEventLoopGroup;
         this.meterRegistry = meterRegistry;
+        this.grpcServerTimingInterceptor = grpcServerTimingInterceptor;
     }
 
     @PostConstruct
@@ -117,7 +122,7 @@ public class FlexlbGrpcServer {
                 .bossEventLoopGroup(bossGroup)
                 .workerEventLoopGroup(grpcServerEventLoopGroup)
                 .executor(grpcExecutor)
-                .addService(flexlbServiceImpl)
+                .addService(ServerInterceptors.intercept(flexlbServiceImpl, grpcServerTimingInterceptor))
                 .maxInboundMessageSize(16 * 1024 * 1024)
                 .flowControlWindow(4 * 1024 * 1024)
                 .build()

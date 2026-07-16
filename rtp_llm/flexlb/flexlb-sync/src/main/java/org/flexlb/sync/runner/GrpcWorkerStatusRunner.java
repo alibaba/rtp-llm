@@ -18,6 +18,9 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.Executor;
 
 import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 
@@ -41,6 +44,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final long syncRequestTimeoutMs;
     private static final int MAX_CONSECUTIVE_FAILURES = 3;
     private final EndpointRegistry endpointRegistry;
+    private final Executor callbackExecutor;
 
     public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType, String group,
                                   WorkerStatus workerStatus,
@@ -48,7 +52,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   EngineGrpcService engineGrpcService,
                                   long syncRequestTimeoutMs,
                                   FlexlbBatchScheduler batchScheduler,
-                                  EndpointRegistry endpointRegistry) {
+                                  EndpointRegistry endpointRegistry,
+                                  Executor callbackExecutor) {
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
         this.ip = split[0];
@@ -63,37 +68,45 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.batchScheduler = batchScheduler;
         this.endpointRegistry = endpointRegistry;
+        this.callbackExecutor = callbackExecutor;
     }
 
     @Override
     public void run() {
+        boolean asyncInitiated = false;
         try {
             logger.info("GrpcWorkerStatusRunner run for {}", ipPort);
             long startTime = System.nanoTime() / 1000;
 
             long latestFinishedTaskVersion = workerStatus.getLatestFinishedTaskVersion().get();
 
-            WorkerStatusResponse response = launchGrpcStatusCheck(ip, grpcPort, latestFinishedTaskVersion);
-            handleStatusResponse(response, startTime);
+            engineGrpcService.getWorkerStatusAsync(ip, grpcPort, latestFinishedTaskVersion,
+                            syncRequestTimeoutMs, roleType)
+                    .thenApply(EngineStatusConverter::convertToWorkerStatusResponse)
+                    .whenCompleteAsync((response, ex) -> {
+                        try {
+                            if (ex != null) {
+                                Throwable throwable = ex instanceof CompletionException ? ex.getCause() : ex;
+                                handleException(throwable);
+                                long failures = workerStatus.getConsecutiveFailures().incrementAndGet();
+                                logger.error("gRPC status check failed, consecutiveFailures={}/{}, msg={}",
+                                        failures, MAX_CONSECUTIVE_FAILURES, throwable.getMessage());
+                                if (failures >= MAX_CONSECUTIVE_FAILURES) {
+                                    workerStatus.setAlive(false);
+                                    logger.error("worker {} marked dead after {} consecutive gRPC failures", ipPort, failures);
+                                }
+                            } else {
+                                handleStatusResponse(response, startTime);
+                            }
+                        } finally {
+                            workerStatus.getStatusCheckInProgress().set(false);
+                        }
+                    }, callbackExecutor);
+            asyncInitiated = true;
         } finally {
-            workerStatus.getStatusCheckInProgress().set(false);
-        }
-    }
-
-    private WorkerStatusResponse launchGrpcStatusCheck(String ip, int grpcPort, long latestFinishedTaskVersion) {
-        try {
-            EngineRpcService.WorkerStatusPB workerStatusPB = engineGrpcService.getWorkerStatus(ip, grpcPort, latestFinishedTaskVersion, syncRequestTimeoutMs, roleType);
-            return EngineStatusConverter.convertToWorkerStatusResponse(workerStatusPB);
-        } catch (Throwable throwable) {
-            handleException(throwable);
-            long failures = workerStatus.getConsecutiveFailures().incrementAndGet();
-            logger.error("gRPC status check failed, consecutiveFailures={}/{}, msg={}",
-                    failures, MAX_CONSECUTIVE_FAILURES, throwable.getMessage());
-            if (failures >= MAX_CONSECUTIVE_FAILURES) {
-                workerStatus.setAlive(false);
-                logger.error("worker {} marked dead after {} consecutive gRPC failures", ipPort, failures);
+            if (!asyncInitiated) {
+                workerStatus.getStatusCheckInProgress().set(false);
             }
-            return null;
         }
     }
 

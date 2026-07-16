@@ -27,6 +27,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -162,29 +164,36 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         // 2. Log dispatch
         logDispatch(batchId, items, prefillEp, predMs, reason);
 
-        // 3. Send gRPC
-        try {
-            long deadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
-            EngineRpcService.EnqueueBatchResponsePB response =
-                    grpcClient.batchEnqueue(prefillEp.getIp(), prefillEp.getGrpcPort(),
-                            request, deadlineMs);
-            if (response == null) {
-                failItems(items, prefillEp, batchId, "EnqueueBatch returned null response", callback);
-                return;
-            }
-            handleResponse(batchId, items, response, callback);
-        } catch (Throwable t) {
-            Logger.warn("EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
-                    batchId, prefillEp.getIp(), prefillEp.getGrpcPort(), t.getMessage());
-            if (Status.fromThrowable(t).getCode() == Status.Code.DEADLINE_EXCEEDED) {
-                prefillEp.releaseBatch(batchId);
-                for (BatchItem item : items) {
-                    callback.onTimeout(item, t);
-                }
-            } else {
-                failItems(items, prefillEp, batchId, "gRPC dispatch failed: " + t.getMessage(), callback);
-            }
-        }
+        // 3. Send gRPC (async)
+        long deadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
+        grpcClient.batchEnqueueAsync(prefillEp.getIp(), prefillEp.getGrpcPort(), request, deadlineMs)
+                .whenCompleteAsync((response, ex) -> {
+                    try {
+                        if (ex != null) {
+                            Throwable cause = ex instanceof CompletionException ? ex.getCause() : ex;
+                            Logger.warn("EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
+                                    batchId, prefillEp.getIp(), prefillEp.getGrpcPort(), cause.getMessage());
+                            if (Status.fromThrowable(cause).getCode() == Status.Code.DEADLINE_EXCEEDED) {
+                                prefillEp.releaseBatch(batchId);
+                                for (BatchItem item : items) {
+                                    callback.onTimeout(item, cause);
+                                }
+                            } else {
+                                failItems(items, prefillEp, batchId,
+                                        "gRPC dispatch failed: " + cause.getMessage(), callback);
+                            }
+                        } else if (response == null) {
+                            failItems(items, prefillEp, batchId, "EnqueueBatch returned null response", callback);
+                        } else {
+                            handleResponse(batchId, items, response, callback);
+                        }
+                    } catch (Throwable t) {
+                        // Safety net: ensure callbacks are always invoked even for unexpected errors
+                        Logger.error("Unexpected error in EnqueueBatch callback batchId={}", batchId, t);
+                        failItems(items, prefillEp, batchId,
+                                "Unexpected callback error: " + t.getMessage(), callback);
+                    }
+                }, dispatchExecutor);
     }
 
     private void failItems(List<BatchItem> items, PrefillEndpoint prefillEp,

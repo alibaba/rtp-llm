@@ -810,6 +810,174 @@ class MockRpcServicer:
         return self.pb2.GetPeerInfoResponsePB()
 
 
+def generate_aggregated_prometheus_metrics(
+    engines: list[dict],
+    cluster_counters: dict | None = None,
+) -> str:
+    """Generate role-aggregated Prometheus exposition format metrics.
+
+    Groups engines by role (prefill/decode) and aggregates:
+    - Counters/state/KV: sum across engines
+    - RPC: sum by method name
+    - Latency avg: weighted average (sum(avg*count)/sum(count))
+    - Latency p99: max across engines
+    - Latency count: sum across engines
+    """
+    lines: list[str] = []
+    metrics_meta = [
+        ("mock_engine_up", "1 if engine is running, 0 if stopped", "gauge"),
+        ("mock_engine_running", "current running requests", "gauge"),
+        (
+            "mock_engine_waiting",
+            "current waiting requests (queued but not yet processing)",
+            "gauge",
+        ),
+        ("mock_engine_accepted_total", "total accepted requests", "counter"),
+        ("mock_engine_completed_total", "total completed requests", "counter"),
+        ("mock_engine_cancelled_total", "total cancelled requests", "counter"),
+        ("mock_engine_cache_keys", "number of cache keys", "gauge"),
+        ("mock_engine_cache_evictions_total", "total cache evictions", "counter"),
+        ("mock_engine_active_kv_tokens", "active KV cache tokens", "gauge"),
+        ("mock_engine_available_kv_tokens", "available KV cache tokens", "gauge"),
+        ("mock_engine_rpc_total", "total RPC calls by method", "counter"),
+        (
+            "mock_engine_prefill_ms_avg",
+            "average prefill execution time in ms",
+            "gauge",
+        ),
+        ("mock_engine_prefill_ms_p99", "p99 prefill execution time in ms", "gauge"),
+        (
+            "mock_engine_prefill_ms_count",
+            "count of recent prefill completions",
+            "gauge",
+        ),
+        (
+            "mock_engine_decode_ms_avg",
+            "average decode execution time in ms",
+            "gauge",
+        ),
+        ("mock_engine_decode_ms_p99", "p99 decode execution time in ms", "gauge"),
+        (
+            "mock_engine_decode_ms_count",
+            "count of recent decode completions",
+            "gauge",
+        ),
+        (
+            "flexlb_mock_grpc_error_count",
+            "Total gRPC errors in remote decode",
+            "counter",
+        ),
+        (
+            "flexlb_mock_grpc_retry_count",
+            "Total gRPC retries in remote decode",
+            "counter",
+        ),
+        (
+            "flexlb_mock_grpc_cancel_forward_count",
+            "Total cancel forwarded to remote engines",
+            "counter",
+        ),
+    ]
+    for name, help_text, mtype in metrics_meta:
+        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# TYPE {name} {mtype}")
+
+    # Group engines by role
+    buckets: dict[str, list[dict]] = {"prefill": [], "decode": []}
+    for e in engines:
+        role = e.get("role", "")
+        if role in buckets:
+            buckets[role].append(e)
+
+    for role in ("prefill", "decode"):
+        group = buckets[role]
+        if not group:
+            continue
+        label = f'role="{role}"'
+
+        up = sum(0 if e.get("stopped", False) else 1 for e in group)
+        lines.append(f"mock_engine_up{{{label}}} {up}")
+
+        running = sum(e.get("running", 0) for e in group)
+        lines.append(f"mock_engine_running{{{label}}} {running}")
+
+        waiting = sum(e.get("waiting", 0) for e in group)
+        lines.append(f"mock_engine_waiting{{{label}}} {waiting}")
+
+        accepted = sum(e.get("accepted", 0) for e in group)
+        lines.append(f"mock_engine_accepted_total{{{label}}} {accepted}")
+
+        completed = sum(e.get("completed", 0) for e in group)
+        lines.append(f"mock_engine_completed_total{{{label}}} {completed}")
+
+        cancelled = sum(e.get("cancelled_count", 0) for e in group)
+        lines.append(f"mock_engine_cancelled_total{{{label}}} {cancelled}")
+
+        cache_keys = sum(e.get("cache_keys", 0) for e in group)
+        lines.append(f"mock_engine_cache_keys{{{label}}} {cache_keys}")
+
+        cache_evictions = sum(e.get("cache_evictions", 0) for e in group)
+        lines.append(f"mock_engine_cache_evictions_total{{{label}}} {cache_evictions}")
+
+        active_kv = sum(e.get("active_kv_tokens", 0) for e in group)
+        lines.append(f"mock_engine_active_kv_tokens{{{label}}} {active_kv}")
+
+        available_kv = sum(e.get("available_kv_tokens", 0) for e in group)
+        lines.append(f"mock_engine_available_kv_tokens{{{label}}} {available_kv}")
+
+        rpc_totals: dict[str, int] = {}
+        for e in group:
+            for method, count in e.get("rpc_counts", {}).items():
+                rpc_totals[method] = rpc_totals.get(method, 0) + count
+        for method in sorted(rpc_totals.keys()):
+            rpc_label = f'role="{role}",rpc_method="{method}"'
+            lines.append(f"mock_engine_rpc_total{{{rpc_label}}} {rpc_totals[method]}")
+
+        prefill_total_count = sum(e.get("prefill_ms_count", 0) for e in group)
+        if prefill_total_count > 0:
+            prefill_weighted = sum(
+                e.get("prefill_ms_avg", 0.0) * e.get("prefill_ms_count", 0)
+                for e in group
+            )
+            prefill_avg = prefill_weighted / prefill_total_count
+        else:
+            prefill_avg = 0.0
+        prefill_p99 = max((e.get("prefill_ms_p99", 0.0) for e in group), default=0.0)
+        lines.append(f"mock_engine_prefill_ms_avg{{{label}}} {prefill_avg:.1f}")
+        lines.append(f"mock_engine_prefill_ms_p99{{{label}}} {prefill_p99:.1f}")
+        lines.append(f"mock_engine_prefill_ms_count{{{label}}} {prefill_total_count}")
+
+        decode_total_count = sum(e.get("decode_ms_count", 0) for e in group)
+        if decode_total_count > 0:
+            decode_weighted = sum(
+                e.get("decode_ms_avg", 0.0) * e.get("decode_ms_count", 0) for e in group
+            )
+            decode_avg = decode_weighted / decode_total_count
+        else:
+            decode_avg = 0.0
+        decode_p99 = max((e.get("decode_ms_p99", 0.0) for e in group), default=0.0)
+        lines.append(f"mock_engine_decode_ms_avg{{{label}}} {decode_avg:.1f}")
+        lines.append(f"mock_engine_decode_ms_p99{{{label}}} {decode_p99:.1f}")
+        lines.append(f"mock_engine_decode_ms_count{{{label}}} {decode_total_count}")
+
+    # Cluster-level metrics (no labels)
+    if cluster_counters is not None:
+        lines.append(
+            f"flexlb_mock_grpc_error_count "
+            f"{cluster_counters.get('grpc_error_count', 0)}"
+        )
+        lines.append(
+            f"flexlb_mock_grpc_retry_count "
+            f"{cluster_counters.get('grpc_retry_count', 0)}"
+        )
+        lines.append(
+            f"flexlb_mock_grpc_cancel_forward_count "
+            f"{cluster_counters.get('grpc_cancel_forward_count', 0)}"
+        )
+
+    return "\n".join(lines) + "\n"
+
+
 class MockEngineCluster:
     def __init__(
         self,
@@ -1294,7 +1462,14 @@ class MockEngineCluster:
         """GET /metrics — Prometheus exposition format for all engines."""
         from aiohttp import web
 
-        metrics_text = await self.generate_prometheus_metrics()
+        per_engine = request.query.get("per_engine", "").lower() == "true"
+        if per_engine:
+            metrics_text = await self.generate_prometheus_metrics()
+        else:
+            snap = await self.snapshot()
+            metrics_text = generate_aggregated_prometheus_metrics(
+                snap["engines"], snap.get("cluster_counters")
+            )
         resp = web.Response(text=metrics_text)
         resp.headers["Content-Type"] = "text/plain; version=0.0.4; charset=utf-8"
         return resp
@@ -1322,7 +1497,14 @@ class MockEngineCluster:
             snap = await state.snapshot()
             snap["stopped"] = state.name in self._stopped
             engines.append(snap)
-        return {"engines": engines}
+        return {
+            "engines": engines,
+            "cluster_counters": {
+                "grpc_error_count": self._grpc_error_count,
+                "grpc_retry_count": self._grpc_retry_count,
+                "grpc_cancel_forward_count": self._grpc_cancel_forward_count,
+            },
+        }
 
     def service_discovery_env(self, prefill_domain: str, decode_domain: str) -> dict:
         prefill = ",".join(s.ip_port for s in self.states if s.role == "prefill")

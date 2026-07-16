@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 
 import aiohttp
 from aiohttp import web
+from online_eval.mock_engine import generate_aggregated_prometheus_metrics
 
 logger = logging.getLogger("shard_launcher")
 
@@ -416,13 +417,43 @@ class ShardProxy:
         return web.json_response(merged)
 
     async def _handle_metrics(self, request: web.Request) -> web.Response:
-        """GET /metrics — aggregated Prometheus metrics from all shards."""
+        """GET /metrics — Prometheus metrics from all shards.
+
+        By default, returns role-aggregated metrics (sum/avg/max by role).
+        Use ?per_engine=true to get per-engine metrics for debugging.
+        """
+        per_engine = request.query.get("per_engine", "").lower() == "true"
+        if per_engine:
+            results = await asyncio.gather(
+                *(self._fetch_text(f"{u}/metrics") for u in self.shard_urls)
+            )
+            combined = "\n".join(r for r in results if r)
+            return web.Response(
+                text=combined,
+                headers={
+                    "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
+                },
+            )
+        # Default: JSON-based aggregation from /snapshot
         results = await asyncio.gather(
-            *(self._fetch_text(f"{u}/metrics") for u in self.shard_urls)
+            *(self._fetch_json(f"{u}/snapshot") for u in self.shard_urls)
         )
-        combined = "\n".join(r for r in results if r)
+        all_engines: list[dict] = []
+        merged_counters = {
+            "grpc_error_count": 0,
+            "grpc_retry_count": 0,
+            "grpc_cancel_forward_count": 0,
+        }
+        for r in results:
+            if r and isinstance(r, dict):
+                all_engines.extend(r.get("engines", []))
+                for k in merged_counters:
+                    merged_counters[k] += r.get("cluster_counters", {}).get(k, 0)
+        metrics_text = generate_aggregated_prometheus_metrics(
+            all_engines, merged_counters
+        )
         return web.Response(
-            text=combined,
+            text=metrics_text,
             headers={
                 "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
             },

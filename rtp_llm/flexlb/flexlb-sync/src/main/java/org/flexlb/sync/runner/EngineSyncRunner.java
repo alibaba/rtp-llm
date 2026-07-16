@@ -141,7 +141,7 @@ public class EngineSyncRunner implements Runnable {
                         GrpcWorkerStatusRunner grpcWorkerStatusRunner
                                 = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
                                 workerStatus, engineHealthReporter, engineGrpcService,
-                                syncRequestTimeoutMs, batchScheduler, endpointRegistry);
+                                syncRequestTimeoutMs, batchScheduler, endpointRegistry, statusCheckExecutor);
                         statusCheckExecutor.submit(grpcWorkerStatusRunner);
                     } catch (RejectedExecutionException e) {
                         workerStatus.getStatusCheckInProgress().set(false);
@@ -157,7 +157,7 @@ public class EngineSyncRunner implements Runnable {
                         GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
                                 = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
                                 workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
-                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval);
+                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval, statusCheckExecutor);
                         statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
                     } catch (RejectedExecutionException e) {
                         workerStatus.getCacheCheckInProgress().set(false);

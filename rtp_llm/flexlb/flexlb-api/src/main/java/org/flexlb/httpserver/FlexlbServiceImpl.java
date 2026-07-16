@@ -17,6 +17,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.enums.ScheduleModeEnum;
+import org.flexlb.interceptor.GrpcServerTimingInterceptor;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -259,6 +260,13 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
 
         ctx.setScheduleMode(resolveScheduleMode(pb.getScheduleMode(), configService.loadBalanceConfig()));
+
+        // Capture gRPC server entry time from interceptor context for delay metric splitting
+        Long grpcEntryTime = GrpcServerTimingInterceptor.get();
+        if (grpcEntryTime != null) {
+            ctx.setGrpcEntryTime(grpcEntryTime);
+        }
+
         return ctx;
     }
 

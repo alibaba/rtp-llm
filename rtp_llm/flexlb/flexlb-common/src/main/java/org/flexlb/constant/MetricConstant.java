@@ -429,9 +429,23 @@ public class MetricConstant {
     public static final String WORKER_PERMIT_CAPACITY = "app.worker.permit.capacity";
 
     /**
-     * Request arrival delay at Netty (difference between client requestTimeSeconds and server startTime, in milliseconds)
+     * Request arrival delay at Netty (difference between client requestTimeSeconds and server startTime, in milliseconds).
+     * <p>Deprecated: superseded by {@link #REQUEST_NETWORK_DELAY_MS} and {@link #GRPC_SERVER_PROCESS_MS}.
+     * Retained for backward compatibility — no longer reported.
      */
     public static final String REQUEST_ARRIVAL_DELAY_MS = "app.request.arrival.delay.ms";
+
+    /**
+     * Network transfer delay: time from client requestTimeMs to gRPC server entry, in milliseconds.
+     * Reported as: grpcEntryTime - requestTimeMs
+     */
+    public static final String REQUEST_NETWORK_DELAY_MS = "app.request.network.delay.ms";
+
+    /**
+     * gRPC server processing time: from gRPC server entry to BalanceContext creation (startTime), in milliseconds.
+     * Reported as: startTime - grpcEntryTime
+     */
+    public static final String GRPC_SERVER_PROCESS_MS = "app.grpc.server.process.ms";
 
     /**
      * Graceful online/offline lifecycle events

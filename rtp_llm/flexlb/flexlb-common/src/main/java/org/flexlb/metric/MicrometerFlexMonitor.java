@@ -11,6 +11,7 @@ import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
@@ -37,6 +38,22 @@ public class MicrometerFlexMonitor implements FlexMonitor {
 
     private static final String METRIC_PREFIX = "flexlb.";
 
+    /**
+     * When non-null, only metrics whose names are in this set will be registered/reported.
+     * Set by {@link org.flexlb.config.CriticalMetricsFilterConfig} when
+     * {@code flexlb.monitor.mode=critical-only} is active.
+     */
+    private static volatile Set<String> ALLOWED_METRICS = null;
+
+    /**
+     * Sets the allowlist of metric names (without the {@code flexlb.} prefix).
+     * Pass {@code null} to disable filtering (allow all metrics).
+     */
+    public static void setAllowedMetrics(Set<String> metrics) {
+        ALLOWED_METRICS = metrics;
+        log.info("MicrometerFlexMonitor allowlist set: {} metrics", metrics == null ? "unlimited" : metrics.size());
+    }
+
     private final MeterRegistry meterRegistry;
     private final ConcurrentHashMap<String, FlexMetricType> metricTypes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicDouble> gaugeValues = new ConcurrentHashMap<>();
@@ -57,6 +74,9 @@ public class MicrometerFlexMonitor implements FlexMonitor {
 
     @Override
     public void register(String metricName, FlexMetricType metricType) {
+        if (ALLOWED_METRICS != null && !ALLOWED_METRICS.contains(metricName)) {
+            return;
+        }
         metricTypes.put(metricName, metricType);
         log.debug("Registered metric: {} as type {}", metricName, metricType);
     }
@@ -78,6 +98,9 @@ public class MicrometerFlexMonitor implements FlexMonitor {
 
     @Override
     public void report(String metricName, FlexMetricTags metricsTags, double value) {
+        if (ALLOWED_METRICS != null && !ALLOWED_METRICS.contains(metricName)) {
+            return;
+        }
         String prefixedName = METRIC_PREFIX + metricName;
         FlexMetricType metricType = metricTypes.getOrDefault(metricName, FlexMetricType.GAUGE);
         Tags tags = (metricsTags == null || metricsTags.isEmpty())

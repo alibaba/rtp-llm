@@ -1,5 +1,8 @@
 package org.flexlb.engine.grpc;
 
+import com.google.common.util.concurrent.FutureCallback;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
 import io.grpc.ManagedChannel;
 import io.grpc.stub.AbstractBlockingStub;
 import lombok.Getter;
@@ -18,8 +21,10 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 /**
  * @author zjw
@@ -228,6 +233,35 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
         }
 
         throw new IllegalArgumentException("Invalid service key format: " + serviceKey);
+    }
+
+    /**
+     * Wrapper class for FutureStub (async gRPC calls)
+     */
+    public static class GrpcFutureStubWrapper {
+        private final RpcServiceGrpc.RpcServiceFutureStub rpcServiceFutureStub;
+        private final MultimodalRpcServiceGrpc.MultimodalRpcServiceFutureStub multimodalFutureStub;
+
+        public GrpcFutureStubWrapper(RpcServiceGrpc.RpcServiceFutureStub rpcServiceFutureStub,
+                                     MultimodalRpcServiceGrpc.MultimodalRpcServiceFutureStub multimodalFutureStub) {
+            this.rpcServiceFutureStub = rpcServiceFutureStub;
+            this.multimodalFutureStub = multimodalFutureStub;
+        }
+
+        public RpcServiceGrpc.RpcServiceFutureStub getRpcServiceFutureStub() {
+            return rpcServiceFutureStub;
+        }
+
+        public MultimodalRpcServiceGrpc.MultimodalRpcServiceFutureStub getMultimodalFutureStub() {
+            return multimodalFutureStub;
+        }
+
+        public GrpcFutureStubWrapper withDeadlineAfter(long timeout, TimeUnit unit) {
+            return new GrpcFutureStubWrapper(
+                    rpcServiceFutureStub.withDeadlineAfter(timeout, unit),
+                    multimodalFutureStub.withDeadlineAfter(timeout, unit)
+            );
+        }
     }
 
     /**

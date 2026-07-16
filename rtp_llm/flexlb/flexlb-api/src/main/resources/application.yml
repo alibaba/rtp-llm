@@ -50,9 +50,11 @@ otel:
 
 flexlb:
   monitor:
-    # Default off. Set FLEXLB_MONITOR_ENABLED=true env var to enable.
+    # Default on. Set FLEXLB_MONITOR_ENABLED=false env var to disable.
     # When enabled with 750+ engines, /prometheus returns 23MB (139K series).
-    enabled: false
+    enabled: true
     # Set to false to aggregate per-engine metrics (reduces ~139K series to ~250)
     # Default: per-engine tags retained (high cardinality with many engines)
     per-engine-tags: true
+    # Default: critical-only metrics reported. Set FLEXLB_MONITOR_MODE=all to report all metrics.
+    mode: critical-only

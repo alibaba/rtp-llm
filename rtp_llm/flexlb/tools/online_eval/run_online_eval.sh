@@ -48,6 +48,8 @@ LOOP="${LOOP:-0}"
 PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-}"
 JFR_FILE="${JFR_FILE:-${RUN_DIR}/flexlb_profile.jfr}"
 JFR_DURATION="${JFR_DURATION:-300s}"
+FLEXLB_MONITOR_ENABLED="${FLEXLB_MONITOR_ENABLED:-true}"
+FLEXLB_MONITOR_MODE="${FLEXLB_MONITOR_MODE:-critical-only}"
 
 DEFAULT_FLEXLB_CONFIG='{"loadBalanceStrategy":"COST_BASED_PREFILL","decodeLoadBalanceStrategy":"COST_BASED_DECODE","cacheHitMaxCacheKeys":10000000,"cacheHitMetricReportEnabled":true,"cacheHitTimeWindowMs":1800000,"cacheHitTraceLogEnabled":false,"cacheHitWindowWriteEnabled":true,"decodeConcurrencyLimit":132,"flexlbBatchAlgorithm":"fixed_window","flexlbBatchFixedWaitMs":10,"flexlbBatchPredictThresholdMs":550,"flexlbBatchSizeMax":32,"hysteresisBiasPercent":30,"maxQueueSize":1000000,"flexlbBatchMaxInflight":1000000,"flexlbBatchDispatchPoolSize":500,"flexlbBatchDispatchQueueSize":10000,"prefillQueueSizeThreshold":100000,"defaultScheduleMode":"BATCH","flexlbBatchFixedMaxInflightBatches":-1,"costSloMs":1000,"flexlbBatchMinSize":8,"prefillLbTimeoutMs":5000}'
 DEFAULT_STRATEGY_CONFIGS='{"shortestTtft":{"candidatePool":{"mode":"FIXED","size":2}}}'
@@ -323,6 +325,7 @@ OVERRIDE_ENV_KEYS=(
   FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE
   FLEXLB_JVM_HEAP_SIZE
   FLEXLB_MONITOR_ENABLED
+  FLEXLB_MONITOR_MODE
   GRADIENT
   GRADIENT_MAX_SPEED
   GRADIENT_START_SPEED
