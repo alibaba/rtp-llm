@@ -76,6 +76,11 @@
                     <groupId>org.flexlb</groupId>
                     <artifactId>dashscope-discovery</artifactId>
                 </dependency>
+                <!-- Turbo-compatible Prometheus endpoint, available in the internal distribution only -->
+                <dependency>
+                    <groupId>org.flexlb</groupId>
+                    <artifactId>turbo-prometheus-endpoint</artifactId>
+                </dependency>
             </dependencies>
         </profile>
     </profiles>

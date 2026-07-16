@@ -207,6 +207,11 @@
                 <artifactId>dashscope-discovery</artifactId>
                 <version>${project.version}</version>
             </dependency>
+            <dependency>
+                <groupId>org.flexlb</groupId>
+                <artifactId>turbo-prometheus-endpoint</artifactId>
+                <version>${project.version}</version>
+            </dependency>
 
             <!-- util tools 依赖 start -->
             <dependency>
