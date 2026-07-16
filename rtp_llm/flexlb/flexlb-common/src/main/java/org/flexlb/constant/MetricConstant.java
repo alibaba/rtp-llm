@@ -109,6 +109,20 @@ public class MetricConstant {
     public static final String DISPATCH_ACK_TIME_MS = "app.flexlb.dispatch.ack.time.ms";
 
     /**
+     * Route+submit time (from schedule() entry to batcher offer completion) in milliseconds.
+     * Measures the time spent in routing the request and enqueuing it into the per-engine batcher,
+     * before the request enters the batch wait window.
+     */
+    public static final String ROUTE_SUBMIT_TIME_MS = "app.flexlb.route.submit.time.ms";
+
+    /**
+     * ACK-to-response time (from engine EnqueueBatch acknowledgment to schedule response sent
+     * to the client) in milliseconds. Measures the latency between the engine ACKing the batch
+     * and the Master sending the schedule response back to the caller.
+     */
+    public static final String ACK_TO_RESPONSE_TIME_MS = "app.flexlb.ack.to.response.time.ms";
+
+    /**
      * Engine running queue time (from EP authoritative value)
      */
     public static final String ENGINE_RUNNING_QUEUE_TIME = "app.engine.health.check.running.queue.time";
@@ -120,6 +134,15 @@ public class MetricConstant {
      * to avoid tag schema conflict (per-engine vs scheduler-level).
      */
     public static final String SCHEDULER_INFLIGHT_SIZE = "app.flexlb.scheduler.inflight.size";
+
+    /**
+     * FlexLB batcher queue size — number of pending (not-yet-batched) requests
+     * in the per-engine WorkerBatcher queue.
+     * <p>Reported by BatchSchedulerReporter with role and engineIp tags.
+     * Independent metric name to avoid tag schema conflict with {@link #ROUTING_QUEUE_LENGTH}
+     * (which uses type=batchQueue tag for backward compatibility).
+     */
+    public static final String BATCHER_QUEUE_SIZE = "app.flexlb.batcher.queue.size";
 
     /**
      * Engine finished task list size
@@ -421,4 +444,59 @@ public class MetricConstant {
      * Forward to master result QPS (status: success/failure)
      */
     public static final String FORWARD_TO_MASTER_RESULT = "app.forward.to.master.result";
+
+    /* ------------------------ gRPC Server Executor Monitoring -------------------------- */
+
+    /**
+     * gRPC server executor active thread count (gauge)
+     */
+    public static final String GRPC_SERVER_EXECUTOR_ACTIVE_THREADS = "grpc.server.executor.active.threads";
+
+    /**
+     * gRPC server executor queue size (gauge)
+     */
+    public static final String GRPC_SERVER_EXECUTOR_QUEUE_SIZE = "grpc.server.executor.queue.size";
+
+    /**
+     * gRPC server executor current pool size (gauge)
+     */
+    public static final String GRPC_SERVER_EXECUTOR_POOL_SIZE = "grpc.server.executor.pool.size";
+
+    /**
+     * gRPC server executor maximum pool size (gauge)
+     */
+    public static final String GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE = "grpc.server.executor.max.pool.size";
+
+    /**
+     * gRPC server executor completed task count (counter — monotonically increasing)
+     */
+    public static final String GRPC_SERVER_EXECUTOR_COMPLETED_TASKS = "grpc.server.executor.completed.tasks";
+
+    /**
+     * gRPC server executor CallerRunsPolicy rejection count (counter — monotonically increasing)
+     * <p>Note: name kept for backward compat after switching to AbortPolicy.
+     */
+    public static final String GRPC_SERVER_EXECUTOR_CALLER_RUNS = "grpc.server.executor.caller.runs";
+
+    /* ------------------------ Dispatch Executor Monitoring ---------------------------- */
+
+    /**
+     * Dispatch executor active thread count (gauge)
+     */
+    public static final String DISPATCH_EXECUTOR_ACTIVE_THREADS = "dispatch.executor.active.threads";
+
+    /**
+     * Dispatch executor queue size (gauge)
+     */
+    public static final String DISPATCH_EXECUTOR_QUEUE_SIZE = "dispatch.executor.queue.size";
+
+    /**
+     * Dispatch executor current pool size (gauge)
+     */
+    public static final String DISPATCH_EXECUTOR_POOL_SIZE = "dispatch.executor.pool.size";
+
+    /**
+     * Dispatch executor completed task count (counter — monotonically increasing)
+     */
+    public static final String DISPATCH_EXECUTOR_COMPLETED_TASKS = "dispatch.executor.completed.tasks";
 }

@@ -49,6 +49,14 @@ public class BalanceContext {
 
     private long dequeueTime;
 
+    /**
+     * Timestamp (ms) when the engine acknowledges the batch in BATCH mode.
+     * Set by FlexlbBatchScheduler.onSuccess() when the ACK is received.
+     * Used to compute ack_to_response_time_ms in FlexlbServiceImpl.completeSchedule().
+     * Remains 0 for non-BATCH paths or when ACK was not received.
+     */
+    private long ackAtMs;
+
     private long sequenceId;
 
     private boolean success = true;

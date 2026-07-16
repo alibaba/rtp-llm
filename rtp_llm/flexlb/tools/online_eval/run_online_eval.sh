@@ -14,9 +14,13 @@ RUN_DIR="${RUN_DIR:-${RUN_ROOT}/${RUN_ID}}"
 
 N_PREFILL="${N_PREFILL:-2}"
 N_DECODE="${N_DECODE:-4}"
-MOCK_BASE_GRPC_PORT="${MOCK_BASE_GRPC_PORT:-55151}"
+MOCK_BASE_GRPC_PORT="${MOCK_BASE_GRPC_PORT:-61000}"
 PREFILL_CACHE_BLOCKS="${PREFILL_CACHE_BLOCKS:-6000}"
 DECODE_CACHE_BLOCKS="${DECODE_CACHE_BLOCKS:-3000}"
+N_SHARDS="${N_SHARDS:-64}"  # mock engine 分片数，默认 64（多进程模式）
+# HTTP proxy port for the shard launcher.
+# Placed above the gRPC engine range to avoid ephemeral port collisions.
+MOCK_PROXY_PORT=$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE + 100 + N_SHARDS))
 
 FLEXLB_HTTP_ADDR="${FLEXLB_HTTP_ADDR:-127.0.0.1:7001}"
 FLEXLB_HTTP_PORT="${FLEXLB_HTTP_ADDR##*:}"
@@ -29,14 +33,16 @@ MAVEN_PROFILES="${MAVEN_PROFILES:-opensource,!internal}"
 LIMIT="${LIMIT:-1000}"
 DURATION_S="${DURATION_S:-0}"
 REPLAY_SPEED="${REPLAY_SPEED:-10}"
-MAX_CONCURRENCY="${MAX_CONCURRENCY:-1024}"
+MAX_CONCURRENCY="${MAX_CONCURRENCY:-999999999}"
 SCHEDULE_MODE="${SCHEDULE_MODE:-batch}"
 TIMEOUT_MS="${TIMEOUT_MS:-3600000}"
 SLA_TTFT_MS="${SLA_TTFT_MS:-500}"
 ZERO_OUTPUT_POLICY="${ZERO_OUTPUT_POLICY:-skip}"
 SCHEDULE_ONLY="${SCHEDULE_ONLY:-0}"
+LOOP="${LOOP:-0}"
+PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-}"
 
-DEFAULT_FLEXLB_CONFIG='{"loadBalanceStrategy":"COST_BASED_PREFILL","decodeLoadBalanceStrategy":"COST_BASED_DECODE","cacheHitMaxCacheKeys":80000000,"cacheHitMetricReportEnabled":true,"cacheHitTimeWindowMs":1800000,"cacheHitTraceLogEnabled":false,"cacheHitWindowWriteEnabled":true,"decodeConcurrencyLimit":132,"flexlbBatchAlgorithm":"fixed_window","flexlbBatchFixedWaitMs":220,"flexlbBatchPredictThresholdMs":550,"flexlbBatchSizeMax":32,"hysteresisBiasPercent":30,"maxQueueSize":5000,"prefillQueueSizeThreshold":100000,"defaultScheduleMode":"BATCH","flexlbBatchFixedMaxInflightBatches":2,"costSloMs":1000,"flexlbBatchMinSize":8,"prefillLbTimeoutMs":5000}'
+DEFAULT_FLEXLB_CONFIG='{"loadBalanceStrategy":"COST_BASED_PREFILL","decodeLoadBalanceStrategy":"COST_BASED_DECODE","cacheHitMaxCacheKeys":80000000,"cacheHitMetricReportEnabled":true,"cacheHitTimeWindowMs":1800000,"cacheHitTraceLogEnabled":false,"cacheHitWindowWriteEnabled":true,"decodeConcurrencyLimit":132,"flexlbBatchAlgorithm":"fixed_window","flexlbBatchFixedWaitMs":10,"flexlbBatchPredictThresholdMs":550,"flexlbBatchSizeMax":32,"hysteresisBiasPercent":30,"maxQueueSize":1000000,"flexlbBatchMaxInflight":1000000,"flexlbBatchDispatchPoolSize":500,"flexlbBatchDispatchQueueSize":10000,"prefillQueueSizeThreshold":100000,"defaultScheduleMode":"BATCH","flexlbBatchFixedMaxInflightBatches":-1,"costSloMs":1000,"flexlbBatchMinSize":8,"prefillLbTimeoutMs":5000}'
 DEFAULT_STRATEGY_CONFIGS='{"shortestTtft":{"candidatePool":{"mode":"FIXED","size":2}}}'
 FLEXLB_CONFIG="${FLEXLB_CONFIG:-${DEFAULT_FLEXLB_CONFIG}}"
 STRATEGY_CONFIGS="${STRATEGY_CONFIGS:-${DEFAULT_STRATEGY_CONFIGS}}"
@@ -129,6 +135,60 @@ sys.exit(1)
 PY
 }
 
+wait_for_endpoints_ready() {
+  local master_port=$1
+  local expected_prefill=$2
+  local expected_decode=$3
+  local max_wait=120
+  local elapsed=0
+
+  echo "[wait_for_endpoints_ready] Waiting for ${expected_prefill} prefill + ${expected_decode} decode endpoints to be discovered and alive..."
+
+  while [ "${elapsed}" -lt "${max_wait}" ]; do
+    local response
+    response=$(curl -s -X POST "http://127.0.0.1:${master_port}/rtp_llm/master/info" \
+        -H "Content-Type: application/json" \
+        -H "Accept: application/json" \
+        -d '{}' 2>/dev/null) || true
+
+    if [ -n "${response}" ]; then
+      local result
+      result=$(echo "${response}" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    ready = data.get('ready', False)
+    ws = data.get('worker_summary', {})
+    prefill = ws.get('PREFILL', {})
+    decode = ws.get('DECODE', {})
+    p_disc = prefill.get('discovered', 0)
+    p_alive = prefill.get('alive', 0)
+    d_disc = decode.get('discovered', 0)
+    d_alive = decode.get('alive', 0)
+    print(f'{ready}|{p_disc}|{p_alive}|{d_disc}|{d_alive}')
+except Exception:
+    print('False|0|0|0|0')
+" 2>/dev/null) || result="False|0|0|0|0"
+
+      local ready p_disc p_alive d_disc d_alive
+      IFS='|' read -r ready p_disc p_alive d_disc d_alive <<< "${result}"
+
+      if [ "${ready}" = "True" ] && [ "${p_disc}" -ge "${expected_prefill}" ] && [ "${p_alive}" -ge "${expected_prefill}" ] && [ "${d_disc}" -ge "${expected_decode}" ] && [ "${d_alive}" -ge "${expected_decode}" ]; then
+        echo "[wait_for_endpoints_ready] All endpoints ready: prefill=${p_alive}/${expected_prefill}, decode=${d_alive}/${expected_decode} (${elapsed}s)"
+        return 0
+      fi
+
+      echo "[wait_for_endpoints_ready] Not ready yet: ready=${ready}, prefill discovered=${p_disc}/${expected_prefill} alive=${p_alive}/${expected_prefill}, decode discovered=${d_disc}/${expected_decode} alive=${d_alive}/${expected_decode} (${elapsed}s)"
+    fi
+
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+
+  echo "[wait_for_endpoints_ready] WARNING: Timeout after ${max_wait}s waiting for endpoints. Proceeding anyway."
+  return 0
+}
+
 mkdir -p "${RUN_DIR}"
 echo "run_dir=${RUN_DIR}"
 
@@ -136,18 +196,32 @@ ENDPOINT_FILE="${RUN_DIR}/endpoints.json"
 FLEXLB_ENV_FILE="${RUN_DIR}/flexlb_env.txt"
 
 if [[ "${START_MOCK}" == "1" ]]; then
-  PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/mock_engine_cluster.py" \
+  MOCK_ENGINE_SCRIPT="${SCRIPT_DIR}/mock_engine_cluster.py"
+  MOCK_ENGINE_EXTRA_ARGS=()
+  if [[ "${N_SHARDS}" -gt 1 ]]; then
+    MOCK_ENGINE_SCRIPT="${SCRIPT_DIR}/mock_engine_shard_launcher.py"
+    MOCK_ENGINE_EXTRA_ARGS=(--n-shards "${N_SHARDS}")
+  fi
+  PYTHONDONTWRITEBYTECODE=1 python3 "${MOCK_ENGINE_SCRIPT}" \
     --n-prefill "${N_PREFILL}" \
     --n-decode "${N_DECODE}" \
     --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
     --performance "${PERFORMANCE_FILE}" \
+    --master-config "${PROCESS_CONFIG_FILE}" \
     --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
     --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
     --endpoint-file "${ENDPOINT_FILE}" \
     --env-file "${FLEXLB_ENV_FILE}" \
+    "${MOCK_ENGINE_EXTRA_ARGS[@]}" \
     >"${RUN_DIR}/mock_engine.log" 2>&1 &
   MOCK_PID="$!"
-  wait_for_port "127.0.0.1" "${MOCK_BASE_GRPC_PORT}" 20
+  if [[ "${N_SHARDS}" -gt 1 ]]; then
+    # 多进程模式：等待 launcher HTTP 代理端口（endpoints.json 合并后才启动）
+    wait_for_port "127.0.0.1" "${MOCK_PROXY_PORT}" 180
+  else
+    # 单进程模式：等待第一个 gRPC 端口
+    wait_for_port "127.0.0.1" "${MOCK_BASE_GRPC_PORT}" 20
+  fi
 else
   if [[ ! -f "${ENDPOINT_FILE}" ]]; then
     echo "START_MOCK=0 requires ENDPOINT_FILE at ${ENDPOINT_FILE}" >&2
@@ -199,13 +273,14 @@ OVERRIDE_ENV_KEYS=(
   DECODE_LOAD_BALANCE_STRATEGY
   DEFAULT_SCHEDULE_MODE
   FLEXLB_BATCH_ALGORITHM
+  FLEXLB_BATCH_DISPATCH_POOL_SIZE
+  FLEXLB_BATCH_DISPATCH_QUEUE_SIZE
   FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES
   FLEXLB_BATCH_FIXED_WAIT_MS
+  FLEXLB_BATCH_MAX_INFLIGHT
   FLEXLB_BATCH_MIN_SIZE
   FLEXLB_BATCH_PREDICT_THRESHOLD_MS
   FLEXLB_BATCH_SIZE_MAX
-  FLEXLB_GRPC_EXECUTOR_CORE_SIZE
-  FLEXLB_GRPC_EXECUTOR_MAX_SIZE
   FLEXLB_JVM_HEAP_SIZE
   HYSTERESIS_BIAS_PERCENT
   LOAD_BALANCE_STRATEGY
@@ -213,6 +288,7 @@ OVERRIDE_ENV_KEYS=(
   PREFILL_QUEUE_SIZE_THRESHOLD
   PREFILL_TIME_FORMULA
   SYNC_REQUEST_TIMEOUT_MS
+  SYNC_STATUS_INTERVAL
 )
 for key in "${OVERRIDE_ENV_KEYS[@]}"; do
   if [[ -v "${key}" ]]; then
@@ -261,7 +337,7 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
       "OTEL_TRACE_SKIP_PATTERN=${OTEL_TRACE_SKIP_PATTERN}" \
       "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
       "HIPPO_ROLE=${HIPPO_ROLE}" \
-      java "${JAVA_HEAP_OPTS[@]}" "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
+      java -XX:StartFlightRecording=filename=/data1/wuran.wzy/flexlb_profile.jfr,settings=profile,dumponexit=true,disk=true,maxsize=256m "${JAVA_HEAP_OPTS[@]}" "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
       --server.port="${FLEXLB_HTTP_PORT}" \
       --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
       --spring.profiles.active="${SPRING_PROFILE:-default}" \
@@ -269,6 +345,7 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
   fi
   FLEXLB_PID="$!"
   wait_for_port "127.0.0.1" "${FLEXLB_HTTP_PORT}" 60
+  wait_for_endpoints_ready "${FLEXLB_HTTP_PORT}" "${N_PREFILL}" "${N_DECODE}"
 fi
 
 CLIENT_ARGS=(
@@ -286,6 +363,15 @@ CLIENT_ARGS=(
 )
 if [[ "${SCHEDULE_ONLY}" == "1" ]]; then
   CLIENT_ARGS+=(--schedule-only)
+fi
+if [[ "${LOOP}" == "1" ]]; then
+  CLIENT_ARGS+=(--loop)
+fi
+if [[ -n "${RESPONSE_TIMEOUT:-}" ]]; then
+  CLIENT_ARGS+=(--response-timeout "${RESPONSE_TIMEOUT}")
+fi
+if [[ -n "${PUSHGATEWAY_URL}" ]]; then
+  CLIENT_ARGS+=(--pushgateway-url "${PUSHGATEWAY_URL}")
 fi
 
 PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/flexlb_load_client.py" "${CLIENT_ARGS[@]}" | tee "${RUN_DIR}/client.stdout"

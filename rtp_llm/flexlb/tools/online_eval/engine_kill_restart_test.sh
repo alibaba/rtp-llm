@@ -106,26 +106,28 @@ fi
 # Cluster allocates ports sequentially: prefill-0, prefill-1, ..., decode-0, ...
 CLUSTER_PREFILL_ADDRS=""
 CLUSTER_DECODE_ADDRS=""
+# DOMAIN_ADDRESS must contain HTTP ports; FlexLB Master computes gRPC port
+# via toGrpcPort(httpPort) = httpPort + 1.
 _port=${MOCK_BASE_GRPC_PORT}
 for ((i = 0; i < CLUSTER_N_PREFILL; i++)); do
   if [[ -z "${CLUSTER_PREFILL_ADDRS}" ]]; then
-    CLUSTER_PREFILL_ADDRS="127.0.0.1:${_port}"
+    CLUSTER_PREFILL_ADDRS="127.0.0.1:$((_port - 1))"
   else
-    CLUSTER_PREFILL_ADDRS="${CLUSTER_PREFILL_ADDRS},127.0.0.1:${_port}"
+    CLUSTER_PREFILL_ADDRS="${CLUSTER_PREFILL_ADDRS},127.0.0.1:$((_port - 1))"
   fi
   _port=$((_port + 1))
 done
 for ((i = 0; i < CLUSTER_N_DECODE; i++)); do
   if [[ -z "${CLUSTER_DECODE_ADDRS}" ]]; then
-    CLUSTER_DECODE_ADDRS="127.0.0.1:${_port}"
+    CLUSTER_DECODE_ADDRS="127.0.0.1:$((_port - 1))"
   else
-    CLUSTER_DECODE_ADDRS="${CLUSTER_DECODE_ADDRS},127.0.0.1:${_port}"
+    CLUSTER_DECODE_ADDRS="${CLUSTER_DECODE_ADDRS},127.0.0.1:$((_port - 1))"
   fi
   _port=$((_port + 1))
 done
 
 # -- Combine addresses for DOMAIN_ADDRESS ----------------------------------
-VICTIM_ADDR="127.0.0.1:${VICTIM_GRPC_PORT}"
+VICTIM_ADDR="127.0.0.1:${VICTIM_HTTP_PORT}"
 if [[ "${KILL_TARGET}" == "prefill" ]]; then
   if [[ -z "${CLUSTER_PREFILL_ADDRS}" ]]; then
     PREFILL_DOMAIN_ADDR="${VICTIM_ADDR}"
@@ -143,7 +145,7 @@ else
 fi
 
 # -- Model service config (constant JSON) ----------------------------------
-readonly MODEL_SERVICE_CONFIG_JSON='{"service_id":"aigc.text-generation.generation.engine_service","load_balance":true,"role_endpoints":[{"group":"mock","prefill_endpoint":{"address":"mock.prefill.hosts.address","protocol":"grpc","path":"/"},"decode_endpoint":{"address":"mock.decode.hosts.address","protocol":"grpc","path":"/"}}]}'
+readonly MODEL_SERVICE_CONFIG_JSON='{"service_id":"aigc.text-generation.generation.engine_service","load_balance":true,"role_endpoints":[{"group":"mock","prefill_endpoint":{"address":"mock.prefill.hosts.address","protocol":"http","path":"/"},"decode_endpoint":{"address":"mock.decode.hosts.address","protocol":"http","path":"/"}}]}'
 
 # -- Load client parameters ------------------------------------------------
 LOAD_CLIENT_LIMIT="${LOAD_CLIENT_LIMIT:-0}"

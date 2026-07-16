@@ -5,12 +5,14 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
+import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 /**
  * MicrometerFlexMonitor - bridges FlexMonitor interface to micrometer MeterRegistry.
@@ -23,6 +25,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * <ul>
  *   <li>{@link FlexMetricType#QPS} / {@link FlexMetricType#COUNTER} → micrometer Counter (increment)</li>
  *   <li>{@link FlexMetricType#GAUGE} → micrometer Gauge (absolute value via AtomicDouble)</li>
+ *   <li>{@link FlexMetricType#TIMER} → micrometer Timer (duration distribution with p50/p90/p95/p99)</li>
  *   <li>Unknown types default to Gauge</li>
  * </ul>
  *
@@ -37,6 +40,9 @@ public class MicrometerFlexMonitor implements FlexMonitor {
     private final MeterRegistry meterRegistry;
     private final ConcurrentHashMap<String, FlexMetricType> metricTypes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicDouble> gaugeValues = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Counter> counterCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Timer> timerCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<FlexMetricTags, Tags> tagsCache = new ConcurrentHashMap<>();
 
     /**
      * Constructor.
@@ -74,16 +80,28 @@ public class MicrometerFlexMonitor implements FlexMonitor {
     public void report(String metricName, FlexMetricTags metricsTags, double value) {
         String prefixedName = METRIC_PREFIX + metricName;
         FlexMetricType metricType = metricTypes.getOrDefault(metricName, FlexMetricType.GAUGE);
-        Tags tags = toMicrometerTags(metricsTags);
+        Tags tags = (metricsTags == null || metricsTags.isEmpty())
+                ? Tags.empty()
+                : tagsCache.computeIfAbsent(metricsTags, this::toMicrometerTags);
 
         try {
             switch (metricType) {
                 case QPS:
                 case COUNTER:
-                    Counter.builder(prefixedName)
-                            .tags(tags)
-                            .register(meterRegistry)
-                            .increment(value);
+                    String counterKey = prefixedName + "|" + tags;
+                    Counter counter = counterCache.computeIfAbsent(counterKey, k ->
+                            Counter.builder(prefixedName).tags(tags).register(meterRegistry));
+                    counter.increment(value);
+                    break;
+                case TIMER:
+                    String timerKey = prefixedName + "|" + tags;
+                    Timer timer = timerCache.computeIfAbsent(timerKey, k ->
+                            Timer.builder(prefixedName)
+                                    .tags(tags)
+                                    .publishPercentileHistogram(true)
+                                    .publishPercentiles(0.5, 0.9, 0.95, 0.99)
+                                    .register(meterRegistry));
+                    timer.record((long) value, TimeUnit.MILLISECONDS);
                     break;
                 case GAUGE:
                 default:

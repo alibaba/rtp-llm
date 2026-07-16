@@ -86,8 +86,8 @@ Start the full SpringBoot `flexlb-api` with the environment variables generated
 by the mock cluster. FlexLB's own gRPC port is `server.port + 2`.
 
 Backend mock engines use the rtp-llm convention `http_port + 1 == grpc_port`.
-The generated service route uses `"protocol": "grpc"`, so FlexLB treats the
-service discovery port as the engine gRPC port and derives HTTP as `grpc - 1`.
+The generated service route uses `"protocol": "http"`, so FlexLB treats the
+service discovery port as the engine HTTP port and derives gRPC as `http + 1`.
 
 ### 3. Run load client
 

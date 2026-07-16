@@ -33,9 +33,6 @@
         <protobuf.version>3.25.1</protobuf.version>
         <curator.version>5.4.0</curator.version>
         <opentelemetry.version>1.51.0</opentelemetry.version>
-        <!-- 高版本 reactor 和 netty，有一些 bug fix  -->
-        <reactor.version>2024.0.10</reactor.version>
-        <netty.version>4.1.127.Final</netty.version>
         <micrometer.version>1.10.13</micrometer.version>
         <!-- 高版本 Mockito，摆脱 powermock 和 JUnit4 的限制 -->
         <mockito.version>5.20.0</mockito.version>
@@ -94,22 +91,8 @@
 
     <dependencyManagement>
         <dependencies>
-            <!-- 自定义管理 reactor, netty 和 micrometer 的版本 -->
+            <!-- 自定义管理 micrometer 的版本 -->
             <!-- 主要是为了版本高可能有一些特性的修复 -->
-            <dependency>
-                <groupId>io.projectreactor</groupId>
-                <artifactId>reactor-bom</artifactId>
-                <version>${reactor.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
-            <dependency>
-                <groupId>io.netty</groupId>
-                <artifactId>netty-bom</artifactId>
-                <version>${netty.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
             <dependency>
                 <groupId>io.micrometer</groupId>
                 <artifactId>micrometer-bom</artifactId>
@@ -258,7 +241,7 @@
             </dependency>
         </dependencies>
     </dependencyManagement>
-    
+
     <build>
         <plugins>
             <plugin>

@@ -107,7 +107,7 @@
         <appender-ref ref="CONSOLE"/>
     </appender>
 
-    <logger name="syncLogger" level="INFO" additivity="false">
+    <logger name="syncLogger" level="WARN" additivity="false">
         <appender-ref ref="sync-async"/>
     </logger>
 

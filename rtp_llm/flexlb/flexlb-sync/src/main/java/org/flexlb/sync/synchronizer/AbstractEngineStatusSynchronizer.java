@@ -55,8 +55,8 @@ public abstract class AbstractEngineStatusSynchronizer {
         this.engineHealthReporter = engineHealthReporter;
         this.engineWorkerStatus = engineWorkerStatus;
         this.modelMetaConfig = modelMetaConfig;
-        int corePoolSize = 500;
-        int maximumPoolSize = 1000;
+        int corePoolSize = 64;
+        int maximumPoolSize = 128;
 
         engineSyncExecutor = new ThreadPoolExecutor(corePoolSize, maximumPoolSize, 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(15000), new NamedThreadFactory("engine-sync-executor"),

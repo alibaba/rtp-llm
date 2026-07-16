@@ -29,7 +29,11 @@ import signal
 
 from online_eval.mock_engine import MockEngineCluster
 from online_eval.proto_utils import ensure_proto_modules
-from online_eval.rt_model import PerformanceModel, load_performance_config
+from online_eval.rt_model import (
+    PerformanceModel,
+    extract_prefill_formula_from_master_config,
+    load_performance_config,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,6 +43,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--role", required=True, choices=["prefill", "decode"])
     parser.add_argument("--name", required=True)
     parser.add_argument("--performance", help="performance model JSON")
+    parser.add_argument(
+        "--master-config",
+        default=None,
+        help="Master config JSON (read PREFILL_TIME_FORMULA for the mock engine)",
+    )
     parser.add_argument("--cache-blocks", type=int, default=6000)
     parser.add_argument("--total-kv-tokens", type=int, default=6_291_456)
     parser.add_argument("--block-size", type=int, default=1024)
@@ -54,6 +63,9 @@ async def main() -> None:
     pb2, pb2_grpc = ensure_proto_modules()
     perf_cfg = load_performance_config(args.performance)
     perf_cfg.setdefault("block_size", args.block_size)
+    formula_str = extract_prefill_formula_from_master_config(args.master_config)
+    if formula_str:
+        perf_cfg.setdefault("prefill", {})["formula_str"] = formula_str
     performance = PerformanceModel(perf_cfg)
 
     http_port = args.grpc_port - 1

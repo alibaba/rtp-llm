@@ -1,0 +1,153 @@
+{
+    "zone_name": "master",
+    "zone_process_setting": {
+        "global": {},
+        "resource_plan": {
+            "resources": [
+                {
+                    "slot_resources": [
+                        {
+                            "name": "mem",
+                            "type": "SCALAR",
+                            "amount": 57344
+                        }
+                    ]
+                }
+            ],
+            "meta_tag_list": []
+        },
+        "process_info": {
+            "args": [],
+            "envs": [
+                [
+                    "CACHE_HIT_MAX_CACHE_KEYS",
+                    "80000000"
+                ],
+                [
+                    "CACHE_HIT_METRIC_REPORT_ENABLED",
+                    "true"
+                ],
+                [
+                    "CACHE_HIT_TIME_WINDOW_MS",
+                    "1800000"
+                ],
+                [
+                    "CACHE_HIT_TRACE_LOG_ENABLED",
+                    "false"
+                ],
+                [
+                    "CACHE_HIT_WINDOW_WRITE_ENABLED",
+                    "true"
+                ],
+                [
+                    "COST_ALPHA0",
+                    "205"
+                ],
+                [
+                    "COST_ALPHA1",
+                    "0"
+                ],
+                [
+                    "COST_ALPHA2",
+                    "1.2e-8"
+                ],
+                [
+                    "COST_ALPHA3",
+                    "1.2e-8"
+                ],
+                [
+                    "COST_ALPHA4",
+                    "0"
+                ],
+                [
+                    "COST_ALPHA5",
+                    "5.0"
+                ],
+                [
+                    "DECODE_CONCURRENCY_LIMIT",
+                    "132"
+                ],
+                [
+                    "DECODE_LOAD_BALANCE_STRATEGY",
+                    "COST_BASED_DECODE"
+                ],
+                [
+                    "FLEXLB_BATCH_ALGORITHM",
+                    "fixed_window"
+                ],
+                [
+                    "FLEXLB_BATCH_DISPATCH_POOL_SIZE",
+                    "500"
+                ],
+                [
+                    "FLEXLB_BATCH_DISPATCH_QUEUE_SIZE",
+                    "10000"
+                ],
+                [
+                    "FLEXLB_BATCH_FIXED_WAIT_MS",
+                    "220"
+                ],
+                [
+                    "FLEXLB_BATCH_PREDICT_THRESHOLD_MS",
+                    "550"
+                ],
+                [
+                    "FLEXLB_BATCH_SIZE_MAX",
+                    "32"
+                ],
+                [
+                    "FLEXLB_JVM_HEAP_SIZE",
+                    "4g"
+                ],
+                [
+                    "HYSTERESIS_BIAS_PERCENT",
+                    "30"
+                ],
+                [
+                    "LOAD_BALANCE_STRATEGY",
+                    "COST_BASED_PREFILL"
+                ],
+                [
+                    "MAX_QUEUE_SIZE",
+                    "1000000"
+                ],
+                [
+                    "PREFILL_QUEUE_SIZE_THRESHOLD",
+                    "100000"
+                ],
+                [
+                    "DEFAULT_SCHEDULE_MODE",
+                    "BATCH"
+                ],
+                [
+                    "FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES",
+                    "2"
+                ],
+                [
+                    "FLEXLB_BATCH_MAX_INFLIGHT",
+                    "1000000"
+                ],
+                [
+                    "COST_SLO_MS",
+                    "1000"
+                ],
+                [
+                    "FLEXLB_BATCH_MIN_SIZE",
+                    "8"
+                ],
+                [
+                    "SYNC_REQUEST_TIMEOUT_MS",
+                    "5000"
+                ],
+                [
+                    "SYNC_STATUS_INTERVAL",
+                    "50"
+                ],
+                [
+                    "PREFILL_TIME_FORMULA",
+                    "max(300, 244.865367146 + 37.2748283785*log(batchSize + 1)\n+ 0*2048*log(1 + exp((sum(computeTokens) - 8192)/2048))\n+ 0.00768264457133*4096*log(1 + exp((sum(computeTokens) - 24576)/4096))\n+ 0*8192*log(1 + exp((sum(computeTokens) - 65536)/8192))\n+ 0.000913293127052*8192*log(1 + exp((sum(computeTokens) - 81920)/8192))\n+ 0.000238132170008*sum(hitCacheTokens)\n+ 48.1819941798*(sum(hasHitCache)/batchSize)\n+ 14.6526667921*(sum(hitCacheTokens/(inputTokens + 1))/batchSize))"
+                ]
+            ]
+        }
+    }
+}

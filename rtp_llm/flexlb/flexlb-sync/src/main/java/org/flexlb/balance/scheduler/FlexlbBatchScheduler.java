@@ -176,6 +176,13 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             }
             WorkerBatcher batcher = prefillEp.getBatcher();
             batcher.offer(item);
+
+            // Report route+submit time: from schedule() entry (ctx.startTime) to batcher offer completion
+            reporter.reportRouteSubmitTimeMs(
+                    RoleType.PREFILL.name(),
+                    prefillEp.getIp(),
+                    prefillEp.ipPort(),
+                    System.currentTimeMillis() - ctx.getStartTime());
         } catch (Throwable t) {
             if (ctx != null) {
                 inflight.remove(ctx.getRequestId());
@@ -464,6 +471,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             }
             RequestLifecycleSnapshot snapshot = entry.lifecycle.acknowledge();
             if (snapshot.state() == RequestLifecycleState.ACKNOWLEDGED) {
+                // Record ACK timestamp for ack_to_response_time_ms metric (reported in FlexlbServiceImpl.completeSchedule)
+                item.ctx().setAckAtMs(System.currentTimeMillis());
+
                 long dispatchedAtMs = entry.lifecycle.getDispatchedAtMs();
                 if (dispatchedAtMs > 0) {
                     PrefillEndpoint ep = item.prefillEp();

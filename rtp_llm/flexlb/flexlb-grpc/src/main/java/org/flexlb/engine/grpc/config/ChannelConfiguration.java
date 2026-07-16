@@ -5,6 +5,7 @@ import io.netty.channel.DefaultSelectStrategyFactory;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.util.concurrent.DefaultEventExecutorChooserFactory;
+import io.netty.util.concurrent.DefaultThreadFactory;
 import io.netty.util.concurrent.RejectedExecutionHandlers;
 import io.netty.util.internal.PlatformDependent;
 import lombok.extern.slf4j.Slf4j;
@@ -34,13 +35,21 @@ public class ChannelConfiguration {
     @Bean
     public EventLoopGroup managedChannelEventLoopGroup() {
         return new NioEventLoopGroup(
-                Runtime.getRuntime().availableProcessors() * 8,
+                Runtime.getRuntime().availableProcessors() * 2,
                 null,
                 DefaultEventExecutorChooserFactory.INSTANCE,
                 SelectorProvider.provider(),
                 DefaultSelectStrategyFactory.INSTANCE,
                 RejectedExecutionHandlers.reject(),
                 PlatformDependent::newMpscQueue
+        );
+    }
+
+    @Bean(destroyMethod = "")
+    public EventLoopGroup grpcServerEventLoopGroup() {
+        return new NioEventLoopGroup(
+                Runtime.getRuntime().availableProcessors(),
+                new DefaultThreadFactory("grpc-server-elg")
         );
     }
 }

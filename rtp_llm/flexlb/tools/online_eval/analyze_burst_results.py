@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -612,6 +613,14 @@ def _fmt_val(val: Any, suffix: str = "") -> str:
     return str(val)
 
 
+def _get_max_concurrency(runs: List[SpeedRunData]) -> str:
+    """Get max_concurrency from first available summary.json, or env var, or default."""
+    for run in runs:
+        if run.summary and isinstance(run.summary.get("max_concurrency"), (int, float)):
+            return str(run.summary["max_concurrency"])
+    return os.environ.get("MAX_CONCURRENCY", "16384")
+
+
 def _get_summary_field(summary: Optional[Dict[str, Any]], *keys: str) -> Optional[Any]:
     if summary is None:
         return None
@@ -653,7 +662,7 @@ def generate_report(runs: List[SpeedRunData], sla_ms: float, speeds: List[int]) 
     L.append("  - SCHEDULE_MODE=batch")
     L.append("  - LOAD_BALANCE_STRATEGY=COST_BASED_PREFILL")
     L.append("  - DECODE_LOAD_BALANCE_STRATEGY=COST_BASED_DECODE")
-    L.append("  - MAX_CONCURRENCY=1024")
+    L.append(f"  - MAX_CONCURRENCY={_get_max_concurrency(runs)}")
     L.append(f"  - SLA_TTFT_MS={int(sla_ms)}")
     L.append("  - ZERO_OUTPUT_POLICY=one (trace ol=0, set to 1)")
     L.append("  - LIMIT=0 (unlimited, full 8332 requests)")
