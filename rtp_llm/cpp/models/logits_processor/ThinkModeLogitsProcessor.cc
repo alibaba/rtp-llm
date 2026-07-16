@@ -387,8 +387,9 @@ int ThinkModeLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorR
             cap = offset;
             break;
         }
+        const bool was_in_think = isActiveThinkState(state);
         advanceThinkStateForSpec(state, draft_token);
-        if (state.process_state == ThinkProcessState::AFTER_THINK) {
+        if (was_in_think && state.process_state == ThinkProcessState::AFTER_THINK) {
             // Stop accepting draft tokens at the thinking boundary. The speculative sampler
             // keeps one target bonus token (accept_len = cap + 1), so exactly one token can
             // be generated after </think> before maxTokenNum() observes the finished length.
