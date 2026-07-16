@@ -257,6 +257,7 @@ markers = [
 
     # Feature markers
     "open_skip: skip in open source build",
+    "remote_cache: remote KV-cache / CAS smoke tests (smoke_remote_cache_oss profile)",
 ]
 
 # 日志配置
