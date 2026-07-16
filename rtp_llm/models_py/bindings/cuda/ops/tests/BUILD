@@ -45,7 +45,23 @@ cc_test(
     ],
     data = [],
     copts = copts(),
-    deps = test_deps,
+    deps = test_deps + [
+        "//3rdparty/flashinfer:flashinfer",
+        "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "rejection_sampling_op_test",
+    srcs = [
+        "CudaRejectionSamplingOpTest.cc",
+    ],
+    data = [],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/testing:rejection_sampling_test_utils",
+    ] + torch_deps(),
     exec_properties = {'gpu':'H20'},
 )
 

@@ -144,8 +144,6 @@ class XQADecodeImpl(FMHAImplBase):
     ) -> bool:
         if attn_inputs.is_prefill:
             return False
-        if attn_configs.kv_cache_dtype == KvCacheDataType.INT8:
-            return False
         if torch.cuda.get_device_capability()[0] not in [9, 10, 12]:
             return False
         group_size = attn_configs.head_num // attn_configs.kv_head_num
@@ -223,7 +221,7 @@ class XQAWrapper:
     ):
         self.config = config
         self.attn_inputs = attn_inputs
-        self.cu_qseqlens = attn_inputs.cu_seqlens
+        self.cu_qseqlens = attn_inputs.cu_seqlens_device
         assert not self.attn_inputs.is_prefill, "XQA is not supported"
         self.workspace_buffer = get_xqa_workspace_buffer()
         self.semaphores = torch.zeros(8 * 1024 * 1024, dtype=torch.uint8, device="cuda")
@@ -270,7 +268,7 @@ class XQAWrapper:
         )
 
     def _compute_batch_geometry(self, attn_inputs: PyAttentionInputs) -> None:
-        cu_seqlens = attn_inputs.decode_cu_seqlens_host
+        cu_seqlens = attn_inputs.decode_cu_seqlens
         seqlens = torch.diff(cu_seqlens).tolist()
         assert (
             len(set(seqlens)) == 1

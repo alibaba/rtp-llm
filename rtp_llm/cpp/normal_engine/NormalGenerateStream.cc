@@ -91,6 +91,10 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             }
         }
 
+        if (update_info.prompt_logits.has_value()) {
+            generate_output.prompt_logits = update_info.prompt_logits;
+        }
+
         generate_output.finished = isSubGenerateDoneWithoutLock(i);
         if (generate_input_->generate_config->aux_info) {
             generate_output.aux_info.iter_count   = iter_count_;

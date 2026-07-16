@@ -6,6 +6,14 @@ test_copts = [
 ] + copts()
 
 cc_library(
+    name = "test_log_capture",
+    hdrs = ["TestLogCapture.h"],
+    deps = ["//rtp_llm/cpp/utils:core_utils"],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+)
+
+cc_library(
     name = "device_test_utils",
     hdrs = glob([
         "*.h",
@@ -64,6 +72,21 @@ cc_library(
         "//rtp_llm/models_py/bindings/core/ops:torch_beam_search_op_impl",
         "//rtp_llm/cpp/models:models",
     ],
+    visibility = ["//visibility:public"],
+    copts = test_copts,
+)
+
+cc_library(
+    name = "rejection_sampling_test_utils",
+    hdrs = [
+        "RejectionSamplingOpTest.hpp",
+    ],
+    deps = [
+        "//rtp_llm/models_py/bindings/core:op_data",
+        "//rtp_llm/models_py/bindings/core:rejection_sampling_ops_test_lib",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
     visibility = ["//visibility:public"],
     copts = test_copts,
 )

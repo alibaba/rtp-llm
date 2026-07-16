@@ -36,6 +36,8 @@ struct StreamUpdateInfo {
     const torch::Tensor all_hidden_states;
     bool                update_remote_generate = true;
     bool                force_update_info      = false;
+    // prompt scoring
+    std::optional<PromptLogitsOutput> prompt_logits;
 };
 
 struct StreamSpecUpdateInfo {
@@ -171,6 +173,7 @@ public:
     bool   calculateLoss() const;
     bool   calculateSoftmaxProbs() const;
     bool   returnLogits() const;
+    bool   returnPromptLogits() const;
     bool   returnCumLogProbs() const;
     bool   genTimeline() const;
     int    profileStep() const;
@@ -249,7 +252,7 @@ public:
     StreamState moveToNext();
 
     virtual StreamState getStatus() const;
-    bool                isFinished() const;  // Returns true if stream is active (no error and not finished)
+    bool                isFinished() const;  // Returns true if stream is finished
     bool                isActive() const;    // Returns true if stream is active (no error and not finished)
     bool                isSubGenerateDoneWithoutLock(int batch_id) const;
 

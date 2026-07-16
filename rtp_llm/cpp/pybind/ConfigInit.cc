@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/model_utils/layernorm_types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/model_utils/RopeCache.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/cast.h"
@@ -112,6 +113,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("STATS", EplbMode::STATS)
         .value("EPLB", EplbMode::EPLB)
         .value("ALL", EplbMode::ALL);
+
+    py::enum_<KVCacheSpecType>(m, "KVCacheSpecType")
+        .value("MHA", KVCacheSpecType::MultiHeadAttention)
+        .value("MLA", KVCacheSpecType::MultiHeadLatentAttention)
+        .value("LINEAR", KVCacheSpecType::LinearAttention);
 
     py::enum_<CPRotateMethod>(m, "CPRotateMethod")
         .value("DISABLED", CPRotateMethod::DISABLED)
@@ -363,7 +369,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("memory_cache_size_mb", &KVCacheConfig::memory_cache_size_mb)
         .def_readwrite("memory_cache_sync_timeout_ms", &KVCacheConfig::memory_cache_sync_timeout_ms)
         .def_readwrite("linear_step", &KVCacheConfig::linear_step)
-        .def_readwrite("int8_kv_cache", &KVCacheConfig::int8_kv_cache)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
@@ -411,7 +416,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.memory_cache_size_mb,
                                       self.memory_cache_sync_timeout_ms,
                                       self.linear_step,
-                                      self.int8_kv_cache,
                                       self.fp8_kv_cache,
                                       self.kv_cache_mem_mb,
                                       self.seq_size_per_block,
@@ -448,7 +452,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.ssm_state_dtype);
             },
             [](py::tuple t) {
-                if (t.size() != 44)
+                if (t.size() != 43)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -461,41 +465,40 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.memory_cache_size_mb                 = t[6].cast<int64_t>();
                     c.memory_cache_sync_timeout_ms         = t[7].cast<int64_t>();
                     c.linear_step                          = t[8].cast<int>();
-                    c.int8_kv_cache                        = t[9].cast<int>();
-                    c.fp8_kv_cache                         = t[10].cast<int>();
-                    c.kv_cache_mem_mb                      = t[11].cast<int64_t>();
-                    c.seq_size_per_block                   = t[12].cast<int>();
-                    c.kernel_seq_size_per_block            = t[13].cast<int>();
-                    c.test_block_num                       = t[14].cast<int>();
-                    c.use_block_cache                      = t[15].cast<int>();
-                    c.enable_device_cache                  = t[16].cast<bool>();
-                    c.enable_memory_cache                  = t[17].cast<bool>();
-                    c.enable_memory_cache_sm_copy          = t[18].cast<bool>();
-                    c.enable_remote_cache                  = t[19].cast<bool>();
-                    c.write_cache_sync                     = t[20].cast<bool>();
-                    c.enable_tiered_memory_cache           = t[21].cast<bool>();
-                    c.device_cache_min_free_blocks         = t[22].cast<int64_t>();
-                    c.reco_enable_vipserver                = t[23].cast<bool>();
-                    c.reco_vipserver_domain                = t[24].cast<std::string>();
-                    c.reco_server_address                  = t[25].cast<std::string>();
-                    c.reco_instance_group                  = t[26].cast<std::string>();
-                    c.reco_meta_channel_retry_time         = t[27].cast<uint32_t>();
-                    c.reco_meta_channel_connection_timeout = t[28].cast<uint32_t>();
-                    c.reco_meta_channel_call_timeout       = t[29].cast<uint32_t>();
-                    c.reco_storage_thread_num              = t[30].cast<uint32_t>();
-                    c.reco_storage_queue_size              = t[31].cast<uint32_t>();
-                    c.reco_put_timeout_ms                  = t[32].cast<int>();
-                    c.reco_get_timeout_ms                  = t[33].cast<int>();
-                    c.reco_model_sdk_config                = t[34].cast<std::string>();
-                    c.reco_model_user_data                 = t[35].cast<std::string>();
-                    c.reco_model_extra_info                = t[36].cast<std::string>();
-                    c.reco_instance_id_salt                = t[37].cast<std::string>();
-                    c.reco_asyncwrapper_thread_num         = t[38].cast<size_t>();
-                    c.reco_asyncwrapper_queue_size         = t[39].cast<size_t>();
-                    c.reco_get_broadcast_timeout           = t[40].cast<int>();
-                    c.reco_put_broadcast_timeout           = t[41].cast<int>();
-                    c.reco_client_config                   = t[42].cast<std::string>();
-                    c.ssm_state_dtype                      = t[43].cast<std::string>();
+                    c.fp8_kv_cache                         = t[9].cast<int>();
+                    c.kv_cache_mem_mb                      = t[10].cast<int64_t>();
+                    c.seq_size_per_block                   = t[11].cast<int>();
+                    c.kernel_seq_size_per_block            = t[12].cast<int>();
+                    c.test_block_num                       = t[13].cast<int>();
+                    c.use_block_cache                      = t[14].cast<int>();
+                    c.enable_device_cache                  = t[15].cast<bool>();
+                    c.enable_memory_cache                  = t[16].cast<bool>();
+                    c.enable_memory_cache_sm_copy          = t[17].cast<bool>();
+                    c.enable_remote_cache                  = t[18].cast<bool>();
+                    c.write_cache_sync                     = t[19].cast<bool>();
+                    c.enable_tiered_memory_cache           = t[20].cast<bool>();
+                    c.device_cache_min_free_blocks         = t[21].cast<int64_t>();
+                    c.reco_enable_vipserver                = t[22].cast<bool>();
+                    c.reco_vipserver_domain                = t[23].cast<std::string>();
+                    c.reco_server_address                  = t[24].cast<std::string>();
+                    c.reco_instance_group                  = t[25].cast<std::string>();
+                    c.reco_meta_channel_retry_time         = t[26].cast<uint32_t>();
+                    c.reco_meta_channel_connection_timeout = t[27].cast<uint32_t>();
+                    c.reco_meta_channel_call_timeout       = t[28].cast<uint32_t>();
+                    c.reco_storage_thread_num              = t[29].cast<uint32_t>();
+                    c.reco_storage_queue_size              = t[30].cast<uint32_t>();
+                    c.reco_put_timeout_ms                  = t[31].cast<int>();
+                    c.reco_get_timeout_ms                  = t[32].cast<int>();
+                    c.reco_model_sdk_config                = t[33].cast<std::string>();
+                    c.reco_model_user_data                 = t[34].cast<std::string>();
+                    c.reco_model_extra_info                = t[35].cast<std::string>();
+                    c.reco_instance_id_salt                = t[36].cast<std::string>();
+                    c.reco_asyncwrapper_thread_num         = t[37].cast<size_t>();
+                    c.reco_asyncwrapper_queue_size         = t[38].cast<size_t>();
+                    c.reco_get_broadcast_timeout           = t[39].cast<int>();
+                    c.reco_put_broadcast_timeout           = t[40].cast<int>();
+                    c.reco_client_config                   = t[41].cast<std::string>();
+                    c.ssm_state_dtype                      = t[42].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }
@@ -510,6 +513,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("ft_core_dump_on_exception", &ProfilingDebugLoggingConfig::ft_core_dump_on_exception)
         .def_readwrite("ft_alog_conf_path", &ProfilingDebugLoggingConfig::ft_alog_conf_path)
         .def_readwrite("gen_timeline_sync", &ProfilingDebugLoggingConfig::gen_timeline_sync)
+        .def_readwrite("timeline_start_step", &ProfilingDebugLoggingConfig::timeline_start_step)
+        .def_readwrite("timeline_num_steps", &ProfilingDebugLoggingConfig::timeline_num_steps)
+        .def_readwrite("timeline_trace_name", &ProfilingDebugLoggingConfig::timeline_trace_name)
         .def_readwrite("torch_cuda_profiler_dir", &ProfilingDebugLoggingConfig::torch_cuda_profiler_dir)
         .def_readwrite("log_file_backup_count", &ProfilingDebugLoggingConfig::log_file_backup_count)
         .def_readwrite("debug_load_server", &ProfilingDebugLoggingConfig::debug_load_server)
@@ -525,6 +531,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.ft_core_dump_on_exception,
                                       self.ft_alog_conf_path,
                                       self.gen_timeline_sync,
+                                      self.timeline_start_step,
+                                      self.timeline_num_steps,
+                                      self.timeline_trace_name,
                                       self.torch_cuda_profiler_dir,
                                       self.log_file_backup_count,
                                       self.debug_load_server,
@@ -534,7 +543,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.check_nan);
             },
             [](py::tuple t) {
-                if (t.size() != 12)
+                if (t.size() != 12 && t.size() != 15)
                     throw std::runtime_error("Invalid state!");
 
                 ProfilingDebugLoggingConfig c;
@@ -544,13 +553,26 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.ft_core_dump_on_exception = t[2].cast<bool>();
                     c.ft_alog_conf_path         = t[3].cast<std::string>();
                     c.gen_timeline_sync         = t[4].cast<bool>();
-                    c.torch_cuda_profiler_dir   = t[5].cast<std::string>();
-                    c.log_file_backup_count     = t[6].cast<int>();
-                    c.debug_load_server         = t[7].cast<bool>();
-                    c.hack_layer_num            = t[8].cast<int>();
-                    c.debug_start_fake_process  = t[9].cast<bool>();
-                    c.enable_detail_log         = t[10].cast<bool>();
-                    c.check_nan                 = t[11].cast<bool>();
+                    if (t.size() == 12) {
+                        c.torch_cuda_profiler_dir  = t[5].cast<std::string>();
+                        c.log_file_backup_count    = t[6].cast<int>();
+                        c.debug_load_server        = t[7].cast<bool>();
+                        c.hack_layer_num           = t[8].cast<int>();
+                        c.debug_start_fake_process = t[9].cast<bool>();
+                        c.enable_detail_log        = t[10].cast<bool>();
+                        c.check_nan                = t[11].cast<bool>();
+                    } else {
+                        c.timeline_start_step      = t[5].cast<int>();
+                        c.timeline_num_steps       = t[6].cast<int>();
+                        c.timeline_trace_name      = t[7].cast<std::string>();
+                        c.torch_cuda_profiler_dir  = t[8].cast<std::string>();
+                        c.log_file_backup_count    = t[9].cast<int>();
+                        c.debug_load_server        = t[10].cast<bool>();
+                        c.hack_layer_num           = t[11].cast<int>();
+                        c.debug_start_fake_process = t[12].cast<bool>();
+                        c.enable_detail_log        = t[13].cast<bool>();
+                        c.check_nan                = t[14].cast<bool>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ProfilingDebugLoggingConfig unpickle error: ") + e.what());
                 }
@@ -1123,18 +1145,27 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("max_context_batch_size", &FIFOSchedulerConfig::max_context_batch_size)
         .def_readwrite("max_batch_tokens_size", &FIFOSchedulerConfig::max_batch_tokens_size)
+        .def_readwrite("pdfusion_scheduler_mode", &FIFOSchedulerConfig::pdfusion_scheduler_mode)
+        .def_readwrite("decode_prefill_ratio", &FIFOSchedulerConfig::decode_prefill_ratio)
         .def("to_string", &FIFOSchedulerConfig::to_string)
         .def(py::pickle(
             [](const FIFOSchedulerConfig& self) {
-                return py::make_tuple(self.max_context_batch_size, self.max_batch_tokens_size);
+                return py::make_tuple(self.max_context_batch_size,
+                                      self.max_batch_tokens_size,
+                                      self.pdfusion_scheduler_mode,
+                                      self.decode_prefill_ratio);
             },
             [](py::tuple t) {
-                if (t.size() != 2)
+                if (t.size() != 2 && t.size() != 4)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
                     c.max_context_batch_size = t[0].cast<int64_t>();
                     c.max_batch_tokens_size  = t[1].cast<int64_t>();
+                    if (t.size() == 4) {
+                        c.pdfusion_scheduler_mode = t[2].cast<std::string>();
+                        c.decode_prefill_ratio    = t[3].cast<std::string>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());
                 }
@@ -1250,7 +1281,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register KvCacheDataType enum
     py::enum_<KvCacheDataType>(m, "KvCacheDataType")
         .value("BASE", KvCacheDataType::BASE)
-        .value("INT8", KvCacheDataType::INT8)
         .value("FP8", KvCacheDataType::FP8);
 
     // Register RopeStyle enum
@@ -1435,6 +1465,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("include_sep_tokens", &MMModelConfig::include_sep_tokens)
         .def_readwrite("mm_position_ids_style", &MMModelConfig::mm_position_ids_style);
 
+    py::class_<KVCacheSpecDesc>(m, "KVCacheSpecDesc")
+        .def(py::init<>())
+        .def_readwrite("tag", &KVCacheSpecDesc::tag)
+        .def_readwrite("cache_type", &KVCacheSpecDesc::cache_type)
+        .def_readwrite("dtype", &KVCacheSpecDesc::dtype);
+
     // Register ModelConfig
     py::class_<ModelConfig>(m, "ModelConfig")
         .def(py::init<>())
@@ -1449,6 +1485,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("special_tokens", &ModelConfig::special_tokens)
         .def_readwrite("quant_algo", &ModelConfig::quant_algo)
         .def_readwrite("eplb_config", &ModelConfig::eplb_config)
+        .def_readwrite("kv_cache_spec_descs", &ModelConfig::kv_cache_spec_descs)
         // task_type is defined as property below
         .def_readwrite("ckpt_path", &ModelConfig::ckpt_path)
         .def_readwrite("tokenizer_path", &ModelConfig::tokenizer_path)

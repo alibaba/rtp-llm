@@ -19,11 +19,27 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
 
     // Capture all torch::Tensors by value so the underlying memory stays alive
     // in the background thread. torch::Tensor copy is a cheap refcount bump.
-    auto captured_input_lengths          = input_lengths;
-    auto captured_prefix_lengths         = prefix_lengths;
-    auto captured_kv_cache_block_id_host = kv_cache_block_id_host;
-    auto captured_cache_store            = cache_store_inputs;
-    auto captured_kv_cache               = kv_cache.value();
+    auto captured_input_lengths           = input_lengths;
+    auto captured_prefix_lengths          = prefix_lengths;
+    auto captured_kv_cache_block_id_host  = kv_cache_block_id_host;
+    auto captured_cache_store             = cache_store_inputs;
+    auto captured_kv_cache                = kv_cache.value();
+    auto captured_kv_cache_layer_to_group = captured_cache_store.kv_cache_layer_to_group;
+    if (captured_kv_cache.layer_id >= 0 && captured_kv_cache.group_id >= 0) {
+        if (captured_kv_cache_layer_to_group.defined()
+            && captured_kv_cache_layer_to_group.numel() > captured_kv_cache.layer_id) {
+            const auto layer_id = captured_kv_cache.layer_id;
+            const auto group_id = captured_kv_cache.group_id;
+            if (captured_kv_cache_layer_to_group.data_ptr<int32_t>()[layer_id] != group_id) {
+                captured_kv_cache_layer_to_group = captured_kv_cache_layer_to_group.clone();
+                captured_kv_cache_layer_to_group.data_ptr<int32_t>()[layer_id] = group_id;
+            }
+        } else {
+            captured_kv_cache_layer_to_group = torch::full({captured_kv_cache.layer_id + 1},
+                                                           captured_kv_cache.group_id,
+                                                           torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+        }
+    }
 
     // Create event in main thread to avoid cudaEventRecord contention on background threads.
     auto event = runtimeCreateEvent();
@@ -33,11 +49,12 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                 captured_kv_cache_block_id_host,
                 captured_cache_store,
                 captured_kv_cache,
+                captured_kv_cache_layer_to_group,
                 event = std::move(event)]() mutable {
         CacheStoreInputs inputs{captured_input_lengths,
                                 captured_prefix_lengths,
                                 captured_kv_cache_block_id_host,
-                                captured_cache_store.kv_cache_layer_to_group,
+                                captured_kv_cache_layer_to_group,
                                 captured_cache_store.kv_cache_group_types,
                                 captured_cache_store.context_batch_size,
                                 captured_cache_store.decoder_batch_size,

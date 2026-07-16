@@ -394,8 +394,10 @@ class EplbMode:
     def value(self) -> int:
         ...
 class FIFOSchedulerConfig:
+    decode_prefill_ratio: str
     max_batch_tokens_size: int
     max_context_batch_size: int
+    pdfusion_scheduler_mode: str
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -639,7 +641,6 @@ class KVCacheConfig:
     enable_memory_cache_sm_copy: bool
     enable_remote_cache: bool
     fp8_kv_cache: int
-    int8_kv_cache: int
     kv_cache_mem_mb: int
     linear_step: int
     max_block_size_per_item: int
@@ -692,14 +693,11 @@ class KvCacheDataType:
     
       BASE
     
-      INT8
-    
       FP8
     """
     BASE: typing.ClassVar[KvCacheDataType]  # value = <KvCacheDataType.BASE: 0>
     FP8: typing.ClassVar[KvCacheDataType]  # value = <KvCacheDataType.FP8: 2>
-    INT8: typing.ClassVar[KvCacheDataType]  # value = <KvCacheDataType.INT8: 1>
-    __members__: typing.ClassVar[dict[str, KvCacheDataType]]  # value = {'BASE': <KvCacheDataType.BASE: 0>, 'INT8': <KvCacheDataType.INT8: 1>, 'FP8': <KvCacheDataType.FP8: 2>}
+    __members__: typing.ClassVar[dict[str, KvCacheDataType]]  # value = {'BASE': <KvCacheDataType.BASE: 0>, 'FP8': <KvCacheDataType.FP8: 2>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:
@@ -858,6 +856,29 @@ class MlaOpsType:
     @property
     def value(self) -> int:
         ...
+class KVCacheSpecType:
+    MHA: typing.ClassVar[KVCacheSpecType]
+    MLA: typing.ClassVar[KVCacheSpecType]
+    LINEAR: typing.ClassVar[KVCacheSpecType]
+
+    @property
+    def name(self) -> str:
+        ...
+
+    @property
+    def value(self) -> int:
+        ...
+
+
+class KVCacheSpecDesc:
+    tag: str
+    cache_type: KVCacheSpecType
+    dtype: DataType
+
+    def __init__(self) -> None:
+        ...
+
+
 class ModelConfig:
     add_bias_linear: bool
     attn_config: AttentionConfigs
@@ -866,6 +887,7 @@ class ModelConfig:
     deepseek_rope_mscale: float
     embedding_size: int
     eplb_config: EPLBConfig
+    kv_cache_spec_descs: list[list[KVCacheSpecDesc]]
     expert_num: int
     extra_data_path: str
     has_lm_head: bool
@@ -1150,6 +1172,9 @@ class ProfilingDebugLoggingConfig:
     gen_timeline_sync: bool
     hack_layer_num: int
     log_file_backup_count: int
+    timeline_num_steps: int
+    timeline_start_step: int
+    timeline_trace_name: str
     torch_cuda_profiler_dir: str
     trace_memory: bool
     def __getstate__(self) -> tuple:

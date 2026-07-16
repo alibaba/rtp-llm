@@ -27,6 +27,10 @@ from rtp_llm.multimodal.multimodal_util import (
     url_data_cache_,
     vit_emb_cache_,
 )
+from rtp_llm.multimodal.vit_metrics import (
+    VitMetricSample,
+    collect_vit_preprocess_metrics,
+)
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.time_util import Timer, timer_wrapper
@@ -56,18 +60,24 @@ def _worker_initializer(
 
 def _worker_process_task(
     mm_inputs: List[MultimodalInput],
-) -> Tuple[Any, float]:
+) -> Tuple[Any, float, List[VitMetricSample]]:
     """
     只接收变化的 `mm_inputs` 参数。
     """
     if _worker_preprocess_func is None:
         raise RuntimeError("Worker process has not been initialized correctly.")
 
-    with Timer() as route_timer:
-        result = _worker_preprocess_func(
-            mm_inputs, _worker_vit_config, **_worker_preprocess_params
-        )
-    return result, route_timer.cost_ms()
+    with collect_vit_preprocess_metrics() as preprocess_metrics:
+        with Timer() as route_timer:
+            result = _worker_preprocess_func(
+                mm_inputs, _worker_vit_config, **_worker_preprocess_params
+            )
+    return result, route_timer.cost_ms(), preprocess_metrics.samples
+
+
+def _report_vit_preprocess_samples(samples: List[VitMetricSample]) -> None:
+    for sample in samples:
+        kmonitor.report(sample.metric, sample.value, sample.tags)
 
 
 class PreprocessExecutor:
@@ -101,14 +111,19 @@ class LocalPreprocessExecutor(PreprocessExecutor):
             return
 
         try:
-            with Timer() as route_timer:
-                result = self.preprocess_func(
-                    work_item.mm_inputs, self.vit_config, **self.preprocess_params
-                )
+            with collect_vit_preprocess_metrics() as preprocess_metrics:
+                with Timer() as route_timer:
+                    result = self.preprocess_func(
+                        work_item.mm_inputs,
+                        self.vit_config,
+                        **self.preprocess_params,
+                    )
             preprocess_time = route_timer.cost_ms()
             work_item.preprocess_result = result
             # 使用简单的对象模拟 future 行为
-            work_item.future = _LocalResult(result, preprocess_time)
+            work_item.future = _LocalResult(
+                result, preprocess_time, preprocess_metrics.samples
+            )
         except Exception as e:
             logging.error(f"Error in local preprocessing: {e}", exc_info=True)
             raise
@@ -120,8 +135,9 @@ class LocalPreprocessExecutor(PreprocessExecutor):
             return
 
         try:
-            _, preprocess_time = work_item.future.get()
+            _, preprocess_time, samples = work_item.future.get()
             kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, preprocess_time)
+            _report_vit_preprocess_samples(samples)
         except Exception as e:
             logging.error(f"Error getting local preprocess result: {e}", exc_info=True)
             raise
@@ -219,12 +235,13 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             return
 
         try:
-            work_item.preprocess_result, preprocess_time = work_item.future.get(
-                timeout=work_item.mm_timeout_ms / 1000.0
+            work_item.preprocess_result, preprocess_time, samples = (
+                work_item.future.get(timeout=work_item.mm_timeout_ms / 1000.0)
             )
             with self._pool_lock:
                 self._consecutive_timeouts = 0
             kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, preprocess_time)
+            _report_vit_preprocess_samples(samples)
         except multiprocessing.pool.TimeoutError:
             with self._pool_lock:
                 self._consecutive_timeouts += 1
@@ -279,12 +296,17 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
 class _LocalResult:
     """本地预处理结果的简单包装类"""
 
-    def __init__(self, result: Any, time: float):
+    def __init__(
+        self, result: Any, time: float, samples: Optional[List[VitMetricSample]] = None
+    ):
         self.result = result
         self.time = time
+        self.samples = samples or []
 
-    def get(self, timeout: Optional[float] = None) -> Tuple[Any, float]:
-        return (self.result, self.time)
+    def get(
+        self, timeout: Optional[float] = None
+    ) -> Tuple[Any, float, List[VitMetricSample]]:
+        return (self.result, self.time, self.samples)
 
 
 class MMEmbeddingRes:

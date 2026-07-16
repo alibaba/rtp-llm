@@ -61,6 +61,12 @@ public:
         return groups_;
     }
 
+    // Aggregate group masks that getNeedWriteGroups() can actually emit.
+    // Singleton specs are registered independently by RemoteConnector.
+    virtual std::vector<uint64_t> reachableAggregateMasks() const {
+        return {};
+    }
+
     void addLocationSpecGroup(uint64_t bithash, const std::string& location_spec_group_name) {
         location_spec_group_map_[bithash] = location_spec_group_name;
     }
@@ -123,6 +129,8 @@ public:
 
     bool getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                             std::vector<std::string>&               location_spec_group_names) const override;
+
+    std::vector<uint64_t> reachableAggregateMasks() const override;
 };
 
 class FullOtherGroupPolicy: public DefaultLayerGroupPolicy {
@@ -135,6 +143,8 @@ public:
                             std::vector<std::string>&               location_spec_group_names) const override;
 
     std::string debugString() const override;
+
+    std::vector<uint64_t> reachableAggregateMasks() const override;
 
 protected:
     FullOtherGroupPolicy(std::shared_ptr<KVCacheAllocator> allocator,

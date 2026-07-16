@@ -4,9 +4,15 @@
 #include <pybind11/stl.h>
 #include <pybind11/embed.h>
 #include <torch/extension.h>
+#include <algorithm>
+#include <map>
+#include <memory>
+#include <utility>
+#include <vector>
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 // Forward declare for opaque pointers in PyCacheStoreInputs
@@ -21,12 +27,14 @@ namespace torch_ext {
 // When kernel_seq_size_per_block < seq_size_per_block the tensor is presented at
 // kernel-block granularity:
 //   MHA: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
-//   MLA: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
+//   MLA: [kernel_block_num, kernel_seq_size_per_block, physical_elements_per_token]
 struct LayerKVCache {
     torch::Tensor kv_cache_base;
     torch::Tensor kv_scale_base;
     int           seq_size_per_block = 0;
     int           layer_id           = -1;
+    int           group_id           = -1;
+    std::string   tag;
 };
 
 // Whole-model KV cache holding tensors for all layers.
@@ -45,6 +53,78 @@ struct KVCache {
 
     // Per-layer attention type (CacheGroupType::FULL or LINEAR).
     std::vector<rtp_llm::CacheGroupType> layer_attn_types;
+
+    // Per-group topology from CacheLayerLayout.
+    std::vector<rtp_llm::CacheGroupType>    group_types;
+    std::vector<std::string>                group_tags;
+    std::vector<std::vector<int>>           layer_to_group_ids;
+    std::vector<std::map<std::string, int>> layer_tag_to_group_id;
+    std::vector<std::vector<torch::Tensor>> kv_cache_base_by_layer_group;
+    std::vector<std::vector<torch::Tensor>> kv_scale_base_by_layer_group;
+
+    void setFullAttentionView(LayerKVCache& layer_cache, const torch::Tensor& base, const torch::Tensor& scale) const {
+        RTP_LLM_CHECK_WITH_INFO(
+            seq_size_per_block > 0, "physical seq_size_per_block must be positive, got %d", seq_size_per_block);
+        layer_cache.seq_size_per_block = kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : seq_size_per_block;
+        RTP_LLM_CHECK_WITH_INFO(layer_cache.seq_size_per_block > 0,
+                                "kernel seq_size_per_block must be positive, got %d",
+                                layer_cache.seq_size_per_block);
+        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block % layer_cache.seq_size_per_block == 0,
+                                "physical seq_size_per_block=%d must be divisible by kernel seq_size_per_block=%d",
+                                seq_size_per_block,
+                                layer_cache.seq_size_per_block);
+        RTP_LLM_CHECK_WITH_INFO(base.defined() && base.dim() > 0,
+                                "full-attention KV cache base must be a defined tensor with at least one dimension");
+
+        const int64_t physical_block_num = base.size(0);
+        const int64_t kernel_blocks_per_kv_block =
+            static_cast<int64_t>(seq_size_per_block) / layer_cache.seq_size_per_block;
+        const int64_t kernel_block_num = physical_block_num * kernel_blocks_per_kv_block;
+
+        if (use_mla) {
+            RTP_LLM_CHECK_WITH_INFO(base.is_contiguous(), "MLA KV cache base must be contiguous");
+            const int64_t elements_per_kernel_page =
+                kernel_block_num * static_cast<int64_t>(layer_cache.seq_size_per_block);
+            RTP_LLM_CHECK_WITH_INFO(elements_per_kernel_page > 0 && base.numel() % elements_per_kernel_page == 0,
+                                    "MLA KV cache elements=%ld must be divisible by kernel pages=%ld",
+                                    base.numel(),
+                                    elements_per_kernel_page);
+            const int64_t stride = base.numel() / elements_per_kernel_page;
+            layer_cache.kv_cache_base =
+                base.reshape({kernel_block_num, static_cast<int64_t>(layer_cache.seq_size_per_block), stride});
+        } else if (base.dim() == 2 && num_kv_heads > 0 && head_dim > 0) {
+            layer_cache.kv_cache_base = base.reshape({kernel_block_num,
+                                                      2,
+                                                      static_cast<int64_t>(num_kv_heads),
+                                                      static_cast<int64_t>(layer_cache.seq_size_per_block),
+                                                      static_cast<int64_t>(head_dim)});
+        } else {
+            layer_cache.kv_cache_base = base;
+        }
+
+        if (!scale.defined()) {
+            return;
+        }
+
+        if (use_mla) {
+            RTP_LLM_CHECK_WITH_INFO(scale.dim() > 0 && scale.size(0) == physical_block_num,
+                                    "MLA scale physical block count must match KV cache base: scale=%ld base=%ld",
+                                    scale.dim() > 0 ? scale.size(0) : -1,
+                                    physical_block_num);
+            RTP_LLM_CHECK_WITH_INFO(scale.is_contiguous(), "MLA scale/indexer cache base must be contiguous");
+            const int64_t elements_per_kernel_page =
+                kernel_block_num * static_cast<int64_t>(layer_cache.seq_size_per_block);
+            RTP_LLM_CHECK_WITH_INFO(elements_per_kernel_page > 0 && scale.numel() % elements_per_kernel_page == 0,
+                                    "MLA scale/indexer elements=%ld must be divisible by kernel pages=%ld",
+                                    scale.numel(),
+                                    elements_per_kernel_page);
+            const int64_t scale_stride = scale.numel() / elements_per_kernel_page;
+            layer_cache.kv_scale_base =
+                scale.reshape({kernel_block_num, static_cast<int64_t>(layer_cache.seq_size_per_block), scale_stride});
+        } else {
+            layer_cache.kv_scale_base = scale.reshape({kernel_block_num, scale.size(1) / kernel_blocks_per_kv_block});
+        }
+    }
 
     LayerKVCache getLayerCache(int idx) {
         LayerKVCache layer_cache;
@@ -68,49 +148,98 @@ struct KVCache {
             layer_cache.kv_cache_base      = base;
             layer_cache.kv_scale_base      = scale;
         } else {
-            layer_cache.seq_size_per_block =
-                kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : seq_size_per_block;
-            const int64_t kernel_blocks_per_kv_block =
-                kernel_seq_size_per_block > 0 ? (int64_t)seq_size_per_block / (int64_t)kernel_seq_size_per_block : 1;
-
-            // [block_num, kv_block_stride_elems] shared by all layer types.
-            if (base.defined() && base.dim() == 2) {
-                const int64_t physical_block_num = base.size(0);
-                const int64_t kernel_block_num   = physical_block_num * kernel_blocks_per_kv_block;
-                if (use_mla && kv_lora_rank > 0 && rope_head_dim > 0) {
-                    // MLA layout: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
-                    layer_cache.kv_cache_base = base.reshape({kernel_block_num,
-                                                              (int64_t)kernel_seq_size_per_block,
-                                                              (int64_t)(kv_lora_rank + rope_head_dim)});
-                } else if (num_kv_heads > 0 && head_dim > 0) {
-                    // MHA layout: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
-                    layer_cache.kv_cache_base = base.reshape({kernel_block_num,
-                                                              2,
-                                                              (int64_t)num_kv_heads,
-                                                              (int64_t)kernel_seq_size_per_block,
-                                                              (int64_t)head_dim});
-                } else {
-                    layer_cache.kv_cache_base = base;
-                }
-            } else {
-                layer_cache.kv_cache_base = base;
-            }
-
-            if (scale.defined()) {
-                // Keep kv_scale_base aligned with kernel-block view of kv_cache_base.
-                const int64_t physical_block_num = base.size(0);
-                const int64_t kernel_block_num   = physical_block_num * kernel_blocks_per_kv_block;
-
-                if (use_mla) {
-                    layer_cache.kv_scale_base =
-                        scale.reshape({kernel_block_num, (int64_t)kernel_seq_size_per_block, scale.size(2)});
-                } else {
-                    layer_cache.kv_scale_base =
-                        scale.reshape({kernel_block_num, scale.size(1) / kernel_blocks_per_kv_block});
-                }
-            }
+            setFullAttentionView(layer_cache, base, scale);
+        }
+        const auto layer = static_cast<size_t>(idx);
+        if (!layer_to_group_ids.empty() && layer < layer_to_group_ids.size() && layer_to_group_ids[layer].size() == 1) {
+            layer_cache.group_id = layer_to_group_ids[layer].front();
+        } else {
+            layer_cache.group_id = 0;
+        }
+        if (layer_cache.group_id >= 0 && static_cast<size_t>(layer_cache.group_id) < group_tags.size()) {
+            layer_cache.tag = group_tags[static_cast<size_t>(layer_cache.group_id)];
         }
         return layer_cache;
+    }
+
+    LayerKVCache getLayerCacheByGroup(int idx, int gid) {
+        const auto layer = static_cast<size_t>(idx);
+        if (idx < 0 || layer >= kv_cache_base_by_layer_group.size()) {
+            throw std::runtime_error("Invalid layer index: " + std::to_string(idx));
+        }
+        if (gid < 0 || static_cast<size_t>(gid) >= kv_cache_base_by_layer_group[layer].size()) {
+            throw std::runtime_error("Invalid KV cache group id: " + std::to_string(gid));
+        }
+        if (!layer_to_group_ids.empty()) {
+            if (layer >= layer_to_group_ids.size()
+                || std::find(layer_to_group_ids[layer].begin(), layer_to_group_ids[layer].end(), gid)
+                       == layer_to_group_ids[layer].end()) {
+                throw std::runtime_error("Layer " + std::to_string(idx) + " does not own KV cache group "
+                                         + std::to_string(gid));
+            }
+        }
+
+        auto base = kv_cache_base_by_layer_group[layer][static_cast<size_t>(gid)];
+        if (!base.defined()) {
+            throw std::runtime_error("Missing KV cache tensor for layer " + std::to_string(idx) + ", group "
+                                     + std::to_string(gid));
+        }
+
+        LayerKVCache layer_cache;
+        layer_cache.layer_id = idx;
+        layer_cache.group_id = gid;
+        if (static_cast<size_t>(gid) < group_tags.size()) {
+            layer_cache.tag = group_tags[static_cast<size_t>(gid)];
+        }
+        const bool is_full_group = gid >= 0 && static_cast<size_t>(gid) < group_types.size()
+                                   && group_types[static_cast<size_t>(gid)] == rtp_llm::CacheGroupType::FULL;
+        torch::Tensor scale;
+        if (!kv_scale_base_by_layer_group.empty() && layer < kv_scale_base_by_layer_group.size()
+            && static_cast<size_t>(gid) < kv_scale_base_by_layer_group[layer].size()) {
+            scale = kv_scale_base_by_layer_group[layer][static_cast<size_t>(gid)];
+        }
+
+        if (!is_full_group) {
+            layer_cache.seq_size_per_block = seq_size_per_block;
+            layer_cache.kv_cache_base      = base;
+            layer_cache.kv_scale_base      = scale;
+            return layer_cache;
+        }
+
+        setFullAttentionView(layer_cache, base, scale);
+        return layer_cache;
+    }
+
+    LayerKVCache getLayerCache(int idx, const std::string& tag) {
+        const auto layer = static_cast<size_t>(idx);
+        if (idx < 0 || layer >= layer_tag_to_group_id.size()) {
+            throw std::runtime_error("Invalid layer index for cache tag lookup: " + std::to_string(idx));
+        }
+        const auto it = layer_tag_to_group_id[layer].find(tag);
+        if (it == layer_tag_to_group_id[layer].end() || it->second < 0) {
+            throw std::runtime_error("Layer " + std::to_string(idx) + " does not own KV cache tag " + tag);
+        }
+        const int gid = it->second;
+        if (gid < 0 || static_cast<size_t>(gid) >= group_tags.size()) {
+            throw std::runtime_error("KV cache tag " + tag + " maps to invalid group " + std::to_string(gid));
+        }
+        return getLayerCacheByGroup(idx, gid);
+    }
+
+    std::vector<LayerKVCache> getLayerCaches(int idx) {
+        if (layer_to_group_ids.empty() || group_tags.empty()) {
+            return {getLayerCache(idx)};
+        }
+        const auto layer = static_cast<size_t>(idx);
+        if (idx < 0 || layer >= layer_to_group_ids.size()) {
+            throw std::runtime_error("Invalid layer index: " + std::to_string(idx));
+        }
+
+        std::vector<LayerKVCache> layer_caches;
+        for (int gid : layer_to_group_ids[layer]) {
+            layer_caches.push_back(getLayerCacheByGroup(idx, gid));
+        }
+        return layer_caches;
     }
 };
 
@@ -127,15 +256,16 @@ struct PyCacheStoreInputs {
     torch::Tensor            kv_cache_group_types;
     std::vector<std::string> cache_keys;  // [context_batch_size]
     size_t                   tokens_per_block;
-    size_t                   kv_block_stride_bytes;
-    size_t                   kv_scale_stride_bytes;
-    bool                     pd_separation   = false;
-    size_t                   model_id        = 0;
-    bool                     decode_entrance = false;
-    bool                     warmup          = false;
-    bool                     mla_kvcache     = false;
+    // Physical KV-manager block strides, supplied by CacheConfig rather than inferred from tensor views.
+    size_t kv_block_stride_bytes;
+    size_t kv_scale_stride_bytes;
+    bool   pd_separation   = false;
+    size_t model_id        = 0;
+    bool   decode_entrance = false;
+    bool   warmup          = false;
+    bool   mla_kvcache     = false;
 
-    // Opaque cache_store reference (C++ only; passes through Python without inspection)
+    // Cache store reference (C++ only; passes through Python without inspection)
     std::shared_ptr<rtp_llm::CacheStore> cache_store;
     rtp_llm::CacheStoreAsyncWriter*      cache_store_async_writer = nullptr;
 };
@@ -157,6 +287,8 @@ struct PyContextParallelParams {
     torch::Tensor prefill_actual_input_lengths_cpu;
 };
 
+// Naming convention: the host (pinned CPU) tensor uses the bare name; its device (CUDA)
+// counterpart carries a _device suffix.
 struct PyAttentionInputs {
     bool          is_prefill{false};
     bool          is_target_verify{false};
@@ -165,25 +297,24 @@ struct PyAttentionInputs {
     torch::Tensor input_lengths;
     // Kernel-granularity block IDs for attention compute.
     // Shape: [group, batch, max_kernel_blocks] or [batch, max_kernel_blocks].
-    torch::Tensor kv_cache_kernel_block_id_host;
+    torch::Tensor kv_cache_kernel_block_id;
     torch::Tensor kv_cache_kernel_block_id_device;
     // Physical block IDs dedicated for cache store.
     // Shape: [group, batch, max_blocks] or [batch, max_blocks].
-    torch::Tensor kv_cache_block_id_host;
+    torch::Tensor kv_cache_block_id;
     torch::Tensor kv_cache_block_id_device;
-    // Hybrid cache support:
-    // - kv_cache_kernel_block_id_*_by_group: vector of 2-D kernel block tables, each [batch, max_kernel_blocks].
-    std::vector<torch::Tensor> kv_cache_kernel_block_id_host_by_group;
+    // Hybrid cache support: vector of 2-D kernel block tables, each [batch, max_kernel_blocks].
+    std::vector<torch::Tensor> kv_cache_kernel_block_id_by_group;  // host
     std::vector<torch::Tensor> kv_cache_kernel_block_id_device_by_group;
     torch::Tensor              kv_cache_layer_to_group;
     caffe2::TypeMeta           dtype;
     // Cumulative sequence lengths for attention kernels (e.g. FusedRopeKVCacheDecodeOp).
-    // cu_seqlens lives on CUDA device; cu_seqlens_host is its pinned-memory CPU mirror
-    // used for CUDA graph replay (write host → async copy to device, avoiding GPU-side fills).
+    // cu_seqlens_device lives on CUDA device; cu_seqlens is its pinned-memory CPU mirror
+    // used for CUDA graph replay (write host -> async copy to device, avoiding GPU-side fills).
     torch::Tensor cu_seqlens;
-    torch::Tensor cu_seqlens_host;
-    torch::Tensor cu_kv_seqlens;
-    torch::Tensor decode_cu_seqlens_host;
+    torch::Tensor cu_seqlens_device;
+    torch::Tensor cu_kv_seqlens_device;  // device only (no host mirror needed)
+    torch::Tensor decode_cu_seqlens;
     int           context_total_kv_length = 0;
     int           total_tokens            = 0;
     torch::Tensor padding_offset;
@@ -195,10 +326,10 @@ struct PyAttentionInputs {
     std::optional<PyPrefillCudaGaphCopyParams> prefill_cuda_graph_copy_params;
     bool                                       is_s_padded = false;
     // Device-side mirrors of host tensors, managed by C++ for fused D2D copy in CUDA graph.
-    torch::Tensor prefix_lengths_d;
-    torch::Tensor sequence_lengths_plus_1_d;
-    torch::Tensor input_lengths_d;
-    torch::Tensor decode_cu_seqlens_d;
+    torch::Tensor prefix_lengths_device;
+    torch::Tensor sequence_lengths_plus_1_device;
+    torch::Tensor input_lengths_device;
+    torch::Tensor decode_cu_seqlens_device;
 
     // CUDA Graph mode flags
     bool is_cuda_graph = false;  // True when running in CUDA graph mode (capture or replay)

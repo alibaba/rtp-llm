@@ -81,6 +81,11 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.head_dim_vo = attn_configs.size_per_head
         self.page_size = attn_configs.kernel_tokens_per_block
         self.datatype = attn_configs.dtype
+        self.kv_cache_dtype = attn_configs.kv_cache_dtype
+        if self.kv_cache_dtype == KvCacheDataType.FP8:
+            self.kv_datatype = torch.float8_e4m3fn
+        else:
+            self.kv_datatype = self.datatype
         self.max_seq_len = attn_configs.max_seq_len
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
@@ -117,7 +122,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id_host,
+            attn_inputs.kv_cache_kernel_block_id,
             self.page_size,
             forbid_realloc,
         )
@@ -126,10 +131,12 @@ class PyFlashinferPrefillPagedAttnOp(object):
         if attn_inputs.prefill_cuda_graph_copy_params is not None:
             # For CUDA graph mode, create a buffer that will be filled later
             self.input_lengths = attn_inputs.input_lengths
-            self.cu_seq_lens = attn_inputs.cu_seqlens
-            qo_indptr = attn_inputs.cu_seqlens.clone()
+            self.cu_seq_lens = attn_inputs.cu_seqlens_device
+            qo_indptr = attn_inputs.cu_seqlens_device.clone()
         else:
-            qo_indptr = attn_inputs.cu_seqlens[: attn_inputs.input_lengths.size(0) + 1]
+            qo_indptr = attn_inputs.cu_seqlens_device[
+                : attn_inputs.input_lengths.size(0) + 1
+            ]
 
         if self.enable_cuda_graph and self.prefill_wrapper._qo_indptr_buf is None:
             self.prefill_wrapper._use_cuda_graph = True
@@ -141,7 +148,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 self.fmha_params.paged_kv_last_page_len_d
             )
             self.prefill_wrapper._paged_kv_indices_buf = self.fmha_params.page_indice_d
-            self.prefill_wrapper._fixed_batch_size = len(attn_inputs.cu_seqlens) - 1
+            self.prefill_wrapper._fixed_batch_size = (
+                len(attn_inputs.cu_seqlens_device) - 1
+            )
             if attn_inputs.prefill_cuda_graph_copy_params is not None:
                 self.prefill_cuda_graph_copy_params = (
                     attn_inputs.prefill_cuda_graph_copy_params
@@ -169,7 +178,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.input_lengths[: attn_inputs.input_lengths.size(0)] = (
                 attn_inputs.input_lengths
             )
-            self.cu_seq_lens[: attn_inputs.cu_seqlens.size(0)] = attn_inputs.cu_seqlens
+            self.cu_seq_lens[: attn_inputs.cu_seqlens_device.size(0)] = (
+                attn_inputs.cu_seqlens_device
+            )
             # Build qo_indptr matching the padded Q layout produced by small2large copy.
             # Each batch's Q tokens sit at [i*max_seq_len, i*max_seq_len + input_len_i)
             # in the padded buffer, so qo_indptr[i] = i*max_seq_len, but we set
@@ -201,7 +212,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.page_size,
             causal=True,
             q_data_type=self.datatype,
-            kv_data_type=self.datatype,
+            kv_data_type=self.kv_datatype,
         )
         return self.fmha_params
 
@@ -352,13 +363,13 @@ class PyFlashinferPrefillAttnOp(object):
             attn_inputs: Attention inputs containing sequence information
         """
         batch_size = attn_inputs.input_lengths.size(0)
-        cu_seqlens = attn_inputs.cu_seqlens[: batch_size + 1]
+        cu_seqlens = attn_inputs.cu_seqlens_device[: batch_size + 1]
 
         self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id_host,
+            attn_inputs.kv_cache_kernel_block_id,
             self.page_size,
         )
 
@@ -667,8 +678,6 @@ class PyFlashinferDecodeAttnOp(object):
         self.fmha_params = params
 
     def _get_kv_data_type(self, attn_inputs: PyAttentionInputs) -> torch.dtype:
-        if self.kv_cache_dtype == KvCacheDataType.INT8:
-            return torch.int8
         if self.kv_cache_dtype == KvCacheDataType.FP8:
             return torch.float8_e4m3fn
         return get_scalar_type(attn_inputs.dtype)
@@ -717,7 +726,7 @@ class PyFlashinferDecodeAttnOp(object):
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id_host,
+            attn_inputs.kv_cache_kernel_block_id,
             self.seq_size_per_block,
             forbid_realloc=forbid_realloc,
         )
@@ -751,7 +760,7 @@ class PyFlashinferDecodeAttnOp(object):
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id_host,
+            attn_inputs.kv_cache_kernel_block_id,
             self.seq_size_per_block,
             forbid_realloc=True,
         )

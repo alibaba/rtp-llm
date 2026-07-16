@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
@@ -42,6 +43,20 @@ void releaseHostMemoryCache() {
 #else
     RTP_LLM_LOG_DEBUG("malloc_trim not available on this platform");
 #endif
+}
+
+std::vector<int32_t> flattenLayerToGroup(const CacheConfig& cache_config) {
+    auto layer_to_group_ids = cache_config.layerGroupIdsSnapshot();
+    std::vector<int32_t> layer_to_group;
+    layer_to_group.reserve(layer_to_group_ids.size());
+    for (size_t layer = 0; layer < layer_to_group_ids.size(); ++layer) {
+        RTP_LLM_CHECK_WITH_INFO(layer_to_group_ids[layer].size() == 1,
+                                "layer %zu owns %zu cache groups; expected exactly one group",
+                                layer,
+                                layer_to_group_ids[layer].size());
+        layer_to_group.push_back(static_cast<int32_t>(layer_to_group_ids[layer].front()));
+    }
+    return layer_to_group;
 }
 }  // anonymous namespace
 
@@ -112,6 +127,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     releaseHostMemoryCache();
 
     initScheduler();
+    step_profiler_.configureFromConfig(profiling_debug_logging_config);
     (void)startLoop();
 }
 
@@ -137,11 +153,31 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
 }
 
 void NormalEngine::initScheduler() {
+    const auto pdfusion_scheduler_mode =
+        parsePDFusionSchedulerMode(runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode);
+    if (pdfusion_scheduler_mode == PDFusionSchedulerMode::UNKNOWN) {
+        RTP_LLM_LOG_WARNING("unknown pdfusion_scheduler_mode [%s], expected '' or 'ratio'; mode will be ignored",
+                            runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode.c_str());
+    }
     if (runtime_config.use_batch_decode_scheduler) {
         scheduler_.reset(new BatchDecodeScheduler(
             runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
+    } else if (pdfusion_scheduler_mode == PDFusionSchedulerMode::RATIO
+               && pd_sep_config.role_type == RoleType::PDFUSION) {
+        scheduler_.reset(new PDFusionRatioScheduler(runtime_config,
+                                                    model_config_,
+                                                    pd_sep_config,
+                                                    parallelism_config,
+                                                    model_specific_config,
+                                                    resource_context_.cache_manager,
+                                                    metrics_reporter_));
+        RTP_LLM_LOG_INFO("create pdfusion ratio scheduler done");
     } else {
+        if (pdfusion_scheduler_mode == PDFusionSchedulerMode::RATIO) {
+            RTP_LLM_LOG_WARNING("pdfusion_scheduler_mode [ratio] is ignored because role_type [%d] is not PDFUSION",
+                                static_cast<int>(pd_sep_config.role_type));
+        }
         scheduler_.reset(new FIFOScheduler(runtime_config,
                                            model_config_,
                                            pd_sep_config,
@@ -250,7 +286,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
 
-    auto cache_config               = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config);
+    auto cache_config               = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, 0);
     cache_config.seq_size_per_block = model_config_.attn_config.tokens_per_block;
     cache_config.block_num          = 5;
     ParallelismConfig temp_parallelism_config;
@@ -260,8 +296,16 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
-    executor_.reset(new NormalExecutor(
-        params, cache_manager, true, false, 0, mla_ops_type_, kv_cache_group_num_, kv_cache_layer_to_group_));
+    const auto& temp_cache_config = cache_manager->cacheConfig();
+    auto        temp_layer_to_group = flattenLayerToGroup(temp_cache_config);
+    executor_.reset(new NormalExecutor(params,
+                                       cache_manager,
+                                       true,
+                                       false,
+                                       0,
+                                       mla_ops_type_,
+                                       static_cast<int32_t>(temp_cache_config.groupNums()),
+                                       temp_layer_to_group));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
@@ -322,7 +366,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
 
         const auto& cache_cfg    = resource_context_.cache_manager->cacheConfig();
         kv_cache_group_num_      = cache_cfg.groupNums();
-        kv_cache_layer_to_group_ = cache_cfg.layer_to_group_id;
+        kv_cache_layer_to_group_ = flattenLayerToGroup(cache_cfg);
     } else {
         auto result = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
@@ -339,7 +383,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         }
         const auto& cache_cfg    = resource_context_.cache_manager->cacheConfig();
         kv_cache_group_num_      = cache_cfg.groupNums();
-        kv_cache_layer_to_group_ = cache_cfg.layer_to_group_id;
+        kv_cache_layer_to_group_ = flattenLayerToGroup(cache_cfg);
     }
 }
 
@@ -461,30 +505,23 @@ absl::Status NormalEngine::step() {
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();
 
-    // If any stream in this batch requested gen_timeline AND no profiling session is
-    // already active, configure + tick BEFORE process() so the profiler is up before
-    // the actual work runs. This guarantees the trace captures THIS step's work, not
-    // the next step's. If a session is already active (e.g. external StartProfile RPC),
-    // skip — first-come-first-served.
+    // Per-request timeline: if any stream requested gen_timeline and no session is
+    // active yet, configure the profiler so the next stepScope() captures THIS step.
     if (!step_profiler_.enabled()) {
         for (const auto& stream : streams) {
             if (stream && stream->genTimeline()) {
                 const auto& cfg = stream->generateConfig();
                 step_profiler_.configure(true, cfg->profile_trace_name, 0, cfg->profile_step);
-                step_profiler_.tick();  // start profiler now (start_step=0)
                 break;
             }
         }
     }
 
     {
+        [[maybe_unused]] auto profile_step = step_profiler_.stepScope();
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         status = executor_->process(streams);
     }
-
-    // tick profiler after process() to count this step (and stop when num_steps reached).
-    // All TP ranks synchronize inside process() via NCCL, so stop happens at aligned points.
-    step_profiler_.tick();
 
     // report step metrics
     if (parallelism_config.tp_rank == 0) {

@@ -17,7 +17,7 @@ def h20_oss_suites():
             smoke_test(
                 name="mla_fp8_reuse_absorb_tp2",
                 task_info="data/model/deepseek_v2/q_r_3090_mla.json",
-                smoke_args="--load_method scratch --reuse_cache 1 --seq_size_per_block 8 --act_type BF16 --quantization FP8_PER_BLOCK --absorb_opt_len 1 --tp_size 2 --world_size 2",
+                smoke_args="--reuse_cache 1 --seq_size_per_block 8 --act_type BF16 --quantization FP8_PER_BLOCK --absorb_opt_len 1 --tp_size 2 --world_size 2",
                 gpu_type=["H20"],
             ),
             smoke_test(
@@ -111,6 +111,12 @@ def h20_oss_suites():
                 smoke_args="--cache_store_rdma_mode 0 --use_local 1 --seq_size_per_block 64 --decode_entrance 1 --act_type bf16 --quantization FP8_PER_BLOCK --tp_size 2 --reserver_runtime_mem_mb 5026",
                 gpu_type=["H20"]
             ),
+            smoke_test(
+                name="mla_glm4_moe_lite",
+                task_info="data/model/glm4_moe_lite/q_r_h20.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --enable_cuda_graph 0 --tp_size 1 --world_size 1 --dp_size 1",
+                gpu_type=["H20"],
+            ),
         ],
     )
 
@@ -203,8 +209,14 @@ def h20_oss_suites():
         tests = [
             smoke_test(
                 name="dense_fp8kv_cudagraph",
-                task_info="data/model/qwen25/q_r_new_model_py_fp8_kv_cache.json",
+                task_info="data/model/qwen25/q_r_new_model_py_fp8_kv_cache_cudagraph.json",
                 smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 1  --disable_flash_infer 1",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="dense_fp8kv_flashinfer_prefill",
+                task_info="data/model/qwen25/q_r_new_model_py_fp8_kv_cache_flashinfer_prefill.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 0 --disable_flash_infer 0 --frontend_server_count 1",
                 gpu_type=["H20"],
             ),
             smoke_test(
@@ -231,9 +243,21 @@ def h20_oss_suites():
                 smoke_args="--reserver_runtime_mem_mb 20000 --json_model_override_args '{\\\"rope_scaling\\\":{\\\"type\\\":\\\"yarn\\\",\\\"factor\\\":2.0,\\\"original_max_position_embeddings\\\":32768,\\\"beta_slow\\\":1.0,\\\"beta_fast\\\":1.0,\\\"mscale\\\":1.0,\\\"extrapolation_factor\\\":1.0}}' --seq_size_per_block 64 --act_type BF16 --warm_up 0",
                 gpu_type=["H20"],
             ),
+            smoke_test(
+                name="dense_pdfusion_ratio_prompt_batch_alternation",
+                task_info="data/model/qwen25/q_r_pdfusion_ratio_prompt_batch.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --disable_flash_infer 1 --tp_size 1 --dp_size 2 --world_size 2 --pdfusion_scheduler_mode ratio --decode_prefill_ratio 3",
+                gpu_type=["H20"],
+                concurrency_test=True,
+            ),
+            smoke_test(
+                name="dense_prompt_scoring",
+                task_info="data/model/qwen25/q_r_prompt_scoring.json",
+                smoke_args="--act_type BF16 --warm_up 0",
+                gpu_type=["H20"],
+            ),
         ],
     )
-
 
     # H20 Qwen3.5/Next
     native.test_suite(
@@ -420,7 +444,7 @@ def h20_oss_suites():
             smoke_test(
                 name="eagle_mtp_cudagraph",
                 task_info="data/model/qwen2_14b/q_r_mtp_cudagraph.json",
-                smoke_args="--max_seq_len 16384 --ft_disable_custom_ar 1 --eplb_mode NONE --redundant_expert 0 --act_type FP16 --concurrency_limit 64 --frontend_server_count 1 --warm_up 0 --reserver_runtime_mem_mb 24096 --seq_size_per_block 64 --enable_xqa 1 --sp_type eagle --gen_num_per_cycle 4 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --sp_act_type FP16 --decode_capture_config '1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16'  --enable_cuda_graph 1 --load_method scratch --tp_size 1 --world_size 1 --dp_size 1",
+                smoke_args="--max_seq_len 16384 --ft_disable_custom_ar 1 --eplb_mode NONE --redundant_expert 0 --act_type FP16 --concurrency_limit 64 --frontend_server_count 1 --warm_up 0 --reserver_runtime_mem_mb 24096 --seq_size_per_block 64 --enable_xqa 1 --sp_type eagle --gen_num_per_cycle 4 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --sp_act_type FP16 --decode_capture_config '1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16'  --enable_cuda_graph 1 --tp_size 1 --world_size 1 --dp_size 1",
                 envs=["NCCL_DISABLE_ABORT=1", "NCCL_DEBUG=INFO", "LOG_LEVEL=INFO"],
                 gpu_type=["H20"]
             ),
@@ -489,4 +513,3 @@ def h20_oss_suites():
             ),
         ],
     )
-

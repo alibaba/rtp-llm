@@ -316,9 +316,10 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
 
     for (const auto& stream : stream_groups.contextStreams()) {
-        model_input.need_all_logits = model_input.need_all_logits || stream->calculateLoss();
-        auto  current_batch_size    = stream->currentBatchSize();
-        auto& kv_cache              = *stream->kvCachePtr();
+        model_input.need_all_logits =
+            model_input.need_all_logits || stream->calculateLoss() || stream->returnPromptLogits();
+        auto  current_batch_size = stream->currentBatchSize();
+        auto& kv_cache           = *stream->kvCachePtr();
         if (config_.enable_detail_log) {
             RTP_LLM_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());
             RTP_LLM_LOG_DEBUG("context stream: %s", stream->debugString().c_str());

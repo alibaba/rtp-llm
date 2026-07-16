@@ -8,7 +8,11 @@
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/SingleConfigCreator.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/config/MTPModelConfigHelper.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -37,17 +41,23 @@ static rtp_llm::ModelConfig makeTestModelConfig(uint32_t num_layers) {
     m.attn_config.tokens_per_block = 4;
     m.attn_config.kv_head_num      = 2;
     m.attn_config.size_per_head    = 1;
-    m.attn_config.kv_cache_dtype   = KvCacheDataType::INT8;
+    m.attn_config.kv_cache_dtype   = KvCacheDataType::FP8;
     m.attn_config.kv_lora_rank     = 0;
     m.attn_config.rope_head_dim    = 0;
     m.attn_config.head_num         = 2;
+    m.kv_cache_spec_descs.resize(num_layers);
+    for (auto& descs : m.kv_cache_spec_descs) {
+        descs.push_back(KVCacheSpecDesc{"full", KVCacheSpecType::MultiHeadAttention});
+    }
     return m;
 }
 
-static rtp_llm::CacheConfig
-makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uint32_t block_num) {
+static rtp_llm::CacheConfig makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers,
+                                                               int      mtp_module_num,
+                                                               uint32_t block_num,
+                                                               uint32_t mtp_module_layers = 1) {
     auto score_model_config   = makeTestModelConfig(main_layers);
-    auto propose_model_config = makeTestModelConfig(/*num_layers=*/1);
+    auto propose_model_config = makeTestModelConfig(mtp_module_layers);
 
     rtp_llm::ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
@@ -94,8 +104,8 @@ BatchKVCacheResourcePtr createBatchKVCacheResource(int batch_size, int layer_num
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->resetBatchSize(batch_size);
     for (int i = 0; i < batch_size; ++i) {
-        std::vector<int> layer_to_group_id(layer_num, 0);
-        resource->initBatchGroups(i, 1, layer_num, layer_to_group_id);
+        std::vector<std::vector<int>> layer_group_ids(static_cast<size_t>(layer_num), std::vector<int>{0});
+        resource->initBatchGroups(i, 1, layer_num, layer_group_ids);
         resource->setBatchBlocks(i, 0, std::vector<int>(block_num_per_batch));
         resource->setBatchCacheKeys(i, CacheKeysType(block_num_per_batch, static_cast<CacheKeyType>(i * 100)));
     }
@@ -126,6 +136,15 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConstructorAndInit) {
 
     EXPECT_EQ(allocator_->totalBlocksNum(), config.block_num - 1);
     EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, InitRejectsLinearGroupBeforeCreatingBlockPool) {
+    auto config = makeSimpleLinearCacheConfig(
+        /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
+    allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(config);
+
+    EXPECT_THROW(allocator_->init(), std::runtime_error);
+    EXPECT_EQ(allocator_->getBlockPool(), nullptr);
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, InitWithDifferentLayerNum) {
@@ -439,8 +458,9 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdSingleNoMtp) {
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdSingleWithMtp) {
-    auto config = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/8);
-    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    auto config = makeMtpCacheConfigByCreateSpConfig(
+        /*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/8, /*mtp_module_layers=*/3);
+    allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(config);
 
     // main model: global == local
     EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/0), 0u);
@@ -448,13 +468,95 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdSingleWithMtp) {
     EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/2),
               std::numeric_limits<uint32_t>::max());
 
-    // mtp sub-models map via sub_cfg->global_layer_ids[0]
+    // Global ids follow main_layers + module_index * module_layers + local_layer.
     EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/0), 2u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/2, /*local_layer_id=*/0), 3u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/1),
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/1), 3u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/2), 4u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/2, /*local_layer_id=*/0), 5u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/2, /*local_layer_id=*/1), 6u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/2, /*local_layer_id=*/2), 7u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/3),
               std::numeric_limits<uint32_t>::max());
     EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/3, /*local_layer_id=*/0),
               std::numeric_limits<uint32_t>::max());
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, MtpGlobalLayerIdRejectsInvalidModuleAndLocalIds) {
+    constexpr auto invalid = std::numeric_limits<uint32_t>::max();
+    EXPECT_EQ(CacheConfig::mtpGlobalLayerId(/*main=*/2, /*module=*/0, /*module_layers=*/3, /*local=*/0), 2u);
+    EXPECT_EQ(CacheConfig::mtpGlobalLayerId(/*main=*/2, /*module=*/0, /*module_layers=*/3, /*local=*/2), 4u);
+    EXPECT_EQ(CacheConfig::mtpGlobalLayerId(/*main=*/2, /*module=*/1, /*module_layers=*/3, /*local=*/0), 5u);
+    EXPECT_EQ(CacheConfig::mtpGlobalLayerId(/*main=*/2, /*module=*/1, /*module_layers=*/3, /*local=*/2), 7u);
+    EXPECT_EQ(CacheConfig::mtpGlobalLayerId(/*main=*/2, /*module=*/-1, /*module_layers=*/3, /*local=*/0), invalid);
+    EXPECT_EQ(CacheConfig::mtpGlobalLayerId(/*main=*/2, /*module=*/0, /*module_layers=*/3, /*local=*/-1), invalid);
+    EXPECT_EQ(CacheConfig::mtpGlobalLayerId(/*main=*/2, /*module=*/0, /*module_layers=*/3, /*local=*/3), invalid);
+    EXPECT_EQ(CacheConfig::mtpGlobalLayerId(/*main=*/2, /*module=*/0, /*module_layers=*/0, /*local=*/0), invalid);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSlicesDescriptorAndAttentionType) {
+    auto config                                            = makeTestModelConfig(/*num_layers=*/2);
+    config.kv_cache_spec_descs[0][0].tag                   = "layer0";
+    config.kv_cache_spec_descs[1][0].tag                   = "layer1";
+    config.hybrid_attention_config.enable_hybrid_attention = true;
+    config.hybrid_attention_config.hybrid_attention_types  = {HybridAttentionType::LINEAR,
+                                                              HybridAttentionType::SLIDING_WINDOW};
+
+    const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/1);
+
+    ASSERT_EQ(single_layer.num_layers, 1);
+    ASSERT_EQ(single_layer.kv_cache_spec_descs.size(), 1u);
+    ASSERT_EQ(single_layer.kv_cache_spec_descs[0].size(), 1u);
+    EXPECT_EQ(single_layer.kv_cache_spec_descs[0][0].tag, "layer1");
+    ASSERT_EQ(single_layer.hybrid_attention_config.hybrid_attention_types.size(), 1u);
+    EXPECT_EQ(single_layer.hybrid_attention_config.hybrid_attention_types[0], HybridAttentionType::SLIDING_WINDOW);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, ActiveMtpCacheLayoutValidationOnlyChecksModule0) {
+    auto config                                            = makeTestModelConfig(/*num_layers=*/2);
+    config.hybrid_attention_config.enable_hybrid_attention = true;
+    config.hybrid_attention_config.hybrid_attention_types  = {HybridAttentionType::NONE, HybridAttentionType::NONE};
+
+    auto module0 = makeSingleLayerMTPModelConfig(config, 0);
+    EXPECT_NO_THROW(validateActiveMTPCacheLayout(module0));
+
+    auto invalid_module0                = module0;
+    invalid_module0.kv_cache_spec_descs = {};
+    EXPECT_THROW(validateActiveMTPCacheLayout(invalid_module0), std::runtime_error);
+
+    config.kv_cache_spec_descs.resize(1);
+    config.hybrid_attention_config.hybrid_attention_types.resize(1);
+    EXPECT_NO_THROW(buildMTPModuleConfigPlan(config, /*weight_count=*/2, /*gen_num_per_cycle=*/2, SP_TYPE_MTP));
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, MtpModuleConfigPlanKeepsWeightsAndCopiesActiveCacheLayout) {
+    auto config                                 = makeTestModelConfig(/*num_layers=*/2);
+    config.kv_cache_spec_descs[0][0].tag        = "active";
+    config.kv_cache_spec_descs[1][0].tag        = "inactive-heterogeneous";
+    config.kv_cache_spec_descs[1][0].cache_type = KVCacheSpecType::MultiHeadLatentAttention;
+
+    const auto multi_weight_plan =
+        buildMTPModuleConfigPlan(config, /*weight_count=*/2, /*gen_num_per_cycle=*/2, SP_TYPE_MTP);
+    ASSERT_EQ(multi_weight_plan.source_layer_indices, (std::vector<size_t>{0, 1}));
+    ASSERT_EQ(multi_weight_plan.module_configs.size(), 2u);
+    for (const auto& module_config : multi_weight_plan.module_configs) {
+        EXPECT_EQ(module_config.num_layers, 1);
+        ASSERT_EQ(module_config.kv_cache_spec_descs.size(), 1u);
+        ASSERT_EQ(module_config.kv_cache_spec_descs[0].size(), config.kv_cache_spec_descs[0].size());
+        EXPECT_EQ(module_config.kv_cache_spec_descs[0][0].tag, "active");
+        EXPECT_EQ(module_config.kv_cache_spec_descs[0][0].cache_type, config.kv_cache_spec_descs[0][0].cache_type);
+    }
+
+    const auto reused_weight_plan =
+        buildMTPModuleConfigPlan(config, /*weight_count=*/1, /*gen_num_per_cycle=*/3, SP_TYPE_MTP);
+    EXPECT_EQ(reused_weight_plan.source_layer_indices, (std::vector<size_t>{0, 0, 0}));
+    ASSERT_EQ(reused_weight_plan.module_configs.size(), 3u);
+    for (const auto& module_config : reused_weight_plan.module_configs) {
+        EXPECT_EQ(module_config.num_layers, 1);
+        ASSERT_EQ(module_config.kv_cache_spec_descs.size(), 1u);
+        ASSERT_EQ(module_config.kv_cache_spec_descs[0].size(), config.kv_cache_spec_descs[0].size());
+        EXPECT_EQ(module_config.kv_cache_spec_descs[0][0].tag, config.kv_cache_spec_descs[0][0].tag);
+        EXPECT_EQ(module_config.kv_cache_spec_descs[0][0].cache_type, config.kv_cache_spec_descs[0][0].cache_type);
+    }
 }
 
 // Test convert index to buffer
@@ -477,12 +579,77 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LayerCacheBase) {
     auto layout = allocator_->allLayerCacheBase();
     EXPECT_EQ(layout.layers_to_kv_buffer_ptrs.size(), config.layer_num);
     EXPECT_EQ(layout.layers_to_scale_buffer_ptrs.size(), config.layer_num);
-    EXPECT_EQ((std::vector<int>(4, 0)), layout.layer_to_groups);
+    EXPECT_EQ((std::vector<std::vector<int>>(4, std::vector<int>{0})), layout.layer_to_group_ids);
+    EXPECT_EQ(layout.group_types, std::vector<CacheGroupType>{CacheGroupType::FULL});
+    EXPECT_EQ(layout.group_tags, std::vector<std::string>{"default"});
+    EXPECT_EQ(layout.layers_to_kv_buffer_ptrs_by_group.size(), config.layer_num);
+    EXPECT_EQ(layout.layers_to_scale_buffer_ptrs_by_group.size(), config.layer_num);
 
     for (size_t i = 0; i < layout.layers_to_kv_buffer_ptrs.size(); ++i) {
         EXPECT_TRUE(layout.layers_to_kv_buffer_ptrs[i].defined());
         EXPECT_GT(layout.layers_to_kv_buffer_ptrs[i].nbytes(), 0u);
+        ASSERT_EQ(layout.layers_to_kv_buffer_ptrs_by_group[i].size(), 1u);
+        ASSERT_TRUE(layout.layers_to_kv_buffer_ptrs_by_group[i][0].defined());
+        EXPECT_EQ(layout.layers_to_kv_buffer_ptrs_by_group[i][0].data_ptr(),
+                  layout.layers_to_kv_buffer_ptrs[i].data_ptr());
     }
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, ManagerLayoutsPreserveSingleTypeGroupTensorsForMainAndMtp) {
+    auto config = makeMtpCacheConfigByCreateSpConfig(
+        /*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/8, /*mtp_module_layers=*/3);
+    auto manager = std::make_shared<KVCacheManager>(config);
+    ASSERT_TRUE(manager->init());
+
+    const auto all_layout  = manager->allLayerCacheBase();
+    const auto main_layout = manager->getMainModelCacheLayerLayout();
+    ASSERT_EQ(all_layout.layers_to_kv_buffer_ptrs.size(), 8u);
+
+    auto verify_layout = [](const CacheLayerLayout& local_layout, const CacheLayerLayout& all, size_t global_begin) {
+        ASSERT_EQ(local_layout.group_types, std::vector<CacheGroupType>{CacheGroupType::FULL});
+        ASSERT_EQ(local_layout.group_tags, std::vector<std::string>{"full"});
+        ASSERT_EQ(local_layout.layers_to_kv_buffer_ptrs_by_group.size(), local_layout.layers_to_kv_buffer_ptrs.size());
+        for (size_t local_layer = 0; local_layer < local_layout.layers_to_kv_buffer_ptrs.size(); ++local_layer) {
+            const size_t global_layer = global_begin + local_layer;
+            ASSERT_TRUE(local_layout.layers_to_kv_buffer_ptrs[local_layer].defined());
+            EXPECT_EQ(local_layout.layers_to_kv_buffer_ptrs[local_layer].data_ptr(),
+                      all.layers_to_kv_buffer_ptrs[global_layer].data_ptr());
+            ASSERT_EQ(local_layout.layers_to_kv_buffer_ptrs_by_group[local_layer].size(), 1u);
+            ASSERT_TRUE(local_layout.layers_to_kv_buffer_ptrs_by_group[local_layer][0].defined());
+            EXPECT_EQ(local_layout.layers_to_kv_buffer_ptrs_by_group[local_layer][0].data_ptr(),
+                      local_layout.layers_to_kv_buffer_ptrs[local_layer].data_ptr());
+            ASSERT_EQ(local_layout.layers_to_scale_buffer_ptrs_by_group[local_layer].size(), 1u);
+            ASSERT_TRUE(local_layout.layers_to_scale_buffer_ptrs_by_group[local_layer][0].defined());
+            EXPECT_EQ(local_layout.layers_to_scale_buffer_ptrs_by_group[local_layer][0].data_ptr(),
+                      local_layout.layers_to_scale_buffer_ptrs[local_layer].data_ptr());
+        }
+
+        torch_ext::KVCache kv_cache;
+        kv_cache.kv_cache_base_by_layer       = local_layout.layers_to_kv_buffer_ptrs;
+        kv_cache.kv_scale_base_by_layer       = local_layout.layers_to_scale_buffer_ptrs;
+        kv_cache.layer_attn_types             = local_layout.layer_attn_types;
+        kv_cache.group_types                  = local_layout.group_types;
+        kv_cache.group_tags                   = local_layout.group_tags;
+        kv_cache.layer_to_group_ids           = local_layout.layer_to_group_ids;
+        kv_cache.layer_tag_to_group_id        = local_layout.layer_tag_to_group_id;
+        kv_cache.kv_cache_base_by_layer_group = local_layout.layers_to_kv_buffer_ptrs_by_group;
+        kv_cache.kv_scale_base_by_layer_group = local_layout.layers_to_scale_buffer_ptrs_by_group;
+        kv_cache.seq_size_per_block           = 4;
+        kv_cache.kernel_seq_size_per_block    = 4;
+
+        const auto by_tag   = kv_cache.getLayerCache(/*idx=*/0, "full");
+        const auto by_group = kv_cache.getLayerCacheByGroup(/*idx=*/0, /*gid=*/0);
+        EXPECT_TRUE(by_tag.kv_cache_base.defined());
+        EXPECT_TRUE(by_group.kv_cache_base.defined());
+        EXPECT_EQ(by_tag.kv_cache_base.data_ptr(), local_layout.layers_to_kv_buffer_ptrs[0].data_ptr());
+        EXPECT_EQ(by_group.kv_cache_base.data_ptr(), local_layout.layers_to_kv_buffer_ptrs[0].data_ptr());
+    };
+
+    verify_layout(main_layout, all_layout, /*global_begin=*/0);
+    verify_layout(manager->getMTPModuleCacheLayerLayout(0), all_layout, /*global_begin=*/2);
+    verify_layout(manager->getMTPModuleCacheLayerLayout(1), all_layout, /*global_begin=*/5);
+    EXPECT_THROW(manager->getMTPModuleCacheLayerLayout(-1), std::runtime_error);
+    EXPECT_THROW(manager->getMTPModuleCacheLayerLayout(2), std::runtime_error);
 }
 
 // Test block copy
@@ -494,7 +661,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockCopySingle) {
     int src_block = 0;
     int dst_block = 1;
 
-    auto&  spec         = config.cache_specs[0];
+    auto&  spec         = config.specForGroup(0);
     size_t k_block_size = spec->k_block_size();
     size_t v_block_size = spec->v_block_size();
 
@@ -550,7 +717,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyVector) {
     copy_mapping.push_back({2, 3});
     copy_mapping.push_back({4, 5});
 
-    auto&  spec         = config.cache_specs[0];
+    auto&  spec         = config.specForGroup(0);
     size_t k_block_size = spec->k_block_size();
     size_t v_block_size = spec->v_block_size();
 
@@ -609,6 +776,66 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyEmpty) {
     EXPECT_NO_THROW(allocator_->blockBatchCopy(empty_mapping));
 }
 
+TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteSparseIndexerStride) {
+    auto model_config                         = makeTestModelConfig(/*num_layers=*/1);
+    model_config.attn_config.is_sparse        = true;
+    model_config.attn_config.indexer_head_dim = 256;
+
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+    auto config                = SingleConfigCreator::createSingleConfig(model_config, parallelism_config);
+    config.block_num           = 4;
+
+    ASSERT_TRUE(config.is_sparse);
+    ASSERT_GT(config.kv_scale_stride_bytes, 0u);
+    ASSERT_NE(config.kv_scale_stride_bytes, config.kvScaleStrideBytesForGroup(0));
+
+    allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator_->init());
+
+    const auto stride   = config.kv_scale_stride_bytes;
+    auto       snapshot = [&]() {
+        std::vector<std::vector<uint8_t>> blocks(config.block_num, std::vector<uint8_t>(stride));
+        for (uint32_t block = 0; block < config.block_num; ++block) {
+            auto addr = allocator_->convertIndexToAddr(/*layer_id=*/0, static_cast<int>(block));
+            EXPECT_NE(addr.kv_scale_addr, nullptr);
+            memcpy(blocks[block].data(), addr.kv_scale_addr, stride);
+        }
+        return blocks;
+    };
+    auto verify = [&](const std::vector<std::vector<uint8_t>>& expected) {
+        for (uint32_t block = 0; block < config.block_num; ++block) {
+            auto addr = allocator_->convertIndexToAddr(/*layer_id=*/0, static_cast<int>(block));
+            EXPECT_EQ(memcmp(addr.kv_scale_addr, expected[block].data(), stride), 0)
+                << "sparse indexer mismatch at block " << block;
+        }
+    };
+
+    for (uint32_t block = 0; block < config.block_num; ++block) {
+        auto  addr = allocator_->convertIndexToAddr(/*layer_id=*/0, static_cast<int>(block));
+        auto* data = static_cast<uint8_t*>(addr.kv_scale_addr);
+        ASSERT_NE(data, nullptr);
+        for (size_t offset = 0; offset < stride; ++offset) {
+            data[offset] = static_cast<uint8_t>((block * 67 + offset) % 251);
+        }
+    }
+
+    const auto initial = snapshot();
+    EXPECT_NO_THROW(allocator_->blockBatchCopy(std::vector<BlockIdPair>{}));
+    verify(initial);
+
+    EXPECT_NO_THROW(allocator_->blockBatchCopy(std::vector<BlockIdPair>{{0, 1}}));
+    auto after_single = initial;
+    after_single[1]   = initial[0];
+    verify(after_single);
+
+    const int last_block = static_cast<int>(config.block_num - 1);
+    EXPECT_NO_THROW(allocator_->blockBatchCopy(std::vector<BlockIdPair>{{1, last_block}}));
+    auto after_last        = after_single;
+    after_last[last_block] = after_single[1];
+    verify(after_last);
+}
+
 TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyPointers) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);
@@ -616,7 +843,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyPointers) {
 
     BlockIdPair pairs[] = {{0, 1}, {2, 3}};
 
-    auto&  spec         = config.cache_specs[0];
+    auto&  spec         = config.specForGroup(0);
     size_t k_block_size = spec->k_block_size();
     size_t v_block_size = spec->v_block_size();
 
@@ -665,7 +892,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyBuffer) {
     std::vector<int32_t> data   = {0, 1, 2, 3, 4, 5};  // 3 pairs: (0->1, 2->3, 4->5)
     auto                 tensor = torch::from_blob(data.data(), {3, 2}, torch::kInt32).clone();
 
-    auto&  spec         = config.cache_specs[0];
+    auto&  spec         = config.specForGroup(0);
     size_t k_block_size = spec->k_block_size();
     size_t v_block_size = spec->v_block_size();
 
@@ -740,7 +967,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 4);
 
     KVCacheResource resource;
-    resource.initGroups(1, config.layer_all_num, config.layer_to_group_id);
+    resource.initGroups(1, config.layer_all_num, config.layerGroupIdsSnapshot());
 
     resource.cacheKeys() = CacheKeysType{100, 101, 102, 103};
     resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1], 0, blocks[2]});
@@ -774,7 +1001,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
 
     KVCacheResource resource;
-    resource.initGroups(1, config.layer_all_num, config.layer_to_group_id);
+    resource.initGroups(1, config.layer_all_num, config.layerGroupIdsSnapshot());
     resource.cacheKeys() = CacheKeysType{100, 101};
     resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1]});
 

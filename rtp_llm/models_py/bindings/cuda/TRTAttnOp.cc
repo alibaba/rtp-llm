@@ -15,14 +15,14 @@ TRTPrefillOpBase::TRTPrefillOpBase(const AttentionConfigs& attn_configs): attn_c
 
 bool TRTPrefillOpBase::support(torch_ext::PyAttentionInputs attn_inputs) {
     // FMHAConfig check will be done in Python layer
-    return attn_configs_.kv_cache_dtype != KvCacheDataType::INT8;
+    return true;
 }
 
 ParamsBasePtr TRTPrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     static_scale_            = torch::ones({1}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
     int           batch_size = attn_inputs.input_lengths.size(0);
     torch::Tensor kv_cache_kernel_block_id_device;
-    if (attn_inputs.kv_cache_kernel_block_id_host.defined() && attn_inputs.kv_cache_kernel_block_id_host.numel() > 0) {
+    if (attn_inputs.kv_cache_kernel_block_id.defined() && attn_inputs.kv_cache_kernel_block_id.numel() > 0) {
         kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
     }
 
@@ -41,8 +41,8 @@ ParamsBasePtr TRTPrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs
         attn_params = std::make_shared<TRTAttn>();
     }
     attn_params->attn_type               = torchDTypeToDataType(attn_inputs.dtype);
-    attn_params->cu_seqlens              = attn_inputs.cu_seqlens;
-    attn_params->cu_kv_seqlens           = attn_inputs.cu_kv_seqlens;
+    attn_params->cu_seqlens              = attn_inputs.cu_seqlens_device;
+    attn_params->cu_kv_seqlens           = attn_inputs.cu_kv_seqlens_device;
     attn_params->max_seq_len             = attn_inputs.input_lengths.max().item<int32_t>();
     attn_params->max_prefix_length       = attn_inputs.prefix_lengths.max().item<int32_t>();
     attn_params->context_total_kv_length = attn_inputs.context_total_kv_length;
@@ -65,7 +65,7 @@ bool TRTPagedPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
         attn_inputs.prefix_lengths.defined() && torch::any(attn_inputs.prefix_lengths.reshape({-1})).item<bool>();
 
     // FMHAConfig check is done in Python layer
-    if (!has_prefix || attn_configs_.kv_cache_dtype == KvCacheDataType::INT8) {
+    if (!has_prefix) {
         return false;
     }
 
@@ -133,7 +133,7 @@ bool TRTNormalPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
         attn_inputs.prefix_lengths.defined() && torch::any(attn_inputs.prefix_lengths.reshape({-1})).item<bool>();
 
     // FMHAConfig check is done in Python layer
-    if (has_prefix || attn_configs_.kv_cache_dtype == KvCacheDataType::INT8) {
+    if (has_prefix) {
         return false;
     }
 

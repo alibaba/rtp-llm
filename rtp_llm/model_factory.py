@@ -312,6 +312,7 @@ class ModelFactory:
             quantization_config=quantization_config,
             vit_config=vit_config,
         )
+        model_cls._post_build_model_config(model_config)
 
         # Set model metadata fields
         # Set lora_infos from lora_config (direct assignment)
@@ -408,9 +409,9 @@ class ModelFactory:
         propose_model_args.mla_ops_type = model_args.mla_ops_type
         propose_model_args.enable_fp32_lm_head = model_args.enable_fp32_lm_head
 
-        # Create propose ModelConfig using create_config
+        # Create propose ModelConfig using _create_config
         propose_model_cls = ModelFactory.get_model_cls(sp_config.model_type)
-        propose_model_config = propose_model_cls.create_config(
+        propose_model_config = propose_model_cls._create_config(
             sp_config.checkpoint_path
         )
         # Ensure max_seq_len matches main model
@@ -430,5 +431,6 @@ class ModelFactory:
             profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
             embedding_config=None,  # Propose model doesn't need embedding_config
         )
+        propose_model_cls._post_build_model_config(propose_model_config)
 
         return propose_model_config

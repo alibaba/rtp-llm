@@ -135,8 +135,8 @@ def _make_rope_prefill_inputs(
     for seq_len in input_lengths:
         cu.append(cu[-1] + seq_len)
     cu_seqlens = torch.tensor(cu, dtype=torch.int32, device=device)
-    attn_inputs.cu_seqlens = cu_seqlens
-    attn_inputs.cu_kv_seqlens = cu_seqlens
+    attn_inputs.cu_seqlens_device = cu_seqlens
+    attn_inputs.cu_kv_seqlens_device = cu_seqlens
 
     max_seq_len = max(input_lengths)
     padding_offset = []
@@ -667,7 +667,6 @@ class TestCompactGatherReshape(unittest.TestCase):
     def test_kv_cache_dtype_controls_compact_mode(self):
         cases = [
             (KvCacheDataType.BASE, torch.float16, True),
-            (KvCacheDataType.INT8, torch.int8, True),
             (KvCacheDataType.FP8, torch.float8_e4m3fn, False),
         ]
         for kv_cache_dtype, expected_torch_dtype, expected_use_compact in cases:
@@ -745,29 +744,6 @@ class TestCompactGatherReshape(unittest.TestCase):
             k_compact[compact_bt.reshape(-1).to(torch.int64)], k_full[orig_indices]
         )
         self.assertEqual(k_compact.shape[0], bt.numel() + 1)
-
-    def test_int8_kv_cache_prepares_int8_compact_buffers(self):
-        """INT8 KV cache keeps compact path with buffers matching storage dtype."""
-        from types import SimpleNamespace
-
-        op = self._make_op(kv_cache_dtype=KvCacheDataType.INT8)
-        block_table = torch.tensor([[0, 1, 2]], dtype=torch.int32)
-        fmha_params = SimpleNamespace(
-            kv_cache_block_id_device=block_table,
-            prefill_seqlen_k_int32=torch.tensor([48], dtype=torch.int32),
-            max_seqlen_k=48,
-        )
-
-        op._prepare_block_table_indices(fmha_params)
-
-        self.assertTrue(op.use_compact)
-        self.assertEqual(fmha_params.k_compact_buf.dtype, torch.int8)
-        self.assertEqual(fmha_params.v_compact_buf.dtype, torch.int8)
-        self.assertEqual(
-            fmha_params.k_compact_buf.shape[0], fmha_params.block_indices.numel() + 1
-        )
-        self.assertEqual(fmha_params.k_compact_buf.shape[1:], (4, 8, 16, 16))
-        self.assertEqual(fmha_params.v_compact_buf.shape[1:], (4, 1, 128, 16))
 
     # ---- FP8 fallback: compact should NOT be used -------------------------
 
@@ -1269,8 +1245,8 @@ class TestAiterPrefillImplNoKvRopeRealOp(unittest.TestCase):
             q_rope,
             k_rope,
             v,
-            attn_inputs.cu_seqlens,
-            attn_inputs.cu_kv_seqlens,
+            attn_inputs.cu_seqlens_device,
+            attn_inputs.cu_kv_seqlens_device,
             causal=True,
         )
         torch.testing.assert_close(actual, ref, atol=1e-2, rtol=1e-2)

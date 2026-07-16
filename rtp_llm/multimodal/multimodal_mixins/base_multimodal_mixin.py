@@ -121,6 +121,7 @@ class BaseMultiModalMixin:
 
     def create_mm_mixin_loader(self) -> MultimodalMixinLoader:
         database = CkptDatabase(self.ckpt_path)
+        self._prepare_vit_weights(database)
 
         weights_info: ModelDeployWeightInfo = self.get_multimodal_mixin_weight_info()(
             vit_weights=self.mm_related_params.vit_weights,
@@ -132,6 +133,9 @@ class BaseMultiModalMixin:
             database,
             load_method=self.load_method,
         )
+
+    def _prepare_vit_weights(self, database: CkptDatabase) -> None:
+        pass
 
     @classmethod
     def get_multimodal_mixin_weight_info(cls) -> ModelDeployWeightInfo:

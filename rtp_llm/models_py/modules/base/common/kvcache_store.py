@@ -18,7 +18,7 @@ class WriteCacheStoreOp(nn.Module):
         super().__init__()
         self.input_lengths = input_lengths
         self.prefix_lengths = prefix_lengths
-        self.kv_cache_block_id_host = kv_cache_block_id_host
+        self.kv_cache_block_id = kv_cache_block_id_host
         self.cache_store_inputs = cache_store_inputs
 
     def forward(self, kv_cache: Optional[LayerKVCache]):
@@ -26,7 +26,7 @@ class WriteCacheStoreOp(nn.Module):
         compute_ops.write_cache_store(
             self.input_lengths,
             self.prefix_lengths,
-            self.kv_cache_block_id_host,
+            self.kv_cache_block_id,
             self.cache_store_inputs,
             kv_cache,
         )

@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/TimeUtility.h"
+#include <algorithm>
 #include <memory>
 #include <thread>
 #include <random>
@@ -123,6 +124,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     fast_topk_sampler_(new speculative::FastTopKSampler()),
     warm_up_(warm_up),
     role_type_(params.pd_sep_config.role_type) {
+    (void)kv_cache_layer_to_group;
     data_type_          = params.model_config_.data_type;
     hidden_size_        = params.model_config_.hidden_size;
     propose_step_       = propose_params->gen_num_per_circle;
@@ -157,7 +159,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                              params.eplb_config);
     }
 
-    sampler_.reset(new Sampler(SamplerInitParams{}));
+    const auto initial_sampler_batch_size =
+        (propose_params->gen_num_per_circle + 1)
+        * static_cast<size_t>(std::max(1, params.concurrency_config.concurrency_limit));
+    // Speculative decoding preallocates the expected fanout, but request-level return sequences or
+    // variable beams may still increase sampler rows. Keep the safe dynamic growth path enabled.
+    sampler_.reset(new Sampler(SamplerInitParams{initial_sampler_batch_size, false}));
 
     // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
     std::optional<CacheLayerLayout> kv_cache_layer_layout = std::nullopt;
@@ -167,6 +174,21 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     auto target_cache_layer_layout = cache_manager->getMainModelCacheLayerLayout();
     auto draft_cache_layer_layout  = cache_manager->getMTPModuleCacheLayerLayout(0);
+
+    auto buildLayerToGroupVector = [](const std::vector<std::vector<int>>& layer_to_group_ids) -> std::vector<int32_t> {
+        std::vector<int32_t> layer_to_group;
+        layer_to_group.reserve(layer_to_group_ids.size());
+        for (size_t i = 0; i < layer_to_group_ids.size(); ++i) {
+            RTP_LLM_CHECK_WITH_INFO(layer_to_group_ids[i].size() == 1,
+                                    "mtp layer %zu owns %zu cache groups; expected exactly one group",
+                                    i,
+                                    layer_to_group_ids[i].size());
+            layer_to_group.push_back(static_cast<int32_t>(layer_to_group_ids[i].front()));
+        }
+        return layer_to_group;
+    };
+    auto target_layer_to_group = buildLayerToGroupVector(target_cache_layer_layout.layer_to_group_ids);
+    auto draft_layer_to_group  = buildLayerToGroupVector(draft_cache_layer_layout.layer_to_group_ids);
 
     GptModelInitParams model_init_params(
         {params.gpt_weights,
@@ -186,7 +208,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          params.model_config_.attn_config.tokens_per_block,
          params.model_config_.attn_config.kernel_tokens_per_block,
          kv_cache_group_num,
-         kv_cache_layer_to_group,
+         target_layer_to_group,
          cache_manager});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
@@ -197,7 +219,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
         model_.reset(new PyWrappedModel(
-            model_init_params, params.py_model, false, true, target_cache_layer_layout.layer_to_groups));
+            model_init_params, params.py_model, false, true));
     }
 
     // when warmup, cache manager maybe nullptr
@@ -234,12 +256,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mtp_params->model_config_.attn_config.tokens_per_block,
                                 mtp_params->model_config_.attn_config.kernel_tokens_per_block,
                                 kv_cache_group_num,
-                                kv_cache_layer_to_group,
+                                draft_layer_to_group,
                                 cache_manager});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
             draft_model_.reset(new PyWrappedModel(
-                model_params, params.py_sp_model, false, false, draft_cache_layer_layout.layer_to_groups));
+                model_params, params.py_sp_model, false, false));
             // Create separate model for speculative prefill with CUDA graph if enabled (from params)
             const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph;
             RTP_LLM_LOG_INFO(
@@ -249,23 +271,22 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                 RTP_LLM_LOG_INFO(
                     "[speculative decoding] creating separate prefill draft model with CUDA graph support");
                 sp_prefill_draft_model_.reset(new PyWrappedModel(
-                    model_params, params.py_sp_model, true, false, draft_cache_layer_layout.layer_to_groups));
+                    model_params, params.py_sp_model, true, false));
             }
         }
         break;  // NOTE: only support one mtp model now
     }
 
-    target_kv_cache_layer_to_group =
-        torch::empty({(int64_t)target_cache_layer_layout.layers_to_kv_buffer_ptrs.size()}, torch::kInt32);
-    draft_kv_cache_layer_to_group =
-        torch::empty({(int64_t)draft_cache_layer_layout.layers_to_kv_buffer_ptrs.size()}, torch::kInt32);
-
-    memcpy(target_kv_cache_layer_to_group.data_ptr<int>(),
-           target_cache_layer_layout.layer_to_groups.data(),
-           target_cache_layer_layout.layer_to_groups.size() * sizeof(int));
-    memcpy(draft_kv_cache_layer_to_group.data_ptr<int>(),
-           draft_cache_layer_layout.layer_to_groups.data(),
-           draft_cache_layer_layout.layer_to_groups.size() * sizeof(int));
+    auto buildLayerToGroupTensor = [](const std::vector<int32_t>& layer_to_group) -> torch::Tensor {
+        auto t   = torch::empty({(int64_t)layer_to_group.size()}, torch::kInt32);
+        auto ptr = t.data_ptr<int>();
+        for (size_t i = 0; i < layer_to_group.size(); ++i) {
+            ptr[i] = layer_to_group[i];
+        }
+        return t;
+    };
+    target_kv_cache_layer_to_group = buildLayerToGroupTensor(target_layer_to_group);
+    draft_kv_cache_layer_to_group  = buildLayerToGroupTensor(draft_layer_to_group);
 }
 
 /*
@@ -377,7 +398,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             CHECK_AND_RETURN_REF(sampler_input,
                                  batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
             sampler_output = std::move(sampler_->forward(sampler_input));
-            batch_stream_processor_->updatePrefillPostDraftModelInput(model_input, model_output, sampler_output);
+            batch_stream_processor_->updatePrefillPostDraftModelInput(
+                stream_groups, model_input, model_output, sampler_output);
         }
     }
 
@@ -679,6 +701,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
         // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_
         if (sp_prefill_draft_model_) {
+            // All currently supported draft models are non-MRoPE and do not use
+            // model_input.combo_position_ids, so the draft prefill CUDA graph does not need to copy it.
             draft_prefill_model_output = std::move(sp_prefill_draft_model_->forward(model_input));
         } else {
             draft_prefill_model_output = std::move(draft_model_->forward(model_input));
@@ -907,6 +931,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         model_input.lm_output_indexes = std::move(lm_output_indexes);
         model_input.prefix_lengths    = spec_prefix_lengths;
         model_input.combo_tokens      = draft_token_ids_t.reshape({(int64_t)(batch_size * (propose_step_ + 1))});
+        batch_stream_processor_->expandTargetVerifyPositionIds(stream_groups, model_input);
         model_input.sequence_lengths =
             torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
         model_input.last_hidden_states = torch::Tensor();
@@ -914,7 +939,11 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         // Since other tp ranks don't have streams, its combo_tokens' first token is not correct.
         // Thus, we need to broadcast the combo_tokens to other tp ranks.
         if (parallelism_config_.tp_size > 1) {
-            execBroadcast({{model_input.combo_tokens}, 0});
+            std::vector<torch::Tensor> broadcast_tensors{model_input.combo_tokens};
+            if (model_input.combo_position_ids.defined()) {
+                broadcast_tensors.push_back(model_input.combo_position_ids);
+            }
+            execBroadcast({broadcast_tensors, 0});
         }
 
         const auto& cache_cfg             = cache_manager_->cacheConfig();

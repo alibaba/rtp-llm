@@ -151,7 +151,6 @@ struct KVCacheConfig {
     int64_t                                 memory_cache_sync_timeout_ms = 10000;
     int                                     linear_step                  = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
-    int         int8_kv_cache             = 0;
     int         fp8_kv_cache              = 0;
     std::string ssm_state_dtype           = "bf16";
     int64_t     kv_cache_mem_mb           = -1;
@@ -200,6 +199,9 @@ struct ProfilingDebugLoggingConfig {
     bool        ft_core_dump_on_exception = false;
     std::string ft_alog_conf_path         = "";
     bool        gen_timeline_sync         = false;
+    int         timeline_start_step       = 0;
+    int         timeline_num_steps        = 3;
+    std::string timeline_trace_name       = "profiler";
     std::string torch_cuda_profiler_dir   = "";
     int         log_file_backup_count     = 16;
     bool        debug_load_server         = false;
@@ -331,9 +333,26 @@ struct BatchDecodeSchedulerConfig {
     std::string to_string() const;
 };
 
+enum class PDFusionSchedulerMode {
+    DEFAULT = 0,
+    RATIO   = 1,
+    UNKNOWN = 2,
+};
+
+PDFusionSchedulerMode parsePDFusionSchedulerMode(const std::string& mode);
+
 struct FIFOSchedulerConfig {
-    int64_t     max_context_batch_size = 1;
-    int64_t     max_batch_tokens_size  = 0;
+    int64_t max_context_batch_size = 1;
+    int64_t max_batch_tokens_size  = 0;
+    // PDFUSION scheduler mode. Supported values:
+    //   ""      -> default FIFO/decode-first scheduler
+    //   "ratio" -> PDFusionRatioScheduler with decode_prefill_ratio
+    std::string pdfusion_scheduler_mode = "";
+    // PDFusionRatioScheduler cadence knob, as a decode:prefill round ratio string.
+    //   "N"   -> 1 prefill : N decode (decode-heavy); "1" = strict alternation.
+    //   "1/X" -> X prefill : 1 decode (prefill-heavy).
+    //   invalid input falls back to "1".
+    std::string decode_prefill_ratio = "1";
     std::string to_string() const;
 };
 
