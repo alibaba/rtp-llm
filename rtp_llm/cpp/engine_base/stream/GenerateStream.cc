@@ -247,6 +247,10 @@ bool GenerateStream::returnLogits() const {
     return generate_input_->generate_config->return_logits;
 }
 
+bool GenerateStream::returnPromptLogits() const {
+    return generate_input_->generate_config->return_prompt_logits;
+}
+
 bool GenerateStream::returnCumLogProbs() const {
     return generate_input_->generate_config->return_cum_log_probs;
 }

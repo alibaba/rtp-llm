@@ -69,12 +69,13 @@ struct GptModelInputs {
     torch::Tensor request_id;             // int64, [context_batch_size]
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
-    size_t        kv_block_stride_bytes;
-    size_t        kv_scale_stride_bytes;
-    size_t        seq_size_per_block;
-    size_t        kernel_seq_size_per_block = 0;  // 0 means same as seq_size_per_block
-    bool          pd_separation             = false;
-    bool          decode_entrance           = false;
+    // Physical KV-manager block strides. These are independent of any kernel-block view exposed to attention ops.
+    size_t kv_block_stride_bytes;
+    size_t kv_scale_stride_bytes;
+    size_t seq_size_per_block;
+    size_t kernel_seq_size_per_block = 0;  // 0 means same as seq_size_per_block
+    bool   pd_separation             = false;
+    bool   decode_entrance           = false;
 
     bool need_all_logits = false;
     bool need_moe_gating = false;
@@ -278,6 +279,13 @@ struct FfnConfigs {
     std::optional<MoeConfigs> moe_configs = std::nullopt;
 };
 
+struct GreedySamplingBuffers {
+    torch::Tensor seed_host;
+    torch::Tensor offset_host;
+    torch::Tensor output_ids_ptrs_host;
+    size_t        max_batch_size = 0;
+};
+
 struct GreedyParams {
     torch::Tensor logits;            // [batch_size, vocab_size_padded], mutable for in-place penalty
     torch::Tensor input_lengths;     // [batch_size]
@@ -303,6 +311,7 @@ struct GreedyParams {
     std::optional<torch::Tensor> do_sample;
 
     std::vector<at::Generator> generator;
+    GreedySamplingBuffers*     sampling_buffers = nullptr;
 };
 
 struct GreedyOutput {

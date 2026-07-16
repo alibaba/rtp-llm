@@ -1,0 +1,173 @@
+{
+  "format_version": 1,
+  "target": {
+    "arch_prefix": "gfx942",
+    "torch_hip_prefix": "7.2",
+    "aiter_version_prefix": "0.1.17.dev79+g2570b35f9",
+    "layout": "fp8_ptpc_swizzleA_col16_4r16",
+    "dtype": "float8_e4m3fn"
+  },
+  "selection_policy": "Built-in offline HIPB solution cache for common VisionBert FP8 PTPC swizzleA M-buckets. Candidates are included only when robust confirmation shows correctness on GPU0/2/3/4, every GPU median is at least 3% faster than solution_index=-1, cross-GPU median std is <=5%, and per-GPU round-median std is <=5%. Shapes without a stable >=3% gain intentionally fall back to -1.",
+  "solutions": [
+    {
+      "op": "down_proj",
+      "m": 512,
+      "k": 3072,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 272551
+    },
+    {
+      "op": "o_proj",
+      "m": 512,
+      "k": 768,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 270677
+    },
+    {
+      "op": "qkv",
+      "m": 512,
+      "k": 768,
+      "n": 2304,
+      "epilogue": "bias",
+      "solution_index": 271680
+    },
+    {
+      "op": "up_proj",
+      "m": 512,
+      "k": 768,
+      "n": 3072,
+      "epilogue": "bias_gelu",
+      "solution_index": 272343
+    },
+    {
+      "op": "down_proj",
+      "m": 1024,
+      "k": 3072,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 272557
+    },
+    {
+      "op": "o_proj",
+      "m": 1024,
+      "k": 768,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 270742
+    },
+    {
+      "op": "qkv",
+      "m": 1024,
+      "k": 768,
+      "n": 2304,
+      "epilogue": "bias",
+      "solution_index": 271842
+    },
+    {
+      "op": "up_proj",
+      "m": 1024,
+      "k": 768,
+      "n": 3072,
+      "epilogue": "bias_gelu",
+      "solution_index": 271141
+    },
+    {
+      "op": "down_proj",
+      "m": 2048,
+      "k": 3072,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 272557
+    },
+    {
+      "op": "o_proj",
+      "m": 2048,
+      "k": 768,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 272118
+    },
+    {
+      "op": "qkv",
+      "m": 2048,
+      "k": 768,
+      "n": 2304,
+      "epilogue": "bias",
+      "solution_index": 271305
+    },
+    {
+      "op": "up_proj",
+      "m": 2048,
+      "k": 768,
+      "n": 3072,
+      "epilogue": "bias_gelu",
+      "solution_index": 271300
+    },
+    {
+      "op": "down_proj",
+      "m": 4096,
+      "k": 3072,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 272502
+    },
+    {
+      "op": "o_proj",
+      "m": 4096,
+      "k": 768,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 271305
+    },
+    {
+      "op": "qkv",
+      "m": 4096,
+      "k": 768,
+      "n": 2304,
+      "epilogue": "bias",
+      "solution_index": 271311
+    },
+    {
+      "op": "up_proj",
+      "m": 4096,
+      "k": 768,
+      "n": 3072,
+      "epilogue": "bias_gelu",
+      "solution_index": 271323
+    },
+    {
+      "op": "o_proj",
+      "m": 8192,
+      "k": 768,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 271337
+    },
+    {
+      "op": "qkv",
+      "m": 8192,
+      "k": 768,
+      "n": 2304,
+      "epilogue": "bias",
+      "solution_index": 271339
+    },
+    {
+      "op": "o_proj",
+      "m": 16384,
+      "k": 768,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 271335
+    },
+    {
+      "op": "qkv",
+      "m": 16384,
+      "k": 768,
+      "n": 2304,
+      "epilogue": "bias",
+      "solution_index": 271329
+    }
+  ]
+}

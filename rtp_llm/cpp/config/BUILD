@@ -47,13 +47,18 @@ cc_library(
 
 cc_library(
     name = "model_config",
-    hdrs = ["ModelConfig.h"],
+    hdrs = [
+        "MTPModelConfigHelper.h",
+        "ModelConfig.h",
+    ],
     srcs = ["ModelConfig.cc"],
     deps = [
         ":eplb_config",
         ":special_tokens",
         ":config_modules",
+        "//rtp_llm/cpp/cache:kvcache_spec_desc",
         "//rtp_llm/cpp/model_utils:model_utils",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings/core:types",
         "//rtp_llm/models_py/bindings/core:type_convert"
     ],

@@ -105,6 +105,14 @@ struct AuxInfo {
     std::map<int, int>           multimodal_lengths = {};
 };
 
+struct PromptLogitsOutput {
+    torch::Tensor topk_logprobs;    // [slice_len, K] float32
+    torch::Tensor topk_token_ids;   // [slice_len, K] int32
+    torch::Tensor target_logprobs;  // [slice_len] float32
+    int           start_pos = 0;
+    int           end_pos   = 0;
+};
+
 class GenerateOutput {
 public:
     torch::Tensor output_ids;
@@ -112,10 +120,11 @@ public:
     AuxInfo       aux_info;
     ErrorInfo     error_info;
 
-    std::optional<torch::Tensor> hidden_states;
-    std::optional<torch::Tensor> all_hidden_states;
-    std::optional<torch::Tensor> logits;
-    std::optional<torch::Tensor> loss;
+    std::optional<torch::Tensor>      hidden_states;
+    std::optional<torch::Tensor>      all_hidden_states;
+    std::optional<torch::Tensor>      logits;
+    std::optional<torch::Tensor>      loss;
+    std::optional<PromptLogitsOutput> prompt_logits;
 };
 
 class GenerateOutputs {

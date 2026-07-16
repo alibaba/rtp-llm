@@ -34,9 +34,7 @@ def kv_cache_dtype_to_torch_dtype(
     Returns:
         torch.dtype value
     """
-    if kv_cache_dtype == KvCacheDataType.INT8:
-        return torch.int8
-    elif kv_cache_dtype == KvCacheDataType.FP8:
+    if kv_cache_dtype == KvCacheDataType.FP8:
         return torch.float8_e4m3fn
     else:  # BASE
         return data_type.to_torch_dtype()
@@ -51,6 +49,7 @@ def ssm_state_dtype_str_to_data_type(ssm_state_dtype: str) -> DataType:
     if ssm_state_dtype == "fp32":
         return DataType.TYPE_FP32
     raise ValueError(f"Unsupported ssm_state_dtype: {ssm_state_dtype}")
+
 
 class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
@@ -239,11 +238,7 @@ class ModelConfig(CppModelConfig):
             return 0
         # Get kv_cache_dtype from attn_config
         kv_cache_dtype_enum = self.attn_config.kv_cache_dtype
-        kv_cache_bytes = (
-            1
-            if kv_cache_dtype_enum in [KvCacheDataType.FP8, KvCacheDataType.INT8]
-            else 2
-        )
+        kv_cache_bytes = 1 if kv_cache_dtype_enum == KvCacheDataType.FP8 else 2
         kv_cache_size = (
             2
             * self.num_layers
@@ -649,12 +644,7 @@ class ModelConfig(CppModelConfig):
 
         # Set attn_config.kv_cache_dtype based on kv_cache_config
         if kv_cache_config is not None:
-            if kv_cache_config.int8_kv_cache:
-                self.attn_config.kv_cache_dtype = KvCacheDataType.INT8
-                logging.info(
-                    "Setting attn_config.kv_cache_dtype to INT8 based on kv_cache_config.int8_kv_cache"
-                )
-            elif kv_cache_config.fp8_kv_cache:
+            if kv_cache_config.fp8_kv_cache:
                 self.attn_config.kv_cache_dtype = KvCacheDataType.FP8
                 logging.info(
                     "Setting attn_config.kv_cache_dtype to FP8 based on kv_cache_config.fp8_kv_cache"
@@ -662,7 +652,7 @@ class ModelConfig(CppModelConfig):
             else:
                 self.attn_config.kv_cache_dtype = KvCacheDataType.BASE
                 logging.info(
-                    "Setting attn_config.kv_cache_dtype to BASE (default, no int8/fp8 kv_cache specified)"
+                    "Setting attn_config.kv_cache_dtype to BASE (default, no fp8 kv_cache specified)"
                 )
 
         if quant_config and quant_config.get_method().lower() == "fp8":
@@ -804,6 +794,31 @@ def update_tokenizer_special_tokens(special_tokens, tokenizer: Any) -> None:
 # ============================================================================
 
 
+def apply_layer_num_override(model_config: ModelConfig, num_layers: int) -> None:
+    """Apply a debug layer-count reduction while preserving per-layer metadata."""
+    old_num_layers = model_config.num_layers
+    if num_layers <= 0 or num_layers > old_num_layers:
+        raise ValueError(
+            f"layer override must be in [1, {old_num_layers}], got {num_layers}"
+        )
+
+    hybrid_config = model_config.hybrid_attention_config
+    if hybrid_config.enable_hybrid_attention:
+        hybrid_attention_types = hybrid_config.hybrid_attention_types
+        if len(hybrid_attention_types) != old_num_layers:
+            raise ValueError(
+                "hybrid_attention_types size "
+                f"{len(hybrid_attention_types)} != num_layers {old_num_layers}"
+            )
+        hybrid_config.hybrid_attention_types = hybrid_attention_types[:num_layers]
+
+    model_config.moe_layer_index = [
+        layer_id for layer_id in model_config.moe_layer_index if layer_id < num_layers
+    ]
+    model_config.kv_cache_spec_descs = []
+    model_config.num_layers = num_layers
+
+
 def build_model_config(
     model_config: ModelConfig,  # ModelConfig instance to build
     model_args: Any,  # ModelArgs from py_env_configs
@@ -888,7 +903,7 @@ def build_model_config(
     hack_layer_num = profiling_debug_logging_config.hack_layer_num
     if hack_layer_num:
         logging.info(f"hack layernum to {hack_layer_num}")
-        model_config.num_layers = hack_layer_num
+        apply_layer_num_override(model_config, hack_layer_num)
 
     if model_args.enable_fp32_lm_head is not None:
         model_config.enable_fp32_lm_head = model_args.enable_fp32_lm_head
