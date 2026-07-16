@@ -14,7 +14,7 @@ public:
                                   EvictionPolicy disk_policy   = EvictionPolicy::FIFO);
 
     std::unique_ptr<MatchValidator> createMatchValidator() override;
-    size_t computeReferenceCount(size_t matched_block_count, const std::vector<TreeNode*>& path) const override;
+    size_t computeReuseBlockCount(size_t matched_block_count, const std::vector<TreeNode*>& path) const override;
 
     // LINEAR: any node with data can enter heap.
     void tryAddToDeviceHeap(TreeNode* node) override;

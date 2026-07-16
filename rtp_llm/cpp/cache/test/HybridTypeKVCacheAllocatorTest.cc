@@ -319,7 +319,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool   = allocator->getBlockPool();
+    auto block_pool   = allocator->getDeviceBlockPool();
     auto shared_cache = allocator->sharedBlockCache();
     ASSERT_NE(block_pool, nullptr);
     ASSERT_NE(shared_cache, nullptr);
@@ -402,7 +402,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DisableDeviceCacheSkipsReuseMatchAndAlloc
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool   = allocator->getBlockPool();
+    auto block_pool   = allocator->getDeviceBlockPool();
     auto shared_cache = allocator->sharedBlockCache();
     ASSERT_NE(block_pool, nullptr);
     ASSERT_NE(shared_cache, nullptr);
@@ -460,7 +460,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
     ASSERT_NE(block_pool, nullptr);
 
     const size_t free_before = allocator->freeBlocksNum();
@@ -509,7 +509,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
     ASSERT_NE(block_pool, nullptr);
 
     const size_t free_before = allocator->freeBlocksNum();
@@ -555,7 +555,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCachePreservesLegacyNonCpAggreg
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool   = allocator->getBlockPool();
+    auto block_pool   = allocator->getDeviceBlockPool();
     auto shared_cache = allocator->sharedBlockCache();
     ASSERT_NE(block_pool, nullptr);
     ASSERT_NE(shared_cache, nullptr);
@@ -624,7 +624,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
     ASSERT_NE(block_pool, nullptr);
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102});

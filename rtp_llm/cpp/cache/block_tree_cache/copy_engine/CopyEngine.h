@@ -35,9 +35,8 @@ private:
 
     void completeRequest(const std::shared_ptr<TransferHandle::State>& state, CopyStatus status);
 
-    void                       buildGroupLayouts(const std::vector<ComponentGroupPtr>& component_groups,
-                                                 const std::vector<Component>&         components);
-    const ResolvedGroupLayout* layoutFor(int component_group_id) const;
+    void buildGroupLayouts(const std::vector<ComponentGroupPtr>& component_groups,
+                           const std::vector<Component>&         components);
 
     static bool isDeviceHostTransfer(Tier source_tier, Tier target_tier);
 

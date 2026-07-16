@@ -1670,7 +1670,7 @@ TEST_F(DSV4AllocatorTest, BlockPoolCreatedWithCorrectTensors) {
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
     ASSERT_NE(block_pool, nullptr);
 
     // allLayerCacheBase should return tensors for all 61 layers
@@ -1701,7 +1701,7 @@ TEST_F(DSV4AllocatorTest, MallocAndFreeBlocks) {
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
     ASSERT_NE(block_pool, nullptr);
 
     size_t free_before = allocator->freeBlocksNum();
@@ -1854,7 +1854,7 @@ TEST_F(DSV4AllocatorTest, FlashMallocAndFree) {
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
-    auto   block_pool  = allocator->getBlockPool();
+    auto   block_pool  = allocator->getDeviceBlockPool();
     size_t free_before = allocator->freeBlocksNum();
     ASSERT_GT(free_before, 5u);
 
@@ -1880,7 +1880,7 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
 
     // Manually set up a BatchKVCacheResource with blocks for all 7 groups
     auto batch_res = std::make_shared<BatchKVCacheResource>();
@@ -1946,7 +1946,7 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
 
     auto batch_res = std::make_shared<BatchKVCacheResource>();
     batch_res->resetBatchSize(1);
@@ -2006,7 +2006,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
 
     // Pre-populate cache for ALL 7 groups with keys {100,101,102}
     constexpr int                          group_num   = 7;
@@ -2078,7 +2078,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
 
     constexpr int                          group_num   = 7;
     CacheKeysType                          cached_keys = {100, 101, 102};
@@ -2131,7 +2131,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseDoesNotRequireHCAStateHit) {
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
 
     constexpr int                          group_num   = 7;
     CacheKeysType                          cached_keys = {1100, 1101, 1102};
@@ -2193,7 +2193,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseAcceptsSingleLatestSWATailHit) {
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
 
     constexpr int group_num   = 7;
     CacheKeysType cached_keys = {100, 101, 102};
@@ -2246,7 +2246,7 @@ TEST_F(DSV4AllocatorTest, FlashPrefixCacheReusePagedGroupsOnly) {
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
 
     constexpr int                          group_num   = 7;
     CacheKeysType                          cached_keys = {500, 501, 502};
@@ -2393,7 +2393,7 @@ TEST_F(DSV4AllocatorTest, SWAGroupParticipatesInPrefixCacheReuse) {
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
 
     constexpr int group_num = 7;
 
@@ -2453,7 +2453,7 @@ TEST_F(DSV4AllocatorTest, SWAPrefixCacheRestoresTailReuse) {
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
 
     // Populate ALL 7 groups with same keys
     constexpr int                          group_num   = 7;

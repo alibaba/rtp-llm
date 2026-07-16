@@ -186,20 +186,6 @@ TEST_F(FullComponentGroupTest, BuildTransferD2H) {
     delete node;
 }
 
-TEST_F(FullComponentGroupTest, CommitInsertData) {
-    auto*                     node   = makeNode(100);
-    std::vector<BlockIdxType> blocks = {10, 20, 30};
-
-    group_->commitInsertData(node, node->group_slots[0], blocks);
-
-    EXPECT_EQ(node->group_slots[0].device_blocks.size(), 3u);
-    EXPECT_EQ(node->group_slots[0].device_blocks[0], 10);
-    EXPECT_EQ(node->group_slots[0].device_blocks[1], 20);
-    EXPECT_EQ(node->group_slots[0].device_blocks[2], 30);
-
-    delete node;
-}
-
 TEST_F(FullComponentGroupTest, HostLeafDetection) {
     auto* a          = makeNode(100);
     auto* b          = makeNode(200);

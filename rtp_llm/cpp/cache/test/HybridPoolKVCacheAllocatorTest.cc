@@ -438,12 +438,12 @@ TEST_F(HybridPoolKVCacheAllocatorTest, SwaDefaultRegionGroupPoolUsesGpuBacking) 
 
 TEST_F(HybridPoolKVCacheAllocatorTest, GetBlockPoolReturnsNullptrInHybridPoolMode) {
     // HybridPoolKVCacheAllocator owns one DeviceBlockPool per group and does not
-    // expose a single canonical block_pool_; getBlockPool() must return nullptr.
+    // expose a single canonical block_pool_; getDeviceBlockPool() must return nullptr.
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
     ASSERT_TRUE(injectBlockTreeCache(allocator, config));
-    EXPECT_EQ(allocator->getBlockPool(), nullptr);
+    EXPECT_EQ(allocator->getDeviceBlockPool(), nullptr);
 }
 
 // ---------------------------------------------------------------------------

@@ -20,7 +20,7 @@ public:
     void tryAddToDeviceHeap(TreeNode* node) override;
 
     // SWA window lock: only lock nodes within sliding_window_size from path tail.
-    size_t computeReferenceCount(size_t matched_block_count, const std::vector<TreeNode*>& path) const override;
+    size_t computeReuseBlockCount(size_t matched_block_count, const std::vector<TreeNode*>& path) const override;
 
     size_t slidingWindowSize() const {
         return sliding_window_size_;

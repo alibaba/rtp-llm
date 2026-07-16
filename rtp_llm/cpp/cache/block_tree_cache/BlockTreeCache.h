@@ -103,18 +103,6 @@ struct BlockTreeCacheConfig {
                 return {};
         }
     }
-
-    size_t hostBlockCount() const {
-        if (memory_cache_size_mb <= 0 || block_size_bytes == 0)
-            return 0;
-        return static_cast<size_t>(memory_cache_size_mb) * 1024 * 1024 / block_size_bytes;
-    }
-
-    size_t diskPoolSizeBytes() const {
-        if (memory_cache_disk_size_mb <= 0)
-            return 0;
-        return static_cast<size_t>(memory_cache_disk_size_mb) * 1024 * 1024;
-    }
 };
 
 // BlockTreeCache: eviction workflow coordinator.
@@ -167,9 +155,6 @@ public:
     CopyStatus executeTransfer(const TransferDescriptor& descriptor);
 
     // ---- Configuration mutators (for runtime adjustment) ----
-    void setWatermark(double ratio, size_t device_capacity) {
-        config_.watermark_device = {ratio, device_capacity};
-    }
     void setTierWatermark(Tier tier, double ratio, size_t capacity) {
         switch (tier) {
             case Tier::DEVICE:

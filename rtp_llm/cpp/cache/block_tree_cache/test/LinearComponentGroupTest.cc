@@ -76,16 +76,6 @@ TEST_F(LinearComponentGroupTest, MatchValidatorHasData) {
     delete node_empty;
 }
 
-TEST_F(LinearComponentGroupTest, CommitInsertData) {
-    auto*                     node   = makeNode(100);
-    std::vector<BlockIdxType> blocks = {55};
-
-    group_->commitInsertData(node, node->group_slots[0], blocks);
-    EXPECT_EQ(node->group_slots[0].device_blocks[0], 55);
-
-    delete node;
-}
-
 TEST_F(LinearComponentGroupTest, DriveEvictionEmptyHeap) {
     auto result = group_->driveEviction(1, Tier::DEVICE);
     EXPECT_FALSE(result.has_value());

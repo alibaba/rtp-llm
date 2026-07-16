@@ -25,7 +25,6 @@ class MemoryUtil;
 struct DeviceBlockPoolConfig: public BlockPoolConfigBase {
     size_t                          total_size_bytes{0};
     std::vector<MemoryLayoutConfig> memory_layouts;
-    AllocationType                  allocation_type{AllocationType::DEVICE};
     bool                            use_cuda_malloc_backing{false};
 };
 

@@ -21,16 +21,6 @@ namespace rtp_llm {
 
 namespace {
 
-const char* allocationTypeName(AllocationType allocation_type) {
-    switch (allocation_type) {
-        case AllocationType::HOST:
-            return "HOST";
-        case AllocationType::DEVICE:
-            return "DEVICE";
-    }
-    return "UNKNOWN";
-}
-
 const char* memoryTypeName(MemoryType memory_type) {
     switch (memory_type) {
         case MemoryType::MEMORY_CPU:
@@ -106,9 +96,6 @@ const DeviceBlockPoolConfig& DeviceBlockPool::config() const {
 // Always CUDA-backed (plain CUDA tensor or cudaMalloc); host backing lives in HostBlockPool.
 void DeviceBlockPool::initializeCacheBuffer() {
     const auto& cfg = config();
-    RTP_LLM_CHECK_WITH_INFO(cfg.allocation_type == AllocationType::DEVICE,
-                            "block_tree_cache::DeviceBlockPool [%s] only supports AllocationType::DEVICE",
-                            cfg.pool_name.c_str());
     RTP_LLM_CHECK_WITH_INFO(
         cfg.total_size_bytes > 0, "device block pool [%s] total_size_bytes must be > 0", cfg.pool_name.c_str());
 
@@ -126,11 +113,10 @@ void DeviceBlockPool::initializeCacheBuffer() {
     const bool           is_cuda   = cache_aligned_buffer_.is_cuda();
     const bool           is_pinned = !is_cuda && cache_aligned_buffer_.is_pinned();
     static constexpr double kBytesPerMB = 1024.0 * 1024.0;
-    RTP_LLM_LOG_INFO("block_tree_cache::DeviceBlockPool backing selected: pool_name=%s allocation_type=%s "
+    RTP_LLM_LOG_INFO("block_tree_cache::DeviceBlockPool backing selected: pool_name=%s "
                      "actual_backing=%s is_cuda=%d is_pinned=%d ptr=%p total_size=%zu bytes total_size_mb=%.2f "
                      "memory_layouts=%zu",
                      cfg.pool_name.c_str(),
-                     allocationTypeName(cfg.allocation_type),
                      memoryTypeName(where()),
                      is_cuda,
                      is_pinned,

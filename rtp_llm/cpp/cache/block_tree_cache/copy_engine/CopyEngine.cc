@@ -94,18 +94,6 @@ void CopyEngine::buildGroupLayouts(const std::vector<ComponentGroupPtr>& compone
     }
 }
 
-const ResolvedGroupLayout* CopyEngine::layoutFor(int component_group_id) const {
-    if (component_group_id < 0) {
-        return nullptr;
-    }
-    for (const auto& layout : group_layouts_) {
-        if (layout.component_group_id == component_group_id) {
-            return &layout;
-        }
-    }
-    return nullptr;
-}
-
 // ---- TransferHandle ----
 
 struct TransferHandle::State {
@@ -207,8 +195,8 @@ void CopyEngine::completeRequest(const std::shared_ptr<TransferHandle::State>& s
 }
 
 CopyStatus CopyEngine::execute(const TransferDescriptor& desc) {
-    if (desc.component_group_id < 0) {
-        RTP_LLM_LOG_WARNING("missing component_group_id");
+    if (desc.component_group_id < 0 || static_cast<size_t>(desc.component_group_id) >= group_layouts_.size()) {
+        RTP_LLM_LOG_WARNING("invalid component_group_id=%d", desc.component_group_id);
         return CopyStatus::INVALID_ARGS;
     }
     if (desc.source_tier == Tier::NONE || desc.target_tier == Tier::NONE || desc.source_tier == desc.target_tier) {
@@ -218,11 +206,7 @@ CopyStatus CopyEngine::execute(const TransferDescriptor& desc) {
         return CopyStatus::INVALID_ARGS;
     }
 
-    const ResolvedGroupLayout* layout = layoutFor(desc.component_group_id);
-    if (!layout) {
-        RTP_LLM_LOG_WARNING("unknown component_group_id=%d", desc.component_group_id);
-        return CopyStatus::INVALID_ARGS;
-    }
+    const ResolvedGroupLayout* layout = &group_layouts_[static_cast<size_t>(desc.component_group_id)];
 
     if (isDeviceHostTransfer(desc.source_tier, desc.target_tier)) {
         if (!layout->has_device_host_layout) {

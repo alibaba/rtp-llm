@@ -42,7 +42,6 @@ makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs, size_t usable_co
     config->pool_type               = BlockPoolType::DEVICE;
     config->pool_name               = pool_name;
     config->physical_block_count    = physical_block_count;
-    config->allocation_type         = AllocationType::DEVICE;
     config->use_cuda_malloc_backing = false;
 
     size_t offset = 0;
@@ -549,36 +548,6 @@ TEST_F(CopyEngineTest, SubmitReturnsCompletedHandleWithFinalStatus) {
     host_pool_->free(host_block);
 }
 
-TEST_F(CopyEngineTest, SubmitUsesGroupIdInsteadOfVectorOrdinal) {
-    const std::vector<MemoryBlockLayerTagSlot> group_11_slots = {{0, "group_11", 64}};
-    const std::vector<MemoryBlockLayerTagSlot> group_4_slots  = {{0, "group_4", 64}};
-    auto                                       group_11_host  = makeHostPool(64, 2, true);
-    auto                                       group_4_host   = makeHostPool(64, 2, true);
-    auto                                       group_11_pool  = makeDevicePool({{64, 0}}, 2, "copy_engine_group_11");
-    auto                                       group_4_pool   = makeDevicePool({{64, 0}}, 2, "copy_engine_group_4");
-    auto                                       group_11_block = poolMalloc(*group_11_pool);
-    auto                                       group_4_block  = poolMalloc(*group_4_pool);
-    auto                                       group_11_host_block = poolMalloc(*group_11_host);
-
-    fillDeviceLayer(group_11_pool, 0, group_11_block, {0xB7});
-    fillDeviceLayer(group_4_pool, 0, group_4_block, {0x44});
-
-    std::vector<Component> components = {
-        makeComponent(0, 11, group_11_slots),
-        makeComponent(1, 4, group_4_slots),
-    };
-    auto group_4  = makeDeviceHostGroup(4, {1}, {group_4_pool}, group_4_host);
-    auto group_11 = makeDeviceHostGroup(11, {0}, {group_11_pool}, group_11_host);
-    auto engine   = std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{group_4, group_11}, components);
-
-    expectStatus(engine,
-                 makeDescriptor(Tier::DEVICE, Tier::HOST, {group_11_block}, group_11_host_block, NULL_BLOCK_IDX, 11),
-                 CopyStatus::OK);
-    const auto* host_data = static_cast<const uint8_t*>(group_11_host->blockBuffer(group_11_host_block).addr);
-    for (size_t i = 0; i < 64; ++i)
-        EXPECT_EQ(host_data[i], 0xB7);
-}
-
 TEST_F(CopyEngineTest, SubmitRejectsAllNullDeviceBlocks) {
     BlockIdxType host_block = poolMalloc(*host_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
@@ -736,30 +705,30 @@ TEST(CopyEngineIntegrationTest, DeviceHostDiskHostDeviceRoundTrip) {
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
-    auto component = makeComponent(0, 7, {{0, "kv_scale", payload_bytes}});
-    auto group     = makeDeviceHostGroup(7, {0}, {device_pool}, host_pool, disk_pool);
+    auto component = makeComponent(0, 0, {{0, "kv_scale", payload_bytes}});
+    auto group     = makeDeviceHostGroup(0, {0}, {device_pool}, host_pool, disk_pool);
     auto engine =
         std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{group}, std::vector<Component>{component});
     fillDeviceLayer(device_pool, 0, device_block, {0x6A, 0xD3});
     const auto expected = readDeviceLayer(device_pool, 0, device_block);
 
     expectStatus(engine,
-                 makeDescriptor(Tier::DEVICE, Tier::HOST, {device_block}, host_block, NULL_BLOCK_IDX, 7),
+                 makeDescriptor(Tier::DEVICE, Tier::HOST, {device_block}, host_block, NULL_BLOCK_IDX, 0),
                  CopyStatus::OK);
     const auto* host_data = static_cast<const uint8_t*>(host_pool->blockBuffer(host_block).addr);
     EXPECT_TRUE(std::equal(expected.begin(), expected.end(), host_data));
 
-    expectStatus(engine, makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block, 7), CopyStatus::OK);
+    expectStatus(engine, makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block, 0), CopyStatus::OK);
     std::memset(host_pool->blockBuffer(host_block).addr, 0, payload_bytes);
     fillDeviceLayer(device_pool, 0, device_block, {0x00, 0x00});
 
-    expectStatus(engine, makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block, disk_block, 7), CopyStatus::OK);
+    expectStatus(engine, makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block, disk_block, 0), CopyStatus::OK);
     EXPECT_TRUE(std::equal(expected.begin(), expected.end(), host_data));
 
     // Clear Device again after the disk read so the final bytes can only come from the full path.
     fillDeviceLayer(device_pool, 0, device_block, {0x00, 0x00});
     expectStatus(engine,
-                 makeDescriptor(Tier::HOST, Tier::DEVICE, {device_block}, host_block, NULL_BLOCK_IDX, 7),
+                 makeDescriptor(Tier::HOST, Tier::DEVICE, {device_block}, host_block, NULL_BLOCK_IDX, 0),
                  CopyStatus::OK);
     EXPECT_EQ(readDeviceLayer(device_pool, 0, device_block), expected);
 }

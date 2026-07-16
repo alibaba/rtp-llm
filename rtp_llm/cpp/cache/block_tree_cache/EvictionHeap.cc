@@ -29,9 +29,6 @@ bool EvictionHeap::EntryComparator::operator()(const EvictionEntry& a, const Evi
             // Lower insert_seq = inserted earlier = worse = evict first
             // So higher insert_seq = better = evict later
             return a.insert_seq > b.insert_seq;
-        case EvictionPolicy::PRIORITY:
-            // Higher priority = better = evict later
-            return a.priority > b.priority;
     }
     return false;
 }
@@ -45,7 +42,6 @@ void EvictionHeap::push(TreeNode* node, int group_id) {
     entry.insert_seq         = insert_seq_counter_++;
     entry.last_access_time   = currentTimeNs();
     entry.hit_count          = 0;
-    entry.priority           = 0;
 
     entry_map_[node] = entry;
     heap_.push(entry);
@@ -98,8 +94,7 @@ void EvictionHeap::onAccess(TreeNode* node) {
             break;
         }
         case EvictionPolicy::FIFO:
-        case EvictionPolicy::PRIORITY:
-            // No-op: insert_seq and priority don't change on access
+            // No-op: insert_seq does not change on access
             break;
     }
 }

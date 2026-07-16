@@ -194,36 +194,6 @@ TEST(EvictionHeapTest, EmptyPopReturnsNullopt) {
     EXPECT_FALSE(result.has_value());
 }
 
-TEST(EvictionHeapTest, PriorityPopOrder) {
-    EvictionHeap heap(EvictionPolicy::PRIORITY);
-
-    TreeNode* n1 = makeNode(1);
-    TreeNode* n2 = makeNode(2);
-    TreeNode* n3 = makeNode(3);
-
-    // Push with different priorities via manual entry manipulation
-    // We need to set priority before push, so let's use a workaround:
-    // push and then check that the comparator works correctly.
-    // Since push sets priority=0 for all, we need to test differently.
-    // Let's push entries and verify the comparator works.
-    heap.push(n1, 0);
-    heap.push(n2, 0);
-    heap.push(n3, 0);
-
-    // All have priority=0, so order is undefined but all should pop
-    size_t count = 0;
-    while (!heap.empty()) {
-        auto r = heap.pop();
-        ASSERT_TRUE(r.has_value());
-        count++;
-    }
-    EXPECT_EQ(count, 3u);
-
-    delete n1;
-    delete n2;
-    delete n3;
-}
-
 TEST(EvictionHeapTest, ContainsAfterPop) {
     EvictionHeap heap(EvictionPolicy::FIFO);
 

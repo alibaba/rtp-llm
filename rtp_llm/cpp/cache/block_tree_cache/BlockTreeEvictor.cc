@@ -252,7 +252,7 @@ void BlockTreeEvictor::applyMoveCompletion(ComponentGroupPtr& group, const Evict
     auto& slot         = move.node->group_slots[static_cast<size_t>(move.component_group_id)];
     auto  source_block = group->getBlocks(slot, move.source_tier);
     // Release source cache-hold (saved ids) before clearing the slot.
-    group->releaseBlocks(GroupBlockSet{move.component_group_id, move.source_tier, {source_block}});
+    group->unreferenceBlocks(GroupBlockSet{move.component_group_id, move.source_tier, {source_block}});
     group->evictFromTier(move.node, slot, move.source_tier);
 
     if (move.target_tier != Tier::NONE) {
@@ -322,12 +322,6 @@ bool BlockTreeEvictor::buildTransferDescriptor(const EvictionMove& eviction_move
         }
         descriptor =
             TransferDescriptor::hostToDisk(eviction_move.component_group_id, eviction_move.source_blocks[0], target);
-    } else if (eviction_move.source_tier == Tier::DISK && eviction_move.target_tier == Tier::HOST) {
-        if (isNullBlockIdx(eviction_move.source_blocks[0])) {
-            return false;
-        }
-        descriptor =
-            TransferDescriptor::diskToHost(eviction_move.component_group_id, eviction_move.source_blocks[0], target);
     } else {
         return false;
     }

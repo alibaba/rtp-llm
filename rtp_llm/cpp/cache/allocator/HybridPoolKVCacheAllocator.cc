@@ -98,7 +98,6 @@ bool HybridPoolKVCacheAllocator::doInit() {
         const auto  group_type  = config_.typeForGroup(static_cast<size_t>(gid));
 
         auto device_config                     = std::make_shared<DeviceBlockPoolConfig>(pool_config);
-        device_config->allocation_type         = allocation_type_;
         device_config->use_cuda_malloc_backing = use_cuda_malloc_block_pool_;
 
         std::shared_ptr<const DeviceBlockPoolConfig> const_config = device_config;

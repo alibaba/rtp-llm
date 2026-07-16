@@ -15,7 +15,7 @@ std::unique_ptr<MatchValidator> LinearComponentGroup::createMatchValidator() {
     return std::make_unique<LinearMatchValidator>();
 }
 
-size_t LinearComponentGroup::computeReferenceCount(size_t matched_block_count, const std::vector<TreeNode*>&) const {
+size_t LinearComponentGroup::computeReuseBlockCount(size_t matched_block_count, const std::vector<TreeNode*>&) const {
     return matched_block_count == 0 ? 0 : 1;
 }
 

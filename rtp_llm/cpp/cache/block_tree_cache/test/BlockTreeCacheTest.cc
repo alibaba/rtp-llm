@@ -241,7 +241,6 @@ static DeviceBlockPoolPtr makeDevicePool() {
     auto config =
         std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfig(cache_config));
     config->pool_name               = "block_tree_cache_device";
-    config->allocation_type         = AllocationType::DEVICE;
     config->use_cuda_malloc_backing = false;
 
     auto pool = std::make_shared<DeviceBlockPool>(config);
@@ -262,7 +261,6 @@ makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs, size_t usable_co
     config->pool_type               = BlockPoolType::DEVICE;
     config->pool_name               = pool_name;
     config->physical_block_count    = physical_block_count;
-    config->allocation_type         = AllocationType::DEVICE;
     config->use_cuda_malloc_backing = false;
 
     size_t offset = 0;

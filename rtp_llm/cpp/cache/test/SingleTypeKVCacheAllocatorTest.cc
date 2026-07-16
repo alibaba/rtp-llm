@@ -729,7 +729,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
     ASSERT_TRUE(initWithBlockTreeCache(config));
 
-    auto block_pool = allocator_->getBlockPool();
+    auto block_pool = allocator_->getDeviceBlockPool();
     ASSERT_NE(block_pool, nullptr);
 
     const size_t total_free_before = allocator_->freeBlocksNum();
@@ -767,7 +767,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
     ASSERT_TRUE(initWithBlockTreeCache(config));
 
-    auto block_pool = allocator_->getBlockPool();
+    auto block_pool = allocator_->getDeviceBlockPool();
     ASSERT_NE(block_pool, nullptr);
 
     const size_t total_free_before = allocator_->freeBlocksNum();
@@ -802,7 +802,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
     ASSERT_TRUE(initWithBlockTreeCache(config));
 
-    auto block_pool = allocator_->getBlockPool();
+    auto block_pool = allocator_->getDeviceBlockPool();
     ASSERT_NE(block_pool, nullptr);
 
     const size_t total_free_before = allocator_->freeBlocksNum();

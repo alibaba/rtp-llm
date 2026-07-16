@@ -33,7 +33,6 @@ std::shared_ptr<DeviceBlockPoolConfig> makeConfig() {
     auto config =
         std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfig(cache_config));
     config->pool_name               = "device";
-    config->allocation_type         = AllocationType::DEVICE;
     config->use_cuda_malloc_backing = false;
     return config;
 }
@@ -61,7 +60,6 @@ std::shared_ptr<DeviceBlockPoolConfig> makeMixedScaleConfig() {
     config->physical_block_count    = l0.block_num;
     config->total_size_bytes        = l0.total_size_bytes + l1.total_size_bytes;
     config->memory_layouts          = {l0, l1};
-    config->allocation_type         = AllocationType::DEVICE;
     config->use_cuda_malloc_backing = false;
     return config;
 }

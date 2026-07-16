@@ -82,13 +82,7 @@ public:
     virtual void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     virtual void blockBatchCopy(const torch::Tensor& copy_mapping);
 
-    DeviceBlockPoolPtr getBlockPool() const {
-        return block_pool_;
-    }
-
-    // The single allocator-owned device pool; allocators that own multiple independent pools
-    // leave block_pool_ null and expose them via groupBlockPools() instead.
-    virtual DeviceBlockPoolPtr getDeviceBlockPool() const {
+    DeviceBlockPoolPtr getDeviceBlockPool() const {
         return block_pool_;
     }
 

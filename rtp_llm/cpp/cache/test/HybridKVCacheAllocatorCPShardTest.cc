@@ -188,7 +188,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ReuseHitOnLastRankCanonicalKey) {
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool   = allocator->getBlockPool();
+    auto block_pool   = allocator->getDeviceBlockPool();
     auto shared_cache = allocator->sharedBlockCache();
     ASSERT_NE(block_pool, nullptr);
     ASSERT_NE(shared_cache, nullptr);
@@ -229,7 +229,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocSkipsReuseWhenDisabled) {
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool   = allocator->getBlockPool();
+    auto block_pool   = allocator->getDeviceBlockPool();
     auto shared_cache = allocator->sharedBlockCache();
 
     const int gid_full = 1;

@@ -31,7 +31,7 @@ void SWAComponentGroup::tryAddToDeviceHeap(TreeNode* node) {
     }
 }
 
-size_t SWAComponentGroup::computeReferenceCount(size_t matched_block_count, const std::vector<TreeNode*>& path) const {
+size_t SWAComponentGroup::computeReuseBlockCount(size_t matched_block_count, const std::vector<TreeNode*>& path) const {
     if (sliding_window_size_ == 0) {
         return matched_block_count;  // No window configured → full path
     }

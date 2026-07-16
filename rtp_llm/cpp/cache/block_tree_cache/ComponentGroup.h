@@ -20,7 +20,6 @@ namespace rtp_llm {
 
 class AsyncContext;
 
-// A matched host/disk block kept alive until deferred load_back is committed or aborted.
 struct PendingLoadBackItem {
     TreeNode*                 node{nullptr};
     int                       group_id{-1};
@@ -28,7 +27,6 @@ struct PendingLoadBackItem {
     std::vector<BlockIdxType> source_blocks;
 };
 
-// Deferred load_back handle. An uncommitted ticket releases its source references on destruction.
 class LoadBackTicket {
 public:
     using CommitCallback = std::function<std::shared_ptr<AsyncContext>(const std::vector<PendingLoadBackItem>& items)>;
@@ -47,8 +45,6 @@ public:
     LoadBackTicket(LoadBackTicket&&)                 = delete;
     LoadBackTicket& operator=(LoadBackTicket&&)      = delete;
 
-    // Allocates every target before submitting copies; any allocation failure rolls back all items.
-    // Returns null on synchronous failure and on repeated or empty commits.
     std::shared_ptr<AsyncContext> commit() {
         if (committed_ || items_.empty() || !commit_callback_) {
             committed_ = true;
@@ -73,7 +69,6 @@ private:
     bool                             committed_{false};
 };
 
-// Pure-descriptor component: describes one device pool's layout.
 struct Component {
     int                                  component_id{-1};
     int                                  component_group_id{-1};
@@ -82,27 +77,18 @@ struct Component {
     int                                  device_pool_index{-1};
 };
 
-// Unified block set: a batch of blocks owned by one component group at one tier.
-// Self-describing layout: outer index is the cache_key (tree node), inner index
-// equals the device pool index, so release/reference needs no i % num_pools.
 struct GroupBlockSet {
-    int  component_group_id{-1};
-    Tier tier{Tier::DEVICE};
-    // per_node[k]    -> the k-th cache_key (tree node)
-    // per_node[k][p] -> device_pools_[p]; inner size == 1 for HOST/DISK.
+    int                                    component_group_id{-1};
+    Tier                                   tier{Tier::DEVICE};
     std::vector<std::vector<BlockIdxType>> per_node;
 };
 
-// Match result returned by BlockTreeCache::match().
 struct BlockTreeMatchResult {
     TreeNode* matched_node{nullptr};
     size_t    matched_blocks{0};
 
-    // Device blocks selected by each component group's reuse rule, in match order.
-    // The key is the tag group id in aggregated mode and component group id otherwise.
     std::unordered_map<int, BlockIndicesType> group_block_indices;
 
-    // Structured match-protection references, one entry per group. Release basis.
     std::vector<GroupBlockSet> matched_block_sets;
 
     std::shared_ptr<AsyncContext> async_context;
@@ -111,21 +97,15 @@ struct BlockTreeMatchResult {
     size_t                        disk_load_back_blocks{0};
     size_t                        remote_load_back_blocks{0};
 
-    // Deferred load_back handle: match() plans (but does not execute) load_back and
-    // hands it back here. The allocator commits it only after its reserve check and
-    // malloc succeed; otherwise the ticket's destructor aborts (no device blocks or
-    // copies are ever spent). Null/empty when there is nothing to load back.
     std::shared_ptr<LoadBackTicket> load_back_ticket;
 };
 
-// Match validator interface.
 class MatchValidator {
 public:
     virtual ~MatchValidator()                                          = default;
     virtual bool validate(const TreeNode* node, const GroupSlot& slot) = 0;
 };
 
-// Transfer type for buildTransfer.
 enum class TransferType {
     DEVICE_TO_HOST,
     HOST_TO_DEVICE,
@@ -136,8 +116,6 @@ enum class TransferType {
     REMOTE_TO_DEVICE,
 };
 
-// A single eviction unit selected from a component group. The same descriptor is
-// used for primary eviction and cascade eviction moves.
 struct EvictionMove {
     TreeNode*                 node{nullptr};
     int                       component_group_id{-1};
@@ -147,52 +125,37 @@ struct EvictionMove {
     std::vector<BlockIdxType> target_blocks;
 };
 
-// ComponentGroup: active management entity.
 class ComponentGroup {
 public:
     virtual ~ComponentGroup() = default;
 
-    // ---- Static metadata ----
     int              component_group_id{-1};
     CacheGroupType   group_type{CacheGroupType::FULL};
     std::vector<int> component_indices;
     size_t           host_block_size{0};
 
-    // ---- Three-tier eviction heaps ----
     std::unique_ptr<EvictionHeap> device_heap;
     std::unique_ptr<EvictionHeap> host_heap;
     std::unique_ptr<EvictionHeap> disk_heap;
 
-    // ---- Match ----
     virtual std::unique_ptr<MatchValidator> createMatchValidator() = 0;
 
-    // ---- Insert (base class provides default; subclasses may override) ----
-    virtual void commitInsertData(TreeNode* node, GroupSlot& slot, const std::vector<BlockIdxType>& block_indices);
     virtual void updateOnInsertOverlap(TreeNode* node, GroupSlot& slot);
 
-    // ---- Evict (base class provides default; subclasses may override) ----
     virtual void                        evictFromTier(TreeNode* node, GroupSlot& slot, Tier tier);
     virtual std::optional<EvictionMove> driveEviction(int num_blocks, Tier tier);
 
-    // ---- Transfer (base class provides default; subclasses may override) ----
     virtual TransferDescriptor buildTransfer(TreeNode* node, TransferType type);
 
-    // ---- Heap management ----
     virtual void tryAddToDeviceHeap(TreeNode* node) = 0;
 
-    // Shared across all subclasses (implemented in ComponentGroup.cc).
-    // Virtual: FullComponentGroup overrides to add Leaf checks.
     virtual void tryAddToHostHeap(TreeNode* node);
     virtual void tryAddToDiskHeap(TreeNode* node);
 
-    // ---- Leaf checks (used by FullComponentGroup and base tryAddTo*Heap) ----
     bool isLeafAtTier(const TreeNode* node, int group_id, Tier tier) const;
 
-    // ---- Reference count for path lock/load_back (per-group strategy) ----
-    // Returns number of nodes from path tail to process.
-    virtual size_t computeReferenceCount(size_t matched_block_count, const std::vector<TreeNode*>& path) const = 0;
+    virtual size_t computeReuseBlockCount(size_t matched_block_count, const std::vector<TreeNode*>& path) const = 0;
 
-    // ---- Heap access helpers ----
     EvictionHeap* heapForTier(Tier tier) {
         switch (tier) {
             case Tier::DEVICE:
@@ -206,7 +169,6 @@ public:
         }
     }
 
-    // ---- Per-group pool injection and access ----
     void setDevicePools(std::vector<DeviceBlockPoolPtr> pools) {
         device_pools_ = std::move(pools);
     }
@@ -227,9 +189,6 @@ public:
         return disk_pool_;
     }
 
-    // ---- Per-group DeviceKVCacheGroup (single-pool sequence-allocation entity) ----
-    // Each DeviceKVCacheGroup wraps exactly one DeviceBlockPool (like the legacy
-    // KVCacheGroup). Allocators reach these via BlockTreeCache::deviceKVGroup().
     void setDeviceKVGroups(std::vector<DeviceKVCacheGroupPtr> groups) {
         device_kv_groups_ = std::move(groups);
     }
@@ -240,12 +199,10 @@ public:
         return pool_index < device_kv_groups_.size() ? device_kv_groups_[pool_index] : nullptr;
     }
 
-    // Device pool usage queries for watermark checking
     size_t devicePoolCount() const {
         return device_pools_.size();
     }
 
-    // Returns true if any device pool's usage exceeds capacity * ratio
     bool anyDevicePoolExceedsRatio(double ratio) const {
         for (const auto& pool : device_pools_) {
             if (!pool)
@@ -261,7 +218,6 @@ public:
         return false;
     }
 
-    // Returns the maximum excess across all device pools
     size_t devicePoolMaxExcess(double ratio) const {
         size_t max_excess = 0;
         for (const auto& pool : device_pools_) {
@@ -278,7 +234,6 @@ public:
         return max_excess;
     }
 
-    // Host/Disk pool usage queries for watermark checking
     size_t hostPoolUsed() const {
         return host_pool_ ? (host_pool_->totalBlocksNum() - host_pool_->freeBlocksNum()) : 0;
     }
@@ -292,9 +247,6 @@ public:
         return disk_pool_ ? disk_pool_->totalBlocksNum() : 0;
     }
 
-    // ---- Device block reference counting via pools ----
-    // A cache-category holder is added with incRef() and released with decRef(), which
-    // returns capacity only when the refcount reaches 0.
     void referenceDeviceBlocks(const std::vector<BlockIdxType>& device_blocks) const {
         for (size_t i = 0; i < device_blocks.size() && i < device_pools_.size(); ++i) {
             if (device_pools_[i] && !isNullBlockIdx(device_blocks[i])) {
@@ -310,28 +262,18 @@ public:
         }
     }
 
-    // ---- Unified structured block lifecycle (device multi-pool & match) ----
-    // count = number of cache_keys. DEVICE allocates count blocks per pool,
-    // organized into per_node[k][p]. Returns empty set on failure (rolled back).
     GroupBlockSet allocateBlocks(Tier tier, size_t count);
-    // Release cache-holding references; inner index is the pool index.
-    void releaseBlocks(const GroupBlockSet& set) const;
-    // Temporary external references, mainly for match result protection.
-    void referenceBlocks(const GroupBlockSet& set) const;
-    void unreferenceBlocks(const GroupBlockSet& set) const;
+    void          referenceBlocks(const GroupBlockSet& set) const;
+    void          unreferenceBlocks(const GroupBlockSet& set) const;
 
-    // Scalar helpers for single-pool tiers (HOST/DISK); DEVICE is multi-pool, use allocateBlocks.
     BlockIdxType allocateSingleBlock(Tier tier);
     void         releaseSingleBlock(Tier tier, BlockIdxType block) const;
 
-    // ---- Slot helpers ----
     std::vector<BlockIdxType> getBlocks(const GroupSlot& slot, Tier tier) const;
     void                      setBlocks(GroupSlot& slot, Tier tier, const std::vector<BlockIdxType>& blocks);
 
-    // ---- Evictability: block held only by the single cache reference ----
     bool isSlotEvictable(const GroupSlot& slot, Tier tier) const;
 
-    // ---- Generic heap helpers (dispatch by tier) ----
     void tryAddToHeap(TreeNode* node, Tier tier);
     void invalidateHeap(TreeNode* node, Tier tier);
     void clearHeapFlag(GroupSlot& slot, Tier tier);
@@ -341,7 +283,6 @@ protected:
     std::shared_ptr<HostBlockPool>  host_pool_;
     std::shared_ptr<DiskBlockPool>  disk_pool_;
 
-    // One DeviceKVCacheGroup per device pool (single-pool). Populated by the factory.
     std::vector<DeviceKVCacheGroupPtr> device_kv_groups_;
 };
 

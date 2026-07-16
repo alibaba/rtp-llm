@@ -62,14 +62,13 @@ DeviceBlockPoolConfig makeDeviceBlockPoolConfig() {
     config.physical_block_count    = kBlockNum;
     config.total_size_bytes        = layout.total_size_bytes;
     config.memory_layouts          = {layout};
-    config.allocation_type         = AllocationType::DEVICE;
     config.use_cuda_malloc_backing = false;
     return config;
 }
 
-// DeviceSWAKVCacheGroup only accepts a DeviceBlockPoolPtr, and DeviceBlockPool's init() rejects any
-// allocation_type other than DEVICE. This test exercises only the SWA tail-block placement
-// pattern (which slots are NULL vs REAL) and the free path, both memory-medium-agnostic.
+// DeviceSWAKVCacheGroup only accepts a DeviceBlockPoolPtr. This test exercises only the SWA
+// tail-block placement pattern (which slots are NULL vs REAL) and the free path, both
+// memory-medium-agnostic.
 DeviceBlockPoolPtr createDeviceBlockPool() {
     auto device_config = std::make_shared<DeviceBlockPoolConfig>(makeDeviceBlockPoolConfig());
 

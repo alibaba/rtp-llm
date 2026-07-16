@@ -154,7 +154,7 @@ TEST_F(SWAComponentGroupTest, ComputeReferenceCountCountsHostAndDiskBlocks) {
     d->group_slots[0].disk_slot = 41;
 
     std::vector<TreeNode*> path = {a, b, c, d};
-    EXPECT_EQ(group_->computeReferenceCount(path.size(), path), 2u);
+    EXPECT_EQ(group_->computeReuseBlockCount(path.size(), path), 2u);
 
     delete a;
     delete b;
