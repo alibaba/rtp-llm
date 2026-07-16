@@ -38,6 +38,20 @@ static void initFullCacheConfig(CacheConfig& cache_config, int layer_num) {
 
 class NormalBatchStreamProcessorTest: public DeviceTestBase {};
 
+TEST_F(NormalBatchStreamProcessorTest, testWarmUpWithoutCacheManager) {
+    ModelConfig model_config;
+    model_config.num_layers = 1;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, true);
+
+    EXPECT_EQ(processor.model_input_gatherer_config_.kv_cache_group_nums, 0);
+    EXPECT_TRUE(processor.model_input_gatherer_config_.kv_cache_group_types.empty());
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable) {
     ResourceContext resource_context;
     ModelConfig     model_config;
