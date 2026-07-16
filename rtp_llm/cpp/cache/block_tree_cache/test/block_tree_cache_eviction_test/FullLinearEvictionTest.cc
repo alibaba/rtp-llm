@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtil.h"
 
 namespace rtp_llm {
 namespace {
@@ -9,13 +10,16 @@ namespace {
 class FullLinearEvictionTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        auto tree                             = std::make_unique<BlockTree>(2);
-        auto full                             = std::make_shared<FullComponentGroup>();
+        std::unique_ptr<BlockTree> tree       = std::make_unique<BlockTree>(2);
+        auto                       full       = std::make_shared<FullComponentGroup>();
         full->component_group_id              = 0;
         auto linear                           = std::make_shared<LinearComponentGroup>();
         linear->component_group_id            = 1;
         std::vector<ComponentGroupPtr> groups = {full, linear};
-        cache_ = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+        cache_                                = BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree),
+                                                            std::move(groups),
+                                                            std::vector<Component>{},
+                                                            BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_block, BlockIdxType linear_block) {
@@ -66,11 +70,15 @@ TEST_F(FullLinearEvictionTest, FullReclaimCascadesToLinear) {
 //   After reclaim [100]: empty tree.
 // ---------------------------------------------------------------------------
 TEST_F(FullLinearEvictionTest, LinearOnlySequentialDrain) {
-    auto tree                             = std::make_unique<BlockTree>(1);
-    auto linear                           = std::make_shared<LinearComponentGroup>();
-    linear->component_group_id            = 0;
-    std::vector<ComponentGroupPtr> groups = {linear};
-    auto lin_cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+    std::unique_ptr<BlockTree> tree        = std::make_unique<BlockTree>(1);
+    auto                       linear      = std::make_shared<LinearComponentGroup>();
+    linear->component_group_id             = 0;
+    std::vector<ComponentGroupPtr>  groups = {linear};
+    std::unique_ptr<BlockTreeCache> lin_cache =
+        BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree),
+                                                   std::move(groups),
+                                                   std::vector<Component>{},
+                                                   BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
 
     std::vector<std::vector<GroupSlot>> slots(3, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {30};

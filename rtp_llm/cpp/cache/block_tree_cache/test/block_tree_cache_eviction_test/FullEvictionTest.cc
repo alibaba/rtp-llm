@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtil.h"
 
 namespace rtp_llm {
 namespace {
@@ -9,11 +10,14 @@ namespace {
 class FullEvictionTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        auto tree                             = std::make_unique<BlockTree>(1);
-        auto full                             = std::make_shared<FullComponentGroup>();
+        std::unique_ptr<BlockTree> tree       = std::make_unique<BlockTree>(1);
+        auto                       full       = std::make_shared<FullComponentGroup>();
         full->component_group_id              = 0;
         std::vector<ComponentGroupPtr> groups = {full};
-        cache_ = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+        cache_                                = BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree),
+                                                            std::move(groups),
+                                                            std::vector<Component>{},
+                                                            BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
     }
 
     // Insert a path with given device block for group 0.

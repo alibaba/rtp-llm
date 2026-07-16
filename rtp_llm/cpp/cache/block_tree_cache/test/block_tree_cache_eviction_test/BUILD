@@ -20,6 +20,7 @@ cuda13_torch_link_deps = select({
 
 test_deps = [
     "//rtp_llm/cpp/cache/block_tree_cache",
+    "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_util",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
 ] + cuda13_torch_link_deps

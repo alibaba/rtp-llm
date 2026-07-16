@@ -25,6 +25,13 @@ test_deps = [
     "@com_google_googletest//:gtest_main",
 ] + cuda13_torch_link_deps + torch_deps() + no_block_copy_link_deps()
 
+cc_library(
+    name = "block_tree_cache_test_util",
+    hdrs = ["BlockTreeCacheTestUtil.h"],
+    visibility = ["//rtp_llm/cpp/cache/block_tree_cache/test:__subpackages__"],
+    deps = ["//rtp_llm/cpp/cache/block_tree_cache"],
+)
+
 cc_test(
     name = "block_tree_test",
     srcs = ["BlockTreeTest.cc"],
@@ -70,6 +77,7 @@ cc_test(
     srcs = ["BlockTreeCacheTest.cc"],
     copts = test_copts,
     deps = test_deps + [
+        ":block_tree_cache_test_util",
         "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
         "//rtp_llm/cpp/cache:device_block_pool_config_helper",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",

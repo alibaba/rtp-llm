@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/CopyEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/TransferTypes.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/device_group/DeviceKVCacheGroup.h"
 
 class MemoryOperationRequestPB;
 
@@ -124,13 +125,14 @@ public:
     BlockTreeCache(std::unique_ptr<BlockTree>         tree,
                    std::vector<ComponentGroupPtr>     component_groups,
                    std::vector<Component>             components,
-                   BlockTreeCacheConfig               config                = {},
-                   std::shared_ptr<StorageBackend>    storage_backend       = nullptr,
-                   std::shared_ptr<BroadcastManager>  broadcast_manager     = nullptr,
-                   std::vector<DeviceKVCacheGroupPtr> per_tag_device_groups = {},
-                   std::vector<PerTagMapping>         per_tag_mapping       = {});
+                   BlockTreeCacheConfig               config,
+                   std::shared_ptr<StorageBackend>    storage_backend,
+                   std::shared_ptr<BroadcastManager>  broadcast_manager,
+                   std::vector<DeviceKVCacheGroupPtr> per_tag_device_groups,
+                   std::vector<PerTagMapping>         per_tag_mapping);
 
     ~BlockTreeCache();
+    bool init();
 
     BlockTreeMatchResult match(const CacheKeysType& cache_keys);
     void insert(TreeNode* parent, const CacheKeysType& cache_keys, const std::vector<std::vector<GroupSlot>>& slots);
@@ -181,22 +183,12 @@ public:
     const std::vector<ComponentGroupPtr>& componentGroups() const {
         return component_groups_;
     }
-    // Single-pool sequence-allocation entity, allocator-facing. In aggregated mode the
-    // first argument is the per-tag gid and resolves through per_tag_device_groups_ (which
-    // also covers NON_REUSABLE tags); in legacy mode it is the component_group_id and
-    // indexes component_groups_ directly. Returns nullptr on out-of-range id or missing pool.
-    DeviceKVCacheGroupPtr deviceKVGroup(int gid, size_t pool_index = 0) const {
-        if (aggregated_) {
-            if (gid < 0 || static_cast<size_t>(gid) >= per_tag_device_groups_.size()) {
-                return nullptr;
-            }
-            return per_tag_device_groups_[static_cast<size_t>(gid)];
-        }
-        if (gid < 0 || static_cast<size_t>(gid) >= component_groups_.size()) {
+    // Allocator-facing per-tag DeviceKVCacheGroup, including NON_REUSABLE tags.
+    DeviceKVCacheGroupPtr deviceKVGroup(int gid) const {
+        if (gid < 0 || static_cast<size_t>(gid) >= per_tag_device_groups_.size()) {
             return nullptr;
         }
-        const auto& group = component_groups_[static_cast<size_t>(gid)];
-        return group ? group->deviceKVGroup(pool_index) : nullptr;
+        return per_tag_device_groups_[static_cast<size_t>(gid)];
     }
     const std::vector<Component>& components() const {
         return components_;
@@ -227,15 +219,15 @@ public:
     }
 
 private:
-    void             taskStarted();
-    void             taskFinished();
-    void             checkWatermark();
-    bool             submitEvictionLocked(EvictionMove& eviction_move);
-    void             performEvictionCopy(const BlockTreeEvictor::EvictionPlan& plan);
-    bool             buildEvictionTransferRequest(const BlockTreeEvictor::EvictionPlan& plan,
-                                                  ::MemoryOperationRequestPB&           request) const;
-    int              evictionTransferTimeoutMs(const BlockTreeEvictor::EvictionPlan& plan) const;
-    bool             broadcastTransfer(const ::MemoryOperationRequestPB& request, int timeout_ms) const;
+    void taskStarted();
+    void taskFinished();
+    void checkWatermark();
+    bool submitEvictionLocked(EvictionMove& eviction_move);
+    void performEvictionCopy(const BlockTreeEvictor::EvictionPlan& plan);
+    bool buildEvictionTransferRequest(const BlockTreeEvictor::EvictionPlan& plan,
+                                      ::MemoryOperationRequestPB&           request) const;
+    int  evictionTransferTimeoutMs(const BlockTreeEvictor::EvictionPlan& plan) const;
+    bool broadcastTransfer(const ::MemoryOperationRequestPB& request, int timeout_ms) const;
 
     // Per-group pool access helpers
     std::shared_ptr<HostBlockPool> hostPoolForGroup(int component_group_id) const;
@@ -249,18 +241,18 @@ private:
         std::vector<BlockIdxType> target_device_blocks;
     };
     void prepareMatchedBlocks(const std::vector<TreeNode*>& matched_path, BlockTreeMatchResult& result);
+    void prepareMatchedLoadBackItem(TreeNode*                path_node,
+                                    const ComponentGroupPtr& component_group,
+                                    const GroupSlot&         group_slot,
+                                    BlockTreeMatchResult&    result);
 
     std::shared_ptr<AsyncContext> commitLoadBack(const std::vector<PendingLoadBackItem>& items);
     void                          abortLoadBack(const std::vector<PendingLoadBackItem>& items);
     bool executeLoadBackTransferBatch(const std::vector<TransferDescriptor>& descriptors, int timeout_ms);
     void performLoadBack(std::vector<LoadBackItem> items, std::shared_ptr<AsyncContext> ctx);
 
-    // Resolve an id (per-tag gid in aggregated mode, component_group_id otherwise) to the
-    // component_group_id used to index component_groups_ / TreeNode::group_slots.
+    // Resolve an allocator-facing per-tag gid to its component_group_id.
     int resolveComponentGroupId(int gid) const {
-        if (!aggregated_) {
-            return gid;
-        }
         if (gid < 0 || static_cast<size_t>(gid) >= per_tag_mapping_.size()) {
             return -1;
         }
@@ -271,12 +263,10 @@ private:
     std::unique_ptr<BlockTree>     tree_;
     std::vector<ComponentGroupPtr> component_groups_;
     std::vector<Component>         components_;
-    // Aggregated mode: per-tag gid -> DeviceKVCacheGroup (covers NON_REUSABLE tags too).
+    // Per-tag gid -> DeviceKVCacheGroup (covers NON_REUSABLE tags too).
     std::vector<DeviceKVCacheGroupPtr> per_tag_device_groups_;
-    // Aggregated mode: per-tag gid -> (component_group_id, local_pool_index).
-    std::vector<PerTagMapping> per_tag_mapping_;
-    // True when a factory-provided per-tag mapping is active (per-group_type aggregation).
-    bool                                       aggregated_{false};
+    // Per-tag gid -> (component_group_id, local_pool_index).
+    std::vector<PerTagMapping>                 per_tag_mapping_;
     CopyEnginePtr                              copy_engine_;
     std::shared_ptr<StorageBackend>            storage_backend_;
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;

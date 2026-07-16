@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 
 #include <algorithm>
-#include <stdexcept>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTransferConverter.h"
@@ -62,27 +61,71 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>         tree,
     components_(std::move(components)),
     per_tag_device_groups_(std::move(per_tag_device_groups)),
     per_tag_mapping_(std::move(per_tag_mapping)),
-    aggregated_(!per_tag_mapping_.empty()),
-    copy_engine_(std::make_shared<CopyEngine>(component_groups_, components_)),
     storage_backend_(std::move(storage_backend)),
     broadcast_manager_(std::move(broadcast_manager)),
     evictor_(
         component_groups_,
         [this](const TransferDescriptor& descriptor) { return executeTransfer(descriptor); },
-        config_.enable_reverse_eviction) {
-    // Validate tier dependencies: Disk requires Host (design doc section 2.7)
-    if (config_.enable_disk_cache && !config_.enable_memory_cache) {
-        throw std::invalid_argument("BlockTreeCache: enable_disk_cache requires enable_memory_cache = true");
+        config_.enable_reverse_eviction) {}
+
+bool BlockTreeCache::init() {
+    if (per_tag_mapping_.empty()) {
+        RTP_LLM_LOG_ERROR("BlockTreeCache::init: per_tag_mapping must not be empty");
+        return false;
     }
+    if (per_tag_mapping_.size() != per_tag_device_groups_.size()) {
+        RTP_LLM_LOG_ERROR("BlockTreeCache::init: per-tag mapping and device group counts must match, mapping=%zu, "
+                          "device_groups=%zu",
+                          per_tag_mapping_.size(),
+                          per_tag_device_groups_.size());
+        return false;
+    }
+    for (size_t component_group_index = 0; component_group_index < component_groups_.size(); ++component_group_index) {
+        const ComponentGroupPtr& component_group = component_groups_[component_group_index];
+        if (component_group == nullptr
+            || component_group->component_group_id != static_cast<int>(component_group_index)) {
+            RTP_LLM_LOG_ERROR("BlockTreeCache::init: component group must be non-null and indexed by id, index=%zu",
+                              component_group_index);
+            return false;
+        }
+    }
+    for (size_t tag_group_index = 0; tag_group_index < per_tag_mapping_.size(); ++tag_group_index) {
+        const PerTagMapping& mapping              = per_tag_mapping_[tag_group_index];
+        const bool           non_reusable_mapping = mapping.component_group_id == -1 && mapping.local_pool_index == -1;
+        if (non_reusable_mapping) {
+            continue;
+        }
+        if (mapping.component_group_id < 0
+            || static_cast<size_t>(mapping.component_group_id) >= component_groups_.size()
+            || mapping.local_pool_index < 0
+            || static_cast<size_t>(mapping.local_pool_index)
+                   >= component_groups_[static_cast<size_t>(mapping.component_group_id)]->devicePoolCount()) {
+            RTP_LLM_LOG_ERROR("BlockTreeCache::init: invalid per-tag mapping, tag_group_index=%zu, "
+                              "component_group_id=%d, local_pool_index=%d",
+                              tag_group_index,
+                              mapping.component_group_id,
+                              mapping.local_pool_index);
+            return false;
+        }
+    }
+
+    if (config_.enable_disk_cache && !config_.enable_memory_cache) {
+        RTP_LLM_LOG_ERROR("BlockTreeCache::init: enable_disk_cache requires enable_memory_cache = true");
+        return false;
+    }
+
+    copy_engine_ = std::make_shared<CopyEngine>(component_groups_, components_);
     evictor_.init(components_);
 
     thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(
         static_cast<size_t>(config_.eviction_thread_pool_size), 1000, nullptr, "BlockTreeEvictionPool");
     if (!thread_pool_->start()) {
-        RTP_LLM_LOG_ERROR("BlockTreeCache: failed to start eviction thread pool, size=%d",
+        RTP_LLM_LOG_ERROR("BlockTreeCache::init: failed to start eviction thread pool, size=%d",
                           config_.eviction_thread_pool_size);
+        thread_pool_.reset();
+        return false;
     }
-    RTP_LLM_LOG_INFO("BlockTreeCache: constructed with %zu component groups, %zu components, "
+    RTP_LLM_LOG_INFO("BlockTreeCache: initialized with %zu component groups, %zu components, "
                      "pool_threads=%d, storage_backend=%s, "
                      "device=%s, host=%s, disk=%s, remote=%s",
                      component_groups_.size(),
@@ -93,37 +136,21 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>         tree,
                      config_.enable_memory_cache ? "on" : "off",
                      config_.enable_disk_cache ? "on" : "off",
                      config_.enable_remote_cache ? "on" : "off");
-    for (const auto& g : component_groups_) {
+    for (const ComponentGroupPtr& component_group : component_groups_) {
         RTP_LLM_LOG_INFO("BlockTreeCache:   group[%d] type=%s host_pool=%s disk_pool=%s",
-                         g->component_group_id,
-                         cacheGroupTypeName(g->group_type),
-                         g->hostPool() ? "enabled" : "null",
-                         g->diskPool() ? "enabled" : "null");
+                         component_group->component_group_id,
+                         cacheGroupTypeName(component_group->group_type),
+                         component_group->hostPool() ? "enabled" : "null",
+                         component_group->diskPool() ? "enabled" : "null");
     }
-    // Wire this cache into each owned DeviceKVCacheGroup so ensureFreeBlocks() can call
-    // back into evictForGroup() for cross-group device eviction via std::function callback.
-    // In aggregated mode the per-tag registry (which also covers NON_REUSABLE tags) is the
-    // full set of device groups; in legacy mode they live under each ComponentGroup.
-    auto wireEviction = [this](const DeviceKVCacheGroupPtr& dkv) {
-        if (dkv) {
-            dkv->setEvictionCallback(
+    // Wire eviction through the complete per-tag registry, including NON_REUSABLE tags.
+    for (DeviceKVCacheGroupPtr& device_group : per_tag_device_groups_) {
+        if (device_group != nullptr) {
+            device_group->setEvictionCallback(
                 [this](int group_id, size_t num_blocks) { return evictForGroup(group_id, num_blocks); });
         }
-    };
-    if (aggregated_) {
-        for (const auto& dkv : per_tag_device_groups_) {
-            wireEviction(dkv);
-        }
-    } else {
-        for (const auto& g : component_groups_) {
-            if (!g) {
-                continue;
-            }
-            for (const auto& dkv : g->deviceKVGroups()) {
-                wireEviction(dkv);
-            }
-        }
     }
+    return true;
 }
 
 BlockTreeCache::~BlockTreeCache() {
@@ -278,55 +305,50 @@ void BlockTreeCache::insert(TreeNode*                                  parent,
         return;
     }
 
-    // Aggregated mode: the caller supplies slots indexed by per-tag gid (one device block
-    // per tag). Translate them into per-ComponentGroup slots whose device_blocks are indexed
-    // by the group's local device pool index before handing them to the tree.
-    std::vector<std::vector<GroupSlot>>        translated;
-    const std::vector<std::vector<GroupSlot>>* effective_slots = &slots;
-    if (aggregated_) {
-        const size_t num_cg = component_groups_.size();
-        translated.assign(cache_keys.size(), std::vector<GroupSlot>(num_cg));
-        for (size_t i = 0; i < cache_keys.size(); ++i) {
-            for (size_t cg = 0; cg < num_cg; ++cg) {
-                const size_t pools = component_groups_[cg] ? component_groups_[cg]->devicePools().size() : 0;
-                translated[i][cg].device_blocks.assign(pools, NULL_BLOCK_IDX);
-            }
-            if (i >= slots.size()) {
+    // Input slots are indexed by per-tag gid; tree slots are indexed by component group.
+    const size_t                        component_group_count = component_groups_.size();
+    std::vector<std::vector<GroupSlot>> translated_slots(cache_keys.size(),
+                                                         std::vector<GroupSlot>(component_group_count));
+    for (size_t i = 0; i < cache_keys.size(); ++i) {
+        for (size_t component_group_index = 0; component_group_index < component_group_count; ++component_group_index) {
+            const size_t device_pool_count = component_groups_[component_group_index]->devicePoolCount();
+            translated_slots[i][component_group_index].device_blocks.assign(device_pool_count, NULL_BLOCK_IDX);
+        }
+        if (i >= slots.size()) {
+            continue;
+        }
+        const std::vector<GroupSlot>& per_tag_slots = slots[i];
+        for (size_t tag_group_index = 0;
+             tag_group_index < per_tag_slots.size() && tag_group_index < per_tag_mapping_.size();
+             ++tag_group_index) {
+            const PerTagMapping& mapping = per_tag_mapping_[tag_group_index];
+            if (mapping.component_group_id < 0) {
                 continue;
             }
-            const auto& per_tag = slots[i];
-            for (size_t tag_gid = 0; tag_gid < per_tag.size() && tag_gid < per_tag_mapping_.size(); ++tag_gid) {
-                const auto m = per_tag_mapping_[tag_gid];
-                if (m.component_group_id < 0) {
-                    continue;
-                }
-                const auto& src = per_tag[tag_gid].device_blocks;
-                if (src.empty() || isNullBlockIdx(src.front())) {
-                    continue;
-                }
-                auto& dst = translated[i][static_cast<size_t>(m.component_group_id)].device_blocks;
-                if (static_cast<size_t>(m.local_pool_index) < dst.size()) {
-                    dst[static_cast<size_t>(m.local_pool_index)] = src.front();
-                }
+            const std::vector<BlockIdxType>& source_blocks = per_tag_slots[tag_group_index].device_blocks;
+            if (source_blocks.empty() || isNullBlockIdx(source_blocks.front())) {
+                continue;
             }
+            std::vector<BlockIdxType>& target_blocks =
+                translated_slots[i][static_cast<size_t>(mapping.component_group_id)].device_blocks;
+            target_blocks[static_cast<size_t>(mapping.local_pool_index)] = source_blocks.front();
         }
-        effective_slots = &translated;
     }
 
-    auto      result = tree_->insertNode(parent, cache_keys, *effective_slots);
-    TreeNode* leaf   = result.leaf;
+    BlockTreeInsertResult insert_result = tree_->insertNode(parent, cache_keys, translated_slots);
+    TreeNode*             leaf          = insert_result.leaf;
 
     // incRef cache-hold on new nodes' device blocks (balanced by unreferenceBlocks on
     // eviction). Reused nodes keep theirs; their demoted data comes from load_back.
-    for (const auto& inserted : result.inserted_nodes) {
+    for (const BlockTreeInsertedNode& inserted : insert_result.inserted_nodes) {
         TreeNode* node = inserted.node;
-        for (auto& group : component_groups_) {
-            auto gid = static_cast<size_t>(group->component_group_id);
+        for (ComponentGroupPtr& group : component_groups_) {
+            const size_t gid = static_cast<size_t>(group->component_group_id);
             if (gid >= node->group_slots.size())
                 continue;
-            auto& slot = node->group_slots[gid];
+            GroupSlot& slot = node->group_slots[gid];
             if (slot.has_value(Tier::DEVICE)) {
-                auto blocks = group->getBlocks(slot, Tier::DEVICE);
+                const std::vector<BlockIdxType> blocks = group->getBlocks(slot, Tier::DEVICE);
                 group->referenceBlocks(GroupBlockSet{group->component_group_id, Tier::DEVICE, {blocks}});
             }
         }
@@ -334,8 +356,8 @@ void BlockTreeCache::insert(TreeNode*                                  parent,
 
     // Only the leaf is offered to the device heap (group Leaf/Any policy decides).
     // Non-leaf nodes enter later via parent promotion on eviction.
-    for (auto& group : component_groups_) {
-        auto gid = static_cast<size_t>(group->component_group_id);
+    for (ComponentGroupPtr& group : component_groups_) {
+        const size_t gid = static_cast<size_t>(group->component_group_id);
         if (gid < leaf->group_slots.size()) {
             group->tryAddToDeviceHeap(leaf);
         }
@@ -343,8 +365,8 @@ void BlockTreeCache::insert(TreeNode*                                  parent,
 
     // Update overlap for existing nodes along the path (walk up from leaf)
     for (TreeNode* node = leaf->parent; node != nullptr && node != tree_->root(); node = node->parent) {
-        for (auto& group : component_groups_) {
-            auto gid = static_cast<size_t>(group->component_group_id);
+        for (ComponentGroupPtr& group : component_groups_) {
+            const size_t gid = static_cast<size_t>(group->component_group_id);
             if (gid < node->group_slots.size()) {
                 group->updateOnInsertOverlap(node, node->group_slots[gid]);
             }
@@ -523,31 +545,18 @@ void BlockTreeCache::prepareMatchedBlocks(const std::vector<TreeNode*>& matched_
             if (group_slot.has_value(Tier::DEVICE)) {
                 const std::vector<BlockIdxType> device_blocks = component_group->getBlocks(group_slot, Tier::DEVICE);
                 bool                            collected_device_block = false;
-                if (aggregated_) {
-                    for (size_t tag_group_index = 0; tag_group_index < per_tag_mapping_.size(); ++tag_group_index) {
-                        const PerTagMapping& tag_mapping = per_tag_mapping_[tag_group_index];
-                        if (tag_mapping.component_group_id != component_group->component_group_id
-                            || tag_mapping.local_pool_index < 0) {
-                            continue;
-                        }
-                        const size_t local_pool_index = static_cast<size_t>(tag_mapping.local_pool_index);
-                        if (local_pool_index >= device_blocks.size()
-                            || device_blocks[local_pool_index] == NULL_BLOCK_IDX) {
-                            continue;
-                        }
-                        result.group_block_indices[static_cast<int>(tag_group_index)].push_back(
-                            device_blocks[local_pool_index]);
-                        collected_device_block = true;
+                for (size_t tag_group_index = 0; tag_group_index < per_tag_mapping_.size(); ++tag_group_index) {
+                    const PerTagMapping& tag_mapping = per_tag_mapping_[tag_group_index];
+                    if (tag_mapping.component_group_id != component_group->component_group_id) {
+                        continue;
                     }
-                } else {
-                    BlockIndicesType& collected_block_indices =
-                        result.group_block_indices[component_group->component_group_id];
-                    for (BlockIdxType device_block : device_blocks) {
-                        if (device_block != NULL_BLOCK_IDX) {
-                            collected_block_indices.push_back(device_block);
-                            collected_device_block = true;
-                        }
+                    const size_t local_pool_index = static_cast<size_t>(tag_mapping.local_pool_index);
+                    if (local_pool_index >= device_blocks.size() || device_blocks[local_pool_index] == NULL_BLOCK_IDX) {
+                        continue;
                     }
+                    result.group_block_indices[static_cast<int>(tag_group_index)].push_back(
+                        device_blocks[local_pool_index]);
+                    collected_device_block = true;
                 }
 
                 matched_device_blocks.per_node.push_back(device_blocks);
@@ -557,44 +566,7 @@ void BlockTreeCache::prepareMatchedBlocks(const std::vector<TreeNode*>& matched_
                 continue;
             }
 
-            if (result.load_back_ticket == nullptr) {
-                continue;
-            }
-
-            Tier source_tier = Tier::NONE;
-            if (group_slot.has_value(Tier::HOST)) {
-                source_tier = Tier::HOST;
-            } else if (group_slot.has_value(Tier::DISK)) {
-                source_tier = Tier::DISK;
-            }
-            if (source_tier == Tier::NONE) {
-                continue;
-            }
-
-            const std::vector<BlockIdxType> source_blocks = component_group->getBlocks(group_slot, source_tier);
-            if (source_blocks.empty()) {
-                continue;
-            }
-
-            // Keep the source non-evictable until the ticket is committed or aborted.
-            component_group->referenceBlocks(
-                GroupBlockSet{component_group->component_group_id, source_tier, {source_blocks}});
-
-            result.load_back_ticket->items().push_back(
-                PendingLoadBackItem{path_node, component_group->component_group_id, source_tier, source_blocks});
-
-            if (source_tier == Tier::HOST) {
-                result.host_load_back_blocks++;
-            } else {
-                result.disk_load_back_blocks++;
-            }
-            result.load_back_blocks++;
-
-            RTP_LLM_LOG_DEBUG("BlockTreeCache::match: planned load_back from %s "
-                              "group[%d] node_key=%ld",
-                              tierName(source_tier),
-                              component_group->component_group_id,
-                              path_node->cache_key);
+            prepareMatchedLoadBackItem(path_node, component_group, group_slot, result);
         }
 
         if (!matched_device_blocks.per_node.empty()) {
@@ -602,6 +574,47 @@ void BlockTreeCache::prepareMatchedBlocks(const std::vector<TreeNode*>& matched_
             result.matched_block_sets.push_back(std::move(matched_device_blocks));
         }
     }
+}
+
+void BlockTreeCache::prepareMatchedLoadBackItem(TreeNode*                path_node,
+                                                const ComponentGroupPtr& component_group,
+                                                const GroupSlot&         group_slot,
+                                                BlockTreeMatchResult&    result) {
+    if (result.load_back_ticket == nullptr) {
+        return;
+    }
+
+    Tier source_tier = Tier::NONE;
+    if (group_slot.has_value(Tier::HOST)) {
+        source_tier = Tier::HOST;
+    } else if (group_slot.has_value(Tier::DISK)) {
+        source_tier = Tier::DISK;
+    }
+    if (source_tier == Tier::NONE) {
+        return;
+    }
+
+    const std::vector<BlockIdxType> source_blocks = component_group->getBlocks(group_slot, source_tier);
+    if (source_blocks.empty()) {
+        return;
+    }
+
+    // Keep the source non-evictable until the ticket is committed or aborted.
+    component_group->referenceBlocks(GroupBlockSet{component_group->component_group_id, source_tier, {source_blocks}});
+    result.load_back_ticket->items().push_back(
+        PendingLoadBackItem{path_node, component_group->component_group_id, source_tier, source_blocks});
+
+    if (source_tier == Tier::HOST) {
+        result.host_load_back_blocks++;
+    } else {
+        result.disk_load_back_blocks++;
+    }
+    result.load_back_blocks++;
+
+    RTP_LLM_LOG_DEBUG("BlockTreeCache::match: planned load_back from %s group[%d] node_key=%ld",
+                      tierName(source_tier),
+                      component_group->component_group_id,
+                      path_node->cache_key);
 }
 
 std::shared_ptr<AsyncContext> BlockTreeCache::commitLoadBack(const std::vector<PendingLoadBackItem>& items) {

@@ -310,12 +310,11 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     std::vector<size_t>                        cg_host_block_size(static_cast<size_t>(cg_num), 0);
 
     for (int cg_id = 0; cg_id < cg_num; ++cg_id) {
-        const auto&                        member_tags = plan.cg_member_tags[static_cast<size_t>(cg_id)];
-        const auto                         type        = plan.cg_types[static_cast<size_t>(cg_id)];
-        std::vector<DeviceBlockPoolPtr>    cg_pools;
-        std::vector<DeviceKVCacheGroupPtr> cg_dkvs;
-        std::vector<int>                   comp_indices;
-        size_t                             host_block_size = 0;
+        const auto&                     member_tags = plan.cg_member_tags[static_cast<size_t>(cg_id)];
+        const auto                      type        = plan.cg_types[static_cast<size_t>(cg_id)];
+        std::vector<DeviceBlockPoolPtr> cg_pools;
+        std::vector<int>                comp_indices;
+        size_t                          host_block_size = 0;
 
         for (size_t local = 0; local < member_tags.size(); ++local) {
             const int  tag_gid = member_tags[local];
@@ -342,13 +341,11 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             // Per-tag DeviceKVCacheGroup (wraps this pool; keeps the per-tag gid as its id).
             DeviceKVCacheGroupPtr dkv =
                 pool ? createDeviceKVCacheGroup(static_cast<int>(type), tag_gid, cache_config, pool) : nullptr;
-            cg_dkvs.push_back(dkv);
             per_tag_device_groups[static_cast<size_t>(tag_gid)] = dkv;
             per_tag_mapping[static_cast<size_t>(tag_gid)]       = {cg_id, static_cast<int>(local)};
         }
 
         component_groups[static_cast<size_t>(cg_id)]->setDevicePools(cg_pools);
-        component_groups[static_cast<size_t>(cg_id)]->setDeviceKVGroups(cg_dkvs);
         component_groups[static_cast<size_t>(cg_id)]->component_indices = comp_indices;
         component_groups[static_cast<size_t>(cg_id)]->host_block_size   = host_block_size;
         cg_host_block_size[static_cast<size_t>(cg_id)]                  = host_block_size;
@@ -443,7 +440,10 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                                   broadcast_manager,
                                                   std::move(per_tag_device_groups),
                                                   std::move(per_tag_mapping));
-
+    if (!cache->init()) {
+        RTP_LLM_LOG_ERROR("createBlockTreeCache: failed to initialize BlockTreeCache");
+        return nullptr;
+    }
     RTP_LLM_LOG_INFO("Created BlockTreeCache: per_tag_groups=%d, component_groups=%d, "
                      "device=%d, memory=%d, disk=%d, remote=%d",
                      group_num,

@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/CopyEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtil.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 
@@ -106,18 +107,17 @@ makeBroadcastManager(const std::vector<BlockTreeBroadcastRpcConfig>&           c
     return broadcast_manager;
 }
 
-static std::unique_ptr<BlockTreeCache>
-makeBroadcastCache(const std::shared_ptr<BroadcastManager>& broadcast_manager) {
-    std::unique_ptr<BlockTree> tree = std::make_unique<BlockTree>(1);
+static std::unique_ptr<BlockTreeCache> makeBroadcastCache(const std::shared_ptr<BroadcastManager>& broadcast_manager) {
+    std::unique_ptr<BlockTree>          tree = std::make_unique<BlockTree>(1);
     std::shared_ptr<FullComponentGroup> full = std::make_shared<FullComponentGroup>();
-    full->component_group_id = 0;
-    std::vector<ComponentGroupPtr> groups = {full};
-    return std::make_unique<BlockTreeCache>(std::move(tree),
-                                            std::move(groups),
-                                            std::vector<Component>{},
-                                            BlockTreeCacheConfig{},
-                                            /*storage_backend=*/nullptr,
-                                            broadcast_manager);
+    full->component_group_id                 = 0;
+    std::vector<ComponentGroupPtr> groups    = {full};
+    return BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree),
+                                                      std::move(groups),
+                                                      std::vector<Component>{},
+                                                      BlockTreeCacheConfig{},
+                                                      /*storage_backend=*/nullptr,
+                                                      broadcast_manager);
 }
 
 static MemoryOperationRequestPB makeBroadcastRequest() {
@@ -348,7 +348,7 @@ protected:
         std::vector<ComponentGroupPtr> groups = {full_group};
         std::vector<Component>         components;
 
-        cache_ = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::move(components));
+        cache_ = BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree), std::move(groups), std::move(components));
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -460,7 +460,8 @@ TEST_F(BlockTreeCacheTest, ReclaimCascadesToLowerPriorityGroup) {
     std::vector<ComponentGroupPtr> groups = {full_group, swa_group};
     std::vector<Component>         components;
 
-    auto multi_cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::move(components));
+    std::unique_ptr<BlockTreeCache> multi_cache =
+        BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree), std::move(groups), std::move(components));
 
     // Insert a node with both Full and SWA data
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(2));
@@ -526,7 +527,8 @@ TEST_F(BlockTreeCacheTest, MultiGroupConstruction) {
     std::vector<ComponentGroupPtr> groups = {full, swa, linear};
     std::vector<Component>         components;
 
-    auto multi_cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::move(components));
+    std::unique_ptr<BlockTreeCache> multi_cache =
+        BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree), std::move(groups), std::move(components));
 
     EXPECT_EQ(multi_cache->componentGroups().size(), 3u);
     EXPECT_EQ(multi_cache->tree()->groupSlotCount(), 3);
@@ -588,7 +590,7 @@ TEST_F(BlockTreeCacheTest, ReclaimBlocksDoesNotAllocateHostBlock) {
     ce_cfg.enable_device_cache       = true;
     ce_cfg.enable_memory_cache       = true;
 
-    auto ce_cache = std::make_unique<BlockTreeCache>(
+    std::unique_ptr<BlockTreeCache> ce_cache = BlockTreeCacheTestUtil::makeBlockTreeCache(
         std::move(tree), std::move(groups), std::vector<Component>{}, std::move(ce_cfg));
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
@@ -625,7 +627,7 @@ TEST_F(BlockTreeCacheTest, SequentialReclaimDrainsChainWithoutHostBlocks) {
     seq_cfg.enable_device_cache       = true;
     seq_cfg.enable_memory_cache       = false;
 
-    auto ce_cache = std::make_unique<BlockTreeCache>(
+    std::unique_ptr<BlockTreeCache> ce_cache = BlockTreeCacheTestUtil::makeBlockTreeCache(
         std::move(tree), std::move(groups), std::vector<Component>{}, std::move(seq_cfg));
 
     std::vector<std::vector<GroupSlot>> slots(3, std::vector<GroupSlot>(1));
@@ -660,7 +662,7 @@ TEST_F(BlockTreeCacheTest, ReusableReclaimDoesNotAllocateHostBlock) {
     reuse_cfg.enable_device_cache       = true;
     reuse_cfg.enable_memory_cache       = true;
 
-    auto ce_cache = std::make_unique<BlockTreeCache>(
+    std::unique_ptr<BlockTreeCache> ce_cache = BlockTreeCacheTestUtil::makeBlockTreeCache(
         std::move(tree), std::move(groups), std::vector<Component>{}, std::move(reuse_cfg));
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
@@ -678,24 +680,23 @@ TEST_F(BlockTreeCacheTest, ReusableReclaimDoesNotAllocateHostBlock) {
 // Tier enable flag tests
 // ---------------------------------------------------------------------------
 
-// Test: Construction validation — disk requires host.
+// Test: Initialization validation — disk requires host.
 TEST_F(BlockTreeCacheTest, DiskRequiresHostValidation) {
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
     full->component_group_id              = 0;
     std::vector<ComponentGroupPtr> groups = {full};
 
-    // disk=true, host=false should throw
-    BlockTreeCacheConfig throw_cfg;
-    throw_cfg.eviction_thread_pool_size = 2;
-    throw_cfg.enable_device_cache       = true;
-    throw_cfg.enable_memory_cache       = false;
-    throw_cfg.enable_disk_cache         = true;
-    throw_cfg.enable_remote_cache       = false;
+    BlockTreeCacheConfig config;
+    config.eviction_thread_pool_size = 2;
+    config.enable_device_cache       = true;
+    config.enable_memory_cache       = false;
+    config.enable_disk_cache         = true;
+    config.enable_remote_cache       = false;
 
-    EXPECT_THROW(std::make_unique<BlockTreeCache>(
-                     std::move(tree), std::move(groups), std::vector<Component>{}, std::move(throw_cfg)),
-                 std::invalid_argument);
+    std::unique_ptr<BlockTreeCache> cache = BlockTreeCacheTestUtil::makeBlockTreeCache(
+        std::move(tree), std::move(groups), std::vector<Component>{}, std::move(config));
+    EXPECT_EQ(cache, nullptr);
 }
 
 // Test: reclaimBlocks on disabled tier returns 0.
@@ -706,10 +707,11 @@ TEST_F(BlockTreeCacheTest, ReclaimDisabledTierReturnsZero) {
     std::vector<ComponentGroupPtr> groups = {full};
 
     // Device enabled, Host disabled (default)
-    auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
-                                                  std::move(groups),
-                                                  std::vector<Component>{},
-                                                  BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+    std::unique_ptr<BlockTreeCache> cache =
+        BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree),
+                                                   std::move(groups),
+                                                   std::vector<Component>{},
+                                                   BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {42};
@@ -732,10 +734,11 @@ TEST_F(BlockTreeCacheTest, HostDisabledDirectRelease) {
     std::vector<ComponentGroupPtr> groups = {full};
 
     // Host disabled (default): Device reclaim → direct release.
-    auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
-                                                  std::move(groups),
-                                                  std::vector<Component>{},
-                                                  BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+    std::unique_ptr<BlockTreeCache> cache =
+        BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree),
+                                                   std::move(groups),
+                                                   std::vector<Component>{},
+                                                   BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {42};
@@ -763,8 +766,8 @@ TEST_F(BlockTreeCacheTest, TierEnableQueries) {
     cfg.enable_disk_cache   = true;
     cfg.enable_remote_cache = true;
 
-    auto cache =
-        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg));
+    std::unique_ptr<BlockTreeCache> cache = BlockTreeCacheTestUtil::makeBlockTreeCache(
+        std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg));
 
     EXPECT_TRUE(cache->isDeviceCacheEnabled());
     EXPECT_TRUE(cache->isMemoryCacheEnabled());
@@ -781,8 +784,9 @@ TEST_F(BlockTreeCacheTest, NodeDeletedWhenAllGroupsEmpty) {
     auto full                = std::make_shared<FullComponentGroup>();
     full->component_group_id = 0;
 
-    std::vector<ComponentGroupPtr> groups = {full};
-    auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
+    std::vector<ComponentGroupPtr>  groups = {full};
+    std::unique_ptr<BlockTreeCache> cache =
+        BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree), std::move(groups), std::vector<Component>{});
 
     // Insert
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
@@ -836,37 +840,6 @@ TEST_F(BlockTreeCacheTest, SWABuildTransferSupportsHostToDisk) {
     EXPECT_EQ(eviction_move->source_blocks[0], 7);
 }
 
-// ---------------------------------------------------------------------------
-// UT-5: match results keep each component group's block ids separate.
-// ---------------------------------------------------------------------------
-TEST_F(BlockTreeCacheTest, MatchCollectsBlocksByComponentGroupId) {
-    auto tree = std::make_unique<BlockTree>(2);
-
-    // group 0 = SWA, group 1 = FULL (FULL's id is NOT 0)
-    auto swa                = std::make_shared<SWAComponentGroup>(128, 64);
-    swa->component_group_id = 0;
-
-    auto full                = std::make_shared<FullComponentGroup>();
-    full->component_group_id = 1;
-
-    std::vector<ComponentGroupPtr> groups = {swa, full};
-    auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
-
-    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(2));
-    slots[0][0].device_blocks = {10};  // SWA group
-    slots[0][1].device_blocks = {42};  // FULL group
-    cache->insert(nullptr, {100}, slots);
-
-    auto result = cache->match({100});
-    EXPECT_EQ(result.matched_blocks, 1u);
-    const std::unordered_map<int, BlockIndicesType>::const_iterator swa_it = result.group_block_indices.find(0);
-    ASSERT_NE(swa_it, result.group_block_indices.end());
-    EXPECT_EQ(swa_it->second, (BlockIndicesType{10}));
-    const std::unordered_map<int, BlockIndicesType>::const_iterator full_it = result.group_block_indices.find(1);
-    ASSERT_NE(full_it, result.group_block_indices.end());
-    EXPECT_EQ(full_it->second, (BlockIndicesType{42}));
-}
-
 TEST_F(BlockTreeCacheTest, MatchCollectsBlocksSelectedByGroupPolicy) {
     std::unique_ptr<BlockTree> tree = std::make_unique<BlockTree>(3);
 
@@ -878,8 +851,8 @@ TEST_F(BlockTreeCacheTest, MatchCollectsBlocksSelectedByGroupPolicy) {
     swa->component_group_id                      = 2;
 
     std::vector<ComponentGroupPtr>  component_groups = {full, linear, swa};
-    std::unique_ptr<BlockTreeCache> cache =
-        std::make_unique<BlockTreeCache>(std::move(tree), std::move(component_groups), std::vector<Component>{});
+    std::unique_ptr<BlockTreeCache> cache            = BlockTreeCacheTestUtil::makeBlockTreeCache(
+        std::move(tree), std::move(component_groups), std::vector<Component>{});
 
     std::vector<std::vector<GroupSlot>> slots(3, std::vector<GroupSlot>(3));
     for (size_t i = 0; i < slots.size(); ++i) {
@@ -904,14 +877,16 @@ TEST_F(BlockTreeCacheTest, MatchKeepsAggregatedDevicePoolsSeparate) {
 
     std::vector<ComponentGroupPtr>             component_groups = {full};
     std::vector<BlockTreeCache::PerTagMapping> per_tag_mapping  = {{0, 0}, {0, 1}};
-    std::unique_ptr<BlockTreeCache>            cache            = std::make_unique<BlockTreeCache>(std::move(tree),
-                                                                             std::move(component_groups),
-                                                                             std::vector<Component>{},
-                                                                             BlockTreeCacheConfig{},
-                                                                             std::shared_ptr<StorageBackend>{},
-                                                                             std::shared_ptr<BroadcastManager>{},
-                                                                             std::vector<DeviceKVCacheGroupPtr>{},
-                                                                             std::move(per_tag_mapping));
+    std::unique_ptr<BlockTreeCache>            cache =
+        std::make_unique<BlockTreeCache>(std::move(tree),
+                                         std::move(component_groups),
+                                         std::vector<Component>{},
+                                         BlockTreeCacheConfig{},
+                                         std::shared_ptr<StorageBackend>{},
+                                         std::shared_ptr<BroadcastManager>{},
+                                         std::vector<DeviceKVCacheGroupPtr>{nullptr, nullptr},
+                                         std::move(per_tag_mapping));
+    ASSERT_TRUE(cache->init());
 
     std::vector<std::vector<GroupSlot>> slots(2, std::vector<GroupSlot>(2));
     slots[0][0].device_blocks = {10};
@@ -926,6 +901,25 @@ TEST_F(BlockTreeCacheTest, MatchKeepsAggregatedDevicePoolsSeparate) {
     EXPECT_EQ(result.group_block_indices.at(1), (BlockIndicesType{20, 21}));
 }
 
+TEST_F(BlockTreeCacheTest, InitializationRequiresPerTagMapping) {
+    std::unique_ptr<BlockTree>          tree = std::make_unique<BlockTree>(1);
+    std::shared_ptr<FullComponentGroup> full = std::make_shared<FullComponentGroup>();
+    full->component_group_id                 = 0;
+    full->setDevicePools({DeviceBlockPoolPtr{}});
+
+    std::vector<ComponentGroupPtr>  component_groups = {full};
+    std::unique_ptr<BlockTreeCache> cache =
+        std::make_unique<BlockTreeCache>(std::move(tree),
+                                         std::move(component_groups),
+                                         std::vector<Component>{},
+                                         BlockTreeCacheConfig{},
+                                         std::shared_ptr<StorageBackend>{},
+                                         std::shared_ptr<BroadcastManager>{},
+                                         std::vector<DeviceKVCacheGroupPtr>{nullptr},
+                                         std::vector<BlockTreeCache::PerTagMapping>{});
+    EXPECT_FALSE(cache->init());
+}
+
 TEST_F(BlockTreeCacheTest, MatchRequiresSWAWindowAfterGap) {
     std::unique_ptr<BlockTree> tree = std::make_unique<BlockTree>(2);
 
@@ -937,7 +931,7 @@ TEST_F(BlockTreeCacheTest, MatchRequiresSWAWindowAfterGap) {
 
     std::vector<ComponentGroupPtr>  groups = {full, swa};
     std::unique_ptr<BlockTreeCache> cache =
-        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
+        BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree), std::move(groups), std::vector<Component>{});
 
     std::vector<std::vector<GroupSlot>> slots(4, std::vector<GroupSlot>(2));
     slots[0][0].device_blocks = {10};
@@ -984,8 +978,8 @@ TEST_F(BlockTreeCacheTest, WatermarkDemotionCopyFailureRollsBack) {
     cfg.enable_memory_cache = true;
     cfg.watermark_device    = {0.01, 0};
 
-    auto cache =
-        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg));
+    std::unique_ptr<BlockTreeCache> cache = BlockTreeCacheTestUtil::makeBlockTreeCache(
+        std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg));
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {device_block};
@@ -1021,12 +1015,12 @@ TEST_F(BlockTreeCacheTest, WatermarkDemotionCopiesHostBlockToDisk) {
     cfg.enable_disk_cache   = true;
     cfg.watermark_host      = {0.01, 0};
 
-    auto cache =
-        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg));
+    std::unique_ptr<BlockTreeCache> cache = BlockTreeCacheTestUtil::makeBlockTreeCache(
+        std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg));
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].host_block = host_block;
-    cache->insert(nullptr, {100}, slots);
+    ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
 
     auto before = cache->tree()->findNode({100});
     ASSERT_NE(before.matched_node, nullptr);
@@ -1058,7 +1052,8 @@ TEST_F(BlockTreeCacheTest, ParentBecomesDeviceLeafAfterChildReclaim) {
     full->component_group_id              = 0;
     std::vector<ComponentGroupPtr> groups = {full};
 
-    auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
+    std::unique_ptr<BlockTreeCache> cache =
+        BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree), std::move(groups), std::vector<Component>{});
 
     // Insert: root -> A -> B -> C
     std::vector<std::vector<GroupSlot>> slots(3, std::vector<GroupSlot>(1));
@@ -1106,8 +1101,8 @@ TEST_F(BlockTreeCacheTest, ReclaimBlocksDoesNotUpdateHostSlot) {
     cfg.enable_device_cache = true;
     cfg.enable_memory_cache = true;
 
-    auto cache =
-        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::move(components), std::move(cfg));
+    std::unique_ptr<BlockTreeCache> cache = BlockTreeCacheTestUtil::makeBlockTreeCache(
+        std::move(tree), std::move(groups), std::move(components), std::move(cfg));
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {42};
@@ -1132,7 +1127,7 @@ TEST_F(BlockTreeCacheTest, LoadBackOnlyReloadsSWAWindow) {
 
     std::vector<ComponentGroupPtr>  groups = {full, swa};
     std::unique_ptr<BlockTreeCache> cache =
-        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
+        BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree), std::move(groups), std::vector<Component>{});
     cache->setEnableLoadBack(true);
 
     std::vector<std::vector<GroupSlot>> slots(4, std::vector<GroupSlot>(2));
@@ -1141,7 +1136,7 @@ TEST_F(BlockTreeCacheTest, LoadBackOnlyReloadsSWAWindow) {
         slots[i][1].host_block    = static_cast<BlockIdxType>(100 + i);
     }
 
-    cache->insert(nullptr, {100, 200, 300, 400}, slots);
+    ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100, 200, 300, 400}, slots));
 
     BlockTreeMatchResult result = cache->match({100, 200, 300, 400});
     EXPECT_EQ(result.matched_blocks, 4u);
@@ -1158,7 +1153,8 @@ TEST_F(BlockTreeCacheTest, LoadBackDetectsHostData) {
     full->component_group_id              = 0;
     std::vector<ComponentGroupPtr> groups = {full};
 
-    auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
+    std::unique_ptr<BlockTreeCache> cache =
+        BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree), std::move(groups), std::vector<Component>{});
     cache->setEnableLoadBack(true);
 
     // Insert a node and manually set host data (simulating prior demotion).
@@ -1208,7 +1204,7 @@ TEST_F(BlockTreeCacheTest, BroadcastManagerStoredCorrectly) {
     BlockTreeCacheConfig cfg;
     cfg.enable_device_cache = true;
 
-    auto cache = std::make_unique<BlockTreeCache>(
+    std::unique_ptr<BlockTreeCache> cache = BlockTreeCacheTestUtil::makeBlockTreeCache(
         std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg), nullptr, broadcast_mgr);
 
     // Verify BroadcastManager is stored (access via internal member)
@@ -1291,17 +1287,17 @@ TEST_F(BlockTreeCacheTest, BroadcastHostLoadBackCommitsDeviceSlot) {
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache                 = true;
-    std::vector<ComponentGroupPtr>      groups = {group};
-    std::unique_ptr<BlockTreeCache>     cache  = std::make_unique<BlockTreeCache>(std::make_unique<BlockTree>(1),
-                                                                             std::move(groups),
-                                                                             std::vector<Component>{},
-                                                                             std::move(config),
-                                                                             /*storage_backend=*/nullptr,
-                                                                             broadcast_manager);
+    config.enable_memory_cache             = true;
+    std::vector<ComponentGroupPtr>  groups = {group};
+    std::unique_ptr<BlockTreeCache> cache  = BlockTreeCacheTestUtil::makeBlockTreeCache(std::make_unique<BlockTree>(1),
+                                                                                       std::move(groups),
+                                                                                       std::vector<Component>{},
+                                                                                       std::move(config),
+                                                                                       /*storage_backend=*/nullptr,
+                                                                                       broadcast_manager);
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].host_block = host_block;
-    cache->insert(nullptr, {100}, slots);
+    ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
     BlockTreeFindResult find_result = cache->tree()->findNode({100});
     ASSERT_NE(find_result.matched_node, nullptr);
 
@@ -1344,17 +1340,17 @@ TEST_F(BlockTreeCacheTest, BroadcastHostLoadBackFailureKeepsSourceSlot) {
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache                 = true;
-    std::vector<ComponentGroupPtr>      groups = {group};
-    std::unique_ptr<BlockTreeCache>     cache  = std::make_unique<BlockTreeCache>(std::make_unique<BlockTree>(1),
-                                                                             std::move(groups),
-                                                                             std::vector<Component>{},
-                                                                             std::move(config),
-                                                                             /*storage_backend=*/nullptr,
-                                                                             broadcast_manager);
+    config.enable_memory_cache             = true;
+    std::vector<ComponentGroupPtr>  groups = {group};
+    std::unique_ptr<BlockTreeCache> cache  = BlockTreeCacheTestUtil::makeBlockTreeCache(std::make_unique<BlockTree>(1),
+                                                                                       std::move(groups),
+                                                                                       std::vector<Component>{},
+                                                                                       std::move(config),
+                                                                                       /*storage_backend=*/nullptr,
+                                                                                       broadcast_manager);
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].host_block = host_block;
-    cache->insert(nullptr, {100}, slots);
+    ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
     BlockTreeFindResult find_result = cache->tree()->findNode({100});
     ASSERT_NE(find_result.matched_node, nullptr);
 
@@ -1399,18 +1395,18 @@ TEST_F(BlockTreeCacheTest, BroadcastDiskLoadBackUsesTwoTransferStages) {
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache                 = true;
-    config.enable_disk_cache                   = true;
-    std::vector<ComponentGroupPtr>      groups = {group};
-    std::unique_ptr<BlockTreeCache>     cache  = std::make_unique<BlockTreeCache>(std::make_unique<BlockTree>(1),
-                                                                             std::move(groups),
-                                                                             std::vector<Component>{},
-                                                                             std::move(config),
-                                                                             /*storage_backend=*/nullptr,
-                                                                             broadcast_manager);
+    config.enable_memory_cache             = true;
+    config.enable_disk_cache               = true;
+    std::vector<ComponentGroupPtr>  groups = {group};
+    std::unique_ptr<BlockTreeCache> cache  = BlockTreeCacheTestUtil::makeBlockTreeCache(std::make_unique<BlockTree>(1),
+                                                                                       std::move(groups),
+                                                                                       std::vector<Component>{},
+                                                                                       std::move(config),
+                                                                                       /*storage_backend=*/nullptr,
+                                                                                       broadcast_manager);
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].disk_slot = disk_block;
-    cache->insert(nullptr, {100}, slots);
+    ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
     BlockTreeFindResult find_result = cache->tree()->findNode({100});
     ASSERT_NE(find_result.matched_node, nullptr);
 
@@ -1500,16 +1496,16 @@ TEST_F(BlockTreeCacheTest, BroadcastEvictionSuccessCommitsPlan) {
     config.enable_disk_cache               = true;
     config.watermark_host                  = {0.01, 0};
     std::vector<ComponentGroupPtr>  groups = {full};
-    std::unique_ptr<BlockTreeCache> cache  = std::make_unique<BlockTreeCache>(std::make_unique<BlockTree>(1),
-                                                                             std::move(groups),
-                                                                             std::vector<Component>{},
-                                                                             std::move(config),
-                                                                             /*storage_backend=*/nullptr,
-                                                                             broadcast_manager);
+    std::unique_ptr<BlockTreeCache> cache  = BlockTreeCacheTestUtil::makeBlockTreeCache(std::make_unique<BlockTree>(1),
+                                                                                       std::move(groups),
+                                                                                       std::vector<Component>{},
+                                                                                       std::move(config),
+                                                                                       /*storage_backend=*/nullptr,
+                                                                                       broadcast_manager);
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].host_block = host_block;
-    cache->insert(nullptr, {100}, slots);
+    ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
     BlockTreeFindResult before = cache->tree()->findNode({100});
     ASSERT_NE(before.matched_node, nullptr);
     full->tryAddToHostHeap(before.matched_node);
@@ -1561,16 +1557,16 @@ TEST_F(BlockTreeCacheTest, BroadcastEvictionFailureRollsBackPlan) {
     config.enable_disk_cache               = true;
     config.watermark_host                  = {0.01, 0};
     std::vector<ComponentGroupPtr>  groups = {full};
-    std::unique_ptr<BlockTreeCache> cache  = std::make_unique<BlockTreeCache>(std::make_unique<BlockTree>(1),
-                                                                             std::move(groups),
-                                                                             std::vector<Component>{},
-                                                                             std::move(config),
-                                                                             /*storage_backend=*/nullptr,
-                                                                             broadcast_manager);
+    std::unique_ptr<BlockTreeCache> cache  = BlockTreeCacheTestUtil::makeBlockTreeCache(std::make_unique<BlockTree>(1),
+                                                                                       std::move(groups),
+                                                                                       std::vector<Component>{},
+                                                                                       std::move(config),
+                                                                                       /*storage_backend=*/nullptr,
+                                                                                       broadcast_manager);
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].host_block = host_block;
-    cache->insert(nullptr, {100}, slots);
+    ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
     BlockTreeFindResult before = cache->tree()->findNode({100});
     ASSERT_NE(before.matched_node, nullptr);
     full->tryAddToHostHeap(before.matched_node);
@@ -1602,7 +1598,7 @@ static std::unique_ptr<BlockTreeCache> makeHostOnlyLoadBackCache() {
     std::vector<ComponentGroupPtr> groups    = {full};
 
     std::unique_ptr<BlockTreeCache> cache =
-        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
+        BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree), std::move(groups), std::vector<Component>{});
     cache->setEnableLoadBack(true);
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
@@ -1650,7 +1646,7 @@ TEST_F(BlockTreeCacheTest, LoadBackDeviceAllocationFailureRollsBackAllItems) {
     second_group->referenceBlocks(GroupBlockSet{1, Tier::HOST, {{second_host_block}}});
 
     std::vector<ComponentGroupPtr>  component_groups = {first_group, second_group};
-    std::unique_ptr<BlockTreeCache> cache            = std::make_unique<BlockTreeCache>(
+    std::unique_ptr<BlockTreeCache> cache            = BlockTreeCacheTestUtil::makeBlockTreeCache(
         std::make_unique<BlockTree>(2), std::move(component_groups), std::vector<Component>{});
     TreeNode first_node;
     first_node.cache_key = 100;

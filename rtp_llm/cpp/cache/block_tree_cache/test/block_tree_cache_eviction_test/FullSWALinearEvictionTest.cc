@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtil.h"
 
 namespace rtp_llm {
 namespace {
@@ -9,15 +10,18 @@ namespace {
 class FullSWALinearEvictionTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        auto tree                             = std::make_unique<BlockTree>(3);
-        auto full                             = std::make_shared<FullComponentGroup>();
+        std::unique_ptr<BlockTree> tree       = std::make_unique<BlockTree>(3);
+        auto                       full       = std::make_shared<FullComponentGroup>();
         full->component_group_id              = 0;
         auto swa                              = std::make_shared<SWAComponentGroup>(128, 64);
         swa->component_group_id               = 1;
         auto linear                           = std::make_shared<LinearComponentGroup>();
         linear->component_group_id            = 2;
         std::vector<ComponentGroupPtr> groups = {full, swa, linear};
-        cache_ = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+        cache_                                = BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree),
+                                                            std::move(groups),
+                                                            std::vector<Component>{},
+                                                            BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_b, BlockIdxType swa_b, BlockIdxType lin_b) {
@@ -173,14 +177,17 @@ TEST_F(FullSWALinearEvictionTest, ForkBothBranchesEvictable) {
 //   [200] all groups empty → deleted. [100] survives.
 // ---------------------------------------------------------------------------
 TEST_F(FullSWALinearEvictionTest, SWAReclaimCascadesToLinear) {
-    auto tree                             = std::make_unique<BlockTree>(2);
-    auto swa                              = std::make_shared<SWAComponentGroup>(128, 64);
-    swa->component_group_id               = 0;
-    auto linear                           = std::make_shared<LinearComponentGroup>();
-    linear->component_group_id            = 1;
-    std::vector<ComponentGroupPtr> groups = {swa, linear};
-    auto                           swa_lin_cache =
-        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+    std::unique_ptr<BlockTree> tree        = std::make_unique<BlockTree>(2);
+    auto                       swa         = std::make_shared<SWAComponentGroup>(128, 64);
+    swa->component_group_id                = 0;
+    auto linear                            = std::make_shared<LinearComponentGroup>();
+    linear->component_group_id             = 1;
+    std::vector<ComponentGroupPtr>  groups = {swa, linear};
+    std::unique_ptr<BlockTreeCache> swa_lin_cache =
+        BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree),
+                                                   std::move(groups),
+                                                   std::vector<Component>{},
+                                                   BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
 
     std::vector<std::vector<GroupSlot>> slots(2, std::vector<GroupSlot>(2));
     slots[0][0].device_blocks = {20};

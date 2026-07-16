@@ -8,7 +8,6 @@
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/device_group/DeviceKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/EvictionHeap.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/TransferTypes.h"
@@ -87,6 +86,7 @@ struct BlockTreeMatchResult {
     TreeNode* matched_node{nullptr};
     size_t    matched_blocks{0};
 
+    // Keyed by allocator-facing per-tag gid.
     std::unordered_map<int, BlockIndicesType> group_block_indices;
 
     std::vector<GroupBlockSet> matched_block_sets;
@@ -189,16 +189,6 @@ public:
         return disk_pool_;
     }
 
-    void setDeviceKVGroups(std::vector<DeviceKVCacheGroupPtr> groups) {
-        device_kv_groups_ = std::move(groups);
-    }
-    const std::vector<DeviceKVCacheGroupPtr>& deviceKVGroups() const {
-        return device_kv_groups_;
-    }
-    DeviceKVCacheGroupPtr deviceKVGroup(size_t pool_index = 0) const {
-        return pool_index < device_kv_groups_.size() ? device_kv_groups_[pool_index] : nullptr;
-    }
-
     size_t devicePoolCount() const {
         return device_pools_.size();
     }
@@ -283,7 +273,6 @@ protected:
     std::shared_ptr<HostBlockPool>  host_pool_;
     std::shared_ptr<DiskBlockPool>  disk_pool_;
 
-    std::vector<DeviceKVCacheGroupPtr> device_kv_groups_;
 };
 
 using ComponentGroupPtr = std::shared_ptr<ComponentGroup>;
