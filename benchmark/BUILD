@@ -15,7 +15,7 @@ py_test(
     srcs = ["test_topology_kv_policy.py"],
     data = ["//rtp_llm/models_py:topology_kv_policy_runfiles"],
     main = "test_topology_kv_policy.py",
-    deps = torch_deps(),
+    deps = torch_deps() + ["//rtp_llm/metrics:metrics"],
 )
 
 py_test(

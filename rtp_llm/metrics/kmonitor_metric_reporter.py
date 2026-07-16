@@ -37,10 +37,12 @@ class AccMetrics(Enum):
     VIT_RPC_PROXY_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_proxy_error_qps"
 
     # topology KV policy
-    TOPOLOGY_KV_COORDINATE_FALLBACK_QPS_METRIC = (
-        "py_rtp_topology_kv_coordinate_fallback_qps"
+    TOPOLOGY_KV_COORDINATE_FALLBACK_LAYER_EVENT_METRIC = (
+        "py_rtp_topology_kv_coordinate_fallback_layer_forward_event"
     )
-    TOPOLOGY_KV_POLICY_BYPASS_QPS_METRIC = "py_rtp_topology_kv_policy_bypass_qps"
+    TOPOLOGY_KV_POLICY_BYPASS_LAYER_EVENT_METRIC = (
+        "py_rtp_topology_kv_policy_bypass_layer_forward_event"
+    )
 
 
 class GaugeMetrics(Enum):

@@ -241,11 +241,12 @@ class Indexer(nn.Module):
             and os.getenv("RTP_LLM_TOPOLOGY_KV_ALLOW_CUDA_SYNC") != "1"
         ):
             kmonitor.report(
-                AccMetrics.TOPOLOGY_KV_POLICY_BYPASS_QPS_METRIC,
+                AccMetrics.TOPOLOGY_KV_POLICY_BYPASS_LAYER_EVENT_METRIC,
                 1,
                 {
                     "policy": self.topology_kv_policy,
                     "reason": "cuda_sync_disabled",
+                    "layer_idx": str(self.layer_idx),
                 },
             )
             global _TOPOLOGY_KV_CUDA_SYNC_WARNING_EMITTED
@@ -294,7 +295,12 @@ class Indexer(nn.Module):
     ) -> None:
         """Report bounded-cardinality policy outcomes before returning only indices."""
         counters = result.counters
-        policy_tags = {"policy": self.topology_kv_policy}
+        # Indexer is instantiated per sparse layer. These are layer-forward
+        # events, not request QPS; layer_idx keeps their aggregation explicit.
+        policy_tags = {
+            "policy": self.topology_kv_policy,
+            "layer_idx": str(self.layer_idx),
+        }
         kmonitor.report(
             GaugeMetrics.TOPOLOGY_KV_POLICY_SCHEDULE_MS_METRIC,
             counters.schedule_ms,
@@ -319,7 +325,7 @@ class Indexer(nn.Module):
                 "action": coordinate_mismatch_action,
             }
             kmonitor.report(
-                AccMetrics.TOPOLOGY_KV_COORDINATE_FALLBACK_QPS_METRIC,
+                AccMetrics.TOPOLOGY_KV_COORDINATE_FALLBACK_LAYER_EVENT_METRIC,
                 counters.coordinate_mismatch_fallbacks,
                 fallback_tags,
             )
@@ -337,7 +343,7 @@ class Indexer(nn.Module):
             for reason in result.bypass_reasons or ("unknown_limit",):
                 bypass_tags = {**policy_tags, "reason": reason}
                 kmonitor.report(
-                    AccMetrics.TOPOLOGY_KV_POLICY_BYPASS_QPS_METRIC,
+                    AccMetrics.TOPOLOGY_KV_POLICY_BYPASS_LAYER_EVENT_METRIC,
                     counters.policy_bypassed,
                     bypass_tags,
                 )

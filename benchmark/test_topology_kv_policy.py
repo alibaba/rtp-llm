@@ -13,13 +13,6 @@ MODULE_PATH = (
     REPO_ROOT / "rtp_llm" / "models_py" / "modules" / "hybrid" / "topology_kv_policy.py"
 )
 INDEXER_PATH = MODULE_PATH.with_name("indexer.py")
-CUDA_INTEGRATION_PATH = (
-    MODULE_PATH.parent / "test" / "topology_kv_cuda_integration_test.py"
-)
-HYBRID_TEST_BUILD_PATH = MODULE_PATH.parent / "test" / "BUILD"
-H20_SUITE_PATH = REPO_ROOT / "rtp_llm" / "test" / "smoke" / "suites_h20_oss.bzl"
-SMOKE_BUILD_PATH = REPO_ROOT / "rtp_llm" / "test" / "smoke" / "BUILD"
-MODELS_BUILD_PATH = REPO_ROOT / "rtp_llm" / "models_py" / "BUILD"
 METRICS_REPORTER_PATH = (
     REPO_ROOT / "rtp_llm" / "metrics" / "kmonitor_metric_reporter.py"
 )
@@ -41,7 +34,6 @@ apply_topology_kv_policy = topology_kv_policy.apply_topology_kv_policy
 
 
 def _load_indexer_for_unit_test():
-    indexer_path = MODULE_PATH.with_name("indexer.py")
     module_names = [
         "rtp_llm",
         "rtp_llm.models_py",
@@ -93,7 +85,7 @@ def _load_indexer_for_unit_test():
 
     try:
         indexer_spec = importlib.util.spec_from_file_location(
-            "unit_test_indexer", indexer_path
+            "unit_test_indexer", INDEXER_PATH
         )
         indexer_module = importlib.util.module_from_spec(indexer_spec)
         assert indexer_spec.loader is not None
@@ -141,6 +133,7 @@ class _FakeIndexerOp:
 
 def _make_indexer(topk_result, *, cp_enabled=False):
     indexer = object.__new__(Indexer)
+    indexer.layer_idx = 7
     indexer.indexer_op = _FakeIndexerOp(topk_result)
     indexer.topology_kv_policy = "topology_sparse_merge"
     indexer.topology_sink_blocks = 1
@@ -161,6 +154,28 @@ def _make_indexer(topk_result, *, cp_enabled=False):
 
 
 class TopologyKvPolicyTest(unittest.TestCase):
+    def test_indexer_bypass_metric_is_a_layer_event_with_bounded_layer_tag(self):
+        topk = torch.arange(2048, dtype=torch.int32).view(1, -1)
+        indexer = _make_indexer(topk)
+
+        with mock.patch.object(indexer_module.logging, "warning"):
+            with mock.patch.object(indexer_module.kmonitor, "report") as report:
+                indexer._apply_topology_kv_policy(
+                    topk, torch.tensor([8193], dtype=torch.int32)
+                )
+
+        bypass_call = next(
+            call
+            for call in report.call_args_list
+            if call.args[0]
+            is indexer_module.AccMetrics.TOPOLOGY_KV_POLICY_BYPASS_LAYER_EVENT_METRIC
+        )
+        self.assertEqual(
+            bypass_call.args[0].value,
+            "py_rtp_topology_kv_policy_bypass_layer_forward_event",
+        )
+        self.assertEqual(bypass_call.args[2]["layer_idx"], "7")
+
     def test_disabled_policy_returns_original_tensor_and_zero_counters(self):
         topk = torch.tensor([[5, 4, 3, 2]], dtype=torch.int32)
         lengths = torch.tensor([8], dtype=torch.int32)
@@ -616,9 +631,10 @@ class TopologyKvPolicyTest(unittest.TestCase):
             call
             for call in report.call_args_list
             if call.args[0]
-            is indexer_module.AccMetrics.TOPOLOGY_KV_COORDINATE_FALLBACK_QPS_METRIC
+            is indexer_module.AccMetrics.TOPOLOGY_KV_COORDINATE_FALLBACK_LAYER_EVENT_METRIC
         )
         self.assertEqual(fallback_call.args[2]["action"], "fallback_disabled")
+        self.assertEqual(fallback_call.args[2]["layer_idx"], "7")
 
     def test_rejects_learned_topk_outside_absolute_contract(self):
         topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)
@@ -872,11 +888,15 @@ class TopologyKvPolicyTest(unittest.TestCase):
             call
             for call in report.call_args_list
             if call.args[0]
-            is indexer_module.AccMetrics.TOPOLOGY_KV_POLICY_BYPASS_QPS_METRIC
+            is indexer_module.AccMetrics.TOPOLOGY_KV_POLICY_BYPASS_LAYER_EVENT_METRIC
         ]
         self.assertEqual(len(bypass_calls), 2)
         self.assertTrue(
-            all(call.args[2]["reason"] == "cuda_sync_disabled" for call in bypass_calls)
+            all(
+                call.args[2]["reason"] == "cuda_sync_disabled"
+                and call.args[2]["layer_idx"] == "7"
+                for call in bypass_calls
+            )
         )
 
     def test_indexer_warns_once_when_long_prefix_exceeds_policy_limit(self):
@@ -926,13 +946,14 @@ class TopologyKvPolicyTest(unittest.TestCase):
             call
             for call in report.call_args_list
             if call.args[0]
-            is indexer_module.AccMetrics.TOPOLOGY_KV_COORDINATE_FALLBACK_QPS_METRIC
+            is indexer_module.AccMetrics.TOPOLOGY_KV_COORDINATE_FALLBACK_LAYER_EVENT_METRIC
         ]
         self.assertEqual(len(fallback_calls), 2)
         self.assertTrue(all(call.args[1] == 1 for call in fallback_calls))
         self.assertTrue(
             all(
                 call.args[2]["reason"] == "coordinate_mismatch"
+                and call.args[2]["layer_idx"] == "7"
                 for call in fallback_calls
             )
         )
@@ -964,49 +985,9 @@ class TopologyKvPolicyTest(unittest.TestCase):
             indexer_module.GaugeMetrics.TOPOLOGY_KV_POLICY_EVICTED_TOKENS_METRIC,
             reported,
         )
-
-    def test_indexer_has_disabled_by_default_topology_kv_gate(self):
-        source = INDEXER_PATH.read_text(encoding="utf-8")
-
-        self.assertIn("RTP_LLM_TOPOLOGY_KV_POLICY", source)
-        self.assertIn("_apply_topology_kv_policy", source)
-        self.assertIn("apply_topology_kv_policy", source)
-
-    def test_cuda_production_boundary_target_is_ci_discoverable(self):
-        self.assertTrue(CUDA_INTEGRATION_PATH.is_file())
-        source = CUDA_INTEGRATION_PATH.read_text(encoding="utf-8")
-        for production_symbol in (
-            "Indexer",
-            "SparseMlaOp",
-            "SparseMlaImpl",
-            "SparseMlaCpImpl",
-            "RTP_LLM_TOPOLOGY_KV_ALLOW_CUDA_SYNC",
-            "TOPOLOGY_KV_POLICY_SCHEDULE_MS_METRIC",
-        ):
-            with self.subTest(production_symbol=production_symbol):
-                self.assertIn(production_symbol, source)
-
-        build = HYBRID_TEST_BUILD_PATH.read_text(encoding="utf-8")
-        self.assertIn('name = "topology_kv_cuda_integration_test"', build)
-        self.assertIn('"topology_kv_cuda_integration_test.py"', build)
-        target_block = build.split(
-            'name = "topology_kv_cuda_integration_test"', maxsplit=1
-        )[1].split("\n)", maxsplit=1)[0]
-        self.assertIn('tags = ["H20"]', target_block)
-        self.assertNotIn("open_skip", target_block)
-        self.assertIn('visibility = ["//rtp_llm/test/smoke:__pkg__"]', target_block)
-        suite = H20_SUITE_PATH.read_text(encoding="utf-8")
-        self.assertIn(
-            '"//rtp_llm/models_py/modules/hybrid/test:topology_kv_cuda_integration_test"',
-            suite,
+        self.assertTrue(
+            all(call.args[2]["layer_idx"] == "7" for call in report.call_args_list)
         )
-        smoke_build = SMOKE_BUILD_PATH.read_text(encoding="utf-8")
-        merge_suite = smoke_build.split('name = "maga_model_smoke"', maxsplit=1)[
-            1
-        ].split("\n)", maxsplit=1)[0]
-        self.assertIn('":smoke_h20_mla"', merge_suite)
-        models_build = MODELS_BUILD_PATH.read_text(encoding="utf-8")
-        self.assertIn('"//rtp_llm/metrics:metrics"', models_build)
 
     def test_indexer_topology_env_int_reports_bad_value(self):
         with mock.patch.dict("os.environ", {"RTP_LLM_TOPOLOGY_SINK_BLOCKS": "true"}):

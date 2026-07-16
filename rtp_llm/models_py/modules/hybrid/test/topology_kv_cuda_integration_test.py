@@ -86,21 +86,20 @@ def _reference_sparse_mla(
     kv_fp32 = kv.float().squeeze(1)
     invalid = (global_indices < 0) | (global_indices >= kv_fp32.size(0))
     safe = global_indices.clamp(0, kv_fp32.size(0) - 1)
-    gathered = kv_fp32[safe].unsqueeze(1).expand(-1, q.size(1), -1, -1)
-    scores = torch.matmul(q_fp32.unsqueeze(2), gathered.transpose(-1, -2))
-    scores = scores.squeeze(2).mul(scale).masked_fill(invalid.unsqueeze(1), -torch.inf)
+    gathered = kv_fp32[safe]
+    scores = torch.einsum("qhd,qkd->qhk", q_fp32, gathered)
+    scores = scores.mul(scale).masked_fill(invalid.unsqueeze(1), -torch.inf)
     probabilities = torch.nan_to_num(torch.softmax(scores, dim=-1), nan=0.0)
-    return (
-        torch.matmul(probabilities.unsqueeze(2), gathered[..., :kv_lora_rank])
-        .squeeze(2)
-        .to(q.dtype)
+    return torch.einsum("qhk,qkd->qhd", probabilities, gathered[..., :kv_lora_rank]).to(
+        q.dtype
     )
 
 
 @skipIf(not CUDA_FLASHMLA_OK, SKIP_REASON)
 class TopologyKvCudaProductionBoundaryTest(TestCase):
     PAGE_SIZE = 64
-    TOPK = 128
+    # The production fast-topk wrappers reject every width except 2048.
+    TOPK = 2048
     HIDDEN_SIZE = 256
     Q_LORA_RANK = 128
     INDEX_HEADS = 64
@@ -161,7 +160,7 @@ class TopologyKvCudaProductionBoundaryTest(TestCase):
     def _model_and_weights(self):
         config = ModelConfig()
         config.hidden_size = self.HIDDEN_SIZE
-        config.max_seq_len = 1024
+        config.max_seq_len = 4096
         config.layernorm_eps = 1e-6
         config.quant_config = None
         attn = config.attn_config
@@ -301,7 +300,9 @@ class TopologyKvCudaProductionBoundaryTest(TestCase):
 
     def _assert_sparse_output_matches_reference(self, op, output, q, kv, topk):
         global_indices = op._convert_topk_indices_to_global(topk)[:, 0, :]
-        sample = torch.arange(max(0, q.size(0) - 2), q.size(0), device=self.device)
+        # The production width is large; one final causal row is sufficient for
+        # the numerical oracle while keeping the H20 gate's peak memory bounded.
+        sample = torch.tensor([q.size(0) - 1], device=self.device)
         reference = _reference_sparse_mla(
             q[sample],
             kv,
@@ -411,7 +412,7 @@ class TopologyKvCudaProductionBoundaryTest(TestCase):
         return baseline_ms, policy_ms
 
     def test_normal_prefill_actual_indexer_to_sparse_mla(self):
-        baseline_ms, policy_ms = self._run_case(129, 0)
+        baseline_ms, policy_ms = self._run_case(self.TOPK + 1, 0)
         print(
             "topology_kv_e2e normal_prefill "
             f"baseline_ms={baseline_ms:.3f} policy_ms={policy_ms:.3f} "
@@ -419,18 +420,20 @@ class TopologyKvCudaProductionBoundaryTest(TestCase):
         )
 
     def test_prefix_prefill_actual_indexer_to_sparse_mla(self):
-        self._run_case(4, 192)
+        self._run_case(1, self.TOPK)
 
     def test_cp_indexer_coordinates_reach_sparse_mla(self):
         self.assertTrue(issubclass(SparseMlaCpImpl, SparseMlaImpl))
         self.assertTrue(SparseMlaCpImpl.support_prefill_cp())
-        query_length = 129
+        query_length = self.TOPK + 1
         config, weights = self._model_and_weights()
         parallelism = self._make_parallelism(True)
         inputs, params = self._attention_inputs(query_length, 0)
         cp_info = PyContextParallelParams()
         cp_info.prefill_cp_chunk_lengths = torch.tensor(
-            [65, 64], dtype=torch.int32, device=self.device
+            [query_length // 2 + 1, query_length // 2],
+            dtype=torch.int32,
+            device=self.device,
         )
         cp_info.prefill_qkv_restore_indice = torch.arange(
             query_length, dtype=torch.long, device=self.device
