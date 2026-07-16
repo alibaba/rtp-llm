@@ -36,6 +36,16 @@ filegroup(
 )
 
 py_library(
+    name = "tile_kernels_mhc",
+    srcs = glob([
+        "3rdparty/__init__.py",
+        "3rdparty/tile_kernels/*.py",
+        "3rdparty/tile_kernels/**/*.py",
+    ]),
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "modules",
     srcs = glob([
         "modules/*.py",
@@ -47,12 +57,14 @@ py_library(
     ],
     deps = [
         ":utils",
+        ":tile_kernels_mhc",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:moriep_wrapper",
         "//rtp_llm/models_py/distributed:collective_torch",
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
+        "@//:using_cuda13_x86": ["deep_gemm"],
         "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,
         "@//:using_rocm": [
@@ -61,13 +73,16 @@ py_library(
         ],
         "//conditions:default": [],
     }) + select({
+        "@//:using_cuda13_x86": ["flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashmla,
         "//conditions:default": [],
     }) + select({
+        "@//:using_cuda13_x86": rtp_kernel,
         "@//:using_cuda12_9_x86": rtp_kernel,
         "@//:using_cuda12_arm": rtp_kernel,
         "//conditions:default": [],
     }) + select({
+        "@//:using_cuda13_x86": [],
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
         "//conditions:default": [],

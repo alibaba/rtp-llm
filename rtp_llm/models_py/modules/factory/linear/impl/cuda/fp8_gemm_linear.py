@@ -130,7 +130,14 @@ class CudaFp8GEMMLinear(LinearBase):
             return True
         return False
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, input: torch.Tensor, out: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        # A caller-provided output is used to keep DSV4 CUDA-graph execution
+        # allocation-free. DeepGEMM supports this contract; the small-M
+        # FlashInfer path currently does not.
+        if out is not None:
+            return self._deepgemm_linear(input, out=out)
         if not self._should_use_flashinfer(input):
             return self._deepgemm_linear(input)
         return self._flashinfer_linear(input)

@@ -125,6 +125,38 @@ cc_library(
 )
 
 cc_library(
+    name = "dsv4_persistent_topk",
+    srcs = ["dsv4_persistent_topk.cu"],
+    hdrs = [
+        "dsv4_persistent_topk.h",
+        "dsv4_persistent_topk.cuh",
+    ],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "dsv4_top_k_per_row_prefill",
+    srcs = ["dsv4_top_k_per_row_prefill.cu"],
+    hdrs = [
+        "dsv4_top_k_per_row_prefill.h",
+        "dsv4_top_k_per_row_prefill.cuh",
+    ],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "mla_quant_kernel",
     srcs = ["mla_quant_kernel.cu"],
     hdrs = ["mla_quant_kernel.h"],

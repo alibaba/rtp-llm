@@ -1011,6 +1011,11 @@ class ModelConfig:
     moe_normalize_expert_scale: bool
     moe_style: int
     moe_topk_group: int
+    hc_mult: int
+    hc_sinkhorn_iters: int
+    hc_eps: float
+    swiglu_limit: float
+    num_hash_layers: int
     num_layers: int
     partial_rotary_factor: float
     position_ids_style: int

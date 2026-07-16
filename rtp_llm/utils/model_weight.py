@@ -1391,6 +1391,74 @@ class W:
     # rotary embedding cos sin cache
     rope_cos_sin_cache = "rotary_embedding.cos_sin_cache"
 
+    # DeepSeek-V4 dense attention, compressors and indexer.
+    v4_attn_norm = "v4.attn_norm.weight"
+    v4_attn_q_norm = "v4.attn.q_norm.weight"
+    v4_attn_kv_norm = "v4.attn.kv_norm.weight"
+    v4_attn_sink = "v4.attn.attn_sink"
+    v4_attn_wq_a_w = "v4.attn.wq_a.weight"
+    v4_attn_wq_a_s = "v4.attn.wq_a.scale"
+    v4_attn_wq_b_w = "v4.attn.wq_b.weight"
+    v4_attn_wq_b_s = "v4.attn.wq_b.scale"
+    v4_attn_wkv_w = "v4.attn.wkv.weight"
+    v4_attn_wkv_s = "v4.attn.wkv.scale"
+    v4_attn_wo_a_w = "v4.attn.wo_a.weight"
+    v4_attn_wo_a_s = "v4.attn.wo_a.scale"
+    v4_attn_wo_b_w = "v4.attn.wo_b.weight"
+    v4_attn_wo_b_s = "v4.attn.wo_b.scale"
+    v4_compressor_wkv = "v4.compressor.wkv.weight"
+    v4_compressor_wgate = "v4.compressor.wgate.weight"
+    v4_compressor_norm = "v4.compressor.norm.weight"
+    v4_compressor_ape = "v4.compressor.ape"
+    v4_indexer_wq_b_w = "v4.indexer.wq_b.weight"
+    v4_indexer_wq_b_s = "v4.indexer.wq_b.scale"
+    v4_indexer_weights_proj_w = "v4.indexer.weights_proj.weight"
+    v4_indexer_compressor_wkv = "v4.indexer.compressor.wkv.weight"
+    v4_indexer_compressor_wgate = "v4.indexer.compressor.wgate.weight"
+    v4_indexer_compressor_norm = "v4.indexer.compressor.norm.weight"
+    v4_indexer_compressor_ape = "v4.indexer.compressor.ape"
+
+    # DeepSeek-V4 mHC residuals and MoE.
+    v4_hc_attn_base = "v4.hc.attn_base"
+    v4_hc_attn_fn = "v4.hc.attn_fn"
+    v4_hc_attn_scale = "v4.hc.attn_scale"
+    v4_hc_ffn_base = "v4.hc.ffn_base"
+    v4_hc_ffn_fn = "v4.hc.ffn_fn"
+    v4_hc_ffn_scale = "v4.hc.ffn_scale"
+    v4_hc_head_base = "v4.hc.head_base"
+    v4_hc_head_fn = "v4.hc.head_fn"
+    v4_hc_head_scale = "v4.hc.head_scale"
+    v4_ffn_norm = "v4.ffn_norm.weight"
+    v4_router_w = "v4.router.weight"
+    v4_router_bias = "v4.router.bias"
+    v4_router_tid2eid = "v4.router.tid2eid"
+    v4_shared_w1_w = "v4.shared.w1.weight"
+    v4_shared_w1_s = "v4.shared.w1.scale"
+    v4_shared_w2_w = "v4.shared.w2.weight"
+    v4_shared_w2_s = "v4.shared.w2.scale"
+    v4_shared_w3_w = "v4.shared.w3.weight"
+    v4_shared_w3_s = "v4.shared.w3.scale"
+    v4_shared_w13_w = "v4.shared.w13.weight"
+    v4_shared_w13_s = "v4.shared.w13.scale"
+    v4_routed_w1_w = "v4.routed.w1.weight"
+    v4_routed_w1_s = "v4.routed.w1.scale"
+    v4_routed_w2_w = "v4.routed.w2.weight"
+    v4_routed_w2_s = "v4.routed.w2.scale"
+    v4_routed_w3_w = "v4.routed.w3.weight"
+    v4_routed_w3_s = "v4.routed.w3.scale"
+
+    # DeepSeek-V4 MTP-only tensors.
+    v4_mtp_enorm = "v4.mtp.enorm.weight"
+    v4_mtp_hnorm = "v4.mtp.hnorm.weight"
+    v4_mtp_norm = "v4.mtp.norm.weight"
+    v4_mtp_e_proj_w = "v4.mtp.e_proj.weight"
+    v4_mtp_e_proj_s = "v4.mtp.e_proj.scale"
+    v4_mtp_h_proj_w = "v4.mtp.h_proj.weight"
+    v4_mtp_h_proj_s = "v4.mtp.h_proj.scale"
+    v4_mtp_hc_head_fn = "v4.mtp.hc_head_fn"
+    v4_mtp_hc_head_base = "v4.mtp.hc_head_base"
+    v4_mtp_hc_head_scale = "v4.mtp.hc_head_scale"
+
     gpt_style_tp_strategy: Dict[str, Any] = {
         embedding: sp_neg1,
         lm_head: sp_0_pad8,
@@ -1508,6 +1576,68 @@ class W:
         mla_indexer_weights_proj_w: sp_id,
         mla_indexer_qb_w: sp_id,
         mla_indexer_k_w: sp_id,
+        v4_attn_norm: sp_id,
+        v4_attn_q_norm: sp_id,
+        v4_attn_kv_norm: sp_id,
+        v4_attn_sink: sp_id,
+        v4_attn_wq_a_w: sp_id,
+        v4_attn_wq_a_s: sp_id,
+        v4_attn_wq_b_w: sp_id,
+        v4_attn_wq_b_s: sp_id,
+        v4_attn_wkv_w: sp_id,
+        v4_attn_wkv_s: sp_id,
+        v4_attn_wo_a_w: sp_id,
+        v4_attn_wo_a_s: sp_id,
+        v4_attn_wo_b_w: sp_id,
+        v4_attn_wo_b_s: sp_id,
+        v4_compressor_wkv: sp_id,
+        v4_compressor_wgate: sp_id,
+        v4_compressor_norm: sp_id,
+        v4_compressor_ape: sp_id,
+        v4_indexer_wq_b_w: sp_id,
+        v4_indexer_wq_b_s: sp_id,
+        v4_indexer_weights_proj_w: sp_id,
+        v4_indexer_compressor_wkv: sp_id,
+        v4_indexer_compressor_wgate: sp_id,
+        v4_indexer_compressor_norm: sp_id,
+        v4_indexer_compressor_ape: sp_id,
+        v4_hc_attn_base: sp_id,
+        v4_hc_attn_fn: sp_id,
+        v4_hc_attn_scale: sp_id,
+        v4_hc_ffn_base: sp_id,
+        v4_hc_ffn_fn: sp_id,
+        v4_hc_ffn_scale: sp_id,
+        v4_hc_head_base: sp_id,
+        v4_hc_head_fn: sp_id,
+        v4_hc_head_scale: sp_id,
+        v4_ffn_norm: sp_id,
+        v4_router_w: sp_id,
+        v4_router_bias: sp_id,
+        v4_router_tid2eid: sp_id,
+        v4_shared_w1_w: sp_id,
+        v4_shared_w1_s: sp_id,
+        v4_shared_w2_w: sp_id,
+        v4_shared_w2_s: sp_id,
+        v4_shared_w3_w: sp_id,
+        v4_shared_w3_s: sp_id,
+        v4_shared_w13_w: sp_id,
+        v4_shared_w13_s: sp_id,
+        v4_routed_w1_w: sp_id,
+        v4_routed_w1_s: sp_id,
+        v4_routed_w2_w: sp_id,
+        v4_routed_w2_s: sp_id,
+        v4_routed_w3_w: sp_id,
+        v4_routed_w3_s: sp_id,
+        v4_mtp_enorm: sp_id,
+        v4_mtp_hnorm: sp_id,
+        v4_mtp_norm: sp_id,
+        v4_mtp_e_proj_w: sp_id,
+        v4_mtp_e_proj_s: sp_id,
+        v4_mtp_h_proj_w: sp_id,
+        v4_mtp_h_proj_s: sp_id,
+        v4_mtp_hc_head_fn: sp_id,
+        v4_mtp_hc_head_base: sp_id,
+        v4_mtp_hc_head_scale: sp_id,
     }
 
     weights_list = [
@@ -1559,6 +1689,12 @@ class CkptWeightInfo:
 
     def __repr__(self) -> str:
         return self.__str__()
+
+
+def is_v4_weight(src_weight_info) -> bool:
+    """Return whether a weight descriptor belongs to the DeepSeek-V4 namespace."""
+    name = getattr(src_weight_info, "name", None)
+    return isinstance(name, str) and name.startswith("v4.")
 
 
 class WeightStyle(Enum):

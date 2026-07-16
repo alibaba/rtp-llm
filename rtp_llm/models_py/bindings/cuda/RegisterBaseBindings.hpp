@@ -21,6 +21,8 @@
 #include "rtp_llm/models_py/bindings/cuda/FakeBalanceExpertOp.h"
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_top_k_per_row_prefill.h"
 
 using namespace rtp_llm;
 
@@ -216,6 +218,38 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("indices"),
                   py::arg("lengths"),
                   py::arg("row_starts") = py::none());
+
+    rtp_ops_m.def("fast_topk_v2_variable",
+                  &fast_topk_v2_variable,
+                  "Fast TopK v2 kernel with selectable TopK",
+                  py::arg("score"),
+                  py::arg("indices"),
+                  py::arg("lengths"),
+                  py::arg("row_starts"),
+                  py::arg("top_k"));
+
+    rtp_ops_m.def("dsv4_persistent_topk",
+                  &dsv4_persistent_topk,
+                  "DSv4 persistent radix-select TopK",
+                  py::arg("logits"),
+                  py::arg("lengths"),
+                  py::arg("output"),
+                  py::arg("workspace"),
+                  py::arg("k"),
+                  py::arg("max_seq_len"));
+
+    rtp_ops_m.def("dsv4_top_k_per_row_prefill",
+                  &dsv4_top_k_per_row_prefill,
+                  "Per-row TopK for DSv4 indexer prefill",
+                  py::arg("logits"),
+                  py::arg("row_starts"),
+                  py::arg("row_ends"),
+                  py::arg("indices_out"),
+                  py::arg("num_rows"),
+                  py::arg("stride0"),
+                  py::arg("stride1"),
+                  py::arg("top_k"),
+                  py::arg("force_radix_sort") = false);
 
     rtp_ops_m.def("fast_topk_transform_fused",
                   &fast_topk_transform_fused,
