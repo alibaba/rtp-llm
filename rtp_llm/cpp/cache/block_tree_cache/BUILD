@@ -164,6 +164,7 @@ cc_library(
         ":crc_dump_writer",
         ":device_block_pool",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:numa_memory_policy",
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:single_type_cache_manager",

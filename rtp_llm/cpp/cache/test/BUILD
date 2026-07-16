@@ -471,3 +471,18 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+cc_test(
+    name = "numa_memory_policy_test",
+    srcs = ["NumaMemoryPolicyTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:numa_memory_policy",
+        "//rtp_llm/cpp/cache/block_tree_cache",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
