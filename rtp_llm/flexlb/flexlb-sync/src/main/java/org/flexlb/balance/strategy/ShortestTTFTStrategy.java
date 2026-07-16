@@ -53,7 +53,6 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     private static final int SMALL_CLUSTER_SIZE = 3;
     private static final int MIN_CANDIDATE_COUNT = 2;
     private static final double CANDIDATE_PERCENTAGE = 0.3;
-    private static final double TTFT_THRESHOLD_PERCENTAGE = 0.1;
     private static final double STDDEV_THRESHOLD_FACTOR = 0.5;
 
     public ShortestTTFTStrategy(EngineWorkerStatus engineWorkerStatus,
@@ -334,7 +333,10 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         }
 
         long minTTFT = candidates.getFirst().ttft();
-        double threshold = calculateTTFTThreshold(candidates, minTTFT);
+        double threshold = calculateTTFTThreshold(
+                candidates,
+                minTTFT,
+                config.getShortestTtftSimilarityThresholdRatio());
 
         List<ScoredWorker> similarWorkers = filterSimilarWorkers(candidates, minTTFT, threshold);
 
@@ -501,7 +503,10 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param candidates Candidate worker list
      * @return TTFT threshold
      */
-    private double calculateTTFTThreshold(List<ScoredWorker> candidates, long minTTFT) {
+    private double calculateTTFTThreshold(
+            List<ScoredWorker> candidates,
+            long minTTFT,
+            double similarityThresholdRatio) {
         double avgTTFT = candidates.stream().mapToLong(ScoredWorker::ttft).average().orElse(0.0);
 
         double stdDev = Math.sqrt(
@@ -510,7 +515,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                         .mapToDouble(v -> Math.pow(v - avgTTFT, 2))
                         .average()
                         .orElse(0.0));
-        double percentageMinTTFT = minTTFT * TTFT_THRESHOLD_PERCENTAGE;
+        double percentageMinTTFT = minTTFT * similarityThresholdRatio;
         double factoredStdDev = stdDev * STDDEV_THRESHOLD_FACTOR;
         Logger.debug("Calculate TTFT threshold, minTTFT: {}, avgTTFT: {}, stdDev: {}, percentageMinTTFT: {}, factoredStdDev: {}",
                 minTTFT, avgTTFT, stdDev, percentageMinTTFT, factoredStdDev);

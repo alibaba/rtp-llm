@@ -80,6 +80,12 @@ public class FlexlbConfig {
     private int prefillCachePreferenceMinBlockGap = 2;
 
     /**
+     * Relative TTFT difference allowed when treating shortest-TTFT candidates as similar.
+     * A value of 0.2 allows candidates within 20% of the minimum estimated TTFT.
+     */
+    private double shortestTtftSimilarityThresholdRatio = 0.2;
+
+    /**
      * KV cache available threshold for DECODE role (percentage)
      * When Worker's KV cache usage is below this threshold, the Worker is considered available
      * Range: 1-100, default 90 means Worker is unavailable when usage exceeds 90%

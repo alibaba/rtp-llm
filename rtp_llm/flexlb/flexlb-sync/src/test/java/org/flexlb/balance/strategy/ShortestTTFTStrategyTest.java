@@ -153,7 +153,7 @@ class ShortestTTFTStrategyTest {
     void prefersCacheLeaderWithTwoBlockLeadWhenTtftIsSimilar() {
         FlexlbConfig config = cacheFocusedConfig();
         WorkerStatus shortestTtftWorker = createWorkerStatus("127.0.0.1", 0, 2128);
-        WorkerStatus cacheLeader = createWorkerStatus("127.0.0.2", 5000, 2128);
+        WorkerStatus cacheLeader = createWorkerStatus("127.0.0.2", 7000, 2128);
         WorkerStatus thirdWorker = createWorkerStatus("127.0.0.3", 1000, 2128);
 
         SelectionResult selection = select(
@@ -176,6 +176,7 @@ class ShortestTTFTStrategyTest {
                 .getShortestTtftDecisionByRole()
                 .get(RoleType.PREFILL);
         Assertions.assertNotNull(decision);
+        Assertions.assertEquals(3616.0, decision.similarTtftThreshold());
         Assertions.assertEquals(3, decision.workers().stream()
                 .filter(worker -> worker.topCandidate())
                 .count());
@@ -225,6 +226,7 @@ class ShortestTTFTStrategyTest {
         FlexlbConfig config = new FlexlbConfig();
         config.setPrefillCacheHitDiscount(1.0);
         config.setPrefillCachePreferenceMinBlockGap(2);
+        config.setShortestTtftSimilarityThresholdRatio(0.2);
         return config;
     }
 
