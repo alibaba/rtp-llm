@@ -1,4 +1,3 @@
-import glob
 import json
 import logging
 import os
@@ -40,7 +39,6 @@ class MagaServerManager(object):
         self._username = os.getenv("USER")
         self._env_args = env_args
         self._log_file = None
-        self._application_log_dir: Optional[str] = None
         self._device_ids = device_ids
         self._server_process = None
         self._role_name = role_name
@@ -73,18 +71,6 @@ class MagaServerManager(object):
     @property
     def log_file_path(self) -> Optional[str]:
         return self._log_file
-
-    @property
-    def application_log_file_paths(self) -> List[str]:
-        """Application logs created by rtp_llm.config.log_config.
-
-        process.log captures only the child process stdout/stderr. Python logging
-        writes main_<world_rank>.log under LOG_PATH, including rotated suffixes.
-        """
-        if self._application_log_dir is None:
-            return []
-        pattern = os.path.join(self._application_log_dir, "main_*.log*")
-        return sorted(glob.glob(pattern))
 
     @property
     def server_pid(self) -> Optional[int]:
@@ -195,11 +181,6 @@ class MagaServerManager(object):
 
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
         cwd_path = os.environ.get("MAGA_SERVER_WORK_DIR", bazel_outputs_dir)
-        # LOG_PATH is relative to the child process cwd, so this is where
-        # get_logging_config creates main_<world_rank>.log.
-        self._application_log_dir = os.path.abspath(
-            os.path.join(cwd_path, role_log_name)
-        )
         # 创建一个文件来存储子进程的日志
         self._log_file = (
             f"{bazel_outputs_dir}/{role_log_name}/{self._process_file_name}"
