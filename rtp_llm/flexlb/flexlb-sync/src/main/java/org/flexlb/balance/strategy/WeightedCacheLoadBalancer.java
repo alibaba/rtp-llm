@@ -96,7 +96,13 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
                     selectedWorker.getIp(),
                     prefixLength);
             // Update local task state
-            return buildServerStatus(selectedWorker, seqLen, prefixLength, roleType, balanceContext.getRequestId());
+            return buildServerStatus(
+                    selectedWorker,
+                    seqLen,
+                    prefixLength,
+                    roleType,
+                    balanceContext.getRequestId(),
+                    cacheMatchResult.source().name());
         }
 
         // Return failure if no suitable worker found
@@ -206,7 +212,13 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
                 .orElse(null);
     }
 
-    private ServerStatus buildServerStatus(WorkerStatus optimalWorker, long seqLen, long prefixLength, RoleType roleType, String requestId) {
+    private ServerStatus buildServerStatus(
+            WorkerStatus optimalWorker,
+            long seqLen,
+            long prefixLength,
+            RoleType roleType,
+            String requestId,
+            String cacheMatchSource) {
         ServerStatus result = new ServerStatus();
         try {
             TaskInfo taskInfo = new TaskInfo();
@@ -214,6 +226,8 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             taskInfo.setWaitingTime(0);
             taskInfo.setInputLength(seqLen);
             taskInfo.setPrefixLength(prefixLength);
+            taskInfo.setPredictedPrefixLength(prefixLength);
+            taskInfo.setCacheMatchSource(cacheMatchSource);
             taskInfo.setRequestId(requestId);
 
             // Update local task state

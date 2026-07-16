@@ -90,6 +90,7 @@ public class EngineStatusConverter {
             String requestId = taskInfoPB.getRequestId();
             taskInfo.setRequestId(requestId);
             taskInfo.setPrefixLength(taskInfoPB.getPrefixLength());
+            taskInfo.setPrefixLengthValid(taskInfoPB.getPrefixLengthValid());
             taskInfo.setInputLength(taskInfoPB.getInputLength());
             taskInfo.setWaitingTime(taskInfoPB.getWaitingTimeMs());
             taskInfo.setIterateCount(taskInfoPB.getIterateCount());

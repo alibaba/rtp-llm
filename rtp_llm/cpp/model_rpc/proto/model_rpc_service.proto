@@ -398,6 +398,8 @@ message TaskInfoPB {
     int64 end_time_ms = 7;
     int64 dp_rank = 8;
     bool is_waiting = 9;
+    // True only after the engine has resolved and prepared the cache hit.
+    bool prefix_length_valid = 10;
 }
 
 message UpdateWeightsRequestPB {

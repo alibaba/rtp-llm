@@ -12,6 +12,12 @@ public class TaskInfo {
     private String requestId;
     @JsonProperty("prefix_length")
     private long prefixLength;    // cache hit len
+    @JsonProperty("prefix_length_valid")
+    private boolean prefixLengthValid;
+    @JsonProperty("predicted_prefix_length")
+    private long predictedPrefixLength;
+    @JsonProperty("cache_match_source")
+    private String cacheMatchSource;
     @JsonProperty("prefill_time")
     private long prefillTime;
     @JsonProperty("input_length")

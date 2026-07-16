@@ -12,6 +12,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -229,6 +230,10 @@ class WeightedCacheLoadBalancerTest {
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertEquals("KVCM", context.getCacheMatchSource());
         Assertions.assertEquals(321, context.getCacheMatchQueryTimeUs());
+        TaskInfo selectedTask = worker.getLocalTaskMap().get("request-kvcm");
+        Assertions.assertNotNull(selectedTask);
+        Assertions.assertEquals(1024, selectedTask.getPredictedPrefixLength());
+        Assertions.assertEquals("KVCM", selectedTask.getCacheMatchSource());
         BalanceContext.CacheMatchSelection selection =
                 context.getCacheMatchSelectionByRole().get(RoleType.DECODE);
         Assertions.assertEquals("127.0.0.1", selection.selectedIp());

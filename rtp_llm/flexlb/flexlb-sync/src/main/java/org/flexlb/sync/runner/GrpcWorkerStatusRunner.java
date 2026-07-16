@@ -4,6 +4,7 @@ import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.pv.CacheHitComparisonPvLog;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.worker.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -12,9 +13,11 @@ import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.util.IdUtils;
+import org.flexlb.util.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
@@ -24,6 +27,7 @@ import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 public class GrpcWorkerStatusRunner implements Runnable {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
+    private static final Logger pvLogger = LoggerFactory.getLogger("pvLogger");
 
     private final String ipPort;
     private final String modelName;
@@ -134,7 +138,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 Map<String, TaskInfo> waitingTaskInfo = newWorkerStatus.getWaitingTaskInfo();
                 Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
                 Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
-                workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
+                logCacheHitComparisons(workerStatus.updateTaskStates(
+                        waitingTaskInfo, runningTaskInfo, finishedTaskInfo));
 
                 // Report success even when version is not updated
                 engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
@@ -162,7 +167,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.setRunningTaskList(runningTaskInfo);
 
             // Update local task state (including checking lost, updating running, and cleaning completed)
-            workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
+            logCacheHitComparisons(workerStatus.updateTaskStates(
+                    waitingTaskInfo, runningTaskInfo, finishedTaskInfo));
 
             // Correct running queue total wait time
             workerStatus.updateRunningQueueTime();
@@ -192,6 +198,15 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 workerStatus.getRole(),
                 workerStatus.getRunningQueueTime(),
                 System.nanoTime() / 1000 - startTime);
+    }
+
+    private void logCacheHitComparisons(List<CacheHitComparisonPvLog> comparisons) {
+        for (CacheHitComparisonPvLog comparison : comparisons) {
+            String json = JsonUtils.toStringOrEmpty(comparison);
+            if (!json.isEmpty()) {
+                pvLogger.info(json);
+            }
+        }
     }
 
     private void updateCacheStatus(CacheStatus cacheStatus) {

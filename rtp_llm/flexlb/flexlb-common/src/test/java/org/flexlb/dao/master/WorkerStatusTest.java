@@ -364,6 +364,7 @@ class WorkerStatusTest {
             TaskInfo waitingTask = new TaskInfo();
             waitingTask.setRequestId(REQUEST_ID);
             waitingTask.setPrefixLength(50);
+            waitingTask.setPrefixLengthValid(true);
             waitingTask.setInputLength(200);
             waitingTask.setWaitingTime(100);
             waitingTask.setDpRank(1);
@@ -379,6 +380,133 @@ class WorkerStatusTest {
             assertEquals(200, updated.getInputLength());
             assertEquals(100, updated.getWaitingTime());
             assertEquals(1, updated.getDpRank());
+        }
+
+        @Test
+        @DisplayName("Waiting task keeps KVCM prediction until engine cache hit is valid")
+        void waitingTaskWithInvalidPrefix_shouldKeepPrediction() {
+            TaskInfo localTask = new TaskInfo();
+            localTask.setRequestId(REQUEST_ID);
+            localTask.setInputLength(200);
+            localTask.setPrefixLength(100);
+            localTask.setPredictedPrefixLength(100);
+            localTask.setCacheMatchSource("KVCM");
+            workerStatus.putLocalTask(REQUEST_ID, localTask);
+
+            TaskInfo waitingTask = new TaskInfo();
+            waitingTask.setRequestId(REQUEST_ID);
+            waitingTask.setInputLength(200);
+            waitingTask.setPrefixLength(0);
+            waitingTask.setPrefixLengthValid(false);
+
+            var comparisons = workerStatus.updateTaskStates(
+                    Map.of(REQUEST_ID, waitingTask), Map.of(), Map.of());
+
+            TaskInfo updated = workerStatus.getLocalTaskMap().get(REQUEST_ID);
+            assertEquals(100, updated.getPrefixLength());
+            assertFalse(updated.isPrefixLengthValid());
+            assertTrue(comparisons.isEmpty());
+        }
+
+        @Test
+        @DisplayName("Valid engine cache hit corrects queue estimate and produces one comparison")
+        void validEnginePrefix_shouldCorrectQueueAndProduceComparisonOnce() {
+            workerStatus.setIp("127.0.0.1");
+            workerStatus.setPort(8080);
+            workerStatus.setGroup("default");
+
+            TaskInfo localTask = new TaskInfo();
+            localTask.setRequestId(REQUEST_ID);
+            localTask.setInputLength(200);
+            localTask.setPrefixLength(100);
+            localTask.setPredictedPrefixLength(100);
+            localTask.setCacheMatchSource("KVCM");
+            workerStatus.putLocalTask(REQUEST_ID, localTask);
+            long predictedQueueTime = TaskInfo.estimatePrefillTimeMs(200, 100);
+
+            TaskInfo runningTask = new TaskInfo();
+            runningTask.setRequestId(REQUEST_ID);
+            runningTask.setInputLength(200);
+            runningTask.setPrefixLength(120);
+            runningTask.setPrefixLengthValid(true);
+
+            var firstComparisons = workerStatus.updateTaskStates(
+                    Map.of(), Map.of(REQUEST_ID, runningTask), Map.of());
+
+            TaskInfo updated = workerStatus.getLocalTaskMap().get(REQUEST_ID);
+            assertEquals(120, updated.getPrefixLength());
+            assertTrue(updated.isPrefixLengthValid());
+            assertEquals(TaskInfo.estimatePrefillTimeMs(200, 120),
+                    workerStatus.getRunningQueueTime().get());
+            assertTrue(workerStatus.getRunningQueueTime().get() < predictedQueueTime);
+            assertEquals(1, firstComparisons.size());
+            assertEquals(100, firstComparisons.getFirst().predictedHitTokens());
+            assertEquals(120, firstComparisons.getFirst().actualHitTokens());
+            assertEquals(20, firstComparisons.getFirst().deltaHitTokens());
+
+            var repeatedComparisons = workerStatus.updateTaskStates(
+                    Map.of(), Map.of(REQUEST_ID, runningTask), Map.of());
+            assertTrue(repeatedComparisons.isEmpty());
+        }
+
+        @Test
+        @DisplayName("Lower actual cache hit increases the queue estimate")
+        void lowerActualPrefix_shouldIncreaseQueueEstimate() {
+            TaskInfo localTask = new TaskInfo();
+            localTask.setRequestId(REQUEST_ID);
+            localTask.setInputLength(200);
+            localTask.setPrefixLength(120);
+            localTask.setPredictedPrefixLength(120);
+            workerStatus.putLocalTask(REQUEST_ID, localTask);
+
+            TaskInfo runningTask = new TaskInfo();
+            runningTask.setRequestId(REQUEST_ID);
+            runningTask.setInputLength(200);
+            runningTask.setPrefixLength(100);
+            runningTask.setPrefixLengthValid(true);
+
+            workerStatus.updateTaskStates(
+                    Map.of(), Map.of(REQUEST_ID, runningTask), Map.of());
+
+            assertEquals(TaskInfo.estimatePrefillTimeMs(200, 100),
+                    workerStatus.getRunningQueueTime().get());
+        }
+
+        @Test
+        @DisplayName("Cache hit is compared again after a preempted task prepares KV again")
+        void preemptedTask_shouldCompareCacheHitAfterKvIsReadyAgain() {
+            TaskInfo localTask = new TaskInfo();
+            localTask.setRequestId(REQUEST_ID);
+            localTask.setInputLength(200);
+            localTask.setPrefixLength(100);
+            localTask.setPredictedPrefixLength(100);
+            workerStatus.putLocalTask(REQUEST_ID, localTask);
+
+            TaskInfo firstRunningTask = new TaskInfo();
+            firstRunningTask.setInputLength(200);
+            firstRunningTask.setPrefixLength(120);
+            firstRunningTask.setPrefixLengthValid(true);
+            assertEquals(1, workerStatus.updateTaskStates(
+                    Map.of(), Map.of(REQUEST_ID, firstRunningTask), Map.of()).size());
+
+            TaskInfo preemptedWaitingTask = new TaskInfo();
+            preemptedWaitingTask.setInputLength(200);
+            workerStatus.updateTaskStates(
+                    Map.of(REQUEST_ID, preemptedWaitingTask), Map.of(), Map.of());
+            assertFalse(localTask.isPrefixLengthValid());
+            assertEquals(100, localTask.getPrefixLength());
+
+            TaskInfo resumedRunningTask = new TaskInfo();
+            resumedRunningTask.setInputLength(200);
+            resumedRunningTask.setPrefixLength(80);
+            resumedRunningTask.setPrefixLengthValid(true);
+            var resumedComparisons = workerStatus.updateTaskStates(
+                    Map.of(), Map.of(REQUEST_ID, resumedRunningTask), Map.of());
+
+            assertEquals(1, resumedComparisons.size());
+            assertEquals(80, resumedComparisons.getFirst().actualHitTokens());
+            assertEquals(TaskInfo.estimatePrefillTimeMs(200, 80),
+                    workerStatus.getRunningQueueTime().get());
         }
 
         @Test
@@ -434,6 +562,34 @@ class WorkerStatusTest {
         }
 
         @Test
+        @DisplayName("Fast finished task compares and corrects cache hit before removal")
+        void fastFinishedTask_shouldCompareCacheHitBeforeRemoval() {
+            TaskInfo localTask = new TaskInfo();
+            localTask.setRequestId(REQUEST_ID);
+            localTask.setInputLength(200);
+            localTask.setPrefixLength(100);
+            localTask.setPredictedPrefixLength(100);
+            localTask.setCacheMatchSource("KVCM");
+            workerStatus.putLocalTask(REQUEST_ID, localTask);
+
+            TaskInfo finishedTask = new TaskInfo();
+            finishedTask.setRequestId(REQUEST_ID);
+            finishedTask.setInputLength(200);
+            finishedTask.setPrefixLength(120);
+            finishedTask.setPrefixLengthValid(true);
+
+            var comparisons = workerStatus.updateTaskStates(
+                    Map.of(), Map.of(), Map.of(REQUEST_ID, finishedTask));
+
+            assertNull(workerStatus.getLocalTaskMap().get(REQUEST_ID));
+            assertEquals(0, workerStatus.getRunningQueueTime().get());
+            assertEquals(1, comparisons.size());
+            assertEquals("finished", comparisons.getFirst().taskState());
+            assertEquals(100, comparisons.getFirst().predictedHitTokens());
+            assertEquals(120, comparisons.getFirst().actualHitTokens());
+        }
+
+        @Test
         @DisplayName("Task in running list should become RUNNING and sync fields")
         void taskInRunningList_shouldBecomeRunningAndSyncFields() {
             TaskInfo localTask = new TaskInfo();
@@ -443,6 +599,7 @@ class WorkerStatusTest {
             TaskInfo runningTask = new TaskInfo();
             runningTask.setRequestId(REQUEST_ID);
             runningTask.setPrefixLength(100);
+            runningTask.setPrefixLengthValid(true);
             runningTask.setInputLength(200);
             runningTask.setPrefillTime(50);
             runningTask.setIterateCount(2);

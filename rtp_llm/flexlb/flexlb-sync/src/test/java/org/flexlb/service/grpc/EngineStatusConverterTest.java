@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EngineStatusConverterTest {
 
@@ -34,6 +35,24 @@ class EngineStatusConverterTest {
                 EngineStatusConverter.convertToWorkerStatusResponse(workerStatus);
 
         assertEquals(requestId, response.getFinishedTaskInfo().get(requestId).getRequestId());
+    }
+
+    @Test
+    void preservesPrefixLengthValidityFromWorkerStatus() {
+        EngineRpcService.TaskInfoPB runningTask = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId("request-1")
+                .setPrefixLength(128)
+                .setPrefixLengthValid(true)
+                .build();
+        EngineRpcService.WorkerStatusPB workerStatus = EngineRpcService.WorkerStatusPB.newBuilder()
+                .addRunningTaskInfo(runningTask)
+                .build();
+
+        WorkerStatusResponse response =
+                EngineStatusConverter.convertToWorkerStatusResponse(workerStatus);
+
+        assertEquals(128, response.getRunningTaskInfo().get("request-1").getPrefixLength());
+        assertTrue(response.getRunningTaskInfo().get("request-1").isPrefixLengthValid());
     }
 
     @Test

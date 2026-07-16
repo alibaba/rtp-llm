@@ -111,6 +111,10 @@ class ShortestTTFTStrategyTest {
         Assertions.assertEquals("KVCM", balanceContext.getCacheMatchSource());
         Assertions.assertEquals(123, balanceContext.getCacheMatchQueryTimeUs());
         Assertions.assertEquals(1, balanceContext.getCacheMatchQueryCount());
+        TaskInfo selectedTask = workerStatus1.getLocalTaskMap().get("request-12345");
+        Assertions.assertNotNull(selectedTask);
+        Assertions.assertEquals(768, selectedTask.getPredictedPrefixLength());
+        Assertions.assertEquals("KVCM", selectedTask.getCacheMatchSource());
         BalanceContext.CacheMatchSelection selection =
                 balanceContext.getCacheMatchSelectionByRole().get(RoleType.PREFILL);
         Assertions.assertEquals("127.0.0.2", selection.selectedIp());

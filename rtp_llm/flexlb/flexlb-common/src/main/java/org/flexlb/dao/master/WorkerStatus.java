@@ -3,12 +3,16 @@ package org.flexlb.dao.master;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.MapUtils;
+import org.flexlb.dao.pv.CacheHitComparisonPvLog;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskStateEnum;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.concurrent.ConcurrentHashMap;
@@ -108,7 +112,11 @@ public class WorkerStatus {
      * Update task states
      * Check for lost tasks, update running/waiting tasks, and clean up finished tasks
      */
-    public void updateTaskStates(Map<String, TaskInfo> waitingTaskInfo, Map<String, TaskInfo> runningTaskInfo, Map<String, TaskInfo> finishedTaskInfo) {
+    public List<CacheHitComparisonPvLog> updateTaskStates(
+            Map<String, TaskInfo> waitingTaskInfo,
+            Map<String, TaskInfo> runningTaskInfo,
+            Map<String, TaskInfo> finishedTaskInfo) {
+        List<CacheHitComparisonPvLog> cacheHitComparisons = Collections.emptyList();
         Iterator<Map.Entry<String, TaskInfo>> iterator = localTaskMap.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<String, TaskInfo> entry = iterator.next();
@@ -122,9 +130,13 @@ public class WorkerStatus {
                     Logger.debug("Task {} first confirmed by worker", requestId);
                 }
                 localTask.updateTaskState(TaskStateEnum.FINISHED);
+                updateTaskInputLength(localTask, finishedTask);
+                cacheHitComparisons = appendCacheHitComparison(
+                        cacheHitComparisons,
+                        applyActualCacheHit(localTask, finishedTask, "finished"));
 
                 if (RoleType.PREFILL.matches(role) || RoleType.PDFUSION.matches(role)) {
-                    long delta = finishedTask.estimatePrefillTime();
+                    long delta = localTask.estimatePrefillTime();
                     safeDecrementQueueTime(runningQueueTime, delta);
                 }
                 Logger.debug("Task {} finished and removed", requestId);
@@ -144,9 +156,11 @@ public class WorkerStatus {
                     localTask.updateTaskState(TaskStateEnum.RUNNING);
                 }
 
-                localTask.setPrefixLength(runningTask.getPrefixLength());
+                updateTaskInputLength(localTask, runningTask);
+                cacheHitComparisons = appendCacheHitComparison(
+                        cacheHitComparisons,
+                        applyActualCacheHit(localTask, runningTask, "running"));
                 localTask.setPrefillTime(runningTask.getPrefillTime());
-                localTask.setInputLength(runningTask.getInputLength());
                 localTask.setWaitingTime(runningTask.getWaitingTime());
                 localTask.setIterateCount(runningTask.getIterateCount());
                 localTask.setEndTimeMs(runningTask.getEndTimeMs());
@@ -164,8 +178,10 @@ public class WorkerStatus {
                     Logger.debug("Task {} first confirmed by worker (waiting)", requestId);
                 }
 
-                localTask.setPrefixLength(waitingTask.getPrefixLength());
-                localTask.setInputLength(waitingTask.getInputLength());
+                updateTaskInputLength(localTask, waitingTask);
+                cacheHitComparisons = appendCacheHitComparison(
+                        cacheHitComparisons,
+                        applyActualCacheHit(localTask, waitingTask, "waiting"));
                 localTask.setWaitingTime(waitingTask.getWaitingTime());
                 localTask.setDpRank(waitingTask.getDpRank());
 
@@ -177,6 +193,80 @@ public class WorkerStatus {
                 logger.warn("Task {} marked as LOST - not in waiting, running or finished list", requestId);
             }
         }
+        return cacheHitComparisons;
+    }
+
+    private void updateTaskInputLength(TaskInfo localTask, TaskInfo engineTask) {
+        if (engineTask.getInputLength() > 0) {
+            localTask.setInputLength(engineTask.getInputLength());
+        }
+    }
+
+    private List<CacheHitComparisonPvLog> appendCacheHitComparison(
+            List<CacheHitComparisonPvLog> comparisons,
+            CacheHitComparisonPvLog comparison) {
+        if (comparison == null) {
+            return comparisons;
+        }
+        if (comparisons.isEmpty()) {
+            comparisons = new ArrayList<>();
+        }
+        comparisons.add(comparison);
+        return comparisons;
+    }
+
+    private CacheHitComparisonPvLog applyActualCacheHit(
+            TaskInfo localTask,
+            TaskInfo engineTask,
+            String taskState) {
+        if (!engineTask.isPrefixLengthValid()) {
+            if (localTask.isPrefixLengthValid()) {
+                long previousPrefillTime = localTask.estimatePrefillTime();
+                localTask.setPrefixLength(localTask.getPredictedPrefixLength());
+                localTask.setPrefixLengthValid(false);
+                correctRunningQueueTime(localTask.estimatePrefillTime() - previousPrefillTime);
+            }
+            return null;
+        }
+
+        boolean cacheHitBecameValid = !localTask.isPrefixLengthValid();
+        long previousPrefillTime = localTask.estimatePrefillTime();
+        localTask.setPrefixLength(engineTask.getPrefixLength());
+        localTask.setPrefixLengthValid(true);
+        correctRunningQueueTime(localTask.estimatePrefillTime() - previousPrefillTime);
+
+        if (!cacheHitBecameValid) {
+            return null;
+        }
+
+        long predictedHitTokens = localTask.getPredictedPrefixLength();
+        long actualHitTokens = localTask.getPrefixLength();
+        long inputTokens = localTask.getInputLength();
+        long blockSize = cacheStatus == null ? 0 : cacheStatus.getBlockSize();
+        return new CacheHitComparisonPvLog(
+                "cache_hit_comparison",
+                localTask.getRequestId(),
+                localTask.getCacheMatchSource(),
+                role,
+                group,
+                ip,
+                port,
+                taskState,
+                inputTokens,
+                blockSize,
+                predictedHitTokens,
+                actualHitTokens,
+                actualHitTokens - predictedHitTokens);
+    }
+
+    private void correctRunningQueueTime(long correction) {
+        if (correction == 0
+                || (!RoleType.PREFILL.matches(role) && !RoleType.PDFUSION.matches(role))) {
+            return;
+        }
+        runningQueueTime.accumulateAndGet(
+                correction,
+                (current, change) -> Math.max(0, current + change));
     }
 
     /**
@@ -195,7 +285,8 @@ public class WorkerStatus {
             rectifiedEstimateRunningTime += taskInfo.estimatePrefillTime();
         }
         if (RoleType.PREFILL.matches(role) || RoleType.PDFUSION.matches(role)) {
-            // Only update when rectified time is less than estimated time, because engine layer returned running_list may include queuing tasks where prefixLength=0
+            // Actual cache-hit corrections are applied incrementally in both directions.
+            // This reconciliation only repairs an overestimated aggregate.
             if (runningQueueTime.get() > rectifiedEstimateRunningTime) {
                 runningQueueTime.getAndSet(rectifiedEstimateRunningTime);
             }

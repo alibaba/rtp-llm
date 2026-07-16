@@ -223,7 +223,11 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         logWorkerSelection(selectedWorker, roleType);
         reportCacheHitMetrics(roleType, workerStatus.getIp(), selectedWorker.hitCacheTokens(), seqLen);
 
-        TaskInfo task = createTaskInfo(requestId, balanceContext.getRequest().getSeqLen(), selectedWorker.hitCacheTokens());
+        TaskInfo task = createTaskInfo(
+                requestId,
+                balanceContext.getRequest().getSeqLen(),
+                selectedWorker.hitCacheTokens(),
+                balanceContext.getCacheMatchSource());
         workerStatus.putLocalTask(requestId, task);
 
         return buildServerStatus(selectedWorker, roleType, requestId);
@@ -266,11 +270,17 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param prefixLength Prefix length
      * @return Task information
      */
-    private TaskInfo createTaskInfo(String requestId, long inputLength, long prefixLength) {
+    private TaskInfo createTaskInfo(
+            String requestId,
+            long inputLength,
+            long prefixLength,
+            String cacheMatchSource) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
         task.setInputLength(inputLength);
         task.setPrefixLength(prefixLength);
+        task.setPredictedPrefixLength(prefixLength);
+        task.setCacheMatchSource(cacheMatchSource);
         return task;
     }
 
