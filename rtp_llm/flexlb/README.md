@@ -16,6 +16,7 @@ FlexLB is a high-performance, intelligent load balancer specifically designed fo
 - **gRPC Support**: Native gRPC client implementation for backend services
 - **Metrics & Monitoring**: Prometheus metrics integration
 - **Master Election**: ZooKeeper-based master election for high availability
+- **Dispatcher Mode** (opt-in): Exposes `/dispatcher/*` on the master listener to split large batch requests across the FE pool, merging sub-batch responses with partial-failure semantics. Small or non-batch requests are passthrough-forwarded to one FE.
 
 ## Architecture
 
@@ -147,6 +148,7 @@ FlexLB supports various configuration options through environment variables and 
 - **Load Balancing Strategy**: Configure through `FLEXLB_CONFIG`
 - **Backend Services**: Configure through `MODEL_SERVICE_CONFIG`
 - **ZooKeeper Settings**: Configure through `FLEXLB_SYNC_CONSISTENCY_CONFIG`
+- **Dispatcher Mode**: Configure through `DISPATCH_CONFIG` (opt-in). When enabled, FlexLB exposes `/dispatcher/*` to split batch requests across the FE pool and merge with partial-failure semantics. See `CLAUDE.md` for the full reference (endpoint registry, failure shapes, timeouts).
 
 ## Monitoring
 

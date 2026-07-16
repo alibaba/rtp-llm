@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.springframework.http.MediaType;
@@ -23,9 +24,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.flexlb.dao.loadbalance.StrategyErrorType.QUEUE_FULL;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * FlexLB queue stress test
