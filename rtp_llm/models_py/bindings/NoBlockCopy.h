@@ -50,8 +50,10 @@ struct StagedMemoryCopyParams {
     size_t                                   host_bytes = 0;
     std::vector<StagedMemoryCopyHostSegment> host_segments;
     std::vector<StagedMemoryCopyTile>        tiles;
-    int                                      device_index = -1;
-    StagedMemoryCopyDirection                direction    = StagedMemoryCopyDirection::H2D;
+    bool                                     direct_pinned_host_segments = false;
+    int                                      device_index                = -1;
+    int                                      sm_copy_block_num           = 0;
+    StagedMemoryCopyDirection                direction                   = StagedMemoryCopyDirection::H2D;
 };
 
 struct StagedMemoryCopyScratch {
@@ -79,6 +81,8 @@ bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params);
 
 // Stages compact host payload in GPU memory, then uses one SM gather/scatter kernel.
 // host_segments may describe non-contiguous host blocks; they are packed/unpacked on CPU.
+// For H2D, direct_pinned_host_segments transfers already-pinned segments directly into device staging, avoiding an
+// extra host-to-host packing pass. sm_copy_block_num limits the final scatter grid (0 uses one CUDA block per tile).
 // scratch is optional; passing one lets callers reuse pinned host staging and device metadata buffers.
 // H2D: compact host payload -> GPU staging -> tile.gpu by tile.host_offset.
 // D2H: tile.gpu -> GPU staging by tile.host_offset -> compact host payload.
