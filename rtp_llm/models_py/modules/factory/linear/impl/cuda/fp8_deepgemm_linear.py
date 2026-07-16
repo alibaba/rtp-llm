@@ -16,6 +16,7 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.modules.factory.linear import LinearBase
+from rtp_llm.models_py.utils.arch import is_sm12x
 from rtp_llm.ops import HWKernelConfig
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,12 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         if weight.dtype not in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
             return False
 
+        # DeepGEMM 2.1.x wheel ships only sm_90/sm_100 cubins; sm_12x consumer
+        # Blackwell would hit cudaErrorNoKernelImageForDevice. Defer to
+        # CudaFp8VllmBlockwiseLinear for sm_12x PER_BLOCK path.
+        if is_sm12x():
+            return False
+
         # Check quantization method - handle all other FP8 methods
         quant_method = quant_config.get_method()
         return quant_method == "FP8_PER_BLOCK"
@@ -58,9 +65,11 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         bias: Optional[torch.Tensor] = None,
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
+        activation_type: Optional[str] = None,
     ):
         super().__init__(
-            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
+            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2,
+            activation_type,
         )
         # Initialize parameters
         self.weight = weight

@@ -8,6 +8,15 @@ sm100_cuda_copts = copts() + cuda_default_copts_without_arch() + [
     '--cuda-include-ptx=sm_100a', '--cuda-gpu-arch=sm_100a',
 ]
 
+sm120_cuda_copts = select({
+    "@//:using_cuda12_9_x86": [
+        '--cuda-include-ptx=sm_120', '--cuda-gpu-arch=sm_120',
+        '--cuda-include-ptx=sm_120a', '--cuda-gpu-arch=sm_120a',
+        "-DCUTLASS_ARCH_MMA_SM120_SUPPORTED",
+    ],
+    "//conditions:default": [],
+})
+
 cuda_deps = [
     "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
     ":cuda_utils_common",
@@ -88,7 +97,7 @@ cc_library(
     ] + torch_deps(),
     copts = sm100_cuda_copts + [
         "-DCUTLASS_ARCH_MMA_SM100_SUPPORTED",
-    ],
+    ] + sm120_cuda_copts,
     visibility = ["//visibility:public"],
 )
 

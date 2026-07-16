@@ -48,9 +48,11 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
         )
+        from rtp_llm.models_py.utils.arch import is_sm12x
 
         resolver = MoeConfigResolver()
         checker.check(get_sm()[0] >= 9)
+        checker.check(not is_sm12x())
         checker.check(resolver.is_ep_enabled(config))
         checker.check(resolver.use_low_latency(config))
         checker.check(DeepEPWrapper.supported())

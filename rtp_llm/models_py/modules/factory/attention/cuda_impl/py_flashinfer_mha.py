@@ -14,7 +14,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
 )
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_sm_100
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_sm10x
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
     check_attention_inputs,
 )
@@ -87,6 +87,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
         else:
             self.kv_datatype = self.datatype
         self.max_seq_len = attn_configs.max_seq_len
+        self.is_causal = attn_configs.is_causal
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
         self.prefill_cuda_graph_copy_params = None
@@ -210,7 +211,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.local_kv_head_num,
             self.head_dim_qk,
             self.page_size,
-            causal=True,
+            causal=self.is_causal,
             q_data_type=self.datatype,
             kv_data_type=self.kv_datatype,
         )
@@ -346,6 +347,7 @@ class PyFlashinferPrefillAttnOp(object):
             backend=backend,
         )
         self.datatype = attn_configs.dtype
+        self.is_causal = attn_configs.is_causal
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
     def __del__(self):
@@ -365,11 +367,17 @@ class PyFlashinferPrefillAttnOp(object):
         batch_size = attn_inputs.input_lengths.size(0)
         cu_seqlens = attn_inputs.cu_seqlens_device[: batch_size + 1]
 
+        # Encoder-only models (BERT) have no paged kv cache; fill_params
+        # pybind requires a Tensor, so substitute an empty int32 tensor.
+        kv_block_id_host = attn_inputs.kv_cache_kernel_block_id
+        if kv_block_id_host is None:
+            kv_block_id_host = torch.empty(0, dtype=torch.int32)
+
         self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id,
+            kv_block_id_host,
             self.page_size,
         )
 
@@ -380,7 +388,7 @@ class PyFlashinferPrefillAttnOp(object):
             self.local_kv_head_num,
             self.head_dim_qk,
             self.head_dim_vo,
-            causal=True,
+            causal=self.is_causal,
             q_data_type=get_scalar_type(attn_inputs.dtype),
         )
         return self.fmha_params
@@ -569,12 +577,14 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         """Check if paged prefill implementation is supported.
 
         Returns True if:
-        1. Not running on SM 10.0 (Blackwell) architecture
+        1. Not running on SM10x datacenter Blackwell, where TRTLLMGen is preferred.
+           SM12x consumer Blackwell keeps this FlashInfer paged fallback because
+           TRTLLMGen/XQA do not have sm_120a support in this build.
         2. The underlying paged FMHA op supports the inputs
         3. MhaRotaryEmbeddingOp supports the inputs
         """
         return (
-            not is_sm_100()
+            not is_sm10x()
             and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
             and attn_configs.rope_config.style != RopeStyle.Mrope
         )
@@ -629,14 +639,19 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
         """Check if ragged prefill implementation is supported.
 
         Returns True if:
-        1. Not running on SM 10.0 (Blackwell) architecture
-        2. The underlying ragged FMHA op supports the inputs
+        1. The underlying ragged FMHA op supports the inputs
            (requires prefix_lengths to be empty or zero)
-        3. MhaRotaryEmbeddingOp supports the inputs
+        2. MhaRotaryEmbeddingOp supports the inputs
+        3. Mrope is not used
+
+        Note: Unlike the paged variant, ragged prefill is kept enabled on
+        Blackwell: TRT-LLM Gen prefill requires a paged kv cache and
+        therefore does not cover BERT-style encoder-only inputs that lack
+        one. Without this fallback, sm_120 has no usable prefill impl for
+        such cases.
         """
         return (
-            not is_sm_100()
-            and PyFlashinferPrefillAttnOp.support(attn_inputs)
+            PyFlashinferPrefillAttnOp.support(attn_inputs)
             and attn_configs.rope_config.style != RopeStyle.Mrope
         )
 
@@ -682,13 +697,14 @@ class PyFlashinferDecodeAttnOp(object):
             return torch.float8_e4m3fn
         return get_scalar_type(attn_inputs.dtype)
 
-    def _requires_fa2_cuda_graph_replan(self) -> bool:
-        # FlashInfer BatchDecode routes tensor-core decode through fa2 BatchPrefill.
-        # fa3 prefill paths do not need this replay-time plan refresh.
-        return self.use_tensor_core
+    def _requires_cuda_graph_replan(self) -> bool:
+        # FlashInfer plan_info is derived from runtime page tables/kv lengths.
+        # CUDA graph replay keeps wrapper buffer addresses fixed, but their
+        # contents and derived plan metadata must be refreshed before replay.
+        return True
 
     def _plan_decode_wrapper(self, attn_inputs: PyAttentionInputs) -> None:
-        if self._requires_fa2_cuda_graph_replan():
+        if self.use_tensor_core:
             page_indptr = self.fmha_params.decode_page_indptr_h
             page_indice = self.fmha_params.page_indice_h
             last_page_len = self.fmha_params.paged_kv_last_page_len_h
@@ -764,7 +780,7 @@ class PyFlashinferDecodeAttnOp(object):
             self.seq_size_per_block,
             forbid_realloc=True,
         )
-        if self._requires_fa2_cuda_graph_replan():
+        if self._requires_cuda_graph_replan():
             self._plan_decode_wrapper(attn_inputs)
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
