@@ -536,6 +536,10 @@ class ModelDeployWeightInfo:
                 for ckpt_weight in getattr(component, "weights", []) or []:
                     if ckpt_weight.name:
                         tensor_names.add(ckpt_weight.name)
+                for overrides in getattr(component, "expert_key_overrides", {}).values():
+                    for ow in overrides:
+                        if ow.name:
+                            tensor_names.add(ow.name)
                 # QuantWeight.get_components() returns [self] without recursing
                 # into sub_weights, so recurse manually to reach nested weights.
                 if (

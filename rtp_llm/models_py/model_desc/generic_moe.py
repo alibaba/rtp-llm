@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Dict, Optional
 
 import torch
@@ -69,6 +70,31 @@ class GenericMoeLayer(nn.Module):
             )
         else:
             self.fake_balance_expert = None
+        self.add_shared_expert = config.moe_style == 2
+        self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
+        self.ep_size = parallelism_config.ep_size
+
+        # Detect shared expert fusion: the weight loader appends the shared
+        # expert as expert #N, making moe_w1.shape[0] == expert_num + 1.
+        # Exclude EPLB redundant experts (phy_exp_num > expert_num) which
+        # also increase shape[0] but are not shared expert fusion.
+        moe_w1 = weights.get(W.moe_w1, None)
+        num_loaded_experts = moe_w1.shape[0] if moe_w1 is not None else 0
+        phy_exp_num = config.eplb_config.phy_exp_num(config.expert_num)
+        is_tp_only = (
+            self.ep_size == 1
+            and parallelism_config.dp_size == 1
+            and self.ffn_tp_size == parallelism_config.get_attn_tp_size()
+        )
+        self.use_fused_shared_expert = (
+            self.add_shared_expert
+            and is_tp_only
+            and num_loaded_experts > config.expert_num
+            and phy_exp_num == config.expert_num
+        )
+        if self.use_fused_shared_expert:
+            self.fused_shared_expert_id = config.expert_num
+
         config_adapter = MoEConfigAdapter(
             model_config=config,
             parallelism_config=parallelism_config,
@@ -76,6 +102,13 @@ class GenericMoeLayer(nn.Module):
             quant_config=quant_config,
             enable_cuda_graph=enable_cuda_graph,
         )
+        if self.use_fused_shared_expert:
+            config_adapter.expert_num = num_loaded_experts
+            logging.info(
+                "shared expert fused as expert %d (total %d experts in moe_w1)",
+                self.fused_shared_expert_id,
+                num_loaded_experts,
+            )
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
 
         self.w1 = weights.get(W.moe_w1, None)
@@ -84,30 +117,58 @@ class GenericMoeLayer(nn.Module):
             self.w1 is not None and self.w2 is not None
         ), "Weights w1 and w2 must be provided"
         self.num_local_experts = self.w1.shape[0]
-        self.add_shared_expert = config.moe_style == 2
-        self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
-        self.ep_size = parallelism_config.ep_size
-        if self.add_shared_expert:
-            self.shared_expert = DenseMLP(
-                config.activation_type,
-                parallelism_config,
-                weights,
-                quant_config,
-                hw_kernel_config=hw_kernel_config,
-            )
-        else:
+
+        if self.use_fused_shared_expert:
             self.shared_expert = None
-        if weights.get(W.shared_expert_gate, None) is not None:
-            self.shared_expert_gate = LinearFactory.create_linear_from_weights(
-                weights, W.shared_expert_gate, None, None, config
-            )
-            self.sigmoid_gate_scale_add = SigmoidGateScaleAdd()
-        else:
-            self.shared_expert_gate = None
+            if weights.get(W.shared_expert_gate, None) is not None:
+                self.shared_expert_gate = LinearFactory.create_linear_from_weights(
+                    weights, W.shared_expert_gate, None, None, config
+                )
+            else:
+                self.shared_expert_gate = None
             self.sigmoid_gate_scale_add = None
+        else:
+            if self.add_shared_expert:
+                self.shared_expert = DenseMLP(
+                    config.activation_type,
+                    parallelism_config,
+                    weights,
+                    quant_config,
+                    hw_kernel_config=hw_kernel_config,
+                )
+            else:
+                self.shared_expert = None
+            if weights.get(W.shared_expert_gate, None) is not None:
+                self.shared_expert_gate = LinearFactory.create_linear_from_weights(
+                    weights, W.shared_expert_gate, None, None, config
+                )
+                self.sigmoid_gate_scale_add = SigmoidGateScaleAdd()
+            else:
+                self.shared_expert_gate = None
+                self.sigmoid_gate_scale_add = None
 
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
+
+    def _extend_topk_with_shared_expert(self, topk_ids, topk_weights, hidden_states):
+        num_tokens = topk_ids.shape[0]
+        k = topk_ids.shape[1]
+        ext_ids = torch.empty(
+            (num_tokens, k + 1), dtype=topk_ids.dtype, device=topk_ids.device
+        )
+        ext_weights = torch.empty(
+            (num_tokens, k + 1), dtype=topk_weights.dtype, device=topk_weights.device
+        )
+        ext_ids[:, :k] = topk_ids
+        ext_ids[:, k] = self.fused_shared_expert_id
+        ext_weights[:, :k] = topk_weights
+        if self.shared_expert_gate is not None:
+            ext_weights[:, k:] = torch.sigmoid(
+                self.shared_expert_gate(hidden_states)
+            ).float()
+        else:
+            ext_weights[:, k] = 1.0
+        return ext_ids, ext_weights
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
@@ -152,6 +213,17 @@ class GenericMoeLayer(nn.Module):
 
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
+
+        if self.use_fused_shared_expert:
+            topk_ids, topk_weights = self._extend_topk_with_shared_expert(
+                topk_ids, topk_weights, hidden_states
+            )
+            return self.fused_moe(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation="SiGLU",
+            )
 
         is_ep_mode = self.ep_size > 1
         # EP mode: routed expert output is already complete (EP combine handles it).
