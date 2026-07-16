@@ -37,7 +37,7 @@ import java.util.stream.Collectors;
  * <p>This strategy selects the optimal worker by considering the following factors:
  * 1. KV-Cache hit rate: Prioritize workers with higher cache hit rates
  * 2. Queue time: Consider the current task queue status of workers
- * 3. Scheduling fairness: Achieve load balancing among workers with similar performance
+ * 3. Cache preference: Among workers with similar TTFT, prefer a meaningful cache lead
  *
  * @author saichen.sm
  * @since 2025/3/10
@@ -50,7 +50,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     private final CacheAwareService cacheAwareService;
     private final ResourceMeasureFactory resourceMeasureFactory;
 
-    private static final int MIN_CANDIDATE_COUNT = 1;
+    private static final int SMALL_CLUSTER_SIZE = 3;
+    private static final int MIN_CANDIDATE_COUNT = 2;
     private static final double CANDIDATE_PERCENTAGE = 0.3;
     private static final double TTFT_THRESHOLD_PERCENTAGE = 0.1;
     private static final double STDDEV_THRESHOLD_FACTOR = 0.5;
@@ -128,10 +129,14 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         CacheMatchResult cacheMatchResult = cacheAwareService.findMatchingEngines(
                 requestId, balanceContext.getRequest().getBlockCacheKeys(), roleType, group);
 
-        List<ScoredWorker> scoredWorkers = scoreWorkers(availableWorkers, cacheMatchResult.matches(), seqLen);
+        List<ScoredWorker> scoredWorkers = scoreWorkers(
+                availableWorkers,
+                cacheMatchResult.matches(),
+                seqLen,
+                config.getPrefillCacheHitDiscount());
 
         ScoredWorker bestWorker = selectBestWorker(
-                scoredWorkers, balanceContext, roleType, group, seqLen);
+                scoredWorkers, balanceContext, roleType, group, seqLen, config);
         if (bestWorker == null) {
             Logger.warn("Failed to find best worker for role: {}", roleType);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
@@ -144,7 +149,13 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 bestWorker.worker().getIp(),
                 bestWorker.hitCacheTokens());
 
-        return finalizeWorkerSelection(bestWorker, balanceContext, roleType, requestId, seqLen);
+        return finalizeWorkerSelection(
+                bestWorker,
+                balanceContext,
+                roleType,
+                requestId,
+                seqLen,
+                config.getPrefillCacheHitDiscount());
     }
 
     /**
@@ -182,12 +193,17 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param seqLen Sequence length
      * @return List of scored workers
      */
-    private List<ScoredWorker> scoreWorkers(List<WorkerStatus> workers, Map<String, Integer> cacheMatchResults, long seqLen) {
+    private List<ScoredWorker> scoreWorkers(
+            List<WorkerStatus> workers,
+            Map<String, Integer> cacheMatchResults,
+            long seqLen,
+            double cacheHitDiscount) {
         return workers.stream()
                 .filter(WorkerStatus::isAlive)
                 .map(workerStatus -> {
                     long hitCacheTokens = calculatePrefixMatchLength(workerStatus, cacheMatchResults);
-                    long prefillTime = TaskInfo.estimatePrefillTimeMs(seqLen, hitCacheTokens);
+                    long prefillTime = TaskInfo.estimatePrefillTimeMs(
+                            seqLen, hitCacheTokens, cacheHitDiscount);
                     long queueTime = workerStatus.getRunningQueueTime().get();
                     long newTTFT = prefillTime + queueTime;
                     long lastSelectedTime = workerStatus.getLastSelectedTime().get();
@@ -217,7 +233,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                                                  BalanceContext balanceContext,
                                                  RoleType roleType,
                                                  String requestId,
-                                                 long seqLen) {
+                                                 long seqLen,
+                                                 double cacheHitDiscount) {
         WorkerStatus workerStatus = selectedWorker.worker();
 
         logWorkerSelection(selectedWorker, roleType);
@@ -227,7 +244,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 requestId,
                 balanceContext.getRequest().getSeqLen(),
                 selectedWorker.hitCacheTokens(),
-                balanceContext.getCacheMatchSource());
+                balanceContext.getCacheMatchSource(),
+                cacheHitDiscount);
         workerStatus.putLocalTask(requestId, task);
 
         return buildServerStatus(selectedWorker, roleType, requestId);
@@ -274,20 +292,24 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             String requestId,
             long inputLength,
             long prefixLength,
-            String cacheMatchSource) {
+            String cacheMatchSource,
+            double cacheHitDiscount) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
         task.setInputLength(inputLength);
         task.setPrefixLength(prefixLength);
         task.setPredictedPrefixLength(prefixLength);
         task.setCacheMatchSource(cacheMatchSource);
+        task.setCacheHitDiscount(cacheHitDiscount);
         return task;
     }
 
     /**
-     * Select best worker considering TTFT and scheduling fairness
+     * Select best worker considering TTFT and cache preference
      *
-     * <p>Algorithm: 1. Sort workers by TTFT 2. Select top 30% as candidates (at least 1) 3. Among candidates with similar TTFT, prioritize recently unscheduled workers
+     * <p>Algorithm: 1. Sort workers by TTFT. 2. Consider all workers in a small cluster,
+     * otherwise the top 30%. 3. Among workers with similar TTFT, prefer the worker whose
+     * cache lead over the shortest-TTFT worker reaches the configured block threshold.
      *
      * @param scoredWorkers List of scored workers
      * @return Best worker
@@ -297,7 +319,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             BalanceContext balanceContext,
             RoleType roleType,
             String group,
-            long seqLen) {
+            long seqLen,
+            FlexlbConfig config) {
         if (scoredWorkers.isEmpty()) {
             return null;
         }
@@ -315,7 +338,10 @@ public class ShortestTTFTStrategy implements LoadBalancer {
 
         List<ScoredWorker> similarWorkers = filterSimilarWorkers(candidates, minTTFT, threshold);
 
-        ScoredWorker selectedWorker = selectWorkerByScheduleFairness(similarWorkers, candidates);
+        ScoredWorker selectedWorker = selectWorkerByCachePreference(
+                similarWorkers,
+                candidates,
+                config.getPrefillCachePreferenceMinBlockGap());
         if (Logger.isDebugEnabled()) {
             balanceContext.recordShortestTtftDecision(buildDecisionSnapshot(
                     selectedWorker,
@@ -326,7 +352,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                     threshold,
                     roleType,
                     group,
-                    seqLen));
+                    seqLen,
+                    config.getPrefillCacheHitDiscount()));
         }
         return selectedWorker;
     }
@@ -340,14 +367,16 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             double similarTtftThreshold,
             RoleType roleType,
             String group,
-            long seqLen) {
+            long seqLen,
+            double cacheHitDiscount) {
         List<WorkerDecision> workers = sortedWorkers.stream()
                 .map(scoredWorker -> buildWorkerDecision(
                         scoredWorker,
                         selectedWorker,
                         topCandidates,
                         similarWorkers,
-                        seqLen))
+                        seqLen,
+                        cacheHitDiscount))
                 .toList();
         return new ShortestTtftDecision(
                 roleType,
@@ -363,12 +392,16 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             ScoredWorker selectedWorker,
             List<ScoredWorker> topCandidates,
             List<ScoredWorker> similarWorkers,
-            long seqLen) {
+            long seqLen,
+            double cacheHitDiscount) {
         WorkerStatus worker = scoredWorker.worker();
-        long requestPrefillTime = TaskInfo.estimatePrefillTimeMs(seqLen, scoredWorker.hitCacheTokens());
+        long requestPrefillTime = TaskInfo.estimatePrefillTimeMs(
+                seqLen, scoredWorker.hitCacheTokens(), cacheHitDiscount);
         List<QueueTask> trackedTasks = snapshotTrackedTasks(worker.getLocalTaskMap());
-        List<QueueTask> waitingTasks = snapshotWorkerTasks(worker.getWaitingTaskList(), "waiting");
-        List<QueueTask> runningTasks = snapshotWorkerTasks(worker.getRunningTaskList(), "running");
+        List<QueueTask> waitingTasks = snapshotWorkerTasks(
+                worker.getWaitingTaskList(), "waiting", cacheHitDiscount);
+        List<QueueTask> runningTasks = snapshotWorkerTasks(
+                worker.getRunningTaskList(), "running", cacheHitDiscount);
         long blockSize = worker.getCacheStatus() == null ? 0 : worker.getCacheStatus().getBlockSize();
 
         return new WorkerDecision(
@@ -402,23 +435,31 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 .toList();
     }
 
-    private List<QueueTask> snapshotWorkerTasks(Map<String, TaskInfo> tasks, String state) {
+    private List<QueueTask> snapshotWorkerTasks(
+            Map<String, TaskInfo> tasks, String state, double cacheHitDiscount) {
         if (MapUtils.isEmpty(tasks)) {
             return List.of();
         }
         return tasks.entrySet().stream()
                 .filter(entry -> entry.getValue() != null)
-                .map(entry -> toQueueTask(entry.getKey(), entry.getValue(), state))
+                .map(entry -> toQueueTask(
+                        entry.getKey(), entry.getValue(), state, cacheHitDiscount))
                 .toList();
     }
 
     private QueueTask toQueueTask(String requestId, TaskInfo task, String state) {
+        return toQueueTask(requestId, task, state, task.getCacheHitDiscount());
+    }
+
+    private QueueTask toQueueTask(
+            String requestId, TaskInfo task, String state, double cacheHitDiscount) {
         return new QueueTask(
                 requestId,
                 state,
                 task.getInputLength(),
                 task.getPrefixLength(),
-                task.estimatePrefillTime(),
+                TaskInfo.estimatePrefillTimeMs(
+                        task.getInputLength(), task.getPrefixLength(), cacheHitDiscount),
                 task.getWaitingTime());
     }
 
@@ -445,7 +486,12 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @return Candidate worker list
      */
     private List<ScoredWorker> selectTopCandidates(List<ScoredWorker> sortedWorkers) {
-        int candidateCount = Math.max(MIN_CANDIDATE_COUNT, (int) (sortedWorkers.size() * CANDIDATE_PERCENTAGE));
+        int workerCount = sortedWorkers.size();
+        int candidateCount = workerCount <= SMALL_CLUSTER_SIZE
+                ? workerCount
+                : Math.max(
+                        MIN_CANDIDATE_COUNT,
+                        (int) Math.ceil(workerCount * CANDIDATE_PERCENTAGE));
         return sortedWorkers.stream().limit(candidateCount).toList();
     }
 
@@ -488,38 +534,73 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     }
 
     /**
-     * Select worker based on scheduling fairness.
-     * Among workers with similar TTFT, prefer the least recently scheduled one.
-     * CAS on lastSelectedTime ensures concurrent requests are spread across different workers
-     * rather than all landing on the same one.
+     * Among workers with similar TTFT, prefer the cache leader only when its lead over the
+     * shortest-TTFT worker reaches the configured number of blocks. Otherwise preserve the
+     * shortest-TTFT choice, which selects the shortest queue when cache hits are equal.
      *
-     * @param similarWorkers workers with similar TTFT
-     * @param fallbackCandidates fallback candidate list
+     * @param similarWorkers workers whose TTFT is close to the minimum
+     * @param fallbackCandidates candidates sorted by TTFT
+     * @param minimumCacheLeadBlocks minimum cache lead required for cache preference
      * @return selected worker
      */
-    private ScoredWorker selectWorkerByScheduleFairness(List<ScoredWorker> similarWorkers, List<ScoredWorker> fallbackCandidates) {
+    private ScoredWorker selectWorkerByCachePreference(
+            List<ScoredWorker> similarWorkers,
+            List<ScoredWorker> fallbackCandidates,
+            int minimumCacheLeadBlocks) {
+        ScoredWorker shortestTtftWorker = fallbackCandidates.getFirst();
         if (similarWorkers.isEmpty()) {
-            return fallbackCandidates.getFirst();
+            return shortestTtftWorker;
         }
 
-        // Sort ascending by lastSelectedTime so the least recently used worker is tried first
-        List<ScoredWorker> sorted = similarWorkers.stream()
-                .sorted(Comparator.comparingLong(ScoredWorker::lastSelectedTime))
-                .toList();
+        ScoredWorker cacheLeader = similarWorkers.stream()
+                .min(Comparator.comparingLong(ScoredWorker::hitCacheTokens)
+                        .reversed()
+                        .thenComparingLong(ScoredWorker::ttft))
+                .orElse(shortestTtftWorker);
+        long blockSize = cacheLeader.worker().getCacheStatus() == null
+                ? 0
+                : cacheLeader.worker().getCacheStatus().getBlockSize();
+        long cacheLeadTokens = cacheLeader.hitCacheTokens() - shortestTtftWorker.hitCacheTokens();
+        long minimumCacheLeadTokens = blockSize * Math.max(0, minimumCacheLeadBlocks);
+
+        Logger.debug(
+                "Cache preference - shortest: {}, cacheLeader: {}, cacheLeadTokens: {}, minimumCacheLeadTokens: {}, shortestTtft: {}, cacheLeaderTtft: {}",
+                shortestTtftWorker.worker().getIpPort(),
+                cacheLeader.worker().getIpPort(),
+                cacheLeadTokens,
+                minimumCacheLeadTokens,
+                shortestTtftWorker.ttft(),
+                cacheLeader.ttft());
+        ScoredWorker preferredWorker = blockSize > 0 && cacheLeadTokens >= minimumCacheLeadTokens
+                ? cacheLeader
+                : shortestTtftWorker;
+        return claimPreferredWorker(preferredWorker, similarWorkers, shortestTtftWorker);
+    }
+
+    /**
+     * Prevent concurrent scheduler threads that observed the same queue snapshot from all
+     * selecting one worker. The algorithm's preferred worker is tried first; only a concurrent
+     * claim causes another similar-TTFT worker to be considered.
+     */
+    private ScoredWorker claimPreferredWorker(
+            ScoredWorker preferredWorker,
+            List<ScoredWorker> similarWorkers,
+            ScoredWorker fallbackWorker) {
+        List<ScoredWorker> claimOrder = new ArrayList<>(similarWorkers.size());
+        claimOrder.add(preferredWorker);
+        similarWorkers.stream()
+                .filter(worker -> !worker.equals(preferredWorker))
+                .sorted(Comparator.comparingLong(ScoredWorker::ttft))
+                .forEach(claimOrder::add);
 
         long now = System.nanoTime() / 1000;
-        for (ScoredWorker candidate : sorted) {
-            long expected = candidate.lastSelectedTime();
-            // CAS: claim this worker only if lastSelectedTime hasn't changed since we read it.
-            // A failed CAS means another concurrent request already claimed this worker.
-            if (candidate.worker().getLastSelectedTime().compareAndSet(expected, now)) {
+        for (ScoredWorker candidate : claimOrder) {
+            if (candidate.worker().getLastSelectedTime().compareAndSet(
+                    candidate.lastSelectedTime(), now)) {
                 return candidate;
             }
-            // Another request claimed this worker; try the next candidate
         }
-
-        // All candidates were claimed concurrently; fall back to the first candidate
-        return fallbackCandidates.getFirst();
+        return fallbackWorker;
     }
 
     /**

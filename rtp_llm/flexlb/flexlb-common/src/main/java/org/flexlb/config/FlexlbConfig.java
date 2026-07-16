@@ -68,6 +68,18 @@ public class FlexlbConfig {
     private long prefillQueueSizeThreshold = 3;
 
     /**
+     * Reduction applied to estimated prefill work for each cache-hit token.
+     * A value of 1 means cache-hit tokens contribute no prefill work.
+     */
+    private double prefillCacheHitDiscount = 0.7;
+
+    /**
+     * Minimum cache lead, in blocks, required to prefer a cache-richer worker
+     * over the shortest-TTFT worker when their estimated TTFT is similar.
+     */
+    private int prefillCachePreferenceMinBlockGap = 2;
+
+    /**
      * KV cache available threshold for DECODE role (percentage)
      * When Worker's KV cache usage is below this threshold, the Worker is considered available
      * Range: 1-100, default 90 means Worker is unavailable when usage exceeds 90%

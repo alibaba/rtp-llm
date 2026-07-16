@@ -6,8 +6,8 @@ import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.CacheMatchResult;
 import org.flexlb.cache.service.CacheMatchSource;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -42,6 +42,7 @@ class ShortestTTFTStrategyTest {
 
     @BeforeEach
     void enableDebugDecisionSnapshots() {
+        clearWorkerStatuses();
         businessLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("flexlbLogger");
         originalLevel = businessLogger.getLevel();
         businessLogger.setLevel(Level.DEBUG);
@@ -50,6 +51,7 @@ class ShortestTTFTStrategyTest {
     @AfterEach
     void restoreLogLevel() {
         businessLogger.setLevel(originalLevel);
+        clearWorkerStatuses();
     }
 
     @Test
@@ -145,6 +147,147 @@ class ShortestTTFTStrategyTest {
         infoContext.setRequest(req);
         staticCacheLoadBalancer.select(infoContext, RoleType.PREFILL, null);
         Assertions.assertTrue(infoContext.getShortestTtftDecisionByRole().isEmpty());
+    }
+
+    @Test
+    void prefersCacheLeaderWithTwoBlockLeadWhenTtftIsSimilar() {
+        FlexlbConfig config = cacheFocusedConfig();
+        WorkerStatus shortestTtftWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+        WorkerStatus cacheLeader = createWorkerStatus("127.0.0.2", 5000, 2128);
+        WorkerStatus thirdWorker = createWorkerStatus("127.0.0.3", 1000, 2128);
+
+        SelectionResult selection = select(
+                List.of(shortestTtftWorker, cacheLeader, thirdWorker),
+                Map.of(
+                        shortestTtftWorker.getIpPort(), 15,
+                        cacheLeader.getIpPort(), 17,
+                        thirdWorker.getIpPort(), 15),
+                config,
+                50000,
+                "cache-lead-two-blocks");
+
+        Assertions.assertEquals(cacheLeader.getIp(), selection.serverStatus().getServerIp());
+        TaskInfo selectedTask = cacheLeader.getLocalTaskMap().get("cache-lead-two-blocks");
+        Assertions.assertNotNull(selectedTask);
+        Assertions.assertEquals(1.0, selectedTask.getCacheHitDiscount());
+        Assertions.assertEquals(13824, selectedTask.estimatePrefillTime());
+
+        var decision = selection.balanceContext()
+                .getShortestTtftDecisionByRole()
+                .get(RoleType.PREFILL);
+        Assertions.assertNotNull(decision);
+        Assertions.assertEquals(3, decision.workers().stream()
+                .filter(worker -> worker.topCandidate())
+                .count());
+    }
+
+    @Test
+    void keepsShortestTtftWorkerWhenCacheLeadIsBelowConfiguredBlocks() {
+        FlexlbConfig config = cacheFocusedConfig();
+        WorkerStatus shortestTtftWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+        WorkerStatus oneBlockLeader = createWorkerStatus("127.0.0.2", 2500, 2128);
+        WorkerStatus thirdWorker = createWorkerStatus("127.0.0.3", 1000, 2128);
+
+        SelectionResult selection = select(
+                List.of(shortestTtftWorker, oneBlockLeader, thirdWorker),
+                Map.of(
+                        shortestTtftWorker.getIpPort(), 15,
+                        oneBlockLeader.getIpPort(), 16,
+                        thirdWorker.getIpPort(), 15),
+                config,
+                50000,
+                "cache-lead-one-block");
+
+        Assertions.assertEquals(shortestTtftWorker.getIp(), selection.serverStatus().getServerIp());
+    }
+
+    @Test
+    void doesNotPreferCacheLeaderWhenItsQueueMakesTtftTooLong() {
+        FlexlbConfig config = cacheFocusedConfig();
+        WorkerStatus shortestTtftWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+        WorkerStatus busyCacheLeader = createWorkerStatus("127.0.0.2", 20000, 2128);
+        WorkerStatus thirdWorker = createWorkerStatus("127.0.0.3", 1000, 2128);
+
+        SelectionResult selection = select(
+                List.of(shortestTtftWorker, busyCacheLeader, thirdWorker),
+                Map.of(
+                        shortestTtftWorker.getIpPort(), 15,
+                        busyCacheLeader.getIpPort(), 20,
+                        thirdWorker.getIpPort(), 15),
+                config,
+                50000,
+                "busy-cache-leader");
+
+        Assertions.assertEquals(shortestTtftWorker.getIp(), selection.serverStatus().getServerIp());
+    }
+
+    private FlexlbConfig cacheFocusedConfig() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setPrefillCacheHitDiscount(1.0);
+        config.setPrefillCachePreferenceMinBlockGap(2);
+        return config;
+    }
+
+    private SelectionResult select(
+            List<WorkerStatus> workers,
+            Map<String, Integer> cacheMatches,
+            FlexlbConfig config,
+            long inputTokens,
+            String requestId) {
+        Map<String, WorkerStatus> prefillStatusMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        for (WorkerStatus worker : workers) {
+            prefillStatusMap.put(worker.getIpPort(), worker);
+        }
+
+        Request request = new Request();
+        request.setSeqLen(inputTokens);
+        request.setRequestId(requestId);
+        request.setBlockCacheKeys(List.of(1L));
+
+        EngineHealthReporter engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
+        CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        org.flexlb.balance.resource.ResourceMeasure resourceMeasure =
+                Mockito.mock(org.flexlb.balance.resource.ResourceMeasure.class);
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
+        Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
+        Mockito.when(cacheAwareService.findMatchingEngines(
+                        Mockito.anyString(), Mockito.anyList(), Mockito.any(), Mockito.any()))
+                .thenReturn(new CacheMatchResult(cacheMatches, CacheMatchSource.KVCM, 123));
+
+        ShortestTTFTStrategy strategy = new ShortestTTFTStrategy(
+                new EngineWorkerStatus(new ModelMetaConfig()),
+                engineHealthReporter,
+                cacheAwareService,
+                resourceMeasureFactory);
+        BalanceContext balanceContext = new BalanceContext();
+        balanceContext.setConfig(config);
+        balanceContext.setRequest(request);
+        return new SelectionResult(
+                strategy.select(balanceContext, RoleType.PREFILL, null), balanceContext);
+    }
+
+    private WorkerStatus createWorkerStatus(String ip, long runningQueueTime, long blockSize) {
+        WorkerStatus workerStatus = createWorkerStatus(
+                ip,
+                runningQueueTime,
+                new HashMap<>(),
+                new HashMap<>(),
+                new HashMap<>(),
+                new ConcurrentHashMap<>());
+        workerStatus.getCacheStatus().setBlockSize(blockSize);
+        return workerStatus;
+    }
+
+    private void clearWorkerStatuses() {
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
+    }
+
+    private record SelectionResult(ServerStatus serverStatus, BalanceContext balanceContext) {
     }
 
     private TaskInfo createTask(String requestId, long inputLength, long prefixLength) {

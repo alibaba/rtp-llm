@@ -1,5 +1,6 @@
 package org.flexlb.dao.master;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
@@ -8,6 +9,8 @@ import org.flexlb.enums.TaskStateEnum;
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class TaskInfo {
+    public static final double DEFAULT_CACHE_HIT_DISCOUNT = 0.7;
+
     @JsonProperty("request_id")
     private String requestId;
     @JsonProperty("prefix_length")
@@ -31,16 +34,24 @@ public class TaskInfo {
     @JsonProperty("dp_rank")
     private long dpRank;
 
+    @JsonIgnore
+    private double cacheHitDiscount = DEFAULT_CACHE_HIT_DISCOUNT;
+
     // Task state related fields
     private TaskStateEnum taskState = TaskStateEnum.CREATED;
     private long lastActiveTimeUs = System.nanoTime() / 1000;
 
     public long estimatePrefillTime() {
-        return estimatePrefillTimeMs(inputLength, prefixLength);
+        return estimatePrefillTimeMs(inputLength, prefixLength, cacheHitDiscount);
     }
 
     public static long estimatePrefillTimeMs(long tokens, long hitCacheTokens) {
-        return (long) (tokens * 1.0 - hitCacheTokens * 0.7);
+        return estimatePrefillTimeMs(tokens, hitCacheTokens, DEFAULT_CACHE_HIT_DISCOUNT);
+    }
+
+    public static long estimatePrefillTimeMs(
+            long tokens, long hitCacheTokens, double cacheHitDiscount) {
+        return (long) (tokens - hitCacheTokens * cacheHitDiscount);
     }
 
     /**
