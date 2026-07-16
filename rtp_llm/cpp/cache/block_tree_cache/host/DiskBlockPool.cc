@@ -87,12 +87,8 @@ bool DiskBlockPool::init() {
         !cfg.work_dir.empty(), "disk block pool [%s] work_dir must not be empty", cfg.pool_name.c_str());
 
     std::string effective_dir = cfg.work_dir;
-    if (cfg.manage_mount) {
-        mount_guard_ = std::make_unique<DiskMountGuard>();
-        RTP_LLM_CHECK_WITH_INFO(mount_guard_->init(cfg.work_dir),
-                                "disk block pool [%s] failed to init mount guard on [%s]",
-                                cfg.pool_name.c_str(),
-                                cfg.work_dir.c_str());
+    if (cfg.mount_guard != nullptr) {
+        mount_guard_  = cfg.mount_guard;
         effective_dir = mount_guard_->workDir();
     }
 

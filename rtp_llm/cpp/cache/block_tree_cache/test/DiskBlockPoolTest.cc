@@ -342,12 +342,15 @@ TEST(DiskBlockPoolTest, BlockZeroReadWriteReturnsInvalidBlock) {
     ::remove(pool.filePath().c_str());
 }
 
-TEST(DiskBlockPoolTest, ManageMountCreatesGuardWorkDirAndBackingFile) {
+TEST(DiskBlockPoolTest, SharedMountGuardCreatesGuardWorkDirAndBackingFile) {
     const std::string mount = ::testing::TempDir() + std::string("/disk_pool_managed_mount");
     ::mkdir(mount.c_str(), 0755);
 
-    auto config           = makeDiskConfig(mount);
-    config->manage_mount  = true;
+    auto guard = std::make_shared<DiskMountGuard>();
+    ASSERT_TRUE(guard->init(mount));
+
+    auto config         = makeDiskConfig(guard->workDir());
+    config->mount_guard = guard;
     DiskBlockPool pool(config);
     ASSERT_TRUE(pool.init());
 
@@ -361,6 +364,34 @@ TEST(DiskBlockPoolTest, ManageMountCreatesGuardWorkDirAndBackingFile) {
     EXPECT_GE(static_cast<size_t>(st.st_size), config->disk_size_bytes);
 
     ::remove(pool.filePath().c_str());
+}
+
+TEST(DiskBlockPoolTest, MultiplePoolsShareOneMountGuardOnSameMount) {
+    const std::string mount = ::testing::TempDir() + std::string("/disk_pool_shared_guard_multi");
+    ::mkdir(mount.c_str(), 0755);
+
+    auto guard = std::make_shared<DiskMountGuard>();
+    ASSERT_TRUE(guard->init(mount));
+
+    auto config_a         = makeDiskConfig(guard->workDir());
+    config_a->pool_name   = "pool_a";
+    config_a->mount_guard = guard;
+    auto pool_a           = std::make_shared<DiskBlockPool>(config_a);
+    ASSERT_TRUE(pool_a->init());
+
+    auto config_b         = makeDiskConfig(guard->workDir());
+    config_b->pool_name   = "pool_b";
+    config_b->mount_guard = guard;
+    auto pool_b           = std::make_shared<DiskBlockPool>(config_b);
+    ASSERT_TRUE(pool_b->init());
+
+    const std::string expected_dir = mount + "/rtp_llm_disk_kv/";
+    EXPECT_EQ(pool_a->filePath().rfind(expected_dir, 0), 0u);
+    EXPECT_EQ(pool_b->filePath().rfind(expected_dir, 0), 0u);
+    EXPECT_NE(pool_a->filePath(), pool_b->filePath());
+
+    ::remove(pool_a->filePath().c_str());
+    ::remove(pool_b->filePath().c_str());
 }
 
 TEST(DiskBlockPoolTest, IoErrorStatusIsMapped) {

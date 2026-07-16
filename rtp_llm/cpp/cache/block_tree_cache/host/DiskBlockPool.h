@@ -31,10 +31,8 @@ struct DiskBlockPoolConfig: public BlockPoolConfigBase {
     size_t      payload_bytes{0};
     size_t      stride_bytes{0};
     bool        buffered_io{true};
-    // When true, init() manages work_dir as a disk mount via DiskMountGuard and places the
-    // backing file under the guard's work dir; when false, work_dir is used directly.
-    bool           manage_mount{false};
-    CacheBlockKind pool_kind{CacheBlockKind::COMPLETE};
+    std::shared_ptr<DiskMountGuard> mount_guard;
+    CacheBlockKind                  pool_kind{CacheBlockKind::COMPLETE};
 };
 
 // DiskBlockPool backs every block with a fixed-stride slice of a single preallocated
@@ -92,7 +90,7 @@ private:
 
     std::unique_ptr<DiskBlockIO>    io_;
     std::string                     file_path_;
-    std::unique_ptr<DiskMountGuard> mount_guard_;
+    std::shared_ptr<DiskMountGuard> mount_guard_;
     std::atomic<size_t>             read_bytes_{0};
     std::atomic<size_t>             write_bytes_{0};
 };

@@ -126,28 +126,36 @@ createHostPool(const std::string& pool_name, size_t payload_bytes, size_t usable
     return pool;
 }
 
-// Create v4 DiskBlockPool for L3 disk cache.
-// disk_size_bytes bounds the pool; DiskBlockPool::normalizeConfig derives the physical
-// block_count from disk_size_bytes / stride_bytes.
-std::shared_ptr<DiskBlockPool> createDiskPool(const KVCacheConfig& kv_cache_config,
-                                              const std::string&   pool_name,
-                                              size_t               payload_bytes,
-                                              size_t               disk_size_bytes,
-                                              int64_t              world_rank,
-                                              int64_t              local_rank,
-                                              int64_t              local_world_size) {
+std::shared_ptr<DiskMountGuard> createDiskMountGuard(const KVCacheConfig& kv_cache_config,
+                                                     int64_t              local_rank,
+                                                     int64_t              local_world_size) {
     RTP_LLM_CHECK_WITH_INFO(!kv_cache_config.memory_cache_disk_paths.empty(),
                             "disk cache enabled but memory_cache_disk_paths is empty");
-    RTP_LLM_CHECK_WITH_INFO(payload_bytes > 0, "disk cache enabled but payload_bytes is 0");
-
     const std::string mount_path =
         resolveDiskMountPath(kv_cache_config.memory_cache_disk_paths, local_world_size, local_rank);
+    auto guard = std::make_shared<DiskMountGuard>();
+    if (!guard->init(mount_path)) {
+        RTP_LLM_LOG_ERROR("Failed to init DiskMountGuard on mount [%s] for BlockTreeCache", mount_path.c_str());
+        return nullptr;
+    }
+    return guard;
+}
+
+std::shared_ptr<DiskBlockPool> createDiskPool(const KVCacheConfig&                   kv_cache_config,
+                                              const std::shared_ptr<DiskMountGuard>& mount_guard,
+                                              const std::string&                     pool_name,
+                                              size_t                                 payload_bytes,
+                                              size_t                                 disk_size_bytes,
+                                              int64_t                                world_rank,
+                                              int64_t                                local_rank) {
+    RTP_LLM_CHECK_WITH_INFO(mount_guard != nullptr, "disk cache enabled but mount guard is null");
+    RTP_LLM_CHECK_WITH_INFO(payload_bytes > 0, "disk cache enabled but payload_bytes is 0");
 
     auto config             = std::make_shared<DiskBlockPoolConfig>();
     config->pool_type       = BlockPoolType::DISK;
     config->pool_name       = pool_name;
-    config->work_dir        = mount_path;
-    config->manage_mount    = true;
+    config->work_dir        = mount_guard->workDir();
+    config->mount_guard     = mount_guard;
     config->local_rank      = local_rank;
     config->world_rank      = world_rank;
     config->disk_size_bytes = disk_size_bytes;
@@ -398,6 +406,12 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         const size_t disk_size_bytes = static_cast<size_t>(kv_cache_config.memory_cache_disk_size_mb) * 1024UL * 1024UL;
         const size_t usable_block_count =
             sum_aligned > 0 ? computeHostUsableBlockCount(disk_size_bytes, sum_aligned) : 0;
+        auto disk_mount_guard = createDiskMountGuard(
+            kv_cache_config, parallelism_config.local_rank, parallelism_config.local_world_size);
+        if (disk_mount_guard == nullptr) {
+            RTP_LLM_LOG_ERROR("createBlockTreeCache: failed to create disk mount guard");
+            return nullptr;
+        }
         for (int cg_id = 0; cg_id < cg_num; ++cg_id) {
             const size_t payload = cg_host_block_size[static_cast<size_t>(cg_id)];
             if (payload == 0 || usable_block_count == 0) {
@@ -406,12 +420,12 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             // Bound each pool to N usable blocks (+1 reserved) at its own aligned stride.
             const size_t pool_disk_bytes = (usable_block_count + 1) * alignUp(payload, kBlockTreeCachePoolAlignment);
             auto         disk_pool       = createDiskPool(kv_cache_config,
+                                            disk_mount_guard,
                                             "block_tree_disk_g" + std::to_string(cg_id),
                                             payload,
                                             pool_disk_bytes,
                                             parallelism_config.world_rank,
-                                            parallelism_config.local_rank,
-                                            parallelism_config.local_world_size);
+                                            parallelism_config.local_rank);
             component_groups[static_cast<size_t>(cg_id)]->setDiskPool(disk_pool);
         }
     }
