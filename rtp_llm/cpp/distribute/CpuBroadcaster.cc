@@ -95,7 +95,7 @@ CpuBroadcastSharedState* mapSharedState(int fd) {
 }
 
 void validateSharedStateFd(int fd, const std::string& path) {
-    struct stat st {};
+    struct stat st{};
     int         rc = ::fstat(fd, &st);
     RTP_LLM_CHECK_WITH_INFO(
         rc == 0, "CpuBroadcaster stat shared state %s failed: %s", path.c_str(), std::strerror(errno));
@@ -175,7 +175,7 @@ bool publishDecision(uint32_t* decision, uint32_t expected, uint32_t desired) {
 }
 
 bool rootConnectionClosed(int root_fd) {
-    struct pollfd pfd {};
+    struct pollfd pfd{};
     pfd.fd     = root_fd;
     pfd.events = POLLIN;
     int rc     = ::poll(&pfd, 1, 0);
@@ -245,10 +245,8 @@ bool waitForDecision(uint32_t* decision_slot,
         if (wait_ms <= 0) {
             wait_ms = 1;
         }
-        struct timespec wait_time {
-            wait_ms / 1000, static_cast<long>(wait_ms % 1000) * 1000 * 1000
-        };
-        int rc = static_cast<int>(
+        struct timespec wait_time{wait_ms / 1000, static_cast<long>(wait_ms % 1000) * 1000 * 1000};
+        int             rc = static_cast<int>(
             ::syscall(SYS_futex, decision_slot, FUTEX_WAIT, previous_decision, &wait_time, nullptr, 0));
         if (rc == 0 || errno == EINTR || errno == EAGAIN) {
             continue;
@@ -290,7 +288,7 @@ bool waitFdUntil(int fd, short events, std::chrono::steady_clock::time_point dea
                 static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
         }
 
-        struct pollfd pfd {};
+        struct pollfd pfd{};
         pfd.fd     = fd;
         pfd.events = events;
         int rc     = ::poll(&pfd, 1, remaining_ms);
@@ -576,7 +574,7 @@ void CpuBroadcaster::initialize(int rank, int world_size, const std::string& bas
             listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
             RTP_LLM_CHECK_WITH_INFO(listen_fd_ >= 0, "CpuBroadcaster socket: %s", std::strerror(errno));
 
-            struct sockaddr_un addr {};
+            struct sockaddr_un addr{};
             addr.sun_family = AF_UNIX;
             RTP_LLM_CHECK_WITH_INFO(
                 path.size() < sizeof(addr.sun_path), "CpuBroadcaster UDS path too long: %s", path.c_str());
@@ -664,7 +662,7 @@ void CpuBroadcaster::initialize(int rank, int world_size, const std::string& bas
         }
     } else {
         const std::string  path = makeUdsPath(base_path, 0);
-        struct sockaddr_un addr {};
+        struct sockaddr_un addr{};
         addr.sun_family = AF_UNIX;
         RTP_LLM_CHECK_WITH_INFO(
             path.size() < sizeof(addr.sun_path), "CpuBroadcaster UDS path too long: %s", path.c_str());

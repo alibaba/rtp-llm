@@ -245,7 +245,7 @@ ssize_t readAllRaw(int fd, void* buf, size_t nbytes) {
 }
 
 bool readPidWithTimeout(int fd, pid_t& pid, std::chrono::milliseconds timeout) {
-    struct pollfd pfd {};
+    struct pollfd pfd{};
     pfd.fd     = fd;
     pfd.events = POLLIN;
     int rc;
@@ -259,7 +259,7 @@ bool readPidWithTimeout(int fd, pid_t& pid, std::chrono::milliseconds timeout) {
 }
 
 bool readByteWithTimeout(int fd, char& value, std::chrono::milliseconds timeout) {
-    struct pollfd pfd {};
+    struct pollfd pfd{};
     pfd.fd     = fd;
     pfd.events = POLLIN;
     int rc;
@@ -351,7 +351,7 @@ int connectWithRetry(const std::string& path) {
             return -1;
         }
 
-        struct sockaddr_un addr {};
+        struct sockaddr_un addr{};
         addr.sun_family = AF_UNIX;
         std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
         if (::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0) {
@@ -457,7 +457,7 @@ void peerHoldUnreadPayload(const std::string& base,
         return;
     }
     while (!release_peer.load(std::memory_order_acquire)) {
-        struct pollfd pfd {};
+        struct pollfd pfd{};
         pfd.fd     = fd;
         pfd.events = POLLIN;
         int rc     = ::poll(&pfd, 1, 10);
@@ -487,7 +487,7 @@ int fakeServerWrongProbe(const std::string& base) {
         return 1;
     }
 
-    struct sockaddr_un addr {};
+    struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
     if (::bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
@@ -546,7 +546,7 @@ int fakeRootSendMismatchedFrame(const std::string& base) {
         return 1;
     }
 
-    struct sockaddr_un addr {};
+    struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
     if (::bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
@@ -639,7 +639,7 @@ int fakeRootWaitAfterAllPeersReady(const std::string& base, int ready_fd) {
         return fail("socket failed");
     }
 
-    struct sockaddr_un addr {};
+    struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
     if (::bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
@@ -793,7 +793,9 @@ int productionTwoGenerationChild(int rank, const std::string& base) {
     bool second_failed = false;
     try {
         bcast.broadcast(&second, sizeof(second), 0);
-    } catch (const std::exception&) { second_failed = true; }
+    } catch (const std::exception&) {
+        second_failed = true;
+    }
     bcast.reset();
     if (!second_failed) {
         std::fprintf(stderr, "rank %d second generation unexpectedly committed\n", rank);
@@ -831,7 +833,9 @@ int productionLateAbortChild(int rank, const std::string& base, int ready_fd = -
     std::string error;
     try {
         bcast.broadcast(&value, sizeof(value), 0);
-    } catch (const std::exception& e) { error = e.what(); }
+    } catch (const std::exception& e) {
+        error = e.what();
+    }
     if (error.empty()) {
         std::fprintf(stderr, "rank %d unexpectedly committed delayed generation\n", rank);
         bcast.reset();
@@ -1290,7 +1294,7 @@ TEST(CpuBroadcasterTest, RootExitBeforeDecisionAbortsAllSurvivingRanks) {
         ASSERT_GT(peer_pids.back(), 0);
     }
 
-    struct pollfd pfd {};
+    struct pollfd pfd{};
     pfd.fd     = ready_pipe[0];
     pfd.events = POLLIN;
     int ready_rc;
@@ -1606,7 +1610,9 @@ TEST(CpuBroadcasterTest, RootWriteFailureClosesOtherPeers) {
     try {
         std::vector<char> payload(1024 * 1024, 0x55);
         bcast.broadcast(payload.data(), payload.size(), 0);
-    } catch (const std::exception& e) { broadcast_error = e.what(); }
+    } catch (const std::exception& e) {
+        broadcast_error = e.what();
+    }
 
     const auto close_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!rank2_done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < close_deadline) {
@@ -1632,7 +1638,9 @@ TEST(CpuBroadcasterTest, RootWriteFailureClosesOtherPeers) {
     try {
         int value = 1;
         bcast.broadcast(&value, sizeof(value), 0);
-    } catch (const std::exception& e) { retry_error = e.what(); }
+    } catch (const std::exception& e) {
+        retry_error = e.what();
+    }
     EXPECT_NE(retry_error.find("reset and reinitialize before reuse"), std::string::npos) << retry_error;
 
     bcast.reset();
@@ -1751,7 +1759,9 @@ TEST(CpuBroadcasterTest, ReadyPeerObservesAbortWhenLaterPeerFails) {
     try {
         int value = 17;
         bcast.broadcast(&value, sizeof(value), 0);
-    } catch (const std::exception& e) { broadcast_error = e.what(); }
+    } catch (const std::exception& e) {
+        broadcast_error = e.what();
+    }
 
     const auto close_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!rank1_done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < close_deadline) {
@@ -1835,7 +1845,9 @@ TEST(CpuBroadcasterTest, AllowsCrossThreadBroadcastAndResetWhenIdle) {
         try {
             int value = 7;
             bcast.broadcast(&value, sizeof(value), 0);
-        } catch (const std::exception& e) { broadcast_error = e.what(); }
+        } catch (const std::exception& e) {
+            broadcast_error = e.what();
+        }
     });
     broadcast_thread.join();
     peer_thread.join();
@@ -1847,7 +1859,9 @@ TEST(CpuBroadcasterTest, AllowsCrossThreadBroadcastAndResetWhenIdle) {
     std::thread reset_thread([&] {
         try {
             bcast.reset();
-        } catch (const std::exception& e) { reset_error = e.what(); }
+        } catch (const std::exception& e) {
+            reset_error = e.what();
+        }
     });
     reset_thread.join();
     EXPECT_TRUE(reset_error.empty()) << reset_error;
@@ -1872,7 +1886,9 @@ TEST(CpuBroadcasterTest, ResetRejectsInFlightBroadcast) {
         try {
             std::vector<char> payload(64 * 1024 * 1024, 0x7f);
             bcast.broadcast(payload.data(), payload.size(), 0);
-        } catch (const std::exception& e) { broadcast_error = e.what(); }
+        } catch (const std::exception& e) {
+            broadcast_error = e.what();
+        }
     });
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -1884,7 +1900,9 @@ TEST(CpuBroadcasterTest, ResetRejectsInFlightBroadcast) {
     if (payload_ready.load(std::memory_order_acquire)) {
         try {
             bcast.reset();
-        } catch (const std::exception& e) { reset_error = e.what(); }
+        } catch (const std::exception& e) {
+            reset_error = e.what();
+        }
     }
 
     release_peer.store(true, std::memory_order_release);
@@ -1916,13 +1934,17 @@ TEST(CpuBroadcasterTest, BroadcastTimeoutRequiresResetBeforeReuse) {
     try {
         std::vector<char> payload(64 * 1024 * 1024, 0x7f);
         bcast.broadcast(payload.data(), payload.size(), 0);
-    } catch (const std::exception& e) { broadcast_error = e.what(); }
+    } catch (const std::exception& e) {
+        broadcast_error = e.what();
+    }
 
     std::string retry_error;
     try {
         int value = 1;
         bcast.broadcast(&value, sizeof(value), 0);
-    } catch (const std::exception& e) { retry_error = e.what(); }
+    } catch (const std::exception& e) {
+        retry_error = e.what();
+    }
 
     release_peer.store(true, std::memory_order_release);
     peer_thread.join();

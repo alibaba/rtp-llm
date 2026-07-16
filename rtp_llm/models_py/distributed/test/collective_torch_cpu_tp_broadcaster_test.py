@@ -113,8 +113,34 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
 
         self.assertIsNone(ct._cpu_tp_broadcaster_base_path)
         self.assertEqual(fake_ops.init_calls, [])
+        self.assertEqual(fake_ops.destroy_calls, 1)
 
-    def test_make_cpu_tp_broadcaster_base_path_chmods_existing_dir(self):
+    def test_missing_parallelism_config_resets_old_cpp_singleton(self):
+        fake_ops = _FakeLibrtpComputeOps()
+        ct._parallelism_config = None
+        ct._cpu_tp_broadcaster_base_path = "/tmp/old-session"
+
+        ct._init_cpu_tp_broadcaster_if_needed(fake_ops)
+
+        self.assertIsNone(ct._cpu_tp_broadcaster_base_path)
+        self.assertEqual(fake_ops.init_calls, [])
+        self.assertEqual(fake_ops.destroy_calls, 1)
+
+    def test_missing_nccl_port_resets_old_cpp_singleton(self):
+        fake_ops = _FakeLibrtpComputeOps()
+        ct._parallelism_config = self._parallelism_config(tp_size=2, local_world_size=2)
+        ct._cpu_tp_broadcaster_base_path = "/tmp/old-session"
+        ct._cpu_tp_broadcaster_nccl_init_port = None
+
+        with patch("logging.warning") as mock_warning:
+            ct._init_cpu_tp_broadcaster_if_needed(fake_ops)
+
+        self.assertIsNone(ct._cpu_tp_broadcaster_base_path)
+        self.assertEqual(fake_ops.init_calls, [])
+        self.assertEqual(fake_ops.destroy_calls, 2)
+        self.assertIn("nccl_init_port is unknown", mock_warning.call_args.args[1])
+
+    def test_make_cpu_tp_broadcaster_base_path_preserves_existing_parent_mode(self):
         parallelism_config = self._parallelism_config(tp_size=2, local_world_size=4)
         with tempfile.TemporaryDirectory() as tmpdir:
             os.chmod(tmpdir, 0o755)
@@ -125,10 +151,55 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
                     "RTP_LLM_CPU_TP_BROADCASTER_ID": "unit-test",
                 },
             ):
-                ct._make_cpu_tp_broadcaster_base_path(parallelism_config, 12345)
+                base_path = ct._make_cpu_tp_broadcaster_base_path(
+                    parallelism_config, 12345
+                )
 
-            mode = stat.S_IMODE(os.stat(tmpdir).st_mode)
-            self.assertEqual(mode, 0o700)
+            parent_mode = stat.S_IMODE(os.stat(tmpdir).st_mode)
+            private_dir = os.path.join(tmpdir, f"rtp_llm_{os.geteuid()}")
+            private_mode = stat.S_IMODE(os.stat(private_dir).st_mode)
+            self.assertEqual(parent_mode, 0o755)
+            self.assertEqual(private_mode, 0o700)
+            self.assertEqual(os.path.dirname(base_path), private_dir)
+
+    def test_make_cpu_tp_broadcaster_base_path_rejects_non_sticky_shared_parent(
+        self,
+    ):
+        parallelism_config = self._parallelism_config(tp_size=2, local_world_size=4)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chmod(tmpdir, 0o777)
+            with patch.dict(
+                os.environ,
+                {
+                    "RTP_LLM_CPU_TP_BROADCASTER_DIR": tmpdir,
+                    "RTP_LLM_CPU_TP_BROADCASTER_ID": "unit-test",
+                },
+            ):
+                with self.assertRaisesRegex(PermissionError, "without sticky bit"):
+                    ct._make_cpu_tp_broadcaster_base_path(parallelism_config, 12345)
+
+            self.assertEqual(stat.S_IMODE(os.stat(tmpdir).st_mode), 0o777)
+
+    def test_make_cpu_tp_broadcaster_base_path_accepts_sticky_shared_parent(self):
+        parallelism_config = self._parallelism_config(tp_size=2, local_world_size=4)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chmod(tmpdir, 0o1777)
+            with patch.dict(
+                os.environ,
+                {
+                    "RTP_LLM_CPU_TP_BROADCASTER_DIR": tmpdir,
+                    "RTP_LLM_CPU_TP_BROADCASTER_ID": "unit-test",
+                },
+            ):
+                base_path = ct._make_cpu_tp_broadcaster_base_path(
+                    parallelism_config, 12345
+                )
+
+            self.assertEqual(stat.S_IMODE(os.stat(tmpdir).st_mode), 0o1777)
+            self.assertEqual(
+                os.path.dirname(base_path),
+                os.path.join(tmpdir, f"rtp_llm_{os.geteuid()}"),
+            )
 
     def test_make_cpu_tp_broadcaster_base_path_defaults_to_job_session(self):
         parallelism_config = self._parallelism_config(tp_size=2, local_world_size=4)
@@ -163,7 +234,10 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
     def test_make_cpu_tp_broadcaster_base_path_checks_highest_rank_path(self):
         parallelism_config = self._parallelism_config(tp_size=11, local_world_size=11)
         with tempfile.TemporaryDirectory() as tmpdir:
-            fixed_path = os.path.join(tmpdir, "rtp_llm_tp__dp0") + "_10.sock"
+            fixed_path = (
+                os.path.join(tmpdir, f"rtp_llm_{os.geteuid()}", "rtp_llm_tp__dp0")
+                + "_10.sock"
+            )
             session_len = ct._UDS_SUN_PATH_LIMIT - len(os.fsencode(fixed_path))
             self.assertGreater(session_len, 0)
             with patch.dict(
@@ -197,6 +271,26 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
             mode = stat.S_IMODE(os.stat(target).st_mode)
             self.assertEqual(mode, 0o755)
 
+    def test_make_cpu_tp_broadcaster_base_path_rejects_symlink_private_child(self):
+        parallelism_config = self._parallelism_config(tp_size=2, local_world_size=4)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = os.path.join(tmpdir, "target")
+            private_dir = os.path.join(tmpdir, f"rtp_llm_{os.geteuid()}")
+            os.mkdir(target)
+            os.chmod(target, 0o755)
+            os.symlink(target, private_dir)
+            with patch.dict(
+                os.environ,
+                {
+                    "RTP_LLM_CPU_TP_BROADCASTER_DIR": tmpdir,
+                    "RTP_LLM_CPU_TP_BROADCASTER_ID": "unit-test",
+                },
+            ):
+                with self.assertRaisesRegex(ValueError, "not safe"):
+                    ct._make_cpu_tp_broadcaster_base_path(parallelism_config, 12345)
+
+            self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o755)
+
     def test_init_cpu_tp_broadcaster_skips_when_tp_group_eligibility_diverges(self):
         fake_ops = _FakeLibrtpComputeOps()
         ct._parallelism_config = self._parallelism_config(tp_size=2, local_world_size=4)
@@ -228,6 +322,7 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
 
         self.assertIsNone(ct._cpu_tp_broadcaster_base_path)
         self.assertEqual(fake_ops.init_calls, [])
+        self.assertEqual(fake_ops.destroy_calls, 1)
         self.assertIn("inconsistent eligibility", mock_warning.call_args.args[0])
 
     def test_init_cpu_tp_broadcaster_destroys_when_actual_init_diverges(self):
@@ -257,17 +352,171 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
             "rtp_llm.models_py.distributed.collective_torch.torch.distributed.all_gather_object",
             side_effect=fake_all_gather_object,
         ), patch(
+            "rtp_llm.models_py.distributed.collective_torch._cpu_tp_broadcaster_preflight_for_group",
+            return_value=True,
+        ), patch(
             "logging.warning"
         ) as mock_warning:
             ct._init_cpu_tp_broadcaster_if_needed(fake_ops)
 
         self.assertIsNone(ct._cpu_tp_broadcaster_base_path)
         self.assertEqual(len(fake_ops.init_calls), 1)
-        self.assertEqual(fake_ops.destroy_calls, 1)
+        self.assertEqual(fake_ops.destroy_calls, 2)
         self.assertIn(
             "inconsistent initialized state",
             mock_warning.call_args.args[0],
         )
+
+    def test_init_cpu_tp_broadcaster_fallbacks_before_cpp_for_different_paths(self):
+        fake_ops = _FakeLibrtpComputeOps()
+        ct._parallelism_config = self._parallelism_config(tp_size=2, local_world_size=2)
+        ct._cpu_tp_broadcaster_nccl_init_port = 12345
+        ct._initialized = True
+        gather_calls = []
+
+        def fake_all_gather_object(output, value, group):
+            gather_calls.append(value)
+            if len(gather_calls) == 1:
+                output[:] = [True, True]
+            elif len(gather_calls) == 2:
+                remote = dict(value)
+                remote.update(
+                    rank=1,
+                    base_path=value["base_path"] + "_different_namespace",
+                    probe_path=None,
+                    probe_token=None,
+                )
+                output[:] = [value, remote]
+            elif len(gather_calls) == 3:
+                remote = {"rank": 1, "ready": False, "reason": "path mismatch"}
+                output[:] = [value, remote]
+            else:
+                remote = {"rank": 1, "clean": True, "reason": None}
+                output[:] = [value, remote]
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_CPU_TP_BROADCASTER_DIR": tmpdir,
+                "RTP_LLM_CPU_TP_BROADCASTER_ID": "different-paths",
+            },
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch.torch.distributed.is_initialized",
+            return_value=True,
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch._get_group",
+            return_value=_FakeProcessGroup(2),
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch.torch.distributed.all_gather_object",
+            side_effect=fake_all_gather_object,
+        ):
+            ct._init_cpu_tp_broadcaster_if_needed(fake_ops)
+
+        self.assertEqual(len(gather_calls), 4)
+        self.assertEqual(fake_ops.init_calls, [])
+        self.assertEqual(fake_ops.destroy_calls, 2)
+        self.assertIsNone(ct._cpu_tp_broadcaster_base_path)
+
+    def test_init_cpu_tp_broadcaster_fallbacks_for_private_tmp_namespace(self):
+        fake_ops = _FakeLibrtpComputeOps()
+        ct._parallelism_config = self._parallelism_config(
+            tp_size=2, local_world_size=2, world_rank=1, local_rank=1
+        )
+        ct._cpu_tp_broadcaster_nccl_init_port = 12345
+        ct._initialized = True
+        gather_calls = []
+
+        def fake_all_gather_object(output, value, group):
+            gather_calls.append(value)
+            if len(gather_calls) == 1:
+                output[:] = [True, True]
+            elif len(gather_calls) == 2:
+                root = dict(value)
+                root.update(
+                    rank=0,
+                    probe_path=os.path.join(
+                        os.path.dirname(value["base_path"]), ".root_private_probe"
+                    ),
+                    probe_token="not-visible-in-this-namespace",
+                )
+                output[:] = [root, value]
+            elif len(gather_calls) == 3:
+                root = {"rank": 0, "ready": True, "reason": None}
+                output[:] = [root, value]
+            else:
+                root = {"rank": 0, "clean": True, "reason": None}
+                output[:] = [root, value]
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_CPU_TP_BROADCASTER_DIR": tmpdir,
+                "RTP_LLM_CPU_TP_BROADCASTER_ID": "private-tmp",
+            },
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch.torch.distributed.is_initialized",
+            return_value=True,
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch._get_group",
+            return_value=_FakeProcessGroup(2),
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch.torch.distributed.all_gather_object",
+            side_effect=fake_all_gather_object,
+        ):
+            ct._init_cpu_tp_broadcaster_if_needed(fake_ops)
+
+        self.assertEqual(len(gather_calls), 4)
+        self.assertEqual(fake_ops.init_calls, [])
+        self.assertEqual(fake_ops.destroy_calls, 2)
+        self.assertIsNone(ct._cpu_tp_broadcaster_base_path)
+
+    def test_init_cpu_tp_broadcaster_fallbacks_when_probe_cleanup_fails(self):
+        fake_ops = _FakeLibrtpComputeOps()
+        ct._parallelism_config = self._parallelism_config(tp_size=2, local_world_size=2)
+        ct._cpu_tp_broadcaster_nccl_init_port = 12345
+        ct._initialized = True
+        gather_calls = []
+
+        def fake_all_gather_object(output, value, group):
+            gather_calls.append(value)
+            if len(gather_calls) == 1:
+                output[:] = [True, True]
+            elif len(gather_calls) == 2:
+                remote = dict(value)
+                remote.update(rank=1, probe_path=None, probe_token=None)
+                output[:] = [value, remote]
+            elif len(gather_calls) == 3:
+                remote = {"rank": 1, "ready": True, "reason": None}
+                output[:] = [value, remote]
+            else:
+                remote = {"rank": 1, "clean": True, "reason": None}
+                output[:] = [value, remote]
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_CPU_TP_BROADCASTER_DIR": tmpdir,
+                "RTP_LLM_CPU_TP_BROADCASTER_ID": "cleanup-failure",
+            },
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch.torch.distributed.is_initialized",
+            return_value=True,
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch._get_group",
+            return_value=_FakeProcessGroup(2),
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch.torch.distributed.all_gather_object",
+            side_effect=fake_all_gather_object,
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch.os.unlink",
+            side_effect=PermissionError("read-only parent"),
+        ):
+            ct._init_cpu_tp_broadcaster_if_needed(fake_ops)
+
+        self.assertEqual(len(gather_calls), 4)
+        self.assertEqual(fake_ops.init_calls, [])
+        self.assertEqual(fake_ops.destroy_calls, 2)
+        self.assertIsNone(ct._cpu_tp_broadcaster_base_path)
 
     def test_skip_cpu_tp_broadcaster_tp1_with_long_uds_path(self):
         fake_ops = _FakeLibrtpComputeOps()
@@ -314,6 +563,7 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
         self.assertEqual((tp_rank, tp_size), (0, 4))
         self.assertIn("rtp_llm_tp_unit-test_dp0", base_path)
         self.assertEqual(ct._cpu_tp_broadcaster_base_path, base_path)
+        self.assertEqual(fake_ops.destroy_calls, 1)
 
     def test_init_cpu_tp_broadcaster_fallbacks_when_base_path_invalid(self):
         fake_ops = _FakeLibrtpComputeOps()

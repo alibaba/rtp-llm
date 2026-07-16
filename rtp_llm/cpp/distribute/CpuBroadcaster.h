@@ -62,7 +62,7 @@ public:
 private:
     CpuBroadcaster() = default;
     ~CpuBroadcaster();
-    CpuBroadcaster(const CpuBroadcaster&) = delete;
+    CpuBroadcaster(const CpuBroadcaster&)            = delete;
     CpuBroadcaster& operator=(const CpuBroadcaster&) = delete;
 
     void cleanupStateLocked();

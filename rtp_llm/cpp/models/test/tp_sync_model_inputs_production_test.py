@@ -13,17 +13,21 @@ import time
 import traceback
 import unittest
 
+# The shipped native modules rely on symbols loaded by torch.  Preserve this
+# order: importing either extension first can segfault in the dynamic loader.
+# isort: off
 import torch
-
 import librtp_compute_ops
 import libth_transformer
+
+# isort: on
+
 from rtp_llm.cpp.models.test import (
     libtp_sync_model_inputs_production_test_bridge as production_bridge,
 )
 from rtp_llm.models_py.distributed import collective_torch as ct
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 from rtp_llm.test.utils.port_util import PortManager
-
 
 _EXPECTED = {
     "combo_tokens": [11, 12, 13],
@@ -122,13 +126,15 @@ def _production_boundary_worker(rank: int, nccl_port: int, uds_dir: str) -> None
         ct._init_cpu_tp_broadcaster_if_needed(librtp_compute_ops)
         valid_base_path = ct._cpu_tp_broadcaster_base_path
         if valid_base_path is None:
-            raise AssertionError(f"rank {rank}: failed to recreate production UDS state")
+            raise AssertionError(
+                f"rank {rank}: failed to recreate production UDS state"
+            )
         torch.distributed.barrier()
 
         # 3. Rank 1 owns a deliberately incompatible *real* singleton state.
-        # Its production init call fails immediately while rank 0's matching
-        # re-init succeeds.  The bootstrap all-gather must reset the whole group
-        # so the following real tpSyncModelInputs call consistently uses c10d.
+        # A retry must reset old state on every rank before entering blocking C++
+        # init; otherwise one side can reject re-init while the other waits for
+        # a peer until the full initialization timeout.
         if rank == 1:
             librtp_compute_ops.destroy_cpu_tp_broadcaster()
             librtp_compute_ops.init_cpu_tp_broadcaster(
@@ -136,26 +142,12 @@ def _production_boundary_worker(rank: int, nccl_port: int, uds_dir: str) -> None
             )
         torch.distributed.barrier()
 
-        init_succeeded = True
-        try:
-            librtp_compute_ops.init_cpu_tp_broadcaster(
-                rank, 2, valid_base_path
-            )
-        except RuntimeError:
-            init_succeeded = False
-        init_results = [False, False]
-        torch.distributed.all_gather_object(init_results, init_succeeded)
-        if init_results != [True, False]:
-            raise AssertionError(
-                f"expected a rank-local production init failure, got {init_results}"
-            )
-
         ct._init_cpu_tp_broadcaster_if_needed(librtp_compute_ops)
-        if ct._cpu_tp_broadcaster_base_path is not None:
+        if ct._cpu_tp_broadcaster_base_path is None:
             raise AssertionError(
-                f"rank {rank}: divergent init did not force group fallback"
+                f"rank {rank}: stale singleton state was not reset before retry"
             )
-        _run_real_tp_sync(rank, "group-consistent-fallback")
+        _run_real_tp_sync(rank, "stale-singleton-reset")
         torch.distributed.barrier()
     except Exception:
         traceback.print_exc()

@@ -5,6 +5,7 @@ import hashlib
 import logging
 import os
 import re
+import secrets
 import stat
 from datetime import timedelta
 from enum import Enum
@@ -170,21 +171,69 @@ def _make_cpu_tp_broadcaster_base_path(
         )
     session_id = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)
 
-    base_dir = os.environ.get(_CPU_TP_BROADCASTER_DIR_ENV)
-    if not base_dir:
-        base_dir = os.path.join(
-            os.environ.get("TMPDIR", "/tmp"), f"rtp_llm_{os.getuid()}"
-        )
-    os.makedirs(base_dir, mode=0o700, exist_ok=True)
-    base_dir_stat = os.lstat(base_dir)
-    if not stat.S_ISDIR(base_dir_stat.st_mode):
-        raise ValueError(f"CpuTpBroadcaster directory is not safe: {base_dir}")
-    if base_dir_stat.st_uid != os.getuid():
-        raise PermissionError(
-            f"CpuTpBroadcaster directory is not owned by current user: {base_dir}"
-        )
-    # Validate before chmod: the default /tmp path is predictable.
-    os.chmod(base_dir, 0o700)
+    # The configured value is a parent directory.  Never change its
+    # permissions; only the per-user child is managed by RTP-LLM.  The parent
+    # chain must be controlled by root/current uid, and any shared writable
+    # component must use sticky-bit rename protection.
+    parent_dir = os.environ.get(_CPU_TP_BROADCASTER_DIR_ENV) or os.environ.get(
+        "TMPDIR", "/tmp"
+    )
+    parent_dir = os.path.abspath(os.path.normpath(parent_dir))
+    uid = os.geteuid()
+    current_dir = parent_dir
+    while True:
+        current_dir_stat = os.lstat(current_dir)
+        if not stat.S_ISDIR(current_dir_stat.st_mode):
+            raise ValueError(
+                f"CpuTpBroadcaster parent directory is not safe: {current_dir}"
+            )
+        if current_dir_stat.st_uid not in (0, uid):
+            raise PermissionError(
+                f"CpuTpBroadcaster parent directory is not trusted: {current_dir}"
+            )
+        writable_by_non_owner = current_dir_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        if writable_by_non_owner and not current_dir_stat.st_mode & stat.S_ISVTX:
+            raise PermissionError(
+                "CpuTpBroadcaster parent directory is writable without sticky bit: "
+                f"{current_dir}"
+            )
+        next_dir = os.path.dirname(current_dir)
+        if next_dir == current_dir:
+            break
+        current_dir = next_dir
+
+    base_dir = os.path.join(parent_dir, f"rtp_llm_{uid}")
+    try:
+        os.mkdir(base_dir, mode=0o700)
+    except FileExistsError:
+        pass
+
+    open_flags = os.O_RDONLY | os.O_DIRECTORY
+    open_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        base_dir_fd = os.open(base_dir, open_flags)
+    except OSError as e:
+        raise ValueError(f"CpuTpBroadcaster directory is not safe: {base_dir}") from e
+    try:
+        base_dir_stat = os.fstat(base_dir_fd)
+        base_dir_path_stat = os.lstat(base_dir)
+        if not stat.S_ISDIR(base_dir_stat.st_mode):
+            raise ValueError(f"CpuTpBroadcaster directory is not safe: {base_dir}")
+        if (
+            base_dir_stat.st_dev,
+            base_dir_stat.st_ino,
+        ) != (
+            base_dir_path_stat.st_dev,
+            base_dir_path_stat.st_ino,
+        ):
+            raise ValueError(f"CpuTpBroadcaster directory was replaced: {base_dir}")
+        if base_dir_stat.st_uid != uid:
+            raise PermissionError(
+                f"CpuTpBroadcaster directory is not owned by current user: {base_dir}"
+            )
+        os.fchmod(base_dir_fd, 0o700)
+    finally:
+        os.close(base_dir_fd)
     base_path = os.path.join(
         base_dir, f"rtp_llm_tp_{session_id}_dp{parallelism_config.dp_rank}"
     )
@@ -197,26 +246,254 @@ def _make_cpu_tp_broadcaster_base_path(
     return base_path
 
 
+def _cpu_tp_broadcaster_preflight_for_group(
+    base_path: Optional[str], local_error: Optional[str]
+) -> bool:
+    """Confirm every TP rank resolves one shared UDS directory before C++ init."""
+    if _parallelism_config is None:
+        return False
+    if not torch.distributed.is_initialized() or not _initialized:
+        if local_error is not None:
+            logging.warning(
+                "Failed to initialize CpuTpBroadcaster, fallback to NCCL broadcast: %s",
+                local_error,
+            )
+        return base_path is not None and local_error is None
+
+    try:
+        tp_group = _get_group(Group.TP)
+        group_size = tp_group.size()
+    except Exception as e:
+        logging.warning(
+            "Skip CpuTpBroadcaster init: failed to access TP group for UDS preflight: %s",
+            e,
+        )
+        return False
+    tp_rank = _parallelism_config.tp_rank
+    normalized_path = (
+        os.path.realpath(os.path.abspath(base_path)) if base_path is not None else None
+    )
+    probe_path = None
+    probe_token = None
+    probe_created = False
+
+    if tp_rank == 0 and normalized_path is not None and local_error is None:
+        try:
+            probe_token = secrets.token_hex(16)
+            probe_path = os.path.join(
+                os.path.dirname(normalized_path), f".rtp_llm_probe_{probe_token}"
+            )
+            probe_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            probe_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            probe_fd = os.open(probe_path, probe_flags, 0o600)
+            probe_created = True
+            try:
+                probe_bytes = probe_token.encode("ascii")
+                if os.write(probe_fd, probe_bytes) != len(probe_bytes):
+                    raise OSError("short write while creating visibility probe")
+            finally:
+                os.close(probe_fd)
+        except Exception as e:
+            local_error = f"failed to create root visibility probe: {e}"
+
+    try:
+        local_candidate = {
+            "rank": tp_rank,
+            "base_path": normalized_path,
+            "error": local_error,
+            "probe_path": probe_path,
+            "probe_token": probe_token,
+        }
+        candidates: List[object] = [None] * group_size
+        torch.distributed.all_gather_object(candidates, local_candidate, group=tp_group)
+
+        expected_ranks = set(range(group_size))
+        candidate_ranks = {
+            candidate.get("rank")
+            for candidate in candidates
+            if isinstance(candidate, dict)
+        }
+        candidate_paths = {
+            candidate.get("base_path")
+            for candidate in candidates
+            if isinstance(candidate, dict)
+        }
+        candidate_errors = [
+            candidate.get("error")
+            for candidate in candidates
+            if isinstance(candidate, dict) and candidate.get("error")
+        ]
+        root_candidates = [
+            candidate
+            for candidate in candidates
+            if isinstance(candidate, dict) and candidate.get("rank") == 0
+        ]
+
+        local_ready = (
+            len(candidates) == group_size
+            and candidate_ranks == expected_ranks
+            and len(candidate_paths) == 1
+            and None not in candidate_paths
+            and not candidate_errors
+            and len(root_candidates) == 1
+        )
+        local_reason = None
+        if not local_ready:
+            local_reason = (
+                "inconsistent paths or local preparation failure: "
+                f"paths={sorted(str(path) for path in candidate_paths)}, "
+                f"errors={candidate_errors}"
+            )
+        else:
+            root_candidate = root_candidates[0]
+            root_probe_path = root_candidate.get("probe_path")
+            root_probe_token = root_candidate.get("probe_token")
+            if not isinstance(root_probe_path, str) or not isinstance(
+                root_probe_token, str
+            ):
+                local_ready = False
+                local_reason = "root visibility probe metadata is missing"
+            else:
+                try:
+                    with open(root_probe_path, "rb") as probe_file:
+                        observed_token = probe_file.read(128).decode("ascii")
+                    if observed_token != root_probe_token:
+                        raise ValueError("root visibility probe token mismatch")
+                except Exception as e:
+                    local_ready = False
+                    local_reason = f"root visibility probe is not shared: {e}"
+
+        local_result = {
+            "rank": tp_rank,
+            "ready": local_ready,
+            "reason": local_reason,
+        }
+        results: List[object] = [None] * group_size
+        torch.distributed.all_gather_object(results, local_result, group=tp_group)
+        all_ready = (
+            len(results) == group_size
+            and {result.get("rank") for result in results if isinstance(result, dict)}
+            == expected_ranks
+            and all(
+                isinstance(result, dict) and result.get("ready") is True
+                for result in results
+            )
+        )
+        if not all_ready:
+            reasons = [
+                result.get("reason")
+                for result in results
+                if isinstance(result, dict) and result.get("reason")
+            ]
+            logging.warning(
+                "Skip CpuTpBroadcaster init: TP group UDS preflight failed: %s",
+                reasons,
+            )
+
+        cleanup_ready = True
+        cleanup_reason = None
+        if tp_rank == 0 and probe_created and probe_path is not None:
+            try:
+                os.unlink(probe_path)
+                probe_created = False
+            except FileNotFoundError:
+                probe_created = False
+            except OSError as e:
+                cleanup_ready = False
+                cleanup_reason = f"failed to remove root visibility probe: {e}"
+        local_cleanup = {
+            "rank": tp_rank,
+            "clean": cleanup_ready,
+            "reason": cleanup_reason,
+        }
+        cleanup_results: List[object] = [None] * group_size
+        torch.distributed.all_gather_object(
+            cleanup_results, local_cleanup, group=tp_group
+        )
+        all_clean = (
+            len(cleanup_results) == group_size
+            and {
+                result.get("rank")
+                for result in cleanup_results
+                if isinstance(result, dict)
+            }
+            == expected_ranks
+            and all(
+                isinstance(result, dict) and result.get("clean") is True
+                for result in cleanup_results
+            )
+        )
+        if not all_clean:
+            cleanup_reasons = [
+                result.get("reason")
+                for result in cleanup_results
+                if isinstance(result, dict) and result.get("reason")
+            ]
+            logging.warning(
+                "Skip CpuTpBroadcaster init: TP group probe cleanup failed: %s",
+                cleanup_reasons,
+            )
+        return all_ready and all_clean
+    except Exception as e:
+        logging.warning(
+            "Skip CpuTpBroadcaster init: failed to run TP group UDS preflight: %s",
+            e,
+        )
+        return False
+    finally:
+        if probe_created and probe_path is not None:
+            try:
+                os.unlink(probe_path)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                logging.warning(
+                    "Failed to remove CpuTpBroadcaster visibility probe %s: %s",
+                    probe_path,
+                    e,
+                )
+
+
 def _init_cpu_tp_broadcaster_if_needed(librtp_compute_ops) -> None:
     global _cpu_tp_broadcaster_base_path
 
     _cpu_tp_broadcaster_base_path = None
     if _parallelism_config is None:
+        librtp_compute_ops.destroy_cpu_tp_broadcaster()
         return
     if not _should_init_cpu_tp_broadcaster_for_group(_parallelism_config):
-        return
-    if _cpu_tp_broadcaster_nccl_init_port is None:
-        logging.warning("Skip CpuTpBroadcaster init: nccl_init_port is unknown")
+        librtp_compute_ops.destroy_cpu_tp_broadcaster()
         return
 
     base_path = None
-    actual_initialized = False
     try:
-        base_path = _make_cpu_tp_broadcaster_base_path(
-            _parallelism_config,
-            _cpu_tp_broadcaster_nccl_init_port,
-            _cpu_tp_broadcaster_nccl_master_addr,
-        )
+        librtp_compute_ops.destroy_cpu_tp_broadcaster()
+        local_error = None
+    except Exception as e:
+        local_error = f"failed to reset old CpuTpBroadcaster state: {e}"
+    actual_initialized = False
+    if _cpu_tp_broadcaster_nccl_init_port is None:
+        port_error = "nccl_init_port is unknown"
+        local_error = f"{local_error}; {port_error}" if local_error else port_error
+    else:
+        try:
+            base_path = _make_cpu_tp_broadcaster_base_path(
+                _parallelism_config,
+                _cpu_tp_broadcaster_nccl_init_port,
+                _cpu_tp_broadcaster_nccl_master_addr,
+            )
+        except Exception as e:
+            path_error = str(e)
+            local_error = f"{local_error}; {path_error}" if local_error else path_error
+
+    if not _cpu_tp_broadcaster_preflight_for_group(base_path, local_error):
+        # This helper is also used for retries.  A failed preflight must not
+        # leave an older C++ singleton active while Python falls back to NCCL.
+        librtp_compute_ops.destroy_cpu_tp_broadcaster()
+        return
+    assert base_path is not None
+
+    try:
         librtp_compute_ops.init_cpu_tp_broadcaster(
             _parallelism_config.tp_rank,
             _parallelism_config.tp_size,
