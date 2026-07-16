@@ -73,7 +73,7 @@ public class LearningPredictor implements PrefillTimePredictor {
         long hit = Math.max(0L, Math.min(hitTokens, seq));
         double thisReuse = hit / 1024.0;
         double thisCompute = (seq - hit) / 1024.0;
-        double[] inputs = new double[this.param_count];
+        double[] inputs = new double[this.total_param_count];
         inputs[0] = 1.0;
         inputs[1] = 1.0;
         inputs[2] = thisReuse;
@@ -81,7 +81,8 @@ public class LearningPredictor implements PrefillTimePredictor {
         inputs[4] = thisCompute * thisCompute;
         inputs[5] = thisReuse * thisCompute;
         double[] weights = this.weightsRef.get();
-        return (long) calcOutput(inputs, weights);
+        double linearExp = calcLinearExp(inputs, weights);
+        return (long) calcOutput(weights, linearExp);
     }
 
     @Override
@@ -227,7 +228,7 @@ public class LearningPredictor implements PrefillTimePredictor {
     }
 
     private int weightIndex(String name) {
-        for (int i = 0; i < this.param_count; i++) {
+        for (int i = 0; i < this.total_param_count; i++) {
             if (("w" + i).equals(name)) {
                 return i;
             }
