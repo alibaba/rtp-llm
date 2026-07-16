@@ -88,11 +88,10 @@ private:
 
     static BlockIOStatus mapStatus(DiskBlockIOStatus status);
 
-    std::unique_ptr<DiskBlockIO>    io_;
-    std::string                     file_path_;
-    std::shared_ptr<DiskMountGuard> mount_guard_;
-    std::atomic<size_t>             read_bytes_{0};
-    std::atomic<size_t>             write_bytes_{0};
+    std::unique_ptr<DiskBlockIO> io_;
+    std::string                  file_path_;
+    std::atomic<size_t>          read_bytes_{0};
+    std::atomic<size_t>          write_bytes_{0};
 };
 
 }  // namespace rtp_llm

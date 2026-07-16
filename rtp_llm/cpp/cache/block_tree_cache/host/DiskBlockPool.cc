@@ -88,8 +88,7 @@ bool DiskBlockPool::init() {
 
     std::string effective_dir = cfg.work_dir;
     if (cfg.mount_guard != nullptr) {
-        mount_guard_  = cfg.mount_guard;
-        effective_dir = mount_guard_->workDir();
+        effective_dir = cfg.mount_guard->workDir();
     }
 
     file_path_ = buildFilePath(effective_dir, cfg);
