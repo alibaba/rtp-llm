@@ -2,28 +2,28 @@
 
 import random
 import unittest
-from typing import Dict, Tuple, Optional
+from typing import Dict, Optional, Tuple
 
 import torch
+from flashinfer import fp4_quantize, scaled_fp4_grouped_quantize
+from torch.nn import functional as F
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
 )
-from rtp_llm.ops import ParallelismConfig, MoeConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutedsl_fp4_executor import (
     CutedslFp4Executor,
 )
+from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
-
-from flashinfer import fp4_quantize
-from torch.nn import functional as F
-from flashinfer import scaled_fp4_grouped_quantize
 
 
 class CutedslFp4ExecutorTestBase:
@@ -64,7 +64,7 @@ class CutedslFp4ExecutorTestBase:
         model_config.hidden_size = self.HIDDEN_SIZE
         model_config.moe_inter_size = self.MOE_INTERMEDIATE_SIZE
         model_config.moe_k = self.TOP_K
-        
+
         parallelism_config = ParallelismConfig()
         parallelism_config.world_size = self.DP_SIZE * self.EP_SIZE
         parallelism_config.dp_size = self.DP_SIZE
@@ -76,10 +76,10 @@ class CutedslFp4ExecutorTestBase:
         parallelism_config.world_rank = 0
         parallelism_config.local_rank = 0
         parallelism_config.local_world_size = 1
-        
+
         moe_config = MoeConfig()
         moe_config.ll_num_max_token = self.MAX_GENERATE_BATCH_SIZE
-        
+
         return MoEConfigAdapter(
             model_config=model_config,
             parallelism_config=parallelism_config,
@@ -109,14 +109,19 @@ class CutedslFp4ExecutorTestBase:
 
         masked_m = torch.tensor(masked_m, dtype=torch.int32)
         hidden_states_3d = torch.empty(
-            (num_experts, max(masked_m), hidden_states.shape[1]), dtype=hidden_states.dtype
+            (num_experts, max(masked_m), hidden_states.shape[1]),
+            dtype=hidden_states.dtype,
         )
         for i in range(num_experts):
-            hidden_states_3d[i, : masked_m[i], :] = hidden_states[topk_idx.view(-1) == i]
+            hidden_states_3d[i, : masked_m[i], :] = hidden_states[
+                topk_idx.view(-1) == i
+            ]
 
         return hidden_states_3d, masked_m, topk_idx, routing_weights
 
-    def _convert_swizzled_to_linear(self, a_sf_swizzled: torch.Tensor, m, k, block_size):
+    def _convert_swizzled_to_linear(
+        self, a_sf_swizzled: torch.Tensor, m, k, block_size
+    ):
         m_tiles = (m + 128 - 1) // 128
         f = block_size * 4
         k_tiles = (k + f - 1) // f
@@ -183,19 +188,33 @@ class CutedslFp4ExecutorTestBase:
     def _generate_payload_and_weights(
         self,
         config: MoEConfigAdapter,
-    ) -> Tuple[ExpertForwardPayload, Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[
+        ExpertForwardPayload,
+        Dict[str, torch.Tensor],
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         num_local_experts = config.expert_num // config.ep_size
         num_tokens = self.BATCH_SIZE
-        
-        routing_logits = torch.rand(num_tokens, config.expert_num, device="cuda").to(torch.bfloat16)
-        hidden_states = torch.randn(num_tokens, self.K, device="cuda").to(torch.bfloat16) * 0.1
-        
+
+        routing_logits = torch.rand(num_tokens, config.expert_num, device="cuda").to(
+            torch.bfloat16
+        )
+        hidden_states = (
+            torch.randn(num_tokens, self.K, device="cuda").to(torch.bfloat16) * 0.1
+        )
+
         hidden_states_expanded = (
             hidden_states.view(num_tokens, -1, self.K)
             .repeat(1, self.TOP_K, 1)
             .reshape(-1, self.K)
         )
-        
+
         hidden_states_3d, masked_m, topk_idx, routing_weights = self._prepare_inputs(
             hidden_states_expanded, routing_logits, config.expert_num, self.TOP_K
         )
@@ -211,29 +230,31 @@ class CutedslFp4ExecutorTestBase:
                 expert_num_tokens_cpu=None,
             ),
         )
-        
+
         intermediate_size = self.MOE_INTERMEDIATE_SIZE
         w1_bf16 = (
-            torch.randn(num_local_experts, 2 * intermediate_size, self.K, device="cuda")
-            .to(torch.bfloat16)
+            torch.randn(
+                num_local_experts, 2 * intermediate_size, self.K, device="cuda"
+            ).to(torch.bfloat16)
             * 0.1
         )
         w2_bf16 = (
-            torch.randn(num_local_experts, self.K, intermediate_size, device="cuda")
-            .to(torch.bfloat16)
+            torch.randn(num_local_experts, self.K, intermediate_size, device="cuda").to(
+                torch.bfloat16
+            )
             * 0.1
         )
-        
+
         w1_amax = w1_bf16.abs().amax(dim=(1, 2)).to(torch.float32).to(w1_bf16.device)
         w2_amax = w2_bf16.abs().amax(dim=(1, 2)).to(torch.float32).to(w2_bf16.device)
-        
+
         input_global_scale = torch.ones(
             (num_local_experts,), dtype=torch.float32, device="cuda"
         )
         a2_global_scale = torch.ones(
             (num_local_experts,), dtype=torch.float32, device="cuda"
         )
-        
+
         w1_global_scale = self.FLOAT8_E4M3_MAX * self.FLOAT4_E2M1_MAX / w1_amax
         w2_global_scale = self.FLOAT8_E4M3_MAX * self.FLOAT4_E2M1_MAX / w2_amax
         w1_fp4, w1_blockscale = scaled_fp4_grouped_quantize(
@@ -249,7 +270,7 @@ class CutedslFp4ExecutorTestBase:
             * self.K,
             w2_global_scale,
         )
-        
+
         w1_quantized = w1_fp4.permute(2, 0, 1)
         w2_quantized = w2_fp4.permute(2, 0, 1)
 
@@ -263,7 +284,17 @@ class CutedslFp4ExecutorTestBase:
             W.moe_w1_i_s: input_global_scale,
             W.moe_w2_i_s: a2_global_scale,
         }
-        return payload, weights, w1_bf16, w2_bf16, topk_idx, routing_weights, hidden_states, w1_global_scale, w2_global_scale
+        return (
+            payload,
+            weights,
+            w1_bf16,
+            w2_bf16,
+            topk_idx,
+            routing_weights,
+            hidden_states,
+            w1_global_scale,
+            w2_global_scale,
+        )
 
     def _generate_ref_output(
         self,
@@ -287,7 +318,7 @@ class CutedslFp4ExecutorTestBase:
             device=hidden_states.device,
             block_size=16,
         )
-        
+
         num_experts = w1_bf16.shape[0]
         w1_d = torch.empty(
             (num_experts, w1_bf16.shape[1], w1_bf16.shape[2]),
@@ -299,7 +330,7 @@ class CutedslFp4ExecutorTestBase:
             device=w2_bf16.device,
             dtype=w2_bf16.dtype,
         )
-        
+
         for idx in range(num_experts):
             w1_fp4_sliced, w1_blockscale_sliced = fp4_quantize(
                 w1_bf16[idx], w1_global_scale[idx]
@@ -331,7 +362,7 @@ class CutedslFp4ExecutorTestBase:
             routing_weights.to(a_in_dtype.device),
             topk_idx.to(a_in_dtype.device),
         )
-        
+
         return ref_output
 
     def _filter_valid_tokens(
@@ -347,10 +378,21 @@ class CutedslFp4ExecutorTestBase:
     def test_cutedsl_fp4_executor(self):
         if torch.cuda.get_device_capability() < (10, 0):
             self.skipTest("Nvfp4 Requires compute capability of 10 or above.")
-        
+
         config = self._generate_config()
-        payload, weights, w1_bf16, w2_bf16, topk_idx, routing_weights, hidden_states, w1_global_scale, w2_global_scale = self._generate_payload_and_weights(config)
-        
+        (
+            payload,
+            weights,
+            w1_bf16,
+            w2_bf16,
+            topk_idx,
+            routing_weights,
+            hidden_states,
+            w1_global_scale,
+            w2_global_scale,
+        ) = self._generate_payload_and_weights(config)
+
+        num_local_experts = self.NUM_EXPERTS // self.EP_SIZE
         executor = CutedslFp4Executor(
             config,
             FusedMoEQuantConfig(
@@ -363,7 +405,13 @@ class CutedslFp4ExecutorTestBase:
         )
         forward_payload = executor.execute(payload, "silu", None, None, False, None)
         output = forward_payload.fused_expert_output
-        
+        self.assertEqual(executor._masked_m.shape, (num_local_experts,))
+        self.assertEqual(executor._masked_m_storage.shape, (num_local_experts + 1,))
+        self.assertEqual(executor._masked_m_storage[-1].item(), 0)
+        torch.testing.assert_close(
+            executor._masked_m, payload.expert_tokens_meta.expert_num_tokens
+        )
+
         input_global_scale = weights[W.moe_w1_i_s]
         ref_output = self._generate_ref_output(
             hidden_states,
@@ -376,28 +424,34 @@ class CutedslFp4ExecutorTestBase:
             w1_global_scale,
             w2_global_scale,
         )
-        
-        output = self._filter_valid_tokens(output, payload.expert_tokens_meta.expert_num_tokens)
-        
-        num_local_experts = self.NUM_EXPERTS // self.EP_SIZE
+
+        output = self._filter_valid_tokens(
+            output, payload.expert_tokens_meta.expert_num_tokens
+        )
+
         num_tokens = self.BATCH_SIZE
         output_aggregated = torch.zeros(
             num_tokens, self.K, device=output.device, dtype=output.dtype
         )
-        expert_positions = torch.zeros(num_local_experts, dtype=torch.long, device="cuda")
-        
+        expert_positions = torch.zeros(
+            num_local_experts, dtype=torch.long, device="cuda"
+        )
+
         for batch_idx in range(num_tokens):
             for k_pos in range(self.TOP_K):
                 expert_id = topk_idx[batch_idx, k_pos].item()
                 if expert_id < num_local_experts:
                     weight = routing_weights[batch_idx, k_pos].item()
                     expert_pos = expert_positions[expert_id].item()
-                    if expert_pos < payload.expert_tokens_meta.expert_num_tokens[expert_id]:
+                    if (
+                        expert_pos
+                        < payload.expert_tokens_meta.expert_num_tokens[expert_id]
+                    ):
                         output_aggregated[batch_idx] += (
                             output[expert_id, expert_pos, :] * weight
                         )
                         expert_positions[expert_id] += 1
-        
+
         print("output_aggregated shape: ", output_aggregated.shape)
         print("ref_output shape: ", ref_output.shape)
         print("output_aggregated: ", output_aggregated)
