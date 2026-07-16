@@ -143,30 +143,88 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
         propose_gid_by_tag.emplace(propose_config.tagForGroup(gid), gid);
     }
 
+    const auto          invalid_gid = std::numeric_limits<size_t>::max();
+    std::vector<size_t> propose_gid_for_target(target_group_num, invalid_gid);
+    std::vector<bool>   propose_gid_used(propose_config.topology().groups().size(), false);
+
+    // Tags identify cache groups within one model, but independently trained
+    // target and draft models are not required to use the same tag names.
+    // Preserve exact matches first, then align an unmatched draft group only
+    // when its cache role has one unambiguous target group.
+    for (size_t target_gid = 0; target_gid < target_group_num; ++target_gid) {
+        const auto propose_it = propose_gid_by_tag.find(tagForGroup(target_gid));
+        if (propose_it == propose_gid_by_tag.end()) {
+            continue;
+        }
+        propose_gid_for_target[target_gid]   = propose_it->second;
+        propose_gid_used[propose_it->second] = true;
+    }
+    for (size_t propose_gid = 0; propose_gid < propose_config.topology().groups().size(); ++propose_gid) {
+        if (propose_gid_used[propose_gid]
+            || propose_config.topology().groupById(propose_gid).layer_ids.empty()) {
+            continue;
+        }
+
+        const auto propose_type       = propose_config.typeForGroup(propose_gid);
+        size_t     matched_target_gid = invalid_gid;
+        size_t     candidate_count    = 0;
+        for (size_t target_gid = 0; target_gid < target_group_num; ++target_gid) {
+            if (propose_gid_for_target[target_gid] != invalid_gid || typeForGroup(target_gid) != propose_type) {
+                continue;
+            }
+            matched_target_gid = target_gid;
+            ++candidate_count;
+        }
+
+        RTP_LLM_CHECK_WITH_INFO(
+            candidate_count == 1,
+            "CacheConfig::mergeMTPModule cannot align propose tag=%s type=%s: found %zu unmatched target groups",
+            propose_config.tagForGroup(propose_gid).c_str(),
+            cacheGroupTypeName(propose_type),
+            candidate_count);
+        propose_gid_for_target[matched_target_gid] = propose_gid;
+        propose_gid_used[propose_gid]              = true;
+        RTP_LLM_LOG_INFO(
+            "CacheConfig::mergeMTPModule aligned propose tag=%s gid=%zu to target tag=%s gid=%zu by type=%s",
+            propose_config.tagForGroup(propose_gid).c_str(),
+            propose_gid,
+            tagForGroup(matched_target_gid).c_str(),
+            matched_target_gid,
+            cacheGroupTypeName(propose_type));
+    }
+
     std::vector<GroupBase> sub_groups;
     std::vector<LayerBase> sub_layers(static_cast<size_t>(mtp_layer_num));
     sub_groups.reserve(target_group_num);
 
     for (size_t target_gid = 0; target_gid < target_group_num; ++target_gid) {
-        const auto&  tag               = tagForGroup(target_gid);
-        const auto   propose_it        = propose_gid_by_tag.find(tag);
-        const bool   has_propose_group = propose_it != propose_gid_by_tag.end();
+        const auto&  target_tag        = tagForGroup(target_gid);
+        const auto   propose_gid       = propose_gid_for_target[target_gid];
+        const bool   has_propose_group = propose_gid != invalid_gid;
         const auto&  source_config     = has_propose_group ? propose_config : *this;
-        const size_t source_gid        = has_propose_group ? propose_it->second : target_gid;
+        const size_t source_gid        = has_propose_group ? propose_gid : target_gid;
         const auto&  source_group      = source_config.topology().groupById(source_gid);
+        const auto&  source_tag        = source_config.tagForGroup(source_gid);
 
         if (has_propose_group) {
             RTP_LLM_CHECK_WITH_INFO(
+                source_group.policy.group_type == target_groups[target_gid].policy.group_type,
+                "CacheConfig::mergeMTPModule target tag=%s type=%s does not match propose tag=%s type=%s",
+                target_tag.c_str(),
+                cacheGroupTypeName(target_groups[target_gid].policy.group_type),
+                source_tag.c_str(),
+                cacheGroupTypeName(source_group.policy.group_type));
+            RTP_LLM_CHECK_WITH_INFO(
                 source_group.layer_ids.size() == static_cast<size_t>(mtp_layer_num),
                 "CacheConfig::mergeMTPModule tag=%s must cover every module layer, got=%zu expected=%u",
-                tag.c_str(),
+                source_tag.c_str(),
                 source_group.layer_ids.size(),
                 mtp_layer_num);
             for (size_t local_layer_id = 0; local_layer_id < source_group.layer_ids.size(); ++local_layer_id) {
                 RTP_LLM_CHECK_WITH_INFO(
                     source_group.layer_ids[local_layer_id] == static_cast<int>(local_layer_id),
                     "CacheConfig::mergeMTPModule tag=%s source layers must be ordered 0..%u, index=%zu value=%d",
-                    tag.c_str(),
+                    source_tag.c_str(),
                     mtp_layer_num - 1,
                     local_layer_id,
                     source_group.layer_ids[local_layer_id]);
@@ -177,7 +235,7 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
             RTP_LLM_CHECK_WITH_INFO(target_groups[target_gid].layer_ids.size() == expected_existing_layers,
                                     "CacheConfig::mergeMTPModule tag=%s gid=%zu physical group alignment mismatch: "
                                     "existing_layers=%zu expected=%zu module=%d group_layer_num=%d module_layers=%u",
-                                    tag.c_str(),
+                                    target_tag.c_str(),
                                     target_gid,
                                     target_groups[target_gid].layer_ids.size(),
                                     expected_existing_layers,
@@ -211,10 +269,10 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
             sub_group.layer_ids.push_back(local_layer_id);
             auto& sub_layer    = sub_layers[static_cast<size_t>(local_layer_id)];
             sub_layer.layer_id = local_layer_id;
-            sub_layer.group_tags.push_back(tag);
+            sub_layer.group_tags.push_back(source_tag);
 
             target_groups[target_gid].layer_ids.push_back(static_cast<int>(global_layer_id));
-            target_layers[global_layer].group_tags.push_back(tag);
+            target_layers[global_layer].group_tags.push_back(target_tag);
 
             RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(local_layer_id) < sub_cfg->layer_to_block_stride_bytes.size(),
                                     "CacheConfig::mergeMTPModule local layer stride missing layer=%d size=%zu",
