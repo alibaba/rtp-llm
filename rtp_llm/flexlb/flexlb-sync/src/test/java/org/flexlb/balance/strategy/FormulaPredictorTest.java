@@ -439,6 +439,34 @@ class FormulaPredictorTest {
         assertEquals(500, p.estimateMs(100, 0));
     }
 
+    // ---- cache behaviour ----
+
+    @Test
+    @DisplayName("predictBatchMs cache invalidated on setParameter")
+    void predictBatchMsCacheInvalidatedOnSetParameter() {
+        FormulaPredictor p = new FormulaPredictor(
+                "param(w0, 10) + param(w1, 0.5) * sum(computeTokens)");
+        BatchItem item = batchItem(100, 0);
+        // 10 + 0.5*100 = 60
+        assertEquals(60, (long) p.predictBatchMs(List.of(item)));
+        p.setParameter("w1", 1.0);
+        // 10 + 1.0*100 = 110 — 缓存必须已失效
+        assertEquals(110, (long) p.predictBatchMs(List.of(item)));
+    }
+
+    @Test
+    @DisplayName("predictBatchMs cache hit returns same result")
+    void predictBatchMsCacheHitReturnsSameResult() {
+        FormulaPredictor p = new FormulaPredictor("50 + sum(computeTokens)");
+        BatchItem item1 = batchItem(100, 0);
+        BatchItem item2 = batchItem(200, 50);
+        // 50 + (100 + 150) = 300
+        double first = p.predictBatchMs(List.of(item1, item2));
+        double second = p.predictBatchMs(List.of(item1, item2));
+        assertEquals(first, second, 0.001);
+        assertEquals(300, (long) first);
+    }
+
     // ---- helpers ----
 
     private static BatchItem batchItem(long seqLen, long hitCacheLen) {

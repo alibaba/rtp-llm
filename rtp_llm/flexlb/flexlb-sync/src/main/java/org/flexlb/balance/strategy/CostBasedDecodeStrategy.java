@@ -23,7 +23,6 @@ import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -124,32 +123,39 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         double hotspotMultiplier = config.getDecodeHotspotMultiplier();
         double imbalanceMultiplier = config.getDecodeImbalanceMultiplier();
 
+        int n = eligible.size();
+        // 缓存每个 endpoint 的值，避免重复调用
+        long[] loads = new long[n];
+        long[] kvUseds = new long[n];
         long sumLoad = 0;
         long sumCacheUsed = 0;
-        for (DecodeEndpoint ep : eligible) {
-            sumLoad += ep.getTotalLoad();
-            sumCacheUsed += ep.realKvUsed();
+        for (int i = 0; i < n; i++) {
+            DecodeEndpoint ep = eligible.get(i);
+            loads[i] = ep.getTotalLoad();
+            kvUseds[i] = ep.realKvUsed();
+            sumLoad += loads[i];
+            sumCacheUsed += kvUseds[i];
         }
-        long avgLoad = sumLoad / eligible.size();
-        long avgCacheUsed = sumCacheUsed / eligible.size();
+        long avgLoad = sumLoad / n;
+        long avgCacheUsed = sumCacheUsed / n;
 
-        List<DecodeEndpoint> survivors = new ArrayList<>(eligible.size());
+        List<DecodeEndpoint> survivors = new ArrayList<>(n);
         Map<String, Integer> rejections = new java.util.HashMap<>();
-        for (DecodeEndpoint ep : eligible) {
+        for (int i = 0; i < n; i++) {
+            DecodeEndpoint ep = eligible.get(i);
             long availableKv = ep.realKvAvailable();
             long totalKv = ep.realKvTotal();
             if (totalKv > 0 && availableKv < seqLen) {
                 rejections.merge("KV_CAPACITY", 1, Integer::sum);
                 continue;
             }
-            long load = ep.getTotalLoad();
             if (hotspotMultiplier > 0 && avgLoad > 0
-                    && load > avgLoad * hotspotMultiplier) {
+                    && loads[i] > avgLoad * hotspotMultiplier) {
                 rejections.merge("HOTSPOT_FILTERED", 1, Integer::sum);
                 continue;
             }
             if (imbalanceMultiplier > 0 && avgCacheUsed > 0
-                    && ep.realKvUsed() > avgCacheUsed * imbalanceMultiplier) {
+                    && kvUseds[i] > avgCacheUsed * imbalanceMultiplier) {
                 rejections.merge("IMBALANCE_FILTERED", 1, Integer::sum);
                 continue;
             }
@@ -185,48 +191,52 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             return null;
         }
 
-        int workerCount = candidateEndpoints.size();
+        int n = candidateEndpoints.size();
+        // 缓存 realKvUsed() 避免重复调用
+        long[] cacheUsed = new long[n];
         long totalCacheUsed = 0;
-        for (DecodeEndpoint ep : candidateEndpoints) {
-            totalCacheUsed += ep.realKvUsed();
+        for (int i = 0; i < n; i++) {
+            cacheUsed[i] = candidateEndpoints.get(i).realKvUsed();
+            totalCacheUsed += cacheUsed[i];
         }
-        double avgCacheUsed = (double) totalCacheUsed / workerCount;
-        List<WeightedWorker> weightedEndpoints = new ArrayList<>();
-        boolean allSameUsage = true;
+        double avgCacheUsed = (double) totalCacheUsed / n;
+
+        double[] weights = new double[n];
         double totalWeight = 0;
-        Long firstCacheUsed = null;
-        for (DecodeEndpoint ep : candidateEndpoints) {
-            long cacheUsed = ep.realKvUsed();
-            double normalizedValue = cacheUsed - avgCacheUsed;
-            if (firstCacheUsed == null) {
-                firstCacheUsed = cacheUsed;
-            } else if (cacheUsed != firstCacheUsed) {
+        boolean allSameUsage = true;
+        long firstCacheUsed = cacheUsed[0];
+        for (int i = 0; i < n; i++) {
+            if (cacheUsed[i] != firstCacheUsed) {
                 allSameUsage = false;
             }
-            double weight = Math.exp(-decayFactor * normalizedValue);
-            weightedEndpoints.add(new WeightedWorker(ep, (long) normalizedValue, weight));
-            totalWeight += weight;
+            double normalizedValue = cacheUsed[i] - avgCacheUsed;
+            weights[i] = Math.exp(-decayFactor * normalizedValue);
+            totalWeight += weights[i];
         }
-        if (totalWeight <= 0) {
-            int randomIndex = ThreadLocalRandom.current().nextInt(workerCount);
-            return candidateEndpoints.get(randomIndex);
+
+        if (allSameUsage || totalWeight <= 0) {
+            // 所有 endpoint 使用率相同，随机选一个
+            return candidateEndpoints.get(ThreadLocalRandom.current().nextInt(n));
         }
-        if (allSameUsage) {
-            int randomIndex = ThreadLocalRandom.current().nextInt(candidateEndpoints.size());
-            return candidateEndpoints.get(randomIndex);
-        }
-        double randomValue = ThreadLocalRandom.current().nextDouble() * totalWeight;
+
+        // 加权随机选择
+        double r = ThreadLocalRandom.current().nextDouble(totalWeight);
         double cumulativeWeight = 0;
-        for (WeightedWorker weightedEndpoint : weightedEndpoints) {
-            cumulativeWeight += weightedEndpoint.weight;
-            if (Double.compare(randomValue, cumulativeWeight) <= 0) {
-                return weightedEndpoint.endpoint;
+        for (int i = 0; i < n; i++) {
+            cumulativeWeight += weights[i];
+            if (r <= cumulativeWeight) {
+                return candidateEndpoints.get(i);
             }
         }
-        return weightedEndpoints.stream()
-                .min(Comparator.comparingLong(w -> w.endpoint.realKvUsed()))
-                .map(w -> w.endpoint)
-                .orElse(null);
+
+        // fallback: 返回使用率最低的
+        int minIdx = 0;
+        for (int i = 1; i < n; i++) {
+            if (cacheUsed[i] < cacheUsed[minIdx]) {
+                minIdx = i;
+            }
+        }
+        return candidateEndpoints.get(minIdx);
     }
 
     private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen, long prefixLength, RoleType roleType, long requestId, ScheduleModeEnum scheduleMode) {

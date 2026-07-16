@@ -94,6 +94,36 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="pushgateway URL for metrics push (e.g. http://11.163.39.110:9091)",
     )
+    parser.add_argument(
+        "--max-input-len",
+        type=int,
+        default=0,
+        help="Cap input length to this value (0=no cap)",
+    )
+    parser.add_argument(
+        "--max-output-len",
+        type=int,
+        default=0,
+        help="Cap output length to this value (0=no cap)",
+    )
+    parser.add_argument(
+        "--gradient",
+        action="store_true",
+        help="enable gradient replay speed: linearly increase from 1x "
+        "to --gradient-max-speed over --duration-s",
+    )
+    parser.add_argument(
+        "--gradient-max-speed",
+        type=int,
+        default=1000,
+        help="max replay speed in gradient mode (default 1000x)",
+    )
+    parser.add_argument(
+        "--gradient-start-speed",
+        type=int,
+        default=10,
+        help="gradient mode start replay speed (default 10x)",
+    )
     return parser.parse_args()
 
 
@@ -123,6 +153,7 @@ class LoadClient:
         self._sent_count: int = 0
         self._actual_sent_count: int = 0
         self._inflight_count: int = 0
+        self._last_gradient_log: float = 0.0
         if getattr(args, "endpoints_file", None):
             self._load_fallback_endpoints(args.endpoints_file)
 
@@ -147,11 +178,50 @@ class LoadClient:
         )
         if not requests:
             raise RuntimeError("no replayable requests loaded")
+
+        # Apply length truncation if requested
+        if self.args.max_input_len > 0 or self.args.max_output_len > 0:
+            truncated = 0
+            for req in requests:
+                if (
+                    self.args.max_input_len > 0
+                    and req.input_len > self.args.max_input_len
+                ):
+                    req.input_len = self.args.max_input_len
+                    if req.token_ids:
+                        req.token_ids = req.token_ids[: self.args.max_input_len]
+                    truncated += 1
+                if (
+                    self.args.max_output_len > 0
+                    and req.output_len > self.args.max_output_len
+                ):
+                    req.output_len = self.args.max_output_len
+                    truncated += 1
+            print(
+                f"truncated {truncated} request length(s): "
+                f"max_input_len={self.args.max_input_len}, "
+                f"max_output_len={self.args.max_output_len}",
+                flush=True,
+            )
+
         print(f"loaded {len(requests)} requests from {self.args.trace}", flush=True)
         if self.args.loop:
             print(
                 f"loop mode: will replay trace repeatedly until "
                 f"duration={self.args.duration_s}s or limit={self.args.limit}",
+                flush=True,
+            )
+        if self.args.gradient and self.args.duration_s <= 0:
+            print(
+                "WARNING: --gradient requires --duration-s > 0, "
+                "falling back to fixed replay_speed",
+                flush=True,
+            )
+        if self.args.gradient and self.args.duration_s > 0:
+            start_speed = max(1, self.args.gradient_start_speed)
+            print(
+                f"gradient mode: speed will increase from {start_speed}x to "
+                f"{self.args.gradient_max_speed}x over {self.args.duration_s}s",
                 flush=True,
             )
 
@@ -185,13 +255,32 @@ class LoadClient:
                 if self.args.limit > 0 and sent_count >= self.args.limit:
                     break
 
+                # Determine current replay speed (gradient or fixed)
+                if self.args.gradient and self.args.duration_s > 0:
+                    elapsed = time.monotonic() - started_at
+                    progress = min(elapsed / self.args.duration_s, 1.0)
+                    start_speed = max(1, self.args.gradient_start_speed)
+                    current_speed = (
+                        start_speed
+                        + (self.args.gradient_max_speed - start_speed) * progress
+                    )
+                    if elapsed - self._last_gradient_log >= 10:
+                        self._last_gradient_log = elapsed
+                        print(
+                            f"gradient speed: {current_speed:.1f}x "
+                            f"(progress {progress * 100:.1f}%, "
+                            f"elapsed {elapsed:.1f}s/"
+                            f"{self.args.duration_s}s)",
+                            flush=True,
+                        )
+                else:
+                    current_speed = self.args.replay_speed
+
                 # Calculate timing with loop offset
-                if self.args.replay_speed > 0 and req.ts_ms > 0:
+                if current_speed > 0 and req.ts_ms > 0:
                     loop_offset_ms = loop_idx * trace_span_ms
                     due_s = (
-                        (req.ts_ms - first_ts + loop_offset_ms)
-                        / 1000.0
-                        / self.args.replay_speed
+                        (req.ts_ms - first_ts + loop_offset_ms) / 1000.0 / current_speed
                     )
                     sleep_s = due_s - (time.monotonic() - started_at)
                     if sleep_s > 0:

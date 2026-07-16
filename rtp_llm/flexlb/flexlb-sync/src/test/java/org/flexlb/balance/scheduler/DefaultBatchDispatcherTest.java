@@ -55,7 +55,7 @@ class DefaultBatchDispatcherTest {
         config.setFlexlbBatchEnqueueDeadlineMs(5000);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService);
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
         callback = new TestCallback();
     }
 

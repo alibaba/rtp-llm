@@ -162,7 +162,9 @@ public class EngineHealthReporter {
             monitor.report(ENGINE_DECODE_WORKER_NUMBER, tags, modelWorkerStatus.getDecodeStatusMap().size());
         }
 
-        if (AbstractEngineStatusSynchronizer.engineSyncExecutor != null && AbstractEngineStatusSynchronizer.statusCheckExecutor != null) {
+        if (AbstractEngineStatusSynchronizer.engineSyncExecutor != null
+                && AbstractEngineStatusSynchronizer.statusCheckExecutor != null
+                && WorkerAddressService.serviceDiscoveryExecutor != null) {
             reportThreadPoolInfo(ENGINE_BALANCING_THREAD_POOL_INFO, "engineSyncExecutor",
                     (ThreadPoolExecutor) AbstractEngineStatusSynchronizer.engineSyncExecutor);
             reportThreadPoolInfo(ENGINE_BALANCING_THREAD_POOL_INFO, "statusCheckExecutor",

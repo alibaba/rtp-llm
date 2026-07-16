@@ -6,6 +6,7 @@ import io.grpc.Status;
 import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.constant.MetricConstant;
@@ -55,12 +56,13 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         this.meterRegistry = meterRegistry;
         int poolSize = configService.loadBalanceConfig().getFlexlbBatchDispatchPoolSize();
         int queueSize = configService.loadBalanceConfig().getFlexlbBatchDispatchQueueSize();
-        Logger.info("FlexLB dispatch executor config: poolSize={}, queueSize={}, rejectionPolicy=AbortPolicy",
+        Logger.info("FlexLB dispatch executor config: poolSize={}, queueSize={}, threadFactory=flexlb-dispatch-executor, rejectionPolicy=AbortPolicy",
                 poolSize, queueSize);
         this.dispatchExecutor = new ThreadPoolExecutor(
                 poolSize, poolSize,
                 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(queueSize),
+                new NamedThreadFactory("flexlb-dispatch-executor"),
                 new ThreadPoolExecutor.AbortPolicy());
         registerMetrics();
     }

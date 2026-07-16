@@ -88,7 +88,7 @@ class FlexlbBatchSchedulerTest {
                 .thenReturn(EngineRpcService.EmptyPB.getDefaultInstance());
 
         EndpointRegistry endpointRegistry = new EndpointRegistry(configService, null, reporter);
-        BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService);
+        BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
         scheduler = new FlexlbBatchScheduler(configService, router, grpcClient, engineWorkerStatus,
                 endpointRegistry, dispatcher, reporter, null);
 

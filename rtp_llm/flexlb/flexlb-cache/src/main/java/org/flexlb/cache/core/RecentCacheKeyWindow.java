@@ -3,8 +3,6 @@ package org.flexlb.cache.core;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.config.ConfigService;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.function.LongSupplier;
@@ -13,7 +11,6 @@ import java.util.function.LongSupplier;
  * Fixed-size recent cache-key pool for request-level cache hit metrics.
  */
 @Slf4j
-@Component
 public class RecentCacheKeyWindow {
 
     public static final long DEFAULT_TIME_WINDOW_MS = 30L * 60L * 1000L;
@@ -45,13 +42,6 @@ public class RecentCacheKeyWindow {
 
     private long cumulativeRequestOccurrences;
     private long cumulativeRequestHitOccurrences;
-
-    @Autowired
-    public RecentCacheKeyWindow(ConfigService configService) {
-        this(resolveTimeWindowMs(configService),
-                resolveMaxCacheKeys(configService),
-                System::currentTimeMillis);
-    }
 
     RecentCacheKeyWindow(long timeWindowMs, LongSupplier nowSupplier) {
         this(timeWindowMs, DEFAULT_MAX_CACHE_KEYS, nowSupplier);
@@ -98,7 +88,9 @@ public class RecentCacheKeyWindow {
             cumulativeRequestHitOccurrences += requestHitOccurrences;
         }
 
-        logRequest(nowMs, requestOccurrences, requestHitOccurrences);
+        if (log.isInfoEnabled()) {
+            logRequest(nowMs, requestOccurrences, requestHitOccurrences);
+        }
         return new Snapshot(timeWindowMs, requestOccurrences, requestHitOccurrences);
     }
 
@@ -124,7 +116,9 @@ public class RecentCacheKeyWindow {
             return 0L;
         }
         long count = 0L;
-        for (Long cacheKey : cacheKeys) {
+        int size = cacheKeys.size();
+        for (int i = 0; i < size; i++) {
+            Long cacheKey = cacheKeys.get(i);
             if (cacheKey != null) {
                 count++;
             }
@@ -137,7 +131,9 @@ public class RecentCacheKeyWindow {
             return 0L;
         }
         long hits = 0L;
-        for (Long cacheKey : cacheKeys) {
+        int size = cacheKeys.size();
+        for (int i = 0; i < size; i++) {
+            Long cacheKey = cacheKeys.get(i);
             if (cacheKey != null && getCount(cacheKey) > 0) {
                 hits++;
             }
@@ -163,7 +159,9 @@ public class RecentCacheKeyWindow {
 
         int start = keyTail;
         int retained = 0;
-        for (Long boxedKey : cacheKeys) {
+        int size = cacheKeys.size();
+        for (int i = 0; i < size; i++) {
+            Long boxedKey = cacheKeys.get(i);
             if (boxedKey == null) {
                 continue;
             }

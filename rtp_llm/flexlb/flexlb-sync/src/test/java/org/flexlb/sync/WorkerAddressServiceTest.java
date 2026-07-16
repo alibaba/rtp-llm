@@ -1,28 +1,27 @@
 package org.flexlb.sync;
 
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyString;
-import static org.mockito.Mockito.eq;
-import static org.mockito.Mockito.isNull;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -38,10 +37,16 @@ class WorkerAddressServiceTest {
     private ServiceDiscovery serviceDiscovery;
 
     @Mock
-    private ExecutorService serviceDiscoveryExecutor;
+    private ConfigService configService;
 
-    @InjectMocks
     private WorkerAddressService workerAddressService;
+
+    @BeforeEach
+    void setUp() {
+        Mockito.lenient().when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        workerAddressService = new WorkerAddressService(engineHealthReporter, modelMetaConfig,
+                serviceDiscovery, configService);
+    }
 
     @Test
     @SuppressWarnings("unchecked")

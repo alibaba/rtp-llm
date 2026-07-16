@@ -82,6 +82,8 @@ public class MicrometerFlexMonitor implements FlexMonitor {
         FlexMetricType metricType = metricTypes.getOrDefault(metricName, FlexMetricType.GAUGE);
         Tags tags = (metricsTags == null || metricsTags.isEmpty())
                 ? Tags.empty()
+                // toMicrometerTags is a lightweight pure function with no external lock,
+                // so computeIfAbsent is safe here — no lock nesting risk.
                 : tagsCache.computeIfAbsent(metricsTags, this::toMicrometerTags);
 
         try {
@@ -89,18 +91,34 @@ public class MicrometerFlexMonitor implements FlexMonitor {
                 case QPS:
                 case COUNTER:
                     String counterKey = prefixedName + "|" + tags;
-                    Counter counter = counterCache.computeIfAbsent(counterKey, k ->
-                            Counter.builder(prefixedName).tags(tags).register(meterRegistry));
+                    // Avoid computeIfAbsent: it holds CHM bin lock while calling register()
+                    // which acquires Micrometer's global meterMapLock, causing lock nesting.
+                    Counter counter = counterCache.get(counterKey);
+                    if (counter == null) {
+                        counter = Counter.builder(prefixedName).tags(tags).register(meterRegistry);
+                        Counter existing = counterCache.putIfAbsent(counterKey, counter);
+                        if (existing != null) {
+                            counter = existing;
+                        }
+                    }
                     counter.increment(value);
                     break;
                 case TIMER:
                     String timerKey = prefixedName + "|" + tags;
-                    Timer timer = timerCache.computeIfAbsent(timerKey, k ->
-                            Timer.builder(prefixedName)
-                                    .tags(tags)
-                                    .publishPercentileHistogram(true)
-                                    .publishPercentiles(0.5, 0.9, 0.95, 0.99)
-                                    .register(meterRegistry));
+                    // Avoid computeIfAbsent: it holds CHM bin lock while calling register()
+                    // which acquires Micrometer's global meterMapLock, causing lock nesting.
+                    Timer timer = timerCache.get(timerKey);
+                    if (timer == null) {
+                        timer = Timer.builder(prefixedName)
+                                .tags(tags)
+                                .publishPercentileHistogram(true)
+                                .publishPercentiles(0.5, 0.9, 0.95, 0.99)
+                                .register(meterRegistry);
+                        Timer existing = timerCache.putIfAbsent(timerKey, timer);
+                        if (existing != null) {
+                            timer = existing;
+                        }
+                    }
                     timer.record((long) value, TimeUnit.MILLISECONDS);
                     break;
                 case GAUGE:
@@ -123,13 +141,19 @@ public class MicrometerFlexMonitor implements FlexMonitor {
      */
     private void reportGauge(String name, Tags tags, double value) {
         String gaugeKey = name + "|" + tags;
-        AtomicDouble atomicDouble = gaugeValues.computeIfAbsent(gaugeKey, k -> {
-            AtomicDouble ad = new AtomicDouble(0.0);
-            Gauge.builder(name, ad, AtomicDouble::get)
+        // Avoid computeIfAbsent: it holds CHM bin lock while calling register()
+        // which acquires Micrometer's global meterMapLock, causing lock nesting.
+        AtomicDouble atomicDouble = gaugeValues.get(gaugeKey);
+        if (atomicDouble == null) {
+            atomicDouble = new AtomicDouble(0.0);
+            Gauge.builder(name, atomicDouble, AtomicDouble::get)
                     .tags(tags)
                     .register(meterRegistry);
-            return ad;
-        });
+            AtomicDouble existing = gaugeValues.putIfAbsent(gaugeKey, atomicDouble);
+            if (existing != null) {
+                atomicDouble = existing;
+            }
+        }
         atomicDouble.set(value);
     }
 

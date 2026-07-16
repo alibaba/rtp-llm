@@ -40,7 +40,11 @@ public class FlexlbGrpcServer {
     // Default executor sizes — overridable via environment variables
     private static final int DEFAULT_EXECUTOR_CORE_SIZE = 1000;
     private static final int DEFAULT_EXECUTOR_MAX_SIZE = 1000;
-    private static final int DEFAULT_EXECUTOR_QUEUE_SIZE = 0;
+    // NOTE: Changed from 0 (unbounded, Integer.MAX_VALUE) to 10000 (bounded).
+    // This is intentional — the bounded queue enables AbortPolicy to fire under load,
+    // returning UNAVAILABLE to clients instead of unbounded queue growth leading to OOM.
+    // Deployments can override via FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE env variable.
+    private static final int DEFAULT_EXECUTOR_QUEUE_SIZE = 10000;
 
     /**
      * Metric prefix — matches {@code MicrometerFlexMonitor.METRIC_PREFIX} so that
@@ -58,7 +62,7 @@ public class FlexlbGrpcServer {
     private Server server;
     private NioEventLoopGroup bossGroup;
     private ThreadPoolExecutor grpcExecutor;
-    private CountingCallerRunsHandler countingCallerRunsHandler;
+    private CountingAbortHandler countingAbortHandler;
 
     public FlexlbGrpcServer(FlexlbServiceImpl flexlbServiceImpl,
                             ConfigService configService,
@@ -96,13 +100,13 @@ public class FlexlbGrpcServer {
                 coreSize, maxSize, queueSize);
 
         this.bossGroup = new NioEventLoopGroup(1, new DefaultThreadFactory("flexlb-grpc-server-boss"));
-        this.countingCallerRunsHandler = new CountingCallerRunsHandler();
+        this.countingAbortHandler = new CountingAbortHandler();
         this.grpcExecutor = new ThreadPoolExecutor(
                 coreSize, maxSize,
                 60L, TimeUnit.SECONDS,
                 queueSize > 0 ? new LinkedBlockingQueue<Runnable>(queueSize) : new LinkedBlockingQueue<Runnable>(),
                 new DefaultThreadFactory("flexlb-grpc-executor"),
-                countingCallerRunsHandler
+                countingAbortHandler
         );
 
         // Register monitoring metrics for the gRPC server executor
@@ -132,7 +136,7 @@ public class FlexlbGrpcServer {
      *   <li>{@code flexlb_grpc_server_executor_pool_size} — gauge: current thread pool size</li>
      *   <li>{@code flexlb_grpc_server_executor_max_pool_size} — gauge: maximum thread pool size</li>
      *   <li>{@code flexlb_grpc_server_executor_completed_tasks_total} — counter: completed task count</li>
-     *   <li>{@code flexlb_grpc_server_executor_caller_runs_total} — counter: CallerRunsPolicy rejections</li>
+     *   <li>{@code flexlb_grpc_server_executor_caller_runs_total} — counter: AbortPolicy rejections</li>
      * </ul>
      *
      * <p>When {@link MeterRegistry} is not available (e.g. actuator not on classpath),
@@ -172,8 +176,8 @@ public class FlexlbGrpcServer {
                 .register(meterRegistry);
 
         FunctionCounter.builder(METRIC_PREFIX + MetricConstant.GRPC_SERVER_EXECUTOR_CALLER_RUNS,
-                        countingCallerRunsHandler, handler -> handler.getRejectionCount().doubleValue())
-                .description("gRPC server executor caller-runs rejection count")
+                        countingAbortHandler, handler -> handler.getRejectionCount().doubleValue())
+                .description("gRPC server executor rejection count (AbortPolicy)")
                 .register(meterRegistry);
 
         Logger.info("FlexLB gRPC server executor metrics registered with MeterRegistry");
@@ -209,18 +213,22 @@ public class FlexlbGrpcServer {
 
     /**
      * Custom {@link RejectedExecutionHandler} that delegates to
-     * {@link ThreadPoolExecutor.CallerRunsPolicy} and counts the number of
+     * {@link ThreadPoolExecutor.AbortPolicy} and counts the number of
      * times the rejection policy is triggered.
      *
      * <p>The rejection count is exposed as a {@link FunctionCounter} metric
-     * ({@code flexlb_grpc_server_executor_caller_runs_total}). When CallerRunsPolicy
-     * fires, it means the executor thread pool and queue are both saturated, and
-     * the calling (Netty EventLoop) thread is forced to execute the task synchronously.
+     * ({@code flexlb_grpc_server_executor_caller_runs_total} — metric name kept
+     * for backward compat). When AbortPolicy fires, it means the executor thread
+     * pool and queue are both saturated. A {@link java.util.concurrent.RejectedExecutionException}
+     * is thrown which gRPC catches and converts into an {@code UNAVAILABLE}
+     * status response to the client. This prevents the Netty EventLoop thread
+     * from being forced to execute the task synchronously (which was the
+     * behaviour with {@code CallerRunsPolicy} and caused ~990 ms blocking).
      */
-    static class CountingCallerRunsHandler implements RejectedExecutionHandler {
+    static class CountingAbortHandler implements RejectedExecutionHandler {
         private final AtomicLong rejectionCount = new AtomicLong(0);
-        private final ThreadPoolExecutor.CallerRunsPolicy delegate =
-                new ThreadPoolExecutor.CallerRunsPolicy();
+        private final ThreadPoolExecutor.AbortPolicy delegate =
+                new ThreadPoolExecutor.AbortPolicy();
 
         @Override
         public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {

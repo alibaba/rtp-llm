@@ -38,17 +38,49 @@ SCHEDULE_MODE="${SCHEDULE_MODE:-batch}"
 TIMEOUT_MS="${TIMEOUT_MS:-3600000}"
 SLA_TTFT_MS="${SLA_TTFT_MS:-500}"
 ZERO_OUTPUT_POLICY="${ZERO_OUTPUT_POLICY:-skip}"
+MAX_INPUT_LEN="${MAX_INPUT_LEN:-0}"
+MAX_OUTPUT_LEN="${MAX_OUTPUT_LEN:-0}"
+GRADIENT="${GRADIENT:-0}"
+GRADIENT_MAX_SPEED="${GRADIENT_MAX_SPEED:-1000}"
+GRADIENT_START_SPEED="${GRADIENT_START_SPEED:-10}"
 SCHEDULE_ONLY="${SCHEDULE_ONLY:-0}"
 LOOP="${LOOP:-0}"
 PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-}"
+JFR_FILE="${JFR_FILE:-${RUN_DIR}/flexlb_profile.jfr}"
+JFR_DURATION="${JFR_DURATION:-300s}"
 
-DEFAULT_FLEXLB_CONFIG='{"loadBalanceStrategy":"COST_BASED_PREFILL","decodeLoadBalanceStrategy":"COST_BASED_DECODE","cacheHitMaxCacheKeys":80000000,"cacheHitMetricReportEnabled":true,"cacheHitTimeWindowMs":1800000,"cacheHitTraceLogEnabled":false,"cacheHitWindowWriteEnabled":true,"decodeConcurrencyLimit":132,"flexlbBatchAlgorithm":"fixed_window","flexlbBatchFixedWaitMs":10,"flexlbBatchPredictThresholdMs":550,"flexlbBatchSizeMax":32,"hysteresisBiasPercent":30,"maxQueueSize":1000000,"flexlbBatchMaxInflight":1000000,"flexlbBatchDispatchPoolSize":500,"flexlbBatchDispatchQueueSize":10000,"prefillQueueSizeThreshold":100000,"defaultScheduleMode":"BATCH","flexlbBatchFixedMaxInflightBatches":-1,"costSloMs":1000,"flexlbBatchMinSize":8,"prefillLbTimeoutMs":5000}'
+DEFAULT_FLEXLB_CONFIG='{"loadBalanceStrategy":"COST_BASED_PREFILL","decodeLoadBalanceStrategy":"COST_BASED_DECODE","cacheHitMaxCacheKeys":10000000,"cacheHitMetricReportEnabled":true,"cacheHitTimeWindowMs":1800000,"cacheHitTraceLogEnabled":false,"cacheHitWindowWriteEnabled":true,"decodeConcurrencyLimit":132,"flexlbBatchAlgorithm":"fixed_window","flexlbBatchFixedWaitMs":10,"flexlbBatchPredictThresholdMs":550,"flexlbBatchSizeMax":32,"hysteresisBiasPercent":30,"maxQueueSize":1000000,"flexlbBatchMaxInflight":1000000,"flexlbBatchDispatchPoolSize":500,"flexlbBatchDispatchQueueSize":10000,"prefillQueueSizeThreshold":100000,"defaultScheduleMode":"BATCH","flexlbBatchFixedMaxInflightBatches":-1,"costSloMs":1000,"flexlbBatchMinSize":8,"prefillLbTimeoutMs":5000}'
 DEFAULT_STRATEGY_CONFIGS='{"shortestTtft":{"candidatePool":{"mode":"FIXED","size":2}}}'
 FLEXLB_CONFIG="${FLEXLB_CONFIG:-${DEFAULT_FLEXLB_CONFIG}}"
 STRATEGY_CONFIGS="${STRATEGY_CONFIGS:-${DEFAULT_STRATEGY_CONFIGS}}"
 OTEL_TRACE_SKIP_PATTERN="${OTEL_TRACE_SKIP_PATTERN:-.*}"
 OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-none}"
 HIPPO_ROLE="${HIPPO_ROLE:-flexlb_eval_master}"
+
+# ========== Thread Pool Size Configuration ==========
+# These defaults keep total threads <1000 on high-core machines.
+export GRPC_CLIENT_EXECUTOR_CORE_SIZE="${GRPC_CLIENT_EXECUTOR_CORE_SIZE:-32}"
+export GRPC_CLIENT_EXECUTOR_MAX_SIZE="${GRPC_CLIENT_EXECUTOR_MAX_SIZE:-32}"
+export GRPC_CLIENT_EXECUTOR_QUEUE_SIZE="${GRPC_CLIENT_EXECUTOR_QUEUE_SIZE:-10000}"
+export GRPC_CLIENT_EVENT_LOOP_THREADS="${GRPC_CLIENT_EVENT_LOOP_THREADS:-8}"
+export GRPC_SERVER_WORKER_EVENT_LOOP_THREADS="${GRPC_SERVER_WORKER_EVENT_LOOP_THREADS:-4}"
+export HTTP_NETTY_EVENT_LOOP_THREADS="${HTTP_NETTY_EVENT_LOOP_THREADS:-4}"
+export HTTP_NETTY_EVENT_EXECUTOR_THREADS="${HTTP_NETTY_EVENT_EXECUTOR_THREADS:-16}"
+export HTTP_NETTY_EVENT_EXECUTOR_QUEUE_SIZE="${HTTP_NETTY_EVENT_EXECUTOR_QUEUE_SIZE:-1000}"
+export HTTP_REQUEST_EXECUTOR_CORE_SIZE="${HTTP_REQUEST_EXECUTOR_CORE_SIZE:-32}"
+export HTTP_REQUEST_EXECUTOR_MAX_SIZE="${HTTP_REQUEST_EXECUTOR_MAX_SIZE:-32}"
+export HTTP_REQUEST_EXECUTOR_QUEUE_SIZE="${HTTP_REQUEST_EXECUTOR_QUEUE_SIZE:-10000}"
+export ENGINE_SYNC_EXECUTOR_CORE_SIZE="${ENGINE_SYNC_EXECUTOR_CORE_SIZE:-32}"
+export ENGINE_SYNC_EXECUTOR_MAX_SIZE="${ENGINE_SYNC_EXECUTOR_MAX_SIZE:-64}"
+export STATUS_CHECK_EXECUTOR_CORE_SIZE="${STATUS_CHECK_EXECUTOR_CORE_SIZE:-32}"
+export STATUS_CHECK_EXECUTOR_MAX_SIZE="${STATUS_CHECK_EXECUTOR_MAX_SIZE:-64}"
+export SERVICE_DISCOVERY_MAX_SIZE="${SERVICE_DISCOVERY_MAX_SIZE:-32}"
+export NETTY_SELECT_THREAD_MULTIPLIER="${NETTY_SELECT_THREAD_MULTIPLIER:-1}"
+export NETTY_WORKER_THREAD_MULTIPLIER="${NETTY_WORKER_THREAD_MULTIPLIER:-1}"
+export FLEXLB_GRPC_EXECUTOR_CORE_SIZE="${FLEXLB_GRPC_EXECUTOR_CORE_SIZE:-64}"
+export FLEXLB_GRPC_EXECUTOR_MAX_SIZE="${FLEXLB_GRPC_EXECUTOR_MAX_SIZE:-64}"
+export FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE="${FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE:-10000}"
+export SCHEDULE_WORKER_SIZE="${SCHEDULE_WORKER_SIZE:-16}"
 
 MOCK_PID=""
 FLEXLB_PID=""
@@ -63,6 +95,9 @@ JAVA_MODULE_OPTS=(
   --add-opens java.base/sun.nio.ch=ALL-UNNAMED
   --add-opens java.instrument/sun.instrument=ALL-UNNAMED
 )
+
+# Limit Reactor boundedElastic scheduler threads to prevent thread explosion
+JVM_SYSTEM_PROPS=(-Dreactor.schedulers.defaultBoundedElasticSize=64)
 
 java_major() {
   local java_bin="${1:-java}"
@@ -272,6 +307,8 @@ OVERRIDE_ENV_KEYS=(
   DECODE_CONCURRENCY_LIMIT
   DECODE_LOAD_BALANCE_STRATEGY
   DEFAULT_SCHEDULE_MODE
+  ENGINE_SYNC_EXECUTOR_CORE_SIZE
+  ENGINE_SYNC_EXECUTOR_MAX_SIZE
   FLEXLB_BATCH_ALGORITHM
   FLEXLB_BATCH_DISPATCH_POOL_SIZE
   FLEXLB_BATCH_DISPATCH_QUEUE_SIZE
@@ -281,12 +318,36 @@ OVERRIDE_ENV_KEYS=(
   FLEXLB_BATCH_MIN_SIZE
   FLEXLB_BATCH_PREDICT_THRESHOLD_MS
   FLEXLB_BATCH_SIZE_MAX
+  FLEXLB_GRPC_EXECUTOR_CORE_SIZE
+  FLEXLB_GRPC_EXECUTOR_MAX_SIZE
+  FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE
   FLEXLB_JVM_HEAP_SIZE
+  FLEXLB_MONITOR_ENABLED
+  GRADIENT
+  GRADIENT_MAX_SPEED
+  GRADIENT_START_SPEED
+  GRPC_CLIENT_EVENT_LOOP_THREADS
+  GRPC_CLIENT_EXECUTOR_CORE_SIZE
+  GRPC_CLIENT_EXECUTOR_MAX_SIZE
+  GRPC_CLIENT_EXECUTOR_QUEUE_SIZE
+  GRPC_SERVER_WORKER_EVENT_LOOP_THREADS
+  HTTP_NETTY_EVENT_EXECUTOR_QUEUE_SIZE
+  HTTP_NETTY_EVENT_EXECUTOR_THREADS
+  HTTP_NETTY_EVENT_LOOP_THREADS
+  HTTP_REQUEST_EXECUTOR_CORE_SIZE
+  HTTP_REQUEST_EXECUTOR_MAX_SIZE
+  HTTP_REQUEST_EXECUTOR_QUEUE_SIZE
   HYSTERESIS_BIAS_PERCENT
   LOAD_BALANCE_STRATEGY
   MAX_QUEUE_SIZE
+  NETTY_SELECT_THREAD_MULTIPLIER
+  NETTY_WORKER_THREAD_MULTIPLIER
   PREFILL_QUEUE_SIZE_THRESHOLD
   PREFILL_TIME_FORMULA
+  SCHEDULE_WORKER_SIZE
+  SERVICE_DISCOVERY_MAX_SIZE
+  STATUS_CHECK_EXECUTOR_CORE_SIZE
+  STATUS_CHECK_EXECUTOR_MAX_SIZE
   SYNC_REQUEST_TIMEOUT_MS
   SYNC_STATUS_INTERVAL
 )
@@ -337,7 +398,7 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
       "OTEL_TRACE_SKIP_PATTERN=${OTEL_TRACE_SKIP_PATTERN}" \
       "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
       "HIPPO_ROLE=${HIPPO_ROLE}" \
-      java -XX:StartFlightRecording=filename=/data1/wuran.wzy/flexlb_profile.jfr,settings=profile,dumponexit=true,disk=true,maxsize=256m "${JAVA_HEAP_OPTS[@]}" "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
+      java -XX:StartFlightRecording=filename=${JFR_FILE},settings=profile,duration=${JFR_DURATION},disk=true,maxsize=256m,dumponexit=true "${JAVA_HEAP_OPTS[@]}" "${JAVA_MODULE_OPTS[@]}" "${JVM_SYSTEM_PROPS[@]}" -jar "${FLEXLB_JAR}" \
       --server.port="${FLEXLB_HTTP_PORT}" \
       --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
       --spring.profiles.active="${SPRING_PROFILE:-default}" \
@@ -373,9 +434,19 @@ fi
 if [[ -n "${PUSHGATEWAY_URL}" ]]; then
   CLIENT_ARGS+=(--pushgateway-url "${PUSHGATEWAY_URL}")
 fi
+if [[ -n "${MAX_INPUT_LEN}" && "${MAX_INPUT_LEN}" != "0" ]]; then
+  CLIENT_ARGS+=(--max-input-len "${MAX_INPUT_LEN}")
+fi
+if [[ -n "${MAX_OUTPUT_LEN}" && "${MAX_OUTPUT_LEN}" != "0" ]]; then
+  CLIENT_ARGS+=(--max-output-len "${MAX_OUTPUT_LEN}")
+fi
+if [[ "${GRADIENT}" == "1" ]]; then
+  CLIENT_ARGS+=(--gradient --gradient-max-speed "${GRADIENT_MAX_SPEED}" --gradient-start-speed "${GRADIENT_START_SPEED}")
+fi
 
 PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/flexlb_load_client.py" "${CLIENT_ARGS[@]}" | tee "${RUN_DIR}/client.stdout"
 
 echo "summary=${RUN_DIR}/load_client/summary.json"
 echo "per_request=${RUN_DIR}/load_client/per_request.jsonl"
 echo "report=${RUN_DIR}/load_client/report.md"
+echo "jfr=${JFR_FILE}"

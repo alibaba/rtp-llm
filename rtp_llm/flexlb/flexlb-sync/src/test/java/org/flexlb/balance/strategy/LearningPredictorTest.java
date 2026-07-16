@@ -17,44 +17,36 @@ import static org.junit.jupiter.api.Assertions.*;
 class LearningPredictorTest {
 
     @Test
-    @DisplayName("default weights produce correct estimateMs")
+    @DisplayName("default weights produce zero estimateMs")
     void defaultWeightsEstimateMs() {
-        // weights = {300, -5, 0, 5, 0, 0}
-        // seq=1000, hit=200, compute=(1000-200)/1024=0.78125
-        // y = 300*1 + (-5)*1 + 0*reuse + 5*0.78125 + 0 + 0 = 295 + 3.90625 = 298.90625
+        // Exponential model: default weights all 0
+        // output = w6/coff1 + w7/coff2 * exp(0/coff3) = 0 + 0 * 1.0 = 0
         LearningPredictor p = new LearningPredictor();
-        assertEquals(298, p.estimateMs(1000, 200));
+        assertEquals(0, p.estimateMs(1000, 200));
     }
 
     @Test
     @DisplayName("estimateMs with zero tokens")
     void estimateMsZeroTokens() {
         LearningPredictor p = new LearningPredictor();
-        // seq=0, hit=0, compute=0
-        // y = 300*1 + (-5)*1 + 0 + 5*0 + 0 + 0 = 295
-        assertEquals(295, p.estimateMs(0, 0));
+        assertEquals(0, p.estimateMs(0, 0));
     }
 
     @Test
     @DisplayName("estimateMs bounds hitTokens to totalTokens")
     void estimateMsHitTokensBounded() {
         LearningPredictor p = new LearningPredictor();
-        // hit=min(500,100)=100, compute=(100-100)/1024=0
-        // y = 300*1 + (-5)*1 + 0 + 5*0 + 0 + 0 = 295
-        assertEquals(295, p.estimateMs(100, 500));
+        assertEquals(0, p.estimateMs(100, 500));
     }
 
     @Test
     @DisplayName("predictBatchMs aggregates correctly")
     void predictBatchMsAggregation() {
         LearningPredictor p = new LearningPredictor();
-        // item1: seq=500, hit=200 → reuse=200/1024, compute=300/1024
-        // item2: seq=300, hit=100 → reuse=100/1024, compute=200/1024
-        // y = 300*1 + (-5)*2 + 0*sumReuse + 5*sumCompute + 0 + 0
-        //   = 300 - 10 + 5*(500/1024) = 290 + 2.4414 = 292.4414
         BatchItem item1 = batchItem(500, 200);
         BatchItem item2 = batchItem(300, 100);
-        assertEquals(292, p.predictBatchMs(List.of(item1, item2)));
+        // Default weights all 0 → prediction 0
+        assertEquals(0, p.predictBatchMs(List.of(item1, item2)));
     }
 
     @Test
@@ -83,24 +75,29 @@ class LearningPredictorTest {
     @DisplayName("getParameter returns weight values")
     void getParameterValues() {
         LearningPredictor p = new LearningPredictor();
-        assertEquals(300.0, p.getParameter("w0"));
-        assertEquals(-5.0, p.getParameter("w1"));
+        // Exponential model: 8 weights, all default to 0
+        assertEquals(0.0, p.getParameter("w0"));
+        assertEquals(0.0, p.getParameter("w1"));
         assertEquals(0.0, p.getParameter("w2"));
-        assertEquals(5.0, p.getParameter("w3"));
+        assertEquals(0.0, p.getParameter("w3"));
         assertEquals(0.0, p.getParameter("w4"));
         assertEquals(0.0, p.getParameter("w5"));
+        assertEquals(0.0, p.getParameter("w6"));
+        assertEquals(0.0, p.getParameter("w7"));
     }
 
     @Test
     @DisplayName("setParameter updates weight")
     void setParameterUpdatesWeight() {
         LearningPredictor p = new LearningPredictor();
-        p.setParameter("w1", 1.0);
-        assertEquals(1.0, p.getParameter("w1"));
-        // weights = {300, 1.0, 0, 5, 0, 0}
-        // seq=1000, hit=200, compute=800/1024=0.78125
-        // y = 300*1 + 1.0*1 + 0 + 5*0.78125 + 0 + 0 = 304.90625
-        assertEquals(304, p.estimateMs(1000, 200));
+        p.setParameter("w6", 300.0);
+        p.setParameter("w7", 360.0);
+        assertEquals(300.0, p.getParameter("w6"));
+        assertEquals(360.0, p.getParameter("w7"));
+        // w6=300, w7=360, other weights=0:
+        // sum=0, linearExp=exp(0/1700)=1.0
+        // output = 300/0.55 + 360/1.2 * 1.0 = 545.45 + 300 = 845.45 → 845
+        assertEquals(845, p.estimateMs(1000, 200));
     }
 
     @Test
@@ -122,12 +119,16 @@ class LearningPredictorTest {
     void getParametersMap() {
         LearningPredictor p = new LearningPredictor();
         Map<String, Double> params = p.getParameters();
-        assertEquals(300.0, params.get("w0"));
-        assertEquals(-5.0, params.get("w1"));
+        // Exponential model has 8 weights (w0-w7), all default to 0
+        assertEquals(8, params.size());
+        assertEquals(0.0, params.get("w0"));
+        assertEquals(0.0, params.get("w1"));
         assertEquals(0.0, params.get("w2"));
-        assertEquals(5.0, params.get("w3"));
+        assertEquals(0.0, params.get("w3"));
         assertEquals(0.0, params.get("w4"));
         assertEquals(0.0, params.get("w5"));
+        assertEquals(0.0, params.get("w6"));
+        assertEquals(0.0, params.get("w7"));
     }
 
     @Test
@@ -141,6 +142,8 @@ class LearningPredictorTest {
     @DisplayName("formulaString contains weight values")
     void formulaStringContainsWeights() {
         LearningPredictor p = new LearningPredictor();
+        p.setParameter("w0", 300.0);
+        p.setParameter("w1", -5.0);
         String desc = p.formulaString();
         assertTrue(desc.contains("w0"));
         assertTrue(desc.contains("w1"));

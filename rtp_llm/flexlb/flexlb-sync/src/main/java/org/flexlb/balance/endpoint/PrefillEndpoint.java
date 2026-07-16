@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 public class PrefillEndpoint extends WorkerEndpoint {
@@ -32,6 +33,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     private volatile PrefillTimePredictor predictor;
     private final ConcurrentHashMap<Long, BatchInflight> inflightBatches = new ConcurrentHashMap<>();
+    private final AtomicInteger inflightRequestCount = new AtomicInteger(0);
     private volatile WorkerBatcher batcher;
     private final InflightEvictor<Long, BatchInflight> batchEvictor;
     private final BatchSchedulerReporter reporter;
@@ -43,6 +45,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     private volatile long engineWaitingQueryLen = 0;
 
+    private static final long WAIT_TIME_CACHE_TTL_MS = 2;
+    private volatile long cachedWaitTimeMs = 0;
+    private volatile long cachedWaitTimeExpireAtMs = 0;
+
     public PrefillEndpoint(WorkerStatus status, FlexlbConfig config,
                            BatchDecisionHandler handler,
                            BatchSchedulerReporter reporter) {
@@ -50,7 +56,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.reporter = reporter;
         this.predictor = createPredictor(config);
         this.batcher = createBatcher(config, handler, reporter);
-        this.batchEvictor = new InflightEvictor<>(inflightBatches, null);
+        this.batchEvictor = new InflightEvictor<>(inflightBatches, batch -> {
+            inflightRequestCount.addAndGet(-batch.requests().size());
+            cachedWaitTimeExpireAtMs = 0;
+        });
         this.batcher.start();
     }
 
@@ -92,11 +101,24 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     public void commitBatch(long batchId, long predictMs, List<BatchItem> requests) {
-        inflightBatches.put(batchId, new BatchInflight(batchId, predictMs, requests));
+        BatchInflight newBatch = new BatchInflight(batchId, predictMs, requests);
+        BatchInflight prev = inflightBatches.putIfAbsent(batchId, newBatch);
+        if (prev != null) {
+            // batchId already exists — subtract the old request count before overwriting,
+            // otherwise the old value is silently lost and the counter stays inflated.
+            inflightRequestCount.addAndGet(-prev.requests().size());
+            inflightBatches.put(batchId, newBatch);
+        }
+        inflightRequestCount.addAndGet(requests.size());
+        cachedWaitTimeExpireAtMs = 0;
     }
 
     public void releaseBatch(long batchId) {
-        inflightBatches.remove(batchId);
+        BatchInflight removed = inflightBatches.remove(batchId);
+        if (removed != null) {
+            inflightRequestCount.addAndGet(-removed.requests().size());
+            cachedWaitTimeExpireAtMs = 0;
+        }
     }
 
     /**
@@ -110,10 +132,15 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     .filter(r -> !failedRequestIds.contains(r.requestId()))
                     .toList();
             if (survivors.isEmpty()) {
+                inflightRequestCount.addAndGet(-old.requests().size());
+                cachedWaitTimeExpireAtMs = 0;
                 return null; // removes entry from map
             }
             long newPredMs = predictor != null ? (long) predictor.predictBatchMs(survivors) : 0;
-            return old.repack(newPredMs, survivors);
+            BatchInflight repacked = old.repack(newPredMs, survivors);
+            inflightRequestCount.addAndGet(-(old.requests().size() - survivors.size()));
+            cachedWaitTimeExpireAtMs = 0;
+            return repacked;
         });
         return result;
     }
@@ -156,6 +183,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     BatchInflight removed = inflightBatches.remove(task.getRequestId());
                     if (removed == null) {
                         logger.warn("Prefill calibrate: finished non-batch request reqId={} not in inflight", task.getRequestId());
+                    } else {
+                        inflightRequestCount.addAndGet(-removed.requests().size());
+                        cachedWaitTimeExpireAtMs = 0;
                     }
                     continue;
                 }
@@ -197,7 +227,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         + "Likely stale or foreign status report. Skipping removal.", batchId);
                 continue;
             }
-            inflightBatches.remove(batchId);
+            BatchInflight removed = inflightBatches.remove(batchId);
+            if (removed != null) {
+                inflightRequestCount.addAndGet(-removed.requests().size());
+                cachedWaitTimeExpireAtMs = 0;
+            }
             reportBatchCompletion(batchId, batch, finishedTaskInfo);
         }
 
@@ -308,11 +342,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     public int getInflightRequestCount() {
-        int count = 0;
-        for (BatchInflight batch : inflightBatches.values()) {
-            count += batch.requests().size();
-        }
-        return count;
+        return inflightRequestCount.get();
     }
 
     /**
@@ -394,7 +424,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     private long estimateWaitingTimeMs(long nowMs) {
+        if (nowMs < cachedWaitTimeExpireAtMs) {
+            return cachedWaitTimeMs;
+        }
         if (inflightBatches.isEmpty()) {
+            cachedWaitTimeMs = 0;
+            cachedWaitTimeExpireAtMs = nowMs + WAIT_TIME_CACHE_TTL_MS;
             return 0;
         }
         long totalPredMs = 0;
@@ -403,11 +438,16 @@ public class PrefillEndpoint extends WorkerEndpoint {
             totalPredMs += Math.max(0, batch.predictTimeMs());
             earliestProgressBaseMs = Math.min(earliestProgressBaseMs, batch.progressBaseMs());
         }
+        long result;
         if (earliestProgressBaseMs == Long.MAX_VALUE) {
-            return 0;
+            result = 0;
+        } else {
+            long elapsedMs = Math.max(0, nowMs - earliestProgressBaseMs);
+            result = Math.max(0, totalPredMs - elapsedMs);
         }
-        long elapsedMs = Math.max(0, nowMs - earliestProgressBaseMs);
-        return Math.max(0, totalPredMs - elapsedMs);
+        cachedWaitTimeMs = result;
+        cachedWaitTimeExpireAtMs = nowMs + WAIT_TIME_CACHE_TTL_MS;
+        return result;
     }
 
     private static boolean isCancelError(TaskInfo task) {

@@ -35,6 +35,19 @@ public interface PrefillTimePredictor {
     double predictBatchMs(List<BatchItem> items);
 
     /**
+     * Estimate prefill time for a batch of requests without consulting or
+     * populating any internal cache.
+     *
+     * <p>Useful in trial-and-error loops (e.g. batcher algorithm candidate
+     * evaluation) where each candidate batch differs and cache lookups are
+     * pure overhead.
+     *
+     * @param items batch items (may be empty)
+     * @return predicted time in milliseconds (0 for an empty batch)
+     */
+    double predictBatchMsUncached(List<BatchItem> items);
+
+    /**
      * Learn from a completed batch's actual execution time.
      *
      * @param items       the batch requests (contains seqLen, hitCache, etc.)
