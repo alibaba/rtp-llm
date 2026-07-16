@@ -6,6 +6,7 @@ import os
 
 import torch
 
+
 _WARMUP_ENV = "RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD"
 
 
@@ -13,9 +14,7 @@ def cuda_graph_warmup_forward_enabled() -> bool:
     return os.environ.get(_WARMUP_ENV, "0") == "1"
 
 
-def sync_cuda_graph_warmup_ranks(
-    _phase: str, device: torch.device | None = None
-) -> None:
+def sync_cuda_graph_warmup_ranks(_phase: str, device: torch.device | None = None) -> None:
     if not cuda_graph_warmup_forward_enabled():
         return
     if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():

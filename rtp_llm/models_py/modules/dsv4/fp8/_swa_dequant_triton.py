@@ -16,18 +16,43 @@ so we dequant a per-request SWA window into a workspace buffer first
 
 from __future__ import annotations
 
-from typing import Optional
+from dataclasses import dataclass
+from typing import Any, Optional
 
 import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
+    CPByteSlicedSlotCompaction,
+)
 from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
     invalid_kv_access_validation_enabled,
     trap_invalid_kv_access_enabled,
     validate_block_table_lookup,
     validate_slot_mapping,
 )
+
+
+@dataclass
+class CPByteSlicedSwaPrefixPending:
+    cp_size: int
+    B: int
+    W: int
+    offset: int
+    full_entries_per_block: int
+    gathered: torch.Tensor
+    unique_blocks: torch.Tensor
+    compact_slots: torch.Tensor
+    gather_lens_cpu: list
+    work: Any
+    stream: Any
+    completion_event: Any
+    local_slices: torch.Tensor
+    ready_event: Any = None
+    work_waited: bool = False
+
 
 # Layout constants — must stay byte-aligned with
 # ``decode/fp8_kv_quant_decode_op.py`` and vLLM ``cache_utils.py``.
@@ -205,12 +230,8 @@ def dequantize_and_gather_k_cache(
 
     # Caller invariant — int32 contig block tables; negative physical ids are
     # rejected before launch.
-    assert (
-        block_table.dtype == torch.int32
-        and block_table.is_contiguous()
-        and block_table.device == k_cache.device
-    ), (
-        "block_table must be int32, contiguous, and on the same device as k_cache; "
+    assert block_table.dtype == torch.int32 and block_table.is_contiguous(), (
+        "block_table must be int32 and contiguous; "
         f"got dtype={block_table.dtype} contig={block_table.is_contiguous()} "
         f"dev={block_table.device} (k_cache dev={k_cache.device})"
     )
@@ -441,7 +462,15 @@ def dequantize_and_gather_k_cache_slots(
     )
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "out_stride0",
+        "out_stride1",
+        "offset",
+        "max_blocks_per_seq",
+        "block_stride",
+    ]
+)
 def _gather_k_cache_packed_kernel(
     out_ptr,
     out_stride0,
@@ -451,11 +480,11 @@ def _gather_k_cache_packed_kernel(
     block_table_ptr,
     offset,
     gather_lens_ptr,
-    max_blocks_per_seq: tl.constexpr,
+    max_blocks_per_seq,
     cache_block_size: tl.constexpr,
     token_data_size: tl.constexpr,
     scale_dim: tl.constexpr,
-    block_stride: tl.constexpr,
+    block_stride,
 ):
     """Gather paged FP8 cache into true per-token packed slots.
 
@@ -484,18 +513,26 @@ def _gather_k_cache_packed_kernel(
         block_in_seq = pos // cache_block_size
         pos_in_block = pos % cache_block_size
 
-        block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
+        block_table_row_ptr = block_table_ptr + batch_idx.to(
+            tl.int64
+        ) * max_blocks_per_seq.to(tl.int64)
         physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)
         tl.device_assert(physical_block_idx >= 0, "block_table contains -1")
 
-        cache_block_ptr = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
+        cache_block_ptr = k_cache_ptr + physical_block_idx.to(
+            tl.int64
+        ) * block_stride.to(tl.int64)
         token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
         token_scale_ptr = (
             cache_block_ptr
             + cache_block_size * token_data_size
             + pos_in_block * scale_dim
         )
-        output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+        output_row_ptr = (
+            out_ptr
+            + batch_idx.to(tl.int64) * out_stride0.to(tl.int64)
+            + (offset.to(tl.int64) + i.to(tl.int64)) * out_stride1.to(tl.int64)
+        )
 
         data = tl.load(token_data_ptr + data_offsets, mask=data_mask, other=0)
         tl.store(output_row_ptr + data_offsets, data, mask=data_mask)
@@ -704,12 +741,18 @@ def dequantize_swa_window_to_bf16(
 # --------------------------------------------------------------------------
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "out_stride0",
+        "pool_block_stride",
+        "num_cache_blocks",
+    ]
+)
 def _dequantize_slots_kernel(
     out_ptr,  # [N, 512] bf16
     out_stride0,
     pool_ptr,  # [num_blocks, block_size, 584] uint8
-    pool_block_stride: tl.constexpr,  # bytes per block (may be padded > bs*584)
+    pool_block_stride,  # bytes per block (may be padded > bs*584)
     slot_indices_ptr,  # [N] int64
     block_size: tl.constexpr,
     fp8_dim: tl.constexpr,  # 448
@@ -717,7 +760,7 @@ def _dequantize_slots_kernel(
     scale_dim: tl.constexpr,  # 8
     quant_block: tl.constexpr,  # 64
     token_data_size: tl.constexpr,  # 576
-    num_cache_blocks: tl.constexpr,
+    num_cache_blocks,
     n_quant_blocks: tl.constexpr,  # 7
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
 ):
@@ -742,7 +785,7 @@ def _dequantize_slots_kernel(
     if blk >= num_cache_blocks:
         _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
 
-    cache_block_ptr = pool_ptr + blk * pool_block_stride
+    cache_block_ptr = pool_ptr + blk * pool_block_stride.to(tl.int64)
     token_data_ptr = cache_block_ptr + off * token_data_size
     token_scale_ptr = cache_block_ptr + block_size * token_data_size + off * scale_dim
     token_fp8_ptr = token_data_ptr
@@ -826,120 +869,192 @@ def dequantize_slots_to_bf16(
     return out
 
 
-@triton.jit
-def _gather_k_cache_packed_slots_cp_byte_sliced_kernel(
-    out_ptr,
-    out_stride0,
-    k_cache_ptr,
-    slot_indices_ptr,
-    n_slots,
-    full_entries_per_block: tl.constexpr,
-    local_slice_bytes: tl.constexpr,
-    cp_rank: tl.constexpr,
-    block_stride: tl.constexpr,
-    num_cache_blocks: tl.constexpr,
-    token_data_size: tl.constexpr,
-    scale_dim: tl.constexpr,
-    entry_bytes: tl.constexpr,
-    TRAP_INVALID_KV_ACCESS: tl.constexpr,
-):
-    """Gather this rank's byte contribution for packed per-token SWA rows."""
-    pid = tl.program_id(0).to(tl.int64)
-    if pid >= n_slots:
-        return
-
-    slot = tl.load(slot_indices_ptr + pid)
-    if slot < 0:
-        return
-
-    blk = slot // full_entries_per_block
-    off = slot % full_entries_per_block
-    if blk < 0:
-        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
-    if blk >= num_cache_blocks:
-        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
-
-    cache_block_ptr = k_cache_ptr + blk.to(tl.int64) * block_stride
-    out_row_ptr = out_ptr + pid * out_stride0
-    slice_start = cp_rank * local_slice_bytes
-    slice_end = slice_start + local_slice_bytes
-
-    data_offsets = tl.arange(0, 1024)
-    data_mask = data_offsets < token_data_size
-    token_data_base = off * token_data_size
-    full_data_offsets = token_data_base + data_offsets
-    data_in_slice = (
-        data_mask & (full_data_offsets >= slice_start) & (full_data_offsets < slice_end)
-    )
-    data = tl.load(
-        cache_block_ptr + full_data_offsets - slice_start, mask=data_in_slice, other=0
-    )
-    tl.store(out_row_ptr + data_offsets, data, mask=data_mask)
-
-    scale_offsets = tl.arange(0, 8)
-    scale_mask = scale_offsets < scale_dim
-    token_scale_base = full_entries_per_block * token_data_size + off * scale_dim
-    full_scale_offsets = token_scale_base + scale_offsets
-    scale_in_slice = (
-        scale_mask
-        & (full_scale_offsets >= slice_start)
-        & (full_scale_offsets < slice_end)
-    )
-    scales = tl.load(
-        cache_block_ptr + full_scale_offsets - slice_start, mask=scale_in_slice, other=0
-    )
-    tl.store(out_row_ptr + token_data_size + scale_offsets, scales, mask=scale_mask)
-
-
-def gather_k_cache_packed_slots_cp_byte_sliced(
-    out: torch.Tensor,
-    k_cache_raw: torch.Tensor,
-    slot_indices: torch.Tensor,
+def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     *,
+    k_cache_raw: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    gather_lens: Optional[torch.Tensor],
+    offset: int,
     full_entries_per_block: int,
     cp_rank: int,
     cp_size: int,
-) -> None:
-    assert out.dim() == 2 and out.shape[-1] == ENTRY_BYTES and out.dtype == torch.uint8
-    assert out.stride(1) == 1, f"out must be packed byte rows; got {out.stride()}"
-    assert k_cache_raw.dim() == 2 and k_cache_raw.dtype == torch.uint8
-    assert (
-        k_cache_raw.stride(1) == 1
-    ), f"k_cache_raw must be byte-contiguous; got {k_cache_raw.stride()}"
+    compaction: CPByteSlicedSlotCompaction,
+    stream: Optional[Any] = None,
+    profile_name: str = "dsv4.cp.all_gather.swa_prefix",
+) -> Optional[CPByteSlicedSwaPrefixPending]:
+    """Launch only the NCCL stage for CP byte-sliced SWA prefix reads."""
+    del gather_lens  # per-request lengths are baked into compaction.
+    assert slot_mapping.dim() == 2
     full_entries_per_block = int(full_entries_per_block)
-    cp_rank = int(cp_rank)
     cp_size = int(cp_size)
+    cp_rank = int(cp_rank)
     assert full_entries_per_block > 0 and cp_size > 1 and 0 <= cp_rank < cp_size
-    slots_i64 = (
-        slot_indices.reshape(-1)
-        .to(device=k_cache_raw.device, dtype=torch.int64)
-        .contiguous()
-    )
-    if slots_i64.numel() == 0:
-        return
-    validate_slot_mapping(
-        "swa.gather_cp_byte.slot_indices",
-        slots_i64,
-        block_size=full_entries_per_block,
-        num_blocks=int(k_cache_raw.shape[0]),
-        negative_mode="skip_any",
-    )
-    _gather_k_cache_packed_slots_cp_byte_sliced_kernel[(int(slots_i64.numel()),)](
-        out,
-        out.stride(0),
-        k_cache_raw,
-        slots_i64,
-        int(slots_i64.numel()),
+    B = int(slot_mapping.shape[0])
+    W = int(slot_mapping.shape[1])
+    if B == 0 or W == 0:
+        return None
+    assert (
+        compaction is not None
+    ), "CP byte-sliced SWA gather requires metadata-precomputed compaction"
+    unique_blocks = compaction.unique_blocks
+    compact_slots = compaction.compact_slots
+    if unique_blocks.numel() == 0:
+        return None
+    assert k_cache_raw.is_cuda, "CP byte-sliced async SWA gather requires CUDA"
+    if not torch.distributed.is_initialized():
+        return None
+
+    from rtp_llm.models_py.distributed import collective_torch
+    from rtp_llm.models_py.distributed.collective_torch import Group
+
+    process_group = collective_torch._get_group(Group.TP)
+    world_size = torch.distributed.get_world_size(process_group)
+    if world_size != cp_size:
+        raise RuntimeError(
+            f"CP byte-sliced SWA gather world_size({world_size}) != cp_size({cp_size})"
+        )
+
+    device = k_cache_raw.device
+    current_stream = torch.cuda.current_stream(device)
+    if stream is None:
+        raise ValueError("CP byte-sliced SWA async gather requires a stream")
+    gather_stream = stream
+    gather_stream.wait_stream(current_stream)
+
+    with torch.cuda.stream(gather_stream):
+        local_slices = k_cache_raw.index_select(0, unique_blocks).contiguous()
+        gathered = torch.empty(
+            (
+                cp_size * int(unique_blocks.numel()),
+                int(k_cache_raw.shape[1]),
+            ),
+            dtype=k_cache_raw.dtype,
+            device=device,
+        )
+        local_slices.record_stream(gather_stream)
+        with record_function_range(f"{profile_name}.launch"):
+            work = torch.distributed.all_gather_into_tensor(
+                gathered,
+                local_slices,
+                group=process_group,
+                async_op=True,
+            )
+        try:
+            completion_event = torch.cuda.Event()
+            completion_event.record(gather_stream)
+        except Exception:
+            # Drain the in-flight NCCL Work before propagating; the caller
+            # never sees the pending handle so nothing else will wait it.
+            work.wait()
+            raise
+
+    return CPByteSlicedSwaPrefixPending(
+        cp_size=cp_size,
+        B=B,
+        W=W,
+        offset=int(offset),
         full_entries_per_block=full_entries_per_block,
-        local_slice_bytes=int(k_cache_raw.shape[1]),
-        cp_rank=cp_rank,
-        block_stride=int(k_cache_raw.stride(0)),
-        num_cache_blocks=int(k_cache_raw.shape[0]),
-        token_data_size=TOKEN_DATA_SIZE,
-        scale_dim=SCALE_BYTES_PER_TOKEN,
-        entry_bytes=ENTRY_BYTES,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        gathered=gathered,
+        unique_blocks=unique_blocks,
+        compact_slots=compact_slots,
+        gather_lens_cpu=compaction.gather_lens_cpu,
+        work=work,
+        stream=gather_stream,
+        completion_event=completion_event,
+        local_slices=local_slices,
     )
+
+
+def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+    pending: CPByteSlicedSwaPrefixPending,
+    *,
+    out: torch.Tensor,
+    stream: Optional[Any] = None,
+) -> None:
+    """Enqueue restore/dequant/copy for a pending CP byte-sliced SWA read."""
+    if pending.ready_event is not None:
+        return
+    device = pending.gathered.device
+    if stream is None:
+        raise ValueError("CP byte-sliced SWA async prepare requires a stream")
+    assemble_stream = stream
+    current_stream = torch.cuda.current_stream(out.device)
+    # ``out`` is the shared attention workspace.  Keep postprocess ordered after
+    # current-stream workspace writes; the caller decides how early to invoke
+    # prepare based on which ranges are disjoint.
+    assemble_stream.wait_stream(current_stream)
+    with torch.cuda.stream(assemble_stream):
+        assemble_stream.wait_event(pending.completion_event)
+        # Fence NCCL on the stream that will read the gathered bytes below.
+        with record_function_range("dsv4.cp.all_gather.swa_prefix.wait_host"):
+            _wait_swa_prefix_work_once(pending)
+        pending.gathered.record_stream(assemble_stream)
+        pending.local_slices.record_stream(assemble_stream)
+        pending.compact_slots.record_stream(assemble_stream)
+        out.record_stream(assemble_stream)
+        full_raw = (
+            pending.gathered.view(
+                pending.cp_size,
+                int(pending.unique_blocks.numel()),
+                int(pending.gathered.shape[1]),
+            )
+            .permute(1, 0, 2)
+            .reshape(
+                int(pending.unique_blocks.numel()),
+                pending.cp_size * int(pending.gathered.shape[1]),
+            )
+            .contiguous()
+        )
+        full_view = full_raw.as_strided(
+            (
+                int(pending.unique_blocks.numel()),
+                pending.full_entries_per_block,
+                ENTRY_BYTES,
+            ),
+            (int(full_raw.shape[1]), ENTRY_BYTES, 1),
+        )
+        restored = dequantize_slots_to_bf16(
+            full_view,
+            pending.compact_slots.reshape(-1),
+        )
+        restored_3d = restored.view(pending.B, pending.W, HEAD_DIM)
+        # gather_lens_cpu is metadata captured during compaction.  Do not
+        # replace this with per-request .item() calls in the hot path.
+        for b, gl in enumerate(pending.gather_lens_cpu):
+            if gl > 0:
+                out[b, pending.offset : pending.offset + gl, :].copy_(
+                    restored_3d[b, :gl, :]
+                )
+        ready_event = torch.cuda.Event()
+        ready_event.record(assemble_stream)
+    pending.ready_event = ready_event
+
+
+def wait_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+    pending: CPByteSlicedSwaPrefixPending,
+) -> None:
+    if pending.ready_event is None:
+        raise RuntimeError("CP byte-sliced SWA prefix pending was not prepared")
+    current_stream = torch.cuda.current_stream(pending.gathered.device)
+    current_stream.wait_event(pending.ready_event)
+    _wait_swa_prefix_work_once(pending)
+
+
+def discard_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+    pending: Optional[CPByteSlicedSwaPrefixPending],
+) -> None:
+    if pending is None:
+        return
+    current_stream = torch.cuda.current_stream(pending.gathered.device)
+    event = pending.ready_event or pending.completion_event
+    current_stream.wait_event(event)
+    _wait_swa_prefix_work_once(pending)
+
+
+def _wait_swa_prefix_work_once(pending: CPByteSlicedSwaPrefixPending) -> None:
+    if not pending.work_waited:
+        pending.work.wait()
+        pending.work_waited = True
 
 
 def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
@@ -948,45 +1063,84 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     slot_mapping: torch.Tensor,
     gather_lens: Optional[torch.Tensor],
     offset: int,
-    *,
     full_entries_per_block: int,
     cp_rank: int,
     cp_size: int,
+    compaction: CPByteSlicedSlotCompaction,
 ) -> None:
-    """Reconstruct byte-sliced SWA entries with all_gather, then dequantize."""
+    """Reconstruct CP byte-sliced SWA entries with all_gather, then dequantize.
+
+    Args:
+        out: BF16 destination workspace with shape ``[B, M, HEAD_DIM]``.
+            M is max_b(max(prefix_len, window_size - 1) + input_len))
+            Restored rows are written to ``out[:, offset:offset + W, :]``,
+            clipped per request by ``gather_lens`` when it is provided.
+        k_cache_raw: Current rank's SWA_KV raw byte pool with shape
+            ``[num_blocks, local_slice_bytes]``. Each row is this CP rank's
+            byte slice of one physical SWA block.
+        slot_mapping: Canonical SWA slot ids with shape ``[B, W]``. Each
+            non-negative slot is encoded as
+            ``physical_block_id * full_entries_per_block + offset_in_block``;
+            ``-1`` means skip.
+            W is max_b(min(prefix_len, window_size - 1))
+        gather_lens: Optional per-request valid length with shape ``[B]``.
+            If ``None``, all ``W`` columns are copied for every request.
+        offset: Column offset in ``out`` where restored SWA rows begin.
+            This is ``0`` for SWA-only attention. For CSA/HCA workspace
+            attention, ``out[:, :offset, :]`` holds compressed K, so SWA rows
+            start after that compressed prefix.
+        full_entries_per_block: Entry count of the reconstructed full SWA
+            block, i.e. the divisor used to decode ``slot_mapping``.
+        cp_rank: Current CP rank id. Used for contract validation only; the
+            input pool already contains this rank's local byte slice.
+        cp_size: Number of CP ranks whose byte slices form one full SWA block.
+    """
     assert out.dim() == 3 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
     assert slot_mapping.dim() == 2
+    full_entries_per_block = int(full_entries_per_block)
+    cp_size = int(cp_size)
+    cp_rank = int(cp_rank)
+    assert full_entries_per_block > 0 and cp_size > 1 and 0 <= cp_rank < cp_size
     B = int(slot_mapping.shape[0])
     W = int(slot_mapping.shape[1])
     if B == 0 or W == 0:
         return
-    slots_i64 = slot_mapping.to(device=out.device, dtype=torch.int64).contiguous()
-    local_packed = torch.zeros(
-        (B * W, ENTRY_BYTES), dtype=torch.uint8, device=out.device
-    )
-    gather_k_cache_packed_slots_cp_byte_sliced(
-        local_packed,
-        k_cache_raw,
-        slots_i64.reshape(-1),
-        full_entries_per_block=full_entries_per_block,
-        cp_rank=cp_rank,
-        cp_size=cp_size,
-    )
+    assert (
+        compaction is not None
+    ), "CP byte-sliced SWA gather requires metadata-precomputed compaction"
+    unique_blocks = compaction.unique_blocks
+    compact_slots = compaction.compact_slots
+    if unique_blocks.numel() == 0:
+        out[:, offset : offset + W, :].zero_()
+        return
 
     from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 
-    gathered = all_gather(local_packed.contiguous(), group=Group.TP).view(
-        cp_size, B * W, ENTRY_BYTES
+    local_slices = k_cache_raw.index_select(
+        0, unique_blocks
+    ).contiguous()  # [num_unique_blocks, local_slice_bytes]
+    with record_function_range("dsv4.cp.all_gather.swa_prefix.sync.launch"):
+        gathered = all_gather(local_slices, group=Group.TP).view(
+            cp_size, int(unique_blocks.numel()), int(k_cache_raw.shape[1])
+        )
+    full_raw = (
+        gathered.permute(1, 0, 2)
+        .reshape(int(unique_blocks.numel()), cp_size * int(k_cache_raw.shape[1]))
+        .contiguous()
+    )  # [num_unique_blocks, full_block_bytes]
+    full_view = full_raw.as_strided(
+        (int(unique_blocks.numel()), full_entries_per_block, ENTRY_BYTES),
+        (int(full_raw.shape[1]), ENTRY_BYTES, 1),
     )
-    packed = gathered.to(torch.int16).sum(dim=0).to(torch.uint8).contiguous()
-    restored = torch.empty((B * W, HEAD_DIM), dtype=torch.bfloat16, device=out.device)
-    dequantize_packed_k_cache_flat(restored, packed)
+    restored = dequantize_slots_to_bf16(full_view, compact_slots.reshape(-1))
     restored_3d = restored.view(B, W, HEAD_DIM)
     if gather_lens is None:
         out[:, offset : offset + W, :].copy_(restored_3d)
         return
-    gather_lens_cpu = gather_lens.to(device="cpu", dtype=torch.int32).reshape(-1)
-    for b in range(B):
-        gl = int(gather_lens_cpu[b].item())
+    gather_lens_cpu = compaction.gather_lens_cpu
+    assert (
+        len(gather_lens_cpu) == B
+    ), "CP byte-sliced SWA gather compaction must include per-request gather_lens_cpu"
+    for b, gl in enumerate(gather_lens_cpu):
         if gl > 0:
             out[b, offset : offset + gl, :].copy_(restored_3d[b, :gl, :])

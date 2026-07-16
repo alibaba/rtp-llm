@@ -3,11 +3,19 @@ package org.flexlb.dao.master;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
+import lombok.extern.slf4j.Slf4j;
 import org.flexlb.enums.TaskStateEnum;
+
+import java.util.Map;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
+@Slf4j
 public class TaskInfo {
+    static final String PREFILL_TIME_ESTIMATE_FORMULA_ENV = "PREFILL_TIME_ESTIMATE_FORMULA";
+    static final String DEFAULT_PREFILL_TIME_ESTIMATE_FORMULA = "tokens * 1.0 - hitCacheTokens * 0.7";
+    private static final PrefillTimeFormula PREFILL_TIME_ESTIMATE_FORMULA = readPrefillTimeFormula(System.getenv());
+
     @JsonProperty("request_id")
     private long requestId;
     @JsonProperty("prefix_length")
@@ -34,7 +42,25 @@ public class TaskInfo {
     }
 
     public static long estimatePrefillTimeMs(long tokens, long hitCacheTokens) {
-        return (long) (tokens * 1.0 - hitCacheTokens * 0.7);
+        return PREFILL_TIME_ESTIMATE_FORMULA.estimate(tokens, hitCacheTokens);
+    }
+
+    static PrefillTimeFormula readPrefillTimeFormula(Map<String, String> environment) {
+        String formula = environment.get(PREFILL_TIME_ESTIMATE_FORMULA_ENV);
+        if (formula == null || formula.trim().isEmpty()) {
+            formula = DEFAULT_PREFILL_TIME_ESTIMATE_FORMULA;
+        }
+        try {
+            return PrefillTimeFormula.parse(formula);
+        } catch (IllegalArgumentException e) {
+            log.warn(
+                    "Invalid {}={}: {}, use default formula {}",
+                    PREFILL_TIME_ESTIMATE_FORMULA_ENV,
+                    formula,
+                    e.getMessage(),
+                    DEFAULT_PREFILL_TIME_ESTIMATE_FORMULA);
+            return PrefillTimeFormula.parse(DEFAULT_PREFILL_TIME_ESTIMATE_FORMULA);
+        }
     }
 
     /**

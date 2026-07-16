@@ -150,19 +150,17 @@ def _prepare_cg_spec_decode_kernel(
     total_bm,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Spec-decode: seq_lens_out = prefix + q_len, block_id -> kv_offset.
+    """Spec-decode: seq_lens_out = prefix + q_len[0], block_id -> kv_offset.
 
-    Valid speculative requests in the batch share the same query length, but
-    CUDA-graph padding rows are zeroed independently in `q_len_ptr`. Read
-    per-row q_len so padding rows can stay fully masked out instead of
-    inheriting the first request's speculative length.
+    Only q_len[0] is read because speculative decoding requires all requests
+    in the batch to share the same speculative query length.
     """
     pid = tl.program_id(0)
     if pid == 0:
         offsets_n = tl.arange(0, BLOCK_SIZE)
         mask_n = offsets_n < N
-        q_len = tl.load(q_len_ptr + offsets_n, mask=mask_n, other=0)
-        prefix = tl.load(prefix_ptr + offsets_n, mask=mask_n, other=0)
+        q_len = tl.load(q_len_ptr)
+        prefix = tl.load(prefix_ptr + offsets_n, mask=mask_n)
         tl.store(seq_lens_out_ptr + offsets_n, prefix + q_len, mask=mask_n)
     _convert_block_id_to_kv_offset(
         pid,
@@ -370,7 +368,7 @@ class FlashInferTRTLLMPrefillOp(object):
             seq_lens=sequence_lengths,
             input_lens=attention_inputs.input_lengths,
             block_tables=attention_inputs.kv_cache_kernel_block_id_device,
-            cu_seqlens=attention_inputs.cu_seqlens_device,
+            cu_seqlens=attention_inputs.cu_seqlens,
             cu_kv_seqlens=cu_kv_seqlens,
         )
 
@@ -588,8 +586,8 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         p = self._cg
         _prepare_cg_prefill_kernel[p.grid](
-            attn_inputs.input_lengths_device,
-            attn_inputs.prefix_lengths_device,
+            attn_inputs.input_lengths,
+            attn_inputs.prefix_lengths,
             p.seq_lens,
             p.cu_kv_seqlens,
             attn_inputs.kv_cache_kernel_block_id_device,
@@ -655,7 +653,7 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
         p = self._cg
         if not attn_inputs.is_prefill:
             _prepare_cg_decode_kernel[p.grid](
-                attn_inputs.sequence_lengths_plus_1_device,
+                attn_inputs.sequence_lengths_plus_1_d,
                 p.seq_lens,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 p.kv_cache_offset,
@@ -666,8 +664,8 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
             )
         else:
             _prepare_cg_spec_decode_kernel[p.grid](
-                attn_inputs.prefix_lengths_device,
-                attn_inputs.input_lengths_device,
+                attn_inputs.prefix_lengths,
+                attn_inputs.input_lengths,
                 p.seq_lens,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 p.kv_cache_offset,
@@ -730,7 +728,7 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         p = self._cg
         _prepare_cg_decode_kernel[p.grid](
-            attn_inputs.sequence_lengths_plus_1_device,
+            attn_inputs.sequence_lengths_plus_1_d,
             p.seq_lens,
             attn_inputs.kv_cache_kernel_block_id_device,
             p.kv_cache_offset,

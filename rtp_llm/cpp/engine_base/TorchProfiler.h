@@ -13,8 +13,6 @@ namespace rtp_llm {
 
 namespace tpi = torch::profiler::impl;
 
-struct ProfilingDebugLoggingConfig;
-
 // Low-level profiler wrapper around Kineto.
 // IMPORTANT: start() and stop() MUST be called on the same thread (Kineto thread-affinity).
 class TorchProfile {
@@ -70,66 +68,43 @@ private:
 };
 
 // Step-window profiler controlled via API (sglang-style).
-// Thread-safe: configure() is called from gRPC thread, stepScope() from engine loop thread.
-// The actual TorchProfile start/stop happens only inside engine step callbacks, satisfying Kineto thread-affinity.
+// Thread-safe: configure() is called from gRPC thread, tick() from engine loop thread.
+// The actual TorchProfile start/stop happens only inside tick(), satisfying Kineto thread-affinity.
 // Trace export is done asynchronously on a background thread to avoid blocking inference.
 class StepWindowProfiler {
 public:
-    // RAII guard that brackets a single engine step. Construct with stepScope() before
-    // process(), destruction after process() advances the profiler state machine.
-    // Strictly scope-bound: not movable, not copyable.
-    class StepScope {
-    public:
-        explicit StepScope(StepWindowProfiler& profiler);
-        ~StepScope();
-        StepScope(const StepScope&)            = delete;
-        StepScope& operator=(const StepScope&) = delete;
-        StepScope(StepScope&&)                 = delete;
-        StepScope& operator=(StepScope&&)      = delete;
-
-    private:
-        StepWindowProfiler& profiler_;
-    };
-
     explicit StepWindowProfiler(const std::string& default_output_dir = "", int world_rank = 0);
     ~StepWindowProfiler();
 
-    // Configure a profiling session. Safe to call from any thread (sets atomic state).
-    // The actual profiler start happens inside the next stepScope() (on the engine loop
-    // thread), satisfying Kineto thread-affinity. If a session is already active, this is
-    // a no-op (first-come-first-served).
+    // Called from gRPC/API thread to configure a profiling session.
     void configure(bool enable, const std::string& trace_name, int start_step, int num_steps);
 
-    // Convenience overload: enable service-wide timeline profiling from config.
-    // No-op if cfg.gen_timeline_sync is false.
-    void configureFromConfig(const ProfilingDebugLoggingConfig& cfg);
+    // Called once per engine step() on the engine loop thread.
+    // Handles start/stop of the underlying TorchProfile based on step counts.
+    void tick();
 
-    // Returns an RAII scope that wraps a single engine step.
-    StepScope stepScope() {
-        return StepScope(*this);
-    }
+    // Called around an actual model-forward step. Unlike tick(), these hooks
+    // do not consume profiling windows on idle TP synchronization steps.
+    void startStep();
+    void finishStep();
 
     bool enabled() const {
         return enabled_.load(std::memory_order_relaxed);
     }
 
 private:
-    friend class StepScope;
-
-    void beginStep();
-    void endStep();
     void stopProfiler(const char* reason);
 
     std::string default_output_dir_;
 
-    // Atomic state set by configure(), read by beginStep()/endStep()
+    // Atomic state set by configure(), read by tick()
     std::atomic<bool> enabled_{false};
     std::atomic<bool> reconfigure_{false};
     std::atomic<bool> has_profiler_{false};
     std::atomic<int>  start_step_{0};
     std::atomic<int>  num_steps_{0};
 
-    // State managed exclusively on the engine loop thread (inside begin/end/shutdown)
+    // State managed exclusively on the engine loop thread (inside tick/shutdown)
     std::mutex                    mu_;
     std::string                   trace_name_;
     std::shared_ptr<TorchProfile> profiler_;

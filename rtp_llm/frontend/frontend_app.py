@@ -1,7 +1,8 @@
 import asyncio
 import gc
-import json
 import logging
+import os
+import signal
 import socket
 import threading
 import time
@@ -15,46 +16,261 @@ from fastapi import Request as RawRequest
 from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import ORJSONResponse, StreamingResponse
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 
 from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
-from rtp_llm.distribute.distributed_server import get_world_info
+from rtp_llm.distribute.distributed_server import (
+    get_dp_addrs_from_world_info,
+    get_world_info,
+)
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
-from rtp_llm.frontend.frontend_worker import get_dp_addrs_from_world_info
-from rtp_llm.openai.api_datatype import (
-    BatchChatCompletionRequest,
-    ChatCompletionRequest,
-)
+from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
+from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
-from rtp_llm.utils.util import AtomicCounter, async_request_server
+from rtp_llm.utils.util import async_request_server
 from rtp_llm.utils.version_info import VersionInfo
 
 # make buffer larger to avoid throw exception "RemoteProtocolError Receive buffer too long"
 MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
 
-active_requests = AtomicCounter()
-server_shutdown = False
+STARTUP_WARMUP_HEALTH_GATE_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
+FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV = "FRONTEND_PRE_STOP_DRAIN_SECONDS"
+DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV = "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"
+PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV = "RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS"
+DEFAULT_PRE_STOP_DRAIN_SECONDS = 120.0
+
+
+def _pre_stop_drain_seconds() -> float:
+    for env_key in (
+        FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV,
+        DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV,
+    ):
+        raw = os.environ.get(env_key, "")
+        if not raw:
+            continue
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            logging.warning(
+                "Invalid %s=%r, falling back to default pre-stop drain %.3fs",
+                env_key,
+                raw,
+                DEFAULT_PRE_STOP_DRAIN_SECONDS,
+            )
+            return DEFAULT_PRE_STOP_DRAIN_SECONDS
+    return DEFAULT_PRE_STOP_DRAIN_SECONDS
+
+
+def _pre_stop_drain_headroom_seconds(shutdown_timeout: float) -> float:
+    raw = os.environ.get(PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV, "")
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            logging.warning(
+                "Invalid %s=%r, using default pre-stop drain headroom",
+                PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV,
+                raw,
+            )
+    return min(60.0, max(1.0, float(shutdown_timeout) * 0.10))
 
 
 class GracefulShutdownServer(Server):
-    def set_server(self, frontend_server: FrontendServer):
+    def set_server(
+        self,
+        frontend_server: FrontendServer,
+        shutdown_manager: FrontendShutdownManager,
+        grpc_client: Optional[GrpcClientWrapper] = None,
+    ):
         self.frontend_server = frontend_server
+        self.shutdown_manager = shutdown_manager
+        self.grpc_client = grpc_client
+        self._pre_stop_lock = threading.RLock()
+        self._pre_stop_timer: Optional[threading.Timer] = None
+        self._shutdown_requested = False
+        self._shutdown_timeout_budget = self.config.timeout_graceful_shutdown
+
+    def install_pre_stop_drain_signal_handler(self) -> None:
+        pre_stop_signal = getattr(signal, "SIGUSR1", None)
+        if pre_stop_signal is None:
+            return
+        try:
+            signal.signal(pre_stop_signal, self.handle_pre_stop_drain_signal)
+        except ValueError:
+            logging.warning(
+                "Frontend pre-stop drain signal handler not installed "
+                "(not on main thread)"
+            )
+
+    def handle_pre_stop_drain_signal(self, sig: int, frame) -> None:
+        try:
+            sig_name = signal.Signals(sig).name
+        except ValueError:
+            sig_name = str(sig)
+        self.shutdown_manager.start_unavailable(f"signal {sig_name}")
+        logging.info(
+            "Frontend entering pre-stop unavailable state before uvicorn shutdown: "
+            "signal=%s, active_requests=%s",
+            sig_name,
+            self.shutdown_manager.active_request_count(),
+        )
+        if not self._schedule_shutdown_after_pre_stop(sig, frame, sig_name):
+            self._begin_shutdown(sig, frame, sig_name)
+
+    @override
+    def handle_exit(self, sig: int, frame) -> None:
+        try:
+            sig_name = signal.Signals(sig).name
+        except ValueError:
+            sig_name = str(sig)
+        if self._defer_sigterm_for_pre_stop_drain(sig, frame, sig_name):
+            return
+        self._begin_shutdown(sig, frame, sig_name)
+
+    def _defer_sigterm_for_pre_stop_drain(self, sig: int, frame, sig_name: str) -> bool:
+        if sig != signal.SIGTERM:
+            return False
+        if self.should_exit:
+            return False
+        return self._schedule_shutdown_after_pre_stop(sig, frame, sig_name)
+
+    def _schedule_shutdown_after_pre_stop(self, sig: int, frame, sig_name: str) -> bool:
+        drain_seconds = self._effective_pre_stop_drain_seconds()
+        if drain_seconds <= 0:
+            return False
+        elapsed = self.shutdown_manager.drain_elapsed_seconds()
+        remaining = max(0.0, drain_seconds - elapsed)
+        if remaining <= 0:
+            return False
+
+        with self._pre_stop_lock:
+            if self._shutdown_requested:
+                return True
+            if self._pre_stop_timer is not None:
+                logging.info(
+                    "Frontend received duplicate %s during pre-stop drain; "
+                    "continuing pre-stop drain before uvicorn shutdown",
+                    sig_name,
+                )
+                return True
+
+            self.shutdown_manager.start_unavailable(f"signal {sig_name}")
+            logging.info(
+                "Frontend entering pre-stop unavailable window before uvicorn shutdown: "
+                "remaining=%.3fs, elapsed=%.3fs, active_requests=%s",
+                remaining,
+                elapsed,
+                self.shutdown_manager.active_request_count(),
+            )
+            timer = threading.Timer(
+                remaining,
+                self._begin_shutdown,
+                args=(sig, frame, sig_name, False),
+            )
+            timer.daemon = True
+            self._pre_stop_timer = timer
+            timer.start()
+            return True
+
+    def _begin_shutdown(
+        self,
+        sig: int,
+        frame,
+        sig_name: str,
+        force_on_duplicate: bool = True,
+    ) -> None:
+        with self._pre_stop_lock:
+            if self._shutdown_requested:
+                if force_on_duplicate:
+                    Server.handle_exit(self, sig, frame)
+                return
+            self._shutdown_requested = True
+            timer = self._pre_stop_timer
+            self._pre_stop_timer = None
+        if timer is not None:
+            timer.cancel()
+        self.shutdown_manager.start_draining(f"signal {sig_name}")
+        self._limit_graceful_shutdown_to_remaining_budget()
+        Server.handle_exit(self, sig, frame)
+
+    def _remaining_shutdown_timeout_after_pre_stop(self) -> Optional[float]:
+        shutdown_timeout = self._shutdown_timeout_budget
+        if shutdown_timeout is None or shutdown_timeout <= 0:
+            return shutdown_timeout
+        elapsed = self.shutdown_manager.drain_elapsed_seconds()
+        return max(0.0, float(shutdown_timeout) - elapsed)
+
+    def _limit_graceful_shutdown_to_remaining_budget(self) -> None:
+        remaining_timeout = self._remaining_shutdown_timeout_after_pre_stop()
+        if remaining_timeout is None:
+            return
+        current_timeout = self.config.timeout_graceful_shutdown
+        if current_timeout is None or current_timeout <= remaining_timeout:
+            return
+        logging.info(
+            "Limit frontend graceful shutdown timeout from %.3fs to remaining "
+            "pre-stop budget %.3fs",
+            float(current_timeout),
+            remaining_timeout,
+        )
+        self.config.timeout_graceful_shutdown = remaining_timeout
+
+    def _effective_pre_stop_drain_seconds(self) -> float:
+        drain_seconds = _pre_stop_drain_seconds()
+        shutdown_timeout = self.config.timeout_graceful_shutdown
+        if shutdown_timeout is None or shutdown_timeout <= 0:
+            return drain_seconds
+        headroom_seconds = _pre_stop_drain_headroom_seconds(float(shutdown_timeout))
+        max_drain_seconds = max(0.0, float(shutdown_timeout) - headroom_seconds)
+        if drain_seconds <= max_drain_seconds:
+            return drain_seconds
+        logging.warning(
+            "Clamp frontend pre-stop drain %.3fs to %.3fs "
+            "(shutdown_timeout=%ss, headroom=%.3fs)",
+            drain_seconds,
+            max_drain_seconds,
+            shutdown_timeout,
+            headroom_seconds,
+        )
+        return max_drain_seconds
 
     @override
     async def shutdown(self, sockets: Optional[List[socket.socket]] = None) -> None:
-        global server_shutdown
-        server_shutdown = True
-        global active_requests
-        while active_requests.get() > 0:
-            logging.info(f"wait {active_requests.get()} requests finish for 1s")
-            await asyncio.sleep(1)
-        await super().shutdown(sockets)
+        self.shutdown_manager.start_draining("uvicorn shutdown")
+        try:
+            await super().shutdown(sockets)
+        finally:
+            await self._close_with_remaining_shutdown_budget(
+                "frontend server", self.frontend_server.close
+            )
+            if self.grpc_client is not None:
+                await self._close_with_remaining_shutdown_budget(
+                    "gRPC client", self.grpc_client.close
+                )
+
+    async def _close_with_remaining_shutdown_budget(self, name, close) -> None:
+        remaining = self._remaining_shutdown_timeout_after_pre_stop()
+        try:
+            close_awaitable = close()
+            if remaining is None:
+                await close_awaitable
+            else:
+                await asyncio.wait_for(close_awaitable, timeout=max(0.0, remaining))
+        except asyncio.TimeoutError:
+            logging.warning(
+                "Timed out closing %s after remaining shutdown budget %.3fs",
+                name,
+                max(0.0, remaining),
+            )
+        except Exception as e:
+            logging.warning("Failed to close %s: %s", name, e, exc_info=True)
 
 
 class FrontendApp(object):
@@ -63,12 +279,14 @@ class FrontendApp(object):
         py_env_configs: PyEnvConfigs,
         separated_frontend: bool = False,
     ):
+        self.py_env_configs = py_env_configs
         self.server_config = py_env_configs.server_config
         self.frontend_server = FrontendServer(
             self.server_config.rank_id,
             self.server_config.frontend_server_id,
             py_env_configs,
         )
+        self.shutdown_manager = FrontendShutdownManager()
         self.separated_frontend = separated_frontend
 
         # Compute all DP addresses for broadcast operations (e.g. update_scheduler_info)
@@ -131,7 +349,6 @@ class FrontendApp(object):
             asyncio.set_event_loop(asyncio.new_event_loop())
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         logging.info(
             f"server_config.ip = {self.server_config.ip}, port = {self.server_config.server_port}, rank id = {self.server_config.rank_id}, server_id = {self.server_config.frontend_server_id}, separated_frontend = {self.separated_frontend}"
@@ -147,6 +364,11 @@ class FrontendApp(object):
             loop=loop,
             log_config=get_uvicorn_logging_config(),
             timeout_keep_alive=timeout_keep_alive,
+            timeout_graceful_shutdown=(
+                None
+                if self.server_config.shutdown_timeout < 0
+                else self.server_config.shutdown_timeout
+            ),
             h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE,
         )
         logging.info(
@@ -154,7 +376,10 @@ class FrontendApp(object):
         )
         try:
             server = GracefulShutdownServer(config)
-            server.set_server(self.frontend_server)
+            server.set_server(
+                self.frontend_server, self.shutdown_manager, self.grpc_client
+            )
+            server.install_pre_stop_drain_signal_handler()
             # freeze all current tracked objects to reduce gc cost
             gc.collect()
             gc.freeze()
@@ -185,6 +410,53 @@ class FrontendApp(object):
                 )
             )
 
+        def draining_response():
+            reason = (
+                "frontend is draining"
+                if self.shutdown_manager.is_draining()
+                else "frontend is unavailable"
+            )
+            return ORJSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "error": reason,
+                    "reason": self.shutdown_manager.drain_reason(),
+                    "active_requests": self.shutdown_manager.active_request_count(),
+                },
+                headers={"Retry-After": "1"},
+            )
+
+        async def track_business_request(call):
+            if not self.shutdown_manager.try_begin_request():
+                return draining_response()
+            should_finish = True
+            try:
+                response = await call()
+                if isinstance(response, StreamingResponse):
+                    response.body_iterator = self._track_streaming_response(
+                        response.body_iterator
+                    )
+                    should_finish = False
+                return response
+            finally:
+                if should_finish:
+                    self.shutdown_manager.finish_request()
+
+        def check_not_draining(request: Request):
+            if request.url.path == "/liveness":
+                return
+            if self.shutdown_manager.is_unavailable():
+                detail = (
+                    "frontend is draining"
+                    if self.shutdown_manager.is_draining()
+                    else "frontend is unavailable"
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=detail,
+                    headers={"Retry-After": "1"},
+                )
+
         async def check_all_health():
             if not self.frontend_server.check_health():
                 raise HTTPException(
@@ -192,13 +464,27 @@ class FrontendApp(object):
                     detail="inference service is not ready",
                 )
 
+        def check_startup_warmup_ready(request: Request):
+            if request.url.path == "/liveness":
+                return
+            gate_file = os.environ.get(STARTUP_WARMUP_HEALTH_GATE_FILE_ENV, "").strip()
+            if gate_file and not os.path.exists(gate_file):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="startup warmup is not ready",
+                )
+
         @app.post("/frontend_health")
         @app.get("/frontend_health")
         async def frontend_health():
+            if self.shutdown_manager.is_unavailable():
+                return draining_response()
             return "ok"
 
         @app.get("/health")
         @app.post("/health")
+        @app.get("/liveness")
+        @app.post("/liveness")
         @app.get("/GraphService/cm2_status")
         @app.post("/GraphService/cm2_status")
         @app.get("/SearchService/cm2_status")
@@ -206,8 +492,13 @@ class FrontendApp(object):
         @app.get("/status")
         @app.post("/status")
         @app.post("/health_check")
-        @app.get("/")
-        async def health_check():
+        async def health_check(request: Request):
+            check_not_draining(request)
+            check_startup_warmup_ready(request)
+            if request.url.path == "/liveness":
+                return "ok"
+            if self.shutdown_manager.is_unavailable():
+                return draining_response()
             if self.separated_frontend:
                 await check_all_health()
                 return "ok"
@@ -221,7 +512,22 @@ class FrontendApp(object):
                     status_code=400,
                     content={"error": f" HTTP health check failed"},
                 )
+            return "ok"
 
+        @app.get("/")
+        async def health(request: Request):
+            check_not_draining(request)
+            if self.shutdown_manager.is_unavailable():
+                return draining_response()
+            if self.separated_frontend:
+                await check_all_health()
+                return {"status": "home"}
+            response = await self.grpc_client.post_request("health_check", {})
+            if response.get("status", "") != "ok":
+                return ORJSONResponse(
+                    status_code=400,
+                    content={"error": f" HTTP health check failed"},
+                )
             return "ok"
 
         @app.get("/cache_status")
@@ -231,6 +537,7 @@ class FrontendApp(object):
         async def cache_status(
             request: Request, data: Optional[Dict[Any, Any]] = Body(None)
         ):
+            check_not_draining(request)
             query_params = (
                 dict(request.query_params) if request.method == "GET" else (data or {})
             )
@@ -256,6 +563,7 @@ class FrontendApp(object):
         async def worker_status(
             request: Request, data: Optional[Dict[Any, Any]] = Body(None)
         ):
+            check_not_draining(request)
             query_params = (
                 dict(request.query_params) if request.method == "GET" else (data or {})
             )
@@ -266,9 +574,6 @@ class FrontendApp(object):
                 response["frontend_available_concurrency"] = (
                     self.frontend_server._global_controller.get_available_concurrency()
                 )
-                response["frontend_concurrency_limit"] = (
-                    self.frontend_server._global_controller.max_concurrency
-                )
             else:
                 return ORJSONResponse(
                     status_code=500,
@@ -277,132 +582,125 @@ class FrontendApp(object):
             return response
 
         @app.get("/v1/models")
-        async def list_models():
+        async def list_models(request: Request):
+            check_not_draining(request)
             assert self.frontend_server._openai_endpoint != None
             return await self.frontend_server._openai_endpoint.list_models()
 
         # request format: {"log_level": "DEBUG"}, {"log_level": "info"}
         @app.post("/set_log_level")
-        async def set_log_level(req: Union[str, Dict[Any, Any]]):
+        async def set_log_level(req: Union[str, Dict[Any, Any]], request: Request):
+            check_not_draining(request)
             result = await self.grpc_client.post_request("set_log_level", req)
             return result
 
         # request format: '{"trace_name":"normal_profiler", "start_step": 0, "num_steps": 3, "enable_all_rank": false}'
         @app.post("/rtp_llm/start_profile")
         @app.post("/start_profile")
-        async def start_profile(req: Union[str, Dict[Any, Any]] = Body(default={})):
+        async def start_profile(
+            request: Request, req: Union[str, Dict[Any, Any]] = Body(default={})
+        ):
+            check_not_draining(request)
             result = await self.grpc_client.post_request("start_profile", req)
             return result
 
         # request format: {"mode": "NONE", "update_time": 5000}
         @app.post("/update_eplb_config")
-        async def update_eplb_config(req: Union[str, Dict[Any, Any]]):
+        async def update_eplb_config(req: Union[str, Dict[Any, Any]], request: Request):
+            check_not_draining(request)
             result = await self.grpc_client.post_request("update_eplb_config", req)
             return result
 
         @app.post("/")
         async def inference(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
             # compat for huggingface-pipeline request endpoint
-            global active_requests
-            active_requests.increment()
-            try:
+            async def call():
                 if self.frontend_server.is_embedding:
                     return await self.frontend_server.embedding(req, raw_request)
-                else:
-                    return await self.frontend_server.inference(req, raw_request)
-            finally:
-                active_requests.decrement()
+                return await self.frontend_server.inference(req, raw_request)
+
+            return await track_business_request(call)
 
         @app.post("/chat/completions")
         @app.post("/v1/chat/completions")
         async def chat_completion(
             request: ChatCompletionRequest, raw_request: RawRequest
         ):
-            global active_requests
-            active_requests.increment()
-            try:
+            async def call():
                 return await self.frontend_server.chat_completion(request, raw_request)
-            finally:
-                active_requests.decrement()
 
-        @app.post("/v1/batch/chat/completions")
-        async def batch_chat_completion(
-            request: BatchChatCompletionRequest, raw_request: RawRequest
-        ):
-            global active_requests
-            active_requests.increment()
-            try:
-                return await self.frontend_server.batch_chat_completion(
-                    request, raw_request
-                )
-            finally:
-                active_requests.decrement()
-
-        @app.post("/batch_infer")
-        async def batch_infer(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
-            global active_requests
-            active_requests.increment()
-            try:
-                if isinstance(req, str):
-                    req = json.loads(req)
-                return await self.frontend_server.batch_infer(req, raw_request)
-            finally:
-                active_requests.decrement()
+            return await track_business_request(call)
 
         @app.post("/update_scheduler_info")
-        async def update_scheduler_info(req: Union[str, Dict[Any, Any]]):
+        async def update_scheduler_info(
+            req: Union[str, Dict[Any, Any]], request: Request
+        ):
+            check_not_draining(request)
             result = await self.grpc_client.post_request("update_scheduler_info", req)
             return result
 
         @app.post("/chat/render")
         @app.post("/v1/chat/render")
         async def chat_render(request: ChatCompletionRequest, raw_request: RawRequest):
-            global active_requests
-            active_requests.increment()
-            try:
+            async def call():
                 return await self.frontend_server.chat_render(request, raw_request)
-            finally:
-                active_requests.decrement()
+
+            return await track_business_request(call)
 
         # example {"prompt": "abcde"}
         @app.post("/tokenizer/encode")
-        async def tokenizer_encode(req: Union[str, Dict[Any, Any]]):
+        async def tokenizer_encode(req: Union[str, Dict[Any, Any]], request: Request):
+            check_not_draining(request)
             return self.frontend_server.tokenizer_encode(req)
 
         # example {"prompt": "abcde"}
         # example openai_request
         @app.post("/tokenize")
-        async def encode(req: Union[str, Dict[Any, Any]]):
+        async def encode(req: Union[str, Dict[Any, Any]], request: Request):
+            check_not_draining(request)
             return self.frontend_server.tokenize(req)
 
         if self.frontend_server.is_embedding:
-            from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
-
             # embedding
             @app.post("/v1/embeddings/similarity")
             @app.post("/v1/reranker")
             @app.post("/v1/classifier")
             @app.post("/v1/embeddings")
             async def embedding(request: Dict[str, Any], raw_request: RawRequest):
-                return await self.frontend_server.embedding(request, raw_request)
+                return await track_business_request(
+                    lambda: self.frontend_server.embedding(request, raw_request)
+                )
 
             @app.post("/v1/embeddings/dense")
             async def embedding_dense(request: Dict[str, Any], raw_request: RawRequest):
                 request[TYPE_STR] = EmbeddingType.DENSE
-                return await self.frontend_server.embedding(request, raw_request)
+                return await track_business_request(
+                    lambda: self.frontend_server.embedding(request, raw_request)
+                )
 
             @app.post("/v1/embeddings/sparse")
             async def embedding_sparse(
                 request: Dict[str, Any], raw_request: RawRequest
             ):
                 request[TYPE_STR] = EmbeddingType.SPARSE
-                return await self.frontend_server.embedding(request, raw_request)
+                return await track_business_request(
+                    lambda: self.frontend_server.embedding(request, raw_request)
+                )
 
             @app.post("/v1/embeddings/colbert")
             async def embedding_colbert(
                 request: Dict[str, Any], raw_request: RawRequest
             ):
                 request[TYPE_STR] = EmbeddingType.COLBERT
-                return await self.frontend_server.embedding(request, raw_request)
+                return await track_business_request(
+                    lambda: self.frontend_server.embedding(request, raw_request)
+                )
 
         return app
+
+    async def _track_streaming_response(self, body_iterator):
+        try:
+            async for chunk in body_iterator:
+                yield chunk
+        finally:
+            self.shutdown_manager.finish_request()

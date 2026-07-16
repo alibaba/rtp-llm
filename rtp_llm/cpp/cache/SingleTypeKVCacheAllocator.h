@@ -25,7 +25,7 @@ public:
     std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
                                                     const CacheKeysType&   cache_keys,
                                                     bool                   is_connector = false) override;
-    GroupedCacheLayerLayout          allLayerCacheBase() const override;
+    CacheLayerLayout                 allLayerCacheBase() const override;
 
     bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                        const std::vector<int>&        block_src_batch,

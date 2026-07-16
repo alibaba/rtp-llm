@@ -30,8 +30,11 @@ class ServerArgsSetTest(TestCase):
         os.environ["WORLD_SIZE"] = "8"
         os.environ["CONCURRENCY_LIMIT"] = "64"
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
+        os.environ["CP_FORCE_SINGLE_PREFILL"] = "0"
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
+        os.environ["REMOTE_JIT_READ_DIR"] = "dfs://bucket/jit/baseline"
+        os.environ["WARM_UP_JIT_AND_WRITE_REMOTE"] = "dfs://bucket/jit/writer"
 
         sys.argv = ["prog"]
 
@@ -59,11 +62,23 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size,
             32,
         )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.cp_force_single_prefill,
+            False,
+        )
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, True)  # bool in C++
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
+        self.assertEqual(
+            py_env_configs.jit_config.remote_jit_read_dir,
+            "dfs://bucket/jit/baseline",
+        )
+        self.assertEqual(
+            py_env_configs.jit_config.warm_up_jit_and_write_remote,
+            "dfs://bucket/jit/writer",
+        )
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
@@ -85,6 +100,10 @@ class ServerArgsSetTest(TestCase):
             "128",
             "--max_context_batch_size",
             "64",
+            "--cp_force_single_prefill",
+            "false",
+            "--max_inited_kv_cache_streams",
+            "16",
             "--warm_up",
             "0",
             "--cache_store_rdma_io_thread_count",
@@ -120,6 +139,14 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size,
             64,
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.cp_force_single_prefill,
+            False,
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams,
+            16,
         )
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
@@ -256,46 +283,27 @@ class ServerArgsSetTest(TestCase):
             1,
         )
 
-    def test_pdfusion_scheduler_mode_config(self):
-        """Test that pdfusion_scheduler_mode is opt-in and decode_prefill_ratio is configurable."""
-        sys.argv = ["prog"]
-
-        import rtp_llm.server.server_args.server_args
-
-        importlib.reload(rtp_llm.server.server_args.server_args)
-        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
-        self.assertEqual(
-            py_env_configs.runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode,
-            "",
-        )
-
+    def test_repetition_detection_config(self):
+        """Test that repetition detection args bind to PyEnvConfigs."""
         sys.argv = [
             "prog",
-            "--pdfusion_scheduler_mode",
-            "ratio",
-            "--decode_prefill_ratio",
-            "1/3",
+            "--tool_call_loop_threshold",
+            "7",
+            "--tool_call_loop_begin_marker",
+            "<tool_call>",
+            "--tool_call_loop_end_marker",
+            "</tool_call>",
         ]
-        importlib.reload(rtp_llm.server.server_args.server_args)
-        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
-        self.assertEqual(
-            py_env_configs.runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode,
-            "ratio",
-        )
-        self.assertEqual(
-            py_env_configs.runtime_config.fifo_scheduler_config.decode_prefill_ratio,
-            "1/3",
-        )
-
-    def test_pdfusion_scheduler_mode_rejects_unknown_value(self):
-        """Test that pdfusion_scheduler_mode only accepts fixed scheduler patterns."""
-        sys.argv = ["prog", "--pdfusion_scheduler_mode", "ratioo"]
 
         import rtp_llm.server.server_args.server_args
 
         importlib.reload(rtp_llm.server.server_args.server_args)
-        with self.assertRaises(SystemExit):
-            rtp_llm.server.server_args.server_args.setup_args()
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        cfg = py_env_configs.repetition_detection_config
+        self.assertEqual(cfg.tool_call_loop_threshold, 7)
+        self.assertEqual(cfg.tool_call_loop_begin_marker, "<tool_call>")
+        self.assertEqual(cfg.tool_call_loop_end_marker, "</tool_call>")
 
 
 if __name__ == "__main__":

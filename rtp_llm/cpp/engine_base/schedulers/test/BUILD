@@ -1,5 +1,5 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
@@ -60,6 +60,20 @@ cc_test(
     data = [],
     copts = copts() + ["-fno-access-control"],
     deps = async_cache_test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "gather_batch_scheduler_test",
+    srcs = [
+        "GatherBatchSchedulerTest.cc",
+    ],
+    data = [],
+    copts = copts() + ["-fno-access-control"],
+    deps = test_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

@@ -81,11 +81,6 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.head_dim_vo = attn_configs.size_per_head
         self.page_size = attn_configs.kernel_tokens_per_block
         self.datatype = attn_configs.dtype
-        self.kv_cache_dtype = attn_configs.kv_cache_dtype
-        if self.kv_cache_dtype == KvCacheDataType.FP8:
-            self.kv_datatype = torch.float8_e4m3fn
-        else:
-            self.kv_datatype = self.datatype
         self.max_seq_len = attn_configs.max_seq_len
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
@@ -103,7 +98,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
 
-    def set_params(self, params: rtp_llm_ops.FlashInferMlaAttnParams):
+    def set_params(self, params: Any):
         """Set the params object to be used by this op."""
         self.fmha_params = params
 
@@ -118,11 +113,12 @@ class PyFlashinferPrefillPagedAttnOp(object):
         forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
         """
         check_attention_inputs(attn_inputs)
-        self.fmha_params.fill_params(
+        # Fill FlashInfer paged-KV plus batch/position metadata on device.
+        self.fmha_params.fill_params_mha_device(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id,
+            attn_inputs.kv_cache_kernel_block_id_device,
             self.page_size,
             forbid_realloc,
         )
@@ -131,12 +127,10 @@ class PyFlashinferPrefillPagedAttnOp(object):
         if attn_inputs.prefill_cuda_graph_copy_params is not None:
             # For CUDA graph mode, create a buffer that will be filled later
             self.input_lengths = attn_inputs.input_lengths
-            self.cu_seq_lens = attn_inputs.cu_seqlens_device
-            qo_indptr = attn_inputs.cu_seqlens_device.clone()
+            self.cu_seq_lens = attn_inputs.cu_seqlens
+            qo_indptr = attn_inputs.cu_seqlens.clone()
         else:
-            qo_indptr = attn_inputs.cu_seqlens_device[
-                : attn_inputs.input_lengths.size(0) + 1
-            ]
+            qo_indptr = attn_inputs.cu_seqlens[: attn_inputs.input_lengths.size(0) + 1]
 
         if self.enable_cuda_graph and self.prefill_wrapper._qo_indptr_buf is None:
             self.prefill_wrapper._use_cuda_graph = True
@@ -148,9 +142,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 self.fmha_params.paged_kv_last_page_len_d
             )
             self.prefill_wrapper._paged_kv_indices_buf = self.fmha_params.page_indice_d
-            self.prefill_wrapper._fixed_batch_size = (
-                len(attn_inputs.cu_seqlens_device) - 1
-            )
+            self.prefill_wrapper._fixed_batch_size = len(attn_inputs.cu_seqlens) - 1
             if attn_inputs.prefill_cuda_graph_copy_params is not None:
                 self.prefill_cuda_graph_copy_params = (
                     attn_inputs.prefill_cuda_graph_copy_params
@@ -178,9 +170,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.input_lengths[: attn_inputs.input_lengths.size(0)] = (
                 attn_inputs.input_lengths
             )
-            self.cu_seq_lens[: attn_inputs.cu_seqlens_device.size(0)] = (
-                attn_inputs.cu_seqlens_device
-            )
+            self.cu_seq_lens[: attn_inputs.cu_seqlens.size(0)] = attn_inputs.cu_seqlens
             # Build qo_indptr matching the padded Q layout produced by small2large copy.
             # Each batch's Q tokens sit at [i*max_seq_len, i*max_seq_len + input_len_i)
             # in the padded buffer, so qo_indptr[i] = i*max_seq_len, but we set
@@ -212,7 +202,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.page_size,
             causal=True,
             q_data_type=self.datatype,
-            kv_data_type=self.kv_datatype,
+            kv_data_type=self.datatype,
         )
         return self.fmha_params
 
@@ -346,14 +336,14 @@ class PyFlashinferPrefillAttnOp(object):
             backend=backend,
         )
         self.datatype = attn_configs.dtype
-        self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        self.params = None
 
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
 
-    def set_params(self, params: rtp_llm_ops.FlashInferMlaAttnParams):
+    def set_params(self, params: ParamsBase):
         """Set the params object to be used by this op."""
-        self.fmha_params = params
+        self.params = params
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> ParamsBase:
         """
@@ -363,13 +353,14 @@ class PyFlashinferPrefillAttnOp(object):
             attn_inputs: Attention inputs containing sequence information
         """
         batch_size = attn_inputs.input_lengths.size(0)
-        cu_seqlens = attn_inputs.cu_seqlens_device[: batch_size + 1]
+        cu_seqlens = attn_inputs.cu_seqlens[: batch_size + 1]
 
-        self.fmha_params.fill_params(
+        # Ragged prefill also uses the device metadata planner.
+        self.fmha_params.fill_params_mha_device(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id,
+            attn_inputs.kv_cache_kernel_block_id_device,
             self.page_size,
         )
 
@@ -383,7 +374,7 @@ class PyFlashinferPrefillAttnOp(object):
             causal=True,
             q_data_type=get_scalar_type(attn_inputs.dtype),
         )
-        return self.fmha_params
+        return self.params if self.params is not None else ParamsBase()
 
     @staticmethod
     def support(attn_inputs: PyAttentionInputs) -> bool:
@@ -573,11 +564,7 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         2. The underlying paged FMHA op supports the inputs
         3. MhaRotaryEmbeddingOp supports the inputs
         """
-        return (
-            not is_sm_100()
-            and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
-            and attn_configs.rope_config.style != RopeStyle.Mrope
-        )
+        return not is_sm_100() and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
 
     def support_cuda_graph(self) -> bool:
         return True
@@ -634,11 +621,7 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
            (requires prefix_lengths to be empty or zero)
         3. MhaRotaryEmbeddingOp supports the inputs
         """
-        return (
-            not is_sm_100()
-            and PyFlashinferPrefillAttnOp.support(attn_inputs)
-            and attn_configs.rope_config.style != RopeStyle.Mrope
-        )
+        return not is_sm_100() and PyFlashinferPrefillAttnOp.support(attn_inputs)
 
 
 def determine_use_tensor_core_from_configs(attn_configs: AttentionConfigs) -> bool:
@@ -651,7 +634,6 @@ class PyFlashinferDecodeAttnOp(object):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs,
     ) -> None:
         self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
         # attn_configs already has head_num and kv_head_num divided by tp_size
@@ -667,105 +649,71 @@ class PyFlashinferDecodeAttnOp(object):
             use_tensor_cores=self.use_tensor_core,
         )
         self.kv_cache_dtype = attn_configs.kv_cache_dtype
-        self.enable_cuda_graph = attn_inputs.is_cuda_graph
-        self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
 
-    def set_params(self, params: rtp_llm_ops.FlashInferMlaAttnParams) -> None:
-        """Set the params object to be used by this op."""
-        self.fmha_params = params
+    def prepare(self, attn_inputs: PyAttentionInputs):
+        # from rtp_llm.models_py.utils.debug import set_trace_on_tty
+        # set_trace_on_tty()
+        # Convert kv_cache_dtype to torch dtype
+        if self.kv_cache_dtype == KvCacheDataType.INT8:
+            kv_datatype = torch.int8
+        elif self.kv_cache_dtype == KvCacheDataType.FP8:
+            kv_datatype = torch.float8_e4m3fn
+        else:  # BASE
+            kv_datatype = get_scalar_type(attn_inputs.dtype)
 
-    def _get_kv_data_type(self, attn_inputs: PyAttentionInputs) -> torch.dtype:
-        if self.kv_cache_dtype == KvCacheDataType.FP8:
-            return torch.float8_e4m3fn
-        return get_scalar_type(attn_inputs.dtype)
-
-    def _requires_fa2_cuda_graph_replan(self) -> bool:
-        # FlashInfer BatchDecode routes tensor-core decode through fa2 BatchPrefill.
-        # fa3 prefill paths do not need this replay-time plan refresh.
-        return self.use_tensor_core
-
-    def _plan_decode_wrapper(self, attn_inputs: PyAttentionInputs) -> None:
-        if self._requires_fa2_cuda_graph_replan():
-            page_indptr = self.fmha_params.decode_page_indptr_h
-            page_indice = self.fmha_params.page_indice_h
-            last_page_len = self.fmha_params.paged_kv_last_page_len_h
-            plan_kwargs = {"non_blocking": True}
-        else:
-            page_indptr = self.fmha_params.decode_page_indptr_d
-            page_indice = self.fmha_params.page_indice_d
-            last_page_len = self.fmha_params.paged_kv_last_page_len_d
-            plan_kwargs = {}
-
+        # Steady-state decode drops the host metadata loop and H2D copy.
+        self.fmha_params.fill_params_mha_device(
+            attn_inputs.prefix_lengths,
+            attn_inputs.sequence_lengths,
+            attn_inputs.input_lengths,
+            attn_inputs.kv_cache_kernel_block_id_device,
+            self.seq_size_per_block,
+        )
+        # Get torch.dtype from attention configs
         self.decode_wrapper.plan(
-            page_indptr,
-            page_indice,
-            last_page_len,
+            flashinfer_decode_params.decode_page_indptr_d,
+            flashinfer_decode_params.page_indice_d,
+            flashinfer_decode_params.paged_kv_last_page_len_d,
             self.local_head_num,
             self.local_kv_head_num,
             self.head_dim_qk,
             self.seq_size_per_block,
             q_data_type=get_scalar_type(attn_inputs.dtype),
-            kv_data_type=self._get_kv_data_type(attn_inputs),
-            **plan_kwargs,
+            kv_data_type=kv_datatype,
         )
-
-    def prepare(
-        self,
-        attn_inputs: PyAttentionInputs,
-        forbid_realloc: bool = False,
-    ) -> ParamsBase:
-        """
-        Prepare the decode wrapper with paged KV cache parameters.
-
-        forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
-        """
-        self.fmha_params.fill_params(
-            attn_inputs.prefix_lengths,
-            attn_inputs.sequence_lengths,
-            attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id,
-            self.seq_size_per_block,
-            forbid_realloc=forbid_realloc,
-        )
-
-        if self.enable_cuda_graph and self.decode_wrapper._fixed_batch_size == 0:
-            batch_size = attn_inputs.input_lengths.size(0)
-            self.decode_wrapper._use_cuda_graph = True
-            # Both decode backends read these buffers during run(); replay only
-            # updates fmha_params in-place, so the wrapper must hold these views.
-            self.decode_wrapper._paged_kv_indptr_buf = (
-                self.fmha_params.decode_page_indptr_d
-            )
-            self.decode_wrapper._paged_kv_last_page_len_buf = (
-                self.fmha_params.paged_kv_last_page_len_d
-            )
-            self.decode_wrapper._paged_kv_indices_buf = self.fmha_params.page_indice_d
-            self.decode_wrapper._fixed_batch_size = batch_size
-            if self.use_tensor_core:
-                self.decode_wrapper._qo_indptr_buf = torch.arange(
-                    batch_size + 1,
-                    dtype=torch.int32,
-                    device=self.g_workspace_buffer.device,
-                )
-
-        self._plan_decode_wrapper(attn_inputs)
         return self.fmha_params
 
     def prepare_for_cuda_graph_replay(self, attn_inputs: PyAttentionInputs) -> None:
-        """Refresh FlashInfer runtime buffers before replaying the captured graph."""
-        self.fmha_params.fill_params(
+        """Update CUDA graph replay buffers without calling plan().
+
+        Replay refreshes decode metadata in-place via fill_decode_cuda_graph_params,
+        falling back to the device MHA planner when the decode-only input is absent.
+        """
+        fill_decode = getattr(self.fmha_params, "fill_decode_cuda_graph_params", None)
+        if (
+            callable(fill_decode)
+            and attn_inputs.sequence_lengths_plus_1_d is not None
+            and attn_inputs.sequence_lengths_plus_1_d.numel() > 0
+        ):
+            fill_decode(
+                attn_inputs.sequence_lengths_plus_1_d,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                self.seq_size_per_block,
+            )
+            return
+
+        # CUDA graph replay fallback when sequence_lengths_plus_1_d is absent.
+        self.fmha_params.fill_params_mha_device(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id,
+            attn_inputs.kv_cache_kernel_block_id_device,
             self.seq_size_per_block,
             forbid_realloc=True,
         )
-        if self._requires_fa2_cuda_graph_replan():
-            self._plan_decode_wrapper(attn_inputs)
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
@@ -795,30 +743,17 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        self.fmha_impl = PyFlashinferDecodeAttnOp(attn_configs, attn_inputs)
+        self.fmha_impl = PyFlashinferDecodeAttnOp(attn_configs)
         self.rope_impl = FusedRopeKVCacheDecodeOp(attn_configs)
         self.attn_configs = attn_configs
 
         # Store input info
         self.attn_inputs = attn_inputs
 
-        self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
-        self.fmha_impl.set_params(self.fmha_params)
-        self.fmha_impl.prepare(attn_inputs)
+        # Create params
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
-
-    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
-        """Prepare FlashInfer/RoPE buffers and metadata for CUDA graph replay."""
-        self.fmha_impl.prepare_for_cuda_graph_replay(attn_inputs)
-        # Update rope params for correct position encoding during cuda graph replay
-        new_rope_params = self.rope_impl.prepare(attn_inputs)
-        common.copy_kv_cache_offset(
-            self.rope_params.kv_cache_offset, new_rope_params.kv_cache_offset
-        )
-
-    def support_cuda_graph(self) -> bool:
-        return True
 
     @classmethod
     def support(

@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 from tqdm import tqdm
@@ -27,11 +28,10 @@ class GridRunner:
         decode_test_length: int = 10,
         tp_size: int = 1,
         generate_config: Optional[Dict[str, Any]] = None,
-        num_measures: int = 3,
     ):
         self._port = port
         self._dp_size = dp_size
-        self._batch_size_list = [1] if not is_decode else batch_size_list
+        self._batch_size_list = batch_size_list
         self._input_len_list = input_len_list
         self._input_query_dict = input_query_dict
         self._is_decode = is_decode
@@ -39,14 +39,14 @@ class GridRunner:
         self._decode_test_length = decode_test_length
         self._tp_size = tp_size
         self._generate_config = generate_config or {}
-        self._num_measures = num_measures
         self._title = "Decode Result" if is_decode else "Prefill Result"
 
     def warmup(self) -> None:
+        warmup_runs = int(os.environ.get("PERF_GRID_WARMUP_RUNS", "1"))
         logging.info(
             f"in warmup, base_port: {self._port}, dp_size: {self._dp_size}, "
             f"batch_size: {1 * self._dp_size}, "
-            f"input_len: {self._input_len_list[0]}"
+            f"input_len: {self._input_len_list[0]}, runs: {warmup_runs}"
         )
         BatchPerfImpl(
             self._port,
@@ -58,6 +58,9 @@ class GridRunner:
             self._decode_test_length,
             False,
             self._generate_config,
+            warmup_runs=0,
+            measure_runs=warmup_runs,
+            profile_runs=0,
         ).run()
 
     def run(self) -> List[MetricState]:
@@ -91,7 +94,7 @@ class GridRunner:
                         True,
                         self._generate_config,
                         trace_name,
-                    ).run(num_measures=self._num_measures)
+                    ).run()
                     metrics_list.append(MetricState(input_len, batch_size, metric))
 
                     pbar.update(1)

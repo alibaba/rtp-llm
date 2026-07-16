@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts", "rocm_copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 # --- Targets moved from cpp/rocm/ ---
 
@@ -9,34 +9,6 @@ cc_library(
         "cuda_shims.h",
         "amd_bfloat16.h",
     ],
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "rocprim_shims",
-    hdrs = [
-        "rocprim_shims.h",
-    ],
-    deps = [
-        ":rocm_types_hdr",
-        "@local_config_rocm//rocm:rocm_headers",
-        "@local_config_rocm//rocm:hip",
-    ],
-    copts = rocm_copts(),
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "hipcub_shims",
-    hdrs = [
-        "hipcub_shims.h",
-    ],
-    deps = [
-        ":rocprim_shims",
-        "@local_config_rocm//rocm:rocm_headers",
-        "@local_config_rocm//rocm:hip",
-    ],
-    copts = rocm_copts(),
     visibility = ["//visibility:public"],
 )
 
@@ -63,7 +35,12 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@havenask//aios/autil:scope",
-    ],
+    ] + select({
+        "@//:using_aiter_src": [
+            "@aiter_src//:module_mha_fwd",
+        ],
+        "//conditions:default": ["@aiter//:module_mha_fwd",],
+    }),
     copts = rocm_copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],
@@ -112,8 +89,6 @@ cc_library(
         "hip_host_utils.h",
         "cuda_shims.h",
         "amd_bfloat16.h",
-        "rocprim_shims.h",
-        "hipcub_shims.h",
     ]),
     copts = rocm_copts(),
     deps = torch_deps() + [
@@ -124,7 +99,6 @@ cc_library(
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common:common",
         "//rtp_llm/models_py/bindings/rocm/kernels:rocm_trtllm_allreduce_fusion",
-        "//rtp_llm/models_py/bindings/common/kernels:kernels_moe",
     ],
 )
 

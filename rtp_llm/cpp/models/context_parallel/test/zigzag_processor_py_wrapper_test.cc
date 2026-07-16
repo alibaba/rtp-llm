@@ -55,6 +55,36 @@ torch::Tensor zigzagGenerateQKVPaddingMask(const torch::Tensor& prefill_cp_chunk
     return processor.generateQKVPaddingMask(prefill_cp_chunk_lengths, prefill_cp_padding_lengths, cp_size);
 }
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+zigzagHandleInputsWithHidden(const torch::Tensor& total_input_tokens,
+                             const torch::Tensor& input_lengths,
+                             const torch::Tensor& sequence_lengths,
+                             const torch::Tensor& hidden_states,
+                             int                  cp_rank,
+                             int                  cp_size) {
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_rank = cp_rank;
+    parallelism_config.tp_size = cp_size;
+    ZigZagProcessor processor(parallelism_config);
+
+    GptModelInputs model_input;
+    model_input.combo_tokens       = total_input_tokens.contiguous().clone();
+    model_input.input_lengths      = input_lengths.contiguous().clone();
+    model_input.sequence_lengths   = sequence_lengths.contiguous().clone();
+    model_input.last_hidden_states = hidden_states.contiguous().clone();
+
+    torch_ext::PyContextParallelParams cp_params;
+    processor.handleInputs(model_input, cp_params);
+
+    return std::make_tuple(model_input.combo_tokens.cpu().clone(),
+                           model_input.input_lengths.cpu().clone(),
+                           model_input.last_hidden_states.cpu().clone(),
+                           cp_params.prefill_shuffle_indices.cpu().clone());
+}
+
+// Wrapper for ZigZagProcessor::computeLocalLastHidden — this rank's contribution
+// to the gathered last-token hidden (no comm). The Python test sums these across
+// ranks to simulate the all-reduce in handleOutputsLastHidden.
 torch::Tensor zigzagComputeLocalLastHidden(const torch::Tensor& hidden_chunk,
                                            const torch::Tensor& restore_indice,
                                            const torch::Tensor& padding_mask,
@@ -101,6 +131,16 @@ PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
           py::arg("cp_size"),
           "Generate padding mask for QKV tensors in context parallel scenarios (legacy wrapper)");
 
+    m.def("handle_inputs_with_hidden",
+          &zigzagHandleInputsWithHidden,
+          py::arg("total_input_tokens"),
+          py::arg("input_lengths"),
+          py::arg("sequence_lengths"),
+          py::arg("hidden_states"),
+          py::arg("cp_rank"),
+          py::arg("cp_size"),
+          "Run CP handleInputs and return split input tokens, lengths, hidden states, and shuffle indices");
+
     m.def("compute_local_last_hidden",
           &zigzagComputeLocalLastHidden,
           py::arg("hidden_chunk"),
@@ -109,7 +149,7 @@ PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
           py::arg("lm_output_indexes"),
           py::arg("cp_rank"),
           py::arg("cp_size"),
-          "Compute this rank's contribution to the CP gather-last-hidden result");
+          "This rank's contribution to the CP gather-last-hidden (sum across ranks == gathered last hidden)");
 }
 
 }  // namespace unittest

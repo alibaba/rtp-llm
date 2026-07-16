@@ -21,7 +21,7 @@ def _fwd_kernel_ep_scatter_1(
     BLOCK_E: tl.constexpr,
     BLOCK_EXPERT_NUM: tl.constexpr,
 ):
-    cur_expert = tl.program_id(0)
+    cur_expert = tl.program_id(0).to(tl.int64)
     offset_cumsum = tl.arange(0, BLOCK_EXPERT_NUM)
     tokens_per_expert = tl.load(
         num_recv_tokens_per_expert + offset_cumsum,
@@ -30,15 +30,15 @@ def _fwd_kernel_ep_scatter_1(
     )
     cumsum = tl.cumsum(tokens_per_expert) - tokens_per_expert
     tl.store(expert_start_loc + offset_cumsum, cumsum, mask=offset_cumsum < num_experts)
-    expert_mask = offset_cumsum == cur_expert
-    cur_expert_start = tl.sum(tl.where(expert_mask, cumsum, tl.zeros_like(cumsum)))
-    cur_expert_token_num = tl.sum(tl.where(expert_mask, tokens_per_expert, tl.zeros_like(tokens_per_expert)))
+    cur_expert_start = tl.load(expert_start_loc + cur_expert).to(tl.int64)
+    cur_expert_token_num = tl.load(num_recv_tokens_per_expert + cur_expert)
     m_indices_start_ptr = m_indices + cur_expert_start
-    off_expert = tl.arange(0, BLOCK_E)
+    off_expert = tl.arange(0, BLOCK_E).to(tl.int64)
     for start_m in tl.range(0, cur_expert_token_num, BLOCK_E, num_stages=4):
+        start_m_i64 = start_m.to(tl.int64)
         tl.store(
-            m_indices_start_ptr + start_m + off_expert,
-            cur_expert,
+            m_indices_start_ptr + start_m_i64 + off_expert,
+            cur_expert.to(tl.int32),
         )
 
 
@@ -254,8 +254,11 @@ def _fwd_kernel_ep_scatter_2_v2(
                     output_tensor + dest_token_index * output_tensor_stride0
                 )
                 token_idx = dest_token_index % alignment
+                expert_id_i64 = expert_id.to(tl.int64)
                 output_tensor_scale_ptr = (
-                    output_tensor_scale + expert_id * output_tensor_scale_stride0 + token_idx * output_tensor_scale_stride1
+                    output_tensor_scale
+                    + expert_id_i64 * output_tensor_scale_stride0
+                    + token_idx * output_tensor_scale_stride1
                 )
                 tl.store(output_tensor_ptr + offset_in, to_copy, mask=mask)
                 tl.store(
@@ -353,8 +356,7 @@ def _fwd_kernel_ep_gather(
     topk_num: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    cur_block_int32 = tl.program_id(0)
-    cur_block = cur_block_int32.to(tl.int64)
+    cur_block = tl.program_id(0).to(tl.int64)
     start_cur_token_int32 = tl.program_id(1)
     grid_num = tl.num_programs(1)
     for cur_token_int32 in range(start_cur_token_int32, total_token_num, grid_num):
@@ -373,7 +375,9 @@ def _fwd_kernel_ep_gather(
                 source_token_index = source_token_index_int32.to(tl.int64)
                 if source_token_index >= 0 and source_token_index < total_input_tokens:
                     acc_weight = tl.load(
-                        recv_topk_weight + cur_token * recv_topk_weight_stride0 + topk_index
+                        recv_topk_weight
+                        + cur_token * recv_topk_weight_stride0
+                        + topk_index
                     )
                     tmp = tl.load(
                         input_tensor
@@ -463,14 +467,15 @@ def _tma_align_input_scale_kernel(
     BLOCK_SIZE_K: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
-    pid_g = tl.program_id(axis=1)
+    pid_g = tl.program_id(axis=1).to(tl.int64)
     grid_m = tl.num_programs(0)
     k_offsets = tl.arange(0, BLOCK_SIZE_K)
     for m_base in range(pid_m, m, grid_m):
+        m_base_i64 = m_base.to(tl.int64)
         input_offset = (
             input_scale_ptr
             + pid_g * input_scale_stride_g
-            + m_base * input_scale_stride_m
+            + m_base_i64 * input_scale_stride_m
             + k_offsets * input_scale_stride_k
         )
         input_data = tl.load(input_offset, mask=k_offsets < k_div_block_size)
@@ -478,7 +483,7 @@ def _tma_align_input_scale_kernel(
             output_ptr
             + pid_g * output_stride_g
             + k_offsets * output_stride_k
-            + m_base * output_stride_m
+            + m_base_i64 * output_stride_m
         )
         tl.store(output_offset, input_data, mask=k_offsets < k_div_block_size)
 
@@ -496,7 +501,11 @@ def tma_align_input_scale(input_scale: torch.Tensor):
         input_view = input_scale
 
     padded_m = get_tma_aligned_size(m, input_scale.element_size())
-    output = torch.empty((g, k_div_block_size, padded_m), dtype=input_scale.dtype, device=input_scale.device)
+    output = torch.empty(
+        (g, k_div_block_size, padded_m),
+        dtype=input_scale.dtype,
+        device=input_scale.device,
+    )
     grid_m = min(m, 8192)
     BLOCK_SIZE_K = triton.next_power_of_2(k_div_block_size)
     _tma_align_input_scale_kernel[(grid_m, g)](
@@ -531,7 +540,9 @@ def recompute_topk_ids_triton_kernel(
     num_total,
     BLOCK_SIZE: tl.constexpr,
 ):
-    token_indices = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    token_indices = tl.program_id(0).to(tl.int64) * BLOCK_SIZE + tl.arange(
+        0, BLOCK_SIZE
+    ).to(tl.int64)
     mask = token_indices < num_total  # Mask out-of-bounds threads
 
     # 1. Load
@@ -556,18 +567,12 @@ def recompute_topk_ids_sum_expert_count(
     Recompute topk_ids by subtracting current_expert_start_id and count expert tokens.
 
     Args:
-        topk_ids: Tensor of shape [num_tokens, topk] containing expert IDs.
-            Sentinel value -1 is allowed and treated as a padding/invalid slot.
+        topk_ids: Tensor of shape [num_tokens, topk] containing expert IDs
         current_expert_start_id: Starting expert ID to subtract
         num_local_experts: Number of local experts
 
     Returns:
         tuple: (adjusted_topk_ids, expert_count)
-
-    Sentinel contract (relied on by PureDpRouter padding):
-        - Input slots equal to -1 are NOT counted in expert_count.
-        - Output adjusted_topk_ids preserves -1 in those slots (no remap).
-        - Out-of-range expert ids (after subtraction) also collapse to -1.
     """
     device = topk_ids.device
     num_tokens, topk = topk_ids.shape
@@ -613,8 +618,8 @@ def pre_reorder_moe_tokenwise_fp8_triton_kernel(
     BLOCK_SIZE: tl.constexpr,
     NUM_STAGES: tl.constexpr,
 ):
-
-    offset = BLOCK_SIZE * tl.program_id(1) + tl.arange(0, BLOCK_SIZE)
+    block_id = tl.program_id(1).to(tl.int64)
+    offset = BLOCK_SIZE * block_id + tl.arange(0, BLOCK_SIZE).to(tl.int64)
     mask = offset < hidden_size
     start_src_idx = tl.program_id(0)
     step = tl.num_programs(0)
@@ -631,7 +636,7 @@ def pre_reorder_moe_tokenwise_fp8_triton_kernel(
         # Load input data
         in_data = tl.load(src_ptr_offs, mask=mask)
 
-        if tl.program_id(1) == 0:
+        if block_id == 0:
             a1_scale = tl.load(input_scale_ptr + src_idx)
         else:
             a1_scale = 1.0
@@ -639,11 +644,11 @@ def pre_reorder_moe_tokenwise_fp8_triton_kernel(
         for idx in range(topk):
             expert_id = tl.load(token_topk_ids_ptr + idx)
             if expert_id >= 0 and expert_id < num_local_experts:
-                dst_idx = tl.load(token_src2dst_ptr + idx)
+                dst_idx = tl.load(token_src2dst_ptr + idx).to(tl.int64)
                 # Store reordered input data
                 tl.store(dst_ptr_offs + dst_idx * hidden_size, in_data, mask=mask)
                 # Store reordered scale
-                if tl.program_id(1) == 0:
+                if block_id == 0:
                     tl.store(permuted_scale_ptr + dst_idx, a1_scale)
 
 
@@ -651,11 +656,11 @@ def pre_reorder_moe_tokenwise_fp8_triton_kernel(
 def compute_src2dst_triton_kernel(
     reorder_ids, src2dst, num_toks, BLOCK_SIZE: tl.constexpr
 ):
-    pid = tl.program_id(axis=0)
-    dst_id = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    pid = tl.program_id(axis=0).to(tl.int64)
+    dst_id = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE).to(tl.int64)
     mask = dst_id < num_toks
     src_id = tl.load(reorder_ids + dst_id, mask=mask)
-    tl.store(src2dst + src_id, dst_id, mask=mask)
+    tl.store(src2dst + src_id, dst_id.to(tl.int32), mask=mask)
 
 
 # moe pre reorder with token-wise fp8 scale
@@ -770,11 +775,11 @@ def _compute_problem_sizes_kernel(
     problem_2_swap_ab: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    expert_id = tl.program_id(0)
+    expert_id = tl.program_id(0).to(tl.int64)
 
     occurrences = 0
     for start in range(0, topk_length, BLOCK_SIZE):
-        offsets = start + tl.arange(0, BLOCK_SIZE)
+        offsets = start.to(tl.int64) + tl.arange(0, BLOCK_SIZE).to(tl.int64)
         mask = offsets < topk_length
         ids = tl.load(topk_ids_ptr + offsets, mask=mask, other=-1)
         occurrences += tl.sum((ids == expert_id).to(tl.int32))

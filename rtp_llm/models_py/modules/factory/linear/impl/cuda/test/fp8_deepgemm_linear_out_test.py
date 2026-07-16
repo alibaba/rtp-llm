@@ -1,6 +1,5 @@
 import unittest
-from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import torch
 
@@ -9,9 +8,6 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda import (
 )
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
     CudaFp8DeepGEMMLinear,
-)
-from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
-    CudaFp8GEMMLinear,
 )
 
 
@@ -77,22 +73,6 @@ class CudaFp8DeepGEMMLinearOutContractTest(unittest.TestCase):
         self.assertFalse(non_contiguous.is_contiguous())
         with self.assertRaisesRegex(ValueError, "Output tensor must be contiguous"):
             linear(input_tensor, out=non_contiguous)
-
-    def test_dispatch_wrapper_uses_deepgemm_for_out_buffer(self):
-        input_tensor = torch.ones(2, 4, dtype=torch.bfloat16)
-        out = torch.empty(2, 3, dtype=torch.bfloat16)
-        deepgemm = Mock(return_value=out)
-        flashinfer = Mock(side_effect=AssertionError("out must bypass FlashInfer"))
-        wrapper = SimpleNamespace(
-            _deepgemm_linear=deepgemm,
-            _flashinfer_linear=flashinfer,
-        )
-
-        returned = CudaFp8GEMMLinear.forward(wrapper, input_tensor, out=out)
-
-        self.assertIs(returned, out)
-        deepgemm.assert_called_once_with(input_tensor, out=out)
-        flashinfer.assert_not_called()
 
 
 if __name__ == "__main__":

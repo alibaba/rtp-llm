@@ -131,7 +131,7 @@ class DSv4DecodeAttnMetadataFP8:
     # ------------------------------------------------------------------
 
     # Per-attn_type framework block_table: [max_B, max_blocks_per_req] int32.
-    # Source: the selected group's ``attn_inputs.kv_cache_kernel_block_id_device``.
+    # Source: ``attn_inputs.kv_cache_kernel_block_id_device_by_group[gid]``.
     # Keys are attn_type ids (1=CSA_KV..7=SWA_KV) from
     # :mod:`rtp_llm.models_py.modules.dsv4.attn_type`; only pools that the
     # model actually uses are present.
@@ -179,8 +179,8 @@ class DSv4DecodeAttnMetadataFP8:
     req_id_per_token_long: Optional[torch.Tensor] = None
     # Decode per-request first position and compact cu-seq offsets used by
     # compressor raw-path metadata for q_len > 1. These are layer-invariant.
-    decode_seq_start_per_req: Optional[torch.Tensor] = None  # [B] int32
-    decode_cu_seq_per_req: Optional[torch.Tensor] = None  # [B + 1] int32
+    decode_seq_start_per_req: Optional[torch.Tensor] = None  # [B] int64
+    decode_cu_seq_per_req: Optional[torch.Tensor] = None  # [B + 1] int64
 
     # Iter3.3: cached ``swa_global_slots`` = translate_local_to_global_slots(
     # req_id, swa_pool_bt, swa_abs_idx, swa_eb). Shape [T, win] int32.
@@ -905,12 +905,12 @@ def allocate_decode_metadata_fp8(
             q_len
         ).contiguous()
     req_id_per_token_long_alloc = req_id_per_token_alloc.to(torch.long)
-    decode_seq_start_per_req_alloc = torch.zeros(B, dtype=torch.int32, device=device)
+    decode_seq_start_per_req_alloc = torch.zeros(B, dtype=torch.int64, device=device)
     decode_cu_seq_per_req_alloc = torch.arange(
         0,
         (B + 1) * q_len,
         q_len,
-        dtype=torch.int32,
+        dtype=torch.int64,
         device=device,
     )
     swa_global_slots_alloc = torch.full(
@@ -1462,12 +1462,12 @@ def build_decode_metadata_fp8(
 
         req_id_per_token = build_req_id_per_token(int(B), q_len, device)
         req_id_per_token_long = req_id_per_token.to(torch.long)
-        decode_seq_start_per_req = start_pos.to(torch.int32).contiguous()
+        decode_seq_start_per_req = start_pos.to(torch.int64).contiguous()
         decode_cu_seq_per_req = torch.arange(
             0,
             (int(B) + 1) * q_len,
             q_len,
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=device,
         )
 

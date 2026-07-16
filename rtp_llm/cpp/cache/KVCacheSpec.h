@@ -7,7 +7,6 @@
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
-#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 
 namespace rtp_llm {
 // All KVCacheSpec classes are now available through individual headers

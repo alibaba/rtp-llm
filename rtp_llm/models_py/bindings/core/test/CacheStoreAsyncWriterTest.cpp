@@ -52,20 +52,21 @@ TEST_F(CacheStoreAsyncWriterTest, InitWhileRunningThrows) {
 
 TEST_F(CacheStoreAsyncWriterTest, InitWaitCycle) {
     CacheStoreAsyncWriter writer;
-    std::atomic<int>      completed{0};
+    std::vector<int>      order;
 
     writer.init();
-    writer.submit([&]() { completed.fetch_add(1); });
-    writer.submit([&]() { completed.fetch_add(1); });
+    writer.submit([&]() { order.push_back(1); });
+    writer.submit([&]() { order.push_back(2); });
     writer.waitAllDone();
 
-    ASSERT_EQ(2, completed.load());
+    ASSERT_EQ(2u, order.size());
 
     writer.init();
-    writer.submit([&]() { completed.fetch_add(1); });
+    writer.submit([&]() { order.push_back(3); });
     writer.waitAllDone();
 
-    ASSERT_EQ(3, completed.load());
+    ASSERT_EQ(3u, order.size());
+    ASSERT_EQ(3, order.back());
 }
 
 TEST_F(CacheStoreAsyncWriterTest, AsyncExecution) {

@@ -24,28 +24,6 @@ static at::ScalarType get_fp8_dtype() {
     return torch::kFloat8_e4m3fnuz;  // gfx942 and default
 }
 
-static void copyTensorExactInPlace(torch::Tensor& dst, const torch::Tensor& src, const char* name) {
-    if (!src.defined()) {
-        throw std::runtime_error(std::string("prepare_in_place expects defined tensor: ") + name);
-    }
-    torch::Tensor src_flat = src.contiguous().reshape({-1});
-    if (!dst.defined()) {
-        dst = src_flat.clone();
-        return;
-    }
-    torch::Tensor dst_flat = dst.reshape({-1});
-    if (dst_flat.numel() != src_flat.numel()) {
-        throw std::runtime_error(std::string("prepare_in_place tensor size mismatch for ") + name + ": capture="
-                                 + std::to_string(dst_flat.numel()) + ", replay=" + std::to_string(src_flat.numel()));
-    }
-
-    torch::Tensor src_match = src_flat;
-    if (src_match.scalar_type() != dst.scalar_type() || src_match.device() != dst.device()) {
-        src_match = src_match.to(dst.options(), true, false);
-    }
-    dst_flat.copy_(src_match, true);
-}
-
 void updateKvCacheOffset(CKAttn& params, const torch::Tensor& kv_cache_block_id_device) {
     if (!params.kv_cache_offset.defined() || !kv_cache_block_id_device.defined()
         || kv_cache_block_id_device.numel() == 0) {
@@ -64,43 +42,8 @@ void updateKvCacheOffset(CKAttn& params, const torch::Tensor& kv_cache_block_id_
                                         stream);
 }
 
-void prepareInPlace(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inputs) {
-    const bool has_prefix = attn_inputs.prefix_lengths.defined() && attn_inputs.prefix_lengths.numel() > 0;
-
-    if (has_prefix && params.prefix_lengths.defined() && params.prefix_lengths.numel() > 0
-        && params.prefix_lengths.data_ptr() != attn_inputs.prefix_lengths.data_ptr()) {
-        copyTensorExactInPlace(params.prefix_lengths, attn_inputs.prefix_lengths, "prefix_lengths");
-    }
-
-    params.max_seq_len = attn_inputs.input_lengths.max().item<int32_t>();
-    int max_prefix_len = 0;
-    if (has_prefix) {
-        max_prefix_len = attn_inputs.prefix_lengths.max().item<int32_t>();
-    }
-    params.prefill_runtime_max_seq_len         = params.max_seq_len;
-    params.prefill_runtime_max_prefix_len      = max_prefix_len;
-    params.prefill_runtime_seq_len_with_prefix = params.max_seq_len + max_prefix_len;
-
-    updateKvCacheOffset(params, attn_inputs.kv_cache_kernel_block_id_device);
-}
-
-static void rejectMropeWithoutPositionIds(const RopeConfig& rope_config, const char* where) {
-    // ROCm prefill/decode dispatch always passes position_ids=nullptr (combo_position_ids
-    // is not plumbed through this path yet). Mrope needs real per-axis position ids — without
-    // them the kernel silently uses position_id=-1, producing wrong RoPE positions.
-    if (rope_config.style == RopeStyle::Mrope) {
-        throw std::runtime_error(std::string(where)
-                                 + ": RopeStyle::Mrope requires combo_position_ids, but ROCm "
-                                   "fused RoPE+KV-cache path does not plumb position_ids yet. "
-                                   "Run this model on the CUDA path or extend this op to accept "
-                                   "position_ids before enabling Mrope.");
-    }
-}
-
 FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
-    attn_configs_(attn_configs) {
-    rejectMropeWithoutPositionIds(attn_configs.rope_config, "FusedRopeKVCachePrefillOp");
-}
+    attn_configs_(attn_configs) {}
 
 FusedRopeKVCachePrefillOpAsm::FusedRopeKVCachePrefillOpAsm(const AttentionConfigs& attn_configs):
     FusedRopeKVCachePrefillOpBase(attn_configs) {}
@@ -111,15 +54,17 @@ FusedRopeKVCachePrefillOpNonAsm::FusedRopeKVCachePrefillOpNonAsm(const Attention
 CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     int           batch_size = attn_inputs.input_lengths.size(0);
     torch::Tensor kv_cache_kernel_block_id_device;
-    if (attn_inputs.kv_cache_kernel_block_id.defined() && attn_inputs.kv_cache_kernel_block_id.numel() > 0) {
+    if (attn_inputs.kv_cache_kernel_block_id_device.defined()
+        && attn_inputs.kv_cache_kernel_block_id_device.numel() > 0) {
         kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
     }
 
     bool has_prefix = attn_inputs.prefix_lengths.defined() && attn_inputs.prefix_lengths.numel() > 0;
 
-    const bool use_fmha_fp8 = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
-    CKAttnPtr  attn_params;
-    auto       params =
+    bool use_fmha_fp8 = false;
+    use_fmha_fp8      = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
+    CKAttnPtr attn_params;
+    auto      params =
         PrepareCKAttn(attn_configs_, kv_cache_kernel_block_id_device, attn_inputs.input_lengths.size(0), use_fmha_fp8);
     if (params) {
         attn_params = CKAttnPtr(params, (CKAttn*)params.get());
@@ -127,12 +72,10 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
         attn_params = std::make_shared<CKAttn>();
     }
     attn_params->attn_type      = torchDTypeToDataType(attn_inputs.dtype);
-    attn_params->cu_seqlens     = attn_inputs.cu_seqlens_device;
-    attn_params->cu_kv_seqlens  = attn_inputs.cu_kv_seqlens_device;
-    attn_params->input_lengths  = attn_inputs.input_lengths;
+    attn_params->cu_seqlens     = attn_inputs.cu_seqlens;
+    attn_params->cu_kv_seqlens  = attn_inputs.cu_kv_seqlens;
     attn_params->max_seq_len    = attn_inputs.input_lengths.max().item<int32_t>();
     attn_params->padding_offset = attn_inputs.padding_offset;
-
     // 处理 prefix_lengths：确保在 CUDA 上且连续
     if (has_prefix) {
         torch::Tensor prefix_lengths = attn_inputs.prefix_lengths;
@@ -144,21 +87,6 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
         attn_params->prefix_lengths = attn_inputs.prefix_lengths;
     }
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
-    attn_params->position_ids = attn_inputs.combo_position_ids;
-
-// Ensure position_ids is on CUDA device (e.g., MROPE position_ids may be on CPU)
-    if (attn_params->position_ids.defined() && !attn_params->position_ids.is_cuda()) {
-        attn_params->position_ids =
-            attn_params->position_ids.to(torch::kCUDA, /*non_blocking=*/false, /*copy=*/true).contiguous();
-    }
-    
-    int max_prefix_length = 0;
-    if (has_prefix && attn_params->prefix_lengths.defined() && attn_params->prefix_lengths.numel() > 0) {
-        max_prefix_length = attn_params->prefix_lengths.max().item<int32_t>();
-    }
-    attn_params->prefill_runtime_max_seq_len         = attn_params->max_seq_len;
-    attn_params->prefill_runtime_max_prefix_len      = max_prefix_length;
-    attn_params->prefill_runtime_seq_len_with_prefix = attn_params->max_seq_len + max_prefix_length;
     return attn_params;
 }
 
@@ -169,28 +97,28 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     const int size_per_head     = attn_configs_.size_per_head;
     const int token_num         = qkv.size(0);
     const int batch_size        = params->cu_seqlens.size(0) - 1;
-    const int seq_len =
-        params->prefill_runtime_max_seq_len >= 0 ? params->prefill_runtime_max_seq_len : params->max_seq_len;
-    const int max_prefix_length =
-        params->prefill_runtime_max_prefix_len >= 0 ? params->prefill_runtime_max_prefix_len : 0;
+    const int seq_len           = params->max_seq_len;
+
+    // 计算包含 prefix 的序列长度
+    int max_prefix_length = 0;
+    if (params->prefix_lengths.size(0)) {
+        max_prefix_length = params->prefix_lengths.max().item<int>();
+    }
     const int seq_len_with_prefix = seq_len + max_prefix_length;
 
-    const int  q_output_token_num = (use_paged_fmha && pad_query) ? batch_size * seq_len : token_num;
-    const bool paged_fp8          = use_paged_fmha && attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
-    const auto q_opts             = torch::TensorOptions(qkv.dtype()).device(qkv.device());
-
-    // pad_query=false: q_output is packed [token_num, heads, dim] and the kernel writes
-    // every cell — skip the zero-fill. pad_query=true: padded slots between sequences
-    // are not written by the kernel, so they must be zero-initialized for downstream
-    // FMHA correctness.
-    torch::Tensor q_output = (use_paged_fmha && pad_query) ?
-                                 torch::zeros({q_output_token_num, local_head_num, size_per_head}, q_opts) :
-                                 torch::empty({q_output_token_num, local_head_num, size_per_head}, q_opts);
+    const int     q_output_token_num = (use_paged_fmha && pad_query) ? batch_size * seq_len : token_num;
+    const bool    paged_fp8          = use_paged_fmha && attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
+    torch::Tensor q_output           = torch::zeros({q_output_token_num, local_head_num, size_per_head},
+                                          torch::TensorOptions(qkv.dtype()).device(qkv.device()));
     torch::Tensor q_fp8_buf;
     if (paged_fp8) {
         q_fp8_buf = torch::empty({q_output_token_num, local_head_num, size_per_head},
                                  torch::TensorOptions(get_fp8_dtype()).device(qkv.device()));
     }
+    torch::Tensor k_output = torch::zeros({batch_size, local_head_num_kv, seq_len_with_prefix, size_per_head},
+                                          torch::TensorOptions(qkv.dtype()).device(qkv.device()));
+    torch::Tensor v_output = torch::zeros({batch_size, local_head_num_kv, seq_len_with_prefix, size_per_head},
+                                          torch::TensorOptions(qkv.dtype()).device(qkv.device()));
 
     PrefixPromptBatchWeightsParam prefix_prompt_param{};
     bool                          use_fmha_fp8 = false;
@@ -202,6 +130,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
 
         auto  kv_block_array = params->kv_block_array;
         void* k_cache_ptr    = kv_cache.value().kv_cache_base.data_ptr();
+        if (k_cache_ptr == nullptr) {
+            throw std::runtime_error("FusedRopeKVCachePrefillOp: kv_cache_base data pointer is null");
+        }
 
         kv_block_array.mPrimaryPoolPtr = k_cache_ptr;
         if (kv_cache.value().kv_scale_base.defined() && kv_cache.value().kv_scale_base.numel() > 0) {
@@ -216,10 +147,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
 
     // 设置 prefix_lengths 参数
     if (max_prefix_length > 0) {
-        if (!params->prefix_lengths.defined() || params->prefix_lengths.numel() < batch_size) {
-            throw std::runtime_error("FusedRopeKVCachePrefillOp: prefix_lengths is not ready for runtime replay");
-        }
         int* prefix_lengths_ptr = params->prefix_lengths.data_ptr<int>();
+        if (prefix_lengths_ptr == nullptr) {
+            throw std::runtime_error("FusedRopeKVCachePrefillOp: prefix_lengths data pointer is null");
+        }
 
         prefix_prompt_param.d_prefix_prompt_lengths  = prefix_lengths_ptr;
         prefix_prompt_param.max_prefix_prompt_length = max_prefix_length;
@@ -231,27 +162,12 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
         //       Please run with BF16 activation instead (set environment variable ACT_TYPE=bf16)
         use_fmha_fp8 = false;
     }
-    // FP8 path: keep original behavior (store QKV linearly for flash_attn_varlen_fp8).
-    // Non-FP8 with paged cache: K/V go directly into the cache via store_cache, so
-    //   store_kv=false (writing k_output/v_output would be wasted HBM bandwidth).
-    // Non-FP8 without paged cache (embedding models): store_kv=true so K/V are
-    //   returned as padded buffers for downstream varlen attention; RoPE must still
-    //   run for positional encoding.
+    // FP8 path: keep original behavior (store QKV linearly for flash_attn_varlen_fp8)
+    // Non-FP8 path: paged layout only (Q packed-token, K/V in paged cache)
     bool store_qkv   = use_fmha_fp8 ? !use_paged_fmha : false;
     bool store_q     = true;
+    bool store_kv    = use_fmha_fp8 ? !use_paged_fmha : false;
     bool store_cache = kv_cache.has_value();
-    bool store_kv    = use_fmha_fp8 ? !use_paged_fmha : !store_cache;
-
-    // Allocate K/V output buffers only when the kernel actually writes them,
-    // avoiding unnecessary GPU memory allocation and zero-fill.
-    torch::Tensor k_output;
-    torch::Tensor v_output;
-    if (store_kv) {
-        k_output = torch::zeros({batch_size, local_head_num_kv, seq_len_with_prefix, size_per_head}, q_opts);
-        v_output = torch::zeros({batch_size, local_head_num_kv, seq_len_with_prefix, size_per_head}, q_opts);
-    }
-    void* k_output_ptr = store_kv ? k_output.data_ptr() : nullptr;
-    void* v_output_ptr = store_kv ? v_output.data_ptr() : nullptr;
 
     // int8
     float* scale_out_ptr = nullptr;
@@ -260,34 +176,22 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     hipStream_t stream_ = GET_CURRENT_STREAM();
     // 添加 FP8 缓冲区支持
     torch::Tensor qkv_buf_fp8;
-    if (use_fmha_fp8 && !paged_fp8) {
+    if (use_fmha_fp8) {
         qkv_buf_fp8 = torch::empty(qkv.sizes(), torch::TensorOptions(get_fp8_dtype()).device(qkv.device()));
     }
-
-    int *padding_offset = nullptr, *position_ids = nullptr;
-    if (params->padding_offset.defined()) {
-        padding_offset = params->padding_offset.data_ptr<int>();
-    }
-    if (params->position_ids.defined()) {
-        position_ids = params->position_ids.data_ptr<int>();
-    }
-
-    auto    rope_cache = getRopeCacheOnce(attn_configs_.rope_config, attn_configs_.max_seq_len, false);
-    float2* rope_cache_ptr =
-        rope_cache.used && rope_cache.data.defined() ? static_cast<float2*>(rope_cache.data.data_ptr()) : nullptr;
 
     if (use_asm()) {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
             torchDTypeToDataType(qkv.dtype()),
             invokeAddFusedQKVBiasTransposePrefill,
             q_output.data_ptr(),
-            k_output_ptr,
-            v_output_ptr,
+            use_fmha_fp8 ? k_output.data_ptr() : nullptr,
+            use_fmha_fp8 ? v_output.data_ptr() : nullptr,
             &prefix_prompt_param,
             qkv.data_ptr(),
             paged_fp8 ? q_fp8_buf.data_ptr() :
                         (use_fmha_fp8 && qkv_buf_fp8.defined() ? qkv_buf_fp8.data_ptr() : nullptr),
-            position_ids,
+            nullptr,  // position_ids
             nullptr,  // qkv_bias
             params->padding_offset.data_ptr<int>(),
             params->cu_seqlens.data_ptr<int>(),
@@ -309,52 +213,53 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
             nullptr,
             pad_query,
             stream_);
+
     } else {
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(
-            torchDTypeToDataType(qkv.dtype()),
-            invokeAddFusedQKVBiasTransposePrefillV1,
-            q_output.data_ptr(),
-            k_output_ptr,
-            v_output_ptr,
-            &prefix_prompt_param,
-            qkv.data_ptr(),
-            paged_fp8 ? q_fp8_buf.data_ptr() :
-                        (use_fmha_fp8 && qkv_buf_fp8.defined() ? qkv_buf_fp8.data_ptr() : nullptr),
-            position_ids,
-            nullptr,
-            params->padding_offset.data_ptr<int>(),
-            params->cu_seqlens.data_ptr<int>(),
-            batch_size,
-            seq_len,
-            token_num,
-            local_head_num,
-            local_head_num_kv,
-            size_per_head,
-            attn_configs_.rope_config,
-            attn_configs_.use_logn_attn,
-            nullptr,
-            0,
-            use_fmha_fp8 ? use_paged_fmha : true,  // FP8: original flag; non-FP8: always paged
-            store_qkv,
-            store_q,
-            store_kv,
-            store_cache,
-            nullptr,
-            stream_);
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
+                                         invokeAddFusedQKVBiasTransposePrefillV1,
+                                         q_output.data_ptr(),
+                                         k_output.data_ptr(),
+                                         v_output.data_ptr(),
+                                         &prefix_prompt_param,
+                                         qkv.data_ptr(),
+                                         nullptr,
+                                         nullptr,
+                                         nullptr,
+                                         params->padding_offset.data_ptr<int>(),
+                                         params->cu_seqlens.data_ptr<int>(),
+                                         batch_size,
+                                         seq_len,
+                                         token_num,
+                                         local_head_num,
+                                         local_head_num_kv,
+                                         size_per_head,
+                                         attn_configs_.rope_config,
+                                         attn_configs_.use_logn_attn,
+                                         nullptr,
+                                         0,
+                                         use_fmha_fp8 ? use_paged_fmha :
+                                                        true,  // FP8: original flag; non-FP8: always paged
+                                         store_qkv,
+                                         store_q,
+                                         store_kv,
+                                         store_cache,
+                                         nullptr,
+                                         stream_);
     }
-    // FP8 path: paged returns Q-only fp8 buf; non-paged returns full qkv fp8 buf
+    // FP8 path: return full qkv_buf_fp8 for flash_attn_varlen_fp8_pertensor_func
     if (use_fmha_fp8) {
-        return std::make_tuple(paged_fp8 ? q_fp8_buf : qkv_buf_fp8, torch::Tensor(), torch::Tensor());
+        return std::make_tuple(qkv_buf_fp8, torch::Tensor(), torch::Tensor());
     }
-    // Non-FP8 with paged cache: return bf16 Q (K/V are already written into the cache).
-    // Non-FP8 without paged cache: also return padded K/V for flash_attn_varlen_func.
-    return std::make_tuple(q_output, k_output, v_output);
+    // Non-FP8 paged path: return packed-token Q only (K/V in paged cache)
+    if (use_paged_fmha) {
+        return std::make_tuple(q_output, torch::Tensor(), torch::Tensor());
+    }
+
+    return std::make_tuple(q_output, torch::Tensor(), torch::Tensor());
 }
 
 FusedRopeKVCacheDecodeOpBase::FusedRopeKVCacheDecodeOpBase(const AttentionConfigs& attn_configs):
-    attn_configs_(attn_configs) {
-    rejectMropeWithoutPositionIds(attn_configs.rope_config, "FusedRopeKVCacheDecodeOp");
-}
+    attn_configs_(attn_configs) {}
 
 FusedRopeKVCacheDecodeOpAsm::FusedRopeKVCacheDecodeOpAsm(const AttentionConfigs& attn_configs):
     FusedRopeKVCacheDecodeOpBase(attn_configs) {}
@@ -365,7 +270,8 @@ FusedRopeKVCacheDecodeOpNonAsm::FusedRopeKVCacheDecodeOpNonAsm(const AttentionCo
 CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     int           batch_size = attn_inputs.sequence_lengths.size(0);
     torch::Tensor kv_cache_kernel_block_id_device;
-    if (attn_inputs.kv_cache_kernel_block_id.defined() && attn_inputs.kv_cache_kernel_block_id.numel() > 0) {
+    if (attn_inputs.kv_cache_kernel_block_id_device.defined()
+        && attn_inputs.kv_cache_kernel_block_id_device.numel() > 0) {
         kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
     }
 
@@ -378,25 +284,19 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
     if (!params) {
         throw std::runtime_error("FusedRopeKVCacheDecodeOp::prepare: PrepareCKAttn failed. "
                                  "kv_cache_kernel_block_id_size="
-                                 + std::to_string(attn_inputs.kv_cache_kernel_block_id.size(0)));
+                                 + std::to_string(attn_inputs.kv_cache_kernel_block_id_device.size(0)));
     }
 
     attn_params                            = CKAttnPtr(params, (CKAttn*)params.get());
     attn_params->decode_plan               = true;
     attn_params->attn_type                 = torchDTypeToDataType(attn_inputs.dtype);
-    attn_params->cu_seqlens                = attn_inputs.cu_seqlens_device;
-    attn_params->cu_kv_seqlens             = attn_inputs.cu_kv_seqlens_device;
+    attn_params->cu_seqlens                = attn_inputs.cu_seqlens;
+    attn_params->cu_kv_seqlens             = attn_inputs.cu_kv_seqlens;
     attn_params->sequence_lengths          = attn_inputs.sequence_lengths;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     attn_params->input_lengths             = attn_inputs.input_lengths;
     attn_params->prefix_lengths            = attn_inputs.prefix_lengths;
     attn_params->padding_offset            = attn_inputs.padding_offset;
-    attn_params->position_ids              = attn_inputs.combo_position_ids;
-    // Ensure position_ids is on CUDA device (e.g., MROPE position_ids may be on CPU)
-    if (attn_params->position_ids.defined() && !attn_params->position_ids.is_cuda()) {
-        attn_params->position_ids =
-            attn_params->position_ids.to(torch::kCUDA, /*non_blocking=*/false, /*copy=*/true).contiguous();
-    }
 
     if (attn_inputs.kv_cache_kernel_block_id_device.defined()
         && attn_inputs.kv_cache_kernel_block_id_device.numel() > 0) {
@@ -453,82 +353,76 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
 
     // Always use aiter_pa for ROCm
     hipStream_t stream_ = GET_CURRENT_STREAM();
-
-    int* position_ids_ptr = nullptr;
-    if (params->position_ids.defined()) {
-        position_ids_ptr = params->position_ids.data_ptr<int>();
-    } else {
-        position_ids_ptr = params->sequence_lengths.data_ptr<int>();
-    }
-
-    auto    rope_cache = getRopeCacheOnce(attn_configs_.rope_config, attn_configs_.max_seq_len, false);
-    float2* rope_cache_ptr =
-        rope_cache.used && rope_cache.data.defined() ? static_cast<float2*>(rope_cache.data.data_ptr()) : nullptr;
-
     if (use_asm()) {
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
-                                         invokeAddFusedQKVBiasTransposeDecode,
-                                         q_output.data_ptr(),
-                                         nullptr,
-                                         nullptr,
-                                         &prefix_prompt_param,
-                                         params->input_lengths.data_ptr<int>(),
-                                         qkv.data_ptr(),
-                                         nullptr,
-                                         position_ids_ptr,
-                                         /*qkv_bias*/ nullptr,
-                                         params->padding_offset.data_ptr<int>(),
-                                         params->cu_seqlens.data_ptr<int>(),
-                                         params->sequence_lengths.data_ptr<int>(),
-                                         batch_size,
-                                         seq_len,
-                                         token_num,
-                                         local_head_num,
-                                         local_head_num_kv,
-                                         size_per_head,
-                                         attn_configs_.rope_config,
-                                         attn_configs_.use_logn_attn,
-                                         nullptr,
-                                         0,
-                                         false,
-                                         store_qkv,
-                                         store_q,
-                                         store_kv,
-                                         store_cache,
-                                         rope_cache_ptr,
-                                         stream_);
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+            torchDTypeToDataType(qkv.dtype()),
+            invokeAddFusedQKVBiasTransposeDecode,
+            q_output.data_ptr(),
+            nullptr,
+            nullptr,
+            &prefix_prompt_param,
+            params->input_lengths.data_ptr<int>(),
+            qkv.data_ptr(),
+            nullptr,
+            /*params.common.position_ids*/ nullptr,
+            /*qkv_bias*/ nullptr,  //                params.configs.fuse_qkv_add_bias &&
+                                   //                params.weights.qkv_weight->bias?
+                                   //                params.weights.qkv_weight->bias->data(): nullptr,???
+            params->padding_offset.data_ptr<int>(),
+            params->cu_seqlens.data_ptr<int>(),
+            params->sequence_lengths.data_ptr<int>(),
+            batch_size,
+            seq_len,
+            token_num,
+            local_head_num,
+            local_head_num_kv,
+            size_per_head,
+            attn_configs_.rope_config,
+            attn_configs_.use_logn_attn,
+            nullptr,
+            0,
+            false,
+            store_qkv,
+            store_q,
+            store_kv,
+            store_cache,
+            nullptr,
+            stream_);
     } else {
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
-                                         invokeAddFusedQKVBiasTransposeDecodeV1,
-                                         q_output.data_ptr(),
-                                         nullptr,
-                                         nullptr,
-                                         &prefix_prompt_param,
-                                         params->input_lengths.data_ptr<int>(),
-                                         qkv.data_ptr(),
-                                         nullptr,
-                                         position_ids_ptr,
-                                         /*qkv_bias*/ nullptr,
-                                         params->padding_offset.data_ptr<int>(),
-                                         params->cu_seqlens.data_ptr<int>(),
-                                         params->sequence_lengths.data_ptr<int>(),
-                                         batch_size,
-                                         seq_len,
-                                         token_num,
-                                         local_head_num,
-                                         local_head_num_kv,
-                                         size_per_head,
-                                         attn_configs_.rope_config,
-                                         attn_configs_.use_logn_attn,
-                                         nullptr,
-                                         0,
-                                         false,
-                                         store_qkv,
-                                         store_q,
-                                         store_kv,
-                                         store_cache,
-                                         rope_cache_ptr,
-                                         stream_);
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+            torchDTypeToDataType(qkv.dtype()),
+            invokeAddFusedQKVBiasTransposeDecodeV1,
+            q_output.data_ptr(),
+            nullptr,
+            nullptr,
+            &prefix_prompt_param,
+            params->input_lengths.data_ptr<int>(),
+            qkv.data_ptr(),
+            nullptr,
+            /*params.common.position_ids*/ nullptr,
+            /*qkv_bias*/ nullptr,  //                params.configs.fuse_qkv_add_bias &&
+                                   //                params.weights.qkv_weight->bias?
+                                   //                params.weights.qkv_weight->bias->data(): nullptr,???
+            params->padding_offset.data_ptr<int>(),
+            params->cu_seqlens.data_ptr<int>(),
+            params->sequence_lengths.data_ptr<int>(),
+            batch_size,
+            seq_len,
+            token_num,
+            local_head_num,
+            local_head_num_kv,
+            size_per_head,
+            attn_configs_.rope_config,
+            attn_configs_.use_logn_attn,
+            nullptr,
+            0,
+            false,
+            store_qkv,
+            store_q,
+            store_kv,
+            store_cache,
+            nullptr,
+            stream_);
     }
 
     return q_output;
@@ -538,8 +432,7 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
     pybind11::class_<KVBlockArray>(m, "KVBlockArray").def(pybind11::init<>());
     pybind11::class_<CKAttn, std::shared_ptr<CKAttn>>(m, "CKAttn")
         .def(pybind11::init<>())
-        .def("update_kv_cache_offset", &updateKvCacheOffset, py::arg("kv_cache_block_id_device"))
-        .def("prepare_in_place", &prepareInPlace, py::arg("attn_inputs"));
+        .def("update_kv_cache_offset", &updateKvCacheOffset, py::arg("kv_cache_block_id_device"));
 
     // Prefill ASM
     pybind11::class_<FusedRopeKVCachePrefillOpAsm>(m, "FusedRopeKVCachePrefillOpAsm")

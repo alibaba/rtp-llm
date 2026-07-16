@@ -12,6 +12,8 @@ import torch
 from rtp_llm.ops import KVCache, PyCacheStoreInputs
 
 __all__ = [
+    "FlashInferAttnParams",
+    "FlashInferOp",
     "SelectTopkOp",
     "TRTAttn",
     "TRTAttnOp",
@@ -28,8 +30,32 @@ __all__ = [
     "silu_and_mul",
 ]
 
+class FlashInferAttnParams:
+    def __init__(self) -> None: ...
+
 class FlashInferMlaAttnParams:
     def __init__(self) -> None: ...
+    def fill_decode_cuda_graph_params(
+        self,
+        sequence_lengths_plus_1_d: torch.Tensor,
+        kv_cache_block_id_device: torch.Tensor,
+        seq_size_per_block: int,
+    ) -> None: ...
+
+class FlashInferOp:
+    def __init__(
+        self, attn_configs: typing.Any
+    ) -> None: ...
+    def forward(
+        self,
+        input: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        params: FlashInferAttnParams,
+    ) -> torch.Tensor: ...
+    def prepare(
+        self, attn_inputs: libth_transformer.PyAttentionInputs
+    ) -> FlashInferAttnParams: ...
 
 class SelectTopkOp:
     def __init__(
@@ -72,6 +98,12 @@ class XQAAttnOp:
     def prepare(
         self, attn_inputs: libth_transformer.PyAttentionInputs
     ) -> XQAParams: ...
+    def update(
+        self, params: XQAParams, attn_inputs: libth_transformer.PyAttentionInputs
+    ) -> None: ...
+    def update_kv_cache_offset(
+        self, kv_cache_offset: torch.Tensor, kv_cache_block_id_device: torch.Tensor
+    ) -> None: ...
 
 class XQAParams:
     def __init__(self) -> None: ...

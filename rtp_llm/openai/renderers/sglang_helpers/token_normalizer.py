@@ -42,27 +42,6 @@ logger = logging.getLogger(__name__)
 _MAX_UTF8_WINDOW = 6
 
 
-def expand_prev_window(tokenizer, output_ids: List[int], last_token_length: int) -> int:
-    """Widen the prev-token window until it decodes without U+FFFD.
-
-    _calculate_yielded_length() only peels from the right, so a leftmost
-    orphan UTF-8 tail byte makes it return 0 and the next iteration
-    re-emits already-yielded text.  This helper extends the window left
-    until the decode is clean.
-
-    Returns the (possibly increased) last_token_length.
-    """
-    if last_token_length <= 0 or not output_ids:
-        return last_token_length
-    max_expand = min(len(output_ids), last_token_length + _MAX_UTF8_WINDOW)
-    while last_token_length < max_expand:
-        window = output_ids[-last_token_length:]
-        if "�" not in tokenizer.decode(window):
-            break
-        last_token_length += 1
-    return last_token_length
-
-
 class TokenNormalizer:
     """
     Normalizes multi-token input into single-token text deltas for detectors.

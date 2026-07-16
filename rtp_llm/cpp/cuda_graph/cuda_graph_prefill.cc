@@ -1,5 +1,4 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
-#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include <optional>
 
 namespace rtp_llm {
@@ -19,47 +18,46 @@ void CudaGraphRunner::capturePrefill() {
         // Prepare common inputs using shared function
         prepareCaptureInputs(inputs, max_bs_, seq_len);
         // Prefill-specific settings, one the first seq is valid, the post ones are all empty
-        if (isEmbeddingStylePrefillCudaGraph()) {
+        if (is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ == max_seq_len_) {
             // embedding model, without kv cache
             inputs.attention_inputs.prefix_lengths.fill_(0);
             // Must set cu_seqlens/cu_kv_seqlens/input_lengths to match actual seq_len,
             // otherwise FlashInfer plans for max_seq_len tokens but q/k/v only have seq_len tokens
-            inputs.attention_inputs.cu_seqlens[0] = 0;
-            inputs.attention_inputs.cu_seqlens[1] = seq_len;
-            inputs.attention_inputs.cu_seqlens_device.copy_(inputs.attention_inputs.cu_seqlens, false);
+            inputs.attention_inputs.cu_seqlens_host[0] = 0;
+            inputs.attention_inputs.cu_seqlens_host[1] = seq_len;
+            inputs.attention_inputs.cu_seqlens.copy_(inputs.attention_inputs.cu_seqlens_host, false);
             inputs.attention_inputs.input_lengths[0] = seq_len;
         } else {
             // Draft model prefill: distribute seq_len tokens across batches (max num_tokens_per_bs_ each).
-            // All max_bs_ batches get the largest legal prefix so
-            // prefix_len + q_len never exceeds max_seq_len_.
+            // All max_bs_ batches get the largest legal prefix to ensure buffer allocation covers worst-case replay.
             int active_bs  = (seq_len + num_tokens_per_bs_ - 1) / num_tokens_per_bs_;
             int prefix_len = max_seq_len_ > num_tokens_per_bs_ ? max_seq_len_ - num_tokens_per_bs_ : 0;
 
-            // All batches get prefix_len to maximize buffer allocation during capture.
+            // Active batches must satisfy prefix_len + input_len <= max_seq_len_;
+            // DSv4 decode metadata derives position_ids from prefix_lengths.
             // Active batches get real input tokens, inactive batches get 0 input tokens.
             inputs.attention_inputs.input_lengths.fill_(0);
             inputs.attention_inputs.prefix_lengths.fill_(prefix_len);
             auto& input_lengths = inputs.attention_inputs.input_lengths;
             for (int b = 0; b < active_bs; b++) {
-                int tokens       = (b < active_bs - 1) ? num_tokens_per_bs_ : (seq_len - b * num_tokens_per_bs_);
+                int tokens           = (b < active_bs - 1) ? num_tokens_per_bs_ : (seq_len - b * num_tokens_per_bs_);
                 input_lengths[b] = tokens;
             }
 
             // Build cu_seqlens and cu_kv_seqlens as cumulative sums
-            auto cu_seqlens_host    = inputs.attention_inputs.cu_seqlens;
-            auto cu_kv_seqlens_host = inputs.attention_inputs.cu_kv_seqlens_device.cpu();
-            auto prefix_lengths     = inputs.attention_inputs.prefix_lengths;
+            auto cu_seqlens_host = inputs.attention_inputs.cu_seqlens_host;
+            auto cu_kv_seqlens_host = inputs.attention_inputs.cu_kv_seqlens.cpu();
+            auto prefix_lengths = inputs.attention_inputs.prefix_lengths;
 
-            cu_seqlens_host[0]    = 0;
-            cu_kv_seqlens_host[0] = 0;
+            cu_seqlens_host[0]        = 0;
+            cu_kv_seqlens_host[0]     = 0;
             for (int b = 0; b < max_bs_; b++) {
-                cu_seqlens_host[b + 1] = cu_seqlens_host[b].item<int>() + input_lengths[b].item<int>();
-                cu_kv_seqlens_host[b + 1] =
-                    cu_kv_seqlens_host[b].item<int>() + input_lengths[b].item<int>() + prefix_lengths[b].item<int>();
+                cu_seqlens_host[b + 1]    = cu_seqlens_host[b].item<int>() + input_lengths[b].item<int>();
+                cu_kv_seqlens_host[b + 1] = cu_kv_seqlens_host[b].item<int>() + input_lengths[b].item<int>() + prefix_lengths[b].item<int>();
             }
 
-            inputs.attention_inputs.cu_seqlens_device.copy_(cu_seqlens_host);
-            inputs.attention_inputs.cu_kv_seqlens_device.copy_(cu_kv_seqlens_host);
+            inputs.attention_inputs.cu_seqlens.copy_(cu_seqlens_host);
+            inputs.attention_inputs.cu_kv_seqlens.copy_(cu_kv_seqlens_host);
         }
 
         inputs.attention_inputs.context_total_kv_length = seq_len;
@@ -71,20 +69,22 @@ void CudaGraphRunner::capturePrefill() {
             inputs.bert_embedding_inputs.combo_tokens_type_ids =
                 inputs.bert_embedding_inputs.combo_tokens_type_ids.slice(0, 0, seq_len);
         }
-        // Prefill reshapes common metadata after prepareCaptureInputs synchronized the tag map.
-        refreshTaggedAttentionInputs(inputs);
         graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, max_bs_ * num_tokens_per_bs_);
         graph_instances_[seq_len].mem_hold_.attn_pyobj_ =
             py_attn_pyobj_method_(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);
-        // DSV4 MTP draft prefill keeps its HC-shaped output at fixed graph
-        // capacity. Other MTP and embedding prefill paths produce the real
-        // flattened seq_len and must keep their metadata shapes aligned.
-        if (!usesFixedCapacityMtpDraftPrefillCudaGraph()) {
+        // Draft prefill graph mode (num_tokens_per_bs_ != max_seq_len_) routes
+        // through ``forward_decode`` whose output is ``[B * q_len, dim]`` —
+        // i.e. always the full ``max_bs_ * num_tokens_per_bs_``. Slicing the
+        // output buffer to ``seq_len`` here would produce a copy-size
+        // mismatch in ``captureOneGraphInstance``'s
+        // ``decoder_layer_hidden_states_.copy_(outputs.hidden_states)``.
+        // Embedding prefill (num_tokens_per_bs_ == max_seq_len_) still needs
+        // the per-seq_len slice because its output shape is ``[seq_len, dim]``.
+        if (num_tokens_per_bs_ == max_seq_len_) {
             graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =
                 graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
         }
         capturePrefillOneSeqLen(seq_len);
-        cuda_graph::finish_capture_session();
         replayAndSyncCheck(seq_len, "seq len");
         RTP_LLM_LOG_INFO("capture success for seq_len: %d", seq_len);
     }
@@ -92,8 +92,8 @@ void CudaGraphRunner::capturePrefill() {
 }
 
 std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
-    // MTP draft prefill: capture at multiples of num_tokens_per_bs_
-    if (isMtpDraftPrefillCudaGraph()) {
+    // Draft model prefill (num_tokens_per_bs_ != max_seq_len_): capture at multiples of num_tokens_per_bs_
+    if (num_tokens_per_bs_ != max_seq_len_) {
         std::vector<int> result;
         for (int i = 1; i <= max_bs_; ++i) {
             result.push_back(i * num_tokens_per_bs_);

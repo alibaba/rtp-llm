@@ -115,17 +115,11 @@ def test_fused_recurrent_continuous_batching(
         offset += block_num[i]
     block_map = block_map.to(device)
     load_block_offset = [(x - 2) // seq_size_per_block for x in sequence_lengths]
-    # ssm_cache is the kernel's V-first (..., V, K) cache (see refactor commit
-    # 5f271c1b). h0 above comes from recurrent_gated_delta_rule_ref which still
-    # uses the FLA-style K-first (..., K, V) convention, so transpose at the
-    # boundary when seeding the cache.
     ssm_cache = torch.zeros(
         total_block_num, HV, D, D, dtype=torch.float32, device=device
     )
     for bs in range(B):
-        ssm_cache[int(block_map[bs, load_block_offset[bs]])] = (
-            h0[bs].transpose(-1, -2).contiguous()
-        )
+        ssm_cache[int(block_map[bs, load_block_offset[bs]])] = h0[bs]
 
     sequence_lengths_t = torch.tensor(
         sequence_lengths, dtype=torch.int32, device=device
@@ -149,11 +143,9 @@ def test_fused_recurrent_continuous_batching(
     tri_ht = torch.zeros(B, S, HV, D, D, dtype=torch.float32, device=device)
     for bs in range(B):
         for seq in range(S):
-            # ssm_cache is V-first (V, K); transpose back to K-first before
-            # comparing with the reference ht.
             tri_ht[bs, seq] = ssm_cache[
                 int(block_map[bs, write_block_offset[bs] + seq])
-            ].transpose(-1, -2)
+            ]
     assert_close("ht", ref_ht, tri_ht, 0.005)
 
 

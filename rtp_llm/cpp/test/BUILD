@@ -1,16 +1,13 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "torch_deps")
 load("//bazel:device_defs.bzl",
     "device_impl_target", "device_test_envs")
 
 cc_test = cc_test_wrapper
 
-test_copts = copts()
-
-sampler_test_copts = [
-    # SamplerTest validates private buffer state; keep access override scoped to this target.
+test_copts = [
     "-fno-access-control",
-] + test_copts
+] + copts()
 
 
 cc_library(
@@ -60,7 +57,7 @@ cc_test(
     data = [
         "//rtp_llm/test/model_test/fake_test/testdata:testdata"
     ],
-    copts = sampler_test_copts,
+    copts = test_copts,
     deps = test_deps + [
         ":test_utils",
     ],

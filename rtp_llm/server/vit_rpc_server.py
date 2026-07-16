@@ -1,96 +1,66 @@
 import logging
-import time
 from concurrent import futures
-from typing import Dict
 
 import grpc
-import torch
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
-    CacheStatusPB,
-    CacheVersionPB,
     MMPreprocessConfigPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
-    StatusVersionPB,
-    WorkerStatusPB,
+    MultimodalOutputsPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceServicer,
     add_MultimodalRpcServiceServicer_to_server,
 )
 from rtp_llm.distribute.distributed_server import get_world_info
-from rtp_llm.metrics import kmonitor
-from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
-from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
+from rtp_llm.utils.mm_process_engine import MMEmbeddingRes, MMProcessEngine
+from rtp_llm.utils.multimodal_util import MMUrlType, url_data_cache_, vit_emb_cache_
+
+setup_logging()
 
 
-def _now_us() -> int:
-    return time.monotonic_ns() // 1000
+def trans_config(mm_process_config_pb: MMPreprocessConfigPB):
+    return [
+        mm_process_config_pb.width,
+        mm_process_config_pb.height,
+        mm_process_config_pb.min_pixels,
+        mm_process_config_pb.max_pixels,
+        mm_process_config_pb.fps,
+    ]
 
 
-def _tensor_pb_bytes(tensor_pb) -> int:
-    return (
-        len(tensor_pb.fp32_data)
-        + len(tensor_pb.int32_data)
-        + len(tensor_pb.fp16_data)
-        + len(tensor_pb.bf16_data)
-    )
-
-
-def _report_output_metrics(output_pb: MultimodalOutputPB, tags: Dict[str, str]) -> None:
-    kmonitor.report(
-        GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC, output_pb.ByteSize(), tags
-    )
-    kmonitor.report(
-        GaugeMetrics.VIT_RESPONSE_EMBEDDING_BYTES_METRIC,
-        _tensor_pb_bytes(output_pb.multimodal_embedding),
-        tags,
-    )
-    kmonitor.report(
-        GaugeMetrics.VIT_RESPONSE_POS_BYTES_METRIC,
-        _tensor_pb_bytes(output_pb.multimodal_pos_id),
-        tags,
-    )
-    kmonitor.report(
-        GaugeMetrics.VIT_RESPONSE_DEEPSTACK_BYTES_METRIC,
-        sum(_tensor_pb_bytes(extra) for extra in output_pb.multimodal_extra_input),
-        tags,
-    )
-    kmonitor.report(
-        GaugeMetrics.VIT_OUTPUT_TOKEN_COUNT_METRIC, sum(output_pb.split_size), tags
-    )
+def trans_input(mutlimodal_inputs_pb: MultimodalInputsPB):
+    urls = []
+    types = []
+    tensors = []
+    configs = []
+    try:
+        for mm_input in mutlimodal_inputs_pb.multimodal_inputs:
+            urls.append(mm_input.multimodal_url)
+            types.append(MMUrlType(mm_input.multimodal_type))
+            tensors.append(trans_tensor(mm_input.multimodal_tensor))
+            configs.append(trans_config(mm_input.mm_preprocess_config))
+    except Exception as e:
+        raise Exception(str(e))
+    return urls, types, tensors, configs
 
 
 def trans_output(res: MMEmbeddingRes):
-    # Guard against empty embeddings (e.g. error path where mm_embedding_rpc
-    # returns no tensors). torch.concat on an empty list raises RuntimeError.
-    if not res.embeddings:
-        return MultimodalOutputPB()
-
-    contain_pos = (res.position_ids is not None) and (len(res.position_ids) > 0)
-    contain_extra_input = (res.extra_input is not None) and (len(res.extra_input) > 0)
-
-    output_pb = MultimodalOutputPB(
-        multimodal_embedding=trans_from_tensor(torch.concat(res.embeddings)),
-        split_size=[e.shape[0] for e in res.embeddings],
-    )
-    if contain_pos:
-        output_pb.multimodal_pos_id.CopyFrom(
-            trans_from_tensor(torch.concat(res.position_ids))
+    output_pb = MultimodalOutputsPB()
+    for i in range(len(res.embeddings)):
+        output = MultimodalOutputPB(
+            multimodal_embedding=trans_from_tensor(res.embeddings[i]),
+            multimodal_pos_id=trans_from_tensor(res.position_ids[i]),
         )
-    if contain_extra_input:
-        # Each extra-input is an opaque flat 1-D tensor (one per image).
-        for extra in res.extra_input:
-            output_pb.multimodal_extra_input.append(trans_from_tensor(extra))
+        output_pb.multimodal_outputs.append(output)
     return output_pb
 
 
@@ -99,79 +69,71 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         self.engine = mm_process_engine
 
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
-        tags = {"source": "vit_server"}
-        start_us = _now_us()
-        lifecycle_reported = False
-
-        def _report_lifecycle():
-            nonlocal lifecycle_reported
-            if lifecycle_reported:
-                return
-            lifecycle_reported = True
-            kmonitor.report(
-                GaugeMetrics.VIT_RPC_SERVER_LIFECYCLE_RT_US_METRIC,
-                _now_us() - start_us,
-                tags,
-            )
-
-        callback_added = False
-        if hasattr(context, "add_callback"):
-            callback_added = context.add_callback(_report_lifecycle)
-
-        try:
-            kmonitor.report(
-                GaugeMetrics.VIT_RPC_REQUEST_BYTES_METRIC,
-                multimodal_inputs.ByteSize(),
-                tags,
-            )
-            kmonitor.report(
-                GaugeMetrics.VIT_INPUT_IMAGE_COUNT_METRIC,
-                len(multimodal_inputs.multimodal_inputs),
-                tags,
-            )
-            res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs)
-            output_pb = trans_output(res)
-            kmonitor.report(
-                GaugeMetrics.VIT_RPC_SERVER_HANDLER_RT_US_METRIC,
-                _now_us() - start_us,
-                tags,
-            )
-            _report_output_metrics(output_pb, tags)
-            return output_pb
-        except Exception:
-            kmonitor.report(
-                AccMetrics.VIT_RPC_SERVER_ERROR_QPS_METRIC,
-                1,
-                {"source": "vit_server", "reason": "exception"},
-            )
-            raise
-        finally:
-            if not callback_added:
-                _report_lifecycle()
-
-    def GetWorkerStatus(self, request: StatusVersionPB, context):
-        worker_status = WorkerStatusPB()
-        worker_status.role = "VIT"
-        worker_status.status_version = 1
-        worker_status.alive = True
-        return worker_status
-
-    def GetCacheStatus(self, request: CacheVersionPB, context):
-        return CacheStatusPB()
-
-    def stop(self):
-        self.engine.stop()
+        urls, types, tensors, configs = trans_input(multimodal_inputs)
+        res: MMEmbeddingRes = self.engine.submit(
+            urls, types, tensors=tensors, preprocess_configs=configs
+        )
+        return trans_output(res)
 
 
-def create_rpc_server():
+def vit_start_server():
+    py_env_configs = setup_args()
+    setup_and_configure_server(py_env_configs)
+    url_data_cache_.resize_cache(py_env_configs.vit_config.url_cache_item_num)
+    vit_emb_cache_.resize_cache(py_env_configs.vit_config.mm_cache_item_num)
+
+    # Create and fully initialize engine config (global singleton, ports from config)
+    engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
+
+    # Create model configs (ModelConfig construction is handled in ModelFactory)
+    # All model metadata (lora_infos, multi_task_prompt, model_name, template_type, mm_model_config)
+    # is set in model_config by create_model_config()
+    model_config = ModelFactory.create_model_config(
+        model_args=py_env_configs.model_args,
+        lora_config=py_env_configs.lora_config,
+        kv_cache_config=engine_config.kv_cache_config,
+        profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
+        generate_env_config=py_env_configs.generate_env_config,
+        embedding_config=py_env_configs.embedding_config,
+        quantization_config=py_env_configs.quantization_config,
+        render_config=py_env_configs.render_config,
+    )
+
+    # Update engine_config based on model_config
+    ModelFactory.update_engine_config_from_model_config(
+        engine_config=engine_config,
+        model_config=model_config,
+    )
+
+    # Create model using new API
+    # All metadata is already in model_config (including mm_model_config)
+    # vit_config is needed for multimodal models
+    model = ModelFactory.from_model_configs(
+        model_config=model_config,
+        engine_config=engine_config,
+        world_info=get_world_info(
+            py_env_configs.server_config,
+            py_env_configs.distribute_config,
+            py_env_configs.parallelism_config,
+        ),
+        vit_config=py_env_configs.vit_config,
+    )
+
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=200),
         options=[
             ("grpc.max_send_message_length", 1024 * 1024 * 1024),
             ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
-            ("grpc.max_concurrent_streams", -1),
-            ("grpc.http2.min_ping_interval_without_data_ms", 1000),
-            ("grpc.http2.max_ping_strikes", 1000),
         ],
     )
-    return server
+    add_MultimodalRpcServiceServicer_to_server(
+        MultimodalRpcServer(MMProcessEngine(model, model.vit_config)), server
+    )
+    logging.info(f"rpc_server_port: {py_env_configs.server_config.rpc_server_port}")
+    server.add_insecure_port(f"0.0.0.0:{py_env_configs.server_config.rpc_server_port}")
+    server.start()
+    server.wait_for_termination()
+
+
+if __name__ == "__main__":
+    vit_start_server()

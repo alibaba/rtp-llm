@@ -1,4 +1,4 @@
-FROM hub.docker.alibaba-inc.com/aone/flexlb_base:20260129144716996579
+FROM hub.docker.alibaba-inc.com/aone-base-global/flexlb_base:20260519160456544448
 
 ############# production #################
 # 设置spring profile或者自定义的jvm参数。如果需要则打开下面的注释内容
@@ -10,6 +10,8 @@ RUN echo whale_wave_prod > /etc/ilogtail/user_defined_id && \
 echo whale_wave_prod > /etc/uniagent/user_defined_id
 
 
+COPY environment/common/bin/ /home/admin/${APP_NAME}/bin/
+RUN chmod +x /home/admin/${APP_NAME}/bin/*.sh
 #以下内容为集团安全部应用安全能力中心自动修复添加，用于静态部署RASP
 COPY environment/common/bin/RASP.sh /home/admin
 

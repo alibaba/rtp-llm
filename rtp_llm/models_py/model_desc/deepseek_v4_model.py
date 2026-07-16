@@ -17,8 +17,7 @@ a free-function call into one of those two packages.
     pre-lm-head hidden states; engine applies lm_head + sampling externally.
   - KV pools are the framework BlockPools (``self.kv_cache``). The handle is
     read on every forward and threaded as ``kv_cache=`` to each layer; per-
-    request block tables come from ``PyModelInputs.attention_inputs`` as either
-    the single-group fast path or a semantic tag mapping
+    request block tables come from ``attn_inputs.kv_cache_kernel_block_id_device_by_group``
     via ``kv_cache_utils.build_block_tables``.
 
 Weight loading: `_initialize_impl` reads `self.weight` (a `ModelWeights`
@@ -38,10 +37,6 @@ import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.block_map import (
-    get_attention_inputs_value,
-    get_primary_attention_inputs,
-)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DSV4_CHUNK_TOKENS_ENV,
@@ -492,14 +487,11 @@ class DeepSeekV4Model(GptModelBase):
     def _resolve_mtp_last_hidden_token_capacity(self) -> Optional[int]:
         return None
 
-    def _resolve_prefill_ws_gather_widths(self) -> Tuple[int, int, int]:
-        """Per-row element counts for the three concurrent CP gather roles —
-        main CSA/HCA compressor, nested indexer compressor, SWA ``kv_full`` —
-        sized off ``V4Args`` STATIC dims, NOT the runtime layer compositions.
+    def _resolve_prefill_ws_gather_widths(self) -> Tuple[int, int]:
+        """Per-row element counts for the concurrent compressor CP gather roles.
 
-        Under the overlap orchestrator + the SWA side stream, up to three
-        gathers can be in flight concurrently within one layer, so each role
-        owns a dedicated workspace sub-region (a shared one would alias).
+        Main CSA/HCA compressor and nested indexer compressor widths are sized
+        off ``V4Args`` STATIC dims, NOT the runtime layer compositions.
 
         Widths are the protocol-level UPPER BOUND for each role, independent
         of how many CSA/HCA layers the current model happens to instantiate:
@@ -509,25 +501,21 @@ class DeepSeekV4Model(GptModelBase):
             (compressor uses fp32 fused gather).
           * indexer: ``2 * 2 * args.index_head_dim`` (nested indexer
             compressor is CSA-only → ``coff=2``). fp32 elements.
-          * swa: ``args.head_dim`` (the KV per-head dim seen after
-            ``fused_rmsnorm_rope``; see ``kv_full.reshape(-1, self.head_dim)``
-            in ``AttentionFP8``). bf16 elements (SWA's only gather dtype).
 
         Whether a model actually USES a role on some layer is irrelevant for
-        sizing — the union buffer is ``max(q_bytes, 2*main+2*idx+2*swa)`` and
-        q dominates in practice, so over-reserving costs nothing while keeping
-        the union BYTE-IDENTICAL across the main forward and the MTP draft
-        forward. That identity is what lets the caching allocator hand the
-        same block back to the draft at the main→draft boundary — the whole
-        reason the per-forward workspace exists. Doing it any other way would
-        re-introduce the allocator fragmentation we built this to avoid.
+        sizing — the union buffer is ``max(q_bytes, 2*main+2*idx)`` and q
+        dominates in practice, so over-reserving costs nothing while keeping the
+        union BYTE-IDENTICAL across the main forward and the MTP draft forward.
+        That identity is what lets the caching allocator hand the same block
+        back to the draft at the main→draft boundary — the whole reason the
+        per-forward workspace exists. Doing it any other way would re-introduce
+        the allocator fragmentation we built this to avoid.
         """
         head_dim = int(self._v4_args.head_dim)
         index_head_dim = int(self._v4_args.index_head_dim)
         main_w = 2 * 2 * head_dim
         idx_w = 2 * 2 * index_head_dim
-        swa_w = head_dim
-        return main_w, idx_w, swa_w
+        return main_w, idx_w
 
     def _bind_runtime_buffers(self, device: torch.device) -> None:
         assert self.v4 is not None
@@ -552,15 +540,12 @@ class DeepSeekV4Model(GptModelBase):
         q_dim = int(self._v4_args.n_heads) * int(self._v4_args.head_dim)
         if cp_size > 1:
             full_rows = q_rows * cp_size
-            main_w, idx_w, swa_w = self._resolve_prefill_ws_gather_widths()
+            main_w, idx_w = self._resolve_prefill_ws_gather_widths()
         else:
             full_rows = 0
             main_w = 0
             idx_w = 0
-            swa_w = 0
-        self.v4._bind_prefill_workspace_dims(
-            q_rows, q_dim, full_rows, main_w, idx_w, swa_w
-        )
+        self.v4._bind_prefill_workspace_dims(q_rows, q_dim, full_rows, main_w, idx_w)
 
         self._shared_runtime_buffers = Dsv4SharedRuntimeBufferStore.get_or_create(
             device=device,
@@ -702,6 +687,9 @@ class DeepSeekV4Model(GptModelBase):
             from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
                 v4_indexer_score as _v4_idx,
             )
+            from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
+                _run_triton_warmup_launch_with_retry,
+            )
 
             if len(self.v4.layers) > 2:
                 _idx = self.v4.layers[2].attn.indexer  # first CSA layer (ratio=4)
@@ -719,15 +707,32 @@ class DeepSeekV4Model(GptModelBase):
                     (1, 1, _H), dtype=_torch.bfloat16, device=device_str
                 )
                 # Decode shape (no mask).
-                _v4_idx(_q_dec, _kv_dec, _w_dec, q_pos=None, compress_ratio=1)
+                _run_triton_warmup_launch_with_retry(
+                    "DSV4IndexerScore",
+                    f"decode shape S=1 T={_T_dec} H={_H} D={_D}",
+                    lambda: _v4_idx(
+                        _q_dec,
+                        _kv_dec,
+                        _w_dec,
+                        q_pos=None,
+                        compress_ratio=1,
+                    ),
+                    device=_torch.device(device_str),
+                )
                 # Prefill mask variant — only matters if CSA prefill goes through
                 # graph capture. Cheap to prewarm regardless.
-                _v4_idx(
-                    _q_dec,
-                    _kv_dec,
-                    _w_dec,
-                    q_pos=_torch.zeros((1, 1), dtype=_torch.int32, device=device_str),
-                    compress_ratio=_ratio,
+                _q_pos_dec = _torch.zeros((1, 1), dtype=_torch.int32, device=device_str)
+                _run_triton_warmup_launch_with_retry(
+                    "DSV4IndexerScore",
+                    f"prefill-mask shape S=1 T={_T_dec} H={_H} D={_D} ratio={_ratio}",
+                    lambda: _v4_idx(
+                        _q_dec,
+                        _kv_dec,
+                        _w_dec,
+                        q_pos=_q_pos_dec,
+                        compress_ratio=_ratio,
+                    ),
+                    device=_torch.device(device_str),
                 )
 
             if os.environ.get("DSV4_PREWARM_FLASH_MLA_SWA", "1") != "0":
@@ -823,12 +828,15 @@ class DeepSeekV4Model(GptModelBase):
                     _collect_dsv4_batched_fp8_einsum_shapes,
                     _collect_dsv4_dense_gemm_shapes,
                     _collect_dsv4_fp8_mqa_logits_shapes,
+                    _collect_dsv4_mhc_head_fused_shapes,
                     _collect_dsv4_mhc_prenorm_shapes,
                     resolve_dense_gemm_warmup_max_m,
                     warmup_batched_fp8_einsum_jit,
                     warmup_compressor_combine_branch_kernels,
                     warmup_dense_gemm_jit,
+                    warmup_dsv4_fp8_swa_slot_dequant_jit,
                     warmup_fp8_mqa_logits_jit,
+                    warmup_mhc_head_fused_jit,
                     warmup_mhc_prenorm_gemm_jit,
                 )
 
@@ -871,7 +879,7 @@ class DeepSeekV4Model(GptModelBase):
                     fixed_region_cp_size=_fixed_region_cp_size,
                     fixed_region_prefill_sliced=_fixed_region_prefill_sliced,
                 )
-                _dense_shapes = _collect_dsv4_dense_gemm_shapes(self.v4)
+                _dense_shapes = _collect_dsv4_dense_gemm_shapes(self)
                 _dense_gemm_prefill_chunk_size = 0
                 if not self._is_decode_role and chunked_moe_enabled():
                     _dense_gemm_prefill_chunk_size = max(
@@ -886,6 +894,9 @@ class DeepSeekV4Model(GptModelBase):
                         _prefill_cp_enabled = bool(_prefill_cp_config.is_enabled())
                     except Exception:
                         _prefill_cp_enabled = False
+                _prefill_kv_cache_sharded = bool(
+                    getattr(_prefill_cp_config, "kv_cache_sharded", False)
+                )
                 _prefill_cp_size = (
                     int(getattr(self.parallelism_config, "tp_size", 1) or 1)
                     if _prefill_cp_enabled
@@ -932,6 +943,23 @@ class DeepSeekV4Model(GptModelBase):
                     max_m=_dense_gemm_max_m,
                     device=_jit_device,
                 )
+                _mhc_head_fused_shapes = _collect_dsv4_mhc_head_fused_shapes(self.v4)
+                warmup_mhc_head_fused_jit(
+                    _mhc_head_fused_shapes,
+                    device=_jit_device,
+                )
+                if (
+                    self.fp8_kv_cache
+                    and not self._is_decode_role
+                    and _prefill_cp_enabled
+                    and _prefill_cp_size > 1
+                    and _prefill_kv_cache_sharded
+                ):
+                    warmup_dsv4_fp8_swa_slot_dequant_jit(
+                        kv_cache=self.kv_cache,
+                        cp_size=_prefill_cp_size,
+                        device=_jit_device,
+                    )
                 _fp8_mqa_logits_shapes = _collect_dsv4_fp8_mqa_logits_shapes(self.v4)
                 warmup_fp8_mqa_logits_jit(
                     _fp8_mqa_logits_shapes,
@@ -1004,8 +1032,7 @@ class DeepSeekV4Model(GptModelBase):
         if not is_cuda_graph:
             return None
 
-        attention_inputs = get_attention_inputs_value(inputs)
-        attn = get_primary_attention_inputs(inputs, self.kv_cache)
+        attn = inputs.attention_inputs
         # V4 captures CUDA graphs for decode AND target verify — but not
         # plain prefill. Verify carries ``is_prefill==True`` (C++ MtpExecutor
         # routes verify-split through PyWrappedModel's prefill path), so
@@ -1064,6 +1091,15 @@ class DeepSeekV4Model(GptModelBase):
         paged_pool_specs = build_paged_pool_specs(
             self.kv_cache, self.v4, max_seq_len=int(self._v4_args.max_seq_len)
         )
+        # Snapshot framework's group ordering — CUDA-graph replay path
+        # inside the impl's ``prepare`` has no live kv_cache, so carry
+        # the list in the config. Position IS the group id.
+        group_region_names_snapshot = (
+            [int(t) for t in (self.kv_cache.group_region_names or [])]
+            if self.kv_cache is not None
+            else []
+        )
+
         if self.kv_cache is None:
             raise RuntimeError(
                 "DSV4 prepare_decode_metadata: self.kv_cache is None; "
@@ -1080,12 +1116,13 @@ class DeepSeekV4Model(GptModelBase):
             ],
             index_topk=int(self._v4_args.index_topk),
             paged_pool_specs=paged_pool_specs,
+            group_region_names=group_region_names_snapshot,
         )
         cfg = _DecodeFmhaImplConfig(**cfg_kwargs)
         impl = _DecodeFmhaImpl(
             cfg,
             device=device,
-            attn_inputs=attention_inputs,
+            attn_inputs=attn,
         )
         # Phase F: pool views resolved on demand in Attention — no
         # per-layer descriptor cache to stash on metadata.
@@ -1158,7 +1195,7 @@ class DeepSeekV4Model(GptModelBase):
             return PyModelOutputs(
                 torch.zeros(T, self._v4_args.dim, dtype=torch.bfloat16, device=device)
             )
-        attn = get_primary_attention_inputs(inputs, self.kv_cache)
+        attn = inputs.attention_inputs
 
         # Subclass-overridable hidden-state preparation hooks.  When a
         # subclass (e.g. ``DeepSeekV4MtpModel``) overrides

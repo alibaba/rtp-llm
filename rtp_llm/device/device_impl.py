@@ -1,7 +1,7 @@
 import logging
 import os
 import re
-from typing import List, Optional
+from typing import List
 
 import psutil
 import torch
@@ -13,23 +13,6 @@ from rtp_llm.ops.compute_ops import (
 )
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.swizzle_utils import swizzle_tensor
-
-
-def is_gfx950(arch_fallback: Optional[str] = None) -> bool:
-    """Detect whether the current ROCm device is gfx950 (MI355X).
-
-    Falls back to ``arch_fallback`` (typically the configured ``specify_gpu_arch``)
-    when CUDA/ROCm is not available — e.g. CPU-only build environments. Callers
-    that have no fallback string can pass ``None`` to use the ``ROCM_GFX_ARCH``
-    env var instead.
-    """
-    try:
-        prop = torch.cuda.get_device_properties(torch.cuda.current_device())
-        return "gfx950" in getattr(prop, "gcnArchName", "")
-    except Exception:
-        if arch_fallback is not None:
-            return arch_fallback == "950"
-        return os.environ.get("ROCM_GFX_ARCH", "") == "950"
 
 
 class CpuImpl(DeviceBase):
@@ -696,15 +679,10 @@ class PpuImpl(CudaImpl):
 class RocmImpl(GpuImpl):
     def __init__(self):
         super().__init__()
-        # arch / mem-info paths read self.rocml unconditionally, so the
-        # attribute must exist even when pyrsmi is missing or smi_initialize
-        # fails. Keep it None on failure; callers already null-check.
-        self.rocml = None
         try:
             from pyrsmi import rocml
 
             rocml.smi_initialize()
-            self.rocml = rocml
         except Exception as e:
             logging.warn(f"no rocm smi found: " + str(e))
 
@@ -883,76 +861,101 @@ class RocmImpl(GpuImpl):
         specify_gpu_arch = self.py_env_configs.runtime_config.specify_gpu_arch
         return "900" if specify_gpu_arch == "" else specify_gpu_arch
 
-    def _is_gfx950(self) -> bool:
-        return is_gfx950(arch_fallback=self.arch)
-
     def shuffle_moe_weight(
         self, x: torch.Tensor, datatype: torch.dtype, name: str
     ) -> torch.Tensor:
-        from aiter.ops.shuffle import shuffle_weight
+        def _padding_to_multiply_512(x_, is_gate):
+            align = [0, 512, 0] if is_gate else [0, 0, 512]
+            shape_tmp = list(
+                x_.shape
+            )  # due to gate+up, need temporarily seperate them for padding
+            if is_gate:
+                shape_tmp[1] = shape_tmp[1] // 2
+            # align and padding to multiply of 512
+            padding = [0 for i in range(len(align) * 2)]
+            for i in range(len(align)):
+                if (align[i] > 0) and (shape_tmp[i] % align[i] > 0):
+                    padding[-(i * 2 + 1)] = align[i] - (shape_tmp[i] % align[i])
+            if sum(padding):
+                if is_gate:
+                    x_ = torch.cat(
+                        [
+                            torch.nn.functional.pad(
+                                x_[:, : x_.shape[1] // 2, :],
+                                padding,
+                                mode="constant",
+                                value=0,
+                            ),
+                            torch.nn.functional.pad(
+                                x_[:, x_.shape[1] // 2 :, :],
+                                padding,
+                                mode="constant",
+                                value=0,
+                            ),
+                        ],
+                        dim=1,
+                    )
+                else:
+                    x_ = torch.nn.functional.pad(
+                        x_, tuple(padding), mode="constant", value=0
+                    )
+                # logging.info(f'Moe padding shape {[ele for ele in x.shape]} with {padding} to {[ele for ele in x_.shape]}')
+            return x_
+
+        def _shuffle_weight(x_, layout=(16, 16), use_int4=False):
+            # Hardcode BLOCK_K and BLOCK_N
+            IN, IK = layout
+            BK = IK * 2
+            K = 16 // x_.element_size() if not use_int4 else 32
+            BN = IN
+            assert (
+                x_.shape[-2] % BN == 0
+            ), f"{x_.shape[-2]} % {BN} == {x_.shape[-2] % BN }"
+            assert (
+                x_.shape[-1] % BK == 0
+            ), f"{x_.shape[-1]} % {BK} == {x_.shape[-1] % BK }"
+            x__ = x_.view(-1, x_.shape[-2] // BN, BN, x_.shape[-1] // BK, BK // K, K)
+            x__ = x__.permute(0, 1, 3, 4, 2, 5)
+            x__ = x__.contiguous()
+            x__ = x__.view(*x_.shape)
+            return x__
 
         is_gate = name in [W.moe_w1, W.moe_s1]
-        do_weight_shuffle = name in [W.moe_w1, W.moe_w2]
-        do_fp4_scale_shuffle = name in [W.moe_s1, W.moe_s2]
-
-        original_ndim = x.dim()
-        if original_ndim == 2:
+        do_shuffle = name in [W.moe_w1, W.moe_w2]
+        if x.dim() == 2:
             x = x.unsqueeze(-1)
         x_ = (
             self.cat_0([x[:, x.shape[1] // 2 :, :], x[:, : x.shape[1] // 2, :]], dim=1)
             if is_gate
             else x
         )  # swap from [up, gate] to [gate, up]
-
-        if do_weight_shuffle:
-            x_ = shuffle_weight(x_, (16, 16))
-
-        # Quark MXFP4 stores MoE scales as uint8 E8M0 blocks. Detect that
-        # directly from the actual tensor instead of relying on the startup
-        # quantization string, which can be empty on ckpt auto-detect paths.
-        is_mxfp4_scale = do_fp4_scale_shuffle and x_.dtype == torch.uint8
-        if is_mxfp4_scale:
-            if not self._is_gfx950():
-                raise RuntimeError(
-                    "Quark MXFP4 MoE scale shuffle requires gfx950 (MI355)."
-                )
-            from aiter.utility.fp4_utils import e8m0_shuffle
-            if x_.dim() == 3:
-                s0, s1, _ = x_.shape
-                x_ = e8m0_shuffle(x_.contiguous().view(s0 * s1, -1)).view(s0, s1, -1)
-            else:
-                x_ = e8m0_shuffle(x_)
-            if original_ndim == 2:
-                x_ = x_.squeeze(-1)
+        if do_shuffle:
+            # for now we use ck_moe for dtype is not fp8, so we need to pad to multiply of 512
+            if x_.dtype not in [torch.float8_e4m3fn, torch.float8_e4m3fnuz]:
+                x_ = _padding_to_multiply_512(x_, is_gate)
+            x_ = _shuffle_weight(x_)
         return x_
 
     def maybe_rewrite_weight_by_key(
         self, key: str, weight: torch.Tensor
     ) -> torch.Tensor:
-        is_gfx950 = self._is_gfx950()
         if key == "weight":
             assert weight.dtype == torch.float8_e4m3fn
-            if not is_gfx950:
-                weight_as_int8 = weight.view(torch.int8)
-                ROCM_FP8_NAN_AS_INT = -128
-                weight_as_int8[weight_as_int8 == ROCM_FP8_NAN_AS_INT] = 0
-                weight = weight_as_int8.view(torch.float8_e4m3fnuz)
+            weight_as_int8 = weight.view(torch.int8)
+            ROCM_FP8_NAN_AS_INT = -128
+            weight_as_int8[weight_as_int8 == ROCM_FP8_NAN_AS_INT] = 0
+            weight = weight_as_int8.view(torch.float8_e4m3fnuz)
         elif key == "scale":
-            if not is_gfx950:
-                weight = weight * 2.0
+            weight = weight * 2.0
 
         if key in [
             W.attn_qkv_w,
             W.attn_o_w,
-            W.attn_gate_w,
             W.ffn_w2,
             W.ffn_w13,
             W.ffn_w3,
             W.moe_gate,
             W.multi_tokens_predict_eh_proj,
-            W.linear_attn_qkvz_w,
-            W.linear_attn_ba_w,
-            W.linear_attn_out_w,
         ]:
             if self.py_env_configs.py_hw_kernel_config.use_swizzleA:
                 if weight.dtype != torch.float8_e4m3fn:
@@ -1001,8 +1004,6 @@ class RocmImpl(GpuImpl):
         self, weight: torch.Tensor, weight_scale: torch.Tensor
     ):
         assert weight.dtype == torch.float8_e4m3fn
-        if self._is_gfx950():
-            return weight, weight_scale
         # The bits pattern 10000000(-128) represents zero in e4m3fn
         # but NaN in e4m3fnuz. So here we set it to 0.
         # https://onnx.ai/onnx/technical/float8.html

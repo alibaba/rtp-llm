@@ -43,20 +43,6 @@ from rtp_llm.models.deepseek_v2 import (
     DeepSeekV3Mtp,
     DeepSeekV3MtpWeight,
 )
-from rtp_llm.ops import (
-    CacheCapacityPolicyDesc,
-    CacheCpPolicyDesc,
-    CacheEvictPolicy,
-    CacheReusePolicyDesc,
-    CacheTailPolicyDesc,
-    CpBlockSliceMode,
-    CpPrefillSliceLayout,
-    DataType,
-    KvCacheDataType,
-    KVCacheSpecDesc,
-    KVCacheSpecType,
-    OpaqueBlockEntryCountMode,
-)
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -71,111 +57,6 @@ from rtp_llm.utils.model_weight import (
 SCORING_FUNC_SOFTMAX = 0
 SCORING_FUNC_SIGMOID = 1
 SCORING_FUNC_SQRT_SOFTPLUS = 2  # DeepSeek-V4
-DSV4_FP8_KV_ENTRY_BYTES = 584
-DSV4_FP8_INDEXER_ENTRY_BYTES = 132
-DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES = 576
-DSV4_SWA_WINDOW_ENTRIES = 128
-
-
-def _dsv4_kv_cache_desc_for_tag(
-    tag: str,
-    config: ModelConfig,
-) -> KVCacheSpecDesc:
-    fp8_kv = config.attn_config.kv_cache_dtype == KvCacheDataType.FP8
-    head_dim = int(config.attn_config.size_per_head)
-    indexer_head_dim = int(config.attn_config.indexer_head_dim)
-    kv_entry_elems = DSV4_FP8_KV_ENTRY_BYTES if fp8_kv else head_dim * 2
-    indexer_entry_elems = (
-        DSV4_FP8_INDEXER_ENTRY_BYTES if fp8_kv else indexer_head_dim * 2
-    )
-
-    desc = KVCacheSpecDesc()
-    desc.tag = tag
-    if tag in ("csa_kv", "hca_kv", "indexer_kv"):
-        desc.dtype = DataType.TYPE_UINT8
-        desc.cache_type = KVCacheSpecType.OPAQUE_KV
-        desc.is_state_cache = False
-        desc.entry_elems = (
-            indexer_entry_elems if tag == "indexer_kv" else kv_entry_elems
-        )
-        desc.entry_dtype = DataType.TYPE_UINT8
-        desc.entry_count_mode = OpaqueBlockEntryCountMode.KERNEL_BLOCK_COMPRESSED
-        desc.compression_ratio = 128 if tag == "hca_kv" else 4
-        if desc.entry_elems == DSV4_FP8_KV_ENTRY_BYTES:
-            desc.block_stride_bytes_alignment = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES
-    else:
-        desc.dtype = DataType.TYPE_UINT8 if tag == "swa_kv" else DataType.TYPE_FP32
-        desc.cache_type = KVCacheSpecType.OPAQUE_STATE
-        desc.entry_dtype = (
-            DataType.TYPE_UINT8 if tag == "swa_kv" else DataType.TYPE_FP32
-        )
-        desc.entry_count_mode = OpaqueBlockEntryCountMode.STATE_RING
-        desc.cp = CacheCpPolicyDesc()
-        desc.cp.scale_seq_size = True
-        desc.cp.align_payload = True
-        if tag == "indexer_state":
-            desc.entry_elems = 4 * indexer_head_dim
-            desc.compression_ratio = 4
-            desc.state_ring_overlap = 1
-            desc.cp.prefill_slice_layout = CpPrefillSliceLayout.PAYLOAD
-            desc.cp.slice = CpBlockSliceMode.PAYLOAD_BYTES
-        elif tag == "csa_state":
-            desc.entry_elems = 4 * head_dim
-            desc.compression_ratio = 4
-            desc.state_ring_overlap = 1
-            desc.cp.prefill_slice_layout = CpPrefillSliceLayout.PAYLOAD
-            desc.cp.slice = CpBlockSliceMode.PAYLOAD_BYTES
-        elif tag == "hca_state":
-            desc.entry_elems = 2 * head_dim
-            desc.compression_ratio = 128
-            desc.cp.prefill_slice_layout = CpPrefillSliceLayout.PAYLOAD
-            desc.cp.slice = CpBlockSliceMode.PAYLOAD_BYTES
-            desc.reuse = CacheReusePolicyDesc()
-            desc.reuse.enable_prefix_reuse = False
-            desc.reuse.evict_policy = CacheEvictPolicy.INDEPENDENT
-            desc.capacity = CacheCapacityPolicyDesc()
-            desc.capacity.explicit_block_num = 256
-            desc.tail = CacheTailPolicyDesc()
-            desc.tail.active_tail_blocks = 1
-            desc.tail.validate_tail_blocks = False
-        elif tag == "swa_kv":
-            desc.entry_elems = kv_entry_elems
-            desc.compression_ratio = DSV4_SWA_WINDOW_ENTRIES
-            desc.cp.prefill_slice_layout = CpPrefillSliceLayout.BLOCK_STRIDE
-            desc.cp.slice = CpBlockSliceMode.EQUAL_BYTES
-            if desc.entry_elems == DSV4_FP8_KV_ENTRY_BYTES:
-                desc.block_stride_bytes_alignment = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES
-        desc.state_ring_include_gen_num_per_cycle = True
-        desc.block_stride_alignment_min_entries = (
-            desc.block_stride_alignment_min_entries or DSV4_SWA_WINDOW_ENTRIES
-        )
-        desc.is_state_cache = True
-        if desc.reuse is None:
-            desc.reuse = CacheReusePolicyDesc()
-        if desc.reuse.evict_policy is None:
-            desc.reuse.evict_policy = CacheEvictPolicy.INDEPENDENT
-    return desc
-
-
-def _build_dsv4_kv_cache_spec_descs(
-    config: ModelConfig,
-) -> List[List[KVCacheSpecDesc]]:
-    layer_descs: List[List[KVCacheSpecDesc]] = []
-    ratios = list(config.attn_config.layer_compress_ratios)
-    for layer_id in range(config.num_layers):
-        ratio = int(ratios[layer_id]) if layer_id < len(ratios) else 0
-        if ratio == 4:
-            tags = ["csa_kv", "indexer_kv", "indexer_state", "csa_state", "swa_kv"]
-        elif ratio == 128:
-            tags = ["hca_kv", "hca_state", "swa_kv"]
-        else:
-            tags = ["swa_kv"]
-        layer_descs.append([_dsv4_kv_cache_desc_for_tag(tag, config) for tag in tags])
-    return layer_descs
-
-
-def _refresh_dsv4_kv_cache_spec_descs(config: ModelConfig) -> None:
-    config.kv_cache_spec_descs = _build_dsv4_kv_cache_spec_descs(config)
 
 
 class DeepSeekV4Weight(DeepSeekV2Weight):
@@ -203,10 +84,6 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         # and no e_score_correction_bias (uses noaux_tc gate.bias on layers ≥ num_hash_layers).
         self.q_use_lora = False
         self.has_e_score_correction_bias = False
-        # The generic FP8-KV compatibility weight is seeded from attn_qkv_w,
-        # which DSV4 intentionally does not expose. Its attention path owns the
-        # required quantization constants, so keep the exception model-scoped.
-        self.gen_dummy_reciprocal = False
         # Per-layer attention type schedule + hash-router count, both attached to
         # ``self`` so ``_get_hf_layer_weight_info`` can branch per layer.
         self._compress_ratios = list(
@@ -613,10 +490,6 @@ class DeepSeekV4(DeepSeekV2):
     `_create_python_model` until M2 lands the HCA-only forward path.
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        _refresh_dsv4_kv_cache_spec_descs(self.model_config)
-
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()
@@ -632,15 +505,6 @@ class DeepSeekV4(DeepSeekV2):
         config.activation_type = "SiGLU"
         DeepSeekV4._from_hf(config, ckpt_path)
         return config
-
-    @classmethod
-    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
-        _refresh_dsv4_kv_cache_spec_descs(model_config)
-        # DSV4 uses 7 independent BlockPools (one per cache group). Declare this
-        # explicitly so CacheConfigCreator routes to HybridPoolConfigCreator
-        # without inspecting internal spec tags or layer_compress_ratios.
-        model_config.hybrid_attention_config.enable_hybrid_attention = True
-        model_config.hybrid_attention_config.enable_independent_kv_cache_pools = True
 
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
@@ -745,7 +609,6 @@ class DeepSeekV4(DeepSeekV2):
         config.attn_config.indexer_head_dim = int(config_json["index_head_dim"])
         config.attn_config.indexer_head_num = int(config_json["index_n_heads"])
         config.attn_config.indexer_topk = int(config_json["index_topk"])
-        _refresh_dsv4_kv_cache_spec_descs(config)
 
         # ---- MoE ----
         scoring_func = config_json.get("scoring_func", "softmax")
@@ -928,13 +791,9 @@ class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
         config = super()._create_config(ckpt_path)
         config.num_layers = 1
         config.attn_config.layer_compress_ratios = [0]
-        _refresh_dsv4_kv_cache_spec_descs(config)
         config.moe_layer_index = list(range(config.num_layers))
         config.reverse_e_h_norm = True
         config.is_mtp = True
-        # MTP module shares the same 7-pool topology as the main model.
-        config.hybrid_attention_config.enable_hybrid_attention = True
-        config.hybrid_attention_config.enable_independent_kv_cache_pools = True
         return config
 
     def _create_python_model(self):

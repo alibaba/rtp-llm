@@ -1,5 +1,4 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
@@ -13,55 +12,6 @@ using namespace rtp_llm::remote_connector;
 
 namespace rtp_llm {
 namespace test {
-namespace {
-
-KVCacheSpecPtr makeTestMhaSpec(const std::string& tag, uint32_t seq_size_per_block) {
-    AttentionConfigs attn_config;
-    attn_config.kv_head_num      = 8;
-    attn_config.size_per_head    = 128;
-    attn_config.tokens_per_block = seq_size_per_block;
-
-    ParallelismConfig parallelism_config;
-    parallelism_config.tp_size = 1;
-
-    KVCacheSpecDesc desc;
-    desc.tag        = tag;
-    desc.cache_type = KVCacheSpecType::MultiHeadAttention;
-    desc.dtype      = rtp_llm::DataType::TYPE_FP16;
-
-    SpecBuildContext ctx;
-    ctx.dtype                   = rtp_llm::DataType::TYPE_FP16;
-    ctx.seq_size_per_block      = seq_size_per_block;
-    ctx.attn_config             = &attn_config;
-    ctx.parallelism_config      = &parallelism_config;
-    return SpecBuilder::build(desc, ctx);
-}
-
-KVCacheSpecPtr makeTestLinearSpec(const std::string& tag, uint32_t seq_size_per_block) {
-    LinearAttentionConfig linear_config;
-    linear_config.linear_conv_kernel_dim = 2;
-    linear_config.linear_key_head_dim    = 1;
-    linear_config.linear_value_head_dim  = 1;
-    linear_config.linear_num_key_heads   = 1;
-    linear_config.linear_num_value_heads = 1;
-
-    ParallelismConfig parallelism_config;
-    parallelism_config.tp_size = 1;
-
-    KVCacheSpecDesc desc;
-    desc.tag        = tag;
-    desc.cache_type = KVCacheSpecType::LinearAttention;
-    desc.dtype      = rtp_llm::DataType::TYPE_FP16;
-
-    SpecBuildContext ctx;
-    ctx.dtype                   = rtp_llm::DataType::TYPE_FP16;
-    ctx.seq_size_per_block      = seq_size_per_block;
-    ctx.linear_attention_config = &linear_config;
-    ctx.parallelism_config      = &parallelism_config;
-    return SpecBuilder::build(desc, ctx);
-}
-
-}  // namespace
 void waitAsyncContextDone(const std::shared_ptr<rtp_llm::AsyncContext>& ctx) {
     ASSERT_NE(ctx, nullptr);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
@@ -144,37 +94,63 @@ private:
     }
 
     void initHybridLayerCacheConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8) {
-        const size_t all_group_num = full_group_ids_.size() + other_group_ids_.size();
-        cache_config_.layer_num       = all_group_num * layer_num;
-        cache_config_.layer_all_num   = all_group_num * layer_num;
-        cache_config_.group_layer_num = layer_num;
+        cache_config_.linear_group_num = other_group_ids_.size();
+        cache_config_.full_group_num   = full_group_ids_.size();
+        size_t all_group_num           = cache_config_.linear_group_num + cache_config_.full_group_num;
+        cache_config_.layer_num        = all_group_num * layer_num;
+        cache_config_.layer_all_num    = all_group_num * layer_num;
+        cache_config_.group_layer_num  = layer_num;
+        int unique_layer_id            = 0;
 
-        auto full_spec   = makeTestMhaSpec("full", static_cast<uint32_t>(seq_size_per_block));
-        auto linear_spec = makeTestLinearSpec("linear", static_cast<uint32_t>(seq_size_per_block));
+        auto full_spec                = std::make_shared<MHAKVCacheSpec>();
+        full_spec->layer_num          = layer_num;
+        full_spec->local_head_num_kv  = 8;
+        full_spec->size_per_head      = 128;
+        full_spec->seq_size_per_block = seq_size_per_block;
+        full_spec->dtype              = rtp_llm::DataType::TYPE_FP16;
+        full_spec->type               = KVCacheSpecType::MultiHeadAttention;
 
-        std::vector<KVCacheSpecPtr>   specs(all_group_num);
-        std::vector<std::vector<int>> layers_by_group(all_group_num);
-        std::vector<CacheGroupType>   group_types(all_group_num);
-        std::vector<std::string>      tags(all_group_num);
-        int unique_layer_id = 0;
-        for (int32_t group_id : full_group_ids_) {
-            specs[static_cast<size_t>(group_id)]       = full_spec;
-            group_types[static_cast<size_t>(group_id)] = CacheGroupType::FULL;
-            tags[static_cast<size_t>(group_id)]        = "full" + std::to_string(group_id);
+        auto linear_spec                = std::make_shared<LinearKVCacheSpec>();
+        linear_spec->type               = KVCacheSpecType::LinearAttention;
+        linear_spec->dtype              = rtp_llm::DataType::TYPE_FP16;
+        linear_spec->layer_num          = layer_num;
+        linear_spec->local_num_k_heads  = 1;
+        linear_spec->local_num_v_heads  = 1;
+        linear_spec->head_k_dim         = 1;
+        linear_spec->head_v_dim         = 1;
+        linear_spec->conv_kernel_dim    = 2;
+        linear_spec->local_head_num_kv  = 1;
+        linear_spec->seq_size_per_block = seq_size_per_block;
+
+        for (int i = 0; i < cache_config_.full_group_num; i++) {
+            cache_config_.global_layer_ids.push_back({});
+            cache_config_.layer_ids.push_back({});
+            cache_config_.group_types.push_back(CacheGroupType::FULL);
+            cache_config_.cache_specs.push_back(full_spec);
+            cache_config_.full_groups.push_back({});
             for (int j = 0; j < layer_num; j++) {
-                layers_by_group[static_cast<size_t>(group_id)].push_back(unique_layer_id++);
+                cache_config_.layer_to_group_id.push_back(full_group_ids_[i]);
+                cache_config_.global_layer_ids.back().push_back(unique_layer_id);
+                cache_config_.layer_ids.back().push_back(unique_layer_id);
+                unique_layer_id++;
             }
         }
-        for (int32_t group_id : other_group_ids_) {
-            specs[static_cast<size_t>(group_id)]       = linear_spec;
-            group_types[static_cast<size_t>(group_id)] = CacheGroupType::LINEAR;
-            tags[static_cast<size_t>(group_id)]        = "linear" + std::to_string(group_id);
+
+        for (int i = 0; i < cache_config_.linear_group_num; i++) {
+            cache_config_.global_layer_ids.push_back({});
+            cache_config_.layer_ids.push_back({});
+            cache_config_.group_types.push_back(CacheGroupType::LINEAR);
+            cache_config_.cache_specs.push_back(linear_spec);
+            cache_config_.linear_groups.push_back({});
             for (int j = 0; j < layer_num; j++) {
-                layers_by_group[static_cast<size_t>(group_id)].push_back(unique_layer_id++);
+                cache_config_.layer_to_group_id.push_back(other_group_ids_[i]);
+                cache_config_.global_layer_ids.back().push_back(unique_layer_id);
+                cache_config_.layer_ids.back().push_back(unique_layer_id);
+                unique_layer_id++;
             }
         }
-        cache_config_.fromGroupedSpecs(specs, layers_by_group, group_types, tags);
 
+        cache_config_.layer_ids          = cache_config_.global_layer_ids;
         cache_config_.block_num          = block_num;
         cache_config_.seq_size_per_block = seq_size_per_block;
         cache_config_.dtype              = rtp_llm::DataType::TYPE_FP16;

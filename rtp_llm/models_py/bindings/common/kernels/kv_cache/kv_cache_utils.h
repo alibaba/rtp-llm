@@ -40,6 +40,10 @@ struct ElementSizeInBytes<KvCacheDataType::BASE> {
     static constexpr int value = 2;
 };
 template<>
+struct ElementSizeInBytes<KvCacheDataType::INT8> {
+    static constexpr int value = 1;
+};
+template<>
 struct ElementSizeInBytes<KvCacheDataType::FP8> {
     static constexpr int value = 1;
 };

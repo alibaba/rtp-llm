@@ -12,15 +12,9 @@
 
 namespace rtp_llm {
 
-struct EmbeddingProfileConfig {
-    bool        gen_timeline = false;
-    int         profile_step = 1;
-    std::string profile_trace_name;
-};
-
 class EmbeddingStream {
 public:
-    EmbeddingStream(const std::shared_ptr<EmbeddingInput>& query, EmbeddingProfileConfig profile_config = {});
+    EmbeddingStream(const std::shared_ptr<EmbeddingInput>& query);
     ~EmbeddingStream() {}
 
 public:
@@ -29,14 +23,6 @@ public:
     std::shared_ptr<EmbeddingOutput> embeddingOutput() const;
 
     const std::optional<MultimodalFeature>& multimodalFeature() const;
-
-    bool genTimeline() const {
-        return profile_config_.gen_timeline;
-    }
-
-    const EmbeddingProfileConfig& profileConfig() const {
-        return profile_config_;
-    }
 
     int64_t inputLength() const;
 
@@ -71,7 +57,6 @@ public:
 protected:
     std::shared_ptr<EmbeddingInput>  embedding_input_;
     std::shared_ptr<EmbeddingOutput> embedding_output_;
-    EmbeddingProfileConfig           profile_config_;
     int64_t                          begin_time_;
     std::condition_variable          cond_;
     std::mutex                       lock_;

@@ -4,7 +4,10 @@ from typing import Any, Optional
 
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.openai.renderer_factory_register import _renderer_factory
+from rtp_llm.openai.renderer_factory_register import (
+    _renderer_factory,
+    ensure_renderer_registered,
+)
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
 from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams
 from rtp_llm.openai.renderers.fast_chat_renderer import FastChatRenderer
@@ -99,7 +102,8 @@ class ChatRendererFactory:
             if renderer:
                 return renderer
             # Try to get renderer from dedicated renderer factory
-            elif model_template_type in _renderer_factory:
+            ensure_renderer_registered(model_template_type)
+            if model_template_type in _renderer_factory:
                 logging.info(
                     f"Renderer factory found MODEL_TEMPLATE_TYPE [{model_template_type}] in dedicated renderer factory, use this."
                 )
@@ -120,6 +124,7 @@ class ChatRendererFactory:
 
         # renderer in _renderer_factory all have higher priority:
         # qwen needs to deal with function call, multimodal models need to add image token
+        ensure_renderer_registered(params.model_type)
         if params.model_type in _renderer_factory:
             logging.info(
                 f"Renderer factory found model type [{params.model_type}] has dedicated renderer, use this."

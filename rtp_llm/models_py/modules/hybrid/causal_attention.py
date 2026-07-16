@@ -11,6 +11,7 @@ from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
 
+# Import device-specific FusedQKRMSNorm
 device_type = get_device_type()
 if device_type == DeviceType.ROCm:
     from rtp_llm.models_py.modules.base.rocm.norm import FusedQKRMSNorm
@@ -39,6 +40,7 @@ class CausalAttention(nn.Module):
         self.head_dim = attn_config.size_per_head
         self.q_size = attn_config.head_num * self.head_dim
 
+        # Create linear layers using LinearFactory
         self.qkv_proj = LinearFactory.create_linear_from_weights(
             weights,
             W.attn_qkv_w,
@@ -77,7 +79,7 @@ class CausalAttention(nn.Module):
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache],
-        gate: Optional[torch.Tensor] = None,
+        gate: Optional[torch.Tensor] = None,  # for qwen3 next
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
         qkv = self.qkv_proj(hidden_states)

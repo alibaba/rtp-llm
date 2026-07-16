@@ -1,14 +1,16 @@
-from typing import Any, List, Optional, Union
+from __future__ import annotations
 
-import numpy as np
-import numpy.typing as npt
-import torch
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+from typing import TYPE_CHECKING, Any, List, Optional, Union
+
+if TYPE_CHECKING:
+    import numpy as np
+    import numpy.typing as npt
 
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     DecodingState,
     IncrementDecodingUtils,
 )
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.utils.word_util import (
     get_stop_word_slices,
     match_stop_words,
@@ -31,7 +33,7 @@ class TokenProcessor:
     def decode(self, token_id: List[int]) -> str:
         return self.tokenizer.decode(token_id)
 
-    def encode(self, prompt: Union[str, bytes]) -> torch.tensor:
+    def encode(self, prompt: Union[str, bytes]) -> Any:
         try:
             if isinstance(prompt, bytes):
                 prompt = prompt.decode("utf-8", errors="ignore")
@@ -48,6 +50,9 @@ class TokenProcessorPerStream:
     has_num_beams: bool
 
     def __init__(self, has_num_beams: bool, size: int, token_processor: TokenProcessor):
+        import numpy as np
+
+        self._np = np
         self.has_num_beams = has_num_beams
         self.tokenizer = token_processor.tokenizer
         self.special_tokens = token_processor.special_tokens
@@ -69,6 +74,7 @@ class TokenProcessorPerStream:
         stop_word_ids: List[List[int]],
         return_incremental: bool = False,
     ):
+        np = self._np
         if not self.has_num_beams:
             if len(self.ouput_tokens_list[i]) == 0:
                 self.ouput_tokens_list[i] = tokens
@@ -108,6 +114,7 @@ class TokenProcessorPerStream:
         stop_word_ids: List[List[int]],
         return_incremental: bool = False,
     ):
+        np = self._np
         batch_output_lens = []
         final_texts = []
         texts_to_process = []
@@ -232,7 +239,7 @@ class TokenProcessorPerStream:
             all_text = self.tokenizer.decode(tokens)
             return all_text, all_text
 
-        if isinstance(self.tokenizer, PreTrainedTokenizerBase):
+        if _is_pretrained_tokenizer(self.tokenizer):
             new_text = IncrementDecodingUtils.detokenize_incrementally(
                 self.tokenizer, tokens, decoding_state
             )
@@ -245,3 +252,13 @@ class TokenProcessorPerStream:
         return (
             new_text if return_incremental == True else decoding_state.all_text
         ), decoding_state.all_text
+
+
+def _is_pretrained_tokenizer(tokenizer: Any) -> bool:
+    if isinstance(tokenizer, BaseTokenizer):
+        return False
+    try:
+        from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+    except ImportError:
+        return False
+    return isinstance(tokenizer, PreTrainedTokenizerBase)

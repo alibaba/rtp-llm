@@ -6,12 +6,6 @@
 
 namespace rtp_llm {
 
-#if defined(__GNUC__)
-#define RTP_LLM_NO_BLOCK_COPY_API __attribute__((visibility("default")))
-#else
-#define RTP_LLM_NO_BLOCK_COPY_API
-#endif
-
 struct MultiCopyParams {
     std::vector<torch::Tensor> multi_dst;
     std::vector<torch::Tensor> multi_src;
@@ -61,40 +55,37 @@ struct StagedMemoryCopyParams {
 };
 
 struct StagedMemoryCopyScratch {
-    void*  host_staging    = nullptr;
-    size_t host_capacity   = 0;
-    void*  device_staging  = nullptr;
-    size_t device_capacity = 0;
-    void*  device_ptrs     = nullptr;
-    void*  device_offsets  = nullptr;
-    void*  device_sizes    = nullptr;
-    size_t meta_capacity   = 0;
-    int    device_index    = -1;
+    void*  host_staging       = nullptr;
+    size_t host_capacity      = 0;
+    void*  device_staging     = nullptr;
+    size_t device_capacity    = 0;
+    void*  device_ptrs        = nullptr;
+    void*  device_offsets     = nullptr;
+    void*  device_sizes       = nullptr;
+    size_t meta_capacity      = 0;
+    int    device_index       = -1;
 };
 
 // Multi-tensor non-blocking copy with device-specific implementation.
 // CUDA: uses a dedicated stream + optional split-KV SM scatter path.
 // ROCm: plain tensor copy_.
 // Other devices: not supported (will abort).
-RTP_LLM_NO_BLOCK_COPY_API void execNoBlockCopy(const MultiCopyParams& params);
+void execNoBlockCopy(const MultiCopyParams& params);
 
 // One CUDA runtime call copy executor for regular host/device pointers.
 // CUDA 12.8+ uses cudaMemcpyBatchAsync to avoid per-tile cudaMemcpyAsync launches.
-RTP_LLM_NO_BLOCK_COPY_API bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params);
+bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params);
 
 // Stages compact host payload in GPU memory, then uses one SM gather/scatter kernel.
 // host_segments may describe non-contiguous host blocks; they are packed/unpacked on CPU.
 // scratch is optional; passing one lets callers reuse pinned host staging and device metadata buffers.
 // H2D: compact host payload -> GPU staging -> tile.gpu by tile.host_offset.
 // D2H: tile.gpu -> GPU staging by tile.host_offset -> compact host payload.
-RTP_LLM_NO_BLOCK_COPY_API bool execStagedMemoryCopy(const StagedMemoryCopyParams& params,
-                                                    StagedMemoryCopyScratch*      scratch = nullptr);
-RTP_LLM_NO_BLOCK_COPY_API void releaseStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch);
+bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopyScratch* scratch = nullptr);
+void releaseStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch);
 
 // Warmup split-KV copy kernels. No-op on non-CUDA / PPU devices.
 // Must be called after cudaSetDevice + setCurrentCUDAStream.
-RTP_LLM_NO_BLOCK_COPY_API void warmupNoBlockCopy();
+void warmupNoBlockCopy();
 
 }  // namespace rtp_llm
-
-#undef RTP_LLM_NO_BLOCK_COPY_API

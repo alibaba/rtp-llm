@@ -50,6 +50,39 @@ py_test(
 )
 
 py_test(
+    name = "hot_hook_runtime_test",
+    srcs = [
+        "hot_hook_runtime_test.py",
+        "hot_hook_target.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+    ],
+)
+
+py_test(
+    name = "multimodal_util_test",
+    srcs = [
+        "multimodal_util_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+        "//rtp_llm:_ft_pickler",
+        "//rtp_llm:pynvml",
+        "//rtp_llm:Pillow",
+        "//rtp_llm:oss2",
+        "//rtp_llm:pyOpenSSL",
+        "//rtp_llm:config_ops"
+    ],
+    data = [
+        "//:th_transformer",
+        "//:th_transformer_config",
+        "//:rtp_compute_ops",
+    ],
+    exec_properties = {'gpu':'H20'}
+)
+
+py_test(
     name = "process_manager_test",
     srcs = [
         "process_manager_test.py",
@@ -65,7 +98,7 @@ py_test(
     exec_properties = {'gpu':'H20'}
 )
 
-load("@arch_config//:arch_select.bzl", "requirement")
+load("//bazel:arch_select.bzl", "requirement")
 
 requirement([
     "grpcio",
@@ -86,6 +119,22 @@ py_test(
         "//:rtp_compute_ops",
     ],
     exec_properties = {'gpu':'H20'}
+)
+
+py_test(
+    name = "oom_diag_test",
+    srcs = [
+        "oom_diag_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+    ],
+    data = [
+        "//:th_transformer",
+        "//:th_transformer_config",
+        "//:rtp_compute_ops",
+    ],
+    exec_properties = {'gpu':'A10'}
 )
 
 py_test(

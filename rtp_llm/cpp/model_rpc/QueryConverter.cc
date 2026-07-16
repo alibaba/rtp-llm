@@ -1,7 +1,5 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 
-#include <numeric>
-
 #include "RPCPool.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
@@ -23,19 +21,8 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     memcpy(generate_config->variable_num_beams.data(),
            config_proto->variable_num_beams().data(),
            config_proto->variable_num_beams_size() * sizeof(int));
-    generate_config->num_return_sequences = config_proto->num_return_sequences();
-    generate_config->return_logits        = config_proto->return_logits();
-    generate_config->return_prompt_logits = config_proto->return_prompt_logits();
-    if (generate_config->return_prompt_logits) {
-        generate_config->prompt_logits_top_k =
-            config_proto->prompt_logits_top_k() > 0 ? config_proto->prompt_logits_top_k() : 64;
-        generate_config->prompt_logits_start = config_proto->prompt_logits_start();
-        generate_config->prompt_logits_end   = config_proto->prompt_logits_end();
-        // Python client (GenerateConfig.return_target_logprob defaults true) always sets this
-        // explicitly. proto3 unset bool = false, which is acceptable for raw gRPC clients
-        // that explicitly opt out of target_logprobs.
-        generate_config->return_target_logprob = config_proto->return_target_logprob();
-    }
+    generate_config->num_return_sequences     = config_proto->num_return_sequences();
+    generate_config->return_logits            = config_proto->return_logits();
     generate_config->return_incremental       = config_proto->return_incremental();
     generate_config->return_hidden_states     = config_proto->return_hidden_states();
     generate_config->return_all_hidden_states = config_proto->return_all_hidden_states();
@@ -48,26 +35,13 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->force_disable_sp_run     = config_proto->force_disable_sp_run();
     generate_config->force_sp_accept          = config_proto->force_sp_accept();
     generate_config->return_cum_log_probs     = config_proto->return_cum_log_probs();
-    if (config_proto->return_all_probs_mode() != 0) {
-        // new client: explicit mode (offset 1). Clamp out-of-range values to NONE
-        // so a malformed client can't synthesize an undefined ReturnAllProbsMode.
-        int mode = config_proto->return_all_probs_mode() - 1;
-        if (mode < static_cast<int>(ReturnAllProbsMode::NONE)
-            || mode > static_cast<int>(ReturnAllProbsMode::ORIGINAL)) {
-            mode = static_cast<int>(ReturnAllProbsMode::NONE);
-        }
-        generate_config->return_all_probs = static_cast<ReturnAllProbsMode>(mode);
-    } else {
-        // legacy client: only bool field set
-        generate_config->return_all_probs =
-            config_proto->return_all_probs() ? ReturnAllProbsMode::DEFAULT : ReturnAllProbsMode::NONE;
-    }
-    generate_config->return_softmax_probs  = config_proto->return_softmax_probs();
-    generate_config->can_use_pd_separation = config_proto->can_use_pd_separation();
-    generate_config->gen_timeline          = config_proto->gen_timeline();
-    generate_config->profile_step          = config_proto->profile_step();
-    generate_config->profile_trace_name    = config_proto->profile_trace_name();
-    generate_config->ignore_eos            = config_proto->ignore_eos();
+    generate_config->return_all_probs         = config_proto->return_all_probs();
+    generate_config->return_softmax_probs     = config_proto->return_softmax_probs();
+    generate_config->can_use_pd_separation    = config_proto->can_use_pd_separation();
+    generate_config->gen_timeline             = config_proto->gen_timeline();
+    generate_config->profile_step             = config_proto->profile_step();
+    generate_config->profile_trace_name       = config_proto->profile_trace_name();
+    generate_config->ignore_eos               = config_proto->ignore_eos();
     generate_config->select_tokens_id.resize(config_proto->select_tokens_id_size());
     memcpy(generate_config->select_tokens_id.data(),
            config_proto->select_tokens_id().data(),
@@ -97,9 +71,17 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(top_p_min);
     TRANS_OPTIONAL(top_p_reset_ids);
     TRANS_OPTIONAL(task_id);
+    TRANS_OPTIONAL(json_schema);
+    TRANS_OPTIONAL(regex);
+    TRANS_OPTIONAL(ebnf);
+    TRANS_OPTIONAL(structural_tag);
+    TRANS_OPTIONAL(response_format);
     TRANS_OPTIONAL(adapter_name);
     generate_config->in_think_mode       = config_proto->in_think_mode();
     generate_config->max_thinking_tokens = config_proto->max_thinking_tokens();
+    for (const auto& token_id : config_proto->begin_think_token_ids()) {
+        generate_config->begin_think_token_ids.push_back(token_id);
+    }
     for (const auto& token_id : config_proto->end_think_token_ids()) {
         generate_config->end_think_token_ids.push_back(token_id);
     }
@@ -117,28 +99,35 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(batch_group_timeout);
     TRANS_OPTIONAL(force_batch);
 
-    // 生成式推荐：组合 token 约束
-    generate_config->combo_token_size = config_proto->combo_token_size();
-    generate_config->enable_cross_sequence_ban = config_proto->enable_cross_sequence_ban();
-    generate_config->cross_seq_diverge_start_combo = config_proto->cross_seq_diverge_start_combo();
-    for (const auto& combo_proto : config_proto->banned_combo_token_ids().rows()) {
-        std::vector<int> combo;
-        combo.reserve(combo_proto.values_size());
-        for (const int value : combo_proto.values()) {
-            combo.push_back(value);
-        }
-        generate_config->banned_combo_token_ids.push_back(std::move(combo));
-    }
-
     return generate_config;
+}
+
+RequestInfo QueryConverter::transRequestInfo(const RequestInfoPB& request_info_pb) {
+    RequestInfo request_info;
+    request_info.frontend_ip = request_info_pb.frontend_ip();
+    request_info.dash_ip     = request_info_pb.dash_ip();
+    request_info.trace_id    = request_info_pb.trace_id();
+    request_info.request_id  = request_info_pb.request_id();
+    request_info.source_role = request_info_pb.source_role();
+    return request_info;
 }
 
 std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB* input) {
     std::shared_ptr<GenerateInput> generate_input = std::make_shared<GenerateInput>();
     generate_input->request_id                    = input->request_id();
+    generate_input->request_info                  = transRequestInfo(input->request_info());
     generate_input->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
     if (input->has_generate_config()) {
         generate_input->generate_config = transGenerateConfig(&(input->generate_config()));
+    }
+    if (generate_input->request_info.trace_id.empty() && generate_input->generate_config) {
+        generate_input->request_info.trace_id = generate_input->generate_config->trace_id;
+    }
+    if (generate_input->request_info.request_id.empty()) {
+        generate_input->request_info.request_id = std::to_string(input->request_id());
+    }
+    if (generate_input->generate_config && generate_input->generate_config->trace_id.empty()) {
+        generate_input->generate_config->trace_id = generate_input->request_info.trace_id;
     }
     generate_input->input_ids =
         torch::from_blob(const_cast<int*>(input->token_ids().data()), {(int64_t)input->token_ids_size()}, torch::kInt32)
@@ -146,12 +135,8 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     if (input->multimodal_inputs_size() > 0) {
         std::vector<MultimodalInput> mm_inputs;
         for (int i = 0; i < input->multimodal_inputs_size(); i++) {
-            auto               mm_input             = &input->multimodal_inputs(i);
-            auto               mm_preprocess_config = &mm_input->mm_preprocess_config();
-            std::vector<float> crop_positions;
-            for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
-                crop_positions.push_back(crop_position);
-            }
+            auto mm_input             = &input->multimodal_inputs(i);
+            auto mm_preprocess_config = &mm_input->mm_preprocess_config();
             mm_inputs.emplace_back(mm_input->multimodal_url(),
                                    torch::empty(1),
                                    mm_input->multimodal_type(),
@@ -161,9 +146,7 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
                                    mm_preprocess_config->max_pixels(),
                                    mm_preprocess_config->fps(),
                                    mm_preprocess_config->min_frames(),
-                                   mm_preprocess_config->max_frames(),
-                                   crop_positions,
-                                   mm_preprocess_config->mm_timeout_ms());
+                                   mm_preprocess_config->max_frames());
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
@@ -189,12 +172,6 @@ std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputs
     for (int i = 0; i < mm_inputs->multimodal_inputs_size(); i++) {
         auto mm_input             = &mm_inputs->multimodal_inputs(i);
         auto mm_preprocess_config = &mm_input->mm_preprocess_config();
-
-        std::vector<float> crop_positions;
-        for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
-            crop_positions.push_back(crop_position);
-        }
-
         // tensor should also converted from input pb, however it is only used in some embedding model, so just empty
         // for now
         inputs_vec.emplace_back(mm_input->multimodal_url(),
@@ -204,11 +181,7 @@ std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputs
                                 mm_preprocess_config->height(),
                                 mm_preprocess_config->min_pixels(),
                                 mm_preprocess_config->max_pixels(),
-                                mm_preprocess_config->fps(),
-                                mm_preprocess_config->min_frames(),
-                                mm_preprocess_config->max_frames(),
-                                crop_positions,
-                                mm_preprocess_config->mm_timeout_ms());
+                                mm_preprocess_config->fps());
     }
     return inputs_vec;
 }
@@ -225,55 +198,25 @@ MultimodalInputsPB QueryConverter::transMMInputsPB(const std::vector<MultimodalI
     return mm_inputs_pb;
 }
 
-void QueryConverter::transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, const MMPreprocessConfig& config) {
+void QueryConverter::transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, const MMPreprocessConfig config) {
     config_pb->set_width(config.width);
     config_pb->set_height(config.height);
     config_pb->set_min_pixels(config.min_pixels);
     config_pb->set_max_pixels(config.max_pixels);
     config_pb->set_fps(config.fps);
-    config_pb->set_min_frames(config.min_frames);
-    config_pb->set_max_frames(config.max_frames);
-    config_pb->set_mm_timeout_ms(config.mm_timeout_ms);
-    for (const float& crop_position : config.crop_positions) {
-        config_pb->add_crop_positions(crop_position);
-    }
 }
 
-MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_pb) {
-    torch::Tensor mm_embedding        = transTensor(output_pb->multimodal_embedding()), mm_position_id;
-    bool          contain_pos         = output_pb->has_multimodal_pos_id();
-    bool          contain_extra_input = output_pb->multimodal_extra_input_size() > 0;
-    if (contain_pos) {
-        mm_position_id = transTensor(output_pb->multimodal_pos_id());
-    }
-    MultimodalOutput     mm_output;
-    std::vector<int64_t> split_sizes;
-    for (auto split_size : output_pb->split_size()) {
-        split_sizes.push_back(split_size);
-    }
-    const int64_t split_total = std::accumulate(split_sizes.begin(), split_sizes.end(), int64_t{0});
-    RTP_LLM_CHECK_WITH_INFO(!split_sizes.empty() && split_total == mm_embedding.size(0),
-                            "split_sizes sum=%ld does not match mm_embedding.size(0)=%ld",
-                            split_total,
-                            mm_embedding.size(0));
-    mm_output.mm_features = mm_embedding.split(split_sizes, 0);
-    if (contain_pos) {
-        RTP_LLM_CHECK_WITH_INFO(split_total == mm_position_id.size(0),
-                                "split_sizes sum=%ld does not match mm_position_id.size(0)=%ld",
-                                split_total,
-                                mm_position_id.size(0));
-        mm_output.mm_position_ids = mm_position_id.split(split_sizes, 0);
-    }
-
-    if (contain_extra_input) {
-        // Each extra-input is an opaque flat 1-D tensor (one per image), reshaped by the
-        // model-specific consumer; no split needed here.
-        std::vector<torch::Tensor> extra_inputs;
-        extra_inputs.reserve(output_pb->multimodal_extra_input_size());
-        for (const auto& extra_input_pb : output_pb->multimodal_extra_input()) {
-            extra_inputs.emplace_back(transTensor(extra_input_pb));
+MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputsPB* outputs_pb) {
+    MultimodalOutput mm_output;
+    for (int i = 0; i < outputs_pb->multimodal_outputs_size(); i++) {
+        auto output_pb = outputs_pb->multimodal_outputs(i);
+        mm_output.mm_features.emplace_back(transTensor(output_pb.multimodal_embedding()));
+        if (output_pb.has_multimodal_pos_id()) {
+            if (mm_output.mm_position_ids == std::nullopt) {
+                mm_output.mm_position_ids = std::vector<torch::Tensor>();
+            }
+            mm_output.mm_position_ids.value().emplace_back(transTensor(output_pb.multimodal_pos_id()));
         }
-        mm_output.mm_extra_input = std::move(extra_inputs);
     }
     return mm_output;
 }
@@ -379,10 +322,6 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             aux_info->set_decode_remote_reuse_len(response.aux_info.decode_remote_reuse_len);
             aux_info->set_decode_memory_reuse_len(response.aux_info.decode_memory_reuse_len);
             aux_info->set_aux_string(aux_string);
-            auto* mm_map = aux_info->mutable_multimodal_lengths();
-            for (const auto& [key, value] : response.aux_info.multimodal_lengths) {
-                (*mm_map)[key] = value;
-            }
             if (response.aux_info.cum_log_probs.has_value()) {
                 transTensorPB(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value());
             }
@@ -407,8 +346,6 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
     }
 
     stackBuffersToTensorPB(
-        flatten_output->mutable_all_probs(), source_outputs, [](const auto& r) { return r.aux_info.all_probs; });
-    stackBuffersToTensorPB(
         flatten_output->mutable_hidden_states(), source_outputs, [](const auto& r) { return r.hidden_states; });
 
     stackBuffersToTensorPB(flatten_output->mutable_loss(), source_outputs, [](const auto& r) { return r.loss; });
@@ -417,18 +354,6 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
 
     stackBuffersToTensorPB(
         flatten_output->mutable_all_hidden_states(), source_outputs, [](const auto& r) { return r.all_hidden_states; });
-
-    if (!source_outputs.empty() && source_outputs[0].prompt_logits.has_value()) {
-        auto*       pb = flatten_output->mutable_prompt_logits();
-        const auto& pl = source_outputs[0].prompt_logits.value();
-        transTensorPB(pb->mutable_topk_logprobs(), pl.topk_logprobs);
-        transTensorPB(pb->mutable_topk_token_ids(), pl.topk_token_ids);
-        if (pl.target_logprobs.defined()) {
-            transTensorPB(pb->mutable_target_logprobs(), pl.target_logprobs);
-        }
-        pb->set_start_pos(pl.start_pos);
-        pb->set_end_pos(pl.end_pos);
-    }
 
     RTP_LLM_LOG_DEBUG("transResponse done");
 }

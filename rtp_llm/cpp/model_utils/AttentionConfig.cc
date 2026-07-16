@@ -8,6 +8,8 @@ static std::string kvCacheDataTypeToString(KvCacheDataType kv_cache_dtype) {
     switch (kv_cache_dtype) {
         case KvCacheDataType::BASE:
             return "BASE";
+        case KvCacheDataType::INT8:
+            return "INT8";
         case KvCacheDataType::FP8:
             return "FP8";
         default:

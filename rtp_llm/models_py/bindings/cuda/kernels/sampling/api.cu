@@ -62,18 +62,22 @@ torch::Tensor prepare_optional_param(const std::optional<torch::Tensor>& maybe_p
 
     const auto& param = maybe_param.value();
     TORCH_CHECK(param.dim() == 1, name, " must be a 1D tensor with shape [batch_size]");
-    TORCH_CHECK(
-        param.numel() == batch_size, name, " length must match batch_size, got ", param.numel(), " vs ", batch_size);
+    TORCH_CHECK(param.numel() == batch_size,
+                name,
+                " length must match batch_size, got ",
+                param.numel(),
+                " vs ",
+                batch_size);
 
-    // Return the input tensor directly when it already matches; callers must clone before any in-place mutation.
     if (param.device() == device && param.scalar_type() == dtype && param.is_contiguous()) {
         return param;
     }
     return param.to(torch::TensorOptions().device(device).dtype(dtype), /*non_blocking=*/true).contiguous();
 }
 
-torch::Tensor
-prepare_optional_index(const std::optional<torch::Tensor>& maybe_indices, int64_t batch_size, c10::Device device) {
+torch::Tensor prepare_optional_index(const std::optional<torch::Tensor>& maybe_indices,
+                                     int64_t                             batch_size,
+                                     c10::Device                         device) {
     if (!maybe_indices.has_value()) {
         return torch::Tensor();
     }
@@ -104,7 +108,7 @@ size_t air_top_p_workspace_size(uint32_t batch_size, uint32_t vocab_size) {
     namespace air = flashinfer::sampling::air_top_p;
     auto align256 = [](size_t x) { return ((x + 255) / 256) * 256; };
 
-    using HistT        = air::HisT<IsDeterministic, DType>;
+    using HistT = air::HisT<IsDeterministic, DType>;
     const auto buf_len = static_cast<size_t>(air::calcBufLen<DType>(static_cast<air::IdxT>(vocab_size)));
 
     const size_t counters_size = align256(sizeof(air::Counter<DType>) * batch_size);
@@ -122,7 +126,8 @@ void check_cuda_status(cudaError_t status, const char* kernel_name) {
 
 }  // namespace
 
-std::tuple<uint64_t, uint64_t> get_seed_and_offset(int increment_size, std::optional<at::Generator> generator) {
+std::tuple<uint64_t, uint64_t> get_seed_and_offset(int                          increment_size,
+                                                   std::optional<at::Generator> generator) {
     auto gen =
         at::get_generator_or_default<at::CUDAGeneratorImpl>(generator, at::cuda::detail::getDefaultCUDAGenerator());
     std::lock_guard<std::mutex> lock(gen->mutex_);
@@ -148,8 +153,8 @@ void top_p_sampling_from_probs(torch::Tensor                probs,
     const auto          batch_size = static_cast<uint32_t>(output.size(0));
     const auto          vocab_size = static_cast<uint32_t>(probs.size(1));
     auto                indices    = prepare_optional_index(maybe_indices, batch_size, probs.device());
-    auto top_p  = prepare_optional_param(maybe_top_p_arr, batch_size, probs.device(), at::kFloat, "top_p");
-    auto seed   = prepare_optional_param(maybe_seed_arr, batch_size, probs.device(), at::kLong, "seed");
+    auto top_p = prepare_optional_param(maybe_top_p_arr, batch_size, probs.device(), at::kFloat, "top_p");
+    auto seed  = prepare_optional_param(maybe_seed_arr, batch_size, probs.device(), at::kLong, "seed");
     auto offset = prepare_optional_param(maybe_offset_arr, batch_size, probs.device(), at::kLong, "offset");
     auto stream = resolve_stream(cuda_stream);
 
@@ -189,19 +194,19 @@ void top_k_sampling_from_probs(torch::Tensor                probs,
     const auto          batch_size = static_cast<uint32_t>(output.size(0));
     const auto          vocab_size = static_cast<uint32_t>(probs.size(1));
     auto                indices    = prepare_optional_index(maybe_indices, batch_size, probs.device());
-    auto                top_k = prepare_optional_param(maybe_top_k_arr, batch_size, probs.device(), at::kInt, "top_k");
-    auto                seed  = prepare_optional_param(maybe_seed_arr, batch_size, probs.device(), at::kLong, "seed");
-    auto       offset = prepare_optional_param(maybe_offset_arr, batch_size, probs.device(), at::kLong, "offset");
-    auto       stream = resolve_stream(cuda_stream);
-    const auto top_k_limit =
-        static_cast<uint32_t>(top_k_val <= 0 ? vocab_size : std::min<int64_t>(top_k_val, vocab_size));
+    auto top_k = prepare_optional_param(maybe_top_k_arr, batch_size, probs.device(), at::kInt, "top_k");
+    auto seed = prepare_optional_param(maybe_seed_arr, batch_size, probs.device(), at::kLong, "seed");
+    auto offset = prepare_optional_param(maybe_offset_arr, batch_size, probs.device(), at::kLong, "offset");
+    auto stream = resolve_stream(cuda_stream);
+    const auto top_k_limit = static_cast<uint32_t>(top_k_val <= 0 ? vocab_size :
+                                                                   std::min<int64_t>(top_k_val, vocab_size));
 
     cudaError_t status = flashinfer::sampling::TopKSamplingFromProb<float, int32_t>(
         static_cast<float*>(probs.data_ptr()),
         static_cast<int32_t*>(output.data_ptr()),
         static_cast<bool*>(valid.data_ptr()),
         indices.defined() ? static_cast<int32_t*>(indices.data_ptr()) : nullptr,
-        top_k.defined() ? static_cast<int32_t*>(top_k.data_ptr()) : nullptr,
+        top_k.defined() ? reinterpret_cast<float*>(top_k.data_ptr<int32_t>()) : nullptr,
         batch_size,
         top_k_limit,
         vocab_size,
@@ -234,13 +239,13 @@ void top_k_top_p_sampling_from_probs(torch::Tensor                probs,
     const auto          batch_size = static_cast<uint32_t>(output.size(0));
     const auto          vocab_size = static_cast<uint32_t>(probs.size(1));
     auto                indices    = prepare_optional_index(maybe_indices, batch_size, probs.device());
-    auto                top_k = prepare_optional_param(maybe_top_k_arr, batch_size, probs.device(), at::kInt, "top_k");
-    auto       top_p  = prepare_optional_param(maybe_top_p_arr, batch_size, probs.device(), at::kFloat, "top_p");
-    auto       seed   = prepare_optional_param(maybe_seed_arr, batch_size, probs.device(), at::kLong, "seed");
-    auto       offset = prepare_optional_param(maybe_offset_arr, batch_size, probs.device(), at::kLong, "offset");
-    auto       stream = resolve_stream(cuda_stream);
-    const auto top_k_limit =
-        static_cast<int32_t>(top_k_val <= 0 ? vocab_size : std::min<int64_t>(top_k_val, vocab_size));
+    auto top_k = prepare_optional_param(maybe_top_k_arr, batch_size, probs.device(), at::kInt, "top_k");
+    auto top_p = prepare_optional_param(maybe_top_p_arr, batch_size, probs.device(), at::kFloat, "top_p");
+    auto seed  = prepare_optional_param(maybe_seed_arr, batch_size, probs.device(), at::kLong, "seed");
+    auto offset = prepare_optional_param(maybe_offset_arr, batch_size, probs.device(), at::kLong, "offset");
+    auto stream = resolve_stream(cuda_stream);
+    const auto top_k_limit = static_cast<int32_t>(top_k_val <= 0 ? vocab_size :
+                                                                  std::min<int64_t>(top_k_val, vocab_size));
 
     cudaError_t status = flashinfer::sampling::TopKTopPSamplingFromProb<float, int32_t>(
         static_cast<float*>(probs.data_ptr()),
@@ -273,9 +278,9 @@ void top_p_renorm_probs(torch::Tensor                probs,
     at::cuda::CUDAGuard device_guard(probs.device());
     const auto          batch_size = static_cast<uint32_t>(probs.size(0));
     const auto          vocab_size = static_cast<uint32_t>(probs.size(1));
-    auto   top_p     = prepare_optional_param(maybe_top_p_arr, batch_size, probs.device(), at::kFloat, "top_p");
-    auto   stream    = resolve_stream(cuda_stream);
-    float* top_p_ptr = top_p.defined() ? static_cast<float*>(top_p.data_ptr()) : nullptr;
+    auto top_p = prepare_optional_param(maybe_top_p_arr, batch_size, probs.device(), at::kFloat, "top_p");
+    auto                stream     = resolve_stream(cuda_stream);
+    float*              top_p_ptr  = top_p.defined() ? static_cast<float*>(top_p.data_ptr()) : nullptr;
 
     cudaError_t status = cudaSuccess;
     if (vocab_size < flashinfer::sampling::air_top_p::NUM_BUCKETS) {
@@ -290,9 +295,9 @@ void top_p_renorm_probs(torch::Tensor                probs,
         return;
     }
 
-    constexpr bool deterministic  = false;
+    constexpr bool deterministic = false;
     const auto     workspace_size = air_top_p_workspace_size<deterministic, float>(batch_size, vocab_size);
-    auto           workspace = torch::empty({static_cast<int64_t>(workspace_size)}, probs.options().dtype(at::kByte));
+    auto workspace = torch::empty({static_cast<int64_t>(workspace_size)}, probs.options().dtype(at::kByte));
 
     status = flashinfer::sampling::air_top_p::AirTopPRenormProb<deterministic, float>(
         static_cast<float*>(probs.data_ptr()),
@@ -319,13 +324,15 @@ void top_k_renorm_probs(torch::Tensor                probs,
     at::cuda::CUDAGuard device_guard(probs.device());
     const auto          batch_size = static_cast<uint32_t>(probs.size(0));
     const auto          vocab_size = static_cast<uint32_t>(probs.size(1));
-    auto                top_k  = prepare_optional_param(maybe_top_k_arr, batch_size, probs.device(), at::kInt, "top_k");
-    auto                stream = resolve_stream(cuda_stream);
-    int*                top_k_ptr   = top_k.defined() ? static_cast<int*>(top_k.data_ptr()) : nullptr;
-    const auto          top_k_limit = static_cast<uint32_t>(
-        top_k_val <= 0 ? vocab_size : std::min<int64_t>(top_k_val, std::numeric_limits<uint32_t>::max()));
+    auto                top_k = prepare_optional_param(maybe_top_k_arr, batch_size, probs.device(), at::kInt, "top_k");
+    auto                stream     = resolve_stream(cuda_stream);
+    int*                top_k_ptr  = top_k.defined() ? static_cast<int*>(top_k.data_ptr()) : nullptr;
+    const auto          top_k_limit =
+        static_cast<uint32_t>(top_k_val <= 0 ? vocab_size :
+                                             std::min<int64_t>(top_k_val, std::numeric_limits<uint32_t>::max()));
 
-    auto  row_states     = torch::zeros({1024 * 1024}, probs.options().dtype(at::kByte));
+    auto row_states =
+        torch::zeros({1024 * 1024}, probs.options().dtype(at::kByte));
     auto* row_states_ptr = reinterpret_cast<flashinfer::sampling::RadixRowState*>(row_states.data_ptr());
 
     cudaError_t status = cudaSuccess;

@@ -1,36 +1,30 @@
 import asyncio
-import copy
 import logging
 import queue
 import threading
+from dataclasses import asdict
 from typing import Any, AsyncGenerator, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     DecodingState,
     IncrementDecodingUtils,
 )
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.metrics import GaugeMetrics, kmonitor
-from rtp_llm.multimodal.multimodal_util import MMUrlType
-from rtp_llm.ops import (
-    MMPreprocessConfig,
-    MultimodalInput,
-    SpecialTokens,
-    SpeculativeExecutionConfig,
-    VitSeparation,
-)
+from rtp_llm.ops import SpecialTokens, SpeculativeExecutionConfig, VitSeparation
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
     GenerateResponse,
 )
+from rtp_llm.utils.multimodal_util import MultimodalInput
 from rtp_llm.utils.time_util import current_time_ms
 from rtp_llm.utils.util import AtomicCounter
 from rtp_llm.utils.word_util import (
@@ -62,6 +56,8 @@ class Pipeline(object):
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
         server_config=None,
         master_config=None,
+        parallelism_config=None,
+        prefill_cp_config=None,
     ):
         self.pd_sep_config = pd_sep_config
         self.tokenizer = tokenizer
@@ -82,7 +78,12 @@ class Pipeline(object):
             vit_separation=vit_separation,
             server_config=server_config,
             master_config=master_config,
+            parallelism_config=parallelism_config,
+            prefill_cp_config=prefill_cp_config,
         )
+
+    async def close(self):
+        await self.backend_rpc_server_visitor.close()
 
     def encode(self, prompt: str):
         assert self.tokenizer is not None
@@ -99,7 +100,7 @@ class Pipeline(object):
         special_tokens: Any,
         tokenizer: BaseTokenizer,
         generate_env_config,
-        **kwargs: Any,
+        **kwargs: Any
     ) -> GenerateConfig:
         if isinstance(generate_config, dict):
             config = GenerateConfig.create_generate_config(generate_config, **kwargs)
@@ -123,7 +124,7 @@ class Pipeline(object):
         prompt: str,
         request_id: int = None,
         urls: Optional[List[str]] = None,
-        **kwargs: Any,
+        **kwargs: Any
     ) -> Iterator[GenerateResponse]:
 
         q = queue.Queue()
@@ -169,13 +170,14 @@ class Pipeline(object):
         prompt: str,
         request_id: int = None,
         urls: Optional[List[str]] = None,
-        **kwargs: Any,
+        **kwargs: Any
     ) -> AsyncGenerator[GenerateResponse, None]:
         begin_time = current_time_ms()
 
         if request_id == None:
             request_id = request_counter.increment()
 
+        request_headers = normalize_request_headers(kwargs.pop("headers", None))
         generate_config_json = kwargs.pop("generate_config", {})
         generate_config = self.create_generate_config(
             generate_config_json,
@@ -184,19 +186,7 @@ class Pipeline(object):
             self.tokenizer,
             **kwargs,
         )
-        mm_inputs = (
-            [
-                MultimodalInput(
-                    url,
-                    MMUrlType.DEFAULT,
-                    torch.empty(0),
-                    MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000),
-                )
-                for url in urls
-            ]
-            if urls is not None
-            else []
-        )
+        mm_inputs = [MultimodalInput(url) for url in urls] if urls is not None else []
 
         if len(prompt) == 0:
             raise FtRuntimeException(
@@ -208,43 +198,7 @@ class Pipeline(object):
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 "expect string prompt, actual: " + str(prompt),
             )
-        # 生成式推荐：由开关控制，默认关闭、对非推荐场景零侵入。
-        # 在 tokenizer.encode(prompt) 之前解析及填充 banned_combo_token_ids，
-        # 避免重复编码 prompt。
-        parse_and_fill_banned_combo(prompt, generate_config, self.tokenizer)
         token_ids = self.tokenizer.encode(prompt)
-
-        # Prompt scoring constraints (max_new_tokens=1, non-streaming, no reuse/PD-sep) are
-        # already enforced by validate() → enforce_prompt_scoring_constraints() during config creation.
-        if generate_config.return_prompt_logits:
-            if mm_inputs:
-                raise FtRuntimeException(
-                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                    "prompt scoring does not support multimodal inputs",
-                )
-            prompt_len = len(token_ids)
-            start = (
-                generate_config.prompt_logits_start
-                if generate_config.prompt_logits_start >= 0
-                else 0
-            )
-            end = (
-                generate_config.prompt_logits_end
-                if generate_config.prompt_logits_end >= 0
-                else prompt_len
-            )
-            # start >= prompt_len is a hard error (no valid data to return).
-            # end > prompt_len is silently clamped (common "take until end" intent).
-            if start >= prompt_len:
-                raise FtRuntimeException(
-                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                    f"prompt_logits_start ({start}) >= prompt length ({prompt_len})",
-                )
-            if end > prompt_len:
-                logging.debug(
-                    f"prompt_logits_end ({end}) > prompt_len ({prompt_len}), clamped to {prompt_len}"
-                )
-                generate_config.prompt_logits_end = prompt_len
 
         if generate_config.sp_advice_prompt != "":
             generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
@@ -257,7 +211,12 @@ class Pipeline(object):
         kmonitor.report(GaugeMetrics.NUM_BEAMS_METRIC, generate_config.max_num_beams())
         kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, len(token_ids))
         return self.generate_stream(
-            request_id, token_ids, mm_inputs, generate_config, **kwargs
+            request_id,
+            token_ids,
+            mm_inputs,
+            generate_config,
+            headers=request_headers,
+            **kwargs,
         )
 
     @staticmethod
@@ -284,7 +243,7 @@ class Pipeline(object):
         stop_word_str_list: List[str],
         stop_word_str_slices: List[str],
         token_buffer: str,
-        **kwargs: Any,
+        **kwargs: Any
     ):
         if generate_config.return_incremental:
             text = token_buffer + text
@@ -321,7 +280,7 @@ class Pipeline(object):
         stop_word_ids: List[int],
         stop_word_id_slices: List[int],
         ouput_tokens_list: List[torch.Tensor],
-        **kwargs: Any,
+        **kwargs: Any
     ) -> Tuple[List[str], List[int]]:
         tokens_lists_for_decode_input = []
         output_lens = []
@@ -413,7 +372,7 @@ class Pipeline(object):
         decoding_states: List[DecodingState],
         token_buffers: List[str],
         ouput_tokens_list: List[torch.Tensor],
-        **kwargs: Any,
+        **kwargs: Any
     ) -> Tuple[List[str], List[int]]:
         """处理增量解码的逻辑。"""
         num_outputs = len(generate_outputs.generate_outputs)
@@ -500,9 +459,10 @@ class Pipeline(object):
         token_ids: List[int],
         mm_inputs: List[MultimodalInput],
         generate_config: GenerateConfig,
-        **kwargs: Any,
+        **kwargs: Any
     ) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
+        request_headers = normalize_request_headers(kwargs.pop("headers", None))
 
         token_ids = torch.tensor(token_ids, dtype=torch.int)
 
@@ -515,6 +475,7 @@ class Pipeline(object):
             token_type_ids=token_type_ids,
             batch_group_size=kwargs.get("batch_group_size", 1),
             batch_group_id=kwargs.get("batch_group_id", -1),
+            headers=request_headers,
         )
 
         stop_word_strs = generate_config.stop_words_str
@@ -522,17 +483,44 @@ class Pipeline(object):
         stop_word_ids = generate_config.stop_words_list
         stop_word_id_slices = get_stop_word_slices(stop_word_ids)
 
-        stream: AsyncGenerator[GenerateOutputs, None] = (
-            await self.backend_rpc_server_visitor.enqueue(input)
-        )
-
         decoding_states: List[DecodingState] = []
         ouput_tokens_list: List[torch.Tensor] = []
         token_buffers: List[str] = []
         generate_outputs_cache = GenerateOutputs()
 
+        async def backend_stream():
+            try:
+                stream: AsyncGenerator[GenerateOutputs, None] = (
+                    await self.backend_rpc_server_visitor.enqueue(input)
+                )
+                async for generate_outputs in stream:
+                    yield generate_outputs
+            except BaseException as e:
+                aux_info = None
+                if generate_outputs_cache.generate_outputs:
+                    aux_info = generate_outputs_cache.generate_outputs[0].aux_info
+                aux_info_dict = asdict(aux_info) if aux_info is not None else {}
+                aux_info_dict.setdefault("input_len", input.prompt_length)
+                aux_info_dict.setdefault("output_len", 0)
+                aux_info_dict.setdefault("step_output_len", 0)
+                aux_info_dict.setdefault("reuse_len", 0)
+                role_addrs = input.generate_config.role_addrs or []
+                if role_addrs:
+                    aux_info_dict["role_addrs"] = [
+                        role_addr.model_dump(mode="json") for role_addr in role_addrs
+                    ]
+                    roles = {
+                        str(getattr(role_addr.role, "name", role_addr.role))
+                        for role_addr in role_addrs
+                    }
+                    aux_info_dict.setdefault(
+                        "pd_sep", {"PREFILL", "DECODE"}.issubset(roles)
+                    )
+                e.aux_info = aux_info_dict
+                raise
+
         # TODO(xinfei.sxf) add batch and stop test
-        async for generate_outputs in stream:
+        async for generate_outputs in backend_stream():
             if not generate_outputs_cache.generate_outputs:
                 generate_outputs_cache.generate_outputs = (
                     generate_outputs.generate_outputs
@@ -608,92 +596,3 @@ class Pipeline(object):
                         sum(output_lens) / len(output_lens),
                     )
                 break
-
-    @torch.inference_mode()
-    async def batch_infer(
-        self,
-        prompts: List[str],
-        base_request_id: int,
-        generate_config_json: dict,
-        generate_env_config=None,
-        **kwargs: Any,
-    ) -> List[GenerateResponse]:
-        generate_config = self.create_generate_config(
-            generate_config_json,
-            len(self.tokenizer),
-            self._special_tokens,
-            self.tokenizer,
-            generate_env_config=generate_env_config,
-            **kwargs,
-        )
-        generate_config.is_streaming = False
-
-        inputs = []
-        for i, prompt in enumerate(prompts):
-            if len(prompt) == 0:
-                raise FtRuntimeException(
-                    ExceptionType.EMPTY_PROMPT_ERROR,
-                    "prompt should have at least one token!",
-                )
-            token_ids = self.tokenizer.encode(prompt)
-
-            if generate_config.return_prompt_logits:
-                prompt_len = len(token_ids)
-                start = (
-                    generate_config.prompt_logits_start
-                    if generate_config.prompt_logits_start >= 0
-                    else 0
-                )
-                if start >= prompt_len:
-                    raise FtRuntimeException(
-                        ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                        f"prompt_logits_start ({start}) >= prompt length ({prompt_len}) at batch index {i}",
-                    )
-
-            if generate_config.sp_advice_prompt != "":
-                generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
-                    generate_config.sp_advice_prompt
-                )
-
-            input_tensor = torch.tensor(token_ids, dtype=torch.int)
-            # Shallow copy is enough: GenerateConfig is treated as immutable from here on,
-            # and at the RPC layer it is converted to a per-request protobuf so any brief
-            # list aliasing across siblings is dropped before it reaches the engine.
-            gen_input = GenerateInput(
-                request_id=base_request_id + i,
-                token_ids=input_tensor,
-                mm_inputs=[],
-                generate_config=copy.copy(generate_config),
-                tokenizer=self.tokenizer,
-            )
-            inputs.append(gen_input)
-
-        batch_outputs = await self.backend_rpc_server_visitor.batch_enqueue(inputs)
-
-        stop_word_strs = generate_config.stop_words_str
-        stop_word_str_slices = get_stop_word_slices(stop_word_strs)
-        stop_word_ids = generate_config.stop_words_list
-        stop_word_id_slices = get_stop_word_slices(stop_word_ids)
-
-        responses = []
-        for i, outputs in enumerate(batch_outputs):
-            (
-                generate_texts,
-                output_lens,
-                _,
-            ) = self.decode_non_incremental_tokens(
-                generate_config,
-                outputs,
-                stop_word_strs,
-                stop_word_str_slices,
-                stop_word_ids,
-                stop_word_id_slices,
-                [],
-            )
-            responses.append(
-                GenerateResponse(
-                    generate_outputs=outputs,
-                    generate_texts=generate_texts,
-                )
-            )
-        return responses

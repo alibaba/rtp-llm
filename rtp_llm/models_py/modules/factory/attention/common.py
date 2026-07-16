@@ -11,7 +11,10 @@ from typing import Any, Optional
 import torch
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
-from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
+from rtp_llm.models_py.modules.base.common.kvcache_store import (
+    create_write_cache_store_impl as _create_write_cache_store_impl,
+)
+from rtp_llm.ops.compute_ops import KVCache, LayerKVCache, PyAttentionInputs
 
 
 def reshape_paged_kv_cache(
@@ -44,6 +47,7 @@ def reshape_paged_kv_cache(
 
 def create_write_cache_store_impl(
     attn_inputs: PyAttentionInputs,
+    kv_cache: Optional[KVCache] = None,
 ) -> Optional[WriteCacheStoreOp]:
     """Create write cache store implementation if needed.
 
@@ -53,24 +57,7 @@ def create_write_cache_store_impl(
     Returns:
         WriteCacheStoreOp instance if cache store is needed, None otherwise
     """
-    if attn_inputs.is_prefill and attn_inputs.cache_store_inputs:
-        input_lengths = attn_inputs.input_lengths
-        cp_info = getattr(attn_inputs, "context_parallel_info", None)
-        if cp_info is not None:
-            actual_lengths = getattr(cp_info, "prefill_actual_input_lengths_cpu", None)
-            if actual_lengths is not None and actual_lengths.numel() > 0:
-                # ContextParallelProcessor rewrites input_lengths to the
-                # rank-local chunk length. Cache keys stay in the full request
-                # namespace, so cache-store planning must use the captured
-                # pre-sharding lengths.
-                input_lengths = actual_lengths
-        return WriteCacheStoreOp(
-            input_lengths,
-            attn_inputs.prefix_lengths,
-            attn_inputs.kv_cache_block_id,
-            attn_inputs.cache_store_inputs,
-        )
-    return None
+    return _create_write_cache_store_impl(attn_inputs, kv_cache)
 
 
 def apply_write_cache_store(
@@ -94,28 +81,25 @@ def apply_write_cache_store(
 
 
 def copy_kv_cache_offset(old_offset: torch.Tensor, new_offset: torch.Tensor) -> None:
-    """Copy new_offset into old_offset for CUDA graph parameter updates.
+    """Copy KV Cache offset data.
 
-    If shapes match, copies directly. Otherwise zeros old_offset first and copies
-    the overlapping region. The shape only mismatches on the block-count (last) dim,
-    and only in benchmark/test harnesses that slice the page table to a shorter
-    sequence; the batch dim never mismatches (a captured graph runs at a fixed batch
-    — smaller real batches are zero-padded, not resized). Production
-    cuda_graph_runner pre-allocates fixed-shape page tables, so this else branch is
-    never taken there. Defensive hardening only — the current RoPE/XQA consumers read
-    only blocks [0, nbPages), so the zeroed/truncated tail is never accessed.
+    Used for CUDA graph parameter update scenarios.
+    Copies new offset data into old offset tensor. If shapes match, copies directly,
+    otherwise only copies the matching portion (slicing from the first dimension).
+
+    Args:
+        old_offset: Target offset tensor, data will be updated
+        new_offset: Source offset tensor, provides new data
     """
     if new_offset.shape == old_offset.shape:
         old_offset.copy_(new_offset, non_blocking=True)
     else:
-        old_offset.zero_()
+        # Build slice indices dynamically
         slice_indices = [
-            slice(0, min(new_offset.size(dim), old_offset.size(dim)))
-            for dim in range(new_offset.dim())
+            slice(0, new_offset.size(dim)) for dim in range(new_offset.dim())
         ]
-        src_slice = new_offset[tuple(slice_indices)]
-        dst_slice = old_offset[tuple(slice_indices)]
-        dst_slice.copy_(src_slice, non_blocking=True)
+        target_slice = old_offset[tuple(slice_indices)]
+        target_slice.copy_(new_offset, non_blocking=True)
 
 
 def update_trt_params(

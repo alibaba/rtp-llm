@@ -130,6 +130,55 @@ public class MetricConstant {
     public static final String CACHE_HIT_RATIO = "app.cache.hit.ratio";
 
     /**
+     * Recent cache-key hit token count for requests in the current metric bucket.
+     */
+    public static final String CACHE_RECENT_KEY_HIT_COUNT = "app.cache.recent.key.hit.count";
+
+    /**
+     * Recent cache-key input token count for requests in the current metric bucket.
+     */
+    public static final String CACHE_RECENT_KEY_TOTAL_COUNT = "app.cache.recent.key.total.count";
+
+    /**
+     * Aggregated theory cache-hit token count. Tagged by window=all.
+     */
+    public static final String CACHE_THEORY_HIT_COUNT = "app.cache.theory.hit.count";
+
+    /**
+     * Aggregated theory cache input-token count. Tagged by window=all.
+     */
+    public static final String CACHE_THEORY_TOTAL_COUNT = "app.cache.theory.total.count";
+
+    /**
+     * Aggregated theory cache-hit token ratio. Tagged by window=all.
+     */
+    public static final String CACHE_THEORY_HIT_RATIO = "app.cache.theory.hit.ratio";
+
+    /**
+     * Per-engine candidate routing cache-match hit tokens. Tagged by role, engineIp.
+     */
+    public static final String CACHE_ROUTING_CANDIDATE_MATCH_HIT_TOKENS =
+            "app.cache.routing.candidate.match.hit.tokens";
+
+    /**
+     * Per-engine candidate routing cache-match input tokens. Tagged by role, engineIp.
+     */
+    public static final String CACHE_ROUTING_CANDIDATE_MATCH_TOTAL_TOKENS =
+            "app.cache.routing.candidate.match.total.tokens";
+
+    /**
+     * Selected-engine routing cache-match hit tokens. Tagged by role, engineIp.
+     */
+    public static final String CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS =
+            "app.cache.routing.selected.match.hit.tokens";
+
+    /**
+     * Selected-engine routing cache-match input tokens. Tagged by role, engineIp.
+     */
+    public static final String CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS =
+            "app.cache.routing.selected.match.total.tokens";
+
+    /**
      * Cache request total count
      */
     public static final String CACHE_REQUEST_TOTAL = "app.cache.request.total";

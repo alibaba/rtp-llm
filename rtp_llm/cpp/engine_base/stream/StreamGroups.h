@@ -42,16 +42,23 @@ public:
             } else {
                 decode_block_update_copy_num_ += block_update_copy_num;
             }
-            model_execute_token_size_ += stream->currentExecuteTokenSize();
+            auto execute_token_size = static_cast<size_t>(stream->currentExecuteTokenSize());
+            if (stream->isContextStream()) {
+                auto reuse_length = stream->reuseLength();
+                context_execute_token_size_ += execute_token_size;
+                context_execute_token_size_with_cache_ += execute_token_size;
+                if (reuse_length > 0) {
+                    context_execute_token_size_with_cache_ += static_cast<size_t>(reuse_length) * cur_batch_size;
+                }
+            }
+            model_execute_token_size_ += execute_token_size;
             total_sampler_batch_size_in_ += stream->needTilingForSampling() ? next_batch_size : cur_batch_size;
             total_sampler_batch_size_out_ += next_batch_size;
             max_blocks_num_ = std::max(max_blocks_num_, stream->curBlocksNum());
             if (stream->hasCacheKeys()) {
-                for (int32_t batch_id = 0; batch_id < cur_batch_size; ++batch_id) {
-                    max_cache_keys_num_ = std::max(max_cache_keys_num_, stream->cacheKeys(batch_id).size());
-                }
+                max_cache_keys_num_ = std::max(max_cache_keys_num_, stream->cacheKeys().size());
             }
-            max_seq_len_ = std::max(max_seq_len_, (size_t)stream->seqLength());
+            max_seq_len_    = std::max(max_seq_len_, (size_t)stream->seqLength());
             total_score_batch_size_ += stream->scoreLen();
             adapter_names.push_back(stream->adapterName());
             gen_timeline_ |= stream->genTimeline();
@@ -91,6 +98,12 @@ public:
     size_t modelExecuteTokenSize() const {
         return model_execute_token_size_;
     }
+    size_t contextExecuteTokenSize() const {
+        return context_execute_token_size_;
+    }
+    size_t contextExecuteTokenSizeWithCache() const {
+        return context_execute_token_size_with_cache_;
+    }
     size_t maxSeqLen() const {
         return max_seq_len_;
     }
@@ -125,68 +138,18 @@ public:
         return decode_streams_;
     }
 
-    bool hasMMExtraInput() const {
+    bool needReturnAllProbs() const {
         for (auto& stream : context_streams_) {
-            if (stream->hasMultimodalExtraInput()) {
+            if (stream->getReturnAllProbs()) {
+                return true;
+            }
+        }
+        for (auto& stream : decode_streams_) {
+            if (stream->getReturnAllProbs()) {
                 return true;
             }
         }
         return false;
-    }
-
-    // NOTE: Aggregates by "max mode" across all streams in the batch
-    // (NONE < DEFAULT < ORIGINAL). When the batch contains any ORIGINAL
-    // stream, the sampler runs the ORIGINAL path for the entire batch and
-    // DEFAULT streams will receive un-renormalized raw probabilities. This
-    // is intentional: it avoids per-row branching inside the sampler kernel.
-    // Callers that cannot tolerate this implicit degradation must ensure
-    // streams with different modes are not scheduled into the same batch.
-    //
-    // CORRECTNESS RISK: bot-flagged P1 — when DEFAULT and ORIGINAL streams
-    // coexist in a batch, the DEFAULT-requesting consumer silently gets raw
-    // (un-softmaxed) probabilities. We emit a one-shot WARNING per process
-    // below so this isn't completely silent; long-term the scheduler should
-    // batch-partition by mode, or the sampler should branch per-row. See
-    // PR #349 review for context.
-    ReturnAllProbsMode needReturnAllProbs() const {
-        // get the max return all probs mode from all streams
-        ReturnAllProbsMode return_all_probs = ReturnAllProbsMode::NONE;
-        bool               has_default      = false;
-        bool               has_original     = false;
-        for (auto& stream : context_streams_) {
-            auto cur_return_all_probs = stream->getReturnAllProbs();
-            if (cur_return_all_probs == ReturnAllProbsMode::DEFAULT) {
-                has_default = true;
-            } else if (cur_return_all_probs == ReturnAllProbsMode::ORIGINAL) {
-                has_original = true;
-            }
-            if (cur_return_all_probs > return_all_probs) {
-                return_all_probs = cur_return_all_probs;
-            }
-        }
-        for (auto& stream : decode_streams_) {
-            auto cur_return_all_probs = stream->getReturnAllProbs();
-            if (cur_return_all_probs == ReturnAllProbsMode::DEFAULT) {
-                has_default = true;
-            } else if (cur_return_all_probs == ReturnAllProbsMode::ORIGINAL) {
-                has_original = true;
-            }
-            if (cur_return_all_probs > return_all_probs) {
-                return_all_probs = cur_return_all_probs;
-            }
-        }
-        if (has_default && has_original) {
-            // One-shot log per process: DEFAULT streams in this batch will
-            // see un-renormalized raw probs because sampler runs ORIGINAL.
-            static std::once_flag mixed_mode_warn_once;
-            std::call_once(mixed_mode_warn_once, []() {
-                RTP_LLM_LOG_WARNING("needReturnAllProbs: batch contains both DEFAULT and ORIGINAL "
-                                    "return_all_probs streams; DEFAULT consumers will receive raw "
-                                    "(un-renormalized) probabilities for this batch. The scheduler "
-                                    "should partition by mode to avoid this silent degradation.");
-            });
-        }
-        return return_all_probs;
     }
 
     bool needReturnCumLogProbs() const {
@@ -243,8 +206,12 @@ public:
                      << ", total_sampler_batch_size_in: " << total_sampler_batch_size_in_
                      << ", total_sampler_batch_size_out: " << total_sampler_batch_size_out_
                      << ", total_block_update_copy_num: " << totalBlockUpdateCopyNum()
-                     << ", max_blocks_num_: " << max_blocks_num_ << ", max_cache_keys_num_: " << max_cache_keys_num_
-                     << ", model_execute_token_size: " << model_execute_token_size_ << ", max_seq_len: " << max_seq_len_
+                     << ", max_blocks_num_: " << max_blocks_num_
+                     << ", max_cache_keys_num_: " << max_cache_keys_num_
+                     << ", model_execute_token_size: " << model_execute_token_size_
+                     << ", context_execute_token_size: " << context_execute_token_size_
+                     << ", context_execute_token_size_with_cache: " << context_execute_token_size_with_cache_
+                     << ", max_seq_len: " << max_seq_len_
                      << ", is_fake_stream: " << is_fake_stream_ << "}";
         return debug_string.str();
     }
@@ -273,6 +240,8 @@ private:
     size_t                       max_blocks_num_                = 0;
     size_t                       max_cache_keys_num_            = 0;
     size_t                       model_execute_token_size_      = 0;
+    size_t                       context_execute_token_size_    = 0;
+    size_t                       context_execute_token_size_with_cache_ = 0;
     size_t                       max_seq_len_                   = 0;
     size_t                       max_context_seq_len_           = 0;
     size_t                       max_reuse_length_              = 0;

@@ -6,7 +6,6 @@ import torch.nn.functional as F
 from aiter import dtypes
 
 from rtp_llm.models_py.utils.arch import is_hip
-from rtp_llm.utils.swizzle_utils import swizzle_tensor
 
 try:
     import aiter
@@ -14,11 +13,6 @@ try:
     AITER_AVAILABLE = True
 except ImportError:
     AITER_AVAILABLE = False
-
-
-class _FP8PTPCQuantConfig:
-    def get_method(self):
-        return "FP8_PER_CHANNEL_COMPRESSED"
 
 
 def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
@@ -45,7 +39,7 @@ def shuffle_weight(x: torch.Tensor, layout=(16, 16)) -> torch.Tensor:
 
 
 class RocmFp8PTPCLinearTest(unittest.TestCase):
-    """PTPC FP8 linear test; kernel weights must be preshuffled."""
+    """PTPC fp8 linear单元测试，kernel weight 必须 shuffle。"""
 
     def setUp(self):
         if not is_hip():
@@ -70,7 +64,7 @@ class RocmFp8PTPCLinearTest(unittest.TestCase):
     def test_ptpc_fp8_forward(self):
         from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
         from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
-            RocmFp8PTPCLinearNoSwizzle,
+            RocmFp8PTPCLinear,
         )
 
         weight_q, weight_scales = rocm_per_token_quant_fp8(
@@ -83,7 +77,7 @@ class RocmFp8PTPCLinearTest(unittest.TestCase):
 
         weight_scales_for_init = weight_scales.T.contiguous()  # [1, N]
 
-        ptpc_linear = RocmFp8PTPCLinearNoSwizzle(
+        ptpc_linear = RocmFp8PTPCLinear(
             weight=weight_for_init,  # [K, N]
             weight_scales=weight_scales_for_init,  # [1, N]
             bias=None,
@@ -102,15 +96,15 @@ class RocmFp8PTPCLinearTest(unittest.TestCase):
 
         ref_output = aiter.gemm_a8w8_bpreshuffle(
             ref_input_fp8,  # A_quant_tensor
-            ptpc_linear.weight,  # W_kernel_tensor from RocmFp8PTPCLinearNoSwizzle
+            ptpc_linear.weight,  # W_kernel_tensor (使用 RocmFp8PTPCLinear 内部的 weight)
             ref_input_scales,  # A_quant_scale_tensor (M, 1)
-            ptpc_linear.weight_scales,  # W_scale_tensor from RocmFp8PTPCLinearNoSwizzle
+            ptpc_linear.weight_scales,  # W_scale_tensor (使用 RocmFp8PTPCLinear 内部的 weight_scales)
             None,  # bias
-            ref_input_bf16.dtype,  # output dtype matches RocmFp8PTPCLinearNoSwizzle.forward()
+            ref_input_bf16.dtype,  # output dtype (与 RocmFp8PTPCLinear.forward() 相同)
         )
         ref = ref_output
 
-        # Compare against the same low-level default kernel path.
+        # 5. 对比结果
         max_diff = (ptpc_output - ref).abs().max().item()
         mean_diff = (ptpc_output - ref).abs().mean().item()
         print(f"nobias max_diff: {max_diff:.6f}, mean_diff: {mean_diff:.6f}")
@@ -119,305 +113,6 @@ class RocmFp8PTPCLinearTest(unittest.TestCase):
         self.assertEqual(ptpc_output.shape, (self.batch_size, self.output_size))
         self.assertFalse(torch.isnan(ptpc_output).any())
         self.assertFalse(torch.isinf(ptpc_output).any())
-
-
-class RocmFp8PTPCLinearDispatchTest(unittest.TestCase):
-    """Test numerical equivalence between cktile and default FP8 GEMM kernels.
-
-    Directly compares gemm_a8w8_bpreshuffle_cktile vs gemm_a8w8_bpreshuffle
-    with identical FP8 inputs at dispatch threshold boundaries.
-    """
-
-    def setUp(self):
-        if not is_hip():
-            raise SkipTest("Test requires ROCm/HIP backend!")
-        if not AITER_AVAILABLE:
-            raise SkipTest("aiter required for RocmFp8PTPCLinear!")
-        self.device = "cuda"
-
-    def _run_and_verify(self, M, N, K):
-        """Verify FP8 PTPC linear dispatch output correctness.
-
-        For all dispatch shapes, verifies:
-        1. Shape correctness and finiteness (no NaN/Inf)
-        2. Determinism: two forward() calls produce identical output (max_diff < 1e-3)
-        3. Amplitude correctness:
-           - Default path: max_diff < 1e-3 vs gemm_a8w8_bpreshuffle (verified baseline)
-           - Cktile path: output is non-trivial (std > 0, absmax within 2x of
-             expected magnitude sqrt(K) for randn inputs)
-        """
-        from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
-        from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
-            RocmFp8PTPCLinearNoSwizzle,
-        )
-
-        input_bf16 = torch.randn(M, K, dtype=torch.bfloat16, device=self.device)
-        weight_bf16 = torch.randn(N, K, dtype=torch.bfloat16, device=self.device)
-
-        weight_q, weight_scales = rocm_per_token_quant_fp8(weight_bf16)
-        weight_shuffle = shuffle_weight(weight_q, layout=(16, 16))
-        ptpc_linear = RocmFp8PTPCLinearNoSwizzle(
-            weight=weight_shuffle.T.contiguous(),
-            weight_scales=weight_scales.T.contiguous(),
-            bias=None,
-        )
-
-        # Forward calls
-        output_1 = ptpc_linear(input_bf16)
-        output_2 = ptpc_linear(input_bf16)
-
-        # 1. Shape and finiteness
-        self.assertEqual(output_1.shape, (M, N))
-        self.assertFalse(torch.isnan(output_1).any(), f"NaN for M={M},N={N},K={K}")
-        self.assertFalse(torch.isinf(output_1).any(), f"Inf for M={M},N={N},K={K}")
-
-        # 2. Determinism: max_diff < 1e-3
-        det_diff = (output_1.float() - output_2.float()).abs().max().item()
-        self.assertLess(
-            det_diff,
-            1e-3,
-            f"determinism max_diff={det_diff:.6f} for M={M},N={N},K={K}",
-        )
-
-        # 3. Amplitude correctness
-        use_cktile = K < 192 or M >= 1536 or (M >= 512 and N > 1536)
-        if not use_cktile:
-            # Default path: compare against gemm_a8w8_bpreshuffle baseline
-            # (verified correct by test_ptpc_fp8_forward with max_diff=0)
-            input_fp8, input_scales = rocm_per_token_quant_fp8(input_bf16)
-            input_scales = input_scales.to(torch.float32)
-            baseline = aiter.gemm_a8w8_bpreshuffle(
-                input_fp8,
-                ptpc_linear.weight,
-                input_scales,
-                ptpc_linear.weight_scales,
-                None,
-                input_bf16.dtype,
-            )
-            max_diff = (output_1.float() - baseline.float()).abs().max().item()
-            self.assertLess(
-                max_diff,
-                1e-3,
-                f"default path max_diff={max_diff:.6f} for M={M},N={N},K={K}",
-            )
-        else:
-            # Cktile path: verify output is non-trivial and has reasonable magnitude.
-            # For randn inputs, matmul output absmax ~ sqrt(K) * input_absmax.
-            # We check: output has variance (not all zeros or constant) and
-            # absmax is within a reasonable range.
-            output_std = output_1.float().std().item()
-            output_absmax = output_1.float().abs().max().item()
-            expected_scale = K**0.5  # sqrt(K) for randn @ randn.T
-
-            self.assertGreater(
-                output_std,
-                0.1,
-                f"cktile output std too low ({output_std:.6f}) for M={M},N={N},K={K}",
-            )
-            self.assertGreater(
-                output_absmax,
-                1.0,
-                f"cktile output absmax too low ({output_absmax:.4f}) for M={M},N={N},K={K}",
-            )
-            # absmax should be roughly in [sqrt(K)/10, sqrt(K)*10] range
-            self.assertLess(
-                output_absmax,
-                expected_scale * 20,
-                f"cktile output absmax too high ({output_absmax:.4f}, "
-                f"expected ~{expected_scale:.1f}) for M={M},N={N},K={K}",
-            )
-
-    # --- default path boundary tests ---
-    def test_decode_small_m(self):
-        """M=32, N=1024, K=256 -> default (protects decode)."""
-        self._run_and_verify(M=32, N=1024, K=256)
-
-    def test_default_below_m512_large_n(self):
-        """M=256, N=2816, K=256 -> default (M<512)."""
-        self._run_and_verify(M=256, N=2816, K=256)
-
-    # --- cktile path boundary tests ---
-    def test_small_n_at_threshold_m1536(self):
-        """M=1536, N=1024, K=256 -> cktile (M>=1536)."""
-        self._run_and_verify(M=1536, N=1024, K=256)
-
-    def test_large_n_at_threshold_m512(self):
-        """M=512, N=2816, K=256 -> cktile (M>=512 and N>1536)."""
-        self._run_and_verify(M=512, N=2816, K=256)
-
-    def test_prefill_large_m(self):
-        """M=2048, N=1024, K=1024 -> cktile (M>=1536)."""
-        self._run_and_verify(M=2048, N=1024, K=1024)
-
-
-class RocmFp8PTPCLinearWithSwizzleTest(unittest.TestCase):
-    """Test the swizzleA hipBLASLt wrappers without caller-side hasattr probes."""
-
-    def setUp(self):
-        if not is_hip():
-            raise SkipTest("Test requires ROCm/HIP backend!")
-        if not AITER_AVAILABLE:
-            raise SkipTest("aiter required for RocmFp8PTPCLinearWithSwizzle!")
-        self.device = "cuda"
-        self.hidden_size = 256
-        self.output_size = 512
-        self.batch_size = 64
-        self.input_bf16 = torch.randn(
-            self.batch_size, self.hidden_size, dtype=torch.bfloat16, device=self.device
-        )
-        self.weight_bf16 = torch.randn(
-            self.output_size, self.hidden_size, dtype=torch.bfloat16, device=self.device
-        )
-        self.bias = torch.randn(
-            self.output_size, dtype=torch.bfloat16, device=self.device
-        )
-
-    def _make_linear(self):
-        from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
-        from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
-            RocmFp8PTPCLinearWithSwizzle,
-        )
-
-        weight_q, weight_scales = rocm_per_token_quant_fp8(self.weight_bf16)
-        # Match device_impl.py: keep the final transpose as a view. Making it
-        # contiguous changes the underlying swizzleA storage layout.
-        weight_swizzled = swizzle_tensor(weight_q, False).T
-        return RocmFp8PTPCLinearWithSwizzle(
-            weight=weight_swizzled,
-            weight_scales=weight_scales.T.contiguous(),
-            bias=self.bias,
-        )
-
-    def test_hipb_weight_view_is_metadata_only_column_major(self):
-        linear = self._make_linear()
-        self.assertEqual(linear.weight.stride(), (1, self.hidden_size))
-        self.assertEqual(linear.weight.shape, (self.hidden_size, self.output_size))
-
-    def test_factory_selects_fp8_ptpc_strategy_by_swizzle_config(self):
-        from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
-        from rtp_llm.models_py.modules.factory import LinearFactory
-        from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
-            RocmFp8PTPCLinearNoSwizzle,
-            RocmFp8PTPCLinearWithSwizzle,
-        )
-        from rtp_llm.ops import HWKernelConfig
-
-        weight_q, weight_scales = rocm_per_token_quant_fp8(self.weight_bf16)
-        scale_b = weight_scales.T.contiguous()
-        weight_no_swizzle = shuffle_weight(weight_q, layout=(16, 16)).T.contiguous()
-        weight_with_swizzle = swizzle_tensor(weight_q, False).T
-        quant_config = _FP8PTPCQuantConfig()
-
-        original_strategies = list(LinearFactory._strategies)
-        try:
-            LinearFactory.clear()
-            LinearFactory.register(RocmFp8PTPCLinearWithSwizzle)
-            LinearFactory.register(RocmFp8PTPCLinearNoSwizzle)
-
-            hw_config = HWKernelConfig()
-            hw_config.use_swizzleA = True
-            linear = LinearFactory.create_linear(
-                weight_with_swizzle, self.bias, scale_b, quant_config, hw_config
-            )
-            self.assertIsInstance(linear, RocmFp8PTPCLinearWithSwizzle)
-
-            hw_config = HWKernelConfig()
-            hw_config.use_swizzleA = False
-            linear = LinearFactory.create_linear(
-                weight_no_swizzle, self.bias, scale_b, quant_config, hw_config
-            )
-            self.assertIsInstance(linear, RocmFp8PTPCLinearNoSwizzle)
-        finally:
-            LinearFactory.clear()
-            for strategy in original_strategies:
-                LinearFactory.register(strategy)
-
-    def test_forward_matches_dequant_reference(self):
-        from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
-
-        linear = self._make_linear()
-        output = linear(self.input_bf16)
-
-        input_q, input_scales = rocm_per_token_quant_fp8(self.input_bf16, eps=1e-10)
-        weight_q, weight_scales = rocm_per_token_quant_fp8(self.weight_bf16)
-        ref = run_torch(
-            input_q,
-            weight_q,
-            input_scales.to(torch.float32),
-            weight_scales,
-            bias=self.bias,
-            dtype=torch.bfloat16,
-        )
-
-        self.assertEqual(output.shape, (self.batch_size, self.output_size))
-        self.assertFalse(torch.isnan(output).any())
-        self.assertFalse(torch.isinf(output).any())
-        torch.testing.assert_close(output, ref, atol=5e-2, rtol=5e-2)
-
-    def test_scale_b_normalize_accepts_common_shapes(self):
-        from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
-            RocmFp8PTPCLinearWithSwizzle,
-        )
-
-        n = self.output_size
-        for scale in (
-            torch.randn(n, device=self.device),
-            torch.randn(n, 1, device=self.device),
-            torch.randn(1, n, device=self.device),
-        ):
-            normalized = RocmFp8PTPCLinearWithSwizzle._as_hipb_scale_b(scale, n)
-            self.assertEqual(normalized.shape, (1, n))
-            self.assertTrue(normalized.is_contiguous())
-
-    def test_solution_cache_file_is_packaged_and_parsed(self):
-        from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
-            RocmFp8PTPCLinearWithSwizzle,
-        )
-
-        RocmFp8PTPCLinearWithSwizzle._load_solution_cache.cache_clear()
-        self.assertTrue(RocmFp8PTPCLinearWithSwizzle._solution_cache_path().exists())
-        cache = RocmFp8PTPCLinearWithSwizzle._load_solution_cache()
-        self.assertEqual(len(cache), 20)
-        self.assertEqual(cache.get((512, 768, 2304, "bias")), 271680)
-        self.assertEqual(cache.get((1024, 768, 3072, "bias_gelu")), 271141)
-        self.assertEqual(cache.get((2048, 768, 2304, "bias")), 271305)
-        self.assertEqual(cache.get((4096, 3072, 768, "bias")), 272502)
-        self.assertEqual(cache.get((8192, 768, 2304, "bias")), 271339)
-        self.assertEqual(cache.get((16384, 768, 2304, "bias")), 271329)
-        # Low-gain rows are intentionally omitted and fall back to -1.
-        self.assertNotIn((8192, 3072, 768, "bias"), cache)
-        self.assertNotIn((8192, 768, 3072, "bias_gelu"), cache)
-        self.assertNotIn((16384, 3072, 768, "bias"), cache)
-        self.assertNotIn((16384, 768, 3072, "bias_gelu"), cache)
-
-    def test_solution_index_falls_back_for_uncached_shape(self):
-        linear = self._make_linear()
-        self.assertEqual(linear._get_solution_index(1, 1, 1, "bias"), -1)
-        self.assertEqual(linear._get_solution_index(8192, 3072, 768, "bias"), -1)
-
-    def test_epilogue_name_for_solution_cache_key(self):
-        from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
-            RocmFp8PTPCLinearWithSwizzle,
-        )
-
-        self.assertEqual(
-            RocmFp8PTPCLinearWithSwizzle._epilogue_name(True, True, True),
-            "bias_gelu",
-        )
-        self.assertEqual(
-            RocmFp8PTPCLinearWithSwizzle._epilogue_name(True, True, False),
-            "bias",
-        )
-        self.assertEqual(
-            RocmFp8PTPCLinearWithSwizzle._epilogue_name(False, True, False),
-            "none",
-        )
-
-    def test_forward_with_bias_gelu_matches_gelu_of_biased_forward(self):
-        linear = self._make_linear()
-        fused = linear.forward_with_bias_gelu(self.input_bf16)
-        ref = F.gelu(linear(self.input_bf16))
-        torch.testing.assert_close(fused, ref, atol=5e-2, rtol=5e-2)
 
 
 if __name__ == "__main__":

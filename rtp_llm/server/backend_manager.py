@@ -2,12 +2,9 @@ import gc
 import logging
 import threading
 import time
-from typing import Any, Dict, Optional, Union
-
-from pydantic import BaseModel
+from typing import TYPE_CHECKING, Optional
 
 from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.engine_config import EngineConfig, update_worker_addrs
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
@@ -16,9 +13,9 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
 from rtp_llm.utils.concurrency_controller import get_global_controller
-from rtp_llm.utils.fuser import _nfs_manager
 
-StreamObjectType = Union[Dict[str, Any], BaseModel]
+if TYPE_CHECKING:
+    from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 
 USAGE_HEADER = "USAGE"
 
@@ -38,7 +35,7 @@ class BackendManager(object):
         # just rank 0 report metric
         if py_env_configs.parallelism_config.world_rank == 0:
             kmonitor.init()
-        self.engine: Optional[BaseEngine] = None
+        self.engine: Optional["BaseEngine"] = None
         self._shutdown_requested = threading.Event()
 
     def start(self):
@@ -80,7 +77,6 @@ class BackendManager(object):
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
             eplb_config=self.py_env_configs.eplb_config,
-            vit_config=self.py_env_configs.vit_config,
         )
         # Let engine_config finalize based on model_config (e.g. scheduler config)
         ModelFactory.update_engine_config_from_model_config(
@@ -88,47 +84,17 @@ class BackendManager(object):
             model_config=model_config,
         )
 
-        # Initialize DeepEP/MoriEP wrapper if MOE model and EP is enabled
+        # Initialize DeepEP wrapper if MOE model and DeepEP is enabled
         if (
-            model_config.expert_num > 0
+            engine_config.moe_config.use_deepep_moe
+            and model_config.expert_num > 0
             and engine_config.parallelism_config.world_size > 1
             and not engine_config.moe_config.use_all_gather
         ):
-            deepep_init_success = False
-            moriep_init_success = False
+            from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
 
-            # Initialize DeepEP if enabled
-            if engine_config.moe_config.use_deepep_moe:
-                try:
-                    from rtp_llm.models_py.distributed.deepep_wrapper import (
-                        init_deepep_wrapper,
-                    )
-
-                    init_deepep_wrapper(engine_config, model_config)
-                    deepep_init_success = True
-                except Exception as e:
-                    logging.error(f"Failed to initialize DeepEP wrapper: {e}")
-
-            # Initialize MoriEP if enabled (can be independent of DeepEP)
-            if engine_config.moe_config.use_mori_ep:
-                try:
-                    from rtp_llm.models_py.distributed.moriep_wrapper import (
-                        init_moriep_wrapper,
-                    )
-
-                    init_moriep_wrapper(engine_config, model_config)
-                    moriep_init_success = True
-                    logging.info("MoriEP wrapper initialized successfully")
-                except Exception as e:
-                    logging.error(f"Failed to initialize MoriEP wrapper: {e}")
-
-            # Raise if a requested EP backend failed to initialize
-            if engine_config.moe_config.use_deepep_moe and not deepep_init_success:
-                raise RuntimeError("DeepEP was requested but failed to initialize")
-            if engine_config.moe_config.use_mori_ep and not moriep_init_success:
-                raise RuntimeError(
-                    "use_mori_ep is set but MoriEP wrapper failed to initialize"
-                )
+            logging.info("initialize deepep wrapper")
+            init_deepep_wrapper(engine_config, model_config)
 
         # Optional propose model config
         propose_model_config = ModelFactory.create_propose_model_config(
@@ -170,13 +136,28 @@ class BackendManager(object):
 
     def stop(self) -> None:
         """Stop the backend manager and cleanup resources"""
-        if isinstance(self.engine, BaseEngine):
-            _nfs_manager.unmount_all()
-            logging.info("all nfs paths unmounted")
-            self.engine.stop()
+        if self.engine is not None:
+            from rtp_llm.utils.fuser import _nfs_manager
+
+            engine_stop_error = None
+            try:
+                self.engine.stop()
+            except Exception as e:
+                engine_stop_error = e
+                logging.exception("engine stop failed during backend shutdown")
+            finally:
+                try:
+                    _nfs_manager.unmount_all()
+                    logging.info("all nfs paths unmounted")
+                except Exception:
+                    logging.exception("nfs unmount failed during backend shutdown")
+                    if engine_stop_error is None:
+                        raise
+            if engine_stop_error is not None:
+                raise engine_stop_error
 
     def ready(self):
-        if isinstance(self.engine, BaseEngine):
+        if self.engine is not None:
             return self.engine.ready()
         return True
 

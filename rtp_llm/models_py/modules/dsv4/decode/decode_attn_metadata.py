@@ -116,7 +116,7 @@ class DSv4DecodeAttnMetadata:
     # ------------------------------------------------------------------
 
     # Per-attn_type framework block_table: [max_B, max_blocks_per_req] int32.
-    # Source: the selected group's ``attn_inputs.kv_cache_kernel_block_id_device``.
+    # Source: ``attn_inputs.kv_cache_kernel_block_id_device_by_group[gid]``.
     # Keys are attn_type ids (1=CSA_KV..7=SWA_KV) from
     # :mod:`rtp_llm.models_py.modules.dsv4.attn_type`; only pools that the
     # model actually uses are present.

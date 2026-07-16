@@ -1,16 +1,17 @@
 #include <memory>
-#include <numeric>
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
 #define private public
+#define protected public
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 
 using namespace std;
 
@@ -18,7 +19,7 @@ namespace rtp_llm {
 
 template<typename T>
 std::vector<T> toVec(const torch::Tensor& t) {
-    auto c = t.contiguous();
+    auto c = t.is_cuda() ? t.cpu().contiguous() : t.contiguous();
     return std::vector<T>(c.data_ptr<T>(), c.data_ptr<T>() + c.numel());
 }
 
@@ -26,77 +27,43 @@ static torch::Tensor hostIntBuffer(std::vector<int32_t> data) {
     return torch::tensor(data, torch::kInt32);
 }
 
-static void initFullCacheConfig(CacheConfig& cache_config, int layer_num) {
-    auto spec = std::make_shared<MHAKVCacheSpec>();
-    spec->tag = "default";
-    std::vector<int> layer_ids(static_cast<size_t>(layer_num));
-    std::iota(layer_ids.begin(), layer_ids.end(), 0);
-    cache_config.layer_num     = static_cast<uint32_t>(layer_num);
-    cache_config.layer_all_num = static_cast<uint32_t>(layer_num);
-    cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
-}
-
 class NormalBatchStreamProcessorTest: public DeviceTestBase {};
 
-TEST_F(NormalBatchStreamProcessorTest, testWarmUpWithoutCacheManager) {
-    ModelConfig model_config;
-    model_config.num_layers = 1;
-    PDSepConfig                 pd_sep_config;
-    ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    CacheConfig                 cache_config;
+class TestStatefulLogitsProcessor: public BaseLogitsProcessor {
+public:
+    explicit TestStatefulLogitsProcessor(bool async_device_state): async_device_state_(async_device_state) {}
 
-    NormalBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, true);
+    void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override {
+        (void)inputs;
+        (void)start_idx;
+        (void)finish_idx;
+    }
 
-    EXPECT_EQ(processor.model_input_gatherer_config_.kv_cache_group_nums, 0);
-    EXPECT_TRUE(processor.model_input_gatherer_config_.kv_cache_group_types.empty());
-}
+    void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override {
+        (void)src_batch_indices;
+    }
 
-TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable) {
-    ResourceContext resource_context;
-    ModelConfig     model_config;
-    model_config.max_seq_len = 2048;
-    model_config.vocab_size  = 2048;
-    model_config.num_layers  = 1;
+    void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override {
+        (void)new_tokens;
+        accepted_token_len_ += num_new_tokens;
+    }
 
-    PDSepConfig pd_sep_config;
-    pd_sep_config.role_type = RoleType::PREFILL;
-    ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    CacheConfig                 cache_config;
-    initFullCacheConfig(cache_config, model_config.num_layers);
-    RuntimeConfig runtime_config;
+    bool isStateful() const override {
+        return true;
+    }
 
-    auto query                                   = make_shared<GenerateInput>();
-    query->input_ids                             = hostIntBuffer({1, 2, 3});
-    query->generate_config                       = make_shared<GenerateConfig>();
-    query->generate_config->num_return_sequences = 2;
-    GenerateStreamPtr stream =
-        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    bool supportsNormalAsyncDeviceState() const override {
+        return async_device_state_;
+    }
 
-    BatchKVCacheResource resource;
-    resource.resetBatchSize(2);
-    resource.initGroups(1, 1, {{0}});
-    resource.setBatchBlocks(0, 0, {1, 2});
-    resource.setBatchBlocks(1, 0, {3, 4});
-    resource.setBatchCacheKeys(0, CacheKeysType{101, 102, 103});
-    resource.setBatchCacheKeys(1, CacheKeysType{201, 202, 203, 204, 205});
-    stream->setKVCache(resource);
-    stream->generate_status_->status = StreamState::RUNNING;
+    int64_t acceptedTokenLen() const override {
+        return accepted_token_len_;
+    }
 
-    StreamGroups stream_groups({stream});
-    EXPECT_EQ(stream_groups.curBlocksNum(), 2);
-    EXPECT_EQ(stream_groups.maxCacheKeysNum(), 5);
-
-    NormalBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
-    auto merge_input_status = processor.gatherModelInput(stream_groups);
-    ASSERT_TRUE(merge_input_status.ok());
-    const auto& cache_keys = merge_input_status.value().cache_keys;
-    ASSERT_TRUE(cache_keys.defined());
-    EXPECT_EQ(cache_keys.size(0), 2);
-    EXPECT_EQ(cache_keys.size(1), 5);
-    EXPECT_EQ(toVec<int64_t>(cache_keys), (std::vector<int64_t>{101, 102, 103, 0, 0, 201, 202, 203, 204, 205}));
-}
+private:
+    bool    async_device_state_;
+    int64_t accepted_token_len_ = 0;
+};
 
 TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     ResourceContext resource_context;
@@ -104,13 +71,11 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     model_config.max_seq_len                = 2048;
     model_config.vocab_size                 = 2048;
     model_config.num_layers                 = 2;
-    model_config.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
+    model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
-    initFullCacheConfig(cache_config, model_config.num_layers);
-    cache_config.kv_block_stride_bytes = 4096;
-    cache_config.kv_scale_stride_bytes = 256;
+    cache_config.group_types = {CacheGroupType::FULL};
 
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
@@ -124,7 +89,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     query1->input_ids = hostIntBuffer({1});
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
-    addr1.initGroups(1, 3, {{0}, {0}, {0}});
+    addr1.initGroups(1, 3, {0, 0, 0});
     addr1.setBatchBlocks(0, 0, {1, 2, 3, 4});
     stream1->setKVCache(addr1);
     stream1->setIsContextStream(false);
@@ -137,7 +102,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     query2->input_ids = hostIntBuffer({1, 2});
     BatchKVCacheResource addr2;
     addr2.resetBatchSize(1);
-    addr2.initGroups(1, 3, {{0}, {0}, {0}});
+    addr2.initGroups(1, 3, {0, 0, 0});
     addr2.setBatchBlocks(0, 0, {5, 6, 7, 8});
     stream2->setKVCache(addr2);
     stream2->setIsContextStream(false);
@@ -149,7 +114,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr3;
     addr3.resetBatchSize(1);
-    addr3.initGroups(1, 3, {{0}, {0}, {0}});
+    addr3.initGroups(1, 3, {0, 0, 0});
     addr3.setBatchBlocks(0, 0, {9, 10});
     stream3->setKVCache(addr3);
 
@@ -160,7 +125,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         make_shared<NormalGenerateStream>(query4, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr4;
     addr4.resetBatchSize(1);
-    addr4.initGroups(1, 3, {{0}, {0}, {0}});
+    addr4.initGroups(1, 3, {0, 0, 0});
     addr4.setBatchBlocks(0, 0, {11, 12, 13, 14});
     stream4->setKVCache(addr4);
     stream4->setReuseLength(1);
@@ -177,8 +142,9 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
 
     {
         StreamGroups stream_groups(streams);
+        TensorHolder holder;
 
-        auto merge_input_status = processor.gatherModelInput(stream_groups);
+        auto merge_input_status = processor.gatherModelInput(stream_groups, holder);
 
         EXPECT_TRUE(merge_input_status.ok());
         auto&       model_input       = merge_input_status.value();
@@ -192,8 +158,6 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(sequence_lengths, toVec<int>(model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, toVec<int>(model_input.prefix_lengths));
         EXPECT_EQ(kv_cache_block_id, toVec<int>(model_input.kv_cache_block_id));
-        EXPECT_EQ(model_input.kv_block_stride_bytes, cache_config.kv_block_stride_bytes);
-        EXPECT_EQ(model_input.kv_scale_stride_bytes, cache_config.kv_scale_stride_bytes);
     }
     {
         MMModelConfig mm_model_config;
@@ -202,11 +166,93 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
             model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
 
         StreamGroups stream_groups(streams);
-        auto         merge_input_status = processor.gatherModelInput(stream_groups);
+        TensorHolder holder;
+        auto         merge_input_status = processor.gatherModelInput(stream_groups, holder);
         EXPECT_TRUE(merge_input_status.ok());
         auto& model_input = merge_input_status.value();
         EXPECT_FALSE(model_input.attention_mask.defined());
     }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathWaitsForBlockingLogitsProcessorState) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 128;
+    model_config.vocab_size  = 128900;
+    RuntimeConfig runtime_config;
+
+    std::shared_ptr<GenerateInput> query          = make_shared<GenerateInput>();
+    query->input_ids                              = hostIntBuffer({1, 2, 3});
+    query->generate_config                        = make_shared<GenerateConfig>();
+    query->generate_config->in_think_mode         = true;
+    query->generate_config->max_thinking_tokens   = 10;
+    query->generate_config->begin_think_token_ids = {128821};
+    query->generate_config->end_think_token_ids   = {128822};
+
+    GenerateStreamPtr stream =
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->setIsContextStream(false);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+        .last_sample_token_gpu = torch::full({1}, 42, cuda_i32),
+        .next_seq_len_gpu      = torch::full({1}, 4, cuda_i32),
+        .last_real_seq_len     = 3,
+        .next_real_seq_len     = 4,
+    });
+
+    std::list<GenerateStreamPtr> streams{stream};
+    StreamGroups                 stream_groups(streams);
+
+    EngineInitParams params;
+    params.model_config_ = model_config;
+    params.py_model      = py::none();
+    NormalExecutor executor(params, nullptr, true);
+
+    EXPECT_TRUE(executor.gatherCanUseDeviceState(stream_groups));
+    stream->logits_processor_list_.push_back(std::make_shared<TestStatefulLogitsProcessor>(false));
+    stream->incPendingAsyncBookkeeping();
+    EXPECT_FALSE(executor.gatherCanUseDeviceState(stream_groups));
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathAllowsAsyncLogitsProcessorState) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 128;
+    model_config.vocab_size  = 128900;
+    RuntimeConfig runtime_config;
+
+    std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+    query->input_ids                     = hostIntBuffer({1, 2, 3});
+    query->generate_config               = make_shared<GenerateConfig>();
+
+    GenerateStreamPtr stream =
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->setIsContextStream(false);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+        .last_sample_token_gpu = torch::full({1}, 42, cuda_i32),
+        .next_seq_len_gpu      = torch::full({1}, 4, cuda_i32),
+        .last_real_seq_len     = 3,
+        .next_real_seq_len     = 4,
+    });
+    stream->logits_processor_list_.push_back(std::make_shared<TestStatefulLogitsProcessor>(true));
+
+    std::list<GenerateStreamPtr> streams{stream};
+    StreamGroups                 stream_groups(streams);
+
+    EngineInitParams params;
+    params.model_config_ = model_config;
+    params.py_model      = py::none();
+    NormalExecutor executor(params, nullptr, true);
+
+    stream->incPendingAsyncBookkeeping();
+    EXPECT_TRUE(executor.gatherCanUseDeviceState(stream_groups));
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
@@ -228,7 +274,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
         make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
-    addr1.initGroups(1, 3, {{0}, {0}, {0}});
+    addr1.initGroups(1, 3, {0, 0, 0});
     addr1.setBatchBlocks(0, 0, {1});
     stream1->setKVCache(addr1);
 
@@ -238,12 +284,13 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     for (const auto& stream : streams) {
         stream->generate_status_->status = StreamState::RUNNING;
     }
-    initFullCacheConfig(cache_config, model_config.num_layers);
+    cache_config.group_types = {CacheGroupType::FULL};
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
 
     StreamGroups stream_groups(streams);
-    auto         merge_input_status = processor.gatherModelInput(stream_groups);
+    TensorHolder holder;
+    auto         merge_input_status = processor.gatherModelInput(stream_groups, holder);
     EXPECT_TRUE(merge_input_status.ok());
 
     SamplerInputs sampler_inputs;
@@ -281,7 +328,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
         make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
-    addr1.initGroups(1, 3, {{0}, {0}, {0}});
+    addr1.initGroups(1, 3, {0, 0, 0});
     addr1.setBatchBlocks(0, 0, {1});
     stream1->setKVCache(addr1);
 
@@ -293,7 +340,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
         make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr3;
     addr3.resetBatchSize(1);
-    addr3.initGroups(1, 3, {{0}, {0}, {0}});
+    addr3.initGroups(1, 3, {0, 0, 0});
     addr3.setBatchBlocks(0, 0, {9});
     stream3->setKVCache(addr3);
 
@@ -305,7 +352,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
         make_shared<NormalGenerateStream>(query4, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr4;
     addr4.resetBatchSize(1);
-    addr4.initGroups(1, 3, {{0}, {0}, {0}});
+    addr4.initGroups(1, 3, {0, 0, 0});
     addr4.setBatchBlocks(0, 0, {11, 12});
     stream4->setKVCache(addr4);
 
@@ -317,12 +364,13 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     for (const auto& stream : streams) {
         stream->generate_status_->status = StreamState::RUNNING;
     }
-    initFullCacheConfig(cache_config, model_config.num_layers);
+    cache_config.group_types = {CacheGroupType::FULL};
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
 
     StreamGroups stream_groups(streams);
-    auto         merge_input_status = processor.gatherModelInput(stream_groups);
+    TensorHolder holder;
+    auto         merge_input_status = processor.gatherModelInput(stream_groups, holder);
     EXPECT_TRUE(merge_input_status.ok());
     EXPECT_TRUE(merge_input_status.value().need_all_logits);
 
@@ -359,12 +407,12 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     model_config.max_seq_len                   = 2048;
     model_config.vocab_size                    = 2048;
     model_config.num_layers                    = 2;
-    model_config.attn_config.kv_cache_dtype    = KvCacheDataType::FP8;
+    model_config.attn_config.kv_cache_dtype    = KvCacheDataType::INT8;
     model_config.mm_model_config.is_multimodal = true;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
-    initFullCacheConfig(cache_config, model_config.num_layers);
+    cache_config.group_types = {CacheGroupType::FULL};
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
@@ -407,8 +455,9 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
 
     {
         StreamGroups stream_groups(streams);
+        TensorHolder holder;
 
-        auto merge_input_status = processor.gatherModelInput(stream_groups);
+        auto merge_input_status = processor.gatherModelInput(stream_groups, holder);
         EXPECT_TRUE(merge_input_status.ok());
 
         auto&       model_input      = merge_input_status.value();

@@ -9,7 +9,7 @@ ComputedLayerCacheBuffer::ComputedLayerCacheBuffer(int64_t                      
                                                    int64_t                                  deadline_ms):
     request_id_(request_id), deadline_ms_(deadline_ms) {
     if (layer_cache_buffer) {
-        layer_cache_buffers_[{layer_cache_buffer->getLayerId(), layer_cache_buffer->getGroupId()}] = layer_cache_buffer;
+        layer_cache_buffers_[layer_cache_buffer->getLayerId()] = layer_cache_buffer;
     }
 }
 
@@ -17,7 +17,7 @@ void ComputedLayerCacheBuffer::addBuffer(const std::shared_ptr<LayerCacheBuffer>
                                          int64_t                                  deadline_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (layer_cache_buffer) {
-        layer_cache_buffers_[{layer_cache_buffer->getLayerId(), layer_cache_buffer->getGroupId()}] = layer_cache_buffer;
+        layer_cache_buffers_[layer_cache_buffer->getLayerId()] = layer_cache_buffer;
     }
     int64_t cur = deadline_ms_.load(std::memory_order_relaxed);
     if (deadline_ms > cur) {
@@ -30,9 +30,10 @@ std::pair<int, std::vector<std::shared_ptr<LayerCacheBuffer>>>
 ComputedLayerCacheBuffer::getBuffers(const std::set<int>& layer_ids) {
     std::lock_guard<std::mutex>                    lock(mutex_);
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
-    for (const auto& [layer_group, buffer] : layer_cache_buffers_) {
-        if (layer_ids.count(layer_group.first)) {
-            layer_cache_buffers.push_back(buffer);
+    for (auto layer_id : layer_ids) {
+        auto iter = layer_cache_buffers_.find(layer_id);
+        if (iter != layer_cache_buffers_.end()) {
+            layer_cache_buffers.push_back(iter->second);
         }
     }
     return {static_cast<int>(layer_cache_buffers_.size()), layer_cache_buffers};

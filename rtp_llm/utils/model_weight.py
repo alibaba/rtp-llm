@@ -45,6 +45,7 @@ def concat_0(ts: List[torch.Tensor]) -> torch.Tensor:
         torch.float8_e4m3fnuz,
         torch.float8_e5m2,
         torch.float8_e5m2fnuz,
+        torch.float8_e8m0fnu,
     ]:
         dtype = ts[0].dtype
         out_u8 = torch.concat([x.view(torch.uint8) for x in ts], dim=0).contiguous()
@@ -62,6 +63,7 @@ def concat_1(ts: List[torch.Tensor]) -> torch.Tensor:
         torch.float8_e4m3fnuz,
         torch.float8_e5m2,
         torch.float8_e5m2fnuz,
+        torch.float8_e8m0fnu,
     ]:
         dtype = ts[0].dtype
         out_u8 = torch.concat([x.view(torch.uint8) for x in ts], dim=1).contiguous()
@@ -397,6 +399,7 @@ def stack_moe_w1_pad(ts: List[torch.Tensor], moe_align_size: int, dim: int):
         z = torch.zeros(pad_shape, device=w1.device).half()
         w1 = torch.cat((w1, z), dim=1)
         w3 = torch.cat((w3, z), dim=1)
+
     x = torch.concat([w1, w3], dim=1)
     return x
 
@@ -410,6 +413,7 @@ def stack_0(ts: List[torch.Tensor]) -> torch.Tensor:
         torch.float8_e4m3fnuz,
         torch.float8_e5m2,
         torch.float8_e5m2fnuz,
+        torch.float8_e8m0fnu,
     ]:
         dtype = ts[0].dtype
         out_u8 = torch.concat(
@@ -949,6 +953,7 @@ def pad_w13(ts: List[torch.Tensor], align_size: int, dim: int):
         torch.float8_e4m3fnuz,
         torch.float8_e5m2,
         torch.float8_e5m2fnuz,
+        torch.float8_e8m0fnu,
     ]:
         dtype = w1.dtype
         out_u8 = torch.concat(
@@ -1052,28 +1057,6 @@ def sp_0_w13(
     return torch.concat([w1, w3], dim=0)
 
 
-def convert_gate_up_proj_(ts: List[torch.Tensor]) -> torch.Tensor:
-    tensor = identity(ts)
-    tensor = tensor.permute(0, 2, 1).contiguous()  # (experts, 1536, hidden)
-    split_size = tensor.shape[1] // 2
-    gate, up = torch.split(tensor, split_size, dim=1)
-    return torch.cat([up, gate], dim=1)
-
-
-# List[gate_up, hidden] -> [Expert, up_gate, hidden]
-def transpose_stack_moe_w1(ts: List[torch.Tensor]) -> torch.Tensor:
-    stacked_tensor = torch.stack(ts, dim=0)
-    gate_up_dim = stacked_tensor.shape[1] // 2
-    return torch.cat(
-        [stacked_tensor[:, gate_up_dim:, :], stacked_tensor[:, :gate_up_dim, :]], dim=1
-    )
-
-
-def convert_down_proj_(ts: List[torch.Tensor]) -> torch.Tensor:
-    tensor = identity(ts)
-    return tensor.permute(0, 2, 1).contiguous()
-
-
 def split_slopes_tp(slopes: torch.Tensor, head_num: int, tp: int, tp_rank: int):
     local_head_num = 1 if head_num == 1 else head_num // tp
     start_pos = local_head_num * tp_rank
@@ -1166,6 +1149,8 @@ class W:
     multi_tokens_predict_eh_proj = "multi_tokens_predict_eh_proj.weight"
     multi_tokens_predict_final_ln_gamma = "multi_tokens_predict_final_layernorm.gamma"
     multi_tokens_predict_final_ln_beta = "multi_tokens_predict_final_layernorm.beta"
+    multi_tokens_predict_d2t_map = "multi_tokens_predict_d2t_map"
+    multi_tokens_predict_t2d_map = "multi_tokens_predict_t2d_map"
 
     # eagle3
     eagle3_fc_proj = "eagle3_fc.weight"
@@ -1200,19 +1185,6 @@ class W:
     linear_attn_alog = "linear_attn.A_log"
     linear_attn_out_w = "linear_attn.out_proj.weight"
     linear_attn_out_s = "linear_attn.out_proj.scale"
-
-    # KDA (Kimi Delta Attention) specific weights
-    linear_attn_qkv_w = "linear_attn.in_proj_qkv.weight"
-    # b_proj: [hidden] -> [num_heads], beta gate
-    linear_attn_b_w = "linear_attn.b_proj.weight"
-    # LoRA forget gate: f_a_proj [hidden -> lora_rank], f_b_proj [lora_rank -> num_heads*head_dim]
-    linear_attn_f_a_w = "linear_attn.f_a_proj.weight"
-    linear_attn_f_b_w = "linear_attn.f_b_proj.weight"
-    # LoRA output gate: g_a_proj [hidden -> lora_rank], g_b_proj [lora_rank -> num_heads*head_dim]
-    linear_attn_g_a_w = "linear_attn.g_a_proj.weight"
-    linear_attn_g_b_w = "linear_attn.g_b_proj.weight"
-    # KDA-specific dt_bias: shape [num_heads * head_dim] (per-dim vector)
-    linear_attn_dt_b_kda = "linear_attn.dt_bias_kda"
 
     # jina_bert
     q_ln_gamma = "self_attention_weights.q_layernorm.gamma"
@@ -1391,7 +1363,8 @@ class W:
     # rotary embedding cos sin cache
     rope_cos_sin_cache = "rotary_embedding.cos_sin_cache"
 
-    # DeepSeek-V4 dense attention, compressors and indexer.
+    # ---- DSv4 ----
+    # Dense MQA self-attn (FP8 e4m3 + UE8M0 [N/128,K/128] block scale)
     v4_attn_norm = "v4.attn_norm.weight"
     v4_attn_q_norm = "v4.attn.q_norm.weight"
     v4_attn_kv_norm = "v4.attn.kv_norm.weight"
@@ -1406,10 +1379,14 @@ class W:
     v4_attn_wo_a_s = "v4.attn.wo_a.scale"
     v4_attn_wo_b_w = "v4.attn.wo_b.weight"
     v4_attn_wo_b_s = "v4.attn.wo_b.scale"
+
+    # Outer compressor (CSA + HCA)
     v4_compressor_wkv = "v4.compressor.wkv.weight"
     v4_compressor_wgate = "v4.compressor.wgate.weight"
     v4_compressor_norm = "v4.compressor.norm.weight"
     v4_compressor_ape = "v4.compressor.ape"
+
+    # Indexer (CSA only) — outer wq_b is FP8; inner compressor is BF16/F32
     v4_indexer_wq_b_w = "v4.indexer.wq_b.weight"
     v4_indexer_wq_b_s = "v4.indexer.wq_b.scale"
     v4_indexer_weights_proj_w = "v4.indexer.weights_proj.weight"
@@ -1418,16 +1395,19 @@ class W:
     v4_indexer_compressor_norm = "v4.indexer.compressor.norm.weight"
     v4_indexer_compressor_ape = "v4.indexer.compressor.ape"
 
-    # DeepSeek-V4 mHC residuals and MoE.
+    # mHC residual (per-layer F32)
     v4_hc_attn_base = "v4.hc.attn_base"
     v4_hc_attn_fn = "v4.hc.attn_fn"
     v4_hc_attn_scale = "v4.hc.attn_scale"
     v4_hc_ffn_base = "v4.hc.ffn_base"
     v4_hc_ffn_fn = "v4.hc.ffn_fn"
     v4_hc_ffn_scale = "v4.hc.ffn_scale"
+    # mHC residual GLOBAL F32 (lives in `weights`, not `layer_weights`)
     v4_hc_head_base = "v4.hc.head_base"
     v4_hc_head_fn = "v4.hc.head_fn"
     v4_hc_head_scale = "v4.hc.head_scale"
+
+    # MoE (per-layer)
     v4_ffn_norm = "v4.ffn_norm.weight"
     v4_router_w = "v4.router.weight"
     v4_router_bias = "v4.router.bias"
@@ -1440,6 +1420,7 @@ class W:
     v4_shared_w3_s = "v4.shared.w3.scale"
     v4_shared_w13_w = "v4.shared.w13.weight"
     v4_shared_w13_s = "v4.shared.w13.scale"
+    # routed experts (FP4 packed int8 + UE8M0 group=32 scale, per-expert)
     v4_routed_w1_w = "v4.routed.w1.weight"
     v4_routed_w1_s = "v4.routed.w1.scale"
     v4_routed_w2_w = "v4.routed.w2.weight"
@@ -1447,7 +1428,9 @@ class W:
     v4_routed_w3_w = "v4.routed.w3.weight"
     v4_routed_w3_s = "v4.routed.w3.scale"
 
-    # DeepSeek-V4 MTP-only tensors.
+    # DSV4 MTP-only per-block extras. The draft block reuses the normal
+    # v4_attn/v4_ffn/v4_hc/v4_router/v4_expert tags with `mtp.{i}` ckpt
+    # prefixes; only these fusion and per-block head tensors are unique.
     v4_mtp_enorm = "v4.mtp.enorm.weight"
     v4_mtp_hnorm = "v4.mtp.hnorm.weight"
     v4_mtp_norm = "v4.mtp.norm.weight"
@@ -1477,6 +1460,8 @@ class W:
         multi_tokens_predict_eh_proj: sp_id,
         multi_tokens_predict_final_ln_gamma: sp_id,
         multi_tokens_predict_final_ln_beta: sp_id,
+        multi_tokens_predict_d2t_map: sp_id,
+        multi_tokens_predict_t2d_map: sp_id,
         eagle3_fc_proj: sp_id,
         eagle3_fc_norm_gamma: sp_id,
         eagle3_input_norm_gamma: sp_id,
@@ -1576,6 +1561,7 @@ class W:
         mla_indexer_weights_proj_w: sp_id,
         mla_indexer_qb_w: sp_id,
         mla_indexer_k_w: sp_id,
+        # ---- DSv4 (TP=1 today; all sp_id placeholders) ----
         v4_attn_norm: sp_id,
         v4_attn_q_norm: sp_id,
         v4_attn_kv_norm: sp_id,
@@ -1691,12 +1677,6 @@ class CkptWeightInfo:
         return self.__str__()
 
 
-def is_v4_weight(src_weight_info) -> bool:
-    """Return whether a weight descriptor belongs to the DeepSeek-V4 namespace."""
-    name = getattr(src_weight_info, "name", None)
-    return isinstance(name, str) and name.startswith("v4.")
-
-
 class WeightStyle(Enum):
     NONE = 0
     TRT_ENGINE = 1
@@ -1709,3 +1689,11 @@ class WeightStyle(Enum):
 
 FP8_E4M3_MAX = 448.0
 FP8_E4M3_MIN = -352.0
+
+
+def is_v4_weight(src_weight_info) -> bool:
+    """Return True iff `src_weight_info.name` belongs to the DSv4 namespace
+    (`v4.…`). Used by V4-specific quant subclass `support()` checks so they
+    do not accidentally match DSv2/V3 weights with similar shapes."""
+    name = getattr(src_weight_info, "name", None)
+    return isinstance(name, str) and name.startswith("v4.")

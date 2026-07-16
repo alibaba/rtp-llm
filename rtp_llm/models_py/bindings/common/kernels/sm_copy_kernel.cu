@@ -132,8 +132,11 @@ __global__ void gather_copy_split_kernel(const void** src_kv_cache_ptrs,
 // ==================== DSV4 memory-cache GPU端 offset=0 的变长 Gather/Scatter Kernel ====================
 
 template<typename T>
-__device__ __forceinline__ void dsv4_copy_typed_region(
-    const char* src_base, char* dst_base, size_t region_size, const size_t tid, const size_t num_threads) {
+__device__ __forceinline__ void dsv4_copy_typed_region(const char*  src_base,
+                                                       char*        dst_base,
+                                                       size_t       region_size,
+                                                       const size_t tid,
+                                                       const size_t num_threads) {
     const size_t vec_bytes   = sizeof(T);
     const size_t vec_num     = region_size / vec_bytes;
     const size_t vec_payload = vec_num * vec_bytes;
@@ -150,8 +153,11 @@ __device__ __forceinline__ void dsv4_copy_typed_region(
     }
 }
 
-__device__ __forceinline__ void
-dsv4_copy_region(const char* src_base, char* dst_base, size_t region_size, const size_t tid, const size_t num_threads) {
+__device__ __forceinline__ void dsv4_copy_region(const char*  src_base,
+                                                 char*        dst_base,
+                                                 size_t       region_size,
+                                                 const size_t tid,
+                                                 const size_t num_threads) {
     const auto addr_mask = reinterpret_cast<uintptr_t>(src_base) | reinterpret_cast<uintptr_t>(dst_base);
     if ((addr_mask & (sizeof(int4) - 1)) == 0) {
         dsv4_copy_typed_region<int4>(src_base, dst_base, region_size, tid, num_threads);
@@ -175,12 +181,11 @@ dsv4_copy_region(const char* src_base, char* dst_base, size_t region_size, const
     }
 }
 
-__global__ void
-dsv4_memory_cache_gather_copy_var_nooffset_kernel(const void**  src_ptrs,
-                                                  const size_t* sizes,        // 每个源要拷贝的字节数
-                                                  const size_t* dst_offsets,  // 目标内存中的前缀和偏移量
-                                                  void*         dst,
-                                                  int           num_srcs) {
+__global__ void dsv4_memory_cache_gather_copy_var_nooffset_kernel(const void**  src_ptrs,
+                                                                  const size_t* sizes,        // 每个源要拷贝的字节数
+                                                                  const size_t* dst_offsets,  // 目标内存中的前缀和偏移量
+                                                                  void*         dst,
+                                                                  int           num_srcs) {
     if (blockIdx.x >= num_srcs)
         return;
     const size_t tid         = threadIdx.x;
@@ -250,14 +255,13 @@ void launch_gather_copy_split(const void** src_kv_cache_ptrs,
         src_kv_cache_ptrs, src_kv_scale_ptrs, kv_cache_size, kv_scale_size, dst, num_srcs);
 }
 
-void launch_dsv4_memory_cache_gather_copy_var_nooffset(
-    const void**  src_ptrs,     // 源指针数组（每个指针已指向实际数据起始位置）
-    const size_t* sizes,        // 每个源要拷贝的字节数数组
-    const size_t* dst_offsets,  // 目标内存中的前缀和偏移量数组
-    void*         dst,          // 目标内存起始地址
-    int           num_srcs,     // 源数量
-    int           block_num,
-    cudaStream_t  stream) {
+void launch_dsv4_memory_cache_gather_copy_var_nooffset(const void**  src_ptrs,     // 源指针数组（每个指针已指向实际数据起始位置）
+                                                       const size_t* sizes,        // 每个源要拷贝的字节数数组
+                                                       const size_t* dst_offsets,  // 目标内存中的前缀和偏移量数组
+                                                       void*         dst,          // 目标内存起始地址
+                                                       int           num_srcs,     // 源数量
+                                                       int           block_num,
+                                                       cudaStream_t  stream) {
     if (block_num == 0) {
         block_num = num_srcs;
     }
@@ -265,14 +269,13 @@ void launch_dsv4_memory_cache_gather_copy_var_nooffset(
         src_ptrs, sizes, dst_offsets, dst, num_srcs);
 }
 
-void launch_dsv4_memory_cache_scatter_copy_var_nooffset(
-    const void*   src,          // 源内存起始地址
-    const size_t* src_offsets,  // 源内存中的前缀和偏移量数组
-    const size_t* sizes,        // 每个目标要拷贝的字节数数组
-    void**        dst_ptrs,     // 目标指针数组（每个指针已指向实际写入起始位置）
-    int           num_dsts,     // 目标数量
-    int           block_num,
-    cudaStream_t  stream) {
+void launch_dsv4_memory_cache_scatter_copy_var_nooffset(const void*   src,          // 源内存起始地址
+                                                        const size_t* src_offsets,  // 源内存中的前缀和偏移量数组
+                                                        const size_t* sizes,        // 每个目标要拷贝的字节数数组
+                                                        void**        dst_ptrs,     // 目标指针数组（每个指针已指向实际写入起始位置）
+                                                        int           num_dsts,     // 目标数量
+                                                        int           block_num,
+                                                        cudaStream_t  stream) {
     if (block_num == 0) {
         block_num = num_dsts;
     }

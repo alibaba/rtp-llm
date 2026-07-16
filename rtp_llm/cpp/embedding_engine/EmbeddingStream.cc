@@ -2,15 +2,12 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <memory>
-#include <utility>
 
 using namespace std;
 
 namespace rtp_llm {
 
-EmbeddingStream::EmbeddingStream(const shared_ptr<rtp_llm::EmbeddingInput>& query,
-                                 EmbeddingProfileConfig                     profile_config):
-    embedding_input_(query), profile_config_(std::move(profile_config)) {
+EmbeddingStream::EmbeddingStream(const shared_ptr<rtp_llm::EmbeddingInput>& query): embedding_input_(query) {
     if (!query.get()) {
         return;
     }

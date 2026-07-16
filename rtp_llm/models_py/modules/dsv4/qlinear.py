@@ -30,45 +30,25 @@ from rtp_llm.models_py.modules.dsv4.quant_layouts import (
     prepare_fp4_weight_scale_for_deepgemm,
 )
 
+
 FP8_BLOCK = 128
 FP4_BLOCK = 32
 
 # FP4 e2m1 lookup: 4-bit raw -> fp32 value
-_FP4_LUT = torch.tensor(
-    [
-        0.0,
-        0.5,
-        1.0,
-        1.5,
-        2.0,
-        3.0,
-        4.0,
-        6.0,
-        -0.0,
-        -0.5,
-        -1.0,
-        -1.5,
-        -2.0,
-        -3.0,
-        -4.0,
-        -6.0,
-    ],
-    dtype=torch.float32,
-)
+_FP4_LUT = torch.tensor([
+     0.0,  0.5,  1.0,  1.5,  2.0,  3.0,  4.0,  6.0,
+    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+], dtype=torch.float32)
 
 
-def _fp4_unpack_to_fp32(
-    weight_int8: torch.Tensor, scale_ue8m0: torch.Tensor
-) -> torch.Tensor:
+def _fp4_unpack_to_fp32(weight_int8: torch.Tensor, scale_ue8m0: torch.Tensor) -> torch.Tensor:
     """Dequantize packed FP4 [out, in/2] + UE8M0 scale [out, in/32] -> fp32 [out, in]."""
     out_dim, packed_in = weight_int8.shape
     in_dim = packed_in * 2
     w_uint = weight_int8.to(torch.int32) & 0xFF
     low = w_uint & 0x0F
     high = (w_uint >> 4) & 0x0F
-    interleaved = torch.empty(
-        out_dim, in_dim, dtype=torch.int64, device=weight_int8.device
-    )
+    interleaved = torch.empty(out_dim, in_dim, dtype=torch.int64, device=weight_int8.device)
     interleaved[:, 0::2] = low.long()
     interleaved[:, 1::2] = high.long()
     lut = _FP4_LUT.to(weight_int8.device)
@@ -77,9 +57,7 @@ def _fp4_unpack_to_fp32(
     return w_f * scale_f
 
 
-def _fp8_dequant_to_fp32(
-    weight_fp8: torch.Tensor, scale_ue8m0: torch.Tensor
-) -> torch.Tensor:
+def _fp8_dequant_to_fp32(weight_fp8: torch.Tensor, scale_ue8m0: torch.Tensor) -> torch.Tensor:
     """Dequantize FP8 e4m3fn [out, in] + scale -> fp32 [out, in].
 
     Accepts the scale in either of two layouts:
@@ -101,9 +79,7 @@ def _fp8_dequant_to_fp32(
         scale_full = scale_per_row.repeat_interleave(FP8_BLOCK, 1)[:, :in_dim]
     else:
         scale_full = scale_ue8m0.to(torch.float32)
-        scale_full = scale_full.repeat_interleave(FP8_BLOCK, 0).repeat_interleave(
-            FP8_BLOCK, 1
-        )
+        scale_full = scale_full.repeat_interleave(FP8_BLOCK, 0).repeat_interleave(FP8_BLOCK, 1)
         scale_full = scale_full[:out_dim, :in_dim]
     return w_f * scale_full
 
@@ -120,13 +96,8 @@ class QuantizedLinear(nn.Module):
     dequantizing. M6 will swap the forward impl for TileLang fp{4,8}_gemm.
     """
 
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        storage: str = "bf16",
-        bias: bool = False,
-    ):
+    def __init__(self, in_features: int, out_features: int, storage: str = "bf16",
+                 bias: bool = False):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -182,18 +153,14 @@ class QuantizedLinear(nn.Module):
         then run FP8 × packed-FP4 GEMM against our stored weight/scale.
         """
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
-            _fp8_fp4_gemm_nt_impl,
-            fp8_fp4_gemm_nt,
+            _fp8_fp4_gemm_nt_impl, fp8_fp4_gemm_nt,
         )
-
         if _fp8_fp4_gemm_nt_impl is None or not x.is_cuda:
             raise RuntimeError(
                 "DSV4 FP4 QuantizedLinear requires deep_gemm fp8_fp4_gemm_nt "
                 f"on CUDA; got device={x.device}, impl={_fp8_fp4_gemm_nt_impl}"
             )
-        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-            sgl_per_token_group_quant_fp8,
-        )
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 
         orig_shape = x.shape
         x_2d = x.reshape(-1, self.in_features).contiguous()
@@ -204,11 +171,8 @@ class QuantizedLinear(nn.Module):
             return x.new_empty(*orig_shape[:-1], self.out_features)
 
         x_fp8, x_scale = sgl_per_token_group_quant_fp8(
-            x_2d,
-            group_size=FP8_BLOCK,
-            eps=1e-4,
-            column_major_scales=True,
-            scale_tma_aligned=True,
+            x_2d, group_size=FP8_BLOCK, eps=1e-4,
+            column_major_scales=True, scale_tma_aligned=True,
             scale_ue8m0=True,
         )
         out = torch.empty(M, self.out_features, dtype=torch.bfloat16, device=x.device)
@@ -220,8 +184,7 @@ class QuantizedLinear(nn.Module):
             (x_fp8, x_scale),
             (self.weight, self.scale_gemm),
             out,
-            recipe_a=(1, FP8_BLOCK),
-            recipe_b=(1, FP4_BLOCK),
+            recipe_a=(1, FP8_BLOCK), recipe_b=(1, FP4_BLOCK),
         )
         return out.to(x.dtype).reshape(*orig_shape[:-1], self.out_features)
 

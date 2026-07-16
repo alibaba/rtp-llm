@@ -31,8 +31,6 @@ class MMPreprocessConfigPart(BaseModel):
     fps: Optional[int] = None
     min_frames: Optional[int] = None
     max_frames: Optional[int] = None
-    crop_positions: Optional[str] = None
-    mm_timeout_ms: Optional[int] = None
 
 
 class ImageURL(BaseModel):

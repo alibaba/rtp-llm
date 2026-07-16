@@ -10,28 +10,19 @@ namespace rtp_llm {
 
 class LinearKVCacheGroup: public KVCacheGroup {
 public:
-    LinearKVCacheGroup(GroupBase                           cache_group,
-                       BlockPoolPtr                        block_pool,
-                       int                                 group_id,
-                       int                                 linear_step      = 0,
-                       SharedBlockCache*                   shared_cache     = nullptr,
-                       const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(std::move(cache_group), std::move(block_pool), group_id, shared_cache, metrics_reporter),
-        linear_step_(linear_step) {}
+    LinearKVCacheGroup(const LayerIdsType&          layer_ids,
+                       std::shared_ptr<KVCacheSpec> kvcache_spec,
+	                       BlockPoolPtr                 block_pool,
+	                       int                          group_id,
+	                       int                          linear_step  = 0,
+	                       SharedBlockCache*            shared_cache = nullptr,
+	                       const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
+	        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, shared_cache, metrics_reporter),
+	        linear_step_(linear_step) {}
 
-    // Transition-only overload.
-    LinearKVCacheGroup(const LayerIdsType&                 layer_ids,
-                       std::shared_ptr<KVCacheSpec>        kvcache_spec,
-                       BlockPoolPtr                        block_pool,
-                       int                                 group_id,
-                       int                                 linear_step      = 0,
-                       SharedBlockCache*                   shared_cache     = nullptr,
-                       const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr,
-                       CacheGroupPolicy                    policy = defaultCacheGroupPolicy(CacheGroupType::LINEAR)):
-        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, policy, shared_cache, metrics_reporter),
-        linear_step_(linear_step) {}
-
-    MatchResult matchSingleKey(CacheKeyType cache_key) const override;
+    MatchResult match(const CacheKeysType& cache_keys) override;
+    // Match a single cache key (used by Hybrid allocator to do right-to-left joint matching).
+    MatchResult matchSingleKey(CacheKeyType cache_key) const;
     bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) override;
 
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
@@ -50,7 +41,7 @@ private:
 
 private:
     // NOTE: linear attention cache can be sparsified; current implementation is conservative:
-    // - always keep policy_.active_tail_blocks tail blocks
+    // - always keep the last 2 blocks (decode edge case: read block i, write block i+1)
     // - other blocks can be freed (set to NULL_BLOCK_IDX)
     int linear_step_ = 0;
 };

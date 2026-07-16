@@ -156,7 +156,9 @@ void launch_persistent_topk(const torch::Tensor& logits,
 
         {
             cudaError_t mz_err = cudaMemsetAsync(workspace.data_ptr<uint8_t>(), 0, state_bytes, stream);
-            TORCH_CHECK(mz_err == cudaSuccess, "row_states memset failed: ", cudaGetErrorString(mz_err));
+            TORCH_CHECK(mz_err == cudaSuccess,
+                        "row_states memset failed: ",
+                        cudaGetErrorString(mz_err));
         }
 
         P::PersistentTopKParams params;

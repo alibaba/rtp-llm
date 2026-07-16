@@ -23,6 +23,9 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
+    CPByteSlicedSlotCompaction,
+)
 from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
     trap_invalid_kv_access_enabled,
     validate_slot_mapping,
@@ -42,7 +45,7 @@ def _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS: tl.constexpr) -> None:
         )
 
 
-@triton.jit(do_not_specialize=["num_tokens"])
+@triton.jit(do_not_specialize=["num_tokens", "block_stride", "num_cache_blocks"])
 def _quantize_and_insert_k_kernel(
     # Inputs
     k_ptr,  # [num_tokens, 512] bf16
@@ -58,8 +61,8 @@ def _quantize_and_insert_k_kernel(
     quant_block: tl.constexpr,  # 64 (NoPE quantization tile size)
     cache_block_size: tl.constexpr,  # tokens per pool block (RTP-LLM: 256)
     token_data_size: tl.constexpr,  # 576 = 448 + 128
-    block_stride: tl.constexpr,  # bytes per block (TMA-padded; from k_cache.stride(0))
-    num_cache_blocks: tl.constexpr,
+    block_stride,  # bytes per block (TMA-padded; from k_cache.stride(0))
+    num_cache_blocks,
     fp8_max: tl.constexpr,  # 448.0
     n_quant_blocks: tl.constexpr,  # 8 (7 real + 1 padding tile-loop iter)
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
@@ -89,7 +92,7 @@ def _quantize_and_insert_k_kernel(
 
     # int64: block_idx * block_stride can overflow int32 with many blocks
     # (e.g. >= 14K at block_stride 149504 → 2^31). Matches dequant kernel.
-    cache_block_ptr = k_cache_ptr + block_idx.to(tl.int64) * block_stride
+    cache_block_ptr = k_cache_ptr + block_idx.to(tl.int64) * block_stride.to(tl.int64)
 
     token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
     token_scale_ptr = (
@@ -217,117 +220,14 @@ def quantize_and_insert_k_cache(
     )
 
 
-@triton.jit(do_not_specialize=["num_tokens"])
-def _quantize_and_insert_k_cp_byte_sliced_kernel(
-    k_ptr,
-    slot_mapping_ptr,
-    k_cache_ptr,
-    num_tokens,
-    input_dim: tl.constexpr,
-    fp8_dim: tl.constexpr,
-    bf16_dim: tl.constexpr,
-    scale_dim: tl.constexpr,
-    quant_block: tl.constexpr,
-    full_entries_per_block: tl.constexpr,
-    token_data_size: tl.constexpr,
-    local_slice_bytes: tl.constexpr,
-    cp_rank: tl.constexpr,
-    block_stride: tl.constexpr,
-    num_cache_blocks: tl.constexpr,
-    fp8_max: tl.constexpr,
-    n_quant_blocks: tl.constexpr,
-    TRAP_INVALID_KV_ACCESS: tl.constexpr,
-):
-    """Write only this CP rank's contiguous byte slice of a full SWA block."""
-    pid = tl.program_id(0).to(tl.int64)
-    if pid >= num_tokens:
-        return
-
-    slot_idx = tl.load(slot_mapping_ptr + pid)
-    if slot_idx == -1:
-        return
-
-    block_idx = slot_idx // full_entries_per_block
-    pos_in_block = slot_idx % full_entries_per_block
-    if block_idx < 0:
-        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
-    if block_idx >= num_cache_blocks:
-        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
-
-    input_row_ptr = k_ptr + pid * input_dim
-    cache_block_ptr = k_cache_ptr + block_idx.to(tl.int64) * block_stride
-    slice_start = cp_rank * local_slice_bytes
-    slice_end = slice_start + local_slice_bytes
-
-    token_data_base = pos_in_block * token_data_size
-    token_scale_base = (
-        full_entries_per_block * token_data_size + pos_in_block * scale_dim
-    )
-
-    for qblock_idx in tl.static_range(n_quant_blocks):
-        qblock_start = qblock_idx * quant_block
-        if qblock_start < fp8_dim:
-            offsets = qblock_start + tl.arange(0, quant_block)
-            mask = offsets < fp8_dim
-
-            x = tl.load(input_row_ptr + offsets, mask=mask, other=0.0)
-            abs_x = tl.abs(x)
-            block_max = tl.max(abs_x, axis=0)
-            block_max = tl.maximum(block_max, 1e-4)
-            exponent = tl.ceil(tl.log2(block_max / fp8_max))
-            scale = tl.exp2(exponent)
-
-            x_fp8 = tl.clamp(x / scale, -fp8_max, fp8_max).to(tl.float8e4nv)
-            x_uint8 = x_fp8.to(tl.uint8, bitcast=True)
-
-            full_offsets = token_data_base + offsets
-            in_slice = mask & (full_offsets >= slice_start) & (full_offsets < slice_end)
-            tl.store(
-                cache_block_ptr + full_offsets - slice_start, x_uint8, mask=in_slice
-            )
-
-            encoded_scale = tl.maximum(tl.minimum(exponent + 127.0, 255.0), 0.0)
-            scale_full_offset = token_scale_base + qblock_idx
-            scale_in_slice = (scale_full_offset >= slice_start) & (
-                scale_full_offset < slice_end
-            )
-            tl.store(
-                cache_block_ptr + scale_full_offset - slice_start,
-                encoded_scale.to(tl.uint8),
-                mask=scale_in_slice,
-            )
-
-    pad_scale_full_offset = token_scale_base + 7
-    pad_scale_in_slice = (pad_scale_full_offset >= slice_start) & (
-        pad_scale_full_offset < slice_end
-    )
-    tl.store(
-        cache_block_ptr + pad_scale_full_offset - slice_start,
-        tl.zeros((), dtype=tl.uint8),
-        mask=pad_scale_in_slice,
-    )
-
-    bf16_input_offset = fp8_dim
-    token_bf16_base = token_data_base + fp8_dim
-    for i in tl.static_range(bf16_dim // 16):
-        chunk_offsets = i * 16 + tl.arange(0, 16)
-        bf16_vals = tl.load(input_row_ptr + bf16_input_offset + chunk_offsets)
-        byte_offsets = token_bf16_base + chunk_offsets * 2
-        in_slice = (byte_offsets >= slice_start) & ((byte_offsets + 1) < slice_end)
-        bf16_out_ptr = (cache_block_ptr + byte_offsets - slice_start).to(
-            tl.pointer_type(tl.bfloat16)
-        )
-        tl.store(bf16_out_ptr, bf16_vals, mask=in_slice)
-
-
 def quantize_and_insert_k_cache_cp_byte_sliced(
     k: torch.Tensor,
     k_cache_raw: torch.Tensor,
     slot_mapping: torch.Tensor,
-    *,
     full_entries_per_block: int,
     cp_rank: int,
     cp_size: int,
+    compaction: CPByteSlicedSlotCompaction,
 ) -> None:
     assert (
         k.dim() == 2 and k.shape[1] == _INPUT_DIM
@@ -344,35 +244,36 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
     cp_rank = int(cp_rank)
     cp_size = int(cp_size)
     assert full_entries_per_block > 0 and cp_size > 1 and 0 <= cp_rank < cp_size
-    if slot_mapping.dtype != torch.long:
-        slot_mapping = slot_mapping.to(torch.long)
     num_tokens = int(slot_mapping.shape[0])
     if num_tokens == 0:
         return
-    validate_slot_mapping(
-        "swa.quantize_and_insert_cp_byte.slot_mapping",
-        slot_mapping,
-        block_size=full_entries_per_block,
-        num_blocks=int(k_cache_raw.shape[0]),
-        negative_mode="skip_minus_one",
+    assert (
+        compaction is not None
+    ), "CP byte-sliced SWA insert requires metadata-precomputed compaction"
+    unique_blocks = compaction.unique_blocks
+    compact_slots = compaction.compact_slots
+    if unique_blocks.numel() == 0:
+        return
+
+    local_slice_bytes = int(k_cache_raw.shape[1])
+    full_stride_bytes = local_slice_bytes * cp_size
+    slice_start = cp_rank * local_slice_bytes
+    slice_end = slice_start + local_slice_bytes
+
+    full_raw = torch.zeros(
+        (int(unique_blocks.numel()), full_stride_bytes),
+        dtype=torch.uint8,
+        device=k_cache_raw.device,
     )
-    _quantize_and_insert_k_cp_byte_sliced_kernel[(num_tokens,)](
+    full_view = full_raw.as_strided(
+        (int(unique_blocks.numel()), full_entries_per_block, 584),
+        (full_stride_bytes, 584, 1),
+    )
+    quantize_and_insert_k_cache(
         k,
-        slot_mapping,
-        k_cache_raw,
-        num_tokens,
-        input_dim=_INPUT_DIM,
-        fp8_dim=_TOKEN_FP8_DIM,
-        bf16_dim=_TOKEN_BF16_DIM,
-        scale_dim=_TOKEN_SCALE_DIM,
-        quant_block=_QUANT_BLOCK_SIZE,
-        full_entries_per_block=full_entries_per_block,
-        token_data_size=_TOKEN_DATA_SIZE,
-        local_slice_bytes=int(k_cache_raw.shape[1]),
-        cp_rank=cp_rank,
-        block_stride=int(k_cache_raw.stride(0)),
-        num_cache_blocks=int(k_cache_raw.shape[0]),
-        fp8_max=_FP8_MAX,
-        n_quant_blocks=8,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        full_view,
+        compact_slots,
+    )
+    k_cache_raw.index_copy_(
+        0, unique_blocks, full_raw[:, slice_start:slice_end].contiguous()
     )

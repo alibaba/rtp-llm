@@ -19,15 +19,10 @@ decode impl.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any, Dict, Optional, Tuple
 
 import torch
 
-from rtp_llm.models_py.model_desc.block_map import (
-    get_attention_inputs_value,
-    get_primary_attention_inputs,
-)
 from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.attn_type import (
@@ -38,28 +33,32 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
     INDEXER_KV,
     INDEXER_STATE,
     SWA_KV,
-    TAG_BY_ATTN_TYPE,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
-    require_kernel_block_table_tokens_per_block,
     require_pool_tokens_per_block,
 )
 
-_ATTN_TYPE_BY_TAG = {tag: attn_type for attn_type, tag in TAG_BY_ATTN_TYPE.items()}
-
 
 def _dsv4_kernel_tokens_per_block(kv_cache: Any) -> int:
-    """No-fallback accessor for the dense kernel block-table geometry.
+    """No-fallback accessor for KVCache.kernel_seq_size_per_block.
 
-    The grouped layout has no global scalar projection.  Framework block
-    tables nevertheless share one dense group-axis width, determined by the
-    smallest per-tag kernel block size.
+    Mirrors the helper in dsv4/fp8/attention.py — surfaces the C++
+    propagation bug instead of silently writing ring buffer with the
+    wrong stride.
     """
     if kv_cache is None:
         raise RuntimeError(
             "DSV4 decode: kv_cache is None when sizing paged pool specs."
         )
-    return require_kernel_block_table_tokens_per_block(kv_cache)
+    ksb = int(getattr(kv_cache, "kernel_seq_size_per_block", 0))
+    if ksb <= 0:
+        spb = int(getattr(kv_cache, "seq_size_per_block", 0))
+        grp = getattr(kv_cache, "group_region_names", None)
+        raise RuntimeError(
+            "DSV4 KVCache.kernel_seq_size_per_block is %d (expected >0). "
+            "seq_size_per_block=%d, group_region_names=%r." % (ksb, spb, grp)
+        )
+    return ksb
 
 
 def _dsv4_pool_tokens_per_block(kv_cache: Any, attn_type: int) -> int:
@@ -172,9 +171,8 @@ def build_metadata_eager(
     Returns ``None`` when the incoming batch is empty (bs == 0) so the
     caller can short-circuit to an empty ``PyModelOutputs``.
 
-    Per-request first-token position is read from the first attention input's
-    ``sequence_lengths`` (normal decode) or ``prefix_lengths`` (target verify).
-    The FP8
+    Per-request first-token position is read from ``attn.sequence_lengths``
+    (normal decode) or ``attn.prefix_lengths`` (target verify). The FP8
     branch passes ``attn`` straight through and lets
     :func:`build_decode_metadata_fp8` derive + clamp ``start_pos``
     internally via :func:`_build_start_pos_from_attention_inputs`; the
@@ -183,25 +181,18 @@ def build_metadata_eager(
     ``[0, max_seq_len - q_len]`` so the whole ``[start_pos, start_pos + q_len)``
     window stays within KV/compressed pool capacity.
     """
-    if isinstance(attn, Mapping):
-        if not attn:
-            return None
-        attn_base = next(iter(attn.values()))
-    else:
-        attn_base = attn
-
     # Target verify is a multi-token decode. C++ MtpExecutor (see
     # MtpExecutor.cc:879-958) clears ``sequence_lengths`` and stashes the
     # prior decode positions into ``prefix_lengths``; ``input_lengths``
     # carries the uniform verify width = ``gen_num_per_cycle + 1``.
-    is_target_verify = bool(getattr(attn_base, "is_target_verify", False))
+    is_target_verify = bool(getattr(attn, "is_target_verify", False))
     if is_target_verify:
-        input_lengths_d = attn_base.input_lengths
+        input_lengths_d = attn.input_lengths
         q_len = int(input_lengths_d[0]) if input_lengths_d.numel() > 0 else 1
-        bs = int(attn_base.prefix_lengths.shape[0])
+        bs = int(attn.prefix_lengths.shape[0])
     else:
         q_len = 1
-        bs = int(attn_base.sequence_lengths.shape[0])
+        bs = int(attn.sequence_lengths.shape[0])
     if bs == 0:
         return None
 
@@ -214,24 +205,30 @@ def build_metadata_eager(
     paged_entries_per_block: Dict[int, int] = {}
     paged_tokens_per_block: Dict[int, int] = {}
     if paged_pool_specs:
-        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
-            iter_tagged_attention_inputs,
+        by_group = getattr(attn, "kv_cache_kernel_block_id_device_by_group", None)
+        group_region_names = (
+            getattr(kv_cache, "group_region_names", None)
+            if kv_cache is not None
+            else None
         )
-
-        for tag, group_attn_inputs in iter_tagged_attention_inputs(kv_cache, attn):
-            attn_type = _ATTN_TYPE_BY_TAG.get(tag)
-            spec = paged_pool_specs.get(attn_type) if attn_type is not None else None
-            group_block_table = getattr(
-                group_attn_inputs, "kv_cache_kernel_block_id_device", None
-            )
-            if (
-                spec is not None
-                and group_block_table is not None
-                and group_block_table.numel() > 0
-            ):
-                paged_block_tables[attn_type] = group_block_table
-                paged_entries_per_block[attn_type] = int(spec[0])
+        if by_group is not None and len(by_group) > 0 and group_region_names:
+            # Walk the framework's group list: position IS the group id,
+            # entry IS the attn_type. Keep the group only if the decode
+            # impl asked for it via paged_pool_specs.
+            for group_id, attn_type_enum in enumerate(group_region_names):
+                if group_id >= len(by_group):
+                    continue
+                attn_type = int(attn_type_enum)
+                spec = paged_pool_specs.get(attn_type)
+                if spec is None:
+                    continue
+                entries_per_block = int(spec[0])
                 paged_tokens_per_block[attn_type] = int(spec[1])
+                group_block_table = by_group[group_id]
+                if group_block_table is None or group_block_table.numel() == 0:
+                    continue
+                paged_block_tables[attn_type] = group_block_table
+                paged_entries_per_block[attn_type] = entries_per_block
 
     if fp8_kv_cache:
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
@@ -239,7 +236,7 @@ def build_metadata_eager(
         )
 
         return build_decode_metadata_fp8(
-            attention_inputs=attn_base,
+            attention_inputs=attn,
             q_len=q_len,
             window_size=int(v4_args.window_size),
             head_dim=int(v4_args.head_dim),
@@ -260,9 +257,9 @@ def build_metadata_eager(
     )
 
     if is_target_verify:
-        start_pos = attn_base.prefix_lengths
+        start_pos = attn.prefix_lengths
     else:
-        start_pos = attn_base.sequence_lengths
+        start_pos = attn.sequence_lengths
     start_pos = start_pos.to(device=device, dtype=torch.int32)
     max_start = max(0, max_s - q_len)
     start_pos = torch.clamp(start_pos, min=0, max=max_start)
@@ -370,7 +367,7 @@ def forward_decode(
       ``fmha_impl.metadata`` as-is. It was populated either in
       ``DSv4DecodeFmhaImpl.__init__`` (initial dtype-check forward) or by
       C++ ``prepare_cuda_graph`` before each replay. Reading
-      attention-input sequence lengths here during stream capture would trigger a
+      ``attn.sequence_lengths`` here during stream capture would trigger a
       CPU→CUDA copy that's illegal inside a graph.
     * **Eager path**: build :class:`DSv4DecodeAttnMetadata` inline via
       :func:`build_metadata_eager`.
@@ -388,7 +385,7 @@ def forward_decode(
     # in the graph-path dispatch so the CUDA-graph capture (which passes an
     # ``fmha_impl`` via ``prepare_fmha_impl``) reads the impl's persistent
     # metadata instead of falling through to ``build_metadata_eager`` — the
-    # eager path does CPU→GPU copies on attention-input sequence lengths which are
+    # eager path does CPU→GPU copies on ``attn.sequence_lengths`` which are
     # rejected inside a CUDA stream capture.
     _graph_impl_types: Tuple[type, ...] = (DSv4DecodeFmhaImpl,)
     try:
@@ -400,8 +397,7 @@ def forward_decode(
     except ImportError:
         pass
 
-    attention_inputs = get_attention_inputs_value(inputs)
-    attn = get_primary_attention_inputs(inputs, kv_cache)
+    attn = inputs.attention_inputs
     # No nn.Parameter on V4Transformer anymore — pull device from a known-bound tensor.
     param_dev = v4.embed.weight.device
 
@@ -420,7 +416,7 @@ def forward_decode(
         )
         meta = build_metadata_eager(
             v4_args,
-            attention_inputs,
+            attn,
             param_dev,
             paged_specs,
             kv_cache=kv_cache,

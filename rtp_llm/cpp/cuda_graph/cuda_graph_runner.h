@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <unordered_map>
 #include <vector>
 #include <pybind11/embed.h>
@@ -35,8 +36,8 @@ public:
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         model_data_type_(graph_params.model_data_type),
-        kv_cache_group_tags_(graph_params.kv_cache_group_tags),
-        position_id_len_factor_(graph_params.position_id_len_factor) {
+        kv_cache_layer_to_group_(graph_params.kv_cache_layer_to_group),
+        kv_cache_group_num_(graph_params.kv_cache_group_num) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
@@ -75,6 +76,11 @@ public:
     void           captureDecodeOneBatchSize(int bs);
     void           capturePrefillOneSeqLen(int seq_len);
     void           prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
+    void           prepareInputData(const PyModelInputs& inputs, CudaGraphState& state);
+    void           prepareAttentionInputs(const PyModelInputs& inputs,
+                                          CudaGraphState&      state,
+                                          bool                 skip_forward_event_sync = false) override;
+    void           updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
     bool           canRun(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           replayGraph(int key);
     void           replayDecode(int bs);
@@ -92,16 +98,6 @@ private:
     void captureOneGraphInstance(int key, const char* key_type);
     // Common replay and sync check logic
     void replayAndSyncCheck(int key, const char* key_type);
-
-    bool isEmbeddingStylePrefillCudaGraph() const {
-        return is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ == max_seq_len_;
-    }
-    bool isMtpDraftPrefillCudaGraph() const {
-        return is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
-    }
-    bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
-        return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
-    }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
     // Common memory hold creation logic
@@ -136,6 +132,10 @@ private:
     int                     seq_size_per_block_{0};
     int                     kernel_seq_size_per_block_{0};
     int                     hidden_size_{0};
+    // DSv4 head-channel residual multiplier (≥1; defaults to 1 for non-DSv4
+    // models). input_hiddens captures with hidden_size_ * hc_mult_ so the MTP
+    // draft graph can take the target's pre-hc residual ([T, hc*dim]) as
+    // input. The post-reduce output tensor still uses hidden_size_.
     int                     hc_mult_{1};
     int                     sp_steps_{0};
     std::vector<int>        capture_range_;
@@ -154,11 +154,13 @@ private:
     at::TensorOptions                      options_cuda_float_;
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
 
-    std::vector<std::string> kv_cache_group_tags_;
-    int                      position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
+    std::vector<int32_t> kv_cache_layer_to_group_;
+    int32_t              kv_cache_group_num_ = 0;
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();
+
+    std::atomic<bool> prepared_attention_inputs_ = false;
 };
 
 }  // namespace rtp_llm

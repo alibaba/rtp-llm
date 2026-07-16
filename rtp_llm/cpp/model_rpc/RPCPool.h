@@ -20,7 +20,6 @@ template<typename T>
 class Pool {
 public:
     absl::StatusOr<Connection<T>> getConnection(std::string peer) {
-
         std::lock_guard<std::mutex> guard(mutex_);
         auto                        iter = connection_pool_.find(peer);
         // Check if we need to create a new connection

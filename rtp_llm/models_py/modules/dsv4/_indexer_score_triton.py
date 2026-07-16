@@ -31,7 +31,6 @@ Returns:
 Shapes constraints (V4-Flash defaults):
   H = 64, D = 128 — both fit in registers per program; we tile S × T.
 """
-
 from __future__ import annotations
 
 from typing import Optional

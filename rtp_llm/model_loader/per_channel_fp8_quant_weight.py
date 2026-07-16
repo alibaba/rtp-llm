@@ -1,7 +1,5 @@
 import copy
 import functools
-import logging
-import re
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -13,12 +11,7 @@ from rtp_llm.config.quant_config import (
 )
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
-from rtp_llm.model_loader.linear_attn_weight import (
-    LinearAttnAtomicWeight,
-    W8A8Fp8PerChannelLinearAttnAtomicWeight,
-)
 from rtp_llm.model_loader.load_config import LoadConfig
-from rtp_llm.model_loader.tensor_source import StackSplitTensorSource
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
     CompositeWeight,
@@ -39,11 +32,11 @@ from rtp_llm.utils.model_weight import (
     sp_head_gemm_a8,
     sp_head_s_gemm_a8_channel,
     sp_id,
-    sp_moe_neg1,
-    sp_moe_w1,
     sp_neg1,
     stack_,
     stack_moe_w1,
+    sp_moe_w1,
+    sp_moe_neg1
 )
 from rtp_llm.utils.util import check_with_info
 
@@ -52,89 +45,9 @@ B_SUFFIX = ".bias"
 QW_SUFFIX = ".weight"
 QS_SUFFIX = ".weight_scale"
 
-
-@functools.lru_cache(maxsize=None)
-def _exclude_pattern_for(base_name_template: str) -> Optional["re.Pattern"]:
-    """Compile a regex for ``base_name_template`` (with ``{i}``→\\d+); cached.
-
-    Returns None if the template has no layer index placeholder."""
-    if "{i}" not in base_name_template:
-        return None
-    parts = base_name_template.split("{i}")
-    return re.compile("^" + r"\d+".join(re.escape(p) for p in parts) + "$")
-
-
-def _ckpt_base_matches_quant_exclude(
-    base_name_template: str, exclude_modules: set
-) -> bool:
-    """
-    Check if the checkpoint module path template matches any entry in the quantization exclude list.
-
-    Args:
-        base_name_template: A template string representing the module path, where '{i}'
-                            acts as a placeholder for the layer index (e.g., 'model.layers.{i}.mlp.gate_proj').
-        exclude_modules: A set of concrete module paths that are excluded from quantization
-                         (e.g., {'model.layers.0.mlp.gate_proj', 'model.layers.1.mlp.gate_proj'}).
-
-    Returns:
-        True if the template (with '{i}' replaced by a wildcard for digits) matches any
-        concrete path in 'exclude_modules'.
-    """
-    if not exclude_modules:
-        return False
-    if base_name_template in exclude_modules:
-        return True
-    rx = _exclude_pattern_for(base_name_template)
-    if rx is None:
-        return False
-    return any(rx.match(ex) for ex in exclude_modules)
-
-
-def _identity_ensure_2d(
-    ts: List[torch.Tensor], allow_empty: bool = False
-) -> torch.Tensor:
-    """Load per-channel scale from checkpoint, ensuring 2D [N, 1] output.
-
-    Quark stores per-channel scale as 1D [N], while compressed-tensors stores
-    it as 2D [N, 1]. This function normalizes both to 2D [N, 1] at the earliest
-    loading stage (as CkptWeightInfo merge_fun), so all downstream functions
-    (pad, pad_w13, stack, sp_0, _postprocess, etc.) work uniformly.
-    """
-    result = identity(ts, allow_empty)
-    if result is not None and result.dim() == 1:
-        return result.unsqueeze(-1)
-    return result
-
-
-def _wrap_merge_fun_ensure_2d(original_merge_fun):
-    """Wrap an original merge_fun to also ensure 2D [N, 1] output for per-channel scale.
-
-    If original_merge_fun is identity, directly return _identity_ensure_2d.
-    Otherwise, return a wrapper that first calls original_merge_fun, then
-    unsqueezes 1D results to 2D.
-    """
-    if original_merge_fun is identity or original_merge_fun is None:
-        return _identity_ensure_2d
-
-    @functools.wraps(original_merge_fun)
-    def wrapped(ts, *args, **kwargs):
-        # Quark per-channel scale may be saved as 1D [N].
-        ts_2d = [
-            t.unsqueeze(-1) if isinstance(t, torch.Tensor) and t.dim() == 1 else t
-            for t in ts
-        ]
-        result = original_merge_fun(ts_2d, *args, **kwargs)
-        if result is not None and result.dim() == 1:
-            return result.unsqueeze(-1)
-        return result
-
-    return wrapped
-
-
 def cast_to_fp8(x: torch.Tensor):
     """Convert tensor to FP8 format."""
     return x.to(torch.float8_e4m3fn)
-
 
 def per_channel_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -144,10 +57,7 @@ def per_channel_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
     Returns:
         tuple[torch.Tensor, torch.Tensor]: Quantized tensor and channel-wise scales
     """
-    assert x.dim() in [
-        2,
-        3,
-    ], f"weight dim=2 or dim=3 supported, but got shape {x.shape}"
+    assert x.dim() in [2, 3], f"weight dim=2 or dim=3 supported, but got shape {x.shape}"
     if x.dim() == 3:
         channel_max = x.abs().amax(dim=-1, keepdim=True).clamp(1e-4)
         scales = (channel_max / FP8_E4M3_MAX).to(torch.float32)
@@ -161,19 +71,6 @@ def per_channel_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
     # Quantize the tensor
     quantized = (x / scales).to(torch.float8_e4m3fn)
     return (quantized.T).contiguous(), (scales.T).contiguous()
-
-
-def per_channel_cast_to_fp8_expert(
-    x: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Per-channel FP8 quantization for a single 2D expert slice [D0, D1].
-    Uses per-row (dim=-1) reduction, matching the 3D stacked path semantics."""
-    assert x.dim() == 2, f"expected 2D expert tensor, got shape {x.shape}"
-    channel_max = x.abs().amax(dim=-1, keepdim=True).clamp(1e-4)
-    scales = (channel_max / FP8_E4M3_MAX).to(torch.float32)
-    quantized = (x / scales).to(torch.float8_e4m3fn)
-    return quantized.contiguous(), scales.contiguous()
-
 
 def gemm_channel_fp8_gpt_style_tp_strategy():
     gemm_channel_fp8_weight_tp_strategy: Dict[str, Any] = {
@@ -192,9 +89,7 @@ def gemm_channel_fp8_gpt_style_tp_strategy():
         W.moe_w1: sp_moe_w1,
         W.moe_s1: sp_moe_w1,
         W.moe_w2: sp_moe_neg1,
-        W.moe_s2: sp_id,
-        W.attn_gate_w: sp_0,
-        W.attn_gate_s: sp_0,
+        W.moe_s2: sp_id
     }
     tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
     tp_strategy.update(gemm_channel_fp8_weight_tp_strategy)
@@ -231,8 +126,6 @@ class W8A8Fp8PerChannelMoeAtomicWeight(MoeAtomicWeight, W8A8Fp8PerChannelAtomicW
 def create_w8a8_fp8_per_channel_weight(
     src_weight_info: WeightModule, *args: Any, **kwargs: Any
 ) -> W8A8Fp8PerChannelAtomicWeight:
-    if isinstance(src_weight_info, LinearAttnAtomicWeight):
-        return W8A8Fp8PerChannelLinearAttnAtomicWeight(*args, **kwargs)
     if isinstance(src_weight_info, AttnAtomicWeight):
         return W8A8Fp8PerChannelAttnAtomicWeight(*args, **kwargs)
     if isinstance(src_weight_info, MoeAtomicWeight):
@@ -254,9 +147,6 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         W.ffn_w13: W.ffn_s13,
         W.moe_w1: W.moe_s1,
         W.moe_w2: W.moe_s2,
-        W.linear_attn_qkvz_w: W.linear_attn_qkvz_s,
-        W.linear_attn_out_w: W.linear_attn_out_s,
-        W.attn_gate_w: W.attn_gate_s,
     }
 
     @classmethod
@@ -264,21 +154,11 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
     ) -> bool:
         if not quant_config.is_quanted() or not isinstance(
-            quant_config,
-            (Fp8PerChannelCompressedQuantConfig, Fp8PerChannelQuarkQuantConfig),
+            quant_config, (Fp8PerChannelCompressedQuantConfig, Fp8PerChannelQuarkQuantConfig)
         ):
             return False
         name = src_weight_info.name
-        if name not in cls.w8a8_weight_list:
-            return False
-        if quant_config.exclude_modules and hasattr(src_weight_info, "weights"):
-            for ckpt_w in src_weight_info.weights:
-                base_name = ckpt_w.name.rsplit(".", 1)[0]
-                if _ckpt_base_matches_quant_exclude(
-                    base_name, quant_config.exclude_modules
-                ):
-                    return False
-        return True
+        return name in cls.w8a8_weight_list
 
     def __init__(
         self,
@@ -300,27 +180,6 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             kernel, scale = self._get_moe_w1_quant_weight(src_weight_info)
         elif src_weight_info.name == W.moe_w2:
             kernel, scale = self._get_moe_w2_quant_weight(src_weight_info)
-        elif src_weight_info.name in [W.linear_attn_qkvz_w, W.linear_attn_out_w]:
-            if (
-                src_weight_info.name == W.linear_attn_qkvz_w
-                and len(src_weight_info.weights) == 2
-            ):
-                # Qwen3.5 split format: in_proj_qkv + in_proj_z
-                kernel, scale = self._get_quant_weight_linear_qkvz_qwen35(
-                    src_weight_info
-                )
-            else:
-                pairs = {
-                    W.linear_attn_qkvz_w: (W.linear_attn_qkvz_w, W.linear_attn_qkvz_s),
-                    W.linear_attn_out_w: (W.linear_attn_out_w, W.linear_attn_out_s),
-                }
-                kernel, scale = self._get_quant_weight_linear(
-                    src_weight_info,
-                    pairs[src_weight_info.name][0],
-                    pairs[src_weight_info.name][1],
-                )
-        elif src_weight_info.name == W.attn_gate_w:
-            kernel, scale = self._get_attn_gate_quant_weight(src_weight_info)
 
         sub_weights = {kernel.name: kernel}
         if scale is not None:
@@ -338,10 +197,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             for sub_w in weights
         ]
         qkv_s_list = [
-            CkptWeightInfo(
-                sub_w.name[: -len(W_SUFFIX)] + QS_SUFFIX,
-                _wrap_merge_fun_ensure_2d(sub_w.merge_fun),
-            )
+            CkptWeightInfo(sub_w.name[: -len(W_SUFFIX)] + QS_SUFFIX, sub_w.merge_fun)
             for sub_w in weights
         ]
         kernel = create_w8a8_fp8_per_channel_weight(
@@ -388,7 +244,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         scale = create_w8a8_fp8_per_channel_weight(
             src_weight_info,
             W.attn_o_s,
-            [CkptWeightInfo(w_name + QS_SUFFIX, _identity_ensure_2d)],
+            [CkptWeightInfo(w_name + QS_SUFFIX)],
             data_type=torch.float32,
             config=src_weight_info.config,
         )
@@ -423,8 +279,8 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                     src_weight_info,
                     s,
                     [
-                        CkptWeightInfo(w1_name + QS_SUFFIX, _identity_ensure_2d),
-                        CkptWeightInfo(w3_name + QS_SUFFIX, _identity_ensure_2d),
+                        CkptWeightInfo(w1_name + QS_SUFFIX, identity),
+                        CkptWeightInfo(w3_name + QS_SUFFIX, identity),
                     ],
                     functools.partial(
                         pad_w13,
@@ -456,7 +312,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             scale = create_w8a8_fp8_per_channel_weight(
                 src_weight_info,
                 s,
-                [CkptWeightInfo(w_name + QS_SUFFIX, _identity_ensure_2d)],
+                [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                 functools.partial(
                     pad,
                     align_size=src_weight_info.config.align_size,
@@ -482,7 +338,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             scale = create_w8a8_fp8_per_channel_weight(
                 src_weight_info,
                 W.ffn_s2,
-                [CkptWeightInfo(w_name + QS_SUFFIX, _identity_ensure_2d)],
+                [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                 data_type=torch.float32,
                 config=src_weight_info.config,
             )
@@ -502,7 +358,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         scale = create_w8a8_fp8_per_channel_weight(
             src_weight_info,
             W.moe_s2,
-            [CkptWeightInfo(w_name + QS_SUFFIX, _identity_ensure_2d)],
+            [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
             stack_,
             data_type=torch.float32,
             config=src_weight_info.config,
@@ -526,104 +382,10 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             src_weight_info,
             W.moe_s1,
             [
-                CkptWeightInfo(
-                    w.name[: -len(W_SUFFIX)] + QS_SUFFIX, _identity_ensure_2d
-                )
+                CkptWeightInfo(w.name[: -len(W_SUFFIX)] + QS_SUFFIX, identity)
                 for w in src_weight_info.weights
             ],
             stack_moe_w1,
-            data_type=torch.float32,
-            config=src_weight_info.config,
-        )
-        return [kernel, scale]
-
-    def _get_quant_weight_linear(
-        self,
-        src_weight_info: LinearAttnAtomicWeight,
-        weight_key: str,
-        scale_key: str,
-    ):
-        assert (
-            len(src_weight_info.weights) == 1
-        ), f"Expected single source weight for {weight_key}, got {len(src_weight_info.weights)}"
-        w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
-
-        kernel = W8A8Fp8PerChannelLinearAttnAtomicWeight(
-            weight_key,
-            [CkptWeightInfo(w_name + QW_SUFFIX, src_weight_info.weights[0].merge_fun)],
-            identity,
-            src_weight_info.config,
-            torch.float8_e4m3fn,
-        )
-
-        scale = W8A8Fp8PerChannelLinearAttnAtomicWeight(
-            scale_key,
-            [
-                CkptWeightInfo(
-                    w_name + QS_SUFFIX,
-                    _wrap_merge_fun_ensure_2d(src_weight_info.weights[0].merge_fun),
-                )
-            ],
-            identity,
-            src_weight_info.config,
-            torch.float32,
-        )
-        return [kernel, scale]
-
-    def _get_quant_weight_linear_qkvz_qwen35(
-        self,
-        src_weight_info: LinearAttnAtomicWeight,
-    ):
-        def merge_qkv_z(ts: List[torch.Tensor]) -> torch.Tensor:
-            qkv = ts[0]
-            z = ts[1]
-            return torch.cat([qkv, z], dim=0)
-
-        qkv_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
-        z_name = src_weight_info.weights[1].name[: -len(W_SUFFIX)]
-
-        kernel = W8A8Fp8PerChannelLinearAttnAtomicWeight(
-            W.linear_attn_qkvz_w,
-            [
-                CkptWeightInfo(qkv_name + QW_SUFFIX, identity),
-                CkptWeightInfo(z_name + QW_SUFFIX, identity),
-            ],
-            merge_qkv_z,
-            src_weight_info.config,
-            torch.float8_e4m3fn,
-        )
-
-        scale = W8A8Fp8PerChannelLinearAttnAtomicWeight(
-            W.linear_attn_qkvz_s,
-            [
-                CkptWeightInfo(qkv_name + QS_SUFFIX, _identity_ensure_2d),
-                CkptWeightInfo(z_name + QS_SUFFIX, _identity_ensure_2d),
-            ],
-            merge_qkv_z,
-            src_weight_info.config,
-            torch.float32,
-        )
-        return [kernel, scale]
-
-    def _get_attn_gate_quant_weight(self, src_weight_info: AtomicWeight):
-        w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
-
-        kernel = create_w8a8_fp8_per_channel_weight(
-            src_weight_info,
-            W.attn_gate_w,
-            [CkptWeightInfo(w_name + QW_SUFFIX, src_weight_info.weights[0].merge_fun)],
-            data_type=torch.float8_e4m3fn,
-            config=src_weight_info.config,
-        )
-        scale = create_w8a8_fp8_per_channel_weight(
-            src_weight_info,
-            W.attn_gate_s,
-            [
-                CkptWeightInfo(
-                    w_name + QS_SUFFIX,
-                    _wrap_merge_fun_ensure_2d(src_weight_info.weights[0].merge_fun),
-                )
-            ],
             data_type=torch.float32,
             config=src_weight_info.config,
         )
@@ -660,7 +422,6 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             processed_res[self.kernel.name] = kernel_weight
 
         return processed_res
-
 
 class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
     """
@@ -703,8 +464,7 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
         scale_name = self.w8a8_weight_list.get(src_weight_info.name)
         scale = None
         if scale_name:
-            # shallow copy is safe: params values are simple types (str, dtype, bool)
-            scale_params = params.copy()
+            scale_params = copy.deepcopy(params)
             scale_params["name"] = scale_name
             scale: AtomicWeight = create_w8a8_fp8_per_channel_weight(
                 src_weight_info, **scale_params
@@ -717,166 +477,6 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
         )
         self.kernel = kernel
         self.scale = scale
-
-    def get_tensor_names(
-        self, layer_id: Optional[int], load_config: LoadConfig
-    ) -> set[str]:
-        return self.kernel.get_tensor_names(layer_id, load_config)
-
-    def _load_moe_inline_quant(
-        self,
-        tensor_source,
-        layer_id: Optional[int],
-        device: str,
-        load_config: LoadConfig,
-    ):
-        """Load MoE weights with inline per-expert FP8 quantization.
-
-        Pre-allocates FP8 + scale storage and quantizes each expert individually,
-        avoiding materializing the full BF16 stacked tensor on GPU.
-
-        If tensor_source is a TensorCollector with pre-quantized FP8 data
-        (from inline quantization during fastsafetensors loading), the already-
-        quantized tensors and scales are used directly without re-quantization.
-        """
-        kernel = self.kernel
-        convert_type = (
-            kernel.data_type
-            if kernel.data_type is not None
-            else load_config.compute_dtype
-        )
-        selected_experts = load_config.get_selected_experts(
-            layer_id, kernel.config.expert_num
-        )
-        num_experts = len(selected_experts)
-
-        if kernel.stacked_ckpt_keys and tensor_source.has_tensor(
-            kernel.weights[0].tensor_name(layer_id)
-        ):
-            tensor_source = StackSplitTensorSource(
-                tensor_source, kernel._build_split_config(layer_id, load_config)
-            )
-        ckpt_weights = (
-            kernel._get_expert_weights() if kernel.stacked_ckpt_keys else kernel.weights
-        )
-        num_ckpt = len(ckpt_weights)
-
-        is_w1 = kernel._process_fun_name == "stack_moe_w1"
-        if kernel._process_fun_name not in (
-            "stack_moe_w1",
-            "transpose_stack_moe_w1",
-            "stack_",
-        ):
-            return None
-
-        first_name, first_tensor = kernel._load_expert_tensor(
-            ckpt_weights[0], layer_id, selected_experts[0], tensor_source, convert_type
-        )
-        if first_tensor.dim() != 2:
-            return None
-
-        dim0, dim1 = first_tensor.shape
-        gpu_device = (
-            device if isinstance(device, torch.device) else torch.device(device)
-        )
-
-        has_prequant = hasattr(tensor_source, "has_prequantized_scale")
-
-        if is_w1:
-            fp8_out = torch.empty(
-                [num_experts, dim0 * 2, dim1],
-                dtype=torch.float8_e4m3fn,
-                device=gpu_device,
-            )
-            scale_out = torch.empty(
-                [num_experts, dim0 * 2, 1], dtype=torch.float32, device=gpu_device
-            )
-            for cw_idx, ckpt_weight in enumerate(ckpt_weights):
-                row_offset = cw_idx * dim0
-                for local_idx, expert_id in enumerate(selected_experts):
-                    name, t = kernel._load_expert_tensor(
-                        ckpt_weight,
-                        layer_id,
-                        expert_id,
-                        tensor_source,
-                        convert_type,
-                        first_name=first_name,
-                        first_tensor=first_tensor,
-                    )
-                    if has_prequant and tensor_source.has_prequantized_scale(name):
-                        fp8_out[local_idx, row_offset : row_offset + dim0].copy_(t)
-                        scale_out[local_idx, row_offset : row_offset + dim0].copy_(
-                            tensor_source.get_scale(name)
-                        )
-                    else:
-                        q, s = per_channel_cast_to_fp8_expert(t.to(gpu_device))
-                        fp8_out[local_idx, row_offset : row_offset + dim0].copy_(q)
-                        scale_out[local_idx, row_offset : row_offset + dim0].copy_(s)
-                        del q, s
-                    del t
-            first_tensor = None
-        else:
-            fp8_out = torch.empty(
-                [num_experts, dim0, dim1], dtype=torch.float8_e4m3fn, device=gpu_device
-            )
-            scale_out = torch.empty(
-                [num_experts, dim0, 1], dtype=torch.float32, device=gpu_device
-            )
-            assert num_ckpt == 1, f"stack_ expects 1 ckpt_weight, got {num_ckpt}"
-            ckpt_weight = ckpt_weights[0]
-            for local_idx, expert_id in enumerate(selected_experts):
-                name, t = kernel._load_expert_tensor(
-                    ckpt_weight,
-                    layer_id,
-                    expert_id,
-                    tensor_source,
-                    convert_type,
-                    first_name=first_name,
-                    first_tensor=first_tensor,
-                )
-                if has_prequant and tensor_source.has_prequantized_scale(name):
-                    fp8_out[local_idx].copy_(t)
-                    scale_out[local_idx].copy_(tensor_source.get_scale(name))
-                else:
-                    q, s = per_channel_cast_to_fp8_expert(t.to(gpu_device))
-                    fp8_out[local_idx].copy_(q)
-                    scale_out[local_idx].copy_(s)
-                    del q, s
-                del t
-            first_tensor = None
-
-        if kernel._process_fun_name == "transpose_stack_moe_w1":
-            # Swap upper/lower halves (gate/up reorder).
-            # Avoid torch.cat on FP8 tensors directly — ROCm does not support it.
-            # Instead pre-allocate and copy_ each half into swapped positions.
-            half = fp8_out.shape[1] // 2
-            swapped_fp8 = torch.empty_like(fp8_out)
-            swapped_fp8[:, :half, :].copy_(fp8_out[:, half:, :])
-            swapped_fp8[:, half:, :].copy_(fp8_out[:, :half, :])
-            fp8_out = swapped_fp8
-
-            swapped_scale = torch.empty_like(scale_out)
-            swapped_scale[:, :half, :].copy_(scale_out[:, half:, :])
-            swapped_scale[:, half:, :].copy_(scale_out[:, :half, :])
-            scale_out = swapped_scale
-
-        used_prequant = (
-            has_prequant
-            and any(
-                tensor_source.has_prequantized_scale(
-                    ckpt_weights[0].name.format(
-                        i=str(layer_id), i_1=str((layer_id or 0) + 1), expert_id=str(eid)
-                    )
-                )
-                for eid in selected_experts[:1]
-            )
-        )
-        logging.info(
-            f"inline MoE FP8 quant: {self.kernel.name} layer={layer_id} "
-            f"experts={num_experts} shape={list(fp8_out.shape)} "
-            f"prequantized={used_prequant}"
-        )
-        return {self.kernel.name: fp8_out, self.scale.name: scale_out}
 
     def _load_raw_tensor(
         self,
@@ -891,13 +491,6 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
         This method implements dynamic per-channel quantization similar to vLLM's PTPC
         but with channel-wise granularity instead of token-wise.
         """
-        if isinstance(self.kernel, MoeAtomicWeight) and self.scale is not None:
-            result = self._load_moe_inline_quant(
-                database, layer_id, device, load_config
-            )
-            if result is not None:
-                return result
-
         # Load the original weight tensor
         kernel = self.kernel._load_raw_tensor(database, layer_id, device, load_config)
 

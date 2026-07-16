@@ -1,14 +1,14 @@
 import functools
+import json
 import logging
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator
 
 import grpc
 from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleType
+from rtp_llm.config.generate_config import RoleType
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
-    BatchGenerateInputPB,
     ErrorDetailsPB,
     GenerateInputPB,
     GenerateOutputsPB,
@@ -16,23 +16,19 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     RoleAddrPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
+from rtp_llm.server.request_headers import (
+    extract_correlation_request_id,
+    extract_trace_id,
+)
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateConfig,
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
-    RoleAddr,
 )
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
-from rtp_llm.utils.grpc_util import (
-    trans_from_tensor,
-    trans_option,
-    trans_option_cast,
-    trans_tensor,
-)
-
-MAX_GRPC_TIMEOUT_SECONDS = 3600
+from rtp_llm.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
 
 
 class StreamState:
@@ -53,6 +49,17 @@ def trans_role_type(role_type: RoleType) -> RoleAddrPB.RoleType:
         return RoleAddrPB.RoleType.FRONTEND
 
 
+def _trans_jsonable_option(config_pb, config, field_name):
+    if not hasattr(config_pb, field_name):
+        return
+    value = getattr(config, field_name, None)
+    if value is None:
+        return
+    if not isinstance(value, str):
+        value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    getattr(config_pb, field_name).value = value
+
+
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
@@ -60,6 +67,28 @@ def trans_input(input_py: GenerateInput):
     input_pb.batch_group_size = input_py.batch_group_size
     if hasattr(input_py, "batch_group_id") and input_py.batch_group_id != -1:
         input_pb.batch_group_id.value = input_py.batch_group_id
+
+    request_info = getattr(input_py, "request_info", None)
+    if request_info is not None:
+        input_pb.request_info.frontend_ip = (
+            getattr(request_info, "frontend_ip", "") or ""
+        )
+        input_pb.request_info.dash_ip = getattr(request_info, "dash_ip", "") or ""
+        input_pb.request_info.trace_id = getattr(request_info, "trace_id", "") or ""
+        input_pb.request_info.request_id = getattr(request_info, "request_id", "") or ""
+        input_pb.request_info.source_role = (
+            getattr(request_info, "source_role", "") or ""
+        )
+    if not input_pb.request_info.trace_id:
+        input_pb.request_info.trace_id = str(
+            input_py.generate_config.trace_id
+            or extract_trace_id(getattr(input_py, "headers", None))
+            or ""
+        )
+    if not input_pb.request_info.request_id:
+        input_pb.request_info.request_id = extract_correlation_request_id(
+            getattr(input_py, "headers", None)
+        ) or str(input_pb.request_info.trace_id or input_py.request_id)
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
     # check generate config is valid before enter into engine
@@ -70,9 +99,14 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.max_thinking_tokens = (
         input_py.generate_config.max_thinking_tokens
     )
-    generate_config_pb.end_think_token_ids.extend(
-        input_py.generate_config.end_think_token_ids
-    )
+    if hasattr(generate_config_pb, "begin_think_token_ids"):
+        generate_config_pb.begin_think_token_ids.extend(
+            input_py.generate_config.begin_think_token_ids
+        )
+    if hasattr(generate_config_pb, "end_think_token_ids"):
+        generate_config_pb.end_think_token_ids.extend(
+            input_py.generate_config.end_think_token_ids
+        )
     generate_config_pb.in_think_mode = input_py.generate_config.in_think_mode
     generate_config_pb.num_beams = input_py.generate_config.num_beams
     generate_config_pb.variable_num_beams.extend(
@@ -99,6 +133,15 @@ def trans_input(input_py: GenerateInput):
     trans_option(generate_config_pb, input_py.generate_config, "top_p_decay")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_min")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_reset_ids")
+    _trans_jsonable_option(generate_config_pb, input_py.generate_config, "json_schema")
+    _trans_jsonable_option(generate_config_pb, input_py.generate_config, "regex")
+    _trans_jsonable_option(generate_config_pb, input_py.generate_config, "ebnf")
+    _trans_jsonable_option(
+        generate_config_pb, input_py.generate_config, "structural_tag"
+    )
+    _trans_jsonable_option(
+        generate_config_pb, input_py.generate_config, "response_format"
+    )
     trans_option(generate_config_pb, input_py.generate_config, "adapter_name")
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "task_id", functools.partial(str)
@@ -109,19 +152,6 @@ def trans_input(input_py: GenerateInput):
     )
     generate_config_pb.calculate_loss = input_py.generate_config.calculate_loss
     generate_config_pb.return_logits = input_py.generate_config.return_logits
-    generate_config_pb.return_prompt_logits = (
-        input_py.generate_config.return_prompt_logits
-    )
-    generate_config_pb.prompt_logits_top_k = (
-        input_py.generate_config.prompt_logits_top_k
-    )
-    generate_config_pb.prompt_logits_start = (
-        input_py.generate_config.prompt_logits_start
-    )
-    generate_config_pb.prompt_logits_end = input_py.generate_config.prompt_logits_end
-    generate_config_pb.return_target_logprob = (
-        input_py.generate_config.return_target_logprob
-    )
     generate_config_pb.return_incremental = input_py.generate_config.return_incremental
     generate_config_pb.return_hidden_states = (
         input_py.generate_config.return_hidden_states
@@ -144,10 +174,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.return_cum_log_probs = (
         input_py.generate_config.return_cum_log_probs
     )
-    # dual-write: legacy bool (true if any probs requested) + new int32 mode (offset 1)
-    _rapm = input_py.generate_config.return_all_probs
-    generate_config_pb.return_all_probs = _rapm != ReturnAllProbsMode.NONE
-    generate_config_pb.return_all_probs_mode = _rapm + 1
+    generate_config_pb.return_all_probs = input_py.generate_config.return_all_probs
     generate_config_pb.return_softmax_probs = (
         input_py.generate_config.return_softmax_probs
     )
@@ -179,14 +206,6 @@ def trans_input(input_py: GenerateInput):
         stop_words = generate_config_pb.stop_words_list.rows.add()
         stop_words.values.extend(input_py.generate_config.stop_words_list[i])
 
-    # 生成式推荐：组合 token 约束
-    generate_config_pb.combo_token_size = input_py.generate_config.combo_token_size
-    generate_config_pb.enable_cross_sequence_ban = input_py.generate_config.enable_cross_sequence_ban
-    generate_config_pb.cross_seq_diverge_start_combo = input_py.generate_config.cross_seq_diverge_start_combo
-    for i in range(len(input_py.generate_config.banned_combo_token_ids)):
-        banned_combo = generate_config_pb.banned_combo_token_ids.rows.add()
-        banned_combo.values.extend(input_py.generate_config.banned_combo_token_ids[i])
-
     for role_addr in input_py.generate_config.role_addrs:
         role_addr_pb = RoleAddrPB()
         role_addr_pb.role = trans_role_type(role_addr.role)
@@ -197,13 +216,6 @@ def trans_input(input_py: GenerateInput):
         generate_config_pb.role_addrs.append(role_addr_pb)
 
     return input_pb
-
-
-def get_multimodal_preprocess_value(value: Optional[int], default: int):
-    if value is not None and value != -1:
-        return value
-    else:
-        return default
 
 
 def trans_multimodal_input(
@@ -222,35 +234,17 @@ def trans_multimodal_input(
         mm_input_pb.multimodal_url = mm_input.url
         mm_input_pb.multimodal_type = mm_input.mm_type
         mm_preprocess_config_pb = mm_input_pb.mm_preprocess_config
-        mm_preprocess_config_pb.width = get_multimodal_preprocess_value(
-            mm_input.mm_preprocess_config.width, resized_shape[0]
+        mm_preprocess_config_pb.width = (
+            mm_input.config.width if mm_input.config.width != -1 else resized_shape[0]
         )
-        mm_preprocess_config_pb.height = get_multimodal_preprocess_value(
-            mm_input.mm_preprocess_config.height, resized_shape[1]
+        mm_preprocess_config_pb.height = (
+            mm_input.config.height if mm_input.config.height != -1 else resized_shape[1]
         )
-        mm_preprocess_config_pb.min_pixels = get_multimodal_preprocess_value(
-            generate_config.min_pixels, mm_input.mm_preprocess_config.min_pixels
-        )
-        mm_preprocess_config_pb.max_pixels = get_multimodal_preprocess_value(
-            generate_config.max_pixels, mm_input.mm_preprocess_config.max_pixels
-        )
-        mm_preprocess_config_pb.fps = get_multimodal_preprocess_value(
-            generate_config.fps, mm_input.mm_preprocess_config.fps
-        )
-        mm_preprocess_config_pb.min_frames = get_multimodal_preprocess_value(
-            generate_config.min_frames, mm_input.mm_preprocess_config.min_frames
-        )
-        mm_preprocess_config_pb.max_frames = get_multimodal_preprocess_value(
-            generate_config.max_frames, mm_input.mm_preprocess_config.max_frames
-        )
-        mm_preprocess_config_pb.crop_positions.extend(
-            generate_config.crop_positions
-            if generate_config.crop_positions is not None
-            else mm_input.mm_preprocess_config.crop_positions
-        )
-        mm_preprocess_config_pb.mm_timeout_ms = get_multimodal_preprocess_value(
-            generate_config.mm_timeout_ms, mm_input.mm_preprocess_config.mm_timeout_ms
-        )
+        mm_preprocess_config_pb.min_pixels = mm_input.config.min_pixels
+        mm_preprocess_config_pb.max_pixels = mm_input.config.max_pixels
+        mm_preprocess_config_pb.fps = mm_input.config.fps
+        mm_preprocess_config_pb.min_frames = mm_input.config.min_frames
+        mm_preprocess_config_pb.max_frames = mm_input.config.max_frames
         input_pb.multimodal_inputs.append(mm_input_pb)
 
 
@@ -313,23 +307,6 @@ def trans_output(
         else None
     )
 
-    prompt_logits_data = None
-    if output_pb.HasField("prompt_logits") and output_pb.prompt_logits.HasField(
-        "topk_logprobs"
-    ):
-        pl_pb = output_pb.prompt_logits
-        prompt_logits_data = {
-            "topk_logprobs": trans_tensor(pl_pb.topk_logprobs),
-            "topk_token_ids": trans_tensor(pl_pb.topk_token_ids),
-            "target_logprobs": (
-                trans_tensor(pl_pb.target_logprobs)
-                if pl_pb.HasField("target_logprobs")
-                else None
-            ),
-            "start_pos": pl_pb.start_pos,
-            "end_pos": pl_pb.end_pos,
-        }
-
     outputs_py = GenerateOutputs()
     input_token_ids = input_py.token_ids.reshape(1, -1)
 
@@ -373,10 +350,6 @@ def trans_output(
                 current_aux_info.softmax_probs = trans_tensor(
                     aux_info_pb.softmax_probs
                 ).tolist()
-            if len(aux_info_pb.multimodal_lengths) > 0:
-                current_aux_info.multimodal_lengths = dict(
-                    aux_info_pb.multimodal_lengths
-                )
 
             output_py.aux_info = current_aux_info
 
@@ -407,9 +380,6 @@ def trans_output(
         if all_all_probs is not None:
             output_py.all_probs = all_all_probs[i]
 
-        if prompt_logits_data is not None:
-            output_py.prompt_logits = prompt_logits_data
-
         if (
             logits_index is not None
             and all_logits is not None
@@ -439,7 +409,9 @@ class ModelRpcClient(object):
 
         Args:
             addresses: List of RPC addresses for data parallel communication
-            max_rpc_timeout_ms: Maximum RPC timeout in milliseconds
+            max_rpc_timeout_ms: Maximum RPC timeout in milliseconds. <= 0 disables
+                the gRPC deadline. Callers normally pass pd_sep_config.max_rpc_timeout_ms
+                (args: --max_rpc_timeout_ms / env: MAX_RPC_TIMEOUT_MS).
             decode_entrance: Whether this is a decode entrance
         """
         self._addresses = addresses
@@ -456,49 +428,20 @@ class ModelRpcClient(object):
         )
         logging.info(f"addresses: {self._addresses}")
 
-    def _compute_grpc_timeout(self, timeout_ms) -> float:
-        rpc_timeout_ms = (
-            self._max_rpc_timeout_ms
-            if self._max_rpc_timeout_ms > 0
-            else MAX_GRPC_TIMEOUT_SECONDS * 1000
-        )
-        if timeout_ms is None or timeout_ms <= 0:
-            return rpc_timeout_ms / 1000
-        return timeout_ms / 1000
-
-    def _handle_grpc_error(self, e: grpc.RpcError, request_desc: str) -> None:
-        error_details = ErrorDetailsPB()
-        metadata = e.trailing_metadata()
-        if "grpc-status-details-bin" in metadata and error_details.ParseFromString(
-            metadata["grpc-status-details-bin"]
-        ):
-            logging.error(
-                f"{request_desc} RPC failed: "
-                f"{e.code()}, {e.details()}, detail error code is "
-                f"{ExceptionType.from_value(error_details.error_code)}"
-            )
-            raise FtRuntimeException(
-                ExceptionType(error_details.error_code), error_details.error_message
-            )
-        else:
-            logging.error(
-                f"{request_desc} RPC failed: "
-                f"error code is {e.code()}, detail is {e.details()}"
-            )
-            if e.code() == StatusCode.DEADLINE_EXCEEDED:
-                raise FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, e.details())
-            elif e.code() == StatusCode.CANCELLED:
-                raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, e.details())
-            else:
-                raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
+    async def close(self):
+        await self._channel_pool.close()
 
     async def enqueue(
         self, input_py: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
-        grpc_timeout_seconds = self._compute_grpc_timeout(
-            input_py.generate_config.timeout_ms
+        request_timeout_ms = input_py.generate_config.timeout_ms
+        # Prefer per-request timeout; otherwise fall back to the server-side default
+        # (pd_sep_config.max_rpc_timeout_ms). effective_ms <= 0 means no gRPC deadline.
+        effective_ms = (
+            request_timeout_ms
+            if request_timeout_ms is not None and request_timeout_ms > 0
+            else self._max_rpc_timeout_ms
         )
-        input_py.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
         input_pb = trans_input(input_py)
         response_iterator = None
         stream_state = StreamState()
@@ -516,82 +459,74 @@ class ModelRpcClient(object):
                     break
 
         if not address_list:
-            raise ValueError(f"No address found for request: {input_py.request_id}")
+            raise ValueError(f"No address found for request: {input_pb.request_id}")
+        # Select target address before entering the try block so it is always
+        # available to the error handlers below (surfaced in logs only)
+        # details to identify which backend peer dropped the connection).
+        target_address = address_list[input_py.request_id % len(address_list)]
         logging.debug(
-            f"request: [{input_py.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
+            f"request: [{input_pb.request_id}] send to address: {target_address}"
         )
-
-        input_pb = trans_input(input_py)
-
         try:
-            # Select target address
-            target_address = address_list[input_py.request_id % len(address_list)]
-            logging.debug(f"target_address: {target_address}")
             # Get channel from pool
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
 
-            response_iterator = stub.GenerateStreamCall(
-                input_pb, timeout=grpc_timeout_seconds
-            )
+            grpc_kwargs = {"timeout": effective_ms / 1000.0} if effective_ms > 0 else {}
+            response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
                 yield trans_output(input_py, response, stream_state)
         except grpc.RpcError as e:
+            # TODO(xinfei.sxf) 非流式的请求无法取消了
             if response_iterator:
                 response_iterator.cancel()
-            self._handle_grpc_error(e, f"request: [{input_pb.request_id}]")
+            error_details = ErrorDetailsPB()
+            metadata = e.trailing_metadata()
+            if "grpc-status-details-bin" in metadata and error_details.ParseFromString(
+                metadata["grpc-status-details-bin"]
+            ):
+                logging.error(
+                    f"request: [{input_pb.request_id}] RPC to [{target_address}] failed: "
+                    f"{e.code()}, {e.details()}, detail error code is "
+                    f"{ExceptionType.from_value(error_details.error_code)}"
+                )
+                raise FtRuntimeException(
+                    ExceptionType(error_details.error_code), error_details.error_message
+                )
+            else:
+                logging.error(
+                    f"request: [{input_pb.request_id}] RPC to [{target_address}] failed: "
+                    f"error code is {e.code()}, detail is {e.details()}"
+                )
+                # NOTE: keep the backend peer (target_address) in the log line above
+                # ONLY. Do NOT append it to the FtRuntimeException message, which is
+                # serialized into the client-facing error response and would leak
+                # internal cluster topology (worker ip:port) to callers.
+                details = e.details() or ""
+                if e.code() == StatusCode.DEADLINE_EXCEEDED:
+                    raise FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, details)
+                elif e.code() == StatusCode.CANCELLED:
+                    raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, details)
+                elif e.code() == StatusCode.UNAVAILABLE:
+                    lower_details = details.lower()
+                    if (
+                        "socket closed" in lower_details
+                        or "connection reset" in lower_details
+                    ):
+                        exception_type = ExceptionType.CONNECTION_RESET_BY_PEER
+                    elif "timed out" in lower_details or "timeout" in lower_details:
+                        exception_type = ExceptionType.CONNECT_TIMEOUT
+                    else:
+                        exception_type = ExceptionType.CONNECT_FAILED
+                    raise FtRuntimeException(exception_type, details)
+                else:
+                    raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, details)
         except Exception as e:
-            logging.error(f"rpc unknown error:{str(e)}")
+            logging.error(
+                f"request: [{input_pb.request_id}] rpc to [{target_address}] unknown error: {str(e)}"
+            )
             raise e
         finally:
             if response_iterator:
                 response_iterator.cancel()
-
-    async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
-        if not inputs:
-            return []
-
-        max_timeout_ms = max((inp.generate_config.timeout_ms or 0) for inp in inputs)
-        grpc_timeout_seconds = self._compute_grpc_timeout(max_timeout_ms)
-
-        batch_input_pb = BatchGenerateInputPB()
-        for inp in inputs:
-            inp.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
-            input_pb = trans_input(inp)
-            batch_input_pb.inputs.append(input_pb)
-
-        target_address = self._addresses[inputs[0].request_id % len(self._addresses)]
-        logging.debug(
-            f"batch request: [{len(inputs)} items] send to address: {target_address}"
-        )
-
-        try:
-            channel = await self._channel_pool.get(target_address)
-            stub = RpcServiceStub(channel)
-            response = await stub.BatchGenerateCall(
-                batch_input_pb, timeout=grpc_timeout_seconds
-            )
-
-            results = []
-            for i, result_pb in enumerate(response.results):
-                if (
-                    result_pb.HasField("error_info")
-                    and result_pb.error_info.error_message
-                ):
-                    raise FtRuntimeException(
-                        ExceptionType.UNKNOWN_ERROR,
-                        f"batch item {i} failed: {result_pb.error_info.error_message}",
-                    )
-                stream_state = StreamState()
-                output = trans_output(inputs[i], result_pb.final_output, stream_state)
-                results.append(output)
-            return results
-
-        except grpc.RpcError as e:
-            self._handle_grpc_error(e, f"batch request: [{len(inputs)} items]")
-        except FtRuntimeException:
-            raise
-        except Exception as e:
-            logging.error(f"batch rpc unknown error: {str(e)}")
-            raise e

@@ -31,10 +31,14 @@ void MemoryEvaluationHelper::updateMemoryIfNeeded(size_t& current_size, size_t m
 
 rtp_llm::DataType MemoryEvaluationHelper::getDataTypeForCache(const ModelConfig& model_config) {
 #if defined(BUILDING_ARM_ONLY)
-    auto dtype = rtp_llm::TYPE_FP32;
+    auto dtype =
+        model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ? rtp_llm::TYPE_INT8 : rtp_llm::TYPE_FP32;
 #else
-    auto dtype = model_config.attn_config.kv_cache_dtype == KvCacheDataType::FP8 ? rtp_llm::DataType::TYPE_FP8_E4M3 :
-                                                                                   model_config.data_type;
+    auto dtype =
+        model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ?
+            rtp_llm::DataType::TYPE_INT8 :
+            (model_config.attn_config.kv_cache_dtype == KvCacheDataType::FP8 ? rtp_llm::DataType::TYPE_FP8_E4M3 :
+                                                                               model_config.data_type);
 #endif
     return dtype;
 }

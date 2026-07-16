@@ -1,30 +1,35 @@
 load("//:def.bzl", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 test_copts = [
     "-fno-access-control",
 ] + copts()
+
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
+
+cuda13_torch_link_deps = select({
+    "@//:using_cuda13_x86": [
+        ":cuda13_torch_nvshmem",
+    ],
+    "//conditions:default": [],
+})
 
 test_deps = [
     "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     "//rtp_llm/cpp/config:config_modules",
-    "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
     "@local_config_cuda//cuda:cuda_headers",
     "@local_config_cuda//cuda:cudart",
-] + torch_deps()
+] + torch_deps() + cuda13_torch_link_deps
 
 test_copts = [
     "-fno-access-control",
 ] + copts()
-
-cuda13_target_compatibility = select({
-    "//:using_cuda13_arm": ["@platforms//:incompatible"],
-    "//:using_cuda13_x86": ["@platforms//:incompatible"],
-    "//conditions:default": [],
-})
 
 cc_test(
     name = "group_policy_test",
@@ -34,7 +39,6 @@ cc_test(
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
     # tags = ["H20"],
-    target_compatible_with = cuda13_target_compatibility,
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
@@ -48,7 +52,6 @@ cc_test(
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
     # tags = ["H20"],
-    target_compatible_with = cuda13_target_compatibility,
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
@@ -62,8 +65,7 @@ cc_test(
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
     # tags = ["H20"],
-    target_compatible_with = cuda13_target_compatibility,
-    deps = test_deps + [
+    deps = [
         ":remote_connector_mock_base",
     ],
 )
@@ -76,8 +78,7 @@ cc_test(
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
     # tags = ["H20"],
-    target_compatible_with = cuda13_target_compatibility,
-    deps = test_deps + [
+    deps = [
         ":remote_connector_mock_base",
     ],
 )
@@ -90,7 +91,6 @@ cc_test(
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
     # tags = ["H20"],
-    target_compatible_with = cuda13_target_compatibility,
     deps = test_deps + [
         ":mock",
     ],

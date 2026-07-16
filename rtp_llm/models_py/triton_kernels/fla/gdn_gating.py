@@ -4,8 +4,6 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.triton_kernels.fla.utils import is_amd
-
 
 @triton.jit
 def fused_gdn_gating_kernel(
@@ -54,16 +52,11 @@ def fused_gdn_gating(
     beta: float = 1.0,
     threshold: float = 20.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fused computation of g and beta for Gated Delta Net.
-
-    g = -A_log.float().exp() * F.softplus(a.float() + dt_bias)
-    beta_output = sigmoid(b)
-
-    Returns:
-        g: always fp32 (gate values).
-        beta_output: fp32 on ROCm (avoids lossy sigmoid→bf16 truncation before
-            the FlyDSL megakernel re-casts to bf16 internally); preserves
-            b.dtype (typically bf16) on CUDA to keep the original contract.
+    """
+    Fused computation of g and beta for Gated Delta Net.
+    g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+    beta_output = b.sigmoid()
+    TODO maybe use torch.compile to replace this triton kernel
     """
     batch, num_heads = a.shape
     seq_len = 1
@@ -82,12 +75,7 @@ def fused_gdn_gating(
 
     grid = (batch, seq_len, triton.cdiv(num_heads, 8))
     g = torch.empty(1, batch, num_heads, dtype=torch.float32, device=a.device)
-    # On ROCm the FlyDSL megakernel internally casts beta to bf16, so keeping
-    # fp32 here avoids lossy sigmoid→bf16 truncation before the cast.
-    # On CUDA the downstream chunk/recurrent kernels consume beta in its
-    # original dtype (bf16), so we preserve it to avoid breaking the contract.
-    beta_dtype = torch.float32 if is_amd else b.dtype
-    beta_output = torch.empty(1, batch, num_heads, dtype=beta_dtype, device=b.device)
+    beta_output = torch.empty(1, batch, num_heads, dtype=b.dtype, device=b.device)
     fused_gdn_gating_kernel[grid](
         g,
         beta_output,

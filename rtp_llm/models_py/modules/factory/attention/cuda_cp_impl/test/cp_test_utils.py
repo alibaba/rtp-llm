@@ -187,7 +187,7 @@ def build_cp_attn_inputs(
     cu = [0]
     for cl in cp_chunk_lengths:
         cu.append(cu[-1] + cl)
-    inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32, device=device)
+    inp.cu_seqlens = torch.tensor(cu, dtype=torch.int32, device=device)
 
     max_blocks = max(math.ceil(sl / tokens_per_block) for sl in sequence_lengths)
     block_ids = torch.zeros(batch_size, max_blocks, dtype=torch.int32)
@@ -196,8 +196,8 @@ def build_cp_attn_inputs(
         nb = math.ceil(sl / tokens_per_block)
         block_ids[i, :nb] = torch.arange(offset, offset + nb, dtype=torch.int32)
         offset += nb
-    inp.kv_cache_block_id = block_ids
-    inp.kv_cache_kernel_block_id = block_ids
+    inp.kv_cache_block_id_host = block_ids
+    inp.kv_cache_kernel_block_id_host = block_ids
     inp.kv_cache_block_id_device = block_ids.to(device)
     inp.dtype = get_typemeta(torch.zeros(1, dtype=torch.bfloat16))
 

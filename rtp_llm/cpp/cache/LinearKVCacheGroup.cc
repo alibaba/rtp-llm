@@ -18,9 +18,8 @@ void LinearKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndi
 }
 
 int LinearKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
-    int       extra_blocks = reserve_step ? reserve_step - 1 : 0;
-    const int block_size   = seqSizePerBlock();
-    return std::max((seq_len + block_size - 1) / block_size + extra_blocks - current_blocks, 0);
+    int extra_blocks = reserve_step ? reserve_step - 1 : 0;
+    return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ + extra_blocks - current_blocks, 0);
 }
 
 bool LinearKVCacheGroup::shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const {
@@ -28,14 +27,12 @@ bool LinearKVCacheGroup::shouldMaterializeBlock(int pos, int seq_len, int reserv
         return false;
     }
 
-    const int  step               = std::max(1, linear_step_);
-    const int  active_tail_blocks = std::max(1, static_cast<int>(activeTailBlocks()));
-    const int  seq_slots          = needBlocksNum(seq_len, 0, 0);
-    const int  total_slots        = needBlocksNum(seq_len, 0, reserve_step);
-    const bool is_seq_tail =
-        (seq_slots > 0) && (pos >= std::max(0, seq_slots - active_tail_blocks)) && (pos < seq_slots);
-    const bool is_reserve = (reserve_step > 0) && (pos >= seq_slots) && (pos < total_slots);
-    const bool step_hit   = (((pos + 1) % step) == 0);
+    const int  step        = std::max(1, linear_step_);
+    const int  seq_slots   = needBlocksNum(seq_len, 0, 0);
+    const int  total_slots = needBlocksNum(seq_len, 0, reserve_step);
+    const bool is_seq_tail = (seq_slots > 0) && (pos >= std::max(0, seq_slots - 2)) && (pos < seq_slots);
+    const bool is_reserve  = (reserve_step > 0) && (pos >= seq_slots) && (pos < total_slots);
+    const bool step_hit    = (((pos + 1) % step) == 0);
     return is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
 }
 
@@ -43,8 +40,10 @@ NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
     int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
     NeedBlocksInfo info;
 
+    // common_slots: blocks for common_seq_len (no reserve)
     const int common_slots = needBlocksNum(common_seq_len, 0);
-    const int total_slots  = needBlocksNum(seq_len, 0, reserve_step);
+    // total_slots includes reserve_step - 1 extra linear slots when reserve_step is non-zero.
+    const int total_slots = needBlocksNum(seq_len, 0, reserve_step);
 
     auto common_required = [&](int pos) { return shouldMaterializeBlock(pos, common_seq_len, 0, reuse_enabled); };
     auto final_required  = [&](int pos) { return shouldMaterializeBlock(pos, seq_len, reserve_step, reuse_enabled); };
@@ -60,6 +59,8 @@ NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
         }
     }
 
+    // Linear reuse materializes only one prefix block: the matched tail at
+    // reuse_blocks_len - 1. Do not count that block as newly allocated.
     const int reused_tail_pos = (reuse_enabled && reuse_blocks_len > 0) ? reuse_blocks_len - 1 : -1;
     if (reused_tail_pos >= 0) {
         if (reused_tail_pos < common_slots && common_required(reused_tail_pos)) {
@@ -79,11 +80,17 @@ MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
     if (!shared_cache_) {
         return result;
     }
-    auto block_idx = shared_cache_->matchGroup(cache_key, group_id());
+    auto block_idx = shared_cache_->matchGroup(cache_key, group_id_);
     if (!isNullBlockIdx(block_idx)) {
         result.block_indices = {block_idx};
     }
     return result;
+}
+
+MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
+    (void)cache_keys;
+    RTP_LLM_CHECK_WITH_INFO(false, "SWA should not call match, use matchSingleKey instead");
+    return {};
 }
 
 bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
@@ -93,12 +100,13 @@ bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_re
     const int total_slots        = needBlocksNum(seq_len, 0, reserve_step);
     const int new_blocks_len     = std::max(total_slots - current_blocks_len, 0);
 
-    const int active_tail_blocks = std::max(1, static_cast<int>(activeTailBlocks()));
-    auto      should_materialize = [&](int pos) {
-        const bool is_seq_tail =
-            (seq_slots > 0) && (pos >= std::max(0, seq_slots - active_tail_blocks)) && (pos < seq_slots);
-        const bool is_reserve = (reserve_step > 0) && (pos >= seq_slots) && (pos < total_slots);
-        const bool step_hit   = (((pos + 1) % step) == 0);
+    auto should_materialize = [&](int pos) {
+        // Materialize tail and tail-1: causal_conv1d_update may read
+        // (seq_len - 2) / SBP when seq_len crosses a block boundary.
+        // Leaving tail-1 NULL can hit IMA on long prompts.
+        const bool is_seq_tail = (seq_slots > 0) && (pos >= std::max(0, seq_slots - 2)) && (pos < seq_slots);
+        const bool is_reserve  = (reserve_step > 0) && (pos >= seq_slots) && (pos < total_slots);
+        const bool step_hit    = (((pos + 1) % step) == 0);
         return is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
     };
 
@@ -167,17 +175,17 @@ bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_re
 }
 
 void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
-    const auto& block_indices = block_ids.blocks();
+    const auto& block_indices = block_ids.blocks();  // const view for reading current state
     if (block_indices.empty()) {
         return;
     }
-    const int step               = std::max(1, linear_step_);
-    const int active_tail_blocks = std::max(2, static_cast<int>(activeTailBlocks()));
-    const int block_size         = static_cast<int>(block_indices.size());
+    const int step       = std::max(1, linear_step_);
+    const int block_size = static_cast<int>(block_indices.size());
 
     BlockIndicesType    blocks_to_free;
     std::vector<size_t> pos_to_remove;
-    for (int i = block_size - active_tail_blocks - 1 - reserve_step; i >= 0; i--) {
+    // keep last 2 and every reserve_step
+    for (int i = block_size - 3 - reserve_step; i >= 0; i--) {
         if (isNullBlockIdx(block_indices[i])) {
             continue;
         }
@@ -189,7 +197,7 @@ void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_re
     }
     if (!blocks_to_free.empty()) {
         block_pool_->requestFree(blocks_to_free);
-        block_ids.remove(pos_to_remove);
+        block_ids.remove(pos_to_remove);  // null-out by position, updates kernel slots incrementally
     }
 }
 

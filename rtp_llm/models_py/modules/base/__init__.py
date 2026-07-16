@@ -8,11 +8,6 @@ from rtp_llm.device.device_type import DeviceType, get_device_type
 # Import common base modules (architecture-independent)
 from rtp_llm.models_py.modules.base.common.embedding import Embedding, EmbeddingBert
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
-from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
-    MultimodalDeepstackInjector,
-    MultimodalEmbeddingInjector,
-    reshape_extra_input_to_deepstack,
-)
 from rtp_llm.models_py.modules.base.common.norm import (
     AddBiasResLayerNormTorch,
     LayerNorm,
@@ -30,7 +25,6 @@ if device_type == DeviceType.ROCm:
     from rtp_llm.models_py.modules.base.rocm.norm import (
         AddBiasResLayerNorm,
         FusedQKRMSNorm,
-        LayerNorm,
         QKRMSNorm,
         RMSNorm,
         RMSResNorm,
@@ -80,7 +74,4 @@ else:
         "FusedSiluAndMul",
         "IndexerOp",
         "SigmoidGateScaleAdd",
-        "MultimodalDeepstackInjector",
-        "MultimodalEmbeddingInjector",
-        "reshape_extra_input_to_deepstack",
     ]

@@ -214,13 +214,13 @@ def _fused_inv_rope_fp8_quant_group_heads(
             x = tl.load(input_base + offsets).to(tl.float32)
 
             rope_abs_start: tl.constexpr = (
-                CHUNKS_PER_HEAD - 1
-            ) * QUANT_GROUP_SIZE + ROPE_START
+                (CHUNKS_PER_HEAD - 1) * QUANT_GROUP_SIZE + ROPE_START
+            )
             is_rope = offsets >= rope_abs_start
             rope_local = offsets - rope_abs_start
-            x_partner = tl.load(input_base + (offsets ^ 1), mask=is_rope, other=0.0).to(
-                tl.float32
-            )
+            x_partner = tl.load(
+                input_base + (offsets ^ 1), mask=is_rope, other=0.0
+            ).to(tl.float32)
 
             cs_idx = tl.maximum(rope_local >> 1, 0)
             b_idx = pid_token // q_len_per_b
@@ -237,7 +237,9 @@ def _fused_inv_rope_fp8_quant_group_heads(
             block_absmax = tl.maximum(tl.max(x_2d, axis=1), eps)
             scale_raw = block_absmax * (1.0 / fp8_max)
             scale_raw_bits = scale_raw.to(tl.int32, bitcast=True)
-            exp = ((scale_raw_bits >> 23) & 0xFF) + ((scale_raw_bits & 0x7FFFFF) != 0)
+            exp = ((scale_raw_bits >> 23) & 0xFF) + (
+                (scale_raw_bits & 0x7FFFFF) != 0
+            )
             exp = tl.minimum(tl.maximum(exp, 1), 254)
             scale_bits = exp << 23
             scales = scale_bits.to(tl.float32, bitcast=True)
@@ -356,7 +358,9 @@ def fused_inv_rope_fp8_quant(
         elif freq_rows == B:
             q_len_per_b = S
         else:
-            raise AssertionError(f"freq rows must be B={B} or M={M}; got {freq_rows}")
+            raise AssertionError(
+                f"freq rows must be B={B} or M={M}; got {freq_rows}"
+            )
     else:
         assert o.dim() == 3
         M, H, D = o.shape

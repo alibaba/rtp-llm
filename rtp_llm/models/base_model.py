@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from typing import Any, Optional, Type, Union
+from typing import Any, Optional, Protocol, Type, Union, cast, runtime_checkable
 
 import torch
 
@@ -16,21 +16,38 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
 from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
-from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import (
-    KVCacheSpecType,
     DeviceResourceConfig,
     FMHAConfig,
     HWKernelConfig,
-    KVCacheSpecDesc,
-    MlaOpsType,
     MoeConfig,
     ParallelismConfig,
+    ProfilingDebugLoggingConfig,
+    VitSeparation,
 )
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.time_util import timer_wrapper
+
+
+@runtime_checkable
+class _MultiModalModel(Protocol):
+    def init_multimodal(
+        self,
+        mm_model_config: Any,
+        vit_config: VitConfig,
+        device: str,
+    ) -> None: ...
+
+    def load_mm_weight(
+        self,
+        model_config: ModelConfig,
+        ctype: str,
+        tp_size: int,
+        tp_rank: int,
+        device: str,
+    ) -> None: ...
 
 
 class BaseModel(object):
@@ -67,6 +84,7 @@ class BaseModel(object):
             fmha_config: FMHA configuration
             moe_config: MoE configuration
             max_generate_batch_size: Maximum batch size for generation
+            vit_config: Optional VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
             device_resource_config: Optional DeviceResourceConfig for device resource configuration
         """
@@ -79,7 +97,6 @@ class BaseModel(object):
         self.max_generate_batch_size = max_generate_batch_size
         self.load_method = load_method
         self.vit_config = vit_config
-
         self.merge_lora = merge_lora
         self.device_resource_config = device_resource_config
         self.force_cpu_load_weights = force_cpu_load_weights
@@ -136,11 +153,15 @@ class BaseModel(object):
         ):
             raise Exception("current model can't support cuda graph in py model mode")
 
+        self._may_init_multimodal()
         self.custom_module = self._init_custom_module()
+
         self.model_weights_loader = self.create_model_loader()
         self.py_eplb = self.model_weights_loader._py_eplb
         device_str = self._get_device_str()
         self._load(device_str)
+        from rtp_llm.model_loader.weight_manager import WeightManager
+
         self.weight_manager = WeightManager(
             self.device, self.weight, self.model_weights_loader
         )
@@ -149,12 +170,6 @@ class BaseModel(object):
         logging.info(
             f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
         )
-        remote_jit_dir = os.environ.get("REMOTE_JIT_DIR", None)
-        logging.info(f"python model remote_jit_dir for deep_gemm: {remote_jit_dir}")
-        if remote_jit_dir:
-            os.environ["DG_JIT_REMOTE_CACHE_DIR"] = os.path.join(
-                remote_jit_dir, "deep_gemm_python"
-            )
         self._create_python_model()
 
     def _create_python_model(self):
@@ -171,6 +186,7 @@ class BaseModel(object):
             device=device
         )
         self._load_custom_module()
+        self._load_multimodal()
 
         # 清理checkpoint加载过程中使用的临时资源，释放host内存
         self._cleanup_loader_resources()
@@ -190,33 +206,8 @@ class BaseModel(object):
         self.model_weights_loader.cleanup_database()
 
     @classmethod
-    def create_config(cls, ckpt_path: str) -> ModelConfig:
-        config = cls._create_config(ckpt_path)
-        cls._post_build_model_config(config)
-        return config
-
-    @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         raise NotImplementedError()
-
-    @classmethod
-    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
-        if model_config.kv_cache_spec_descs:
-            return
-
-        desc = KVCacheSpecDesc()
-        if (
-            model_config.attn_config.use_mla
-            and model_config.mla_ops_type != MlaOpsType.MHA
-        ):
-            desc.cache_type = KVCacheSpecType.MLA
-        else:
-            desc.cache_type = KVCacheSpecType.MHA
-
-        desc.tag = "default"
-        model_config.kv_cache_spec_descs = [
-            [desc] for _ in range(model_config.num_layers)
-        ]
 
     @classmethod
     def from_config(
@@ -229,7 +220,7 @@ class BaseModel(object):
         moe_config: MoeConfig,
         load_method,
         max_generate_batch_size: int,
-        vit_config: Optional[VitConfig],
+        vit_config: VitConfig,
         merge_lora: bool,
         device_resource_config: DeviceResourceConfig,
         force_cpu_load_weights: bool = False,
@@ -245,6 +236,7 @@ class BaseModel(object):
             fmha_config: FMHA configuration
             moe_config: MoE configuration
             max_generate_batch_size: Maximum batch size for generation
+            vit_config: VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
             device_resource_config: DeviceResourceConfig for device resource configuration
         """
@@ -287,6 +279,27 @@ class BaseModel(object):
         assert self.weight is not None
         return self.weight.dtype
 
+    @timer_wrapper(description="init mutlimodal")
+    def _may_init_multimodal(self):
+        multimodal_model = self._as_multimodal_model()
+        if multimodal_model is None:
+            return
+
+        self.model_config.mm_model_config.is_multimodal = True
+        if self.parallelism_config.tp_rank != 0:
+            return
+
+        if self.vit_config is None:
+            raise ValueError("vit_config is required for multimodal models")
+        # Only initialize multimodal if vit_separation != REMOTE
+        vit_separation = self.vit_config.vit_separation
+        if vit_separation != VitSeparation.VIT_SEPARATION_REMOTE:
+            multimodal_model.init_multimodal(
+                mm_model_config=self.model_config.mm_model_config,
+                vit_config=self.vit_config,
+                device=self._get_device_str(),
+            )
+
     def _init_custom_module(self) -> Optional[CustomModule]:
         return create_custom_module(self.model_config, self.tokenizer)
 
@@ -300,7 +313,12 @@ class BaseModel(object):
             self.model_config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
 
     def is_multimodal(self) -> bool:
-        return self.model_config.mm_model_config.is_multimodal
+        return self._as_multimodal_model() is not None
+
+    def _as_multimodal_model(self) -> Optional[_MultiModalModel]:
+        if isinstance(self, _MultiModalModel):
+            return cast(_MultiModalModel, self)
+        return None
 
     def _load_model_weights(self):
         self.weight: ModelWeights = self.model_weights_loader.load_weights(
@@ -311,6 +329,24 @@ class BaseModel(object):
     def _load_custom_module(self):
         if self.custom_module is not None:
             self.custom_module.init(self.weight)
+
+    @timer_wrapper(description="load multimodal")
+    def _load_multimodal(self):
+        multimodal_model = self._as_multimodal_model()
+        if (
+            self.vit_config is not None
+            and self.vit_config.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE
+            and multimodal_model is not None
+        ):
+            # Convert torch.dtype to string for load_mm_weight
+            dtype_str = self.model_config.data_type
+            multimodal_model.load_mm_weight(
+                model_config=self.model_config,
+                ctype=dtype_str,
+                tp_size=self.parallelism_config.tp_size,
+                tp_rank=self.parallelism_config.tp_rank,
+                device=self._get_device_str(),
+            )
 
     def create_model_loader(self) -> ModelLoader:
         # Create database locally, only used for model loading
@@ -324,12 +360,18 @@ class BaseModel(object):
                 database.load_lora(name, path)
             database.dump_lora_info()
 
+        vit_weights = None
+        if self.model_config.mm_related_params is not None:
+            vit_weights = self.model_config.mm_related_params.vit_weights
+
         weights_info: ModelDeployWeightInfo = self.get_weight_cls()(
             model_config=self.model_config,
             parallelism_config=self.parallelism_config,
             hw_kernel_config=self.hw_kernel_config,
             kv_cache_config=self.kv_cache_config,
             merge_lora=self.merge_lora,
+            vit_config=self.vit_config,
+            vit_weights=vit_weights,
             load_method=self.load_method,
         )
         misc_weights_info = (

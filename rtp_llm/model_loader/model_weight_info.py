@@ -18,10 +18,9 @@ from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
     CompositeWeight,
-    QuantWeight,
     WeightModule,
 )
-from rtp_llm.ops import KvCacheDataType
+from rtp_llm.ops import KvCacheDataType, VitSeparation
 from rtp_llm.utils.ckpt_file_info import CkptFileInfo
 from rtp_llm.utils.database import BaseDatabase, CkptDatabase
 from rtp_llm.utils.model_weight import (
@@ -84,7 +83,9 @@ class ModelWeightInfo:
         if self.weights:
             for weight in self.weights:
                 weights.append(weight.create(weight, quant_config))
-        layer_weights: Union[List[WeightModule], List[List[WeightModule]]] = []
+        layer_weights: Union[List[WeightModule], List[List[WeightModule]]] = (
+            [] if self.layer_weights else None
+        )
         if self.layer_weights:
             for weight in self.layer_weights:
                 if isinstance(weight, list):
@@ -160,6 +161,7 @@ class ModelDeployWeightInfo:
         hw_kernel_config: "HWKernelConfig",
         kv_cache_config: "KVCacheConfig",
         merge_lora: bool = False,
+        vit_config: Optional["VitConfig"] = None,
         **kwargs,
     ):
         """Initialize ModelDeployWeightInfo with independent configuration objects."""
@@ -245,6 +247,11 @@ class ModelDeployWeightInfo:
         self.nope_head_dim = model_config.attn_config.nope_head_dim
         self.rope_head_dim = model_config.attn_config.rope_head_dim
         self.v_head_dim = model_config.attn_config.v_head_dim
+        self.vit_separation = (
+            vit_config.vit_separation
+            if vit_config is not None
+            else VitSeparation.VIT_SEPARATION_LOCAL
+        )
 
         # for moe
         self._moe_pure_tp_mode = (
@@ -300,6 +307,14 @@ class ModelDeployWeightInfo:
     def get_weight_info(self) -> ModelWeightInfo:
         weight_info = self._get_weight_info()
         # avoid circular import
+        from rtp_llm.models.multimodal.multimodal_mixin import BaseMultiModalWeightInfo
+
+        if (
+            isinstance(self, BaseMultiModalWeightInfo)
+            and self.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE
+            and self.tp_rank == 0
+        ):
+            weight_info = self._get_vit_info(weight_info)
 
         if weight_info.layer_weights and not isinstance(
             weight_info.layer_weights[0], List
@@ -413,7 +428,13 @@ class ModelDeployWeightInfo:
                     attn_q_weight_info = weight.weights[0]
                     break
 
-            assert attn_q_weight_info is not None
+            if attn_q_weight_info is None:
+                # Models with non-standard attention layouts (e.g. DSv4's MQA
+                # path that doesn't expose ``attn_qkv_w``) won't have a weight
+                # to seed the reciprocal off — skip those layers.  The FP8 KV
+                # decode path on DSv4 supplies its own quant constants via
+                # ``Attention.enable_fp8_kv_cache``.
+                continue
             weights.append(
                 AtomicWeight(
                     W.attention_output_static_quant_reciprocal,
@@ -536,15 +557,6 @@ class ModelDeployWeightInfo:
                 for ckpt_weight in getattr(component, "weights", []) or []:
                     if ckpt_weight.name:
                         tensor_names.add(ckpt_weight.name)
-                # QuantWeight.get_components() returns [self] without recursing
-                # into sub_weights, so recurse manually to reach nested weights.
-                if (
-                    isinstance(component, QuantWeight)
-                    and hasattr(component, "sub_weights")
-                    and isinstance(component.sub_weights, dict)
-                ):
-                    for sub_weight in component.sub_weights.values():
-                        collect_from_weight(sub_weight)
 
         for weight in weight_info.weights or []:
             collect_from_weight(weight)
@@ -627,8 +639,11 @@ class ModelDeployWeightInfo:
                 f"current weights_info: {self.__class__} not support lora, but database has lora"
             )
 
-        if database.is_ft_style and database.ft_weight_params:
-            # check ft_style ParallelInfo is match weight's ParallelInfo
+        if (
+            database.is_ft_style
+            and database.ft_weight_params
+            and self.vit_separation != VitSeparation.VIT_SEPARATION_ROLE
+        ):
             src_tp_size = int(database.ft_weight_params.get("TP_SIZE", self.tp_size))
             src_dp_size = int(database.ft_weight_params.get("DP_SIZE", self.dp_size))
             src_ep_size = int(database.ft_weight_params.get("EP_SIZE", self.ep_size))
@@ -669,6 +684,7 @@ class ModelDeployWeightInfo:
             ffn_tp_rank=self.ffn_tp_rank,
             ffn_tp_size=self.ffn_tp_size,
             merge_lora=merge_lora,
+            vit_separation=self.vit_separation,
             compute_dtype=compute_dtype,
             quant_algo=self._quant_algo,
             bit=self._quant_algo.getWeightBits(),

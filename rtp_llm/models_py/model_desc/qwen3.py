@@ -5,10 +5,7 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.block_map import (
-    get_fmha_params,
-    select_fmha_impl_for_layer,
-)
+from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
@@ -67,9 +64,7 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
         # Self Attention
         hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-            fmha_impl=fmha_impl,
-            kv_cache=kv_cache,
+            hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
         )
         hidden_states = residual + hidden_states
 
@@ -131,14 +126,14 @@ class Qwen3Model(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+            select_block_map_for_layer(inputs.attention_inputs, i)
             hidden_states = decoder_layer(
                 hidden_states,
-                layer_fmha_impl,
+                fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
         hidden_states = self.norm(hidden_states)
-        return PyModelOutputs(hidden_states, get_fmha_params(fmha_impl))
+        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
 
 
 __all__ = [

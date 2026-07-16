@@ -31,7 +31,18 @@ public:
                                  const GptModelInputs&                     inputs,
                                  const torch_ext::PyContextParallelParams& cp_params) = 0;
 
-    /// @brief Gather only the lm-head rows selected by lm_output_indexes.
+    /// @brief CP exit variant that materializes only the last-token rows lm_head needs.
+    ///
+    /// Instead of all-gathering the full [seq, hidden] sequence and restoring its
+    /// original order (handleOutputs), this gathers only the rows selected by
+    /// inputs.lm_output_indexes. Each selected row lives on exactly one CP rank
+    /// (zigzag is a bijection on valid positions), so the cross-rank merge is a
+    /// single all-reduce-sum over a [num_lm, hidden] buffer. On return,
+    /// hidden_states is replaced by that [num_lm, hidden] tensor, ordered to match
+    /// lm_output_indexes (identical to index_select(restored_hidden, lm_output_indexes)).
+    ///
+    /// Only valid when no consumer needs the full sequence hidden, i.e.
+    /// !need_all_logits && !need_all_hidden_states. See PyWrappedModel::forward.
     virtual void handleOutputsLastHidden(torch::Tensor&                            hidden_states,
                                          const GptModelInputs&                     inputs,
                                          const torch_ext::PyContextParallelParams& cp_params) = 0;

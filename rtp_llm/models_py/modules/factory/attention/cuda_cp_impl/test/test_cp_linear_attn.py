@@ -29,35 +29,11 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
-class _AttnInputsWrapper:
-    """Thin wrapper to override readonly pybind11 attributes for testing."""
-
-    def __init__(self, wrapped, overrides: dict):
-        object.__setattr__(self, "_wrapped", wrapped)
-        object.__setattr__(self, "_overrides", overrides)
-
-    def __getattr__(self, name):
-        overrides = object.__getattribute__(self, "_overrides")
-        if name in overrides:
-            return overrides[name]
-        return getattr(object.__getattribute__(self, "_wrapped"), name)
-
-    def __setattr__(self, name, value):
-        try:
-            setattr(object.__getattribute__(self, "_wrapped"), name, value)
-        except AttributeError:
-            object.__getattribute__(self, "_overrides")[name] = value
-
-
 def _add_device_tensors(inputs, device: torch.device):
-    """Wrap PyAttentionInputs with device tensors that C++ normally creates."""
-    return _AttnInputsWrapper(
-        inputs,
-        {
-            "prefix_lengths_device": inputs.prefix_lengths.to(device),
-            "input_lengths_device": inputs.input_lengths.to(device),
-        },
-    )
+    """Move length tensors to the device, matching C++ PyAttentionInputs."""
+    inputs.prefix_lengths = inputs.prefix_lengths.to(device)
+    inputs.input_lengths = inputs.input_lengths.to(device)
+    return inputs
 
 
 class TestCPLinearAttnIndexMath(unittest.TestCase):
@@ -247,7 +223,7 @@ class TestCPLinearAttnForward(unittest.TestCase):
 
         nocp_inputs = PyAttentionInputs()
         nocp_inputs.is_prefill = True
-        nocp_inputs.cu_seqlens_device = full_cu
+        nocp_inputs.cu_seqlens = full_cu
         nocp_inputs.input_lengths = torch.tensor(
             sequence_lengths, dtype=torch.int32, device="cpu"
         )
@@ -285,9 +261,8 @@ class TestCPLinearAttnForward(unittest.TestCase):
             for r in range(cp_size):
                 r_pos = torch.tensor(all_rank_pos[r], device=self.device)
                 r_hidden = full_hidden[r_pos]
-                # Use the projection helper so the test runs under both the
-                # fused (single-GEMM) and 2-GEMM dispatch paths.
-                r_qkvz, r_ba = module._input_project(r_hidden)
+                r_qkvz = module.in_proj_qkvz(r_hidden)
+                r_ba = module.in_proj_ba(r_hidden)
                 r_mixed_qkv, r_z, r_b, r_a = module.fix_query_key_value_ordering(
                     r_qkvz, r_ba
                 )

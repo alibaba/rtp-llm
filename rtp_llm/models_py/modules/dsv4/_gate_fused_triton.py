@@ -16,7 +16,6 @@ indices [N, 6] long, weights [N, 6] fp32.
 Currently supports score_func='sqrtsoftplus' (V4 default).  For other
 score functions, fall back to the eager path.
 """
-
 import torch
 import triton
 import triton.language as tl

@@ -1,5 +1,5 @@
 
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "torch_deps")
 load("//:def.bzl", "copts")
 
 cc_library(

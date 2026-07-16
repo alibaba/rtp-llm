@@ -60,9 +60,6 @@ void TreeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32_t 
         for (size_t j = 0; j < num_new_tokens; ++j) {
             auto current_token_id = new_tokens.data_ptr<int>()[i * new_tokens.size(1) + j + offset];
             info.dfa_ptr->next(current_token_id);
-            if (info.dfa_ptr->hasError()) {
-                break;
-            }
         }
 
         info.current_output_length += num_new_tokens;

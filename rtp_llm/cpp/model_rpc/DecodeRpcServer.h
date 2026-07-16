@@ -13,8 +13,8 @@ public:
     DecodeRpcServer() {}
     ~DecodeRpcServer();
     grpc::Status init(const EngineInitParams&                                maga_init_params,
-                      std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
-                      py::object                                             mm_process_engine);
+                      py::object                                             mm_process_engine,
+                      std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params);
 
     grpc::Status RemoteGenerate(grpc::ServerContext* server_context, ServerStream* stream);
 
@@ -61,12 +61,6 @@ public:
     };
 
 private:
-    struct MTPModuleLoadPlan {
-        size_t                  module_index;
-        const EngineInitParams* engine_init_params;
-        size_t                  cache_model_id;
-    };
-
     void         initThreadPool();
     void         prepareGenerateContext(DecodeGenerateContext& decode_context);
     void         allocateResource(DecodeGenerateContext& decode_context);
@@ -84,14 +78,6 @@ private:
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
-    static std::string
-    makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
-    static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);
-    static void                           logReadFailures(int64_t                         request_id,
-                                                          const std::string&              peer_addr,
-                                                          ErrorCode                       error_code,
-                                                          const std::string&              error_message,
-                                                          const std::vector<std::string>& buffer_debug_infos);
 
 private:
     autil::ThreadPoolBasePtr thread_pool_;

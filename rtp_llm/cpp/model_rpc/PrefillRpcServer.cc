@@ -5,11 +5,11 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include <cstdlib>
 #include <cstring>
-#include <memory>
+#include <strings.h>
 #include <unistd.h>
-#include <limits.h>
-#include <c10/core/InferenceMode.h>
 
 using namespace std;
 using namespace autil::legacy;
@@ -21,74 +21,75 @@ namespace rtp_llm {
 
 namespace {
 
-class BatchOutputCollector: public grpc::internal::WriterInterface<GenerateOutputsPB> {
-public:
-    bool Write(const GenerateOutputsPB& output, grpc::WriteOptions) override {
-        if (!local_output_complete_) {
-            local_output_.CopyFrom(output);
-            has_local_output_ = true;
-        } else {
-            remote_output_.CopyFrom(output);
-            has_remote_output_ = true;
+bool envValueIsTrue(const char* value) {
+    return value != nullptr
+           && (strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 || strcasecmp(value, "on") == 0
+               || strcasecmp(value, "yes") == 0);
+}
+
+bool prefillTraceLogEnabled() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("PREFILL_TRACE_LOG_ENABLE");
+        if (value == nullptr) {
+            value = std::getenv("PREFILL_CACHE_DEBUG_LOG");
         }
-        return true;
+        if (value == nullptr) {
+            value = std::getenv("KV_CACHE_DEBUG_LOG");
+        }
+        return envValueIsTrue(value);
+    }();
+    return enabled;
+}
+
+const char* prefillStageName(PrefillStatInfo::ExecuteStage stage) {
+    switch (stage) {
+        case PrefillStatInfo::start:
+            return "start";
+        case PrefillStatInfo::getRpcConnection:
+            return "getRpcConnection";
+        case PrefillStatInfo::multimodalProcess:
+            return "multimodalProcess";
+        case PrefillStatInfo::remoteAllocateResource:
+            return "remoteAllocateResource";
+        case PrefillStatInfo::enqueueRequest:
+            return "enqueueRequest";
+        case PrefillStatInfo::remoteLoadCacheStart:
+            return "remoteLoadCacheStart";
+        case PrefillStatInfo::pollLocalOutput:
+            return "pollLocalOutput";
+        case PrefillStatInfo::remoteLoadCacheEnd:
+            return "remoteLoadCacheEnd";
+        case PrefillStatInfo::RemoteGenerate:
+            return "RemoteGenerate";
+        case PrefillStatInfo::pollRemoteOutput:
+            return "pollRemoteOutput";
+        case PrefillStatInfo::finish:
+            return "finish";
+        default:
+            return "unknown";
     }
+}
 
-    void markLocalOutputComplete() {
-        local_output_complete_ = true;
+void logPrefillFailureTrace(const char* event, PrefillGenerateContext& prefill_context) {
+    if (!prefillTraceLogEnabled()) {
+        return;
     }
-
-    bool hasOutput() const {
-        return has_local_output_ || has_remote_output_;
-    }
-
-    GenerateOutputsPB finalOutput() const {
-        if (!has_remote_output_) {
-            return local_output_;
-        }
-        GenerateOutputsPB output = remote_output_;
-        if (!has_local_output_) {
-            return output;
-        }
-
-        const auto& local_ids  = local_output_.flatten_output().output_ids();
-        const auto& remote_ids = remote_output_.flatten_output().output_ids();
-        if (local_ids.shape_size() == 0) {
-            return output;
-        }
-        if (remote_ids.shape_size() == 0) {
-            output.mutable_flatten_output()->mutable_output_ids()->CopyFrom(local_ids);
-            return output;
-        }
-
-        auto local_tensor  = QueryConverter::transTensor(local_ids);
-        auto remote_tensor = QueryConverter::transTensor(remote_ids);
-        RTP_LLM_CHECK_WITH_INFO(local_tensor.dim() > 0 && local_tensor.dim() == remote_tensor.dim(),
-                                "PD batch output ids rank mismatch, got local=%ld remote=%ld",
-                                local_tensor.dim(),
-                                remote_tensor.dim());
-        const auto token_dim = local_tensor.dim() - 1;
-        for (int64_t dim = 0; dim < token_dim; ++dim) {
-            RTP_LLM_CHECK_WITH_INFO(local_tensor.size(dim) == remote_tensor.size(dim),
-                                    "PD batch output ids shape mismatch at dim=%ld, local=%ld remote=%ld",
-                                    dim,
-                                    local_tensor.size(dim),
-                                    remote_tensor.size(dim));
-        }
-        auto  merged     = torch::cat({local_tensor, remote_tensor}, token_dim).contiguous();
-        auto* merged_ids = output.mutable_flatten_output()->mutable_output_ids();
-        merged_ids->Clear();
-        QueryConverter::transTensorPB(merged_ids, merged);
-        return output;
-    }
-
-private:
-    GenerateOutputsPB local_output_;
-    GenerateOutputsPB remote_output_;
-    bool              local_output_complete_{false};
-    bool              has_local_output_{false};
-    bool              has_remote_output_{false};
-};
+    RTP_LLM_LOG_WARNING("Prefill request trace: event=%s request_id=%ld request_key=%s stage=%s retry_times=%ld "
+                        "retry_cost_time_ms=%ld execute_time_ms=%ld decode_addr=%s grpc_code=%d grpc_message=%s "
+                        "error_code=%d error_message=%s",
+                        event,
+                        prefill_context.request_id,
+                        prefill_context.request_key.c_str(),
+                        prefillStageName(prefill_context.stat_info.stage),
+                        prefill_context.retry_times,
+                        prefill_context.retry_cost_time_ms,
+                        prefill_context.executeTimeMs(),
+                        prefill_context.decode_addr.c_str(),
+                        static_cast<int>(prefill_context.error_status.error_code()),
+                        prefill_context.error_status.error_message().c_str(),
+                        static_cast<int>(prefill_context.error_info.code()),
+                        prefill_context.error_info.ToString().c_str());
+}
 
 }  // namespace
 
@@ -144,27 +145,23 @@ private:
         if (prefill_context.getStream()) {                                                                             \
             prefill_context.getStream()->reportEvent(StreamEvents::Error, new_error_code, new_error_msg);              \
         }                                                                                                              \
-        prefill_context.error_info   = ErrorInfo(new_error_code, new_error_msg);                                       \
-        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);     \
+        prefill_context.error_info = ErrorInfo(new_error_code, new_error_msg);                                         \
+        prefill_context.error_status =                                                                                 \
+            serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);  \
+        logPrefillFailureTrace("client_grpc_error", prefill_context);                                                  \
         return;                                                                                                        \
     }
 
 grpc::Status PrefillRpcServer::init(const EngineInitParams&                                maga_init_params,
-                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
-                                    py::object                                             mm_process_engine) {
+                                    py::object                                             mm_process_engine,
+                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
     RTP_LLM_CHECK_WITH_INFO(maga_init_params.pd_sep_config.role_type == RoleType::PREFILL,
                             "prefill's role_type must be PREFILL");
-    auto ret = RemoteRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
+    auto ret = RemoteRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params));
     if (!ret.ok()) {
         return ret;
     }
     return grpc::Status::OK;
-}
-
-bool PrefillRpcServer::canUsePDSep(const GenerateInputPB& request) const {
-    const auto& config = request.generate_config();
-    return config.max_new_tokens() > 1 && config.num_beams() <= 1 && config.variable_num_beams().size() == 0
-           && config.num_return_sequences() <= 1 && config.can_use_pd_separation();
 }
 
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
@@ -189,7 +186,14 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
 void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
-    auto input                            = QueryConverter::transQuery(prefill_context.rpc_context.request);
+    auto input                   = QueryConverter::transQuery(prefill_context.rpc_context.request);
+    prefill_context.request_info = input->request_info;
+    if (applyTimelineGate(prefill_context.request_key,
+                          input->generate_config->gen_timeline,
+                          input->generate_config->profile_step,
+                          input->generate_config->profile_trace_name)) {
+        input->generate_config->gen_timeline = true;
+    }
     input->generate_config->pd_separation = true;
     if (engine_->isMTPEagle()) {
         input->generate_config->force_disable_sp_run = false;
@@ -228,15 +232,20 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     if (!host || host->ip.empty()) {
         prefill_context.error_info =
             ErrorInfo(ErrorCode::GET_HOST_FAILED, "get host for decode cluster " + decode_cluster_name_ + " failed");
-        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        prefill_context.error_status =
+            serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
+        logPrefillFailureTrace("get_rpc_connection_no_decode_host", prefill_context);
         return;
     }
     auto decode_addr    = host->ip + ":" + std::to_string(host->rpc_port);
     auto connect_status = resource_.rpc_pool.getConnection(decode_addr);
     if (!connect_status.ok()) {
-        prefill_context.error_info   = ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
+        prefill_context.error_info = ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
                                                "get grpc connection for decode addr " + decode_addr + " failed");
-        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        prefill_context.error_status =
+            serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
+        prefill_context.decode_addr = decode_addr;
+        logPrefillFailureTrace("get_rpc_connection_failed", prefill_context);
         return;
     }
     prefill_context.decode_addr     = decode_addr;
@@ -260,19 +269,23 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
             mutable_request->add_token_ids(ids_ptr[i]);
         }
     }
+    if (prefill_context.hasError()) {
+        logPrefillFailureTrace("multimodal_process_failed", prefill_context);
+    }
 }
 
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote allocate resource", prefill_context.request_id);
     prefill_context.client_context.reset(new ClientContext());
-    auto request_timeout_ms = prefill_context.request_timeout_ms;
-    auto max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
-    auto final_timeout_ms   = max_rpc_timeout_ms > 0 ? max_rpc_timeout_ms : MAX_GRPC_TIMEOUT_MS;
-    final_timeout_ms        = request_timeout_ms > 0 ? request_timeout_ms : final_timeout_ms;
-
-    auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(final_timeout_ms);
-    prefill_context.client_context->set_deadline(deadline);
+    auto    request_timeout_ms = prefill_context.request_timeout_ms;
+    auto    max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
+    int64_t final_timeout_ms   = request_timeout_ms > 0 ? request_timeout_ms : max_rpc_timeout_ms;
+    if (final_timeout_ms > 0) {
+        auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(final_timeout_ms);
+        prefill_context.client_context->set_deadline(deadline);
+    }
+    // final_timeout_ms <= 0: skip set_deadline; gRPC treats it as no deadline.
     prefill_context.client_stream =
         std::move(prefill_context.grpc_connection.stub->RemoteGenerate(prefill_context.client_context.get()));
     auto&             client_stream = prefill_context.client_stream;
@@ -287,11 +300,26 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
         alloc_request.add_peer_addrs(addrs);
     }
 
+    // Propagate CP size so decode knows prefill used context-parallel page-RR.
+    const auto& cp_cfg = maga_init_params_.parallelism_config.prefill_cp_config;
+    if (cp_cfg.kv_cache_sharded && maga_init_params_.parallelism_config.tp_size > 1) {
+        alloc_request.set_prefill_cp_size(static_cast<int32_t>(maga_init_params_.parallelism_config.tp_size));
+    }
+
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Write(alloc_request), ErrorCode::REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED);
     GenerateOutputsPB allocate_response;
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Read(&allocate_response), ErrorCode::REMOTE_ALLOCATE_RESOURCE_READ_FAILED);
+    if (prefillTraceLogEnabled() && allocate_response.has_error_info()
+        && allocate_response.error_info().error_code() != 0) {
+        RTP_LLM_LOG_WARNING("Prefill request trace: event=remote_allocate_response_error request_id=%ld "
+                            "decode_addr=%s remote_error_code=%d remote_error_message=%s",
+                            prefill_context.request_id,
+                            prefill_context.decode_addr.c_str(),
+                            allocate_response.error_info().error_code(),
+                            allocate_response.error_info().error_message().c_str());
+    }
     RTP_LLM_LOG_DEBUG("request [%ld] remote allocate resource done", prefill_context.request_id);
 }
 
@@ -307,9 +335,13 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
 void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
+    auto start_time_us = currentTimeUs();
     prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
+    prefill_context.stat_info.remote_load_cache_wait_stream_rt_us += currentTimeUs() - start_time_us;
     if (prefill_context.error_info.hasError()) {
-        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        prefill_context.error_status =
+            serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
+        logPrefillFailureTrace("wait_stream_before_run_failed", prefill_context);
         return;
     }
     AtomicGuard       request_guard(loading_cache_requests_);
@@ -317,8 +349,10 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
     load_request.set_client_id(process_id_);
     load_request.set_request_id(prefill_context.request_id);
     load_request.set_start_time(currentTimeUs());
+    start_time_us = currentTimeUs();
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.client_stream->Write(load_request), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
+    prefill_context.stat_info.remote_load_cache_write_request_rt_us += currentTimeUs() - start_time_us;
 }
 
 void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) {
@@ -330,6 +364,7 @@ void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) 
                                          prefill_context.getStream());
     if (!first_status.ok()) {
         prefill_context.error_status = first_status;
+        logPrefillFailureTrace("poll_local_output_failed", prefill_context);
         return;
     }
     RTP_LLM_LOG_DEBUG("request [%ld] poll local output end", prefill_context.request_id);
@@ -338,6 +373,7 @@ void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) 
     if (stream->hasError()) {
         prefill_context.finished     = true;
         prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, stream->statusInfo().ToString());
+        logPrefillFailureTrace("local_stream_failed", prefill_context);
     }
 }
 
@@ -347,13 +383,23 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.client_stream->Read(&load_response), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
     auto error_code = transRPCErrorCode(load_response.error_info().error_code());
-    CLIENT_GRPC_RET_IF_ERROR(prefill_context, error_code == ErrorCode::NONE_ERROR, error_code);
-    RTP_LLM_LOG_DEBUG("request [%ld] remote load cache done", prefill_context.request_id);
 
     // Decode has finished loading cache, now safe to release KV cache blocks.
     // This is called after cache store transfer is complete.
     if (prefill_context.generate_input->generate_config->pd_separation) {
         prefill_context.getStream()->releaseKVCacheForPDSep();
+    }
+
+    CLIENT_GRPC_RET_IF_ERROR(prefill_context, error_code == ErrorCode::NONE_ERROR, error_code);
+    RTP_LLM_LOG_DEBUG("request [%ld] remote load cache done", prefill_context.request_id);
+
+    meta_->dequeue(prefill_context.request_id, prefill_context.getStream());
+    if (!prefill_context.getStream()->hasEvent(StreamEvents::NeedRemoteGenerate)) {
+        RTP_LLM_LOG_DEBUG("request [%ld] pd-sep prefill finished locally without remote generate, "
+                          "skipping remote generate stages",
+                          prefill_context.request_id);
+        // Exit here to keep the remote load-cache completion and release ordering intact.
+        prefill_context.finished = true;
     }
 }
 
@@ -361,7 +407,7 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote generate", prefill_context.request_id);
     std::shared_ptr<GenerateStream> stream = prefill_context.getStream();
-    RTP_LLM_LOG_DEBUG("remote generate stream[%ld]: %s", stream->streamId(), stream->debugString().c_str());
+    RTP_LLM_LOG_DEBUG("remote generate stream[%s]: %s", stream->streamLogTag().c_str(), stream->debugString().c_str());
     vector<int> all_token   = stream->currentExecuteTokens();
     int         first_token = all_token[all_token.size() - 1];
     RTP_LLM_LOG_DEBUG("first token token id %d", first_token);
@@ -482,8 +528,29 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   grpc::ServerWriter<GenerateOutputsPB>* writer) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start generate stream call", request->request_id());
-    c10::InferenceMode inference_guard(true);
-    if (!canUsePDSep(*request)) {
+    auto pd_separation = request->generate_config().max_new_tokens() > 1 && request->generate_config().num_beams() <= 1
+                         && request->generate_config().variable_num_beams().size() == 0
+                         && request->generate_config().num_return_sequences() <= 1
+                         && request->generate_config().can_use_pd_separation();
+    if (prefillTraceLogEnabled()) {
+        RTP_LLM_LOG_INFO(
+            "Prefill request trace: event=recv request_id=%ld pd_separation=%d token_ids=%d "
+            "max_new_tokens=%d num_beams=%d num_return_sequences=%d can_use_pd_separation=%d timeout_ms=%ld",
+            request->request_id(),
+            pd_separation,
+            request->token_ids_size(),
+            request->generate_config().max_new_tokens(),
+            request->generate_config().num_beams(),
+            request->generate_config().num_return_sequences(),
+            request->generate_config().can_use_pd_separation(),
+            request->generate_config().timeout_ms());
+    }
+    if (!pd_separation) {
+        if (prefillTraceLogEnabled()) {
+            RTP_LLM_LOG_INFO("Prefill request trace: event=bypass_local request_id=%ld token_ids=%d",
+                             request->request_id(),
+                             request->token_ids_size());
+        }
         return LocalRpcServer::GenerateStreamCall(server_context, request, writer);
     }
 
@@ -506,6 +573,7 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         EXECUTE_WITH_RETRY(
             prepareAllocateResource, prefill_context, max_retry_times, max_retry_timeout_ms, retry_interval_ms);
         if (prefill_context.hasError()) {
+            logPrefillFailureTrace("prepare_allocate_failed", prefill_context);
             RTP_LLM_LOG_WARNING(
                 "request [%ld] prepare allocate resource failed after retry [%d] times, cost time ms [%ld], "
                 "max retry time [%ld], max retry timeout ms [%ld]",
@@ -520,136 +588,23 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         EXECUTE_STAGE_FUNC(remoteLoadCacheStart, prefill_context);
         EXECUTE_STAGE_FUNC(pollLocalOutput, prefill_context);
         EXECUTE_STAGE_FUNC(remoteLoadCacheEnd, prefill_context);
-        meta_->dequeue(prefill_context.request_id, prefill_context.getStream());
         EXECUTE_STAGE_FUNC(remoteGenerate, prefill_context);
         EXECUTE_STAGE_FUNC(pollRemoteOutput, prefill_context);
         prefill_context.stat_info.nextStage();
     } catch (const std::exception& e) {
         auto error_msg = "request [" + prefill_context.request_key + "] catch exception [" + e.what() + "]";
         prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        logPrefillFailureTrace("catch_exception", prefill_context);
         return prefill_context.error_status;
     } catch (...) {
         auto error_msg               = "request [" + prefill_context.request_key + "] catch unknown exception";
         prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        logPrefillFailureTrace("catch_unknown_exception", prefill_context);
         return prefill_context.error_status;
     }
 
     RTP_LLM_LOG_DEBUG("request [%ld] all done", prefill_context.request_id);
 
-    return grpc::Status::OK;
-}
-
-grpc::Status PrefillRpcServer::BatchGenerateCall(grpc::ServerContext*        server_context,
-                                                 const BatchGenerateInputPB* request,
-                                                 BatchGenerateOutputsPB*     response) {
-    RTP_LLM_PROFILE_SCOPE("rpc.prefill_batch_generate_call");
-    c10::InferenceMode inference_guard(true);
-    const int          batch_size = request->inputs_size();
-    if (batch_size == 0) {
-        return grpc::Status::OK;
-    }
-
-    bool has_pd_request     = false;
-    bool has_non_pd_request = false;
-    for (int i = 0; i < batch_size; ++i) {
-        if (canUsePDSep(request->inputs(i))) {
-            has_pd_request = true;
-        } else {
-            has_non_pd_request = true;
-        }
-    }
-    if (!has_pd_request) {
-        return LocalRpcServer::BatchGenerateCall(server_context, request, response);
-    }
-    if (has_non_pd_request) {
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
-                            "mixing PD and non-PD requests in one atomic batch is not supported");
-    }
-
-    RTP_LLM_LOG_INFO("receive PD batch generate request, batch_size=%d", batch_size);
-    AtomicGuardPtr request_guard = make_shared<AtomicGuard>(onflight_requests_);
-
-    std::vector<std::unique_ptr<BatchOutputCollector>>   collectors;
-    std::vector<std::unique_ptr<PrefillGenerateContext>> contexts;
-    collectors.reserve(batch_size);
-    contexts.reserve(batch_size);
-
-    const auto    max_retry_times      = maga_init_params_.pd_sep_config.prefill_retry_times;
-    const auto    max_retry_timeout_ms = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms;
-    constexpr int retry_interval_ms    = 1;
-
-    for (int i = 0; i < batch_size; ++i) {
-        auto       collector = std::make_unique<BatchOutputCollector>();
-        RPCContext rpc_context{&request->inputs(i), collector.get()};
-        auto       context              = std::make_unique<PrefillGenerateContext>(&this->resource(),
-                                                                rpc_context,
-                                                                request->inputs(i).generate_config().timeout_ms(),
-                                                                server_context,
-                                                                metrics_reporter_,
-                                                                meta_);
-        context->onflight_requests      = onflight_requests_;
-        context->loading_cache_requests = loading_cache_requests_;
-
-        auto& prefill_context = *context;
-        EXECUTE_WITH_RETRY(
-            prepareAllocateResource, prefill_context, max_retry_times, max_retry_timeout_ms, retry_interval_ms);
-        CHECK_ERROR_STATUS(prefill_context);
-
-        collectors.emplace_back(std::move(collector));
-        contexts.emplace_back(std::move(context));
-    }
-
-    std::vector<std::shared_ptr<GenerateInput>> inputs;
-    inputs.reserve(batch_size);
-    for (const auto& context : contexts) {
-        inputs.emplace_back(context->generate_input);
-    }
-    auto streams = engine_->batchEnqueue(inputs);
-    if (streams.size() != contexts.size()) {
-        return grpc::Status(grpc::StatusCode::INTERNAL,
-                            "batchEnqueue returned " + std::to_string(streams.size()) + " streams for "
-                                + std::to_string(contexts.size()) + " inputs");
-    }
-    for (size_t i = 0; i < contexts.size(); ++i) {
-        contexts[i]->setStream(streams[i]);
-        contexts[i]->stat_info.nextStage();  // enqueueRequest
-    }
-
-    for (auto& context : contexts) {
-        auto& prefill_context = *context;
-        EXECUTE_STAGE_FUNC(remoteLoadCacheStart, prefill_context);
-    }
-    for (auto& context : contexts) {
-        auto& prefill_context = *context;
-        EXECUTE_STAGE_FUNC(pollLocalOutput, prefill_context);
-    }
-    for (auto& collector : collectors) {
-        collector->markLocalOutputComplete();
-    }
-    for (auto& context : contexts) {
-        auto& prefill_context = *context;
-        EXECUTE_STAGE_FUNC(remoteLoadCacheEnd, prefill_context);
-        meta_->dequeue(context->request_id, context->getStream());
-        EXECUTE_STAGE_FUNC(remoteGenerate, prefill_context);
-    }
-    for (auto& context : contexts) {
-        auto& prefill_context = *context;
-        EXECUTE_STAGE_FUNC(pollRemoteOutput, prefill_context);
-        context->stat_info.nextStage();
-    }
-
-    for (size_t i = 0; i < collectors.size(); ++i) {
-        auto* result = response->add_results();
-        if (!collectors[i]->hasOutput()) {
-            auto* error = result->mutable_error_info();
-            error->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
-            error->set_error_message("PD batch item completed without an output");
-            continue;
-        }
-        result->mutable_final_output()->CopyFrom(collectors[i]->finalOutput());
-    }
-
-    RTP_LLM_LOG_INFO("PD batch generate done, batch_size=%d", batch_size);
     return grpc::Status::OK;
 }
 

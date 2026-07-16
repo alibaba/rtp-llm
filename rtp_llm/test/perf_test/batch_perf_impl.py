@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Union
 
@@ -14,6 +15,13 @@ from rtp_llm.test.perf_test.dataclass import (
 from rtp_llm.utils.util import check_with_info
 
 
+def _effective_profile_steps(is_decode: bool, decode_test_length: int) -> int:
+    # Prefill has a single model-forward step; requesting more steps leaves the
+    # profiler armed and prevents trace export before the test server exits.
+    profile_steps = int(os.environ.get("PERF_PROFILE_NUM_STEPS", "3"))
+    return min(decode_test_length, profile_steps) if is_decode else 1
+
+
 def _curl_server_single_worker(
     i: int,
     base_port: int,
@@ -25,18 +33,17 @@ def _curl_server_single_worker(
     generate_config: Optional[Dict[str, Any]] = None,
     profile_trace_name: str = "",
 ) -> ResponseInfo:
-    gen_config: Dict[str, Any] = {
-        "max_new_tokens": decode_test_length if is_decode else 1,
-        "min_new_tokens": decode_test_length if is_decode else 1,
-        "force_sp_accept": True,
-    }
-    req: Dict[str, Any] = {
+    req = {
         "prompt": input_query,
-        "generate_config": gen_config,
+        "generate_config": {
+            "max_new_tokens": decode_test_length if is_decode else 1,
+            "min_new_tokens": decode_test_length if is_decode else 1,
+            "force_sp_accept": True,
+        },
     }
 
     if generate_config is not None:
-        gen_config.update(generate_config)
+        req["generate_config"].update(generate_config)
         if "top_k" in generate_config:
             req["top_k"] = generate_config["top_k"]
         if "top_p" in generate_config:
@@ -45,13 +52,15 @@ def _curl_server_single_worker(
     if "top_k" not in req:
         req["top_k"] = 1
 
-    # for prefill profiler step should only be 1, but for decode, we hope to get more steps for cpu analysis
-    profile_step = min(decode_test_length, 3) if is_decode else 1
+    profile_step = _effective_profile_steps(is_decode, decode_test_length)
     if profile:
         req["gen_timeline"] = True
+        req["generate_config"]["gen_timeline"] = True
         req["profile_step"] = profile_step
+        req["generate_config"]["profile_step"] = profile_step
         if profile_trace_name:
             req["profile_trace_name"] = profile_trace_name
+            req["generate_config"]["profile_trace_name"] = profile_trace_name
     try:
         response = requests.post(
             f"http://127.0.0.1:{base_port}", json=req, timeout=wait_time
@@ -110,6 +119,9 @@ class BatchPerfImpl(object):
         profile: bool = True,
         generate_config: Optional[Dict[str, Any]] = None,
         profile_trace_name: str = "",
+        warmup_runs: Optional[int] = None,
+        measure_runs: Optional[int] = None,
+        profile_runs: Optional[int] = None,
     ):
         self.base_port = base_port
         self.dp_size = dp_size
@@ -135,32 +147,93 @@ class BatchPerfImpl(object):
         self.profile = profile
         self.generate_config = generate_config or {}
         self.profile_trace_name = profile_trace_name
+        self.warmup_runs = (
+            int(os.environ.get("PERF_FORMAL_WARMUP_RUNS", "1"))
+            if warmup_runs is None
+            else int(warmup_runs)
+        )
+        self.measure_runs = (
+            int(os.environ.get("PERF_MEASURE_RUNS", "1"))
+            if measure_runs is None
+            else int(measure_runs)
+        )
+        self.profile_runs = (
+            int(os.environ.get("PERF_PROFILE_RUNS", "1" if profile else "0"))
+            if profile_runs is None
+            else int(profile_runs)
+        )
 
-    # warmup → N× measure (trim min/max, average) → profile
-    def run(self, num_measures: int = 3):
+    # warmup (JIT compile), measure timing, profile (optional, torch profiler affects accuracy)
+    def run(self):
         self._set_concurrency()
-        _ = self._curl_server()  # warmup
-
-        measurements = [self._curl_server() for _ in range(num_measures)]
-        key = "avg_decode_time" if self.is_decode else "avg_prefill_time"
-        measurements.sort(key=lambda m: getattr(m, key))
-        values = [f"{getattr(m, key):.2f}" for m in measurements]
-
-        if num_measures >= 3:
-            # Trim min and max, average the rest
-            trimmed = measurements[1:-1]
-            avg_val = sum(getattr(m, key) for m in trimmed) / len(trimmed)
-            logging.debug(
-                f"{num_measures} runs {key}: {values}, "
-                f"trimmed [{values[0]}, {values[-1]}], avg={avg_val:.2f}"
+        for i in range(self.warmup_runs):
+            logging.info(
+                "[PERF_WARMUP_RUN] %d/%d trace=%s",
+                i + 1,
+                self.warmup_runs,
+                self.profile_trace_name,
             )
-            results = trimmed[len(trimmed) // 2]  # use median of trimmed as base
-            setattr(results, key, avg_val)  # override with trimmed average
-        else:
-            results = measurements[0]
+            _ = self._curl_server()
 
-        if self.profile:
-            _ = self._curl_server(True)
+        all_measure_responses: List[ResponseInfo] = []
+        for i in range(self.measure_runs):
+            responses = self._curl_server_responses()
+            metric = analyze_results(responses)
+            logging.info(
+                "[PERF_MEASURE_RUN] %d/%d trace=%s success=%d/%d "
+                "avg_prefill_ms=%.3f avg_total_ms=%.3f avg_wait_ms=%.3f",
+                i + 1,
+                self.measure_runs,
+                self.profile_trace_name,
+                metric.success_requests,
+                metric.total_requests,
+                metric.avg_prefill_time,
+                metric.avg_total_time,
+                metric.avg_wait_time,
+            )
+            all_measure_responses.extend(responses)
+        results = analyze_results(all_measure_responses)
+
+        if self.profile and self.profile_runs > 0:
+            # Pre-arm via /start_profile with enable_all_rank=true so that
+            # all TP/DP ranks profile the upcoming request.  Requires the
+            # NormalEngine::step() patch that ticks BEFORE process(), so
+            # the first post-configure tick starts the profiler in time
+            # for the next process() to be captured.  Controlled by env
+            # PERF_PREARM_PROFILE=1.
+            if os.environ.get("PERF_PREARM_PROFILE", "0") == "1":
+                try:
+                    num_steps = _effective_profile_steps(
+                        self.is_decode, self.decode_test_length
+                    )
+                    arm_sleep = float(os.environ.get("PERF_PROFILE_ARM_SLEEP", "2"))
+                    r = requests.post(
+                        f"http://127.0.0.1:{self.base_port}/start_profile",
+                        json={
+                            "gen_timeline": True,
+                            "trace_name": self.profile_trace_name or "perf_prearm",
+                            "start_step": 0,
+                            "num_steps": num_steps,
+                            "enable_all_rank": True,
+                        },
+                        timeout=60,
+                    )
+                    logging.info(
+                        f"[PERF_PREARM_PROFILE] num_steps={num_steps} arm_sleep={arm_sleep} "
+                        f"-> {r.status_code} {r.text[:200]}"
+                    )
+                    time.sleep(arm_sleep)
+                except Exception as e:
+                    logging.warning(f"[PERF_PREARM_PROFILE] failed: {e}")
+            for i in range(self.profile_runs):
+                logging.info(
+                    "[PERF_PROFILE_RUN] %d/%d trace=%s",
+                    i + 1,
+                    self.profile_runs,
+                    self.profile_trace_name,
+                )
+                _ = self._curl_server(True)
+            time.sleep(int(os.environ.get("PERF_PROFILE_FLUSH_SLEEP", "60")))
         return results
 
     def _set_concurrency(self):
@@ -169,19 +242,35 @@ class BatchPerfImpl(object):
             f"concurrency {self.batch_size} must be divisible by dp_size {self.dp_size}",
         )
         local_batch_size = self.batch_size // self.dp_size
-        response = requests.post(
-            f"http://127.0.0.1:{self.base_port}/update_scheduler_info",
-            json={
-                "batch_size": local_batch_size,
-                "mode": "decode" if self.is_decode else "prefill",
-            },
-        )
-        if response.status_code != 200 or response.json().get("status", "ok") != "ok":
-            raise Exception(
-                f"failed to set concurrency: {response.text}, {response.status_code}"
+        payload = {
+            "batch_size": local_batch_size,
+            "mode": "decode" if self.is_decode else "prefill",
+        }
+        last_error = None
+        for attempt in range(1, 21):
+            try:
+                response = requests.post(
+                    f"http://127.0.0.1:{self.base_port}/update_scheduler_info",
+                    json=payload,
+                    timeout=60,
+                )
+                if (
+                    response.status_code == 200
+                    and response.json().get("status", "ok") == "ok"
+                ):
+                    return
+                last_error = f"{response.text}, {response.status_code}"
+            except Exception as e:
+                last_error = repr(e)
+            logging.warning(
+                "failed to set concurrency, retrying (%d/20): %s",
+                attempt,
+                last_error,
             )
+            time.sleep(3)
+        raise Exception(f"failed to set concurrency after retries: {last_error}")
 
-    def _curl_server(self, profile: bool = False) -> TestResultMetrics:
+    def _curl_server_responses(self, profile: bool = False) -> List[ResponseInfo]:
         request_batches: List[List[int]] = []
         for i in range(0, self.batch_size, self.max_requests_per_process):
             batch_indices = list(
@@ -211,7 +300,10 @@ class BatchPerfImpl(object):
         for future in futures:
             all_responses.extend(future.result())
 
-        return analyze_results(all_responses)
+        return all_responses
+
+    def _curl_server(self, profile: bool = False) -> TestResultMetrics:
+        return analyze_results(self._curl_server_responses(profile))
 
     def dump_results(self, results: List[Dict[str, Any]]):
         for result in results:

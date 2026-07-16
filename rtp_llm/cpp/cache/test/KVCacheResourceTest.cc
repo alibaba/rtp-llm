@@ -1,10 +1,7 @@
 #include <gtest/gtest.h>
 
-#include <string>
-
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {
 namespace test {
@@ -62,29 +59,12 @@ TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
     KVCacheResource resource;
     resource.initGroups(/*group_num=*/2,
                         /*layer_num=*/3,
-                        /*layer_group_ids=*/{{0}, {1}, {0}},
+                        /*layer_to_group_id=*/{0, 1, 0},
                         /*kernel_blocks_per_kv_block=*/4,
                         /*group_types=*/{CacheGroupType::FULL, CacheGroupType::LINEAR});
 
     ASSERT_EQ(resource.groupNums(), 2);
-    auto multi_group_layer_blocks = resource.layerBlocks();
-    ASSERT_EQ(multi_group_layer_blocks.size(), 3u);
-    EXPECT_EQ(multi_group_layer_blocks[0], resource.groupBlocks()[0]);
-    EXPECT_EQ(multi_group_layer_blocks[1], resource.groupBlocks()[1]);
-    EXPECT_EQ(multi_group_layer_blocks[2], resource.groupBlocks()[0]);
-    ASSERT_EQ(resource.layerGroupBlocks().size(), 3u);
-
-    KVCacheResource single_group_resource;
-    single_group_resource.initGroups(/*group_num=*/1,
-                                     /*layer_num=*/3,
-                                     /*layer_group_ids=*/{{0}, {0}, {0}},
-                                     /*kernel_blocks_per_kv_block=*/4,
-                                     /*group_types=*/{CacheGroupType::FULL});
-    auto layer_blocks = single_group_resource.layerBlocks();
-    ASSERT_EQ(layer_blocks.size(), 3u);
-    ASSERT_EQ(layer_blocks[0], single_group_resource.groupBlocks()[0]);
-    ASSERT_EQ(layer_blocks[1], single_group_resource.groupBlocks()[0]);
-    ASSERT_EQ(layer_blocks[2], single_group_resource.groupBlocks()[0]);
+    ASSERT_EQ(resource.layerBlocks().size(), 3u);
 
     auto& g0 = resource.mutableBlockIds(0);
     auto& g1 = resource.mutableBlockIds(1);
@@ -100,27 +80,6 @@ TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
 
     ASSERT_EQ(resource.blocks(1), (BlockIndicesType{1}));
     ASSERT_EQ(resource.kernelBlocks(1), (BlockIndicesType{1}));
-}
-
-TEST(KVCacheResourceTest, LayerBlocksRejectsMultipleGroupsForOneLayer) {
-    KVCacheResource resource;
-    resource.initGroups(/*group_num=*/2,
-                        /*layer_num=*/1,
-                        /*layer_group_ids=*/{{0, 1}},
-                        /*kernel_blocks_per_kv_block=*/1,
-                        /*group_types=*/{CacheGroupType::FULL, CacheGroupType::LINEAR});
-
-    EXPECT_THROW(resource.layerBlocks(), std::exception);
-}
-
-TEST(PrefillCPConfigTest, ToStringIncludesShardingFields) {
-    PrefillCPConfig config;
-    config.kv_cache_sharded = true;
-    config.prefill_cp_size  = 2;
-
-    const auto text = config.to_string();
-    EXPECT_NE(text.find("kv_cache_sharded: 1"), std::string::npos);
-    EXPECT_NE(text.find("prefill_cp_size: 2"), std::string::npos);
 }
 
 TEST(KVCacheResourceTest, CacheKeysMaintainLinearDependencies) {
@@ -145,11 +104,8 @@ TEST(KVCacheResourceTest, CacheKeysMaintainLinearDependencies) {
     resource.setBlockDependencies(custom);
     resource.ensureLinearBlockDependencies();
     ASSERT_EQ(resource.blockDependencies().size(), 2u);
-    EXPECT_FALSE(resource.blockDependencies()[0].has_parent);
-    EXPECT_EQ(resource.blockDependencies()[0].ordinal, 0u);
-    EXPECT_TRUE(resource.blockDependencies()[1].has_parent);
+    EXPECT_EQ(resource.blockDependencies()[0].ordinal, 7u);
     EXPECT_EQ(resource.blockDependencies()[1].parent_key, 100);
-    EXPECT_EQ(resource.blockDependencies()[1].ordinal, 1u);
 
     resource.cacheKeys().push_back(300);
     resource.ensureLinearBlockDependencies();
@@ -174,7 +130,7 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
     batch.resetBatchSize(2);
     batch.initGroups(/*group_nums=*/2,
                      /*layer_num=*/3,
-                     /*layer_group_ids=*/{{0}, {1}, {0}},
+                     /*layer_to_group_id=*/{0, 1, 0},
                      /*kernel_blocks_per_kv_block=*/4,
                      /*group_types=*/{CacheGroupType::FULL, CacheGroupType::LINEAR});
 
@@ -215,7 +171,7 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
     KVCacheResource moved;
     moved.initGroups(/*group_num=*/1,
                      /*layer_num=*/1,
-                     /*layer_group_ids=*/{{0}},
+                     /*layer_to_group_id=*/{0},
                      /*kernel_blocks_per_kv_block=*/2,
                      /*group_types=*/{CacheGroupType::FULL});
     moved.mutableBlockIds(0).add(BlockIndicesType{3});

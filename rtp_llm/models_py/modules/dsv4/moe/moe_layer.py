@@ -207,28 +207,8 @@ class MoE(nn.Module):
             layer_weights=layer_weights,
         )
         assert n_shared_experts == 1, "V4 always has exactly 1 shared expert"
-        shared_w = {
-            "w13_w": layer_weights[W.v4_shared_w13_w],
-            "w13_s": layer_weights[W.v4_shared_w13_s],
-            "w2_w": layer_weights[W.v4_shared_w2_w],
-            "w2_s": layer_weights[W.v4_shared_w2_s],
-        }
-        self.shared_experts = W13SharedExpert(
-            dim,
-            moe_inter_dim,
-            expert_weights=shared_w,
-            swiglu_limit=swiglu_limit,
-        )
-        self._shared_executor = get_shared_expert_executor(
-            max_tokens_per_rank=max_tokens_per_rank,
-            dim=dim,
-            inter_dim=moe_inter_dim,
-            swiglu_limit=swiglu_limit,
-        )
-        self._shared_executor.prepare(self.shared_experts)
-        self._final_out: torch.Tensor | None = None
 
-        # --- Strategy selection + weight setup ---
+        # --- Strategy selection ---
         cfg = MoeCfg(
             layer_id=layer_id,
             dim=dim,
@@ -245,10 +225,50 @@ class MoE(nn.Module):
         )
         forced, strict = _resolve_forced(strategy)
         strategy_cls = select_strategy(cfg, forced=forced, strict=strict)
+        # Strategies that fold the shared expert into their routed kernel
+        # (MegaMoEFusedStrategy) own the shared-expert weights themselves and
+        # produce ``routed + shared`` directly; the MoE layer then skips its
+        # standalone shared-expert executor and the combine add.
+        self._routed_includes_shared = bool(
+            getattr(strategy_cls, "routed_includes_shared", False)
+        )
+
+        if self._routed_includes_shared:
+            # The fused strategy pops + owns W.v4_shared_* in setup_weights.
+            self.shared_experts = None
+            self._shared_executor = None
+        else:
+            shared_w = {
+                "w13_w": layer_weights[W.v4_shared_w13_w],
+                "w13_s": layer_weights[W.v4_shared_w13_s],
+                "w2_w": layer_weights[W.v4_shared_w2_w],
+                "w2_s": layer_weights[W.v4_shared_w2_s],
+            }
+            self.shared_experts = W13SharedExpert(
+                dim,
+                moe_inter_dim,
+                expert_weights=shared_w,
+                swiglu_limit=swiglu_limit,
+            )
+            self._shared_executor = get_shared_expert_executor(
+                max_tokens_per_rank=max_tokens_per_rank,
+                dim=dim,
+                inter_dim=moe_inter_dim,
+                swiglu_limit=swiglu_limit,
+            )
+            self._shared_executor.prepare(self.shared_experts)
+        self._final_out: torch.Tensor | None = None
+
         # Register strategy as a child nn.Module so its child weights
         # (e.g. LocalLoopStrategy.experts ModuleList) propagate through
         # ``MoE.to(device)``.
         self._strategy = strategy_cls(cfg)
+        self._gate_pack_static = (
+            os.environ.get("MOEDBG", "0") == "0"
+            and self._strategy.can_use_gate_pack_static(self.gate)
+        )
+        self._strategy._gate_pack_warmup_enabled = self._gate_pack_static
+        self._strategy._gate_pack_route_scale = float(self.gate.route_scale)
         self._strategy.setup_weights(layer_weights)
 
     def _should_chunk(self, tokens: int) -> bool:
@@ -277,8 +297,44 @@ class MoE(nn.Module):
         input_ids: torch.Tensor,
         out: torch.Tensor,
     ) -> None:
+        if self._gate_pack_static:
+            if self._routed_includes_shared:
+                with record_function_range("dsv4.moe.routed_experts"):
+                    routed = self._strategy.forward_with_gate_pack(
+                        x, self.gate, input_ids
+                    )
+                out.copy_(routed)
+                return
+
+            with record_function_range("dsv4.moe.shared_expert_start"):
+                self._shared_executor.start(self.shared_experts, x)
+            try:
+                with record_function_range("dsv4.moe.routed_experts"):
+                    routed = self._strategy.forward_with_gate_pack(
+                        x, self.gate, input_ids
+                    )
+            except Exception:
+                with record_function_range("dsv4.moe.shared_expert_finish"):
+                    self._shared_executor.finish()
+                raise
+
+            with record_function_range("dsv4.moe.shared_expert_finish"):
+                shared = self._shared_executor.finish()
+            with record_function_range("dsv4.moe.add_shared"):
+                combined = combine_routed_and_shared(routed, shared, x.dtype, out=out)
+                if combined.data_ptr() != out.data_ptr():
+                    out.copy_(combined)
+            return
+
         with record_function_range("dsv4.moe.gate"):
             weights, indices = self.gate(x, input_ids)
+
+        if self._routed_includes_shared:
+            # Fused strategy returns ``routed + shared`` directly.
+            with record_function_range("dsv4.moe.routed_experts"):
+                routed = self._strategy(x, weights, indices)
+            out.copy_(routed)
+            return
 
         with record_function_range("dsv4.moe.shared_expert_start"):
             self._shared_executor.start(self.shared_experts, x)
@@ -366,6 +422,48 @@ class MoE(nn.Module):
         if self._should_chunk(x.size(0)):
             return self._forward_chunked(x, input_ids_flat, shape)
 
+        if self._gate_pack_static:
+            if self._routed_includes_shared:
+                with record_function_range("dsv4.moe.routed_experts"):
+                    y = self._strategy.forward_with_gate_pack(
+                        x, self.gate, input_ids_flat
+                    )
+                with record_function_range("dsv4.moe.add_shared"):
+                    T = x.size(0)
+                    out = _get_or_create_final_out(
+                        max(T, self.max_tokens_per_rank, 1),
+                        self.dim,
+                        x.dtype,
+                        x.device,
+                    )
+                    out[:T].copy_(y)
+                    return out[:T].view(shape)
+
+            with record_function_range("dsv4.moe.shared_expert_start"):
+                self._shared_executor.start(self.shared_experts, x)
+            try:
+                with record_function_range("dsv4.moe.routed_experts"):
+                    y = self._strategy.forward_with_gate_pack(
+                        x, self.gate, input_ids_flat
+                    )
+            except Exception:
+                with record_function_range("dsv4.moe.shared_expert_finish"):
+                    self._shared_executor.finish()
+                raise
+
+            with record_function_range("dsv4.moe.shared_expert_finish"):
+                shared_y = self._shared_executor.finish()
+            with record_function_range("dsv4.moe.add_shared"):
+                T = x.size(0)
+                out = _get_or_create_final_out(
+                    max(T, self.max_tokens_per_rank, 1),
+                    self.dim,
+                    x.dtype,
+                    x.device,
+                )
+                y = combine_routed_and_shared(y, shared_y, x.dtype, out=out[:T])
+                return y.view(shape)
+
         with record_function_range("dsv4.moe.gate"):
             if _dbg:
                 self.gate._dbg_prefix = f"L{self.layer_id:02d}_moe_gate"
@@ -388,6 +486,30 @@ class MoE(nn.Module):
                     f"L{self.layer_id:02d}_moe_topk_indices_{dbg_pos_name}",
                     indices[dbg_pos_mask].contiguous(),
                 )
+
+        if self._routed_includes_shared:
+            # Fused strategy: the kernel already produced ``routed + shared``.
+            with record_function_range("dsv4.moe.routed_experts"):
+                y = self._strategy(x, weights, indices)
+            if _dbg:
+                _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_routed_y", y)
+                if dbg_pos_mask is not None:
+                    _rt.record_if_level(
+                        2,
+                        f"L{self.layer_id:02d}_moe_y_{dbg_pos_name}",
+                        y[dbg_pos_mask].contiguous(),
+                    )
+                return y.type_as(x).view(shape)
+            with record_function_range("dsv4.moe.add_shared"):
+                T = x.size(0)
+                out = _get_or_create_final_out(
+                    max(T, self.max_tokens_per_rank, 1),
+                    self.dim,
+                    x.dtype,
+                    x.device,
+                )
+                out[:T].copy_(y)
+                return out[:T].view(shape)
 
         with record_function_range("dsv4.moe.shared_expert_start"):
             self._shared_executor.start(self.shared_experts, x)

@@ -68,7 +68,9 @@ def _mhc_head_fuse(
             rms[0] = T.rsqrt(sqrsum[0] / mhc_hidden_size + rms_eps)
             for mix_id in T.Parallel(mhc_mult):
                 pre_mix[mix_id] = (
-                    T.sigmoid(mixes[mix_id] * rms[0] * mhc_scale[0] + mhc_base[mix_id])
+                    T.sigmoid(
+                        mixes[mix_id] * rms[0] * mhc_scale[0] + mhc_base[mix_id]
+                    )
                     + mhc_pre_eps
                 )
 

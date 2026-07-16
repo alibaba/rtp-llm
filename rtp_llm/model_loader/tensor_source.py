@@ -1,4 +1,4 @@
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 
@@ -77,16 +77,14 @@ class DatabaseTensorSource(TensorSource):
 
 
 class TensorCollector(TensorSource):
-    _target_keys: Set[str]
+    _target_keys: List[str]
     _tensors: Dict[str, torch.Tensor]
-    _scales: Dict[str, torch.Tensor]
     _completed_once: bool
     _database: BaseDatabase
 
-    def __init__(self, target_keys: Set[str], database: BaseDatabase):
+    def __init__(self, target_keys: List[str], database: BaseDatabase):
         self._target_keys = target_keys
         self._tensors = {}
-        self._scales = {}
         self._completed_once = False
         self._database = database
 
@@ -94,10 +92,7 @@ class TensorCollector(TensorSource):
         tensors = []
         t = self._tensors.get(name)
         if t is not None:
-            if name in self._scales:
-                tensors.append(t)
-            else:
-                tensors.append(t.to(data_type))
+            tensors.append(self._tensors[name].to(data_type))
         return tensors
 
     def has_tensor(self, name: str) -> bool:
@@ -110,29 +105,12 @@ class TensorCollector(TensorSource):
         self._check_completion()
         return self.is_collection_complete()
 
-    def store_fp8_quantized(
-        self, name: str, fp8_tensor: torch.Tensor, scale: torch.Tensor
-    ) -> bool:
-        if name not in self._target_keys:
-            raise ValueError(f"Tensor name '{name}' not in target list.")
-        self._tensors[name] = fp8_tensor
-        self._scales[name] = scale
-        self._check_completion()
-        return self.is_collection_complete()
-
-    def has_prequantized_scale(self, name: str) -> bool:
-        return name in self._scales
-
-    def get_scale(self, name: str) -> torch.Tensor:
-        return self._scales[name]
-
     def _check_completion(self):
         if self._target_keys.issubset(self._tensors.keys()):
             self._completed_once = True
 
     def clear(self):
         self._tensors.clear()
-        self._scales.clear()
 
     def is_collection_complete(self) -> bool:
         return self._completed_once

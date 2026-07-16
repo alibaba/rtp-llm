@@ -83,7 +83,7 @@ def _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS: tl.constexpr) -> None:
 # =============================================================================
 # Per-token state-cache writer (fp32). ape is added to score in-kernel.
 # =============================================================================
-@triton.jit
+@triton.jit(do_not_specialize=["num_state_blocks"])
 def _save_partial_states_kernel(
     kv_ptr,
     kv_stride,
@@ -97,7 +97,7 @@ def _save_partial_states_kernel(
     state_cache_stride1,
     slot_mapping_ptr,
     block_size,
-    num_state_blocks: tl.constexpr,
+    num_state_blocks,
     HEAD_SIZE: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
     STATE_WIDTH: tl.constexpr,
@@ -144,6 +144,9 @@ def _save_partial_states_kernel(
         "seq_start",
         "n_raw",
         "kv_cache_block_size",
+        "KV_BLOCK_STRIDE",
+        "NUM_STATE_BLOCKS",
+        "NUM_KV_BLOCKS",
     ]
 )
 def _fused_kv_compress_norm_rope_insert_sparse_attn(
@@ -196,9 +199,9 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     QUANT_BLOCK: tl.constexpr,
     TOKEN_STRIDE: tl.constexpr,
     SCALE_DIM: tl.constexpr,
-    KV_BLOCK_STRIDE: tl.constexpr,
-    NUM_STATE_BLOCKS: tl.constexpr,
-    NUM_KV_BLOCKS: tl.constexpr,
+    KV_BLOCK_STRIDE,
+    NUM_STATE_BLOCKS,
+    NUM_KV_BLOCKS,
     BATCHED: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     STATE_RING_ENTRIES: tl.constexpr,
@@ -229,9 +232,9 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     #   kv_raw[cu_seq_per_req[b] : cu_seq_per_req[b+1]] and cover abs
     #   positions [seq_start_per_req[b], seq_start_per_req[b]+req_n_raw).
     if BATCHED:
-        req_seq_start = tl.load(seq_start_per_req_ptr + req_idx)
-        req_cu_lo = tl.load(cu_seq_per_req_ptr + req_idx)
-        req_cu_hi = tl.load(cu_seq_per_req_ptr + req_idx + 1)
+        req_seq_start = tl.load(seq_start_per_req_ptr + req_idx).to(tl.int64)
+        req_cu_lo = tl.load(cu_seq_per_req_ptr + req_idx).to(tl.int64)
+        req_cu_hi = tl.load(cu_seq_per_req_ptr + req_idx + 1).to(tl.int64)
         req_n_raw = req_cu_hi - req_cu_lo
         flat_idx_in_req = pos - req_seq_start
         use_raw = mask_pos & (flat_idx_in_req >= 0) & (flat_idx_in_req < req_n_raw)
@@ -294,8 +297,8 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
 
     row_base = (
         state_cache_ptr
-        + block_numbers_i64 * state_cache_stride0
-        + block_offsets * state_cache_stride1
+        + block_numbers_i64 * state_cache_stride0.to(tl.int64)
+        + block_offsets.to(tl.int64) * state_cache_stride1.to(tl.int64)
         + head_offset
     )
     cache_mask = valid_block[:, None] & mask[None, :]
@@ -334,7 +337,9 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     if kv_block_idx >= NUM_KV_BLOCKS:
         _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
 
-    cache_block_ptr = k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE
+    cache_block_ptr = k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE.to(
+        tl.int64
+    )
     fp8_ptr = cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE
     scale_ptr = (
         cache_block_ptr
@@ -413,6 +418,9 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
         "seq_start",
         "n_raw",
         "kv_cache_block_size",
+        "KV_BLOCK_STRIDE",
+        "NUM_STATE_BLOCKS",
+        "NUM_KV_BLOCKS",
     ]
 )
 def _fused_kv_compress_norm_rope_insert_indexer_attn(
@@ -465,9 +473,9 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     QUANT_BLOCK: tl.constexpr,
     TOKEN_STRIDE: tl.constexpr,
     SCALE_DIM: tl.constexpr,
-    KV_BLOCK_STRIDE: tl.constexpr,
-    NUM_STATE_BLOCKS: tl.constexpr,
-    NUM_KV_BLOCKS: tl.constexpr,
+    KV_BLOCK_STRIDE,
+    NUM_STATE_BLOCKS,
+    NUM_KV_BLOCKS,
     BATCHED: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     STATE_RING_ENTRIES: tl.constexpr,
@@ -495,9 +503,9 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     #                                    block_table[req_idx])
     # Decode: disable_raw_path → n_raw == 0, every position → cache.
     if BATCHED:
-        req_seq_start = tl.load(seq_start_per_req_ptr + req_idx)
-        req_cu_lo = tl.load(cu_seq_per_req_ptr + req_idx)
-        req_cu_hi = tl.load(cu_seq_per_req_ptr + req_idx + 1)
+        req_seq_start = tl.load(seq_start_per_req_ptr + req_idx).to(tl.int64)
+        req_cu_lo = tl.load(cu_seq_per_req_ptr + req_idx).to(tl.int64)
+        req_cu_hi = tl.load(cu_seq_per_req_ptr + req_idx + 1).to(tl.int64)
         req_n_raw = req_cu_hi - req_cu_lo
         flat_idx_in_req = pos - req_seq_start
         use_raw = mask_pos & (flat_idx_in_req >= 0) & (flat_idx_in_req < req_n_raw)
@@ -561,8 +569,8 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
 
     row_base = (
         state_cache_ptr
-        + block_numbers_i64 * state_cache_stride0
-        + block_offsets * state_cache_stride1
+        + block_numbers_i64 * state_cache_stride0.to(tl.int64)
+        + block_offsets.to(tl.int64) * state_cache_stride1.to(tl.int64)
         + head_offset
     )
     cache_mask = valid_block[:, None] & mask[None, :]
@@ -605,7 +613,9 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     if kv_block_idx >= NUM_KV_BLOCKS:
         _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
 
-    cache_block_ptr = k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE
+    cache_block_ptr = k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE.to(
+        tl.int64
+    )
     fp8_ptr = cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE
     scale_ptr = (
         cache_block_ptr
@@ -829,8 +839,8 @@ def run_fused_compress_kv_write(
     # ``flat_idx`` so B>1 batched prefill keeps the raw fast path that
     # avoids state-cache readback. Scalar ``seq_start`` is
     # ignored in that mode.
-    seq_start_per_req: Optional[torch.Tensor] = None,  # [B] int32/int64
-    cu_seq_per_req: Optional[torch.Tensor] = None,  # [B+1] int32/int64
+    seq_start_per_req: Optional[torch.Tensor] = None,  # [B] int64
+    cu_seq_per_req: Optional[torch.Tensor] = None,  # [B+1] int64
     state_tokens_per_block: int,
 ) -> None:
     """Boundary-token compress→norm→rope→fp8 quant→KV-pool store.
@@ -866,11 +876,8 @@ def run_fused_compress_kv_write(
         and cu_seq_per_req is not None
     )
     if batched:
-        # Match the ``int32`` dtype the kernel expects (positions/req_idx
-        # are int32 throughout the wrapper) so the per-request loads stay
-        # in-register without an implicit promote.
-        seq_start_per_req = seq_start_per_req.to(torch.int32).contiguous()
-        cu_seq_per_req = cu_seq_per_req.to(torch.int32).contiguous()
+        seq_start_per_req = seq_start_per_req.contiguous()
+        cu_seq_per_req = cu_seq_per_req.contiguous()
     else:
         # Triton requires a non-None pointer arg even when BATCHED=False.
         # Pass ``positions`` as a stand-in — the kernel never reads from

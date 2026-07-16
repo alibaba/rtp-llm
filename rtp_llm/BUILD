@@ -2,7 +2,8 @@ package(default_visibility = ["//visibility:public"])
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
 load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
-load("@arch_config//:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps", "platform_deps")
+load("//bazel:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps", "triton_deps")
+load("//open_source/bazel:arch_select.bzl", "platform_deps")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 
 load("@release_version//:defs.bzl", "RELEASE_VERSION")
@@ -62,13 +63,13 @@ xft_dep = select({
 arch_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
-    "//conditions:default": [":decord", ":av"],
+    "//conditions:default": [":decord"],
 })
 
 arch_with_version_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
-    "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
+    "//conditions:default": ["decord==0.6.0"],
 })
 
 requirement([
@@ -93,7 +94,6 @@ requirement([
     "torch",
     "torchvision",
     "triton",
-    "triton-kernels",
     "numpy",
     "safetensors",
     "einops",
@@ -106,7 +106,6 @@ requirement([
     "xfastertransformer_devel",
     "xfastertransformer_devel_icx",
     "decord",
-    "av",
     # add qwen agent package
     "pydantic",
     "json5",
@@ -154,7 +153,7 @@ py_library(
         ":prettytable",
         ":psutil",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
-    ] + internal_deps()
+    ] + arch_dep + internal_deps()
 )
 
 py_library(
@@ -211,31 +210,6 @@ py_library(
 )
 
 py_library(
-    name = "multimodal",
-    srcs = glob([
-        "multimodal/*.py",
-        "multimodal/**/*.py",
-    ]),
-    deps = [
-        ":utils",
-        ":Pillow",
-        ":pillow-heif",
-        ":pillow-avif-plugin",
-        ":nest_asyncio",
-        ":matplotlib",
-        ":torchvision",
-        ":protobuf",
-        ":pyOpenSSL",
-    ] + select({
-        "@//:using_arm": [],
-	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
-        "@//:using_cpu": [],
-        "@//:using_cuda12_arm": [],
-        "//conditions:default": ["flash_attn"]
-    }) + arch_dep,
-)
-
-py_library(
     name = "models",
     srcs = glob([
         "models/*.py",
@@ -249,41 +223,57 @@ py_library(
         ":pynvml",
         ":tiktoken",
         ":protobuf",
+        ":Pillow",
+        ":pillow-heif",
+        ":pillow-avif-plugin",
         ":torch",
+        ":torchvision",
         ":triton",
+        ":pyOpenSSL",
         ":einops",
         ":utils",
         ":ops",
         ":timm",
         ":onnx",
         #":decord",
+        ":nest_asyncio",
+        ":matplotlib",
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
-        ":multimodal",
-    ] + select({
+    ] + arch_dep + select({
+        # cuda13 lock omits deep_ep pending rebuild → only deep_gemm here.
         "@//:using_cuda13_x86": ["deep_gemm"],
+        "@//:using_cuda13_arm": ["deep_gemm"],
         "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
+        # cuda13 lock currently ships flash-mla + tilelang (no flashinfer /
+        # fast-hadamard yet); rebuilds for those tracked separately.
         "@//:using_cuda13_x86": ["flash-mla", "tilelang"],
+        "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
         "@//:cuda_pre_12_9": flashinfer,
         "//conditions:default": []
     }) + select({
+        # rtp_kernel built from gitlab cuda_extension main against torch 2.11+cu130.
         "@//:using_cuda13_x86": rtp_kernel,
+        "@//:using_cuda13_arm": rtp_kernel,
         "@//:using_cuda12_9_x86": rtp_kernel,
         "@//:using_cuda12_arm": rtp_kernel,
         "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + select({
+        # flash_attn / flash_attn_3 not yet rebuilt for torch 2.11 → cuda13 empty.
         "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
         "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + select({
         "@//:using_arm": [],
+        "@//:using_cuda13_arm": [],
         "@//:using_cuda12_arm": [],
         # "//:xft_use_icx": [
         #     "xfastertransformer_devel_icx",
@@ -295,9 +285,10 @@ py_library(
         "@//:using_arm": [],
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cpu": [],
+        "@//:using_cuda13_arm": [],
         "@//:using_cuda12_arm": [],
         "//conditions:default": []
-    }) + internal_deps(),
+    }) + triton_deps(["triton"]) + internal_deps(),
 )
 
 py_library(
@@ -326,8 +317,7 @@ py_library(
         "config/**/*.py",
     ]),
     deps = [
-        "//rtp_llm/distribute:distribute",
-        ":multimodal"
+        "//rtp_llm/distribute:distribute"
     ],
     data = [":alog_config"]
 )
@@ -413,6 +403,7 @@ py_library(
         'start_server.py',
         'start_frontend_server.py',
         'start_backend_server.py',
+        'start_dash_sc_server.py',
         '_ft_pickler.py',
         'model_factory_register.py',
     ],
@@ -494,6 +485,7 @@ py_library(
         "//rtp_llm/server:server",
         ":plugins",
         "//rtp_llm/cpp/model_rpc:model_rpc_client",
+        "//rtp_llm/dash_sc:dash_sc_grpc_server",
         ":openai_api",
         ":lora",
         ":sdk",
@@ -522,7 +514,6 @@ py_library(
             ":embedding",
             "//rtp_llm/tools/convert:convert",
             ":aiter",
-            ":triton-kernels",
         ],
         "//conditions:default": [
             ":models",
@@ -577,7 +568,7 @@ whl_reqs = [
     "sympy",
     "typing-extensions",
     "importlib_metadata",
-    "transformers==5.2.0",
+    "transformers==4.51.2",
     "sentencepiece==0.2.0",
     "fastapi==0.115.6",
     "grpcio-tools==1.57.0",
@@ -594,6 +585,7 @@ whl_reqs = [
     "pyarrow==14.0.0",
     "safetensors",
     "cpm_kernels",
+    "pyodps",
     "Pillow",
     "pillow-heif",
     "pillow-avif-plugin",
@@ -603,7 +595,7 @@ whl_reqs = [
     "pydantic",
     "timm==0.9.12",
     "onnx",
-    "sentence-transformers==5.2.0",
+    "sentence-transformers==2.7.0",
     # "xfastertransformer_devel==1.8.1.1",
     # "xfastertransformer_devel_icx==1.8.1.1",
     "grpcio==1.62.0",
@@ -635,7 +627,7 @@ py_wheel(
     version = RELEASE_VERSION,
     deps = [
         ":rtp_llm_frontend_package",
-        "@rtp_deps//:extension_package_frontend"
+        "//deps:extension_package_frontend"
     ],
     requires = whl_reqs,
 )
@@ -644,6 +636,49 @@ rename_wheel(
     name = "rtp_llm_frontend",
     package_name = "rtp_llm_frontend-%s" % RELEASE_VERSION,
     src = ":rtp_llm_frontend_whl",
+)
+
+# Standalone DashSc gRPC server wheel: dash_sc proto + dash_sc_grpc_server, no full frontend app.
+# Run: python -m rtp_llm.dash_sc.server [--port 8000] or: rtp-llm-dash-sc-grpc [--port 8000]
+py_library(
+    name = "dash_sc_grpc_standalone_lib",
+    srcs = ["__init__.py"],
+    deps = [
+        "//rtp_llm/dash_sc:dash_sc_grpc_server",
+    ],
+    visibility = ["//visibility:private"],
+)
+
+py_package(
+    name = "dash_sc_grpc_standalone_package",
+    deps = [":dash_sc_grpc_standalone_lib"],
+    packages = ["rtp_llm"],
+)
+
+whl_reqs_dash_sc_grpc = [
+    "grpcio>=1.57.0",
+    "protobuf>=4.25",
+]
+
+py_wheel(
+    name = "rtp_llm_dash_sc_grpc_whl",
+    distribution = "rtp_llm_dash_sc_grpc",
+    python_tag = "py3",
+    tags = ["manual", "local", "no-remote"],
+    version = RELEASE_VERSION,
+    entry_points = {
+        "console_scripts": [
+            "rtp-llm-dash-sc-grpc = rtp_llm.dash_sc.server:main",
+        ]
+    },
+    deps = [":dash_sc_grpc_standalone_package"],
+    requires = whl_reqs_dash_sc_grpc,
+)
+
+rename_wheel(
+    name = "rtp_llm_dash_sc_grpc",
+    package_name = "rtp_llm_dash_sc_grpc-%s" % RELEASE_VERSION,
+    src = ":rtp_llm_dash_sc_grpc_whl",
 )
 
 # target for wheel
@@ -660,7 +695,7 @@ py_wheel(
     },
     deps = [
         ":rtp_llm_package",
-        "@rtp_deps//:extension_package"
+        "//deps:extension_package"
     ],
     requires = whl_reqs,
 )
@@ -673,7 +708,7 @@ py_wheel(
     version = RELEASE_VERSION,
     deps = [
         ":rtp_llm_package",
-        "@rtp_deps//:extension_package",
+        "//deps:extension_package",
     ],
     requires = whl_reqs + [
         "kserve",
@@ -731,7 +766,7 @@ py_library(
     deps = [
         ":rtp_llm_lib",
         "//rtp_llm/test/utils:test_util",
-        "@rtp_deps//:extension_lib",
+        "//deps:extension_lib",
         ":aiohttp",
     ]
 )

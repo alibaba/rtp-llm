@@ -337,8 +337,6 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
                 output_token_ids[row_idx * (num_speculative_tokens + 1) + i] = draft_id;
                 all_same_token                                               = all_same_token && same_token;
             } else {
-                // Keep all_same_token as-is. If every previous accepted token was an exact target/draft match,
-                // the verifier token at this rejected position is already target-distributed and can be emitted.
                 pos = i;
                 break;
             }
@@ -351,9 +349,6 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
                 target_token_ids[(row_idx * (num_speculative_tokens + 1) + pos) * target_token_stride
                                  + target_token_stride - 1];
             output_token_ids[row_idx * (num_speculative_tokens + 1) + pos] = bonus_token_id;
-            for (int p = pos + 1; p < num_speculative_tokens + 1; ++p) {
-                output_token_ids[row_idx * (num_speculative_tokens + 1) + p] = -1;
-            }
         }
 
         s_pos            = pos;

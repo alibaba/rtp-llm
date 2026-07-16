@@ -17,7 +17,7 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
     auto all_streams          = stream_groups.allStreams();
     auto total_batch_size_in  = stream_groups.totalSamplerBatchSizeIn();
     auto total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
-    ReturnAllProbsMode return_all_probs = stream_groups.needReturnAllProbs();
+    bool return_all_probs     = stream_groups.needReturnAllProbs();
 
     SamplerInputs sampler_inputs = allocateSamplerInputs(stream_groups, total_batch_size_in, total_batch_size_out);
     fillSamplerCommonInputs(sampler_inputs, all_streams);
@@ -59,12 +59,9 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
 
     auto vocab_size           = (size_t)model_output.logits.size(1);
     sampler_inputs.vocab_size = vocab_size;
-    if (return_all_probs != ReturnAllProbsMode::NONE) {
+    if (return_all_probs) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size_in, (int64_t)vocab_size},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-        if (return_all_probs == ReturnAllProbsMode::ORIGINAL) {
-            sampler_inputs.return_original_all_probs = true;
-        }
     }
 
     // copy logits when needs tiling or returning logits
@@ -134,8 +131,12 @@ SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGrou
     if (stream_groups.needReturnCumLogProbs()) {
         sampler_inputs.cum_log_probs = torch::empty({(int64_t)total_batch_size_in}, torch::kFloat32);
     }
+    // Pin token_ids so Sampler::forward can non_blocking=true the H2D copy.
+    // Without pinning, the .to(kCUDA) becomes a blocking pageable memcpy that
+    // shows up as Memcpy Pageable→Device on the timeline (~33 MiB/rank/step
+    // at bs=128 / step=65552).
     sampler_inputs.token_ids =
-        torch::empty({(int64_t)total_batch_size_in, (int64_t)(sampler_inputs.step + 1)}, torch::kInt32);
+        torch::empty({(int64_t)total_batch_size_in, (int64_t)(sampler_inputs.step + 1)}, pinned_i32);
     sampler_inputs.generator.resize(total_batch_size_in);
     return sampler_inputs;
 }
@@ -201,11 +202,30 @@ void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&        
                                                           std::list<GenerateStreamPtr>& all_streams,
                                                           bool                          score_batch) const {
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
-    std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, idx = 0](auto& stream) mutable {
-        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
-            state_ptr->insert(processor, idx, idx + stream->currentBatchSize());
+    std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, score_batch, idx = 0](auto& stream) mutable {
+        const auto stream_id = static_cast<uint64_t>(stream->streamId());
+        if (score_batch) {
+            const int score_len = static_cast<int>(stream->scoreLen());
+            size_t    processor_idx = 0;
+            for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+                if (processor->isStateful()) {
+                    ++processor_idx;
+                    continue;
+                }
+                for (int i = 0; i < score_len; ++i) {
+                    state_ptr->insert(processor, idx + i, idx + i + 1, stream_id, processor_idx);
+                }
+                ++processor_idx;
+            }
+            idx += score_len;
+        } else {
+            size_t processor_idx = 0;
+            for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+                state_ptr->insert(processor, idx, idx + stream->currentBatchSize(), stream_id, processor_idx);
+                ++processor_idx;
+            }
+            idx += stream->currentBatchSize();
         }
-        idx += stream->currentBatchSize();
     });
     sampler_inputs.logits_processor_states_ptr = state_ptr;
 }

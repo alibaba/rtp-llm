@@ -1,86 +1,91 @@
 #include "OpDefs.h"
 
 namespace torch_ext {
-namespace {
 
-void registerCacheGroupType(pybind11::module& m) {
-    try {
-        auto config_m            = pybind11::module_::import("libth_transformer_config");
-        m.attr("CacheGroupType") = config_m.attr("CacheGroupType");
-        return;
-    } catch (const pybind11::error_already_set& e) {
-        PyErr_Clear();
-    }
-
+void registerPyOpDefs(pybind11::module& m) {
     pybind11::enum_<rtp_llm::CacheGroupType>(m, "CacheGroupType")
         .value("LINEAR", rtp_llm::CacheGroupType::LINEAR)
         .value("FULL", rtp_llm::CacheGroupType::FULL)
         .value("SWA", rtp_llm::CacheGroupType::SWA)
         .export_values();
-}
 
-}  // namespace
-
-void registerPyOpDefs(pybind11::module& m) {
-    registerCacheGroupType(m);
+    pybind11::enum_<rtp_llm::KVCacheRegionName>(m, "KVCacheRegionName")
+        .value("DEFAULT", rtp_llm::KVCacheRegionName::DEFAULT)
+        .value("CSA_KV", rtp_llm::KVCacheRegionName::CSA_KV)
+        .value("HCA_KV", rtp_llm::KVCacheRegionName::HCA_KV)
+        .value("INDEXER_KV", rtp_llm::KVCacheRegionName::INDEXER_KV)
+        .value("INDEXER_STATE", rtp_llm::KVCacheRegionName::INDEXER_STATE)
+        .value("CSA_STATE", rtp_llm::KVCacheRegionName::CSA_STATE)
+        .value("HCA_STATE", rtp_llm::KVCacheRegionName::HCA_STATE)
+        .value("SWA_KV", rtp_llm::KVCacheRegionName::SWA_KV)
+        .export_values();
 
     pybind11::class_<LayerKVCache>(m, "LayerKVCache")
         .def(pybind11::init<>())
-        .def(
-            pybind11::init([](torch::Tensor    kv_cache_base,
-                              int              seq_size_per_block,
-                              int              layer_id,
-                              int              group_id,
-                              std::string      tag,
-                              pybind11::object kv_scale_base) {
-                torch::Tensor scale;
-                if (!kv_scale_base.is_none()) {
-                    scale = kv_scale_base.cast<torch::Tensor>();
-                }
-                return LayerKVCache(
-                    std::move(kv_cache_base), seq_size_per_block, layer_id, group_id, std::move(tag), std::move(scale));
-            }),
-            pybind11::arg("kv_cache_base"),
-            pybind11::arg("seq_size_per_block"),
-            pybind11::arg("layer_id")      = -1,
-            pybind11::arg("group_id")      = -1,
-            pybind11::arg("tag")           = "default",
-            pybind11::arg("kv_scale_base") = pybind11::none())
         .def_readwrite("kv_cache_base", &LayerKVCache::kv_cache_base, "Key/value cache tensor (per-layer view)")
         .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id")
-        .def_readonly("group_id", &LayerKVCache::group_id, "Cache group id (-1 = default)")
-        .def_readonly("tag", &LayerKVCache::tag, "Cache group tag");
+        .def_readonly("group_id", &LayerKVCache::group_id, "KV cache group id")
+        .def_readonly("region_name", &LayerKVCache::region_name, "KV cache attention type");
 
     pybind11::class_<KVCache>(m, "KVCache")
-        .def_property_readonly("group_tags", &KVCache::groupTags, "Cache group tags in topology slot order")
-        .def_property_readonly("layer_count", &KVCache::layerCount, "Number of model-local cache layers")
+        .def(pybind11::init<>())
+        .def_readwrite("kv_cache_base_by_layer", &KVCache::kv_cache_base_by_layer, "Per-layer KV cache tensors")
+        .def_readwrite("kv_scale_base_by_layer", &KVCache::kv_scale_base_by_layer, "Per-layer KV scale tensors")
+        .def_readwrite("seq_size_per_block", &KVCache::seq_size_per_block, "Physical (logical) block size in tokens")
+        .def_readwrite("kernel_seq_size_per_block",
+                       &KVCache::kernel_seq_size_per_block,
+                       "Kernel block size (0 = same as seq_size_per_block)")
+        .def_readwrite("num_kv_heads", &KVCache::num_kv_heads, "Number of KV heads per TP rank")
+        .def_readwrite("head_dim", &KVCache::head_dim, "Head dimension")
+        .def_readwrite("use_mla", &KVCache::use_mla, "Whether MLA cache layout is used")
+        .def_readwrite("kv_lora_rank", &KVCache::kv_lora_rank, "MLA KV LoRA rank")
+        .def_readwrite("rope_head_dim", &KVCache::rope_head_dim, "MLA RoPE head dimension")
+        .def_readwrite("layer_group_types",
+                       &KVCache::layer_group_types,
+                       "Per-layer attention type (CacheGroupType::FULL or LINEAR). "
+                       "Empty = all layers treated as FULL (backward compatibility).")
+        .def_readwrite("group_region_names", &KVCache::group_region_names, "Per-group KV cache attention types")
+        .def_readwrite("group_seq_size_per_block",
+                       &KVCache::group_seq_size_per_block,
+                       "Per-group raw-token coverage of one block-table row")
+        .def_readwrite("layer_region_to_group_id",
+                       &KVCache::layer_region_to_group_id,
+                       "Dense mapping from layer id and KVCacheRegionName to group id")
+        .def_readwrite("kv_cache_base_by_layer_region",
+                       &KVCache::kv_cache_base_by_layer_region,
+                       "Per-layer and per-attention-type KV cache tensors")
+        .def_readwrite("kv_cache_base_by_layer_region_flat",
+                       &KVCache::kv_cache_base_by_layer_region_flat,
+                       "Flat version of by_layer_region: [layer*8+region_name] = tensor")
+        .def_readwrite("kv_scale_base_by_layer_region",
+                       &KVCache::kv_scale_base_by_layer_region,
+                       "Per-layer and per-attention-type KV scale tensors")
         .def("get_layer_cache",
-             static_cast<LayerKVCache (KVCache::*)(int) const>(&KVCache::getLayerCache),
-             "Return a per-layer LayerKVCache for the given global layer id")
+             pybind11::overload_cast<int>(&KVCache::getLayerCache),
+             "Return the legacy/default per-layer LayerKVCache for the given global layer id")
         .def("get_layer_cache",
-             static_cast<LayerKVCache (KVCache::*)(int, const std::string&) const>(&KVCache::getLayerCache),
-             "Return a LayerKVCache for the given layer and tag")
-        .def("get_layer_cache_by_group",
-             &KVCache::getLayerCacheByGroup,
-             "Compatibility accessor using a CacheTopology slot")
-        .def("get_layer_cache_groups",
-             &KVCache::getLayerCacheGroups,
-             "Return every valid LayerKVCache group owned by the layer")
-        .def("get_seq_size_per_block",
-             &KVCache::getSeqSizePerBlock,
-             "Return the physical sequence size per block for a cache tag")
-        .def("get_kernel_seq_size_per_block",
-             &KVCache::getKernelSeqSizePerBlock,
-             "Return the kernel sequence size per block for a cache tag");
+             pybind11::overload_cast<int, rtp_llm::KVCacheRegionName>(&KVCache::getLayerCache),
+             "Return a raw per-layer LayerKVCache for the given global layer id and KV cache attention type")
+        .def("get_layer_caches",
+             &KVCache::getLayerCaches,
+             "Return every per-region LayerKVCache owned by the given global layer id")
+        .def("get_raw_pool_tensor",
+             &KVCache::getRawPoolTensor,
+             "Return raw [total_blocks, stride_bytes] tensor for a specific layer and region name, no reshape (DSV4)");
 
     pybind11::class_<PyModelInitResources>(m, "PyModelInitResources")
         .def(pybind11::init<>())
         .def_readonly("kv_cache", &PyModelInitResources::kv_cache, "KV cache for all layers")
-        .def_readonly("is_speculative", &PyModelInitResources::is_speculative)
-        .def_readonly("is_decode_role", &PyModelInitResources::is_decode_role)
-        .def_readonly("max_context_batch_size", &PyModelInitResources::max_context_batch_size);
+        .def_readonly(
+            "is_speculative", &PyModelInitResources::is_speculative, "True when speculative decoding is active")
+        .def_readonly("is_decode_role",
+                      &PyModelInitResources::is_decode_role,
+                      "True when this model instance runs in decode role")
+        .def_readonly("max_context_batch_size",
+                      &PyModelInitResources::max_context_batch_size,
+                      "Max concurrent context (prefill) batches from FIFO scheduler");
 
     pybind11::class_<caffe2::TypeMeta>(m, "TypeMeta").def(pybind11::init<>());
 
@@ -94,7 +99,10 @@ void registerPyOpDefs(pybind11::module& m) {
         [](caffe2::TypeMeta dtype) { return dtype.toScalarType(); },
         "Convert TypeMeta to scalar type");
 
-    pybind11::class_<PyCacheStoreInputs>(m, "PyCacheStoreInputs").def(pybind11::init<>());
+    pybind11::class_<PyCacheStoreInputs>(m, "PyCacheStoreInputs")
+        .def(pybind11::init<>())
+        .def_readwrite("input_lengths_host", &PyCacheStoreInputs::input_lengths_host)
+        .def_readwrite("prefix_lengths_host", &PyCacheStoreInputs::prefix_lengths_host);
 
     pybind11::class_<rtp_llm::ParamsBase, std::shared_ptr<rtp_llm::ParamsBase>>(m, "ParamsBase")
         .def(pybind11::init<>())
@@ -139,26 +147,27 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
         .def_readwrite("sequence_lengths", &PyAttentionInputs::sequence_lengths)
         .def_readwrite("input_lengths", &PyAttentionInputs::input_lengths)
-        .def_readwrite("kv_cache_kernel_block_id", &PyAttentionInputs::kv_cache_kernel_block_id)
+        .def_readwrite("kv_cache_kernel_block_id_host", &PyAttentionInputs::kv_cache_kernel_block_id_host)
         .def_readwrite("kv_cache_kernel_block_id_device", &PyAttentionInputs::kv_cache_kernel_block_id_device)
-        .def_readwrite("kv_cache_block_id", &PyAttentionInputs::kv_cache_block_id)
+        .def_readwrite("kv_cache_block_id_host", &PyAttentionInputs::kv_cache_block_id_host)
         .def_readwrite("kv_cache_block_id_device", &PyAttentionInputs::kv_cache_block_id_device)
+        .def_readwrite("kv_cache_kernel_block_id_device_by_group",
+                       &PyAttentionInputs::kv_cache_kernel_block_id_device_by_group)
+        .def_readwrite("kv_cache_layer_to_group", &PyAttentionInputs::kv_cache_layer_to_group)
         .def_readwrite("dtype", &PyAttentionInputs::dtype)
-        .def_readwrite("cu_seqlens_device", &PyAttentionInputs::cu_seqlens_device)
         .def_readwrite("cu_seqlens", &PyAttentionInputs::cu_seqlens)
-        .def_readwrite("cu_kv_seqlens_device", &PyAttentionInputs::cu_kv_seqlens_device)
+        .def_readwrite("cu_seqlens_host", &PyAttentionInputs::cu_seqlens_host)
+        .def_readwrite("cu_kv_seqlens", &PyAttentionInputs::cu_kv_seqlens)
         .def_readwrite("context_total_kv_length", &PyAttentionInputs::context_total_kv_length)
         .def_readwrite("total_tokens", &PyAttentionInputs::total_tokens)
         .def_readwrite("padding_offset", &PyAttentionInputs::padding_offset)
         .def_readwrite("is_s_padded", &PyAttentionInputs::is_s_padded)
-        .def_readonly("prefix_lengths_device", &PyAttentionInputs::prefix_lengths_device)
-        .def_readwrite("sequence_lengths_plus_1_device", &PyAttentionInputs::sequence_lengths_plus_1_device)
-        .def_readonly("input_lengths_device", &PyAttentionInputs::input_lengths_device)
-        .def_readwrite("decode_cu_seqlens_device", &PyAttentionInputs::decode_cu_seqlens_device)
-        .def_readwrite("decode_cu_seqlens", &PyAttentionInputs::decode_cu_seqlens)
+        .def_readwrite("sequence_lengths_plus_1_d", &PyAttentionInputs::sequence_lengths_plus_1_d)
+        .def_readwrite("decode_cu_seqlens_d", &PyAttentionInputs::decode_cu_seqlens_d)
+        .def_readonly("decode_cu_seqlens_host", &PyAttentionInputs::decode_cu_seqlens_host)
+        .def_readwrite("position_ids", &PyAttentionInputs::position_ids)
         .def_readwrite("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
         .def_readwrite("context_parallel_info", &PyAttentionInputs::context_parallel_info)
-        .def_readwrite("combo_position_ids", &PyAttentionInputs::combo_position_ids)
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
         .def_readwrite("prefill_cuda_graph_copy_params", &PyAttentionInputs::prefill_cuda_graph_copy_params)
         .def_readwrite("headwise_config", &PyAttentionInputs::headwise_config)
@@ -182,86 +191,16 @@ void registerPyOpDefs(pybind11::module& m) {
             "input_embedding_scalar", &BertEmbeddingInputs::input_embedding_scalar, "Input embedding scalar value")
         .def("__repr__", [](const BertEmbeddingInputs& self) { return "BertEmbeddingInputs"; });
 
-    pybind11::class_<PyEmbeddingInputs>(m, "PyEmbeddingInputs")
-        .def(pybind11::init<>())
-        .def_readwrite(
-            "combo_tokens_type_ids", &PyEmbeddingInputs::combo_tokens_type_ids, "Combined token type IDs tensor")
-        .def_readwrite("text_tokens_mask", &PyEmbeddingInputs::text_tokens_mask, "Text tokens mask tensor")
-        .def("__repr__", [](const PyEmbeddingInputs& self) { return "PyEmbeddingInputs"; });
-
-    pybind11::class_<PyMultimodalInputs>(m, "PyMultimodalInputs")
-        .def(pybind11::init<>())
-        .def_readwrite("multimodal_features", &PyMultimodalInputs::multimodal_features, "Multimodal features tensor")
-        .def_readwrite(
-            "mm_features_locs", &PyMultimodalInputs::mm_features_locs, "Multimodal features locations tensor")
-        .def_readwrite(
-            "mm_extra_input", &PyMultimodalInputs::mm_extra_input, "Multimodal model-specific extra input tensor")
-        .def("__repr__", [](const PyMultimodalInputs& self) { return "PyMultimodalInputs"; });
-
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())
-        .def(pybind11::init([](torch::Tensor       input_ids,
-                               torch::Tensor       input_hiddens,
-                               torch::Tensor       combo_position_ids,
-                               PyEmbeddingInputs   embedding_inputs,
-                               PyMultimodalInputs  multimodal_inputs,
-                               pybind11::object    attention_inputs,
-                               BertEmbeddingInputs bert_embedding_inputs) {
-                 PyModelInputs result;
-                 result.input_ids             = std::move(input_ids);
-                 result.input_hiddens         = std::move(input_hiddens);
-                 result.combo_position_ids    = std::move(combo_position_ids);
-                 result.embedding_inputs      = std::move(embedding_inputs);
-                 result.multimodal_inputs     = std::move(multimodal_inputs);
-                 result.bert_embedding_inputs = std::move(bert_embedding_inputs);
-                 if (pybind11::isinstance<PyAttentionInputs>(attention_inputs)) {
-                     result.attention_inputs = attention_inputs.cast<PyAttentionInputs>();
-                 } else {
-                     result.attention_inputs_by_tag = attention_inputs.cast<AttentionInputsByTag>();
-                     RTP_LLM_CHECK_WITH_INFO(!result.attention_inputs_by_tag.empty(),
-                                             "attention_inputs tag map must not be empty");
-                     result.attention_inputs = result.attention_inputs_by_tag.begin()->second;
-                 }
-                 return result;
-             }),
+        .def(pybind11::init<torch::Tensor, torch::Tensor, PyAttentionInputs, BertEmbeddingInputs>(),
              pybind11::arg("input_ids")             = torch::empty(0),
              pybind11::arg("input_hiddens")         = torch::empty(0),
-             pybind11::arg("combo_position_ids")    = torch::empty(0),
-             pybind11::arg("embedding_inputs")      = PyEmbeddingInputs(),
-             pybind11::arg("multimodal_inputs")     = PyMultimodalInputs(),
              pybind11::arg("attention_inputs")      = PyAttentionInputs(),
              pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs())
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
-        .def_readwrite("combo_position_ids", &PyModelInputs::combo_position_ids, "Combo position IDs tensor")
-        .def_readwrite("embedding_inputs", &PyModelInputs::embedding_inputs, "Embedding inputs structure")
-        .def_readwrite("multimodal_inputs", &PyModelInputs::multimodal_inputs, "Multimodal inputs structure")
-        .def_property(
-            "attention_inputs",
-            [](PyModelInputs& self) -> pybind11::object {
-                if (!self.attention_inputs_by_tag.empty()) {
-                    pybind11::dict result;
-                    for (auto& [tag, inputs] : self.attention_inputs_by_tag) {
-                        result[pybind11::str(tag)] = pybind11::cast(
-                            &inputs, pybind11::return_value_policy::reference_internal, pybind11::cast(&self));
-                    }
-                    return std::move(result);
-                }
-                return pybind11::cast(
-                    &self.attention_inputs, pybind11::return_value_policy::reference_internal, pybind11::cast(&self));
-            },
-            [](PyModelInputs& self, pybind11::object value) {
-                if (pybind11::isinstance<PyAttentionInputs>(value)) {
-                    self.attention_inputs        = value.cast<PyAttentionInputs>();
-                    self.attention_inputs_by_tag = {};
-                    return;
-                }
-                auto by_tag = value.cast<AttentionInputsByTag>();
-                RTP_LLM_CHECK_WITH_INFO(!by_tag.empty(), "attention_inputs tag map must not be empty");
-                self.attention_inputs        = by_tag.begin()->second;
-                self.attention_inputs_by_tag = std::move(by_tag);
-            },
-            "A PyAttentionInputs value or a tag-to-PyAttentionInputs mapping")
+        .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(
             "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
 
@@ -271,19 +210,17 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("hidden_states"),
              "Initialize with hidden states tensor only (params_ptr defaults to nullptr)")
         .def(pybind11::init([](torch::Tensor hidden_states, pybind11::object params_obj) {
-                 // PyModelOutputs may be destroyed by an engine thread without the
-                 // GIL. Keep its lifetime purely C++ and discard non-ParamsBase
-                 // Python objects instead of retaining them in the output.
-                 std::shared_ptr<rtp_llm::ParamsBase> params_ptr = nullptr;
-                 if (!params_obj.is_none()) {
-                     try {
-                         params_ptr = pybind11::cast<std::shared_ptr<rtp_llm::ParamsBase>>(params_obj);
-                     } catch (const pybind11::cast_error&) {
-                         // Some attention implementations expose Python-only params.
-                         // They are owned by the FMHA implementation during forward.
-                     }
+                 // Try to cast to shared_ptr, return nullptr if conversion fails
+                 std::shared_ptr<rtp_llm::ParamsBase> params_ptr     = nullptr;
+                 py::object                           py_attn_params = py::none();
+                 try {
+                     params_ptr = pybind11::cast<std::shared_ptr<rtp_llm::ParamsBase>>(params_obj);
+                 } catch (const pybind11::cast_error& e) {
+                     // Conversion failed, params_ptr remains nullptr
+                     //  RTP_LLM_LOG_INFO("Failed to cast params_obj to shared_ptr<ParamsBase>: %s", e.what());
+                     py_attn_params = params_obj;
                  }
-                 return PyModelOutputs(std::move(hidden_states), std::move(params_ptr));
+                 return PyModelOutputs(hidden_states, params_ptr, py_attn_params);
              }),
              pybind11::arg("hidden_states"),
              pybind11::arg("params_ptr"),

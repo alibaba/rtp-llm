@@ -16,9 +16,7 @@ def _mode_from_env() -> HCMode:
         return HCMode(raw)
     except ValueError as exc:
         allowed = ", ".join(m.value for m in HCMode)
-        raise ValueError(
-            f"invalid DSV4_HC_IMPL={raw!r}; expected one of: {allowed}"
-        ) from exc
+        raise ValueError(f"invalid DSV4_HC_IMPL={raw!r}; expected one of: {allowed}") from exc
 
 
 def build_hc_unit(

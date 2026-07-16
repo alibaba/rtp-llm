@@ -33,9 +33,6 @@ from rtp_llm.tools.api.model_basic_info_analyzer import (
     parse_ft_model_type,
     parse_model_basic_info,
 )
-from rtp_llm.tools.convert.weights_convert_utils import (
-    apply_layer_override_and_post_build,
-)
 from rtp_llm.utils.fuser import MountRwMode, fetch_remote_file_to_local
 from rtp_llm.utils.time_util import timer_wrapper
 
@@ -252,6 +249,7 @@ class WeightConverter:
         kv_cache_config = KVCacheConfig()
         kv_cache_config.seq_size_per_block = 64
         kv_cache_config.fp8_kv_cache = int(env_params.get("FP8_KV_CACHE", 0))
+        kv_cache_config.int8_kv_cache = int(env_params.get("INT8_KV_CACHE", 0))
 
         quantization_config = QuantizationConfig()
         quantization_config.quantization = quantization
@@ -265,8 +263,10 @@ class WeightConverter:
             profiling_debug_logging_config=ProfilingDebugLoggingConfig(),
             embedding_config=None,  # Fake loader doesn't need embedding_config
         )
-        apply_layer_override_and_post_build(model_config, self.model_cls, env_params)
 
+        model_config.num_layers = int(
+            env_params.get("HACK_LAYER_NUM", str(model_config.num_layers))
+        )
         parallelism_config = self._build_parallelism_config()
 
         # Create other required configs

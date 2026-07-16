@@ -6,7 +6,7 @@ twice — once for Attention and once for MoE FFN.
 
 import logging
 import os
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -15,6 +15,18 @@ from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
 from rtp_llm.models_py.modules.dsv4.moe import MoE
+
+
+_PrefillFastHCImpls = Tuple[Callable, Callable, Callable, Callable]
+
+
+def _prefill_fast_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    if (
+        isinstance(norm, RMSNorm)
+        and norm.__class__.__module__ == "rtp_llm.models_py.modules.base.cuda.norm"
+    ):
+        return norm(x, output=x)
+    return norm(x)
 
 
 class Block(nn.Module):
@@ -148,13 +160,17 @@ class Block(nn.Module):
             layer_id=layer_id,
             name="ffn",
         )
+        self._prefill_fast_hc_impls_cached = self._resolve_prefill_fast_hc_impls()
 
     def _sync_after_first_cp_prefill_attention(self) -> None:
         if self._cp_sync_after_attn_done:
             return
         if os.environ.get("DSV4_CP_SYNC_AFTER_ATTN_ONCE", "1") == "0":
             return
-        if getattr(getattr(self.ffn, "_strategy", None), "name", "") != "mega":
+        if getattr(getattr(self.ffn, "_strategy", None), "name", "") not in (
+            "mega",
+            "mega_fused",
+        ):
             return
         if getattr(self.attn, "_cp_ctx", None) is None:
             return
@@ -176,6 +192,92 @@ class Block(nn.Module):
             "[DeepSeekV4Block] CP first-prefill sync after attention done layer=%d",
             self.layer_id,
         )
+
+    def _resolve_prefill_fast_hc_impls(self) -> _PrefillFastHCImpls:
+        attn_hc_pre = getattr(self.attn_hc, "_pre_impl_prefill_fast", None)
+        if attn_hc_pre is None:
+            attn_hc_pre = self.attn_hc._pre_impl
+        ffn_hc_pre = getattr(self.ffn_hc, "_pre_impl_prefill_fast", None)
+        if ffn_hc_pre is None:
+            ffn_hc_pre = self.ffn_hc._pre_impl
+        attn_hc_post = getattr(self.attn_hc, "_post_impl_prefill_fast", None)
+        if attn_hc_post is None:
+            attn_hc_post = self.attn_hc._post_impl
+        ffn_hc_post = getattr(self.ffn_hc, "_post_impl_prefill_fast", None)
+        if ffn_hc_post is None:
+            ffn_hc_post = self.ffn_hc._post_impl
+        return attn_hc_pre, ffn_hc_pre, attn_hc_post, ffn_hc_post
+
+    def _prefill_fast_hc_impls(self) -> _PrefillFastHCImpls:
+        impls = getattr(self, "_prefill_fast_hc_impls_cached", None)
+        if impls is None:
+            impls = self._resolve_prefill_fast_hc_impls()
+            self._prefill_fast_hc_impls_cached = impls
+        return impls
+
+    def prefill_fast_callable(self):
+        if not isinstance(self.attn, AttentionFP8):
+            return None
+        # ``prefill.forward_layers`` caches this private callable only after the
+        # layer has passed the production FP8 support matrix. Keep the public
+        # ``forward_prefill_fast`` wrapper defensive for tests/manual calls.
+        return self._forward_prefill_fast_fp8
+
+    def prefill_fast_attn_pre(self, x: torch.Tensor):
+        attn_hc_pre, _, _, _ = self._prefill_fast_hc_impls()
+        residual = x
+        x_pre, post, comb = attn_hc_pre(x)
+        x_pre = _prefill_fast_norm(self.attn_norm, x_pre)
+        return residual, x_pre, post, comb
+
+    def prefill_fast_attn_body(
+        self,
+        x_pre: torch.Tensor,
+        positions: torch.Tensor,
+        *,
+        kv_cache=None,
+        block_tables_by_type=None,
+    ) -> torch.Tensor:
+        return self.attn(
+            x_pre,
+            positions,
+            kv_cache=kv_cache,
+            block_tables_by_type=block_tables_by_type,
+        )
+
+    def prefill_fast_attn_post(
+        self,
+        attn_out: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ) -> torch.Tensor:
+        _, _, attn_hc_post, _ = self._prefill_fast_hc_impls()
+        x = attn_hc_post(attn_out, residual, post, comb)
+        self._sync_after_first_cp_prefill_attention()
+        return x
+
+    def prefill_fast_ffn_pre(self, x: torch.Tensor):
+        _, ffn_hc_pre, _, _ = self._prefill_fast_hc_impls()
+        residual = x
+        x_pre, post, comb = ffn_hc_pre(x)
+        x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
+        return residual, x_pre, post, comb
+
+    def prefill_fast_ffn_body(
+        self, x_pre: torch.Tensor, input_ids: torch.Tensor
+    ) -> torch.Tensor:
+        return self.ffn(x_pre, input_ids)
+
+    def prefill_fast_ffn_post(
+        self,
+        ffn_out: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ) -> torch.Tensor:
+        _, _, _, ffn_hc_post = self._prefill_fast_hc_impls()
+        return ffn_hc_post(ffn_out, residual, post, comb)
 
     def forward_decode(
         self,
@@ -225,6 +327,102 @@ class Block(nn.Module):
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
         x = self.ffn_hc.post(ffn_out, residual, post, comb)
         return x
+
+    def forward_prefill_fast(
+        self,
+        x: torch.Tensor,  # [T, hc, dim]
+        input_ids: Optional[torch.Tensor],  # [T]
+        positions: torch.Tensor,  # [T] int64
+        cu_seqlens: torch.Tensor,  # [B+1] int64
+        kv_cache=None,
+        block_tables_by_type=None,
+    ) -> torch.Tensor:
+        """Prefill fast path for the FP8 production path.
+
+        This preserves the normal prefill operator order, but calls the HC
+        implementations directly and skips the debug/shape-check wrapper work
+        in :meth:`forward`.  The generic attention fallback is deliberately
+        kept on the default path because it has extra layout handling that the
+        B300 DSV4-Pro FP8 path does not need.
+        """
+        fast_call = self.prefill_fast_callable()
+        if fast_call is None:
+            return self.forward(
+                x,
+                input_ids,
+                positions,
+                cu_seqlens,
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )
+        return fast_call(
+            x,
+            input_ids,
+            positions,
+            cu_seqlens,
+            kv_cache=kv_cache,
+            block_tables_by_type=block_tables_by_type,
+        )
+
+    def _forward_prefill_fast_fp8(
+        self,
+        x: torch.Tensor,
+        input_ids: Optional[torch.Tensor],
+        positions: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        kv_cache=None,
+        block_tables_by_type=None,
+    ) -> torch.Tensor:
+        """Validated FP8 prefill fast body.
+
+        This private method is cached by ``prefill.forward_layers`` after the
+        layer is proven to be ``Block + AttentionFP8``. Keep it semantically
+        paired with ``forward``: production runs may switch between the normal
+        and fast paths via env/debug gates.
+        """
+        if input_ids is None:
+            raise RuntimeError("DSV4 prefill fast path requires input_ids")
+
+        (
+            attn_hc_pre,
+            ffn_hc_pre,
+            attn_hc_post,
+            ffn_hc_post,
+        ) = self._prefill_fast_hc_impls()
+
+        residual = x
+        x_pre, post, comb = attn_hc_pre(x)
+        if self.attn.can_fuse_prefill_attn_norm_input_quant(
+            x_pre, self.attn_norm.weight.data
+        ):
+            x_pre, shared_input_quant = self.attn.prefill_fused_attn_norm_input_quant(
+                x_pre,
+                self.attn_norm.weight.data,
+                self.attn_norm.variance_epsilon,
+            )
+            attn_out = self.attn.forward_with_shared_input_quant(
+                x_pre,
+                positions,
+                shared_input_quant,
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )
+        else:
+            x_pre = _prefill_fast_norm(self.attn_norm, x_pre)
+            attn_out = self.attn(
+                x_pre,
+                positions,
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )
+        x = attn_hc_post(attn_out, residual, post, comb)
+        self._sync_after_first_cp_prefill_attention()
+
+        residual = x
+        x_pre, post, comb = ffn_hc_pre(x)
+        x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
+        ffn_out = self.ffn(x_pre, input_ids)
+        return ffn_hc_post(ffn_out, residual, post, comb)
 
     def forward(
         self,

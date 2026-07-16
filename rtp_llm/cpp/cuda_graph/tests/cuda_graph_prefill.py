@@ -173,12 +173,12 @@ class TestCudaGraphPrefill(unittest.TestCase):
         inputs.input_ids = input_ids
         inputs.input_hiddens = torch.empty(0, dtype=torch.bfloat16, device="cuda")
         attention_inputs.input_lengths = torch.tensor(
-            input_lengths_data, dtype=torch.int32, device="cpu"
+            input_lengths_data, dtype=torch.int32, device="cuda"
         )
 
         attention_inputs.prefix_lengths = torch.zeros(
-            batch_size, dtype=torch.int32, device="cpu"
-        ).pin_memory()
+            batch_size, dtype=torch.int32, device="cuda"
+        )
 
         attention_inputs.is_prefill = True
         attention_inputs.dtype = get_typemeta(torch.zeros(1, dtype=torch.bfloat16))
@@ -197,8 +197,8 @@ class TestCudaGraphPrefill(unittest.TestCase):
                 total_seq_len += input_lengths_data[i]
 
         cu_seqlens[batch_size] = total_seq_len
-        attention_inputs.cu_seqlens_device = cu_seqlens
-        attention_inputs.cu_kv_seqlens_device = cu_seqlens.clone()
+        attention_inputs.cu_seqlens = cu_seqlens
+        attention_inputs.cu_kv_seqlens = cu_seqlens.clone()
         attention_inputs.context_total_kv_length = total_seq_len
         attention_inputs.total_tokens = total_seq_len
         if not use_max_padded_mode:

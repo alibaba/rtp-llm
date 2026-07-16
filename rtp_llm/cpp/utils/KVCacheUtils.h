@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cassert>
 
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
+
 namespace rtp_llm {
 
 inline std::string makeCacheKey(size_t model_id, const std::string& token_id_str, size_t layer_id) {
@@ -13,11 +15,11 @@ inline std::string makeCacheKey(size_t model_id, const std::string& token_id_str
 }
 
 inline std::string
-makeCacheKey(size_t model_id, const std::string& token_id_str, size_t layer_id, const std::string& tag) {
-    if (tag.empty() || tag == "default") {
+makeCacheKey(size_t model_id, const std::string& token_id_str, size_t layer_id, KVCacheRegionName region_name) {
+    if (region_name == KVCacheRegionName::DEFAULT) {
         return makeCacheKey(model_id, token_id_str, layer_id);
     }
-    return makeCacheKey(model_id, token_id_str, layer_id) + "_tag_" + tag;
+    return makeCacheKey(model_id, token_id_str, layer_id) + "_region_" + std::to_string(static_cast<int>(region_name));
 }
 
 }  // namespace rtp_llm

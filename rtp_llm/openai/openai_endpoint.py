@@ -7,7 +7,7 @@ from typing import Any, AsyncGenerator, List, Optional
 from fastapi import Request
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import GenerateConfig, ReturnAllProbsMode
+from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
@@ -16,7 +16,6 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
-from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
@@ -42,9 +41,19 @@ from rtp_llm.openai.renderers.custom_renderer import (
 )
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
+
+_INT32_MAX = 2_147_483_647
+
+
+def _positive_int_or_none(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    value = int(value)
+    return value if value > 0 else None
 
 
 class OpenaiEndpoint(object):
@@ -165,6 +174,58 @@ class OpenaiEndpoint(object):
     ) -> List[List[int]]:
         return [i for i, _ in itertools.groupby(sorted(stop_words_list))]
 
+    @staticmethod
+    def _apply_json_format(config: GenerateConfig) -> None:
+        config.json_format = True
+        config.json_schema = json.dumps(
+            {"type": "object"}, ensure_ascii=False, separators=(",", ":")
+        )
+
+    @staticmethod
+    def _apply_response_format(rf, config: GenerateConfig) -> None:
+        config.json_format = False
+        config.json_schema = None
+        config.regex = None
+        config.ebnf = None
+        config.structural_tag = None
+        config.response_format = None
+        if rf.type == "text":
+            return
+        if rf.type == "json_schema":
+            assert rf.json_schema is not None and rf.json_schema.schema is not None
+            config.json_schema = json.dumps(
+                rf.json_schema.schema, ensure_ascii=False, separators=(",", ":")
+            )
+        elif rf.type == "json_object":
+            config.json_schema = json.dumps(
+                {"type": "object"}, ensure_ascii=False, separators=(",", ":")
+            )
+        elif rf.type == "regex":
+            assert rf.pattern
+            config.regex = rf.pattern
+        elif rf.type == "ebnf":
+            assert rf.grammar
+            config.ebnf = rf.grammar
+        else:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                f"unknown response_format.type: {rf.type!r}",
+            )
+
+    def _ensure_think_end_token_ids(self, config: GenerateConfig) -> None:
+        if config.end_think_token_ids:
+            return
+        end_token_id = self.generate_env_config.think_end_token_id
+        if end_token_id != -1:
+            config.end_think_token_ids = [end_token_id]
+            return
+        think_end_tag = self.generate_env_config.think_end_tag.encode("utf-8").decode(
+            "unicode_escape"
+        )
+        config.end_think_token_ids = self.tokenizer.encode(
+            think_end_tag, add_special_tokens=False
+        )
+
     def _extract_generation_config(
         self, request: ChatCompletionRequest
     ) -> GenerateConfig:
@@ -178,8 +239,8 @@ class OpenaiEndpoint(object):
             config.temperature = request.temperature
         if request.top_p != None:
             config.top_p = request.top_p
-        if request.max_tokens != None:
-            config.max_new_tokens = request.max_tokens
+        if request.top_k != None:
+            config.top_k = request.top_k
         if request.n != None:
             config.num_return_sequences = request.n
         request_stop_words_list = request.stop if request.stop != None else []
@@ -202,45 +263,53 @@ class OpenaiEndpoint(object):
         if request.seed != None:
             config.random_seed = request.seed
         if request.logprobs != None:
-            if not request.logprobs:
-                config.return_all_probs = ReturnAllProbsMode.NONE
-            # Priority: if extra_configs.return_all_probs is already set to
-            # something non-NONE (typically ORIGINAL), honor that — caller has
-            # explicitly opted into a specific mode. Only fall through to
-            # logprobs_mode when no extra_configs override is present.
-            elif config.return_all_probs == ReturnAllProbsMode.NONE:
-                if request.logprobs_mode == "original":
-                    config.return_all_probs = ReturnAllProbsMode.ORIGINAL
-                else:
-                    config.return_all_probs = ReturnAllProbsMode.DEFAULT
+            config.return_all_probs = request.logprobs
         if request.logprobs or request.functions:
             config.is_streaming = True
-        if request.prompt_logprobs is not None:
-            if request.prompt_logprobs <= 0 or request.prompt_logprobs > 1024:
-                raise FtRuntimeException(
-                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                    f"prompt_logprobs must be in [1, 1024], got {request.prompt_logprobs}",
-                )
-            config.return_prompt_logits = True
-            config.prompt_logits_top_k = request.prompt_logprobs
-            config.enforce_prompt_scoring_constraints()
-            request.stream = False
-        if config.return_prompt_logits and request.prompt_logprobs is None:
-            config.validate()
-            request.stream = False
+        if request.response_format is not None:
+            self._apply_response_format(request.response_format, config)
+        elif request.json_format or config.json_format:
+            self._apply_json_format(config)
         config.convert_select_tokens(len(self.tokenizer), self.tokenizer)
 
-        if (
-            request.extra_configs
-            and request.extra_configs.max_thinking_tokens is not None
-            and isinstance(request.extra_configs.max_thinking_tokens, int)
-        ):
-            config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
         # add_thinking_params now accepts generate_env_config parameter
         config.add_thinking_params(self.tokenizer, self.generate_env_config)
+        if (
+            request.extra_configs is not None
+            and "max_thinking_tokens" in request.extra_configs.model_fields_set
+        ):
+            config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
+        if request.thinking_budget is not None:
+            budget = int(request.thinking_budget)
+            config.max_thinking_tokens = _INT32_MAX if budget < 0 else budget
+        if request.enable_thinking_requested() and config.max_thinking_tokens != 0:
+            config.in_think_mode = True
+            self._ensure_think_end_token_ids(config)
+        if request.disable_thinking():
+            config.in_think_mode = False
+            config.max_thinking_tokens = 0
+        max_completion_tokens = _positive_int_or_none(request.max_completion_tokens)
+        max_tokens_cap = _positive_int_or_none(request.max_tokens)
+        if max_completion_tokens is not None:
+            backend_max_new_tokens = max_completion_tokens
+            if max_tokens_cap is not None:
+                backend_max_new_tokens = min(backend_max_new_tokens, max_tokens_cap)
+            config.max_new_tokens = backend_max_new_tokens
+        elif request.max_tokens != None:
+            config.max_new_tokens = request.max_tokens
         if request.debug_info:
             config.return_output_ids = True
         return config
+
+    @staticmethod
+    def _apply_renderer_chat_constraints(
+        renderer,
+        request: ChatCompletionRequest,
+        config: GenerateConfig,
+    ) -> None:
+        apply_constraints = getattr(renderer, "apply_chat_completion_constraints", None)
+        if apply_constraints is not None:
+            apply_constraints(request, config)
 
     @staticmethod
     def _merge_tool_calls(
@@ -424,10 +493,6 @@ class OpenaiEndpoint(object):
         debug_info: Optional[DebugInfo],
         tokenizer: Optional[Any] = None,
     ) -> CompleteResponseAsyncGenerator:
-        # prompt_logits is attached by renderer.generate_choice on the last StreamResponseObject;
-        # capture it here so collect_with_prompt_logits can attach it to the final ChatCompletionResponse.
-        captured_prompt_logits = {}
-
         async def response_generator():
             debug_info_responded = False
 
@@ -445,9 +510,6 @@ class OpenaiEndpoint(object):
                         for output_ids in response.extra_outputs.output_ids
                     ]
 
-                if response.prompt_logits is not None:
-                    captured_prompt_logits["data"] = response.prompt_logits
-
                 yield ChatCompletionStreamResponse(
                     choices=response.choices,
                     usage=response.usage,
@@ -457,16 +519,13 @@ class OpenaiEndpoint(object):
                 )
                 debug_info_responded = True
 
-        async def collect_with_prompt_logits(generator):
-            resp = await OpenaiEndpoint._collect_complete_response(
-                generator, debug_info=debug_info, tokenizer=tokenizer
-            )
-            if "data" in captured_prompt_logits:
-                resp.prompt_logprobs = captured_prompt_logits["data"]
-            return resp
-
+        complete_response_collect_func = partial(
+            OpenaiEndpoint._collect_complete_response,
+            debug_info=debug_info,
+            tokenizer=tokenizer,
+        )
         return CompleteResponseAsyncGenerator(
-            response_generator(), collect_with_prompt_logits
+            response_generator(), complete_response_collect_func
         )
 
     def _get_debug_info(
@@ -516,20 +575,9 @@ class OpenaiEndpoint(object):
         )
         rendered_input = self.render_chat(chat_request)
         generate_config = self._extract_generation_config(chat_request)
-
-        # 生成式推荐：chat 链路同样需要从 rendered_prompt 解析已曝光商品并填充
-        # banned_combo_token_ids。函数内部做了开关与空值短路，对非推荐场景零侵入。
-        parse_and_fill_banned_combo(
-            rendered_input.rendered_prompt, generate_config, self.tokenizer
-        )
+        self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
 
         mm_inputs = rendered_input.multimodal_inputs
-
-        if generate_config.return_prompt_logits and mm_inputs:
-            raise FtRuntimeException(
-                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                "prompt scoring does not support multimodal inputs",
-            )
 
         if generate_config.sp_advice_prompt != "":
             generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
@@ -549,96 +597,12 @@ class OpenaiEndpoint(object):
             generate_config,
             self.backend_rpc_server_visitor,
             chat_request,
+            headers=extract_request_headers(raw_request.headers),
         )
 
         return self._complete_stream_response(
             choice_generator, debug_info, self.tokenizer
         )
-
-    def _prepare_chat_input(self, request_id: int, chat_request):
-        import torch
-
-        from rtp_llm.utils.base_model_datatypes import GenerateInput
-
-        rendered_input = self.render_chat(chat_request)
-        generate_config = self._extract_generation_config(chat_request)
-
-        if generate_config.return_prompt_logits and rendered_input.multimodal_inputs:
-            raise FtRuntimeException(
-                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                "prompt scoring does not support multimodal inputs",
-            )
-
-        if generate_config.sp_advice_prompt != "":
-            generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
-                generate_config.sp_advice_prompt
-            )
-
-        input_id_tensor = torch.Tensor(rendered_input.input_ids).int().unsqueeze(0)
-        gen_input = GenerateInput(
-            request_id=request_id,
-            token_ids=input_id_tensor,
-            mm_inputs=rendered_input.multimodal_inputs,
-            generate_config=generate_config,
-            tokenizer=self.tokenizer,
-        )
-        return gen_input, generate_config
-
-    async def _render_single_output(self, outputs, chat_request, generate_config):
-        """Render a single GenerateOutputs into a ChatCompletionResponse.
-        Only non-streaming mode is supported for batch inference."""
-        renderer = (
-            self.template_renderer if chat_request.user_template else self.chat_renderer
-        )
-
-        async def _single_output_gen(out):
-            yield out
-
-        output_generator = _single_output_gen(outputs)
-
-        prompt_logits_data = None
-        if generate_config.return_prompt_logits:
-            output_generator, prompt_logits_data = (
-                await renderer._extract_prompt_logits(output_generator)
-            )
-
-        merged_gen = await renderer._merge_non_streaming_outputs(output_generator)
-        choice_generator = renderer.render_response_stream(
-            merged_gen, chat_request, generate_config
-        )
-        resp = await self._collect_complete_response(
-            choice_generator, None, self.tokenizer
-        )
-        if prompt_logits_data is not None:
-            resp.prompt_logprobs = prompt_logits_data
-        return resp
-
-    async def batch_chat_completion(self, base_request_id: int, batch_request) -> list:
-        inputs = []
-        all_configs = []
-        for i, chat_request in enumerate(batch_request.requests):
-            if chat_request.stream:
-                raise ValueError(
-                    f"batch chat completion does not support streaming (request index {i})"
-                )
-            chat_request.stream = False
-            gen_input, generate_config = self._prepare_chat_input(
-                base_request_id + i, chat_request
-            )
-            generate_config.is_streaming = False
-            inputs.append(gen_input)
-            all_configs.append(generate_config)
-
-        batch_outputs = await self.backend_rpc_server_visitor.batch_enqueue(inputs)
-
-        responses = []
-        for i, outputs in enumerate(batch_outputs):
-            complete_response = await self._render_single_output(
-                outputs, batch_request.requests[i], all_configs[i]
-            )
-            responses.append(complete_response)
-
-        return responses
 
     def chat_render(self, chat_request: ChatCompletionRequest) -> DebugInfo:
         renderer = (
@@ -646,5 +610,6 @@ class OpenaiEndpoint(object):
         )
         rendered_input = renderer.render_chat(chat_request)
         generate_config = self._extract_generation_config(chat_request)
+        self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
         debug_info = self._get_debug_info(renderer, rendered_input, generate_config)
         return debug_info

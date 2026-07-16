@@ -49,30 +49,6 @@ def init_profile_debug_logging_group_args(parser, profiling_debug_config):
         help="是否开启收集Timeline信息用于性能分析",
     )
     profile_debug_logging_group.add_argument(
-        "--gen_timeline_start_step",
-        env_name="GEN_TIMELINE_START_STEP",
-        bind_to=(profiling_debug_config, "timeline_start_step"),
-        type=int,
-        default=0,
-        help="Timeline采集跳过前N步(warmup)，从第N+1步开始",
-    )
-    profile_debug_logging_group.add_argument(
-        "--gen_timeline_num_steps",
-        env_name="GEN_TIMELINE_NUM_STEPS",
-        bind_to=(profiling_debug_config, "timeline_num_steps"),
-        type=int,
-        default=3,
-        help="Timeline采集步数，采集N步后自动停止并保存",
-    )
-    profile_debug_logging_group.add_argument(
-        "--gen_timeline_trace_name",
-        env_name="GEN_TIMELINE_TRACE_NAME",
-        bind_to=(profiling_debug_config, "timeline_trace_name"),
-        type=str,
-        default="profiler",
-        help="Timeline输出文件名前缀",
-    )
-    profile_debug_logging_group.add_argument(
         "--torch_cuda_profiler_dir",
         env_name="TORCH_CUDA_PROFILER_DIR",
         bind_to=(profiling_debug_config, "torch_cuda_profiler_dir"),
@@ -119,4 +95,12 @@ def init_profile_debug_logging_group_args(parser, profiling_debug_config):
         type=str2bool,
         default=False,
         help="控制是否check nan, 为了排查。可选值: True (启用), False (禁用)。默认为 False",
+    )
+    profile_debug_logging_group.add_argument(
+        "--enable_model_inputs_log",
+        env_name="ENABLE_MODEL_INPUTS_LOG",
+        bind_to=(profiling_debug_config, "enable_model_inputs_log"),
+        type=str2bool,
+        default=False,
+        help="控制是否打印模型输入日志。可选值: True (启用), False (禁用)。默认为 False",
     )

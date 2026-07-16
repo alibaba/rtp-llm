@@ -115,6 +115,7 @@ void ChatCompletionRequest::Jsonize(Jsonizable::JsonWrapper& json) {
     JSONIZE_OPTIONAL(functions);
     JSONIZE_OPTIONAL(temperature);
     JSONIZE_OPTIONAL(top_p);
+    JSONIZE_OPTIONAL(top_k);
     JSONIZE_OPTIONAL(max_tokens);
 
     std::variant<std::string, std::vector<std::string>> stop_;
@@ -139,7 +140,6 @@ void ChatCompletionRequest::Jsonize(Jsonizable::JsonWrapper& json) {
     JSONIZE_OPTIONAL(seed);
     JSONIZE_OPTIONAL(n);
     JSONIZE_OPTIONAL(logprobs);
-    JSONIZE_OPTIONAL(logprobs_mode);
     JSONIZE_OPTIONAL(top_logprobs);
     JSONIZE_OPTIONAL(extra_configs);
     json.Jsonize("private_request", private_request, private_request);

@@ -70,7 +70,6 @@ def _ensure_libz3_loadable() -> None:
 
     try:
         import z3
-
         lib_dir = os.path.join(os.path.dirname(z3.__file__), "lib")
     except Exception:
         return

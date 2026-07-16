@@ -41,7 +41,7 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
                 existing_item.is_resident = resident;
             }
             const bool dependency_updated = updateItemDependencyLocked(existing_item, namespace_id, dependency);
-            bool       updated            = false;
+            bool updated = false;
             for (size_t gid = 0; gid < group_slots.size(); ++gid) {
                 if (isNullBlockIdx(group_slots[gid])) {
                     continue;
@@ -56,11 +56,11 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
                     existing_item.slot_created_time_us.resize(gid + 1, 0);
                 }
                 if (isNullBlockIdx(existing_item.slots[gid])) {
-                    existing_item.slots[gid]                = group_slots[gid];
+                    existing_item.slots[gid] = group_slots[gid];
                     existing_item.slot_created_time_us[gid] = now_us;
                     existing_item.matchable_slots[gid] =
                         matchable_slots.empty() || gid >= matchable_slots.size() ? true : matchable_slots[gid];
-                    updated = true;
+                    updated                  = true;
                     if (static_cast<int>(gid) < group_num_) {
                         group_pools_[gid]->blockCacheReference(group_slots[gid]);
                     }
@@ -247,8 +247,8 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
 
     std::lock_guard<std::mutex> lock(mu_);
     EvictResult                 result;
-    if (independent_group_eviction_enabled_ && prefix_tree_enabled_ && isIndependentEvictionGroupLocked(group_id)) {
-        if (selectIndependentGroupEvictionsLocked(group_id, min_blocks, result)) {
+    if (state_block_independent_eviction_enabled_ && prefix_tree_enabled_ && isStateEvictionGroupLocked(group_id)) {
+        if (selectStateOnlyEvictionsLocked(group_id, min_blocks, result)) {
             return result;
         }
     }
@@ -256,6 +256,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
         return result;
     }
 
+    // Re-enter the normal selection path without taking the mutex twice.
     if (lru_cache_.empty()) {
         return result;
     }
@@ -328,8 +329,13 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
     size_t selected_blocks = 0;
     for (const auto cache_key : lru_keys) {
         UnifiedCacheItem removed_item;
-        const auto*      item            = lru_cache_.find(cache_key);
-        bool             has_target_slot = item && hasUsableSlot(*item, group_id);
+        bool has_target_slot = false;
+        for (const auto& [key, item] : lru_cache_.items()) {
+            if (key == cache_key) {
+                has_target_slot = hasUsableSlot(item, group_id);
+                break;
+            }
+        }
         if (!has_target_slot) {
             continue;
         }
@@ -464,21 +470,21 @@ bool SharedBlockCache::prefixTreeEnabled() const {
     return prefix_tree_enabled_;
 }
 
-void SharedBlockCache::setIndependentGroupEviction(bool enabled, const std::vector<int>& group_ids) {
+void SharedBlockCache::setStateBlockIndependentEviction(bool enabled, const std::vector<int>& state_group_ids) {
     std::lock_guard<std::mutex> lock(mu_);
-    independent_group_eviction_enabled_ = enabled;
-    independent_eviction_group_ids_.clear();
-    for (const auto gid : group_ids) {
+    state_block_independent_eviction_enabled_ = enabled;
+    state_eviction_group_ids_.clear();
+    for (const auto gid : state_group_ids) {
         if (gid >= 0) {
-            independent_eviction_group_ids_.insert(gid);
+            state_eviction_group_ids_.insert(gid);
         }
     }
 }
 
-void SharedBlockCache::upsertTreeNodeLocked(CacheKeyType           cache_key,
-                                            NamespaceId            namespace_id,
-                                            const BlockDependency& dependency,
-                                            bool                   is_resident) {
+void SharedBlockCache::upsertTreeNodeLocked(CacheKeyType               cache_key,
+                                            NamespaceId                namespace_id,
+                                            const BlockDependency&     dependency,
+                                            bool                       is_resident) {
     if (!prefix_tree_enabled_) {
         return;
     }
@@ -488,14 +494,14 @@ void SharedBlockCache::upsertTreeNodeLocked(CacheKeyType           cache_key,
     auto                it = tree_nodes_.find(key);
     if (it == tree_nodes_.end()) {
         PrefixTreeNode node;
-        node.key              = key;
-        node.parent           = parent;
-        node.has_parent       = has_parent;
-        node.ordinal          = dependency.ordinal;
-        node.resident         = is_resident;
-        node.last_access_seq  = ++tree_access_seq_;
+        node.key        = key;
+        node.parent     = parent;
+        node.has_parent = has_parent;
+        node.ordinal    = dependency.ordinal;
+        node.resident   = is_resident;
+        node.last_access_seq = ++tree_access_seq_;
         auto [inserted_it, _] = tree_nodes_.emplace(key, std::move(node));
-        it                    = inserted_it;
+        it = inserted_it;
         aliases_by_cache_key_[cache_key].insert(key);
     } else {
         eraseLeafLocked(it->second);
@@ -507,10 +513,10 @@ void SharedBlockCache::upsertTreeNodeLocked(CacheKeyType           cache_key,
                 detachPendingChildLocked(it->second.parent, key);
             }
         }
-        it->second.parent          = parent;
-        it->second.has_parent      = has_parent;
-        it->second.ordinal         = dependency.ordinal;
-        it->second.resident        = it->second.resident || is_resident;
+        it->second.parent     = parent;
+        it->second.has_parent = has_parent;
+        it->second.ordinal    = dependency.ordinal;
+        it->second.resident   = it->second.resident || is_resident;
         it->second.last_access_seq = ++tree_access_seq_;
     }
 
@@ -670,8 +676,12 @@ void SharedBlockCache::refreshAllTreeAliasesLocked(CacheKeyType cache_key) {
 }
 
 bool SharedBlockCache::flatItemHasCanonicalDependencyLocked(CacheKeyType cache_key) const {
-    const auto* item = lru_cache_.find(cache_key);
-    return item && item->has_dependency && item->dependency_namespace == kGpuCpCanonicalNamespace;
+    for (const auto& [key, item] : lru_cache_.items()) {
+        if (key == cache_key) {
+            return item.has_dependency && item.dependency_namespace == kGpuCpCanonicalNamespace;
+        }
+    }
+    return false;
 }
 
 bool SharedBlockCache::updateItemDependencyLocked(UnifiedCacheItem&      item,
@@ -736,9 +746,10 @@ SharedBlockCache::collectEvictChainLocked(const NamespacedKey& leaf_key) const {
 
 bool SharedBlockCache::chainHasUsableSlotLocked(const std::vector<NamespacedKey>& chain, int group_id) const {
     for (const auto& key : chain) {
-        const auto* item = lru_cache_.find(key.cache_key);
-        if (item && hasUsableSlot(*item, group_id)) {
-            return true;
+        for (const auto& [cache_key, item] : lru_cache_.items()) {
+            if (cache_key == key.cache_key && hasUsableSlot(item, group_id)) {
+                return true;
+            }
         }
     }
     return false;
@@ -756,8 +767,13 @@ bool SharedBlockCache::chainHasReachableAncestorSlotLocked(const std::vector<Nam
             || !hasFlatItemLocked(parent_it->first.cache_key) || isFlatItemResidentLocked(parent_it->first.cache_key)) {
             return false;
         }
-        const auto* parent_item            = lru_cache_.find(parent_it->first.cache_key);
-        bool        parent_has_target_slot = parent_item && hasUsableSlot(*parent_item, group_id);
+        bool parent_has_target_slot = false;
+        for (const auto& [cache_key, item] : lru_cache_.items()) {
+            if (cache_key == parent_it->first.cache_key && hasUsableSlot(item, group_id)) {
+                parent_has_target_slot = true;
+                break;
+            }
+        }
         if (parent_has_target_slot) {
             bool all_children_evictable = true;
             for (const auto& child : parent_it->second.children) {
@@ -789,11 +805,11 @@ bool SharedBlockCache::subtreeEvictableForAncestorSlotLocked(const NamespacedKey
     return true;
 }
 
-bool SharedBlockCache::selectIndependentGroupEvictionsLocked(int group_id, size_t min_blocks, EvictResult& result) {
+bool SharedBlockCache::selectStateOnlyEvictionsLocked(int group_id, size_t min_blocks, EvictResult& result) {
     if (group_id < 0 || (group_num_ > 0 && group_id >= group_num_) || min_blocks == 0) {
         return false;
     }
-    size_t               selected_blocks = 0;
+    size_t selected_blocks = 0;
     std::vector<LeafKey> leaves(leaf_lru_.begin(), leaf_lru_.end());
     for (const auto& leaf : leaves) {
         if (selected_blocks >= min_blocks) {
@@ -804,8 +820,10 @@ bool SharedBlockCache::selectIndependentGroupEvictionsLocked(int group_id, size_
         if (chain.size() <= 1) {
             continue;
         }
+        // Keep the leaf state's tail block when possible. Scan from leaf-parent
+        // upward and drop the deepest non-tail state slot first.
         for (size_t chain_idx = 1; chain_idx < chain.size(); ++chain_idx) {
-            const auto& key      = chain[chain_idx];
+            const auto& key = chain[chain_idx];
             auto [success, item] = lru_cache_.get(key.cache_key);
             if (!success || item.is_resident || static_cast<size_t>(group_id) >= item.slots.size()
                 || isNullBlockIdx(item.slots[static_cast<size_t>(group_id)])) {
@@ -839,11 +857,12 @@ void SharedBlockCache::removeSlotFromItemLocked(CacheKeyType cache_key, int grou
     if (item.has_dependency) {
         result.evicted_dependencies[cache_key] = item.dependency;
     }
-    const int64_t created_time_us               = static_cast<size_t>(group_id) < item.slot_created_time_us.size() ?
-                                                      item.slot_created_time_us[static_cast<size_t>(group_id)] :
-                                                      item.created_time_us;
-    result.evicted_lifetime_ms[cache_key]       = std::max<int64_t>(0, (currentTimeUs() - created_time_us) / 1000);
-    result.evicted_independent_group[cache_key] = group_id;
+    const int64_t created_time_us =
+        static_cast<size_t>(group_id) < item.slot_created_time_us.size() ?
+            item.slot_created_time_us[static_cast<size_t>(group_id)] :
+            item.created_time_us;
+    result.evicted_lifetime_ms[cache_key] = std::max<int64_t>(0, (currentTimeUs() - created_time_us) / 1000);
+    result.evicted_state_only_group[cache_key] = group_id;
 
     item.slots[static_cast<size_t>(group_id)] = NULL_BLOCK_IDX;
     if (static_cast<size_t>(group_id) < item.matchable_slots.size()) {
@@ -853,8 +872,9 @@ void SharedBlockCache::removeSlotFromItemLocked(CacheKeyType cache_key, int grou
         item.slot_created_time_us[static_cast<size_t>(group_id)] = 0;
     }
 
-    const bool has_any_slot =
-        std::any_of(item.slots.begin(), item.slots.end(), [](BlockIdxType slot) { return !isNullBlockIdx(slot); });
+    const bool has_any_slot = std::any_of(item.slots.begin(), item.slots.end(), [](BlockIdxType slot) {
+        return !isNullBlockIdx(slot);
+    });
     if (has_any_slot) {
         lru_cache_.put(cache_key, item);
         refreshAllTreeAliasesLocked(cache_key);
@@ -869,12 +889,16 @@ bool SharedBlockCache::hasFlatItemLocked(CacheKeyType cache_key) const {
 }
 
 bool SharedBlockCache::isFlatItemResidentLocked(CacheKeyType cache_key) const {
-    const auto* item = lru_cache_.find(cache_key);
-    return item && item->is_resident;
+    for (const auto& [key, item] : lru_cache_.items()) {
+        if (key == cache_key) {
+            return item.is_resident;
+        }
+    }
+    return false;
 }
 
-bool SharedBlockCache::isIndependentEvictionGroupLocked(int group_id) const {
-    return independent_eviction_group_ids_.find(group_id) != independent_eviction_group_ids_.end();
+bool SharedBlockCache::isStateEvictionGroupLocked(int group_id) const {
+    return state_eviction_group_ids_.find(group_id) != state_eviction_group_ids_.end();
 }
 
 }  // namespace rtp_llm

@@ -46,9 +46,6 @@ class WeightModule(ABC):
         super().__init_subclass__(**kwargs)
         cls._registry[cls.__name__] = cls
 
-    def get_components(self):
-        return [self]
-
     @property
     def lora_a_name(self):
         return f"{self.name}.{self.lora_A_suffix}"
@@ -624,11 +621,24 @@ class AtomicWeight(WeightModule):
         load_config: LoadConfig,
     ):
         raw_tensor = tensor if isinstance(tensor, torch.Tensor) else tensor[self.name]
-        if (
-            load_config.tp_size <= 1
-            and load_config.dp_size <= 1
-            and load_config.ep_size <= 1
-        ):
+        # lm_head uses its own (lm_head_tp_size, lm_head_tp_rank) which can
+        # differ from the attn-tp pair the rest of the loader plumbs through.
+        # Most importantly, under prefill-CP RTP-LLM repurposes the TP group
+        # as the CP group; ``get_attn_tp_size()`` returns 1 (so attention
+        # weights stay unsharded) but ``parallelism_config.tp_size`` is still
+        # the raw CP/TP size (so the C++ engine's ``tpSyncEmbeddingOrLogits``
+        # all-gathers across that group expecting sharded lm_head logits).
+        # The early-bypass below would skip the split altogether based on the
+        # generic ``load_config.tp_size``, leaving lm_head as a full
+        # ``[vocab, dim]`` tensor on every rank. The gather then doubles it
+        # into ``[B, vocab * tp_size]`` and argmax lands in the OOV range
+        # ``[vocab, vocab * tp_size)``.  Use the lm_head-specific size here
+        # so the bypass and the actual ``__split_tensor`` agree.
+        if self.name in [W.lm_head]:
+            tp_for_skip = load_config.lm_head_tp_size
+        else:
+            tp_for_skip = load_config.tp_size
+        if tp_for_skip <= 1 and load_config.dp_size <= 1 and load_config.ep_size <= 1:
             return {self.name: raw_tensor}
 
         split_func = self._get_split_func()
@@ -664,6 +674,9 @@ class AtomicWeight(WeightModule):
     def _get_split_func(self):
         return W.gpt_style_tp_strategy[self.name]
 
+    def get_components(self):
+        return [self]
+
     @classmethod
     def support(
         cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
@@ -686,6 +699,44 @@ class QuantWeight(WeightModule):
     def __init__(self, name: str, quant_config, *args, **kwargs):
         super().__init__(name)
         self.quant_config = quant_config
+
+
+class MMAtomicWeight(AtomicWeight):
+    def __init__(
+        self,
+        name: str,
+        weights: List[CkptWeightInfo],
+        process_fun: Callable[[List[torch.Tensor]], torch.Tensor] = identity,
+        data_type: Optional[torch.dtype] = None,
+        split_func: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(name, weights, process_fun, data_type, **kwargs)
+        self.split_func = split_func
+
+    def _get_split_func(self):
+        return self.split_func
+
+
+class CustomAtomicWeight(AtomicWeight):
+    """自定义权重组件"""
+
+    prefix = "__custom__."
+
+    def __init__(
+        self,
+        name: str,
+        weights: List[CkptWeightInfo],
+        process_fun: Callable[[List[torch.Tensor]], torch.Tensor] = identity,
+        data_type: Optional[torch.dtype] = None,
+        split_func: Optional[Callable[[torch.Tensor], torch.Tensor]] = sp_id,
+        **kwargs,
+    ) -> None:
+        super().__init__(name, weights, process_fun, data_type, **kwargs)
+        self.split_func = split_func
+
+    def _get_split_func(self):
+        return self.split_func
 
 
 class CustomAtomicWeight(AtomicWeight):
@@ -721,8 +772,6 @@ class CompositeWeight(WeightModule):
         )
 
     def get_components(self):
-        if isinstance(self, QuantWeight):
-            return [self]
         res = []
         for sub_weight in self.sub_weights.values():
             res.extend(sub_weight.get_components())

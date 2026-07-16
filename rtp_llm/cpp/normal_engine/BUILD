@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
     name = "normal_engine",
@@ -12,6 +12,7 @@ cc_library(
         "speculative/*.cc",
     ]),
     deps = [
+        "//rtp_llm/cpp/config:role_types",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/engine_base:engine_base",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
@@ -28,6 +29,7 @@ cc_library(
     ] + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
+            "//rtp_llm/models_py/bindings/cuda/kernels:mtp_target_verify_prepare",
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         ],
         "@//:using_rocm": [

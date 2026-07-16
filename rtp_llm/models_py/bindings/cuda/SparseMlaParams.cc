@@ -16,6 +16,21 @@ namespace rtp_llm {
 static const int MIN_CACHE_BATCH_SIZE  = 1024;
 static const int MIN_CACHE_INPUT_TOKEN = 1024;
 
+namespace {
+
+torch::Tensor toHostContiguousI32(const torch::Tensor& tensor) {
+    if (!tensor.defined()) {
+        return tensor;
+    }
+    auto host_tensor = tensor.is_cuda() ? tensor.cpu() : tensor;
+    if (host_tensor.scalar_type() != torch::kInt32) {
+        host_tensor = host_tensor.to(torch::kInt32);
+    }
+    return host_tensor.is_contiguous() ? host_tensor : host_tensor.contiguous();
+}
+
+}  // namespace
+
 void SparseMlaParams::ensureTensorSize(int batch_size, int token_num, bool forbid_realloc) {
     int old_max_batch_size = max_batch_size_;
     int old_max_token_num  = max_token_num_;
@@ -177,7 +192,8 @@ void SparseMlaParams::ensureCpTensorSize(int max_idx_count, int batch_size) {
     size_t total_i64 = 0;
     for (const auto& s : i64_shapes) {
         size_t n = 1;
-        for (auto d : s) n *= d;
+        for (auto d : s)
+            n *= d;
         n = (n + 31) / 32 * 32;
         total_i64 += n;
     }
@@ -189,7 +205,8 @@ void SparseMlaParams::ensureCpTensorSize(int max_idx_count, int batch_size) {
     size_t total_i32 = 0;
     for (const auto& s : i32_shapes) {
         size_t n = 1;
-        for (auto d : s) n *= d;
+        for (auto d : s)
+            n *= d;
         n = (n + 31) / 32 * 32;
         total_i32 += n;
     }
@@ -201,13 +218,13 @@ void SparseMlaParams::ensureCpTensorSize(int max_idx_count, int batch_size) {
         cp_max_i64_elements_ = total_i64;
         cp_max_idx_count_    = max_idx_count;
 
-        auto alloc_h = FlashInferMlaAttnParams::allocateManyBuffer(i64_shapes, false, torch::kInt64);
+        auto alloc_h  = FlashInferMlaAttnParams::allocateManyBuffer(i64_shapes, false, torch::kInt64);
         cp_buf_h_i64_ = std::get<0>(alloc_h);
-        auto& th = std::get<1>(alloc_h);
+        auto& th      = std::get<1>(alloc_h);
 
-        auto alloc_d = FlashInferMlaAttnParams::allocateManyBuffer(i64_shapes, true, torch::kInt64);
+        auto alloc_d  = FlashInferMlaAttnParams::allocateManyBuffer(i64_shapes, true, torch::kInt64);
         cp_buf_d_i64_ = std::get<0>(alloc_d);
-        auto& td = std::get<1>(alloc_d);
+        auto& td      = std::get<1>(alloc_d);
 
         cp_kv_restore_unpad_indices_h_ = th[0];
         cp_total_global_ids_h_         = th[1];
@@ -222,13 +239,13 @@ void SparseMlaParams::ensureCpTensorSize(int max_idx_count, int batch_size) {
         cp_max_i32_elements_  = total_i32;
         cp_max_batch_size_cp_ = batch_size;
 
-        auto alloc_h = FlashInferMlaAttnParams::allocateManyBuffer(i32_shapes, false, torch::kInt32);
+        auto alloc_h    = FlashInferMlaAttnParams::allocateManyBuffer(i32_shapes, false, torch::kInt32);
         cp_buf_h_i32_2_ = std::get<0>(alloc_h);
-        auto& th2 = std::get<1>(alloc_h);
+        auto& th2       = std::get<1>(alloc_h);
 
-        auto alloc_d = FlashInferMlaAttnParams::allocateManyBuffer(i32_shapes, true, torch::kInt32);
+        auto alloc_d    = FlashInferMlaAttnParams::allocateManyBuffer(i32_shapes, true, torch::kInt32);
         cp_buf_d_i32_2_ = std::get<0>(alloc_d);
-        auto& td2 = std::get<1>(alloc_d);
+        auto& td2       = std::get<1>(alloc_d);
 
         cp_cu_kv_seqlens_global_h_ = th2[0];
         cp_cu_kv_seqlens_global_d_ = td2[0];
@@ -242,9 +259,8 @@ void SparseMlaParams::refreshCpBuffer(int kv_restore_count, int total_ids_count,
     // pre-allocated capacity (which is at least 1024 * 3 int64 elements).
     // Buffer layout (i64): [kv_restore | global_ids | local_ids] — contiguous
     // with 32-element alignment between sub-tensors.
-    if (cp_buf_h_i64_.defined() && cp_buf_d_i64_.defined()
-        && (kv_restore_count > 0 || total_ids_count > 0)) {
-        auto* buf_start = cp_buf_h_i64_.data_ptr<int64_t>();
+    if (cp_buf_h_i64_.defined() && cp_buf_d_i64_.defined() && (kv_restore_count > 0 || total_ids_count > 0)) {
+        auto*          buf_start = cp_buf_h_i64_.data_ptr<int64_t>();
         const int64_t* last_data_end;
         if (total_ids_count > 0) {
             last_data_end = cp_total_local_ids_h_.data_ptr<int64_t>() + total_ids_count;
@@ -257,8 +273,8 @@ void SparseMlaParams::refreshCpBuffer(int kv_restore_count, int total_ids_count,
 
     if (cp_buf_h_i32_2_.defined() && cp_buf_d_i32_2_.defined()) {
         size_t i32_bytes = static_cast<size_t>(batch_size + 1) * sizeof(int32_t);
-        cudaMemcpyAsync(cp_buf_d_i32_2_.data_ptr(), cp_buf_h_i32_2_.data_ptr(),
-                        i32_bytes, cudaMemcpyHostToDevice, stream);
+        cudaMemcpyAsync(
+            cp_buf_d_i32_2_.data_ptr(), cp_buf_h_i32_2_.data_ptr(), i32_bytes, cudaMemcpyHostToDevice, stream);
     }
 
     std::vector<int64_t> kv_shape  = {(int64_t)kv_restore_count};
@@ -280,30 +296,38 @@ void SparseMlaParams::refreshCpBuffer(int kv_restore_count, int total_ids_count,
     cp_cu_kv_seqlens_global     = cp_cu_kv_seqlens_global_d_;
 }
 
-void SparseMlaParams::fillCpPlanParams(const torch::Tensor&         padding_mask,
-                                       const torch::Tensor&         kv_restore_indices,
-                                       const std::vector<int64_t>&  q0_idx,
-                                       const std::vector<int64_t>&  q1_idx,
-                                       int                          cp_rank,
-                                       int                          local_tokens,
-                                       const torch::Tensor&         actual_input_lengths,
-                                       const torch::Tensor&         prefix_lengths) {
-    const int padded_total  = padding_mask.size(0);
-    const int batch_size    = actual_input_lengths.size(0);
-    const int max_idx_count = std::max(padded_total, (int)(q0_idx.size() + q1_idx.size()));
+void SparseMlaParams::fillCpPlanParams(const torch::Tensor&        padding_mask,
+                                       const torch::Tensor&        kv_restore_indices,
+                                       const std::vector<int64_t>& q0_idx,
+                                       const std::vector<int64_t>& q1_idx,
+                                       int                         cp_rank,
+                                       int                         local_tokens,
+                                       const torch::Tensor&        actual_input_lengths,
+                                       const torch::Tensor&        prefix_lengths) {
+    auto padding_mask_host       = toHostContiguousI32(padding_mask);
+    auto kv_restore_indices_host = kv_restore_indices.is_cuda() ? kv_restore_indices.cpu() : kv_restore_indices;
+    kv_restore_indices_host =
+        kv_restore_indices_host.is_contiguous() ? kv_restore_indices_host : kv_restore_indices_host.contiguous();
+    auto      actual_input_lengths_host = toHostContiguousI32(actual_input_lengths);
+    auto      prefix_lengths_host       = toHostContiguousI32(prefix_lengths);
+    const int padded_total              = padding_mask_host.size(0);
+    const int batch_size                = actual_input_lengths_host.size(0);
+    const int max_idx_count             = std::max(padded_total, (int)(q0_idx.size() + q1_idx.size()));
 
     ensureCpTensorSize(max_idx_count, batch_size);
 
-    const auto* pm_ptr = padding_mask.data_ptr<int32_t>();
+    const auto* pm_ptr = padding_mask_host.data_ptr<int32_t>();
 
     // kv_restore_indices may be int32 (from ZigZagProcessor) or int64 — read into a local int64 vector
     std::vector<int64_t> ri_vec(padded_total);
-    if (kv_restore_indices.scalar_type() == torch::kInt32) {
-        const auto* ri32 = kv_restore_indices.data_ptr<int32_t>();
-        for (int i = 0; i < padded_total; ++i) ri_vec[i] = static_cast<int64_t>(ri32[i]);
+    if (kv_restore_indices_host.scalar_type() == torch::kInt32) {
+        const auto* ri32 = kv_restore_indices_host.data_ptr<int32_t>();
+        for (int i = 0; i < padded_total; ++i)
+            ri_vec[i] = static_cast<int64_t>(ri32[i]);
     } else {
-        const auto* ri64 = kv_restore_indices.data_ptr<int64_t>();
-        for (int i = 0; i < padded_total; ++i) ri_vec[i] = ri64[i];
+        const auto* ri64 = kv_restore_indices_host.data_ptr<int64_t>();
+        for (int i = 0; i < padded_total; ++i)
+            ri_vec[i] = ri64[i];
     }
     const int64_t* ri_ptr = ri_vec.data();
 
@@ -331,7 +355,7 @@ void SparseMlaParams::fillCpPlanParams(const torch::Tensor&         padding_mask
 
     // Step 3: Build pad_to_unpad cumsum (pad_to_unpad[i] = cumsum(padding_mask, 0..i) - 1)
     std::vector<int64_t> pad_to_unpad(padded_total);
-    int64_t cumsum = 0;
+    int64_t              cumsum = 0;
     for (int i = 0; i < padded_total; ++i) {
         cumsum += pm_ptr[i];
         pad_to_unpad[i] = cumsum - 1;
@@ -342,13 +366,16 @@ void SparseMlaParams::fillCpPlanParams(const torch::Tensor&         padding_mask
 
     auto process_q_indices = [&](const std::vector<int64_t>& q_idx) {
         for (size_t j = 0; j < q_idx.size(); ++j) {
-            int64_t idx = q_idx[j];
+            int64_t idx         = q_idx[j];
             int64_t source_flat = (int64_t)cp_rank * local_tokens + idx;
-            if (source_flat < 0 || source_flat >= padded_total) continue;
+            if (source_flat < 0 || source_flat >= padded_total)
+                continue;
             int64_t global_padded = inv_restore[source_flat];
-            if (global_padded < 0 || global_padded >= padded_total) continue;
-            if (pm_ptr[global_padded] != 1) continue;
-            int64_t global_unpadded = pad_to_unpad[global_padded];
+            if (global_padded < 0 || global_padded >= padded_total)
+                continue;
+            if (pm_ptr[global_padded] != 1)
+                continue;
+            int64_t global_unpadded     = pad_to_unpad[global_padded];
             local_out[total_ids_count]  = idx;
             global_out[total_ids_count] = global_unpadded;
             total_ids_count++;
@@ -359,24 +386,27 @@ void SparseMlaParams::fillCpPlanParams(const torch::Tensor&         padding_mask
     process_q_indices(q1_idx);
 
     if (total_ids_count == 0 && !q0_idx.empty()) {
-        RTP_LLM_LOG_WARNING(
-            "[SparseMlaParams::fillCpPlanParams] All q indices were filtered out "
-            "(total_ids_count=0, q0_idx.size=%zu, q1_idx.size=%zu, "
-            "cp_rank=%d, local_tokens=%d, padded_total=%d). "
-            "This may indicate a data mismatch between CP chunking and padding mask.",
-            q0_idx.size(), q1_idx.size(), cp_rank, local_tokens, padded_total);
+        RTP_LLM_LOG_WARNING("[SparseMlaParams::fillCpPlanParams] All q indices were filtered out "
+                            "(total_ids_count=0, q0_idx.size=%zu, q1_idx.size=%zu, "
+                            "cp_rank=%d, local_tokens=%d, padded_total=%d). "
+                            "This may indicate a data mismatch between CP chunking and padding mask.",
+                            q0_idx.size(),
+                            q1_idx.size(),
+                            cp_rank,
+                            local_tokens,
+                            padded_total);
     }
 
     // Step 5: cu_kv_seqlens_global = [0, cumsum(actual_input_lengths + prefix_lengths)]
-    TORCH_CHECK(actual_input_lengths.scalar_type() == torch::kInt32,
+    TORCH_CHECK(actual_input_lengths_host.scalar_type() == torch::kInt32,
                 "fillCpPlanParams: actual_input_lengths must be int32, got ",
-                actual_input_lengths.scalar_type());
-    TORCH_CHECK(prefix_lengths.scalar_type() == torch::kInt32,
+                actual_input_lengths_host.scalar_type());
+    TORCH_CHECK(prefix_lengths_host.scalar_type() == torch::kInt32,
                 "fillCpPlanParams: prefix_lengths must be int32, got ",
-                prefix_lengths.scalar_type());
-    const auto* ail_ptr = actual_input_lengths.data_ptr<int32_t>();
-    const auto* pl_ptr  = prefix_lengths.data_ptr<int32_t>();
-    cu_kv_out[0] = 0;
+                prefix_lengths_host.scalar_type());
+    const auto* ail_ptr = actual_input_lengths_host.data_ptr<int32_t>();
+    const auto* pl_ptr  = prefix_lengths_host.data_ptr<int32_t>();
+    cu_kv_out[0]        = 0;
     for (int i = 0; i < batch_size; ++i) {
         cu_kv_out[i + 1] = cu_kv_out[i] + ail_ptr[i] + pl_ptr[i];
     }
@@ -389,23 +419,27 @@ void SparseMlaParams::fillCpPlanParams(const torch::Tensor&         padding_mask
 void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
                                  int                          seq_size_per_block,
                                  bool                         forbid_realloc) {
+    auto input_lengths_host    = toHostContiguousI32(attn_inputs.input_lengths);
+    auto prefix_lengths_host   = toHostContiguousI32(attn_inputs.prefix_lengths);
+    auto sequence_lengths_host = toHostContiguousI32(attn_inputs.sequence_lengths);
+
     // Step 1: Call base class fillParams to fill shared parameters
-    FlashInferMlaAttnParams::fillParams(attn_inputs.prefix_lengths,
-                                        attn_inputs.sequence_lengths,
-                                        attn_inputs.input_lengths,
-                                        attn_inputs.kv_cache_kernel_block_id,
+    FlashInferMlaAttnParams::fillParams(prefix_lengths_host,
+                                        sequence_lengths_host,
+                                        input_lengths_host,
+                                        attn_inputs.kv_cache_kernel_block_id_host,
                                         seq_size_per_block,
                                         forbid_realloc);
 
     // Step 2: Fill IndexerParams-specific parameters
     bool is_prefill = attn_inputs.is_prefill;
-    int  batch_size = is_prefill ? attn_inputs.input_lengths.size(0) : attn_inputs.sequence_lengths.size(0);
+    int  batch_size = is_prefill ? input_lengths_host.size(0) : sequence_lengths_host.size(0);
 
     // Now we can directly access base class positions_h, batch_indice_h, kvlen_d, etc.
 
     int64_t total_tokens = 0;
     if (is_prefill) {
-        const auto input_lengths_ptr = attn_inputs.input_lengths.data_ptr<int32_t>();
+        const auto input_lengths_ptr = input_lengths_host.data_ptr<int32_t>();
         for (int i = 0; i < batch_size; ++i) {
             total_tokens += input_lengths_ptr[i];
         }
@@ -415,9 +449,9 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
 
             // Use base class positions_h (no need to pass from parameter)
             fillParamsInternal(true,
-                               attn_inputs.input_lengths,
-                               attn_inputs.prefix_lengths,
-                               attn_inputs.sequence_lengths,
+                               input_lengths_host,
+                               prefix_lengths_host,
+                               sequence_lengths_host,
                                batch_size,
                                seq_size_per_block,
                                total_tokens,
@@ -448,9 +482,9 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
 
             // Use base class positions_h (no need to pass from parameter)
             fillParamsInternal(false,
-                               attn_inputs.input_lengths,
-                               attn_inputs.prefix_lengths,
-                               attn_inputs.sequence_lengths,
+                               input_lengths_host,
+                               prefix_lengths_host,
+                               sequence_lengths_host,
                                batch_size,
                                seq_size_per_block,
                                0,
@@ -481,28 +515,34 @@ void registerPySparseMlaParams(pybind11::module& m) {
         .def_readonly("ks", &SparseMlaParams::ks)
         .def_readonly("ke", &SparseMlaParams::ke)
         .def_readwrite("schedule_metadata", &SparseMlaParams::schedule_metadata)
-        .def("fill_cp_plan_params",
-             [](rtp_llm::SparseMlaParams&   self,
-                const torch::Tensor&         padding_mask,
-                const torch::Tensor&         kv_restore_indices,
-                const std::vector<int64_t>&  q0_idx,
-                const std::vector<int64_t>&  q1_idx,
-                int                          cp_rank,
-                int                          local_tokens,
-                const torch::Tensor&         actual_input_lengths,
-                const torch::Tensor&         prefix_lengths) {
-                 self.fillCpPlanParams(padding_mask, kv_restore_indices,
-                                       q0_idx, q1_idx, cp_rank, local_tokens,
-                                       actual_input_lengths, prefix_lengths);
-             },
-             pybind11::arg("padding_mask"),
-             pybind11::arg("kv_restore_indices"),
-             pybind11::arg("q0_idx"),
-             pybind11::arg("q1_idx"),
-             pybind11::arg("cp_rank"),
-             pybind11::arg("local_tokens"),
-             pybind11::arg("actual_input_lengths"),
-             pybind11::arg("prefix_lengths"))
+        .def(
+            "fill_cp_plan_params",
+            [](rtp_llm::SparseMlaParams&   self,
+               const torch::Tensor&        padding_mask,
+               const torch::Tensor&        kv_restore_indices,
+               const std::vector<int64_t>& q0_idx,
+               const std::vector<int64_t>& q1_idx,
+               int                         cp_rank,
+               int                         local_tokens,
+               const torch::Tensor&        actual_input_lengths,
+               const torch::Tensor&        prefix_lengths) {
+                self.fillCpPlanParams(padding_mask,
+                                      kv_restore_indices,
+                                      q0_idx,
+                                      q1_idx,
+                                      cp_rank,
+                                      local_tokens,
+                                      actual_input_lengths,
+                                      prefix_lengths);
+            },
+            pybind11::arg("padding_mask"),
+            pybind11::arg("kv_restore_indices"),
+            pybind11::arg("q0_idx"),
+            pybind11::arg("q1_idx"),
+            pybind11::arg("cp_rank"),
+            pybind11::arg("local_tokens"),
+            pybind11::arg("actual_input_lengths"),
+            pybind11::arg("prefix_lengths"))
         .def_readonly("cp_kv_restore_unpad_indices", &SparseMlaParams::cp_kv_restore_unpad_indices)
         .def_readonly("cp_total_global_ids", &SparseMlaParams::cp_total_global_ids)
         .def_readonly("cp_total_local_ids", &SparseMlaParams::cp_total_local_ids)

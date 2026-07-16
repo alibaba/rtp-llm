@@ -16,10 +16,6 @@
 #include "rtp_llm/models_py/bindings/common/kernels/mask_logits.h"
 #include <cuda_profiler_api.h>
 #elif USING_ROCM
-#include <ATen/hip/HIPContext.h>
-#include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
-#include "rtp_llm/models_py/bindings/common/kernels/batch_copy.h"
-#include "rtp_llm/models_py/bindings/common/kernels/copy_utils.h"
 #include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
 #endif
 
@@ -130,6 +126,84 @@ static void batchCopyFallback(const BatchCopyParams& params) {
     }
 }
 
+void runtimeBatchCopy(const BatchCopyParams& params) {
+    constexpr size_t cuda_sector_size = 128;
+
+    constexpr auto align_to = [](size_t size, size_t alignment) {
+        return ((size + alignment - 1) / alignment) * alignment;
+    };
+
+    auto         stream_raw  = at::cuda::getCurrentCUDAStream().stream();
+    auto         comm_stream = getOverlapStream().stream();
+    bool         use_overlap = getEnableCommOverlap();
+    cudaStream_t stream      = (params.overlapped && use_overlap) ? comm_stream : stream_raw;
+
+    BatchCopyParams fallback_copies;
+    bool            need_fallback = false;
+
+    for (uint32_t copy_type_enum = 0; copy_type_enum < BatchCopyParams::TYPE_SIZE; ++copy_type_enum) {
+        auto   copy_type       = BatchCopyParams::CopyType(copy_type_enum);
+        auto&  buffers         = params.copy_buffers[copy_type];
+        size_t copy_batch_size = buffers.sizes.size();
+        if (copy_batch_size == 0) {
+            continue;
+        }
+
+        switch (copy_type) {
+            case BatchCopyParams::D2D: {
+                const size_t org_src_ptrs_bytes = sizeof(void*) * copy_batch_size;
+                const size_t org_dst_ptrs_bytes = sizeof(void*) * copy_batch_size;
+                const size_t org_sizes_bytes    = sizeof(uint64_t) * copy_batch_size;
+                const size_t src_ptrs_bytes     = align_to(org_src_ptrs_bytes, cuda_sector_size);
+                const size_t dst_ptrs_bytes     = align_to(org_dst_ptrs_bytes, cuda_sector_size);
+                const size_t sizes_bytes        = org_sizes_bytes;
+                const size_t workspace_bytes    = src_ptrs_bytes + dst_ptrs_bytes + sizes_bytes;
+
+                auto workspace = torch::empty({(int64_t)workspace_bytes},
+                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+
+                auto src_ptrs = reinterpret_cast<void**>(workspace.data_ptr<uint8_t>());
+                auto dst_ptrs = reinterpret_cast<void**>(workspace.data_ptr<uint8_t>() + src_ptrs_bytes);
+                auto sizes =
+                    reinterpret_cast<uint64_t*>(workspace.data_ptr<uint8_t>() + src_ptrs_bytes + dst_ptrs_bytes);
+
+                check_cuda_value(cudaMemcpyAsync(
+                    src_ptrs, buffers.src_ptr.data(), org_src_ptrs_bytes, cudaMemcpyHostToDevice, stream));
+                check_cuda_value(cudaMemcpyAsync(
+                    dst_ptrs, buffers.dst_ptr.data(), org_dst_ptrs_bytes, cudaMemcpyHostToDevice, stream));
+                check_cuda_value(
+                    cudaMemcpyAsync(sizes, buffers.sizes.data(), org_sizes_bytes, cudaMemcpyHostToDevice, stream));
+
+                cudaEvent_t copy_params_done;
+                check_cuda_value(cudaEventCreate(&copy_params_done));
+                check_cuda_value(cudaEventRecord(copy_params_done, stream));
+
+                auto config = kernels::getBatchCopyConfig(buffers.sizes.data(), copy_batch_size);
+                kernels::invokeBatchCopy(dst_ptrs, src_ptrs, sizes, copy_batch_size, config, stream);
+
+                check_cuda_value(cudaEventSynchronize(copy_params_done));
+                check_cuda_value(cudaEventDestroy(copy_params_done));
+
+                check_cuda_error();
+            } break;
+            case BatchCopyParams::H2H:
+            case BatchCopyParams::H2D:
+            case BatchCopyParams::D2H: {
+                need_fallback                           = true;
+                fallback_copies.overlapped              = params.overlapped;
+                fallback_copies.copy_buffers[copy_type] = buffers;
+            } break;
+            default:
+                RTP_LLM_FAIL("Unexpected CopyType %d", copy_type);
+                break;
+        }
+    }
+
+    if (need_fallback) {
+        batchCopyFallback(fallback_copies);
+    }
+}
+
 // ============================================================
 // maskLogits (CUDA)
 // ============================================================
@@ -154,13 +228,6 @@ void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask) {
 }
 
 #else  // ROCm / non-CUDA
-
-namespace {
-at::hip::HIPStream& getOverlapStream() {
-    static thread_local auto s = at::hip::getStreamFromPool(/*isHighPriority=*/true);
-    return s;
-}
-}  // anonymous namespace
 
 // ============================================================
 // Copy ops (ROCm)
@@ -226,101 +293,14 @@ static void batchCopyFallback(const BatchCopyParams& params) {
     }
 }
 
+void runtimeBatchCopy(const BatchCopyParams& params) {
+    batchCopyFallback(params);
+}
+
 void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
 #endif  // USING_CUDA
-
-#if USING_CUDA || USING_ROCM
-void runtimeBatchCopy(const BatchCopyParams& params) {
-    constexpr size_t cuda_sector_size = 128;
-
-    constexpr auto align_to = [](size_t size, size_t alignment) {
-        return ((size + alignment - 1) / alignment) * alignment;
-    };
-
-#if USING_CUDA
-    auto stream_raw = at::cuda::getCurrentCUDAStream().stream();
-#else   // USING_ROCM
-    auto stream_raw = at::hip::getCurrentHIPStream(at::hip::current_device()).stream();
-#endif  // USING_CUDA
-    auto         comm_stream = getOverlapStream().stream();
-    bool         use_overlap = getEnableCommOverlap();
-    cudaStream_t stream      = (params.overlapped && use_overlap) ? comm_stream : stream_raw;
-
-    BatchCopyParams fallback_copies;
-    bool            need_fallback = false;
-
-    for (uint32_t copy_type_enum = 0; copy_type_enum < BatchCopyParams::TYPE_SIZE; ++copy_type_enum) {
-        auto   copy_type       = BatchCopyParams::CopyType(copy_type_enum);
-        auto&  buffers         = params.copy_buffers[copy_type];
-        size_t copy_batch_size = buffers.sizes.size();
-        if (copy_batch_size == 0) {
-            continue;
-        }
-
-        switch (copy_type) {
-            case BatchCopyParams::D2D: {
-                const size_t org_src_ptrs_bytes = sizeof(void*) * copy_batch_size;
-                const size_t org_dst_ptrs_bytes = sizeof(void*) * copy_batch_size;
-                const size_t org_sizes_bytes    = sizeof(uint64_t) * copy_batch_size;
-                const size_t src_ptrs_bytes     = align_to(org_src_ptrs_bytes, cuda_sector_size);
-                const size_t dst_ptrs_bytes     = align_to(org_dst_ptrs_bytes, cuda_sector_size);
-                const size_t sizes_bytes        = org_sizes_bytes;
-                const size_t workspace_bytes    = src_ptrs_bytes + dst_ptrs_bytes + sizes_bytes;
-
-                auto workspace = torch::empty({(int64_t)workspace_bytes},
-                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
-
-                auto src_ptrs = reinterpret_cast<void**>(workspace.data_ptr<uint8_t>());
-                auto dst_ptrs = reinterpret_cast<void**>(workspace.data_ptr<uint8_t>() + src_ptrs_bytes);
-                auto sizes =
-                    reinterpret_cast<uint64_t*>(workspace.data_ptr<uint8_t>() + src_ptrs_bytes + dst_ptrs_bytes);
-
-                check_cuda_value(cudaMemcpyAsync(
-                    src_ptrs, buffers.src_ptr.data(), org_src_ptrs_bytes, cudaMemcpyHostToDevice, stream));
-                check_cuda_value(cudaMemcpyAsync(
-                    dst_ptrs, buffers.dst_ptr.data(), org_dst_ptrs_bytes, cudaMemcpyHostToDevice, stream));
-                check_cuda_value(
-                    cudaMemcpyAsync(sizes, buffers.sizes.data(), org_sizes_bytes, cudaMemcpyHostToDevice, stream));
-
-                cudaEvent_t copy_params_done;
-                check_cuda_value(cudaEventCreate(&copy_params_done));
-                check_cuda_value(cudaEventRecord(copy_params_done, stream));
-
-                auto config = kernels::getBatchCopyConfig(buffers.sizes.data(), copy_batch_size);
-                kernels::invokeBatchCopy(dst_ptrs, src_ptrs, sizes, copy_batch_size, config, stream);
-
-                check_cuda_value(cudaEventSynchronize(copy_params_done));
-                check_cuda_value(cudaEventDestroy(copy_params_done));
-                // The batch-copy kernel reads pointer/size tables from the temporary workspace above.
-                // Keep the workspace alive until the copy is complete before returning to the caller.
-                check_cuda_value(cudaStreamSynchronize(stream));
-
-                check_cuda_error();
-            } break;
-            case BatchCopyParams::H2H:
-            case BatchCopyParams::H2D:
-            case BatchCopyParams::D2H: {
-                need_fallback                           = true;
-                fallback_copies.overlapped              = params.overlapped;
-                fallback_copies.copy_buffers[copy_type] = buffers;
-            } break;
-            default:
-                RTP_LLM_FAIL("Unexpected CopyType %d", copy_type);
-                break;
-        }
-    }
-
-    if (need_fallback) {
-        batchCopyFallback(fallback_copies);
-    }
-}
-#else
-void runtimeBatchCopy(const BatchCopyParams& params) {
-    batchCopyFallback(params);
-}
-#endif
 
 }  // namespace rtp_llm

@@ -15,7 +15,6 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
     INDEXER_KV,
     INDEXER_STATE,
     SWA_KV,
-    TAG_BY_ATTN_TYPE,
 )
 
 _PHYSICAL_ROW_REGIONS = {
@@ -41,62 +40,74 @@ def _positive_int(value: Any) -> Optional[int]:
     return ivalue if ivalue > 0 else None
 
 
+def _region_for_group_or_region(
+    kv_cache: Any,
+    group: Optional[int] = None,
+    region: Optional[int] = None,
+) -> Optional[int]:
+    if region is not None:
+        return int(region)
+    if group is None:
+        return None
+    group_region_names = getattr(kv_cache, "group_region_names", None)
+    if not group_region_names or group < 0 or group >= len(group_region_names):
+        return None
+    return int(group_region_names[group])
+
+
+def _group_for_region(kv_cache: Any, region: int) -> Optional[int]:
+    group_region_names = getattr(kv_cache, "group_region_names", None)
+    if not group_region_names:
+        return None
+    region = int(region)
+    for gid, group_region in enumerate(group_region_names):
+        if int(group_region) == region:
+            return gid
+    return None
+
+
+def _group_tokens_per_block(kv_cache: Any, group: Optional[int]) -> Optional[int]:
+    if group is None:
+        return None
+    group_sizes = getattr(kv_cache, "group_seq_size_per_block", None)
+    if not group_sizes or group < 0 or group >= len(group_sizes):
+        return None
+    return _positive_int(group_sizes[group])
+
+
 def require_pool_tokens_per_block(
     kv_cache: Any,
-    region: int,
+    group: Optional[int] = None,
+    region: Optional[int] = None,
 ) -> int:
     """Return block-table row raw-token coverage for a pool.
 
-    The cache topology is keyed by semantic tag. FULL paged pools use their
-    per-group kernel block size; SWA_KV and state pools use their per-group
-    physical block size. Scalar access is only the one-group fast path.
+    C++ exposes only scalar physical/kernel block sizes. The group-specific
+    row size is inferred from the region identity: FULL paged pools use
+    ``kernel_seq_size_per_block``; SWA_KV and state pools use
+    ``seq_size_per_block``.
     """
-    attn_type = int(region)
-    tag = TAG_BY_ATTN_TYPE.get(attn_type)
-    group_tags = list(getattr(kv_cache, "group_tags", None) or [])
-    if tag is None or tag not in {str(value) for value in group_tags}:
-        raise RuntimeError(
-            "DSV4 KVCache topology does not contain region tag. "
-            f"region={region!r}, expected_tag={tag!r}, group_tags={group_tags!r}"
+    region_id = _region_for_group_or_region(kv_cache, group=group, region=region)
+    if region_id in _PHYSICAL_ROW_REGIONS:
+        value = _group_tokens_per_block(
+            kv_cache,
+            group if group is not None else _group_for_region(kv_cache, int(region_id)),
         )
-
-    accessor = (
-        kv_cache.get_seq_size_per_block
-        if attn_type in _PHYSICAL_ROW_REGIONS
-        else kv_cache.get_kernel_seq_size_per_block
-    )
-    value = _positive_int(accessor(tag))
-    if value is not None:
-        return value
+        if value is not None:
+            return value
+        value = _positive_int(getattr(kv_cache, "seq_size_per_block", None))
+        if value is not None:
+            return value
+    if region_id in _KERNEL_ROW_REGIONS:
+        value = _positive_int(getattr(kv_cache, "kernel_seq_size_per_block", None))
+        if value is not None:
+            return value
 
     raise RuntimeError(
         "DSV4 KVCache pool tokens-per-block cannot be inferred. "
-        "region=%r, tag=%r, group_tags=%r" % (region, tag, group_tags)
+        "group=%r, region=%r, group_region_names=%r"
+        % (group, region, getattr(kv_cache, "group_region_names", None))
     )
-
-
-def require_kernel_block_table_tokens_per_block(kv_cache: Any) -> int:
-    """Return raw-token coverage used by the dense kernel block-table axis.
-
-    Framework block tables keep a common width across cache groups.  That width
-    is determined by the group with the smallest kernel block coverage, so the
-    canonical grouped topology must be queried tag by tag.
-    """
-    group_tags = [str(value) for value in (getattr(kv_cache, "group_tags", None) or [])]
-    accessor = getattr(kv_cache, "get_kernel_seq_size_per_block", None)
-    if not group_tags or accessor is None:
-        raise RuntimeError(
-            "DSV4 KVCache kernel block-table size cannot be inferred. "
-            f"group_tags={group_tags!r}"
-        )
-
-    sizes = {tag: _positive_int(accessor(tag)) for tag in group_tags}
-    if any(value is None for value in sizes.values()):
-        raise RuntimeError(
-            "DSV4 KVCache kernel block-table size must be positive for every "
-            f"group. sizes={sizes!r}"
-        )
-    return min(value for value in sizes.values() if value is not None)
 
 
 class PoolBackedModule(nn.Module):
@@ -163,9 +174,7 @@ class PoolBackedModule(nn.Module):
         self._kv_eb = kv_eb
         self._kv_tokens_per_block = kv_tokens_per_block
         self._kv_owner_tokens_per_block = (
-            kv_owner_tokens_per_block
-            if kv_owner_tokens_per_block > 0
-            else kv_tokens_per_block
+            kv_owner_tokens_per_block if kv_owner_tokens_per_block > 0 else kv_tokens_per_block
         )
 
         if state_pool_view is not None:

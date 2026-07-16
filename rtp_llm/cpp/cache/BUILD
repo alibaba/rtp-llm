@@ -7,12 +7,6 @@ cc_library(
     hdrs = ["CPSlotMapper.h"],
     copts = copts(),
     visibility = ["//visibility:public"],
-    deps = [
-        ":batch_kv_cache_resource",
-        ":cache_config",
-        ":cache_group_type",
-        "//rtp_llm/cpp/utils:core_utils",
-    ],
 )
 
 cc_library(
@@ -24,7 +18,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-
 cc_library(
     name = "block_info",
     hdrs = [
@@ -35,84 +28,20 @@ cc_library(
 )
 
 cc_library(
-    name = "kv_cache_specs",
-    srcs = [
-        "KVCacheSpecDesc.cc",
-    ],
-    hdrs = [
-        "KVCacheSpec.h",
-        "KVCacheSpecBase.h",
-        "KVCacheSpecDesc.h",
-        "MHAKVCacheSpec.h",
-        "LinearKVCacheSpec.h",
-        "MLAKVCacheSpec.h",
-        "OpaqueKVCacheSpec.h",
-        "Types.h",
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-    deps = [
-        ":block_info",
-        ":batch_kv_cache_resource",
-        ":cache_group_type",
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/models_py/bindings/core:types",
-    ],
-)
-
-alias(
-    name = "kv_cache_spec_desc",
-    actual = ":kv_cache_specs",
-    visibility = ["//visibility:public"],
-)
-
-alias(
-    name = "kvcache_spec_desc",
-    actual = ":kv_cache_specs",
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "cache_config",
-    srcs = [
-        "CacheConfig.cc",
-        "CacheTopology.cc",
-    ],
-    hdrs = [
-        "CacheConfig.h",
-        "CacheTopology.h",
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-    deps = [
-        ":cache_group_type",
-        ":kv_cache_specs",
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/models_py/bindings/core:types",
-    ],
-)
-
-cc_library(
-    name = "cache_layout",
-    hdrs = ["BufferTypes.h"],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-    deps = [
-        ":cache_config",
-        "//rtp_llm/cpp/utils:core_utils",
-    ] + torch_deps(),
-)
-
-cc_library(
     name = "cache_types",
     srcs = [
         "Types.cc",
     ],
     hdrs = [
+        "BufferTypes.h",
         "CacheConfig.h",
+        "CacheGroupType.h",
+        "DSV4KVCacheSpec.h",
+        "KVCacheSpec.h",
+        "KVCacheSpecBase.h",
+        "MHAKVCacheSpec.h",
+        "LinearKVCacheSpec.h",
+        "MLAKVCacheSpec.h",
         "Types.h",
         "WarmUpResult.h",
     ],
@@ -121,15 +50,12 @@ cc_library(
     deps = [
         ":block_info",
         ":batch_kv_cache_resource",
-        ":cache_config",
         ":cache_group_type",
-        ":cache_layout",
-        ":kv_cache_specs",
+        ":cp_slot_mapper",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings/core:types",
     ] + torch_deps(),
 )
@@ -187,6 +113,35 @@ cc_library(
 )
 
 cc_library(
+    name = "recent_cache_key_window",
+    srcs = ["RecentCacheKeyWindow.cc"],
+    hdrs = ["RecentCacheKeyWindow.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_types",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:time_util",
+    ],
+)
+
+cc_library(
+    name = "prefill_cache_hit_metrics_reporter",
+    srcs = ["PrefillCacheHitMetricsReporter.cc"],
+    hdrs = ["PrefillCacheHitMetricsReporter.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":batch_kv_cache_resource",
+        ":cache_types",
+        ":cp_slot_mapper",
+        ":recent_cache_key_window",
+        "//rtp_llm/cpp/metrics",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+)
+
+cc_library(
     name = "kv_cache_group",
     srcs = [
         "FullKVCacheGroup.cc",
@@ -218,7 +173,6 @@ cc_library(
     deps = [
         ":block_pool",
         ":cache_types",
-        ":cp_slot_mapper",
         "//rtp_llm/cpp/metrics:metrics",
     ] + torch_deps(),
 )
@@ -242,7 +196,6 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
-        ":cp_slot_mapper",
         ":kv_cache_allocator_hdr",
         ":kv_cache_group",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
@@ -261,7 +214,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
-        ":cache_group_type",
+        "//rtp_llm/cpp/cache:cache_group_type",
     ],
 )
 
@@ -269,6 +222,7 @@ cc_library(
     name = "cache_core",
     srcs = [
         "CacheConfigCreator.cc",
+        "DSV4CacheConfigHelper.cc",
         "HybridConfigCreator.cc",
         "HybridPoolConfigCreator.cc",
         "KVCacheHashUtil.cc",
@@ -277,6 +231,7 @@ cc_library(
     ],
     hdrs = [
         "CacheConfigCreator.h",
+        "DSV4CacheConfigHelper.h",
         "HybridConfigCreator.h",
         "HybridPoolConfigCreator.h",
         "KVCacheHashUtil.h",
@@ -289,6 +244,7 @@ cc_library(
         ":batch_kv_cache_resource",
         ":cache_types",
         ":kv_cache_allocator",
+        ":prefill_cache_hit_metrics_reporter",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
@@ -341,7 +297,6 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_core",
-        ":cp_slot_mapper",
         "//rtp_llm/cpp/cache/connector",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",

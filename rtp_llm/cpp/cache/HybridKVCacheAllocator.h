@@ -29,17 +29,15 @@ public:
                        bool                           copy_last_block,
                        std::vector<BlockIdPair>&      block_update_mapping) override;
 
-    int              seqSizePerBlock() const override;
-    int              singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                           int                            seq_len,
-                                           int                            reserve_step) const override;
-    std::vector<int> independentEvictionGroupIds() const override;
+    int seqSizePerBlock() const override;
+    int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                              int                            seq_len,
+                              int                            reserve_step) const override;
 
 protected:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) override;
     int          getNeedBlocks(const MallocInfo& malloc_info) const override;
-    void         checkCPShardedMallocResult(const MallocInfo& malloc_info) const override;
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
 
     int reuseCache(const CacheKeysType&                 cache_keys,
@@ -58,8 +56,6 @@ protected:
     void         rollbackIncrMalloc(BatchKVCacheResource&                   kv_resource,
                                     const std::vector<std::vector<size_t>>& original_sizes,
                                     int                                     failed_batch);
-    virtual void copyBlockMappingForGroup(int gid, const std::vector<BlockIdPair>& block_update_mapping) const;
-    virtual MemoryType memoryTypeForGroup(int gid) const;
 
     std::vector<KVCacheGroupPtr> kv_cache_groups_;
     std::vector<int>             full_group_ids_;

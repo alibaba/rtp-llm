@@ -1,7 +1,5 @@
 import ctypes
-import sys
 import unittest
-import unittest.mock
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -35,12 +33,11 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
             self.assertTrue(hr.should_use_hipgraph_capture_rccl(True))
             self.assertFalse(hr.should_use_hipgraph_capture_rccl(False))
 
-    def test_should_use_hipgraph_capture_rccl_even_without_comm(self):
-        """Comm check is deferred to _get_rccl_runtime; should_use only checks runtime+capture+tp."""
+    def test_should_not_use_hipgraph_capture_rccl_without_comm(self):
         hr._is_rocm_runtime = True
         hr._rccl_comm = None
         with patch.object(hr, "_is_hipgraph_capture_active", return_value=True):
-            self.assertTrue(hr.should_use_hipgraph_capture_rccl(True))
+            self.assertFalse(hr.should_use_hipgraph_capture_rccl(True))
 
     def test_get_nccl_dtype_map_and_error(self):
         fp16_tensor = torch.zeros(1, dtype=torch.float16)
@@ -65,16 +62,14 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
         self.assertEqual(out1.device, src.device)
         self.assertEqual(len(hr._hipgraph_allgather_outputs), 1)
 
-    def test_get_or_create_allgather_output_returns_temp_when_inactive(self):
-        """Non-capture mode returns a fresh temporary tensor without caching."""
+    def test_get_or_create_allgather_output_rejects_inactive_capture(self):
         hr._rccl_world_size = 2
         src = torch.zeros((2, 4), dtype=torch.float16)
 
         with patch.object(hr, "_is_hipgraph_capture_active", return_value=False):
-            out = hr._get_or_create_allgather_output(src)
+            with self.assertRaises(RuntimeError):
+                hr._get_or_create_allgather_output(src)
 
-        self.assertEqual(tuple(out.shape), (4, 4))
-        self.assertEqual(out.dtype, src.dtype)
         self.assertEqual(len(hr._hipgraph_allgather_outputs), 0)
 
     def test_set_graph_capture_nccl_comm_clears_cache(self):
@@ -250,10 +245,9 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
         hr._rccl_lib = fake_lib
 
         tensor = torch.zeros((2, 4), dtype=torch.bfloat16)
-        mock_group = object()
-        with patch.object(hr, "_is_hipgraph_capture_active", return_value=True), \
-             patch("torch.cuda.current_stream") as mock_stream, \
-             patch("rtp_llm.models_py.distributed.collective_torch._get_group", return_value=mock_group):
+        with patch.object(hr, "_is_hipgraph_capture_active", return_value=True), patch(
+            "torch.cuda.current_stream"
+        ) as mock_stream:
             mock_stream.return_value.cuda_stream = 0
             out = ct.all_gather(tensor, ct.Group.TP)
 
@@ -344,122 +338,6 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
 
         # bootstrap must be called (not skipped) because _rccl_comm is None
         bootstrap.assert_called_once_with(tp_group)
-
-    def test_finish_session_calls_consume_when_pending(self):
-        """consume_capture() is called when has_pending_capture() returns True."""
-        mock_consume = unittest.mock.MagicMock()
-        mock_has_pending = unittest.mock.MagicMock(return_value=True)
-        fake_module = SimpleNamespace(
-            consume_capture=mock_consume,
-            has_pending_capture=mock_has_pending,
-        )
-        with patch.dict("sys.modules", {"rtp_llm.models_py.modules.base.rocm.trt_allreduce": fake_module}):
-            hr.finish_hipgraph_capture_session()
-
-        mock_has_pending.assert_called_once()
-        mock_consume.assert_called_once()
-
-    def test_finish_session_skips_when_not_pending(self):
-        """consume_capture() is NOT called when has_pending_capture() returns False."""
-        mock_consume = unittest.mock.MagicMock()
-        mock_has_pending = unittest.mock.MagicMock(return_value=False)
-        fake_module = SimpleNamespace(
-            consume_capture=mock_consume,
-            has_pending_capture=mock_has_pending,
-        )
-        with patch.dict("sys.modules", {"rtp_llm.models_py.modules.base.rocm.trt_allreduce": fake_module}):
-            hr.finish_hipgraph_capture_session()
-
-        mock_has_pending.assert_called_once()
-        mock_consume.assert_not_called()
-
-    def test_finish_session_propagates_consume_error(self):
-        """Runtime errors from consume_capture() propagate (not silenced)."""
-        mock_consume = unittest.mock.MagicMock(side_effect=RuntimeError("barrier timeout"))
-        mock_has_pending = unittest.mock.MagicMock(return_value=True)
-        fake_module = SimpleNamespace(
-            consume_capture=mock_consume,
-            has_pending_capture=mock_has_pending,
-        )
-        with patch.dict("sys.modules", {"rtp_llm.models_py.modules.base.rocm.trt_allreduce": fake_module}):
-            with self.assertRaises(RuntimeError):
-                hr.finish_hipgraph_capture_session()
-
-    def test_finish_session_tolerates_import_error(self):
-        """ImportError (trt_allreduce unavailable) is silently handled."""
-        with patch.dict("sys.modules", {"rtp_llm.models_py.modules.base.rocm.trt_allreduce": None}):
-            hr.finish_hipgraph_capture_session()
-
-    # ------------------------------------------------------------------
-    # Size guard for trtllm allreduce in hipgraph_capture_all_reduce
-    # ------------------------------------------------------------------
-
-    def _setup_trtllm_size_guard(self, max_size_in_bytes: int):
-        """Helper: mock trtllm imports with a dist_env that exposes max_size_in_bytes."""
-        hr._is_rocm_runtime = True
-        hr._rccl_comm = ctypes.c_void_p(999)
-        hr._rccl_world_size = 2
-        hr._rccl_lib = self._make_fake_lib(all_reduce_ret=0)
-        hr._trtllm_fallback_warned = False
-
-        fake_dist_env = SimpleNamespace(max_size_in_bytes=max_size_in_bytes)
-        fake_comm_manager = SimpleNamespace(dist_env=fake_dist_env)
-        fake_allreduce = unittest.mock.MagicMock(side_effect=lambda **kw: kw["allreduce_in"])
-        fake_module = SimpleNamespace(
-            _trtllm_comm_manager=fake_comm_manager,
-            allreduce=fake_allreduce,
-            ALLREDUCE_SUPPORTED_HIDDEN_SIZES={128, 256, 512, 1024, 2048, 4096, 8192},
-            is_trt_allreduce_ready=lambda: True,
-        )
-        return fake_module, fake_allreduce
-
-    def test_size_guard_allows_when_size_equals_cap(self):
-        """trtllm path is used when tensor byte size == max_size_in_bytes."""
-        cap = 1024
-        fake_module, fake_allreduce = self._setup_trtllm_size_guard(cap)
-        # tensor: 512 elements * 2 bytes (fp16) = 1024 bytes == cap
-        tensor = torch.zeros((512,), dtype=torch.float16)
-        process_group = object()
-
-        with patch.dict("sys.modules", {"rtp_llm.models_py.modules.base.rocm.trt_allreduce": fake_module}), \
-             patch.object(hr, "_is_hidden_size_supported_for_trtllm", return_value=True), \
-             patch.object(hr, "_is_trtllm_allreduce_ready", return_value=True), \
-             patch("torch.cuda.current_device", return_value=0):
-            result = hr.hipgraph_capture_all_reduce(tensor, process_group)
-
-        fake_allreduce.assert_called_once()
-        hr._rccl_lib.ncclAllReduce.assert_not_called()
-
-    def test_size_guard_falls_through_when_size_exceeds_cap(self):
-        """NCCL fallback is used when tensor byte size > max_size_in_bytes."""
-        cap = 1024
-        fake_module, fake_allreduce = self._setup_trtllm_size_guard(cap)
-        # tensor: 1024 elements * 2 bytes (fp16) = 2048 bytes > cap
-        tensor = torch.zeros((1024,), dtype=torch.float16)
-        process_group = object()
-
-        with patch.dict("sys.modules", {"rtp_llm.models_py.modules.base.rocm.trt_allreduce": fake_module}), \
-             patch.object(hr, "_is_hidden_size_supported_for_trtllm", return_value=True), \
-             patch.object(hr, "_is_trtllm_allreduce_ready", return_value=True), \
-             patch("torch.cuda.current_stream") as mock_stream:
-            mock_stream.return_value.cuda_stream = 0
-            result = hr.hipgraph_capture_all_reduce(tensor, process_group)
-
-        fake_allreduce.assert_not_called()
-        hr._rccl_lib.ncclAllReduce.assert_called_once()
-
-    def test_dist_env_max_size_in_bytes_attribute_exists(self):
-        """dist_env.max_size_in_bytes is accessible via the trtllm size guard path."""
-        # Verify that the size guard in hipgraph_capture_all_reduce can read
-        # max_size_in_bytes without AttributeError. We mock the dist_env with
-        # varying capacities and confirm the attribute is accessed correctly.
-        cap = 2048
-        fake_dist_env = SimpleNamespace(max_size_in_bytes=cap)
-        fake_comm_manager = SimpleNamespace(dist_env=fake_dist_env)
-
-        # The attribute must be accessible as used in the production code path
-        self.assertTrue(hasattr(fake_comm_manager.dist_env, "max_size_in_bytes"))
-        self.assertEqual(fake_comm_manager.dist_env.max_size_in_bytes, cap)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,10 @@
 from __future__ import annotations
-import libth_transformer_config
-import torch
+
 import typing
-__all__: list[str] = ['EmbeddingCppOutput', 'RtpEmbeddingOp', 'RtpLLMOp', 'TypedOutput']
+
+import torch
+
+__all__: list[str] = ['EmbeddingCppOutput', 'MultimodalInput', 'RtpEmbeddingOp', 'RtpLLMOp', 'TypedOutput', 'build_xgrammar_tokenizer_info_json']
 class EmbeddingCppOutput:
     output: TypedOutput
     def __init__(self) -> None:
@@ -11,10 +13,16 @@ class EmbeddingCppOutput:
         ...
     def setTensorOutput(self, arg0: torch.Tensor) -> None:
         ...
+class MultimodalInput:
+    mm_type: int
+    tensor: torch.Tensor
+    url: str
+    def __init__(self, url: str, tensor: torch.Tensor, mm_type: int) -> None:
+        ...
 class RtpEmbeddingOp:
     def __init__(self) -> None:
         ...
-    def decode(self, token_ids: torch.Tensor, token_type_ids: torch.Tensor, input_lengths: torch.Tensor, request_id: int, multimodal_inputs: list[libth_transformer_config.MultimodalInput]) -> typing.Any:
+    def decode(self, token_ids: torch.Tensor, token_type_ids: torch.Tensor, input_lengths: torch.Tensor, request_id: int, multimodal_inputs: list[MultimodalInput]) -> typing.Any:
         ...
     def init(self, model: typing.Any, engine_config: typing.Any, vit_config: typing.Any, mm_process_engine: typing.Any) -> None:
         ...
@@ -23,7 +31,7 @@ class RtpEmbeddingOp:
 class RtpLLMOp:
     def __init__(self) -> None:
         ...
-    def init(self, model: typing.Any, engine_config: typing.Any, vit_config: typing.Any, propose_model: typing.Any, token_processor: typing.Any, mm_process_engine: typing.Any) -> None:
+    def init(self, model: typing.Any, engine_config: typing.Any, vit_config: typing.Any, mm_process_engine: typing.Any, propose_model: typing.Any, token_processor: typing.Any) -> None:
         ...
     def start_http_server(self, model_weights_loader: typing.Any, lora_infos: typing.Any, world_info: typing.Any, tokenizer: typing.Any, render: typing.Any) -> None:
         ...
@@ -45,3 +53,5 @@ class TypedOutput:
     @t.setter
     def t(self, arg1: torch.Tensor) -> None:
         ...
+def build_xgrammar_tokenizer_info_json(vocab: dict[str, int], backend_tokenizer_str: str, vocab_size: int, stop_token_ids: list[int]) -> str:
+    ...

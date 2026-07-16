@@ -23,7 +23,6 @@ from rtp_llm.models_py.distributed.collective_torch import (
     distributed_environment_initialized,
     init_distributed_environment,
     recv,
-    reduce_scatter,
     send,
 )
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
@@ -231,128 +230,6 @@ def _test_all_gather_collective(
     torch.distributed.barrier()
 
 
-def _test_reduce_scatter_collective(
-    rank: int,
-    parallelism_config: ParallelismConfig,
-    world_size: int,
-    tp_size: int,
-    dp_size: int,
-    get_process_group_and_ranks,
-):
-    """Test reduce_scatter collective operation across all groups"""
-    logging.info(f"Rank {rank} testing reduce_scatter")
-    for group_type in [Group.DP_AND_TP, Group.DP, Group.TP]:
-        if group_type == Group.DP and dp_size == 1:
-            continue
-        if group_type == Group.TP and tp_size == 1:
-            continue
-
-        process_group, group_ranks = get_process_group_and_ranks(group_type)
-
-        if rank in group_ranks:
-            group_size = len(group_ranks)
-            local_idx = group_ranks.index(rank)
-            chunk_size = 2
-            hidden_dim = 3
-
-            # Make each chunk position carry a distinct value so a chunk
-            # mis-scatter (e.g. wrong offset) cannot be hidden by uniform
-            # inputs. Chunk c on rank r holds the value (r+1) * (c+1).
-            input_tensor = torch.empty(
-                group_size * chunk_size, hidden_dim,
-                device=f"cuda:{parallelism_config.local_rank}",
-            )
-            for c in range(group_size):
-                input_tensor[c * chunk_size : (c + 1) * chunk_size] = (
-                    (rank + 1) * (c + 1)
-                )
-
-            result = reduce_scatter(input_tensor, group=group_type)
-            torch.cuda.synchronize()
-            torch.distributed.barrier(group=process_group)
-
-            # After reduce_scatter, the rank at position local_idx receives
-            # chunk local_idx of the summed tensor:
-            #   sum_r((r+1) * (local_idx+1)) = (local_idx+1) * sum(r+1).
-            # If reduce_scatter mis-aligned chunks, expected != observed.
-            expected_sum = sum(r + 1 for r in group_ranks)
-            expected_chunk_value = expected_sum * (local_idx + 1)
-            expected = torch.ones(
-                chunk_size, hidden_dim,
-                device=f"cuda:{parallelism_config.local_rank}",
-            ) * expected_chunk_value
-
-            assert result.shape == (chunk_size, hidden_dim), (
-                f"Rank {rank} reduce_scatter {group_type}: "
-                f"Expected shape {(chunk_size, hidden_dim)}, got {result.shape}"
-            )
-            assert torch.allclose(result, expected), (
-                f"Rank {rank} reduce_scatter {group_type} (local_idx={local_idx}): "
-                f"Expected {expected.cpu()}, got {result.cpu()}"
-            )
-
-    torch.distributed.barrier()
-
-
-def _test_allgather_reduce_scatter_roundtrip(
-    rank: int,
-    parallelism_config: ParallelismConfig,
-    world_size: int,
-    tp_size: int,
-    dp_size: int,
-    get_process_group_and_ranks,
-):
-    """Test that all_gather followed by reduce_scatter recovers the original data.
-
-    This validates the core communication pattern used for CP MoE:
-    scattered -> all_gather -> (compute partial results) -> reduce_scatter -> scattered
-    """
-    logging.info(f"Rank {rank} testing allgather+reduce_scatter roundtrip")
-    for group_type in [Group.DP_AND_TP, Group.TP]:
-        if group_type == Group.TP and tp_size == 1:
-            continue
-
-        process_group, group_ranks = get_process_group_and_ranks(group_type)
-
-        if rank in group_ranks:
-            group_size = len(group_ranks)
-            local_idx = group_ranks.index(rank)
-            chunk_size = 4
-            hidden_dim = 8
-
-            # Each rank starts with its own scattered chunk
-            original = torch.randn(
-                chunk_size, hidden_dim,
-                device=f"cuda:{parallelism_config.local_rank}",
-            )
-
-            # Step 1: all_gather (scattered -> full)
-            gathered = all_gather(original, group=group_type)
-            assert gathered.shape == (group_size * chunk_size, hidden_dim)
-
-            # Step 2: simulate partial MoE compute — each rank contributes
-            # 1/group_size of the result. We divide by group_size so that
-            # reduce_scatter (which sums) recovers the original gathered tensor.
-            partial_result = gathered / group_size
-
-            # Step 3: reduce_scatter (full -> scattered)
-            result = reduce_scatter(partial_result, group=group_type)
-            torch.cuda.synchronize()
-            torch.distributed.barrier(group=process_group)
-
-            # Result should equal the original chunk
-            assert result.shape == original.shape, (
-                f"Rank {rank} roundtrip {group_type}: "
-                f"Expected shape {original.shape}, got {result.shape}"
-            )
-            assert torch.allclose(result, original, atol=1e-5), (
-                f"Rank {rank} roundtrip {group_type}: "
-                f"Max diff = {(result - original).abs().max().item()}"
-            )
-
-    torch.distributed.barrier()
-
-
 def _test_all_collectives_worker(
     rank: int, world_size: int, tp_size: int, dp_size: int, nccl_port: int
 ):
@@ -429,22 +306,6 @@ def _test_all_collectives_worker(
             _get_process_group_and_ranks,
         )
         _test_all_gather_collective(
-            rank,
-            parallelism_config,
-            world_size,
-            tp_size,
-            dp_size,
-            _get_process_group_and_ranks,
-        )
-        _test_reduce_scatter_collective(
-            rank,
-            parallelism_config,
-            world_size,
-            tp_size,
-            dp_size,
-            _get_process_group_and_ranks,
-        )
-        _test_allgather_reduce_scatter_roundtrip(
             rank,
             parallelism_config,
             world_size,

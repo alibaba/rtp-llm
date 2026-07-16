@@ -4,6 +4,7 @@
 #include <c10/util/Float8_e4m3fn.h>
 
 #include <cmath>
+#include <limits>
 // #include <flashinfer/vec_dtypes.cuh>
 // #include "utils.h"
 #include "vec_dtypes.cuh"
@@ -122,17 +123,17 @@ struct DtypeInfo<c10::Float8_e4m3fn> {
 };
 
 template<bool FUSE_SILU_AND_MUL>
-__device__ __forceinline__ int compute_input_group_start_offset(int expert_idx,
-                                                                int token_idx,
-                                                                int hidden_dim_group_idx,
-                                                                int hidden_size,
-                                                                int num_tokens_per_expert,
-                                                                int group_size) {
-    return expert_idx * num_tokens_per_expert * hidden_size * (FUSE_SILU_AND_MUL ? 2 : 1)
-           + token_idx * hidden_size * (FUSE_SILU_AND_MUL ? 2 : 1) + hidden_dim_group_idx * group_size;
+__device__ __forceinline__ int64_t compute_input_group_start_offset(int     expert_idx,
+                                                                    int     token_idx,
+                                                                    int64_t hidden_dim_group_idx,
+                                                                    int     hidden_size,
+                                                                    int     num_tokens_per_expert,
+                                                                    int     group_size) {
+    constexpr int input_multiplier = FUSE_SILU_AND_MUL ? 2 : 1;
+    return static_cast<int64_t>(expert_idx) * num_tokens_per_expert * hidden_size * input_multiplier
+           + static_cast<int64_t>(token_idx) * hidden_size * input_multiplier + hidden_dim_group_idx * group_size;
 }
 
-constexpr float    LOCAL_ABSMAX_ABS            = 1e-10;
 constexpr uint32_t INPUT_PRIMARY_VEC_NUM_BYTES = 32;
 
 struct NaiveScheduler {
@@ -249,8 +250,9 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
                                                   DST_DTYPE* __restrict__ output_q,
                                                   scale_packed_t* __restrict__ output_s,
                                                   const int32_t* __restrict__ masked_m,
-                                                  const int subwarps_per_block,
-                                                  const int hidden_dim_num_groups,
+                                                  const int   subwarps_per_block,
+                                                  const int   hidden_dim_num_groups,
+                                                  const float eps,
                                                   // TODO can this be removed?
                                                   const int scale_expert_stride,
                                                   const int scale_hidden_stride,
@@ -268,12 +270,24 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
             const int token_idx,
             const int hidden_dim_group_idx,
             const int lane_id,
-            const int input_group_start_offset) {
+            const int64_t input_group_start_offset) {
             constexpr uint32_t INPUT_PRIMARY_VEC_SIZE  = INPUT_PRIMARY_VEC_NUM_BYTES / sizeof(T);
             constexpr uint32_t INPUT_PRIMARY_INT4_SIZE = INPUT_PRIMARY_VEC_NUM_BYTES / sizeof(int4);
 
-            const int offset_num_groups = expert_idx * num_tokens_per_expert * hidden_dim_num_groups
-                                          + token_idx * hidden_dim_num_groups + hidden_dim_group_idx;
+            // Use ``int64_t`` so the byte offset ``offset_num_groups *
+            // GROUP_SIZE`` (used at the global ``st_global`` below) cannot
+            // wrap when ``M * hidden_dim_num_groups * GROUP_SIZE >= 2^31``.
+            // Concrete failure: long-context CP4 prefill wo_b feeds
+            // ``[M=274092, K=8192]`` -> ``offset_num_groups`` in [0, 17.5M),
+            // ``offset_num_groups * GROUP_SIZE=128`` peaks at 2.245B which
+            // overflows int32 and produces a negative pointer offset. The
+            // ``st_global`` then writes off ``output_q``'s allocation and
+            // surfaces a sticky ``CUDA_ERROR_ILLEGAL_ADDRESS`` (700) at the
+            // next sync (typically inside DeepGEMM's TMA encode /
+            // ``cuLaunchKernel``), which makes it look like a DeepGEMM bug.
+            const int64_t offset_num_groups =
+                static_cast<int64_t>(expert_idx) * num_tokens_per_expert * hidden_dim_num_groups
+                + static_cast<int64_t>(token_idx) * hidden_dim_num_groups + hidden_dim_group_idx;
 
             int4 input_primary_int4[INPUT_PRIMARY_INT4_SIZE];
             T*   input_primary_vec = reinterpret_cast<T*>(input_primary_int4);
@@ -290,7 +304,7 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
                     + j);
             }
             if constexpr (FUSE_SILU_AND_MUL) {
-                const int secondary_offset = hidden_dim_num_groups * GROUP_SIZE;
+                const int64_t secondary_offset = static_cast<int64_t>(hidden_dim_num_groups) * GROUP_SIZE;
 #pragma unroll
                 for (uint32_t j = 0; j < INPUT_PRIMARY_INT4_SIZE; ++j) {
                     input_secondary_int4[j] = ld_global_nc(
@@ -326,7 +340,7 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
                 }
             }
 
-            float local_absmax = LOCAL_ABSMAX_ABS;
+            float local_absmax = eps;
 
 #pragma unroll
             for (uint32_t j = 0; j < INPUT_PRIMARY_VEC_SIZE; ++j) {
@@ -409,10 +423,10 @@ void sgl_per_token_group_quant_8bit_v2(
     CHECK_INPUT(output_q);
     TORCH_CHECK(input.numel() > 0);
 
-    TORCH_CHECK(std::abs(LOCAL_ABSMAX_ABS - eps) < 1e-13);
-
     CHECK_EQ(input.numel() % group_size, 0);
-    const int num_groups = static_cast<int>(input.numel()) / group_size / (fuse_silu_and_mul ? 2 : 1);
+    const int64_t num_groups_64 = input.numel() / group_size / (fuse_silu_and_mul ? 2 : 1);
+    TORCH_CHECK(num_groups_64 <= std::numeric_limits<int>::max(), "num_groups exceeds int32 range");
+    const int num_groups = static_cast<int>(num_groups_64);
 
     const bool masked_layout = masked_m.has_value();
     TORCH_CHECK(output_s.dim() == (masked_layout ? 3 : 2));
@@ -448,6 +462,7 @@ void sgl_per_token_group_quant_8bit_v2(
                                          static_cast<int32_t*>(masked_m.has_value() ? masked_m->data_ptr() : 0),       \
                                          subwarps_per_block,                                                           \
                                          hidden_dim_num_groups,                                                        \
+                                         static_cast<float>(eps),                                                      \
                                          scale_expert_stride,                                                          \
                                          scale_hidden_stride,                                                          \
                                          num_tokens_per_expert);                                                       \

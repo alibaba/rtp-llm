@@ -1,5 +1,5 @@
 import functools
-from typing import Any, Collection, Dict, List
+from typing import Any, Dict, List
 
 import torch
 
@@ -34,7 +34,6 @@ from rtp_llm.utils.model_weight import (
     stack_moe_w1,
     transpose,
     transpose_pad,
-    transpose_stack_moe_w1,
 )
 
 
@@ -188,6 +187,15 @@ def transpose_gate_up(ts: List[torch.Tensor]):
     up = ts[0][:, half_dim:, :]
 
     return torch.cat([up, gate], dim=1)
+
+
+# List[gate_up, hidden] -> [Expert, up_gate, hidden]
+def transpose_stack_moe_w1(ts: List[torch.Tensor]) -> torch.Tensor:
+    stacked_tensor = torch.stack(ts, dim=0)
+    gate_up_dim = stacked_tensor.shape[1] // 2
+    return torch.cat(
+        [stacked_tensor[:, gate_up_dim:, :], stacked_tensor[:, :gate_up_dim, :]], dim=1
+    )
 
 
 class Qwen3NextBaseWeight(ModelDeployWeightInfo):
@@ -550,24 +558,18 @@ class Qwen3NextWeight(Qwen3NextBaseWeight):
 
 
 class Qwen35MoeWeight(Qwen3NextBaseWeight):
-    """Qwen3.5 MoE weight loading (dynamic prefix detection, separate weight format, stacked support)."""
+    """Qwen3.5 MoE weight loading (model.language_model. prefix, separate weight format, stackwd support)."""
 
     def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
         super().__init__(*args, **kwargs)
+        self.prefix = "model.language_model."
         self._has_stacked_ckpt = False
 
-    def _process_meta(self, meta_dict: Any, weight_keys: Collection[str]):
-        # detect prefix from layer-0 input_layernorm; skip mtp draft keys (unique match)
-        suffix = "layers.0.input_layernorm.weight"
-        for key in weight_keys:
-            if key.endswith(suffix) and "mtp." not in key:
-                self.prefix = key[: -len(suffix)]
-                break
-        else:
-            raise ValueError(
-                f"Qwen35MoeWeight: cannot determine prefix, no non-mtp key ending "
-                f"with {suffix!r} in {len(weight_keys)} ckpt keys"
-            )
+    def _process_meta(self, meta_dict: Any, weight_keys: List[str]):
+        """Detect whether stackwd format is used.
+
+        Qwen3.5 bf16 uses stackwd moe weight while fp8 uses splited moe weights.
+        """
         if self._contains(weight_keys, "layers.0.mlp.experts.gate_up_proj"):
             self._has_stacked_ckpt = True
 
@@ -650,7 +652,7 @@ class Qwen35MoeWeight(Qwen3NextBaseWeight):
 
 
 class Qwen35DenseWeight(Qwen35MoeWeight):
-    """Qwen3.5 Dense weight loading (dynamic prefix detection, separate weight format, stacked support)."""
+    """Qwen3.5 Dense weight loading (model.language_model. prefix, separate weight format, stackwd support)."""
 
     def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
         super().__init__(*args, **kwargs)

@@ -5,7 +5,6 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <string>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
@@ -27,12 +26,12 @@ public:
     ~MemoryAsyncMatchContext() override = default;
 
 public:
-    void                  waitDone() override;
-    bool                  done() const override;
-    bool                  success() const override;
-    size_t                matchedBlockCount() const override;
-    int                   startReadBlockIndex() const;
-    int                   readBlockNum() const;
+    void   waitDone() override;
+    bool   done() const override;
+    bool   success() const override;
+    size_t matchedBlockCount() const override;
+    int    startReadBlockIndex() const;
+    int    readBlockNum() const;
     std::shared_ptr<void> readCopyPlan() const;
     void                  clearReadCopyPlan();
 
@@ -54,7 +53,6 @@ public:
     bool done() const override;
     bool success() const override;
     void setBroadcastResult(const std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>& result);
-    void markFailed(const std::string& reason);
 
 private:
     bool successLocked() const;
@@ -66,8 +64,6 @@ private:
     std::function<void(bool)>                                               done_callback_;
     bool                                                                    result_ready_{false};
     bool                                                                    finalizing_{false};
-    bool                                                                    failed_{false};
-    std::string                                                             failure_reason_;
     std::atomic<bool>                                                       already_done_{false};
 };
 

@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
     name = "test_cuda_graph_runner_libs",
@@ -29,7 +29,6 @@ py_library(
     name = "cuda_graph_test_utils",
     srcs = ["cuda_graph_test_utils.py"],
     deps = [
-        "//rtp_llm/models_py:utils",
         "//rtp_llm/test/model_test/test_util:test_util",
     ],
     visibility = ["//visibility:public"],

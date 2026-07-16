@@ -50,7 +50,7 @@ void RtpEmbeddingOp::init(py::object model,
         // Extract vit_config
         VitConfig vit_config_cpp;
         if (!vit_config.is_none()) {
-            vit_config_cpp.vit_separation = static_cast<VitSeparation>(vit_config.attr("vit_separation").cast<int>());
+            vit_config_cpp.vit_separation = vit_config.attr("vit_separation").cast<VitSeparation>();
         }
 
         py::object py_layers_weights = model.attr("weight").attr("weights");
@@ -91,6 +91,7 @@ void RtpEmbeddingOp::init(py::object model,
         bool       need_post_process = py_handler.attr("need_post_process").cast<bool>();
 
         if (parallelism_config.tp_rank == 0) {
+
             // kmon metric init
             (void)initKmonitorFactory();
             auto kmon_tags = kmonitor::MetricsTags();
@@ -101,11 +102,6 @@ void RtpEmbeddingOp::init(py::object model,
         if (!mm_process_engine.is_none()) {
             mm_processor_.reset(new LocalMultimodalProcessor(
                 mm_process_engine, params.model_config_.mm_model_config, params.model_config_.max_seq_len));
-        } else if (vit_config_cpp.vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
-            mm_processor_.reset(new RemoteMultimodalProcessor(
-                params.model_config_.mm_model_config, params.model_config_.max_seq_len, params.metrics_reporter));
-        } else {
-            RTP_LLM_LOG_WARNING("Skip init mm_processor");
         }
 
         int64_t model_rpc_port     = params.server_config.attr("rpc_server_port").cast<int64_t>();
@@ -156,6 +152,10 @@ void RtpEmbeddingOp::initGrpcServer(int64_t                              embeddi
     for (auto it = server_config.begin(); it != server_config.end(); ++it) {
         RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);
         builder.AddChannelArgument(it->first, it->second);
+    }
+    if (grpc_config.max_server_pollers > 0) {
+        builder.SetSyncServerOption(grpc::ServerBuilder::MAX_POLLERS, grpc_config.max_server_pollers);
+        RTP_LLM_LOG_INFO("embedding grpc sync server MAX_POLLERS: %d", grpc_config.max_server_pollers);
     }
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(embedding_grpc_service_.get());
@@ -242,7 +242,7 @@ py::object RtpEmbeddingOp::decode(th::Tensor                   token_ids,
     auto                             embedding_input =
         std::make_shared<EmbeddingInput>(token_ids, token_type_ids, input_lengths, request_id, multimodal_features);
     if (mm_processor_ != nullptr && !multimodal_inputs.empty()) {
-        auto mm_res = mm_processor_->updateMultimodalFeatures(embedding_input, multimodal_inputs, "");
+        auto mm_res = mm_processor_->updateMultimodalFeatures(embedding_input, multimodal_inputs);
         if (!mm_res.ok()) {
             throw std::runtime_error(mm_res.ToString());
         }

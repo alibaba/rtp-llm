@@ -2,9 +2,6 @@
 #include <ATen/ATen.h>
 #include "rtp_llm/models_py/bindings/common/FusedQKRmsNorm.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
-#if USING_ROCM
-#include "rtp_llm/models_py/bindings/rocm/kernels/fused_qk_rmsnorm_v2.h"
-#endif
 #include <vector>
 #include <cstdint>
 #include <iostream>
@@ -51,45 +48,4 @@ void FusedQKRMSNorm(at::Tensor&   input,
         return true;
     });
 }
-
-#if USING_ROCM
-void FusedQKRMSNormV2(at::Tensor&   input,
-                      at::Tensor&   q_gamma,
-                      at::Tensor&   k_gamma,
-                      const double  layernorm_eps,
-                      const int64_t q_group_num,
-                      const int64_t k_group_num,
-                      const int64_t m,
-                      const int64_t n,
-                      const int64_t norm_size) {
-    CHECK_INPUT(input);
-    CHECK_INPUT(q_gamma);
-    CHECK_INPUT(k_gamma);
-    auto device = input.device();
-    CHECK_EQ(q_gamma.device(), device);
-    CHECK_EQ(k_gamma.device(), device);
-    CHECK_DIM(2, input);
-    CHECK_DIM(1, q_gamma);
-    CHECK_DIM(1, k_gamma);
-
-    StreamType stream = GET_CURRENT_STREAM();
-
-    DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
-        invokeFusedQkRmsNormV2(static_cast<c_type*>(input.data_ptr()),
-                               static_cast<c_type*>(q_gamma.data_ptr()),
-                               static_cast<c_type*>(nullptr),
-                               static_cast<c_type*>(k_gamma.data_ptr()),
-                               static_cast<c_type*>(nullptr),
-                               float(layernorm_eps),
-                               q_group_num,
-                               k_group_num,
-                               m,
-                               n,
-                               norm_size,
-                               stream);
-        return true;
-    });
-}
-#endif
-
 }  // namespace rtp_llm

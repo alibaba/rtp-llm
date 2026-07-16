@@ -4,7 +4,6 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
@@ -16,6 +15,118 @@
 #endif
 
 namespace rtp_llm {
+namespace {
+
+CacheGroupType groupTypeForConnector(const CacheConfig& cache_config, int group_id) {
+    if (group_id >= 0 && static_cast<size_t>(group_id) < cache_config.group_types.size()) {
+        return cache_config.group_types[static_cast<size_t>(group_id)];
+    }
+    return CacheGroupType::FULL;
+}
+
+bool isCpCompactFixedGroup(const CacheConfig& cache_config, int group_id, int cp_size) {
+    if (cp_size <= 1 || groupTypeForConnector(cache_config, group_id) == CacheGroupType::FULL || group_id < 0
+        || static_cast<size_t>(group_id) >= cache_config.group_seq_size_per_block.size()) {
+        return false;
+    }
+    const auto row_tokens = cache_config.group_seq_size_per_block[static_cast<size_t>(group_id)];
+    return row_tokens > 0 && row_tokens == cache_config.seq_size_per_block * static_cast<size_t>(cp_size);
+}
+
+bool isCompactFullBlockList(const KVCacheResource& source,
+                            const BlockIndicesType& src_blocks,
+                            const CacheKeysType& selected_keys) {
+    return src_blocks.size() <= selected_keys.size() || src_blocks.size() < source.cacheKeys().size();
+}
+
+bool selectedLastRankKeysAreAligned(const KVCacheResource& source, int cp_size) {
+    if (source.lastBlockAligned()) {
+        return true;
+    }
+    const auto& keys = source.cacheKeys();
+    if (keys.empty() || cp_size <= 1) {
+        return source.lastBlockAligned();
+    }
+    const int partial_key_pos = static_cast<int>(keys.size() - 1);
+    const int last_rank       = cp_size - 1;
+    return partial_key_pos % cp_size != last_rank;
+}
+
+KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
+                                               const CacheConfig&     cache_config,
+                                               const CacheKeysType&   selected_keys,
+                                               int                    cp_size) {
+    std::vector<CacheGroupType> group_types;
+    group_types.reserve(static_cast<size_t>(source.groupNums()));
+    for (int gid = 0; gid < source.groupNums(); ++gid) {
+        group_types.push_back(groupTypeForConnector(cache_config, gid));
+    }
+
+    KVCacheResource selected = source;
+    selected.initGroups(source.groupNums(),
+                        static_cast<int>(cache_config.layer_all_num),
+                        cache_config.layer_to_group_id,
+                        cache_config.kernelBlocksPerKvBlock(),
+                        group_types,
+                        cache_config.layer_region_to_group_id);
+    selected.setCacheKeys(selected_keys);
+    const bool selected_aligned = selectedLastRankKeysAreAligned(source, cp_size);
+    selected.setLastBlockAligned(selected_aligned);
+
+    // Memory connector intentionally drops the last key to avoid matching a
+    // partial tail.  After CP Page-RR remap, a source partial can belong to a
+    // non-last rank, making the selected last-rank key complete.  Append the
+    // original partial key as a connector-only dummy tail so the drop-last
+    // contract discards the dummy, not the usable selected key.
+    if (!source.lastBlockAligned() && selected_aligned && !source.cacheKeys().empty()) {
+        selected.cacheKeys().push_back(source.cacheKeys().back());
+        selected.rebuildLinearBlockDependencies();
+        selected.setLastBlockAligned(false);
+    }
+
+    for (int gid = 0; gid < source.groupNums(); ++gid) {
+        const auto&      src_blocks = source.blocks(gid);
+        BlockIndicesType dst_blocks;
+        dst_blocks.reserve(selected_keys.size());
+
+        if (isCpCompactFixedGroup(cache_config, gid, cp_size)) {
+            // DSV4 fixed/SWA groups can be CP-compact by using a row size of
+            // seq_size_per_block * cp_size, so their block list is already in
+            // the canonical last-rank key namespace.
+            for (size_t i = 0; i < selected_keys.size(); ++i) {
+                dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
+            }
+        } else if (group_types[static_cast<size_t>(gid)] == CacheGroupType::FULL) {
+            // Prefill rank-local FULL blocks are compact already. Decode-side
+            // FULL blocks are full-logical, so select the canonical last-rank
+            // logical positions.
+            if (isCompactFullBlockList(source, src_blocks, selected_keys)) {
+                for (size_t i = 0; i < selected_keys.size(); ++i) {
+                    dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
+                }
+            } else {
+                for (size_t logical_pos = static_cast<size_t>(cp_size - 1); dst_blocks.size() < selected_keys.size();
+                     logical_pos += static_cast<size_t>(cp_size)) {
+                    dst_blocks.push_back(logical_pos < src_blocks.size() ? src_blocks[logical_pos] : NULL_BLOCK_IDX);
+                }
+            }
+        } else {
+            // SWA/state groups keep the non-sharded logical coordinate system.
+            // Select the block at the original logical key position instead of
+            // reinterpreting the group as rank-local compact storage.
+            for (size_t logical_pos = static_cast<size_t>(cp_size - 1); dst_blocks.size() < selected_keys.size();
+                 logical_pos += static_cast<size_t>(cp_size)) {
+                dst_blocks.push_back(logical_pos < src_blocks.size() ? src_blocks[logical_pos] : NULL_BLOCK_IDX);
+            }
+        }
+
+        selected.mutableBlockIds(gid).assign(std::move(dst_blocks));
+    }
+
+    return selected;
+}
+
+}  // namespace
 
 KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&                       cache_config,
                                                          const KVCacheConfig&                     kv_cache_config,
@@ -121,17 +232,18 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
     const int       cp_size      = cpSize();
     CacheKeysType   ref_keys     = kvcache_resource.cacheKeys();
     KVCacheResource ref_resource = kvcache_resource;
-    if (cp_size > 1 && !kvcache_resource.cacheKeysAreCpCanonical()) {
-        CPSlotMapper mapper(cp_size - 1, cp_size, static_cast<int>(cache_config_.seq_size_per_block));
-        ref_keys = mapper.canonicalCacheKeys(kvcache_resource.cacheKeys());
-        // Short requests (< cp_size logical blocks) have no complete virtual
-        // block, so the canonical last-rank-key namespace is empty by design.
-        // Skip silently — connector activity for these is a no-op anyway.
-        if (ref_keys.empty()) {
-            return nullptr;
+    if (cp_size > 1) {
+        if (!kvcache_resource.cacheKeysAreCpCanonical()) {
+            ref_keys = kvcache_resource.localCacheKeys(cp_size - 1, cp_size);
+            // Short requests (< cp_size logical blocks) have no complete virtual
+            // block, so the canonical last-rank-key namespace is empty by design.
+            // Skip silently — connector activity for these is a no-op anyway.
+            if (ref_keys.empty()) {
+                return nullptr;
+            }
+            ref_resource = makeCpShardedConnectorResource(kvcache_resource, cache_config_, ref_keys, cp_size);
+            ref_keys     = ref_resource.cacheKeys();
         }
-        ref_resource = mapper.projectConnectorResource(kvcache_resource, cache_config_, ref_keys);
-        ref_keys     = ref_resource.cacheKeys();
     }
     auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);
     if (!resource) {
@@ -174,14 +286,15 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
     const int       cp_size      = cpSize();
     CacheKeysType   ref_keys     = kvcache_resource.cacheKeys();
     KVCacheResource ref_resource = kvcache_resource;
-    if (cp_size > 1 && !kvcache_resource.cacheKeysAreCpCanonical()) {
-        CPSlotMapper mapper(cp_size - 1, cp_size, static_cast<int>(cache_config_.seq_size_per_block));
-        ref_keys = mapper.canonicalCacheKeys(kvcache_resource.cacheKeys());
-        if (ref_keys.empty()) {
-            return nullptr;  // request shorter than one virtual block — nothing to write
+    if (cp_size > 1) {
+        if (!kvcache_resource.cacheKeysAreCpCanonical()) {
+            ref_keys = kvcache_resource.localCacheKeys(cp_size - 1, cp_size);
+            if (ref_keys.empty()) {
+                return nullptr;  // request shorter than one virtual block — nothing to write
+            }
+            ref_resource = makeCpShardedConnectorResource(kvcache_resource, cache_config_, ref_keys, cp_size);
+            ref_keys     = ref_resource.cacheKeys();
         }
-        ref_resource = mapper.projectConnectorResource(kvcache_resource, cache_config_, ref_keys);
-        ref_keys     = ref_resource.cacheKeys();
     }
     auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);
     if (!resource) {
@@ -416,6 +529,13 @@ std::vector<CacheKeyType> KVCacheConnectorCoordinator::memoryCacheKeys() const {
         return {};
     }
     return memory_connector_->cacheKeys();
+}
+
+std::vector<CacheKeyType> KVCacheConnectorCoordinator::memoryCacheKeysForStatus() const {
+    if (!memory_connector_) {
+        return {};
+    }
+    return memory_connector_->cacheKeysForStatus();
 }
 
 }  // namespace rtp_llm

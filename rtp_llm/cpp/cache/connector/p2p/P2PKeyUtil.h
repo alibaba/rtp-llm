@@ -10,15 +10,6 @@ public:
     static std::string makePartitionLayerKey(const std::string& base_key, int layer_id, int partition_id) {
         return base_key + "_" + std::to_string(layer_id) + "_" + std::to_string(partition_id);
     }
-
-    static std::string
-    makePartitionLayerGroupKey(const std::string& base_key, int layer_id, int group_id, int partition_id) {
-        if (group_id == 0) {
-            return makePartitionLayerKey(base_key, layer_id, partition_id);
-        }
-        return base_key + "_" + std::to_string(layer_id) + "_g" + std::to_string(group_id) + "_"
-               + std::to_string(partition_id);
-    }
 };
 
 }  // namespace rtp_llm

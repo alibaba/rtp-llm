@@ -1,4 +1,3 @@
-import logging
 import math
 from argparse import Namespace
 from typing import Any, List
@@ -7,38 +6,40 @@ import torch
 from torch import nn
 from transformers.activations import ACT2FN
 
-from rtp_llm.config.model_config import ModelConfig, VitParameters
-from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
+from rtp_llm.config.model_config import VitParameters
+from rtp_llm.models.multimodal.multimodal_common import (
     ImageEmbeddingInterface,
     ImageTransform,
 )
-from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
 class EVA2CLIPImageEmbedding(ImageEmbeddingInterface):
-    def __init__(self, config: ModelConfig):
-        self.data_type = config.compute_dtype
-        """Initialize EVA2CLIPImageEmbedding."""
+    def __init__(self, mm_related_params: VitParameters, vit_trt: int = None):
+        """Initialize EVA2CLIPImageEmbedding.
+        
+        Args:
+            mm_related_params: VitParameters object containing vision config.
+        """
+        self.mm_related_params = mm_related_params
         # EVA2CLIPModel is too big, create it in cpu
-        self.vit = EVA2CLIPModel(config).cpu()
+        # Pass mm_related_params.config to EVA2CLIPModel
+        self.vit = EVA2CLIPModel(mm_related_params.config, vit_trt).cpu()
         self.image_transform = ImageTransform(
-            config.mm_related_params.config["image_size"]
+            mm_related_params.config["image_size"]
         )
 
     @property
     def _device(self):
         return self.vit.device
 
-    @property
-    def _data_type(self):
-        return self.vit.dtype
-
-    @torch.inference_mode()
-    def embedding(self, data, mm_type: MMUrlType, **kwargs):
-        tensor_images = self.image_transform.encode(data, self._device, self._data_type)
-        tensor_images = self.vit(tensor_images).to(device=self._device)
-        assert tensor_images.shape[0] == len(data)
-        return tensor_images, None
+    def image_embedding(self, images: List[Any]) -> torch.Tensor:
+        with torch.inference_mode():
+            tensor_images = self.image_transform.encode(
+                images, self._device, self._data_type
+            )
+            tensor_images = self.vit(tensor_images).to(device=self._device)
+        assert tensor_images.shape[0] == len(images)
+        return tensor_images
 
 
 class PatchEmbedding(nn.Module):
@@ -65,7 +66,7 @@ class PatchEmbedding(nn.Module):
 class Attention(nn.Module):
     def __init__(self, config, vit_trt: int = None):
         """Initialize Attention module.
-
+        
         Args:
             config: Vision config object.
         """
@@ -120,7 +121,7 @@ class MLP(nn.Module):
 class TransformerLayer(nn.Module):
     def __init__(self, config, vit_trt: int = None):
         """Initialize TransformerLayer.
-
+        
         Args:
             config: Vision config object.
         """
@@ -147,7 +148,7 @@ class TransformerLayer(nn.Module):
 class Transformer(nn.Module):
     def __init__(self, config, vit_trt: int = None):
         """Initialize Transformer.
-
+        
         Args:
             config: Vision config object.
         """
@@ -186,16 +187,16 @@ class GLU(nn.Module):
 
 
 class EVA2CLIPModel(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, vit_trt: int = None):
         """Initialize EVA2CLIPModel.
-
+        
         Args:
             config: Model config object.
         """
         super().__init__()
         vision_config = Namespace(**config.mm_related_params.config)
         self.patch_embedding = PatchEmbedding(vision_config)
-        self.transformer = Transformer(vision_config)
+        self.transformer = Transformer(vision_config, vit_trt)
         self.linear_proj = GLU(
             config,
             in_features=(

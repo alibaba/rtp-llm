@@ -40,11 +40,11 @@ def get_mla_impl(
         if not impl.support(attn_configs, attn_inputs):
             continue
 
-        cos_sin_cache = weight.get_global_weight_or_none(W.rope_cos_sin_cache)
+        cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
         # TODO: support fast path for cp prefill
         use_fast_path = (
             attn_inputs.is_prefill
-            and attn_inputs.cu_kv_seqlens_device.max().item() <= attn_configs.indexer_topk
+            and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
             and not (
                 parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
             )
@@ -114,13 +114,9 @@ def _is_fmha_impl_disabled(
     # Aiter ASM / Paged prefill
     elif (
         "AiterPrefillImplAsm" in impl_class_name
+        or "AiterDecodeImplAsm" in impl_class_name
         or "AiterPrefillImplPaged" in impl_class_name
     ):
-        return not fmha_config.use_asm_pa
-    # Aiter ASM decode — disabled when triton PA is enabled (triton PA takes priority)
-    elif "AiterDecodeImplAsm" in impl_class_name:
-        if fmha_config.use_triton_pa:
-            return True
         return not fmha_config.use_asm_pa
     # Aiter Non-ASM implementations
     elif (

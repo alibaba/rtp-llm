@@ -42,6 +42,42 @@ public class FlexlbConfig {
      */
     private double weightedCacheDecayFactor = 0.001;
 
+    /**
+     * Time window for recent cache-key hit ratio metrics in milliseconds.
+     * Default is 30 minutes. Environment override: CACHE_HIT_TIME_WINDOW_MS.
+     */
+    private long cacheHitTimeWindowMs = 30L * 60L * 1000L;
+
+    /**
+     * Maximum cache-key occurrences retained by the recent cache-key pool.
+     * Environment override: CACHE_HIT_MAX_CACHE_KEYS.
+     */
+    private long cacheHitMaxCacheKeys = 10_000_000L;
+
+    /**
+     * Whether Master writes successful requests into the recent cache-key window.
+     * Environment override: CACHE_HIT_WINDOW_WRITE_ENABLED.
+     */
+    private boolean cacheHitWindowWriteEnabled = true;
+
+    /**
+     * Whether Master reports recent cache-key hit/total metrics.
+     * Environment override: CACHE_HIT_METRIC_REPORT_ENABLED.
+     */
+    private boolean cacheHitMetricReportEnabled = true;
+
+    /**
+     * Whether Master logs per-request recent cache-key hit trace.
+     * Environment override: CACHE_HIT_TRACE_LOG_ENABLED.
+     */
+    private boolean cacheHitTraceLogEnabled = false;
+
+    /**
+     * Whether Master writes aggregated theory hit counters to master_theory_hit.log.
+     * Environment override: CACHE_HIT_THEORY_LOG_ENABLED.
+     */
+    private boolean cacheHitTheoryLogEnabled = true;
+
     // ========== Queue Configuration ==========
 
     /**
@@ -73,6 +109,13 @@ public class FlexlbConfig {
      * Range: 1-100, default 90 means Worker is unavailable when usage exceeds 90%
      */
     private long decodeAvailableMemoryThreshold = 90;
+
+    /**
+     * Maximum in-flight requests per DECODE worker.
+     * FlexLB counts reported waiting/running tasks plus local in-transit selections.
+     * Values <= 0 disable the FlexLB-side decode concurrency limit.
+     */
+    private long decodeConcurrencyLimit = 0;
 
     /**
      * Resource availability hysteresis bias (percentage)
@@ -127,6 +170,11 @@ public class FlexlbConfig {
      * Actual worker threads = availableProcessors * nettyWorkerThreadMultiplier
      */
     private int nettyWorkerThreadMultiplier = 2;
+
+    /**
+     * Ordered traffic policy rules. A matched rule forces the whole request to a worker group.
+     */
+    private volatile TrafficPolicyConfig trafficPolicy = new TrafficPolicyConfig();
 
     /**
      * Get load balancing strategy for a role type

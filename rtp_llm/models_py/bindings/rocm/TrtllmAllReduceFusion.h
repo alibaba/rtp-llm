@@ -28,9 +28,6 @@ public:
 
     // CUDA Graph capture support
     void capture_clear();
-    void invalidate_capture();
-    void commit_capture();
-    void begin_capture_session();
     std::vector<torch::Tensor> get_captured_handles();
     torch::Tensor get_captured_offsets();
     void open_captured_handles(const std::vector<torch::Tensor>& handles,

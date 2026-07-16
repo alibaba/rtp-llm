@@ -20,7 +20,16 @@ import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_BYTES;
 import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
+import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MATCH_HIT_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MATCH_TOTAL_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT;
 
 /**
@@ -77,6 +86,15 @@ public class CacheMetricsReporter {
         // Cache hit rate metrics
         monitor.register(CACHE_HIT_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_HIT_RATIO, FlexMetricType.GAUGE);
+        monitor.register(CACHE_RECENT_KEY_HIT_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_RECENT_KEY_TOTAL_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_THEORY_HIT_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
+        monitor.register(CACHE_ROUTING_CANDIDATE_MATCH_HIT_TOKENS, FlexMetricType.GAUGE);
+        monitor.register(CACHE_ROUTING_CANDIDATE_MATCH_TOTAL_TOKENS, FlexMetricType.GAUGE);
+        monitor.register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.GAUGE);
+        monitor.register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.GAUGE);
         monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS);
 
         // Cache service response time metrics
@@ -149,6 +167,99 @@ public class CacheMetricsReporter {
         monitor.report(CACHE_HIT_COUNT, baseTags, hitTokens);
         monitor.report(CACHE_HIT_RATIO, baseTags, hitRatio);
         monitor.report(CACHE_REQUEST_TOTAL, baseTags, 1.0);
+    }
+
+    /**
+     * Report request-level routing cache-match token metrics for candidate engines.
+     */
+    public void reportRoutingCandidateCacheMatchMetrics(RoleType roleType,
+                                                        String engineIp,
+                                                        long hitTokens,
+                                                        long totalTokens) {
+        reportRoutingCacheMatchMetrics(CACHE_ROUTING_CANDIDATE_MATCH_HIT_TOKENS,
+                CACHE_ROUTING_CANDIDATE_MATCH_TOTAL_TOKENS,
+                roleType,
+                engineIp,
+                hitTokens,
+                totalTokens);
+    }
+
+    /**
+     * Report request-level routing cache-match token metrics for the selected engine.
+     */
+    public void reportRoutingSelectedCacheMatchMetrics(RoleType roleType,
+                                                       String engineIp,
+                                                       long hitTokens,
+                                                       long totalTokens) {
+        reportRoutingCacheMatchMetrics(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS,
+                CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS,
+                roleType,
+                engineIp,
+                hitTokens,
+                totalTokens);
+    }
+
+    private void reportRoutingCacheMatchMetrics(String hitMetric,
+                                                String totalMetric,
+                                                RoleType roleType,
+                                                String engineIp,
+                                                long hitTokens,
+                                                long totalTokens) {
+        if (roleType == null || totalTokens <= 0L) {
+            return;
+        }
+
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", roleType.name(),
+                "engineIp", engineIp == null ? "" : engineIp
+        );
+
+        monitor.report(hitMetric, tags, hitTokens);
+        monitor.report(totalMetric, tags, totalTokens);
+    }
+
+    /**
+     * Report token hits for the current request against the recent cache-key pool.
+     */
+    public void reportRecentCacheKeyHitMetrics(long timeWindowMs,
+                                               long hitTokens,
+                                               long inputTokens) {
+        if (inputTokens <= 0L) {
+            return;
+        }
+
+        FlexMetricTags tags = FlexMetricTags.of(
+                "timeWindowMs", String.valueOf(timeWindowMs)
+        );
+
+        monitor.report(CACHE_RECENT_KEY_HIT_COUNT, tags, hitTokens);
+        monitor.report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, inputTokens);
+    }
+
+    /**
+     * Report cumulative theory cache-hit token counters.
+     */
+    public void reportTheoryCacheHitMetrics(CacheHitTheoryStats.Snapshot snapshot) {
+        if (snapshot == null) {
+            return;
+        }
+        reportTheoryWindow("all", 0L,
+                snapshot.getAllHitCount(),
+                snapshot.getAllTotalCount(),
+                snapshot.getAllHitRatio());
+    }
+
+    private void reportTheoryWindow(String window, long windowMs, long hitCount, long totalCount, double hitRatio) {
+        if (totalCount <= 0L) {
+            return;
+        }
+        FlexMetricTags tags = FlexMetricTags.of(
+                "window", window,
+                "windowMs", String.valueOf(windowMs)
+        );
+        monitor.report(CACHE_THEORY_HIT_COUNT, tags, hitCount);
+        monitor.report(CACHE_THEORY_TOTAL_COUNT, tags, totalCount);
+        monitor.report(CACHE_THEORY_HIT_RATIO, tags, hitRatio);
     }
 
     /**

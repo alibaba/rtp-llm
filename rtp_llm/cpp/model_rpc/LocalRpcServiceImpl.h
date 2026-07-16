@@ -16,29 +16,23 @@ public:
     LocalRpcServiceImpl() {}
     virtual ~LocalRpcServiceImpl() {}
     virtual grpc::Status init(const EngineInitParams&                                maga_init_params,
-                              std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
-                              py::object                                             mm_process_engine) {
+                              py::object                                             mm_process_engine,
+                              std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
         local_server_ = std::make_shared<LocalRpcServer>();
-        return local_server_->init(maga_init_params, std::move(propose_params), mm_process_engine);
+        return local_server_->init(maga_init_params, mm_process_engine, std::move(propose_params));
     }
     grpc::Status init(const EngineInitParams&                                maga_init_params,
+                      py::object                                             mm_process_engine,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
-                      py::object                                             weight_manager,
-                      py::object                                             mm_process_engine) {
+                      py::object                                             weight_manager) {
         local_server_ = std::make_shared<LocalRpcServer>();
-        return local_server_->init(maga_init_params, std::move(propose_params), mm_process_engine);
+        return local_server_->init(maga_init_params, mm_process_engine, std::move(propose_params));
     }
 
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer) override {
         return local_server_->GenerateStreamCall(context, request, writer);
-    }
-
-    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
-                                   const BatchGenerateInputPB* request,
-                                   BatchGenerateOutputsPB*     response) override {
-        return local_server_->BatchGenerateCall(context, request, response);
     }
 
     ::grpc::Status

@@ -35,9 +35,10 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
 )
 from rtp_llm.models_py.utils.math import align, ceil_div
 
-from ...quant_layouts import FP4_BLOCK, FP8_BLOCK, prepare_fp4_weight_scale_for_deepgemm
-from .._silu_mul_fp8_quant_triton import silu_mul_fp8_quant_packed
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
+from .._silu_mul_fp8_quant_triton import silu_mul_fp8_quant_packed
+from ...quant_layouts import FP4_BLOCK, FP8_BLOCK, prepare_fp4_weight_scale_for_deepgemm
+
 
 # ep_scatter requires m_indices.shape[0] % BLOCK_E == 0 (BLOCK_E=128); also
 # DeepGEMM contiguous requires per-expert M to be a multiple of the kernel's
@@ -115,7 +116,9 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         stacked_w3_s = layer_weights.pop(W.v4_routed_w3_s)
         device = stacked_w1_w.device
 
-        self._w13 = torch.empty((E, 2 * inter, D // 2), dtype=torch.int8, device=device)
+        self._w13 = torch.empty(
+            (E, 2 * inter, D // 2), dtype=torch.int8, device=device
+        )
         s13_raw = torch.empty(
             (E, 2 * inter, D // FP4_BLOCK),
             dtype=torch.float8_e8m0fnu,
@@ -138,7 +141,9 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         del stacked_w1_w, stacked_w1_s, stacked_w2_w, stacked_w2_s
         del stacked_w3_w, stacked_w3_s
 
-        self._s13 = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
+        self._s13 = prepare_fp4_weight_scale_for_deepgemm(
+            s13_raw, 2 * inter, D, E
+        )
         self._s2 = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
         s13_dense = prepare_fp4_weight_scale_for_deepgemm(
             s13_raw.reshape(E * 2 * inter, D // FP4_BLOCK),
@@ -228,9 +233,7 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         # GPU tensor of aligned counts before calling ep_scatter.
         aligned_counts = torch.tensor(
             aligned_counts_list,
-            dtype=torch.int32,
-            pin_memory=True,
-            device="cpu",
+            dtype=torch.int32, pin_memory=True, device="cpu",
         ).to(device, non_blocking=True)
 
         # (2) Triton ep_scatter: per-expert padded layout in 1 kernel pair.
@@ -242,8 +245,7 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         )
         scatter_out_scale = torch.zeros(
             [ceil_div(D // FP8_BLOCK, 4), all_tokens],
-            device=device,
-            dtype=torch.int,
+            device=device, dtype=torch.int,
         ).transpose(0, 1)
         # m_indices is fully overwritten by ep_scatter's kernel_1 (one expert_id
         # per row across the aligned region). Padding rows therefore tag a real
@@ -295,7 +297,9 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         del gate_up
 
         # GEMM 2: down
-        down_out = torch.empty(all_tokens, D, device=device, dtype=torch.bfloat16)
+        down_out = torch.empty(
+            all_tokens, D, device=device, dtype=torch.bfloat16
+        )
         m_grouped_fp8_fp4_gemm_nt_contiguous(
             (h_fp8, h_scale),
             (self._w2, self._s2),
@@ -352,7 +356,9 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
                     .squeeze(0)
                     .transpose(0, 1)
                 )
-                gate_up = torch.empty(1, 2 * inter, device=device, dtype=torch.bfloat16)
+                gate_up = torch.empty(
+                    1, 2 * inter, device=device, dtype=torch.bfloat16
+                )
                 fp8_fp4_gemm_nt(
                     (x_fp8, x_scale),
                     (w13, s13),

@@ -22,15 +22,11 @@ struct CKAttn {
     torch::Tensor kv_cache_kernel_block_id_device;
 
     torch::Tensor prefix_lengths;
-    torch::Tensor position_ids;
     torch::Tensor cu_seqlens;
     torch::Tensor cu_kv_seqlens;
     torch::Tensor input_lengths;
     torch::Tensor sequence_lengths;
     torch::Tensor padding_offset;
-    int           prefill_runtime_max_seq_len         = -1;
-    int           prefill_runtime_max_prefix_len      = -1;
-    int           prefill_runtime_seq_len_with_prefix = -1;
     int           max_seq_len;
     bool          decode_plan;
 
@@ -53,16 +49,20 @@ inline ParamsPtr PrepareCKAttn(const AttentionConfigs& configs,
     if (batch_size <= 0 || !kv_cache_block_id.defined() || kv_cache_block_id.numel() == 0) {
         return nullptr;
     }
-    auto            ck_attn              = std::make_shared<CKAttn>();
-    KvCacheDataType cache_type           = KvCacheDataType::BASE;
-    const auto      max_blocks_per_batch = kv_cache_block_id.size(1);
-    auto const      elemSize             = use_fp8_fmha ? sizeof(int8_t) : 2;  // 2 for kv cache fp16
+    auto            ck_attn    = std::make_shared<CKAttn>();
+    KvCacheDataType cache_type = KvCacheDataType::BASE;
+    if (configs.kv_cache_dtype == KvCacheDataType::INT8) {
+        RTP_LLM_LOG_DEBUG("now use kv_cache int8");
+        cache_type = KvCacheDataType::INT8;
+    }
+    const auto max_blocks_per_batch = kv_cache_block_id.size(1);
+    auto const elemSize             = use_fp8_fmha ? sizeof(int8_t) : 2;  // 2 for kv cache fp16
 
     ck_attn->kv_cache_offset           = torch::empty({(int64_t)batch_size, 1, 2, (int64_t)max_blocks_per_batch},
                                             torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
     ck_attn->kv_block_array            = KVBlockArray(batch_size,
                                            max_blocks_per_batch,
-                                           configs.kernel_tokens_per_block,
+                                           configs.tokens_per_block,
                                            configs.kv_head_num * configs.size_per_head * elemSize,
                                            0,
                                            0,
@@ -70,7 +70,7 @@ inline ParamsPtr PrepareCKAttn(const AttentionConfigs& configs,
                                            nullptr,
                                            (rtp_llm::KVCacheIndex*)ck_attn->kv_cache_offset.data_ptr<int>());
     ck_attn->kv_block_array.cache_type = cache_type;
-    ck_attn->kv_block_array.mScaleBytesPerBlock = configs.kernel_tokens_per_block * configs.kv_head_num * sizeof(float);
+    ck_attn->kv_block_array.mScaleBytesPerBlock = configs.tokens_per_block * configs.kv_head_num * sizeof(float);
     hipStream_t stream                          = at::hip::getCurrentHIPStream().stream();
     invokeConvertOffsetToBlockArrayData(ck_attn->kv_cache_offset.data_ptr<int>(),
                                         kv_cache_block_id.data_ptr<int>(),

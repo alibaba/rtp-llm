@@ -29,20 +29,16 @@ The eager path is unchanged.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.attn_type import TAG_BY_ATTN_TYPE
 from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
     DSv4DecodeAttnMetadataFP8,
     allocate_decode_metadata_fp8,
     update_decode_metadata_in_place_fp8,
 )
-
-_ATTN_TYPE_BY_TAG = {tag: attn_type for attn_type, tag in TAG_BY_ATTN_TYPE.items()}
 
 
 @dataclass
@@ -61,11 +57,19 @@ class DSv4DecodeFmhaImplConfigFP8:
     # Phase 2 paged-decode wiring. When provided, the impl pre-allocates
     # per-attn_type block_table + slot_mapping buffers in the metadata
     # and ``prepare`` populates them from
-    # the selected group's ``attn_inputs.kv_cache_kernel_block_id_device``.
+    # ``attn_inputs.kv_cache_kernel_block_id_device_by_group``.
     #
     # ``paged_pool_specs[attn_type]`` is
     # ``(entries_per_block, tokens_per_block, max_blocks_per_req)``.
     paged_pool_specs: Dict[int, Tuple[int, int, int]] = field(default_factory=dict)
+
+    # Snapshot of ``kv_cache.group_region_names`` (framework-owned group
+    # ordering, one attn_type per entry). Position = group id. ``prepare``
+    # iterates this to index ``attn_inputs.kv_cache_kernel_block_id_device_by_group``
+    # without needing a live ``kv_cache`` (the CUDA-graph replay path
+    # doesn't hand one in). Static for the allocator's lifetime, so
+    # snapshot-at-construct is safe.
+    group_region_names: List[int] = field(default_factory=list)
 
 
 class DSv4DecodeFmhaImplFP8:
@@ -109,39 +113,26 @@ class DSv4DecodeFmhaImplFP8:
         # False here (prepare_cuda_graph is hardcoded on the class).
         return True
 
-    def _attn_inputs_base(self, attn_inputs: Any) -> Any:
-        if isinstance(attn_inputs, Mapping):
-            if not attn_inputs:
-                raise RuntimeError("DSV4 attention input tag mapping must not be empty")
-            return next(iter(attn_inputs.values()))
-        return attn_inputs
-
     def _extract_paged_block_tables(
         self,
         attn_inputs: Any,
     ) -> Optional[Dict[int, torch.Tensor]]:
-        if not self._paged_entries_per_block:
+        if not self._paged_entries_per_block or not self.config.group_region_names:
+            return None
+        by_group = getattr(
+            attn_inputs,
+            "kv_cache_kernel_block_id_device_by_group",
+            None,
+        )
+        if by_group is None or len(by_group) == 0:
             return None
         paged_block_tables: Dict[int, torch.Tensor] = {}
-        if isinstance(attn_inputs, Mapping):
-            tagged_inputs = attn_inputs.items()
-        else:
-            if len(self.config.paged_pool_specs) != 1:
-                raise RuntimeError(
-                    "plain DSV4 attention inputs require exactly one paged cache group"
-                )
-            tagged_inputs = ((None, attn_inputs),)
-        for tag, group_attn_inputs in tagged_inputs:
-            attn_type = (
-                next(iter(self.config.paged_pool_specs))
-                if tag is None
-                else _ATTN_TYPE_BY_TAG.get(str(tag))
-            )
+        for group_id, attn_type in enumerate(self.config.group_region_names):
+            if group_id >= len(by_group):
+                continue
             if attn_type not in self.config.paged_pool_specs:
                 continue
-            group_block_table = getattr(
-                group_attn_inputs, "kv_cache_kernel_block_id_device", None
-            )
+            group_block_table = by_group[group_id]
             if group_block_table is None or group_block_table.numel() == 0:
                 continue
             paged_block_tables[attn_type] = group_block_table
@@ -162,7 +153,7 @@ class DSv4DecodeFmhaImplFP8:
         paged_block_tables = self._extract_paged_block_tables(attn_inputs)
         update_decode_metadata_in_place_fp8(
             self.metadata,
-            self._attn_inputs_base(attn_inputs),
+            attn_inputs,
             forbid_realloc=forbid_realloc,
             paged_block_tables=paged_block_tables,
             paged_pool_entries_per_block=self._paged_entries_per_block,
@@ -191,7 +182,7 @@ class DSv4DecodeFmhaImplFP8:
             )
         update_decode_metadata_in_place_fp8(
             self.metadata,
-            self._attn_inputs_base(attn_inputs),
+            attn_inputs,
             forbid_realloc=True,
             paged_block_tables=paged_block_tables,
             paged_pool_entries_per_block=self._paged_entries_per_block,

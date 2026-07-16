@@ -6,7 +6,7 @@
 
 namespace rtp_llm {
 
-static const std::unordered_set<int> kValidGroupSizes = {16, 32, 64, 128};
+static const std::unordered_set<int> kValidGroupSizes = {16, 64, 128};
 
 void QuantAlgo::setQuantAlgo(const std::string& quant_method, int64_t bits, int64_t group_size) {
     if (quant_method == "gptq") {
@@ -44,10 +44,6 @@ void QuantAlgo::setQuantAlgo(const std::string& quant_method, int64_t bits, int6
         weight_bits_  = 8;
     } else if (quant_method == "w4a8_int4_per_channel") {
         quant_method_ = W4A8INT4PTPC;
-        weight_bits_  = 4;
-        group_size_   = group_size;
-    } else if (quant_method == "mxfp4-quark") {
-        quant_method_ = QuarkMXFP4;
         weight_bits_  = 4;
         group_size_   = group_size;
     } else if (quant_method == "modelopt_fp4") {

@@ -7,7 +7,6 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from rtp_llm.ops import HWKernelConfig
@@ -62,7 +61,7 @@ class LinearBase(nn.Module, ABC):
             weight_scales: Weight scales tensor
             input_scales: Input scales tensor
             bias: Bias tensor
-            quant_config: Quantization configuration (required)
+            quant_config: Quantization configuration (required)ers
             weight_scale_2: Second weight scale tensor (for FP4, can be None)
         """
         super().__init__()
@@ -88,14 +87,6 @@ class LinearBase(nn.Module, ABC):
             Output tensor
         """
         pass
-
-    def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
-        """Forward pass followed by GELU.
-
-        Backends with a fused GEMM+bias+GELU epilogue can override this method.
-        The default implementation preserves existing device behavior.
-        """
-        return F.gelu(self.forward(input))
 
     def __repr__(self) -> str:
         """Return string representation of the strategy"""

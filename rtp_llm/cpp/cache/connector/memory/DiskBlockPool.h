@@ -38,12 +38,12 @@ private:
 };
 
 struct DiskBlockPoolConfig {
-    std::string    work_dir;
-    int64_t        local_rank{0};
-    int64_t        world_rank{0};
-    size_t         disk_size_bytes{0};
-    size_t         block_size_bytes{0};
-    bool           buffered_io{true};
+    std::string work_dir;
+    int64_t     local_rank{0};
+    int64_t     world_rank{0};
+    size_t      disk_size_bytes{0};
+    size_t      block_size_bytes{0};
+    bool        buffered_io{true};
     CacheBlockKind pool_kind{CacheBlockKind::COMPLETE};
 };
 

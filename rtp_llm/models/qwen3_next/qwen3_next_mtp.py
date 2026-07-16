@@ -4,10 +4,9 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
-from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next, Qwen35Moe
 from rtp_llm.models.qwen3_next.qwen3_next_weight import Qwen3NextWeight, plus_one
-from rtp_llm.ops import HybridAttentionType, KVCacheSpecType
+from rtp_llm.ops import HybridAttentionType
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose
 
 
@@ -88,13 +87,6 @@ class Qwen3NextMTP(Qwen3Next):
         config.is_mtp = True
         return config
 
-    @classmethod
-    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
-        model_config.kv_cache_spec_descs = build_hybrid_kv_cache_spec_descs(
-            [HybridAttentionType.NONE],
-            KVCacheSpecType.MHA,
-        )
-
     def _create_python_model(self) -> Optional[Any]:
         from rtp_llm.models_py.model_desc.qwen3_next_mtp import Qwen3NextMTPModel
 
@@ -130,19 +122,7 @@ class Qwen35MoeMTP(Qwen35Moe):
         config.moe_layer_index = [0]
         config.num_layers = 1
         config.is_mtp = True
-        # Draft MTP consumes text tokens only (no vision tokens), so MRoPE's 3D
-        # position encoding is unnecessary. Falling back to plain RoPE keeps the
-        # PyFlashinfer prefill impl eligible (it filters out MRoPE), which is the
-        # only impl in the registry that handles prefill CUDA graph correctly.
-        config.attn_config.rope_config.style = 1
         return config
-
-    @classmethod
-    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
-        model_config.kv_cache_spec_descs = build_hybrid_kv_cache_spec_descs(
-            [HybridAttentionType.NONE],
-            KVCacheSpecType.MHA,
-        )
 
     def _create_python_model(self) -> Optional[Any]:
         from rtp_llm.models_py.model_desc.qwen3_next_mtp import Qwen3NextMTPModel

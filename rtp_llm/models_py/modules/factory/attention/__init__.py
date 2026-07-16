@@ -42,9 +42,9 @@ if device_type == DeviceType.ROCm:
     PREFILL_MHA_IMPS.append(AiterPrefillImplPaged)
     PREFILL_MHA_IMPS.append(AiterPrefillImplAsm)
     PREFILL_MHA_IMPS.append(AiterPrefillImplNonAsm)
-    DECODE_MHA_IMPS.append(AiterDecodeImplTriton)
     DECODE_MHA_IMPS.append(AiterDecodeImplAsm)
     DECODE_MHA_IMPS.append(AiterDecodeImplNonAsm)
+    DECODE_MHA_IMPS.append(AiterDecodeImplTriton)
 else:
     # currently append early means impl has higher priority
     if device_type == DeviceType.Cuda:
@@ -69,7 +69,6 @@ else:
             FlashInferTRTLLMSpecDecodeImpl,
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import (
-            XQAImpl,
             get_xqa_impl,
         )
 
@@ -86,14 +85,7 @@ else:
             ]
         )
         DECODE_MHA_IMPS.extend([FlashInferTRTLLMDecodeImpl])
-        # XQAImpl (TRT GMMA) before XQADecodeImpl (FlashInfer HMMA): different
-        # accumulation paths produce <1 ULP divergence that flips tokens in long
-        # generations.  Existing golden data was generated with XQAImpl, so keep
-        # it higher-priority to avoid unnecessary golden refreshes.
-        DECODE_MHA_IMPS.append(XQAImpl)
-        _xqa_decode_impl = get_xqa_impl()
-        if _xqa_decode_impl is not XQAImpl:
-            DECODE_MHA_IMPS.append(_xqa_decode_impl)
+        DECODE_MHA_IMPS.append(get_xqa_impl())
 
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
             MlaFlashInferDecodeImpl,
@@ -122,6 +114,14 @@ else:
                     PREFILL_MLA_IMPS.append(SparseMlaCpImpl)
         except (ImportError, AttributeError, ValueError):
             pass  # Skip SparseMlaImpl if CUDA < 12.9 or flash_mla not available
+
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_infer import (
+            FlashInferDecodeImpl,
+            FlashInferPrefillImpl,
+        )
+
+        PREFILL_MHA_IMPS.append(FlashInferPrefillImpl)
+        DECODE_MHA_IMPS.append(FlashInferDecodeImpl)
 
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
         PyFlashinferDecodeImpl,

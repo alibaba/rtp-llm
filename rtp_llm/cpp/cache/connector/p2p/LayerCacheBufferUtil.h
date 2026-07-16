@@ -35,14 +35,6 @@ public:
                                                           int              block_count,
                                                           int              cp_rank = 0,
                                                           int              cp_size = 1);
-    static std::shared_ptr<LayerCacheBuffer> convertLayer(KVCacheResource& resource,
-                                                          int              batch_id,
-                                                          int              layer_id,
-                                                          int              group_id,
-                                                          int              start_block_idx,
-                                                          int              block_count,
-                                                          int              cp_rank,
-                                                          int              cp_size);
 
     /// @brief 将 LayerCacheBuffer 转换为 transfer 层需要的 KeyBlockInfoMap
     static transfer::KeyBlockInfoMap buildKeyBlockInfos(const std::shared_ptr<LayerBlockConverter>& converter,

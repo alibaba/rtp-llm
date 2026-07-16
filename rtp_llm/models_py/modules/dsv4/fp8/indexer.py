@@ -37,6 +37,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
     indexer_q_fp8_quant_fold,
+    indexer_q_rope_fp8_quant_fold,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
     INDEXER_ENTRY_BYTES,
@@ -55,12 +56,6 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     _CompressorPending,
 )
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
-
-
-def _use_varlen_prefill() -> bool:
-    return os.environ.get("DSV4_VARLEN_PREFILL", "1") != "0"
-
-
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -415,7 +410,10 @@ class IndexerFP8(PoolBackedModule):
         attention_inputs: _IndexerFP8PrefillMeta,
         k_quant_flat: torch.Tensor,
         k_scale_buf: torch.Tensor,
-    ) -> None:
+        *,
+        cp_gather_stream: Optional[Any] = None,
+        post_gather_stream: Optional[Any] = None,
+    ) -> Optional[Any]:
         """Fill prefill indexer-K buffers from the FP8 pool.
 
         Shared by ``forward`` and ``forward_with_pending_nested`` so the overlap
@@ -435,7 +433,7 @@ class IndexerFP8(PoolBackedModule):
                 attention_inputs.block_table_i32,
                 attention_inputs.cu_kv_seqlens,
             )
-            return
+            return None
 
         from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_assembler as asm
 
@@ -478,6 +476,27 @@ class IndexerFP8(PoolBackedModule):
                 padded_k_quant=local_q,
                 padded_k_scale=local_s,
             )
+        if cp_gather_stream is not None and post_gather_stream is not None:
+            pending = asm.start_assemble_indexer_k_async(
+                plan=plan,
+                local_k_quant=local_q,
+                local_k_scale=local_s,
+                out_k_quant=k_quant_flat,
+                out_k_scale=k_scale_buf,
+                stream=cp_gather_stream,
+            )
+            if pending is not None:
+                try:
+                    asm.prepare_assemble_indexer_k_async(
+                        pending,
+                        stream=post_gather_stream,
+                    )
+                except Exception:
+                    with suppress(Exception):
+                        asm.discard_assemble_indexer_k_async(pending)
+                    raise
+                return pending
+
         asm.assemble_indexer_k(
             plan=plan,
             local_k_quant=local_q,
@@ -485,6 +504,24 @@ class IndexerFP8(PoolBackedModule):
             out_k_quant=k_quant_flat,
             out_k_scale=k_scale_buf,
         )
+        return None
+
+    @staticmethod
+    def _wait_prefill_k_cache_gather(pending: Optional[Any]) -> None:
+        if pending is None:
+            return
+        from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_assembler as asm
+
+        asm.wait_assemble_indexer_k_async(pending)
+
+    @staticmethod
+    def _discard_prefill_k_cache_gather(pending: Optional[Any]) -> None:
+        if pending is None:
+            return
+        from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_assembler as asm
+
+        with suppress(Exception):
+            asm.discard_assemble_indexer_k_async(pending)
 
     # --------------------------------------------------------------
     # Q-projection + RoPE helper (shared between prefill & decode)
@@ -494,8 +531,9 @@ class IndexerFP8(PoolBackedModule):
         qr: torch.Tensor,
         freqs_cis: torch.Tensor,
         batched_rope: bool = False,
+        apply_rope: bool = True,
     ) -> torch.Tensor:
-        """qr → wq_b → unflatten → RoPE → q.
+        """qr → wq_b → unflatten → optional RoPE → q.
 
         Output layout mirrors qr's leading dims:
           * qr ``[B, S, q_lora]``  → q ``[B, S, H, D]``  (legacy 3D)
@@ -516,6 +554,8 @@ class IndexerFP8(PoolBackedModule):
             else:
                 q = self.wq_b(qr)
             q = q.unflatten(-1, (self.n_heads, self.head_dim))
+        if not apply_rope:
+            return q
         with record_function_range("dsv4.fp8.indexer.compute_q.rope"):
             rope_view = q[..., -self.rope_head_dim :]
             if not rope_view.is_cuda:
@@ -557,13 +597,17 @@ class IndexerFP8(PoolBackedModule):
 
             if position_ids is None:
                 freqs = self.freqs_cis[start_pos.long()]
-                q = self._compute_indexer_q(qr, freqs, batched_rope=True)
+                q = self._compute_indexer_q(
+                    qr, freqs, batched_rope=True, apply_rope=False
+                )
                 compressed_len = ((start_pos + 1) // ratio).view(bsz, 1, 1)
             else:
                 assert compressor_meta is not None
                 pos_flat = compressor_meta.positions.reshape(-1)
                 freqs = self.freqs_cis.index_select(0, pos_flat).contiguous()
-                q = self._compute_indexer_q(qr, freqs, batched_rope=False)
+                q = self._compute_indexer_q(
+                    qr, freqs, batched_rope=False, apply_rope=False
+                )
                 assert compressor_meta.compressed_lens_per_token is not None
                 compressed_len = compressor_meta.compressed_lens_per_token.view(
                     bsz, q_len, 1
@@ -581,8 +625,11 @@ class IndexerFP8(PoolBackedModule):
             T_static = self._kv_cache_t if self._kv_cache_t > 0 else T_cache
             T_max = max(32, min(T_cache, T_static))
 
-            q_fp8, w_fold = indexer_q_fp8_quant_fold(
-                _as_bf16_contig(q), _as_bf16_contig(weights)
+            q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
+                _as_bf16_contig(q),
+                _as_bf16_contig(weights),
+                freqs,
+                self.rope_head_dim,
             )
             ctx_lens_2d = compressed_len.view(bsz, q_len)
             bt_i32 = self._kv_block_table[:bsz].to(torch.int32).contiguous()
@@ -993,6 +1040,8 @@ class IndexerFP8(PoolBackedModule):
         # Always passed (unused on non-CP) so there is one buffer-lifecycle
         # contract and no hidden ``None``/fallback-allocate. Do NOT make Optional.
         workspace: "PrefillWorkspace",
+        cp_gather_stream: Optional[Any] = None,
+        post_gather_stream: Optional[Any] = None,
     ) -> torch.Tensor:
         M = attention_inputs.M
         T = attention_inputs.T
@@ -1019,9 +1068,12 @@ class IndexerFP8(PoolBackedModule):
             self.compressor.freqs_cis = self.freqs_cis
 
         self._propagate_pool_to_nested()
+        indexer_k_pending = None
         try:
             with record_function_range("dsv4.fp8.indexer.prefill.compute_q"):
-                q = self._compute_indexer_q(qr, attention_inputs.freqs_cis_slice)
+                q = self._compute_indexer_q(
+                    qr, attention_inputs.freqs_cis_slice, apply_rope=False
+                )
             with record_function_range("dsv4.fp8.indexer.prefill.nested_compressor"):
                 self.compressor(
                     x, sp, meta=attention_inputs.compressor_meta, workspace=workspace
@@ -1029,6 +1081,16 @@ class IndexerFP8(PoolBackedModule):
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
             with record_function_range("dsv4.fp8.indexer.prefill.weights_proj"):
                 weights = F.linear(x, self.weights_proj)
+
+            q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
+            w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
+            with record_function_range("dsv4.fp8.indexer.prefill.quant_q_rope"):
+                q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
+                    _as_bf16_contig(q_for_quant),
+                    _as_bf16_contig(w_for_quant),
+                    attention_inputs.freqs_cis_slice,
+                    self.rope_head_dim,
+                )
 
             assert (
                 has_fp8_mqa_logits()
@@ -1054,26 +1116,23 @@ class IndexerFP8(PoolBackedModule):
                 )
                 # quant_block_size = head_dim*4/dst_scale.size(1) = 128*4/4 = 128.
                 k_scale_buf = torch.empty((T, 4), dtype=torch.uint8, device=x.device)
-                self._gather_prefill_k_cache(
+                indexer_k_pending = self._gather_prefill_k_cache(
                     attention_inputs,
                     k_quant_flat,
                     k_scale_buf,
+                    cp_gather_stream=cp_gather_stream,
+                    post_gather_stream=post_gather_stream,
                 )
-                # ``deep_gemm.fp8_mqa_logits`` expects k_scale as 1D fp32
-                # contig — view uint8 [T, 4] → fp32 [T, 1] → squeeze [T].
-                k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
 
-            # Phase-3a part 3 fix: when ``_compute_indexer_q`` was given a
-            # flat 2D qr it returns 3D ``[T, H, D]``; ``indexer_q_fp8_quant_fold``
-            # requires 4D ``[B, S, H, D]`` (asserts ``q_bf16.dim() == 4``).
-            # Wrap with a fake B=1 — downstream consumers immediately reshape
-            # to flat ``[M, H, D]`` so the wrap is a free view.
-            q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
-            w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
-            with record_function_range("dsv4.fp8.indexer.prefill.quant_q"):
-                q_fp8, w_fold = indexer_q_fp8_quant_fold(
-                    _as_bf16_contig(q_for_quant), _as_bf16_contig(w_for_quant)
-                )
+            if indexer_k_pending is not None:
+                with record_function_range(
+                    "dsv4.fp8.indexer.prefill.gather_k_cache.prefetch_wait"
+                ):
+                    self._wait_prefill_k_cache_gather(indexer_k_pending)
+                indexer_k_pending = None
+            # ``deep_gemm.fp8_mqa_logits`` expects k_scale as 1D fp32 contig:
+            # view uint8 [T, 4] → fp32 [T, 1] → squeeze [T].
+            k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
 
             q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
             w_score = w_fold.view(M, self.n_heads)
@@ -1113,6 +1172,7 @@ class IndexerFP8(PoolBackedModule):
 
             return out_buf.view(out_shape)
         finally:
+            self._discard_prefill_k_cache_gather(indexer_k_pending)
             self._clear_nested_pool()
 
     # --------------------------------------------------------------
@@ -1178,6 +1238,8 @@ class IndexerFP8(PoolBackedModule):
         attention_inputs: _IndexerFP8PrefillMeta,
         nested_pending: Optional[_CompressorPending],
         before_gather_k: Optional[Callable[[], None]] = None,
+        cp_gather_stream: Optional[Any] = None,
+        post_gather_stream: Optional[Any] = None,
     ) -> torch.Tensor:
         """Overlap-variant of :meth:`forward`.
 
@@ -1223,13 +1285,26 @@ class IndexerFP8(PoolBackedModule):
         # entered through this path without start_prefill_nested_compressor
         # (e.g. tests) still work.
         self._propagate_pool_to_nested()
+        indexer_k_pending = None
         try:
             with record_function_range("dsv4.fp8.indexer.prefill.compute_q"):
-                q = self._compute_indexer_q(qr, attention_inputs.freqs_cis_slice)
+                q = self._compute_indexer_q(
+                    qr, attention_inputs.freqs_cis_slice, apply_rope=False
+                )
             with record_function_range("dsv4.fp8.indexer.prefill.nested_compressor"):
                 self.compressor.finish_prefill(nested_pending)
             with record_function_range("dsv4.fp8.indexer.prefill.weights_proj"):
                 weights = F.linear(x, self.weights_proj)
+
+            q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
+            w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
+            with record_function_range("dsv4.fp8.indexer.prefill.quant_q_rope"):
+                q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
+                    _as_bf16_contig(q_for_quant),
+                    _as_bf16_contig(w_for_quant),
+                    attention_inputs.freqs_cis_slice,
+                    self.rope_head_dim,
+                )
 
             assert (
                 has_fp8_mqa_logits()
@@ -1254,19 +1329,21 @@ class IndexerFP8(PoolBackedModule):
                     device=x.device,
                 )
                 k_scale_buf = torch.empty((T, 4), dtype=torch.uint8, device=x.device)
-                self._gather_prefill_k_cache(
+                indexer_k_pending = self._gather_prefill_k_cache(
                     attention_inputs,
                     k_quant_flat,
                     k_scale_buf,
+                    cp_gather_stream=cp_gather_stream,
+                    post_gather_stream=post_gather_stream,
                 )
-                k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
 
-            q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
-            w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
-            with record_function_range("dsv4.fp8.indexer.prefill.quant_q"):
-                q_fp8, w_fold = indexer_q_fp8_quant_fold(
-                    _as_bf16_contig(q_for_quant), _as_bf16_contig(w_for_quant)
-                )
+            if indexer_k_pending is not None:
+                with record_function_range(
+                    "dsv4.fp8.indexer.prefill.gather_k_cache.prefetch_wait"
+                ):
+                    self._wait_prefill_k_cache_gather(indexer_k_pending)
+                indexer_k_pending = None
+            k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
 
             q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
             w_score = w_fold.view(M, self.n_heads)
@@ -1302,4 +1379,5 @@ class IndexerFP8(PoolBackedModule):
 
             return out_buf.view(out_shape)
         finally:
+            self._discard_prefill_k_cache_gather(indexer_k_pending)
             self._clear_nested_pool()

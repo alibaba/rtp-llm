@@ -148,7 +148,7 @@ class FlashInferPythonMHATest(TestCase):
             attn_inputs.input_lengths if is_prefill else attn_inputs.sequence_lengths
         )
         write_kv_cache(
-            k_ref, v_ref, kv_cache, kv_write_lengths, attn_inputs.kv_cache_block_id
+            k_ref, v_ref, kv_cache, kv_write_lengths, attn_inputs.kv_cache_block_id_host
         )
 
         out_ref = attention_prefill_ref(
@@ -173,7 +173,7 @@ class FlashInferPythonMHATest(TestCase):
             out_ref_f32 = out_ref.float()
             allowed_mismatch_rate = 1e-5
         else:
-            last_token_idx = attn_inputs.cu_seqlens_device[1:] - 1
+            last_token_idx = attn_inputs.cu_seqlens[1:] - 1
             if is_prefill:
                 q_len_per_req = 6
                 attn_inputs.prefix_lengths = attn_inputs.input_lengths - q_len_per_req
@@ -354,14 +354,14 @@ class PrepareCudaGraphKernelTest(TestCase):
         torch.testing.assert_close(seq_lens_out, src1)
         torch.testing.assert_close(kv_offset, self._reference_kv_offset(block_id))
 
-    # -- spec-decode prefill: seq_lens = prefix + q_len --
+    # -- spec-decode prefill: seq_lens = prefix + src2[0] --
 
     def test_mode1_base(self):
         N, M = 4, 8
         prefix = torch.tensor(
             [100, 200, 300, 400], dtype=torch.int32, device=self.device
         )
-        q_len_tensor = torch.full((N,), 5, dtype=torch.int32, device=self.device)
+        q_len_tensor = torch.tensor([5], dtype=torch.int32, device=self.device)
         seq_lens_out = torch.zeros(N, dtype=torch.int32, device=self.device)
         cu_kv = torch.zeros(N + 1, dtype=torch.int32, device=self.device)
         block_id = self._make_block_id(N, M)
@@ -387,7 +387,7 @@ class PrepareCudaGraphKernelTest(TestCase):
     def test_mode1_large_batch(self):
         N, M = 64, 32
         prefix = torch.randint(50, 500, (N,), dtype=torch.int32, device=self.device)
-        q_len_tensor = torch.full((N,), 7, dtype=torch.int32, device=self.device)
+        q_len_tensor = torch.tensor([7], dtype=torch.int32, device=self.device)
         seq_lens_out = torch.zeros(N, dtype=torch.int32, device=self.device)
         cu_kv = torch.zeros(N + 1, dtype=torch.int32, device=self.device)
         block_id = self._make_block_id(N, M)
@@ -408,33 +408,6 @@ class PrepareCudaGraphKernelTest(TestCase):
 
         torch.testing.assert_close(seq_lens_out, prefix + 7)
         torch.testing.assert_close(kv_offset, self._reference_kv_offset(block_id))
-
-    def test_mode1_padding_rows_stay_zero(self):
-        N, M = 4, 8
-        prefix = torch.tensor([100, 200, 0, 0], dtype=torch.int32, device=self.device)
-        q_len_tensor = torch.tensor([5, 5, 0, 0], dtype=torch.int32, device=self.device)
-        seq_lens_out = torch.full((N,), -1, dtype=torch.int32, device=self.device)
-        cu_kv = torch.zeros(N + 1, dtype=torch.int32, device=self.device)
-        block_id = self._make_block_id(N, M)
-        kv_offset = torch.zeros(N, 2, M, dtype=torch.int32, device=self.device)
-
-        self._run_kernel(
-            prefix,
-            q_len_tensor,
-            seq_lens_out,
-            cu_kv,
-            block_id,
-            kv_offset,
-            0,
-            N,
-            M,
-            mode=1,
-        )
-
-        torch.testing.assert_close(
-            seq_lens_out,
-            torch.tensor([105, 205, 0, 0], dtype=torch.int32, device=self.device),
-        )
 
     # -- prefill: seq_lens = input + prefix, cu_kv_seqlens --
 

@@ -55,6 +55,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="指定一个多任务提示字符串（multi-task prompt string），为多任务纯json字符串，类似于系统提示词。默认为空 ",
     )
     kv_cache_group.add_argument(
+        "--int8_kv_cache",
+        env_name="INT8_KV_CACHE",
+        bind_to=(kv_cache_config, "int8_kv_cache"),
+        type=int,
+        default=0,
+        help="是否开启INT8的KV_CACHE",
+    )
+    kv_cache_group.add_argument(
         "--fp8_kv_cache",
         env_name="FP8_KV_CACHE",
         bind_to=(kv_cache_config, "fp8_kv_cache"),
@@ -135,6 +143,38 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="内存 Cache 拷贝是否启用 split-KV SM scatter/gather（CUDA 上满足布局条件时）。默认 False；True 时满足条件可走 SM copy。",
     )
     kv_cache_group.add_argument(
+        "--enable_prefix_tree_memory_cache",
+        env_name="ENABLE_PREFIX_TREE_MEMORY_CACHE",
+        bind_to=(kv_cache_config, "enable_prefix_tree_memory_cache"),
+        type=str2bool,
+        default=True,
+        help="Memory cache 是否启用新的 prefix-tree connector。非 DSV4 typed layout 会回退旧 connector 行为。",
+    )
+    kv_cache_group.add_argument(
+        "--enable_legacy_memory_connector_fallback",
+        env_name="ENABLE_LEGACY_MEMORY_CONNECTOR_FALLBACK",
+        bind_to=(kv_cache_config, "enable_legacy_memory_connector_fallback"),
+        type=str2bool,
+        default=True,
+        help="新 memory connector 初始化不适用时是否允许回退旧 memory connector。",
+    )
+    kv_cache_group.add_argument(
+        "--prefix_tree_memory_state_swa_pool_ratio",
+        env_name="PREFIX_TREE_MEMORY_STATE_SWA_POOL_RATIO",
+        bind_to=(kv_cache_config, "prefix_tree_memory_state_swa_pool_ratio"),
+        type=int,
+        default=0,
+        help="新 prefix-tree memory cache 中 state/SWA pool 占总 memory cache 字节数的百分比。0 表示沿用按 key 等容量切分。",
+    )
+    kv_cache_group.add_argument(
+        "--enable_dsv4_state_block_independent_eviction",
+        env_name="ENABLE_DSV4_STATE_BLOCK_INDEPENDENT_EVICTION",
+        bind_to=(kv_cache_config, "enable_dsv4_state_block_independent_eviction"),
+        type=str2bool,
+        default=False,
+        help="DSV4 新 tree memory reuse 下启用 state/SWA block 独立淘汰。默认关闭。",
+    )
+    kv_cache_group.add_argument(
         "--memory_cache_size_mb",
         env_name="MEMORY_CACHE_SIZE_MB",
         bind_to=(kv_cache_config, "memory_cache_size_mb"),
@@ -149,6 +189,46 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         default=10000,
         help="Memory Cache 多TP同步的超时时间, 单位为毫秒",
+    )
+    kv_cache_group.add_argument(
+        "--enable_memory_cache_disk",
+        env_name="ENABLE_MEMORY_CACHE_DISK",
+        bind_to=(kv_cache_config, "enable_memory_cache_disk"),
+        type=str2bool,
+        default=False,
+        help="Memory connector 内部 disk KV cache 开关。开启时必须同时开启 enable_memory_cache。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_paths",
+        env_name="MEMORY_CACHE_DISK_PATHS",
+        bind_to=(kv_cache_config, "memory_cache_disk_paths"),
+        type=str,
+        default="",
+        help="逗号分隔的本机 disk KV cache 挂载点列表，数量必须等于本机 local_world_size。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_size_mb",
+        env_name="MEMORY_CACHE_DISK_SIZE_MB",
+        bind_to=(kv_cache_config, "memory_cache_disk_size_mb"),
+        type=int,
+        default=0,
+        help="每个 GPU rank 可用的 disk KV cache 文件大小，单位 MB。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_buffered_io",
+        env_name="MEMORY_CACHE_DISK_BUFFERED_IO",
+        bind_to=(kv_cache_config, "memory_cache_disk_buffered_io"),
+        type=str2bool,
+        default=True,
+        help="disk KV cache 是否使用 buffered IO。False 时使用 O_DIRECT。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_sync_timeout_ms",
+        env_name="MEMORY_CACHE_DISK_SYNC_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "memory_cache_disk_sync_timeout_ms"),
+        type=int,
+        default=30000,
+        help="包含 disk backing 的 memory cache copy plan 同步超时时间，单位毫秒。",
     )
     kv_cache_group.add_argument(
         "--write_cache_sync",
@@ -328,6 +408,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="分层 cache 开关。开启后，stream 释放时只全量写 remote，再按 GPU 空闲 block 阈值将冷 block 淘汰到 memory。",
     )
     kv_cache_group.add_argument(
+        "--enable_gpu_prefix_tree",
+        env_name="ENABLE_GPU_PREFIX_TREE",
+        bind_to=(kv_cache_config, "enable_gpu_prefix_tree"),
+        type=str2bool,
+        default=True,
+        help="GPU device cache 是否启用 prefix tree 标记和 leaf-LRU eviction；关闭时回退旧 flat LRU。",
+    )
+    kv_cache_group.add_argument(
         "--device_cache_min_free_blocks",
         env_name="DEVICE_CACHE_MIN_FREE_BLOCKS",
         bind_to=(kv_cache_config, "device_cache_min_free_blocks"),
@@ -335,4 +423,30 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         default=0,
         help="分层 cache 模式下 GPU 侧至少保留的空闲 block 数；当空闲 block 低于该阈值时，会把冷 block 从 GPU 淘汰到 memory。"
         "不填或填 0 时自动计算为 min(max_context_batch_size * max_seq_len, max_batch_tokens_size) / seq_size_per_block。",
+    )
+    kv_cache_group.add_argument(
+        "--dsv4_fixed_pool_blocks",
+        env_name="DSV4_FIXED_POOL_BLOCKS",
+        bind_to=(kv_cache_config, "dsv4_fixed_pool_blocks"),
+        type=int,
+        default=0,
+        help="DSV4 固定池 block 数。>0 时用于 INDEXER_STATE/CSA_STATE/HCA_STATE/SWA_KV 四个 pool；"
+        "不配置或配置为 0 时，这四个 pool 按 linear_step 派生 block 数，并保持一致。",
+    )
+    kv_cache_group.add_argument(
+        "--dsv4_hca_state_pool_blocks",
+        env_name="DSV4_HCA_STATE_POOL_BLOCKS",
+        bind_to=(kv_cache_config, "dsv4_hca_state_pool_blocks"),
+        type=int,
+        default=0,
+        help="DSV4 HCA_STATE pool 单独 block 数。>0 时仅覆盖 HCA_STATE；"
+        "不配置或配置为 0 时，HCA_STATE 跟随 DSV4_FIXED_POOL_BLOCKS 或 linear_step 派生 block 数。",
+    )
+    kv_cache_group.add_argument(
+        "--dsv4_fixed_pool_use_memory",
+        env_name="DSV4_FIXED_POOL_USE_MEMORY",
+        bind_to=(kv_cache_config, "dsv4_fixed_pool_use_memory"),
+        type=str2bool,
+        default=False,
+        help="DSV4 固定池（INDEXER_STATE/CSA_STATE/HCA_STATE/SWA_KV）是否使用 pinned CPU memory。False 表示继续使用 GPU memory。",
     )

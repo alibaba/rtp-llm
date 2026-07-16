@@ -223,12 +223,7 @@ class IndexerDecodeV4Op:
             lengths=compressed_len_per_req.view(B, 1).expand(B, q_len).reshape(-1),
         )
         if k_eff < self.index_topk and idxs.shape[-1] != self.index_topk:
-            pad = torch.full(
-                (B, q_len, self.index_topk - k_eff),
-                -1,
-                dtype=torch.int32,
-                device=device,
-            )
+            pad = torch.full((B, q_len, self.index_topk - k_eff), -1, dtype=torch.int32, device=device)
             idxs = torch.cat([idxs, pad], dim=-1)
 
         out_buffer.copy_(idxs)

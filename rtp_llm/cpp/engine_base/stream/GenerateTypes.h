@@ -13,6 +13,18 @@
 
 namespace rtp_llm {
 
+struct RequestInfo {
+    std::string frontend_ip;
+    std::string dash_ip;
+    std::string trace_id;
+    std::string request_id;
+    std::string source_role;
+
+    bool empty() const {
+        return frontend_ip.empty() && dash_ip.empty() && trace_id.empty() && request_id.empty() && source_role.empty();
+    }
+};
+
 class GenerateInput {
 public:
     int inputLength() {
@@ -24,26 +36,18 @@ public:
         return inputLength() - prefix_length;
     }
 
-    std::map<int, int> multimodalLengths() const {
-        std::map<int, int> lengths;
-        if (!multimodal_inputs.has_value() || !multimodal_features.has_value()) {
-            return {};
-        } else {
-            RTP_LLM_CHECK(multimodal_inputs.value().size() == multimodal_features.value().size());
-            int mm_num = multimodal_inputs.value().size();
-            for (int i = 0; i < mm_num; ++i) {
-                lengths[multimodal_inputs.value()[i].mm_type] += multimodal_features.value()[i].size(0);
-            }
-        }
-        return lengths;
-    }
-
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "GenerateInput {"
                      << "request_id: " << request_id << ", generate_config:" << generate_config->debugString()
                      << ", input_ids: tensor[" << input_ids.numel() << "]"
-                     << ", prefix_length:" << prefix_length << "}";
+                     << ", prefix_length:" << prefix_length;
+        if (!request_info.empty()) {
+            debug_string << ", source_role:" << request_info.source_role << ", frontend_ip:" << request_info.frontend_ip
+                         << ", dash_ip:" << request_info.dash_ip << ", trace_id:" << request_info.trace_id
+                         << ", source_request_id:" << request_info.request_id;
+        }
+        debug_string << "}";
         return debug_string.str();
     }
 
@@ -56,6 +60,7 @@ public:
 
 public:
     int64_t                         request_id = 0;
+    RequestInfo                     request_info;
     std::shared_ptr<GenerateConfig> generate_config;
     torch::Tensor                   input_ids;
     bool                            need_release_resource = true;
@@ -66,7 +71,6 @@ public:
     std::optional<torch::Tensor>                text_tokens_mask;  // text part for 1 and multimodal part for 0
     std::optional<torch::Tensor>                mm_locs;           // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
-    std::optional<std::vector<torch::Tensor>>   mm_extra_input;
 
     int     prefix_length = 0;
     int64_t begin_time_us = 0;
@@ -102,15 +106,6 @@ struct AuxInfo {
     std::optional<torch::Tensor> cum_log_probs;
     std::optional<torch::Tensor> all_probs;
     std::optional<torch::Tensor> softmax_probs;
-    std::map<int, int>           multimodal_lengths = {};
-};
-
-struct PromptLogitsOutput {
-    torch::Tensor topk_logprobs;    // [slice_len, K] float32
-    torch::Tensor topk_token_ids;   // [slice_len, K] int32
-    torch::Tensor target_logprobs;  // [slice_len] float32
-    int           start_pos = 0;
-    int           end_pos   = 0;
 };
 
 class GenerateOutput {
@@ -120,11 +115,10 @@ public:
     AuxInfo       aux_info;
     ErrorInfo     error_info;
 
-    std::optional<torch::Tensor>      hidden_states;
-    std::optional<torch::Tensor>      all_hidden_states;
-    std::optional<torch::Tensor>      logits;
-    std::optional<torch::Tensor>      loss;
-    std::optional<PromptLogitsOutput> prompt_logits;
+    std::optional<torch::Tensor> hidden_states;
+    std::optional<torch::Tensor> all_hidden_states;
+    std::optional<torch::Tensor> logits;
+    std::optional<torch::Tensor> loss;
 };
 
 class GenerateOutputs {

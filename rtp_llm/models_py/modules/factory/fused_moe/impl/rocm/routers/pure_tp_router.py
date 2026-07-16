@@ -4,7 +4,6 @@ from typing import Any, Optional, Tuple
 import aiter
 import torch
 
-from rtp_llm.device.device_impl import is_gfx950
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,
     all_reduce,
@@ -126,7 +125,9 @@ class PureTpRouterBase(FusedMoeDataRouter):
     ) -> torch.Tensor:
         fused_expert_output = payload.fused_expert_output
         if self.tp_size > 1:
-            fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
+            fused_expert_output = all_reduce(
+                fused_expert_output, group=Group.TP
+            )
         return fused_expert_output
 
 
@@ -171,70 +172,15 @@ class PureTpRouterFusedQuant(PureTpRouterBase):
         super().check_conditions(checker, config)
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
-        checker.check(
-            quant_method in ("FP8_PER_CHANNEL_COMPRESSED", "FP8_PER_CHANNEL_QUARK")
-        )
+        checker.check(quant_method == "FP8_PER_CHANNEL_COMPRESSED")
 
     def _do_quant(
         self, a1: torch.Tensor
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Pass through BF16 without quantization; fused_moe handles quantization internally."""
-        return a1, None
-
-    def finalize(
-        self,
-        payload: CombineForwardPayload,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        apply_router_weight_on_input: bool,
-        extra_finalize_args: Optional[dict[str, Any]],
-    ) -> torch.Tensor:
-        fused_expert_output = payload.fused_expert_output
-        if self.tp_size > 1:
-            fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
-        return fused_expert_output
-
-class PureTpRouterFp8PerBlockPassthrough(PureTpRouterBase):
-    """Pure TP router for FP8 PerBlock: accepts FP8_PER_BLOCK quant but passes through BF16 without quantization (executor handles quantization internally)."""
-
-    def __init__(
-        self,
-        config: MoEConfigAdapter,
-        quant_config: FusedMoEQuantConfig,
-    ):
-        super().__init__(config, quant_config, do_recompute_topk=False)
-
-    @classmethod
-    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        super().check_conditions(checker, config)
-        resolver = MoeConfigResolver()
-        quant_method = resolver.get_quant_method(config)
-        checker.check(quant_method in ("FP8_PER_BLOCK", "FP8_PER_BLOCK_QUARK"))
-
-    def _do_quant(
-        self, a1: torch.Tensor
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        return a1, None
-
-class PureTpRouterMXFp4Passthrough(PureTpRouterBase):
-    """Pure TP router for the MXFP4 passthrough path."""
-
-    def __init__(
-        self,
-        config: MoEConfigAdapter,
-        quant_config: FusedMoEQuantConfig,
-    ):
-        super().__init__(config, quant_config, do_recompute_topk=False)
-
-    @classmethod
-    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        super().check_conditions(checker, config)
-        resolver = MoeConfigResolver()
-        quant_method = resolver.get_quant_method(config)
-        checker.check(quant_method == "QuarkMXFP4")
-        checker.check(is_gfx950())
-        
-    def _do_quant(
-        self, a1: torch.Tensor
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        return a1, None
+        """Quantization is fused to executor, just pass through"""
+        M, model_dim = a1.shape
+        a8_type = self.quant_config.quant_dtype
+        a8 = torch.empty((M, model_dim), dtype=a8_type, device=a1.device)
+        a8_scale = torch.empty((M, 1), dtype=torch.float32, device=a1.device)
+        aiter.dynamic_per_token_scaled_quant(a8, a1, a8_scale)
+        return a8, a8_scale

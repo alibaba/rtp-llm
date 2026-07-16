@@ -1,6 +1,6 @@
 load("//:def.bzl", "copts", "cuda_copts")
-load("@arch_config//:arch_select.bzl", "cuda_register", "flashinfer_deps", "flashmla_deps")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "cuda_register", "flashinfer_deps", "flashmla_deps")
+load("@//bazel:arch_select.bzl", "torch_deps")
 
 cuda_register()
 flashinfer_deps()
@@ -23,13 +23,17 @@ cc_library(
 
 cc_library(
     name = "gpu_base",
-    hdrs = select({
+    hdrs = [
+        "CudaFlashInfer.h",
+    ] + select({
         "@//:using_cuda12": [
             "CudaXqa.h"
         ],
         "//conditions:default": [],
     }),
-    srcs = select({
+    srcs = [
+        "CudaFlashInfer.cc",
+    ] + select({
         "@//:using_cuda12": [
             "CudaXqa.cc"
         ],
@@ -61,6 +65,8 @@ cc_library(
         "@local_config_cuda//cuda:cuda_headers",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/utils:profiling_scope",
+        ":flashinfer",
+        "//3rdparty/flashinfer:flashinfer",
         ":flashmla",
     ] + select({
         "@//:using_cuda12": [
@@ -85,6 +91,14 @@ cc_library(
 )
 
 cc_library(
+    name = "torch_beam_search_op_impl",
+    hdrs = ["BeamSearchOp.h"],
+    deps = torch_deps(),
+    visibility = ["//visibility:public"],
+    copts = copts(),
+)
+
+cc_library(
     name = "standalone_ops",
     hdrs = ["StandaloneOps.h"],
     srcs = ["StandaloneOps.cc"],
@@ -103,13 +117,13 @@ cc_library(
     srcs = ["//rtp_llm/models_py/bindings/core:exec_ctx_impl_srcs"],
     deps = [
         ":gpu_base",
-        "//rtp_llm/models_py/bindings/core/ops:torch_beam_search_op_impl",
+        ":torch_beam_search_op_impl",
         "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
         "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
         "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
+        "//rtp_llm/models_py/bindings/common/kernels:vocab_prune_kernels",
+        "//rtp_llm/models_py/bindings/core:tensor_holder",
         "//rtp_llm/cpp/utils:debug_utils",
-        ":flashinfer",
-        "//3rdparty/flashinfer:flashinfer",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

@@ -30,8 +30,8 @@ public:
     LocalRpcServer() {}
     virtual ~LocalRpcServer() {}
     virtual grpc::Status init(const EngineInitParams&                                maga_init_params,
-                              std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
-                              py::object                                             mm_process_engine);
+                              py::object                                             mm_process_engine,
+                              std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params);
 
     grpc::Status
     GetWorkerStatus(grpc::ServerContext* context, const ::StatusVersionPB* request, ::WorkerStatusPB* response);
@@ -39,13 +39,9 @@ public:
     grpc::Status
     GetCacheStatus(grpc::ServerContext* context, const ::CacheVersionPB* request, ::CacheStatusPB* response);
 
-    virtual grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
-                                            const GenerateInputPB*                 request,
-                                            grpc::ServerWriter<GenerateOutputsPB>* writer);
-
-    virtual grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
-                                           const BatchGenerateInputPB* request,
-                                           BatchGenerateOutputsPB*     response);
+    grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
+                                    const GenerateInputPB*                 request,
+                                    grpc::ServerWriter<GenerateOutputsPB>* writer);
 
     grpc::Status CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response);
 
@@ -103,17 +99,17 @@ public:
 
 protected:
     grpc::Status serializeErrorMsg(const std::string& request_key, ErrorInfo error_info);
+    grpc::Status serializeErrorMsg(const std::string& request_key,
+                                   const RequestInfo& request_info,
+                                   ErrorInfo          error_info);
+    bool         applyTimelineGate(const std::string& request_key,
+                                   bool               request_timeline,
+                                   int                profile_step,
+                                   const std::string& profile_trace_name = "");
     grpc::Status pollStreamOutput(grpc::ServerContext*             context,
                                   const std::string&               request_key,
                                   WriterInterface*                 writer,
                                   std::shared_ptr<GenerateStream>& stream);
-
-    // Shared helpers for single and batch paths
-    ErrorInfo prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output);
-    ErrorInfo collectStreamOutput(grpc::ServerContext*                  context,
-                                  std::shared_ptr<GenerateStream>&      stream,
-                                  const std::shared_ptr<GenerateInput>& input,
-                                  GenerateOutputs&                      last_outputs);
 
 protected:
     std::shared_ptr<EngineBase>           engine_;

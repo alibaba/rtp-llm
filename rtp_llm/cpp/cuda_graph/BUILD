@@ -1,4 +1,4 @@
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
     name = "cuda_graph_base",
@@ -75,6 +75,7 @@ cc_library(
     ] + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda:cuda",
+            "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
         ],
         "@//:using_rocm": [
             "@local_config_rocm//rocm:rocm_headers",

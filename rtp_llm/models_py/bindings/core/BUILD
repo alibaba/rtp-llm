@@ -1,5 +1,5 @@
 load("//:def.bzl", "rpm_library", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
     name = "types_hdr",
@@ -54,6 +54,16 @@ cc_library(
 )
 
 cc_library(
+    name = "tensor_holder",
+    hdrs = [
+        "TensorHolder.h",
+    ],
+    deps = torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "op_data",
     hdrs = [
         "OpData.h",
@@ -64,10 +74,12 @@ cc_library(
     deps = [
         ":type_convert",
         ":common_defines",
+        ":tensor_holder",
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/models:stats",
         "//rtp_llm/models_py/bindings:op_defs",
+        "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/utils:stack_trace",
         "//rtp_llm/cpp/utils:tensor_debug_utils",
         "//rtp_llm/cpp/config:static_config",
@@ -122,6 +134,7 @@ cc_library(
         ":type_convert",
         ":types_hdr",
         ":common_defines",
+        "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
         "//rtp_llm/cpp/utils:signal_utils",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:debug_utils",
@@ -131,8 +144,9 @@ cc_library(
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/cpp/models:stats",
         "//rtp_llm/cpp/models/models_weight:weights_define",
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:cache_group_type",
-        "//rtp_llm/cpp/cache:cp_slot_mapper",
+        "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
@@ -199,6 +213,7 @@ cc_library(
         ":type_convert",
         ":types_hdr",
         ":common_defines",
+        "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
         "//rtp_llm/cpp/utils:signal_utils",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:debug_utils",
@@ -209,7 +224,7 @@ cc_library(
         "//rtp_llm/cpp/models:stats",
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/cache:cache_group_type",
-        "//rtp_llm/cpp/cache:cp_slot_mapper",
+        "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
@@ -262,6 +277,7 @@ cc_library(
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
+        "//rtp_llm/models_py/bindings/common/kernels:vocab_prune_kernels",
         "@havenask//aios/autil:stack_tracer",
         "@havenask//aios/autil:string_helper",
         "@havenask//aios/autil:scope",
@@ -270,45 +286,11 @@ cc_library(
             "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
             "//rtp_llm/models_py/bindings/rocm:speculative_sampling",
             "//rtp_llm/models_py/bindings/rocm:rocm_host_utils",
-            "//rtp_llm/models_py/bindings/common/kernels:kernels_copy",
-            "//3rdparty/trt_beam_search:trt_beam_search_impl",
             "@local_config_rocm//rocm:rocm_headers",
             "@local_config_rocm//rocm:rocm",
         ],
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
-            "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
-        ],
-        "//conditions:default": [],
-    }),
-    copts = copts(),
-    visibility = ["//visibility:public"],
-    alwayslink = 1,
-)
-
-cc_library(
-    name = "rejection_sampling_ops_test_lib",
-    srcs = [
-        "CudaSampleOp.cc",
-    ],
-    deps = [
-        ":common_defines",
-        ":op_data",
-        "//rtp_llm/cpp/utils:debug_utils",
-        "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
-    ] + torch_deps() + select({
-        "@//:using_rocm": [
-            "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
-            "//rtp_llm/models_py/bindings/rocm:speculative_sampling",
-            "//rtp_llm/models_py/bindings/rocm:rocm_host_utils",
-            "@local_config_rocm//rocm:rocm_headers",
-            "@local_config_rocm//rocm:rocm",
-        ],
-        "@//:using_cuda": [
-            "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
-            "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
-            "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
-            "//3rdparty/flashinfer:flashinfer",
         ],
         "//conditions:default": [],
     }),

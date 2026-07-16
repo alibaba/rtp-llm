@@ -150,10 +150,6 @@ DiskBlockPool::~DiskBlockPool() {
     if (io_) {
         io_->close();
     }
-    if (!file_path_.empty() && ::unlink(file_path_.c_str()) != 0 && errno != ENOENT) {
-        RTP_LLM_LOG_WARNING(
-            "remove disk block pool file failed, path=%s, error=%s", file_path_.c_str(), strerror(errno));
-    }
 }
 
 size_t DiskBlockPool::alignUp(size_t value, size_t alignment) {
@@ -196,10 +192,11 @@ bool DiskBlockPool::init() {
 }
 
 bool DiskBlockPool::initFile() {
-    file_path_ = joinPath(
-        config_.work_dir,
-        fmtstr(
-            "rank_%ld_world_%ld_%s.kv", config_.local_rank, config_.world_rank, cacheBlockKindName(config_.pool_kind)));
+    file_path_ = joinPath(config_.work_dir,
+                          fmtstr("rank_%ld_world_%ld_%s.kv",
+                                 config_.local_rank,
+                                 config_.world_rank,
+                                 cacheBlockKindName(config_.pool_kind)));
     return io_->openAndPreallocate(file_path_, slot_count_ * slot_stride_bytes_, config_.buffered_io);
 }
 
@@ -338,7 +335,8 @@ std::string DiskBlockPool::debugString() const {
     oss << "DiskBlockPool{work_dir=" << config_.work_dir << ", file=" << file_path_
         << ", local_rank=" << config_.local_rank << ", world_rank=" << config_.world_rank
         << ", kind=" << cacheBlockKindName(config_.pool_kind) << ", disk_size=" << config_.disk_size_bytes
-        << ", block_size=" << config_.block_size_bytes << ", stride=" << slot_stride_bytes_ << ", slots=" << slot_count_
+        << ", block_size=" << config_.block_size_bytes
+        << ", stride=" << slot_stride_bytes_ << ", slots=" << slot_count_
         << ", io=" << (config_.buffered_io ? "buffered" : "direct") << "}";
     return oss.str();
 }

@@ -173,7 +173,7 @@ DeviceSamplingFromProb(uint32_t                                                 
         valid[j]                       = pred(prob_vec[j]) && (i * BLOCK_THREADS + tx) * VEC_SIZE < d;
     }
     T aggregate_local = BlockReduce<T, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage->block_prim.reduce)
-                            .template Sum<VEC_SIZE>(prob_greater_than_threshold);
+                            .Sum<VEC_SIZE>(prob_greater_than_threshold);
     if (tx == 0) {
         temp_storage->block_aggregate.value = aggregate_local;
     }
@@ -186,7 +186,7 @@ DeviceSamplingFromProb(uint32_t                                                 
                 prob_greater_than_threshold, inclusive_cdf, temp_storage);
         } else {
             BlockScan<T, BLOCK_THREADS, SCAN_ALGORITHM>(temp_storage->block_prim.scan)
-                .template InclusiveSum<VEC_SIZE>(prob_greater_than_threshold, inclusive_cdf);
+                .InclusiveSum<VEC_SIZE>(prob_greater_than_threshold, inclusive_cdf);
 
             __syncthreads();
         }
@@ -199,10 +199,10 @@ DeviceSamplingFromProb(uint32_t                                                 
         bool greater_than_u_diff[VEC_SIZE];
 #ifdef FLASHINFER_CUB_SUBTRACTLEFT_DEFINED
         BlockAdjacentDifference<bool, BLOCK_THREADS>(temp_storage->block_prim.adj_diff)
-            .template SubtractLeft<VEC_SIZE>(greater_than_u, greater_than_u_diff, BoolDiffOp());
+            .SubtractLeft<VEC_SIZE>(greater_than_u, greater_than_u_diff, BoolDiffOp());
 #else
         BlockAdjacentDifference<bool, BLOCK_THREADS>(temp_storage->block_prim.adj_diff)
-            .template FlagHeads<VEC_SIZE>(greater_than_u_diff, greater_than_u, BoolDiffOp(), 0);
+            .FlagHeads<VEC_SIZE>(greater_than_u_diff, greater_than_u, BoolDiffOp(), 0);
 #endif
         __syncthreads();
 
@@ -269,8 +269,6 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
                 output_token_ids[row_idx * (num_speculative_tokens + 1) + i] = draft_id;
                 all_same_token                                               = all_same_token && same_token;
             } else {
-                // Keep all_same_token as-is. If every previous accepted token was an exact target/draft match,
-                // the verifier token at this rejected position is already target-distributed and can be emitted.
                 pos = i;
                 break;
             }
@@ -283,9 +281,6 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
                 target_token_ids[(row_idx * (num_speculative_tokens + 1) + pos) * target_token_stride
                                  + target_token_stride - 1];
             output_token_ids[row_idx * (num_speculative_tokens + 1) + pos] = bonus_token_id;
-            for (int p = pos + 1; p < num_speculative_tokens + 1; ++p) {
-                output_token_ids[row_idx * (num_speculative_tokens + 1) + p] = -1;
-            }
         }
 
         s_pos            = pos;
@@ -319,7 +314,7 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
             relu_q_minus_p[j] = max(q_vec[j] - p_vec[j], DType(0));
         }
         sum_relu_q_minus_p += BlockReduce<DType, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
-                                  .template Sum<VEC_SIZE>(relu_q_minus_p);
+                                  .Sum<VEC_SIZE>(relu_q_minus_p);
         __syncthreads();
     }
     if (tx == 0) {

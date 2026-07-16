@@ -14,6 +14,7 @@ import torch
 import triton
 import triton.language as tl
 
+
 _DEFAULT_GROUP_HEADS = 8
 
 
@@ -78,12 +79,8 @@ def _rope_only_group_heads_kernel(
     rows = x_ptr + (row_start + h_off)[:, None] * row_stride
     real_off = 2 * pair_off
     imag_off = real_off + 1
-    real = tl.load(rows + real_off[None, :], mask=mask[None, :], other=0.0).to(
-        tl.float32
-    )
-    imag = tl.load(rows + imag_off[None, :], mask=mask[None, :], other=0.0).to(
-        tl.float32
-    )
+    real = tl.load(rows + real_off[None, :], mask=mask[None, :], other=0.0).to(tl.float32)
+    imag = tl.load(rows + imag_off[None, :], mask=mask[None, :], other=0.0).to(tl.float32)
 
     freq_base = freqs_ri_ptr + freq_idx * freqs_stride_b + pair_off * freqs_stride_k
     cos = tl.load(freq_base, mask=mask, other=1.0)
@@ -136,9 +133,7 @@ def rope_only_inplace(
     selected_group_heads = (
         group_heads
         if group_heads is not None
-        else int(
-            os.environ.get("DSV4_ROPE_ONLY_GROUP_HEADS", str(_DEFAULT_GROUP_HEADS))
-        )
+        else int(os.environ.get("DSV4_ROPE_ONLY_GROUP_HEADS", str(_DEFAULT_GROUP_HEADS)))
     )
     can_group_heads = (
         selected_group_heads in (2, 4, 8)

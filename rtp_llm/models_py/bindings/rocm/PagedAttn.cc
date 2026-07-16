@@ -27,12 +27,13 @@ CKAttnPtr PagedAttnDecodeOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     int batch_size = attn_inputs.sequence_lengths.size(0);
 
     torch::Tensor kv_cache_kernel_block_id_device;
-    if (attn_inputs.kv_cache_kernel_block_id.defined() && attn_inputs.kv_cache_kernel_block_id.numel() > 0) {
+    if (attn_inputs.kv_cache_kernel_block_id_device.defined()
+        && attn_inputs.kv_cache_kernel_block_id_device.numel() > 0) {
         kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
     }
 
     CKAttnPtr attn_params;
-    bool      use_fmha_fp8 = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
+    bool      use_fmha_fp8 = false;
     auto      params       = PrepareCKAttn(
         attn_configs_, kv_cache_kernel_block_id_device, attn_inputs.sequence_lengths.size(0), use_fmha_fp8);
 

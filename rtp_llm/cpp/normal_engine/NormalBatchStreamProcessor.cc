@@ -25,11 +25,11 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
     model_input_gatherer_config_.kv_cache_group_nums        = cache_config.groupNums();
     model_input_gatherer_config_.use_opaque_kv_cache_store  = cache_config.use_opaque_kv_cache_store;
-    if (model_input_gatherer_config_.kv_cache_group_nums > 0) {
-        model_input_gatherer_config_.kv_cache_group_types = cache_config.groupTypesSnapshot();
-    }
-    model_input_gatherer_config_.warm_up           = warm_up;
-    model_input_gatherer_config_.enable_detail_log = profiling_debug_logging_config.enable_detail_log;
+    model_input_gatherer_config_.layer_to_kv_cache_group_id = cache_config.layer_to_group_id;
+    model_input_gatherer_config_.kv_cache_group_types       = cache_config.group_types;
+    model_input_gatherer_config_.warm_up                    = warm_up;
+    model_input_gatherer_config_.enable_detail_log          = profiling_debug_logging_config.enable_detail_log;
+    model_input_gatherer_config_.enable_model_inputs_log    = profiling_debug_logging_config.enable_model_inputs_log;
 
     model_input_gatherer_   = std::make_unique<NormalModelInputGatherer>(model_input_gatherer_config_);
     sampler_input_gatherer_ = std::make_unique<NormalSamplerInputGatherer>();
@@ -41,13 +41,19 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     return output_dispatcher_->dispatch(stream_groups, merge_outputs);
 }
 
-absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups) const {
-    return model_input_gatherer_->gather(stream_groups);
+absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups,
+                                                                            TensorHolder&       host_holder) const {
+    return model_input_gatherer_->gather(stream_groups, host_holder);
 }
 
 absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
     const StreamGroups& stream_groups, const GptModelInputs& model_inputs, const GptModelOutputs& model_output) const {
     return sampler_input_gatherer_->gather(stream_groups, model_inputs, model_output);
+}
+
+absl::StatusOr<torch::Tensor> NormalBatchStreamProcessor::gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
+                                                                                     TensorHolder& host_holder) const {
+    return model_input_gatherer_->gatherKvCacheKernelBlockId(stream_groups, host_holder);
 }
 
 SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGroups& stream_groups,

@@ -1,6 +1,6 @@
 load("//:def.bzl", "copts")
 load(
-    "@arch_config//:arch_select.bzl",
+    "//bazel:arch_select.bzl",
     "no_block_copy_link_deps",
     "select_py_bindings",
     "torch_deps",
@@ -34,8 +34,6 @@ cc_library(
     ],
     deps = [
         ":py_utils",
-        "//rtp_llm/cpp/cache:cache_types",
-        "//rtp_llm/cpp/multimodal_processor:multimodal_input_class",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:model_config",  # Add ModelConfig implementation
         "//rtp_llm/cpp/model_utils:model_utils",
@@ -59,8 +57,8 @@ cc_library(
     hdrs = [],
     deps = [
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
-        "//rtp_llm/cpp/cache:block_info",
-        "//rtp_llm/cpp/cache:cp_slot_mapper",
+        "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
+        "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/cpp/utils:device_perf_wrapper",
@@ -83,12 +81,14 @@ cc_library(
         "common/InitEngineOps.cc",
         "multi_gpu_gpt/RtpEmbeddingOp.cc",
         "multi_gpu_gpt/RtpLLMOp.cc",
+        "multi_gpu_gpt/XGrammarBootstrap.cc",
     ],
     hdrs = [
         "common/InitEngineOps.h",
         "common/blockUtil.h",
         "multi_gpu_gpt/RtpEmbeddingOp.h",
         "multi_gpu_gpt/RtpLLMOp.h",
+        "multi_gpu_gpt/XGrammarBootstrap.h",
     ],
     deps = [
         "//rtp_llm/cpp/api_server:http_api_server",
@@ -97,6 +97,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/utils:signal_utils",
         "//:rtp_compute_ops",
+        "@xgrammar//:xgrammar",
     ] + torch_deps() + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",

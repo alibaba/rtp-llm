@@ -29,11 +29,12 @@ can be unit-tested independently.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
     build_kv_allgather_restore_indices,
@@ -62,6 +63,21 @@ class IndexerCPChunkPlan:
     owner_block_size: int
 
 
+@dataclass
+class IndexerKCPGatherHandle:
+    plan: IndexerCPChunkPlan
+    gathered_q: torch.Tensor
+    gathered_s: torch.Tensor
+    work_q: Any
+    work_s: Any
+    completion_event: torch.cuda.Event
+    stream: torch.cuda.Stream
+    out_k_quant: torch.Tensor
+    out_k_scale: torch.Tensor
+    done_event: Optional[torch.cuda.Event] = None
+    work_waited: bool = False
+
+
 def build_indexer_cp_chunk_plan(
     cp_ctx: CPContext,
     per_req_total_kv_lens: torch.Tensor,
@@ -82,6 +98,9 @@ def build_indexer_cp_chunk_plan(
     actual_lens = cp_actual_owned_kv_lens(
         per_req, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
     ).contiguous()
+    # Host scalars size the rank-local all_gather buffers.  Keep these syncs in
+    # plan construction; the per-chunk gather/restore path below should remain
+    # device work plus the single NCCL Work.wait().
     total_local = int(local_lens.sum().item())
     total_actual = int(actual_lens.sum().item())
     restore = build_kv_allgather_restore_indices(
@@ -210,6 +229,201 @@ def assemble_indexer_k(
     with the rank-local ``cu_kv_seqlens`` (from ``build_local_cu_kv_seqlens``)
     and block_table to fill ``local_k_quant`` / ``local_k_scale`` first.
     """
+    chunk_T = _validate_assemble_args(
+        plan=plan,
+        local_k_quant=local_k_quant,
+        local_k_scale=local_k_scale,
+        out_k_quant=out_k_quant,
+        out_k_scale=out_k_scale,
+    )
+    if chunk_T == 0:
+        return
+    # Use raw rank-major all_gather (NOT cp_all_gather_full_async, which
+    # asserts T_local == cp_ctx.chunk_length — that's the prefill-token
+    # space; here local_k_* lives in KV-pool-entry space sized by
+    # plan.total_local_T = sum_b n_virtual_blocks * block_size). The
+    # restore_indices are built against this rank-major layout.
+    # INVARIANT: the nested compressor writer lands its indexer-pool writes
+    # on the current stream (cp_wait_gather_full + writer _launch), so NCCL
+    # stream-ordering alone suffices for visibility. No CPU-blocking sync —
+    # at chunk granularity this would serialize the pipeline. See
+    # _pool_reader.fill for the same pattern.
+    with record_function_range("dsv4.cp.all_gather.indexer_k.quant.launch"):
+        gathered_q = all_gather(local_k_quant, group=Group.TP)
+    with record_function_range("dsv4.cp.all_gather.indexer_k.scale.launch"):
+        gathered_s = all_gather(local_k_scale, group=Group.TP)
+    restore_indexer_k(plan, gathered_q, gathered_s, out_k_quant, out_k_scale)
+
+
+def start_assemble_indexer_k_async(
+    *,
+    plan: IndexerCPChunkPlan,
+    local_k_quant: torch.Tensor,
+    local_k_scale: torch.Tensor,
+    out_k_quant: torch.Tensor,
+    out_k_scale: torch.Tensor,
+    stream: torch.cuda.Stream,
+) -> Optional[IndexerKCPGatherHandle]:
+    chunk_T = _validate_assemble_args(
+        plan=plan,
+        local_k_quant=local_k_quant,
+        local_k_scale=local_k_scale,
+        out_k_quant=out_k_quant,
+        out_k_scale=out_k_scale,
+    )
+    if chunk_T == 0:
+        return None
+    if (
+        stream is None
+        or not local_k_quant.is_cuda
+        or not torch.distributed.is_initialized()
+        or torch.cuda.is_current_stream_capturing()
+    ):
+        return None
+
+    from rtp_llm.models_py.distributed import collective_torch
+
+    process_group = collective_torch._get_group(Group.TP)
+    world_size = torch.distributed.get_world_size(process_group)
+    if world_size != plan.cp_ctx.cp_size:
+        raise RuntimeError(
+            f"indexer K gather world_size({world_size}) != cp_size({plan.cp_ctx.cp_size})"
+        )
+
+    device = local_k_quant.device
+    current_stream = torch.cuda.current_stream(device)
+    stream.wait_stream(current_stream)
+    local_k_quant.record_stream(stream)
+    local_k_scale.record_stream(stream)
+    with torch.cuda.stream(stream):
+        gathered_q = torch.empty(
+            (world_size * int(local_k_quant.shape[0]), local_k_quant.shape[1]),
+            dtype=local_k_quant.dtype,
+            device=device,
+        )
+        gathered_s = torch.empty(
+            (world_size * int(local_k_scale.shape[0]), local_k_scale.shape[1]),
+            dtype=local_k_scale.dtype,
+            device=device,
+        )
+        with record_function_range("dsv4.cp.all_gather.indexer_k.quant.launch"):
+            work_q = torch.distributed.all_gather_into_tensor(
+                gathered_q,
+                local_k_quant,
+                group=process_group,
+                async_op=True,
+            )
+        with record_function_range("dsv4.cp.all_gather.indexer_k.scale.launch"):
+            try:
+                work_s = torch.distributed.all_gather_into_tensor(
+                    gathered_s,
+                    local_k_scale,
+                    group=process_group,
+                    async_op=True,
+                )
+            except Exception:
+                # quant gather already launched — drain it before propagating.
+                work_q.wait()
+                raise
+        try:
+            completion_event = torch.cuda.Event()
+            completion_event.record(stream)
+        except Exception:
+            # Both NCCL gathers in flight but pending handle never returns;
+            # drain both before propagating.
+            work_q.wait()
+            work_s.wait()
+            raise
+
+    return IndexerKCPGatherHandle(
+        plan=plan,
+        gathered_q=gathered_q,
+        gathered_s=gathered_s,
+        work_q=work_q,
+        work_s=work_s,
+        completion_event=completion_event,
+        stream=stream,
+        out_k_quant=out_k_quant,
+        out_k_scale=out_k_scale,
+    )
+
+
+def prepare_assemble_indexer_k_async(
+    handle: IndexerKCPGatherHandle,
+    *,
+    stream: torch.cuda.Stream,
+) -> None:
+    if handle.done_event is not None:
+        return
+    if stream is None:
+        raise ValueError("prepare_assemble_indexer_k_async requires an explicit stream")
+    current_stream = torch.cuda.current_stream(handle.out_k_quant.device)
+    # The output buffers are caller-owned and may have just been initialized on
+    # the current stream.  Preserve that ordering here instead of relying on
+    # allocator stream semantics alone.
+    stream.wait_stream(current_stream)
+    with torch.cuda.stream(stream):
+        stream.wait_event(handle.completion_event)
+        # Fence NCCL on the stream that will restore into out_k_* below.
+        with record_function_range("dsv4.cp.all_gather.indexer_k.wait_host"):
+            _wait_indexer_k_work_once(handle)
+        handle.gathered_q.record_stream(stream)
+        handle.gathered_s.record_stream(stream)
+        handle.out_k_quant.record_stream(stream)
+        handle.out_k_scale.record_stream(stream)
+        try:
+            restore_indexer_k(
+                handle.plan,
+                handle.gathered_q,
+                handle.gathered_s,
+                handle.out_k_quant,
+                handle.out_k_scale,
+            )
+        finally:
+            handle.done_event = torch.cuda.Event()
+            handle.done_event.record(stream)
+
+
+def wait_assemble_indexer_k_async(handle: IndexerKCPGatherHandle) -> None:
+    current_stream = torch.cuda.current_stream(handle.out_k_quant.device)
+    if handle.done_event is not None:
+        current_stream.wait_event(handle.done_event)
+    else:
+        current_stream.wait_event(handle.completion_event)
+    _wait_indexer_k_work_once(handle)
+
+
+def discard_assemble_indexer_k_async(handle: IndexerKCPGatherHandle) -> None:
+    wait_assemble_indexer_k_async(handle)
+
+
+def _wait_indexer_k_work_once(handle: IndexerKCPGatherHandle) -> None:
+    if not handle.work_waited:
+        handle.work_q.wait()
+        handle.work_s.wait()
+        handle.work_waited = True
+
+
+def restore_indexer_k(
+    plan: IndexerCPChunkPlan,
+    gathered_q: torch.Tensor,
+    gathered_s: torch.Tensor,
+    out_k_quant: torch.Tensor,
+    out_k_scale: torch.Tensor,
+) -> None:
+    with record_function_range("dsv4.cp.all_gather.indexer_k.restore"):
+        out_k_quant.copy_(gathered_q[plan.restore_indices])
+        out_k_scale.copy_(gathered_s[plan.restore_indices])
+
+
+def _validate_assemble_args(
+    *,
+    plan: IndexerCPChunkPlan,
+    local_k_quant: torch.Tensor,
+    local_k_scale: torch.Tensor,
+    out_k_quant: torch.Tensor,
+    out_k_scale: torch.Tensor,
+) -> int:
     if local_k_quant.shape[0] != plan.total_local_T:
         raise ValueError(
             f"local_k_quant rows {local_k_quant.shape[0]} != total_local_T "
@@ -226,19 +440,4 @@ def assemble_indexer_k(
             f"out shapes [{out_k_quant.shape[0]}, {out_k_scale.shape[0]}] != "
             f"chunk_T {chunk_T}"
         )
-    if chunk_T == 0:
-        return
-    # Use raw rank-major all_gather (NOT cp_all_gather_full_async, which
-    # asserts T_local == cp_ctx.chunk_length — that's the prefill-token
-    # space; here local_k_* lives in KV-pool-entry space sized by
-    # plan.total_local_T = sum_b n_virtual_blocks * block_size). The
-    # restore_indices are built against this rank-major layout.
-    # INVARIANT: the nested compressor writer lands its indexer-pool writes
-    # on the current stream (cp_wait_gather_full + writer _launch), so NCCL
-    # stream-ordering alone suffices for visibility. No CPU-blocking sync —
-    # at chunk granularity this would serialize the pipeline. See
-    # _pool_reader.fill for the same pattern.
-    gathered_q = all_gather(local_k_quant, group=Group.TP)
-    gathered_s = all_gather(local_k_scale, group=Group.TP)
-    out_k_quant.copy_(gathered_q[plan.restore_indices])
-    out_k_scale.copy_(gathered_s[plan.restore_indices])
+    return chunk_T

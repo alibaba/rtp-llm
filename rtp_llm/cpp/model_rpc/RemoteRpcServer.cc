@@ -6,10 +6,10 @@ using namespace std;
 namespace rtp_llm {
 
 grpc::Status RemoteRpcServer::init(const EngineInitParams&                                maga_init_params,
-                                   std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
-                                   py::object                                             mm_process_engine) {
+                                   py::object                                             mm_process_engine,
+                                   std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
     rtp_llm::ProposeModelEngineInitParams* propose_params_ptr = propose_params ? propose_params.get() : nullptr;
-    auto ret = LocalRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
+    auto ret = LocalRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params));
     if (!ret.ok()) {
         return ret;
     }
@@ -71,7 +71,7 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
     params.rdma_listen_port             = init_params.pd_sep_config.cache_store_rdma_listen_port;
     params.rdma_mode                    = init_params.pd_sep_config.cache_store_rdma_mode;
     params.thread_count                 = init_params.cache_store_config.thread_count;
-    params.queue_size                   = 500;
+    params.queue_size                   = 1000;
     params.rdma_connect_timeout_ms      = init_params.cache_store_config.rdma_connect_timeout_ms;
     params.rdma_qp_count_per_connection = init_params.cache_store_config.rdma_qp_count_per_connection;
     params.rdma_io_thread_count         = init_params.cache_store_config.rdma_io_thread_count;
@@ -79,6 +79,7 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
     params.messager_io_thread_count     = init_params.cache_store_config.messager_io_thread_count;
     params.messager_worker_thread_count = init_params.cache_store_config.messager_worker_thread_count;
     params.metrics_reporter             = metrics_reporter_;
+    params.device_id                    = static_cast<int>(init_params.parallelism_config.local_rank);
     RTP_LLM_LOG_INFO("cache store listen port is [%ld], rdma listen port is [%ld] rdma_mode is [%d]",
                      params.listen_port,
                      params.rdma_listen_port,

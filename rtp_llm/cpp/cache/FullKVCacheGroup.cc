@@ -4,8 +4,7 @@
 namespace rtp_llm {
 
 int FullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
-    const int block_size = seqSizePerBlock();
-    return std::max((seq_len + reserve_step + block_size - 1) / block_size - current_blocks, 0);
+    return std::max((seq_len + reserve_step + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
 }
 
 NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
@@ -42,15 +41,16 @@ bool FullKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reus
     return true;
 }
 
-MatchResult FullKVCacheGroup::matchPrefix(const CacheKeysType& cache_keys) const {
+MatchResult FullKVCacheGroup::match(const CacheKeysType& cache_keys) {
     MatchResult final_result;
 
     if (!shared_cache_) {
         return final_result;
     }
 
-    for (const auto& cache_key : cache_keys) {
-        auto block_idx = shared_cache_->matchGroup(cache_key, group_id());
+    for (size_t i = 0; i < cache_keys.size(); ++i) {
+        const auto cache_key = cache_keys[i];
+        auto       block_idx = shared_cache_->matchGroup(cache_key, group_id_);
         if (isNullBlockIdx(block_idx)) {
             break;
         }
@@ -59,14 +59,7 @@ MatchResult FullKVCacheGroup::matchPrefix(const CacheKeysType& cache_keys) const
     }
 
     final_result.reuse_length = final_result.reuse_blocks * seqSizePerBlock();
-
     return final_result;
-}
-
-void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
-                                       const BlockIndicesType& block_indices,
-                                       bool                    is_resident) {
-    KVCacheGroup::insertIntoCache(cache_keys, block_indices, is_resident);
 }
 
 void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {

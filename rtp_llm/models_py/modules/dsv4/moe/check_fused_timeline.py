@@ -16,6 +16,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+
 HOT_RANGES = (
     "dsv4.moe.shared_expert_start",
     "dsv4.moe.shared_expert",

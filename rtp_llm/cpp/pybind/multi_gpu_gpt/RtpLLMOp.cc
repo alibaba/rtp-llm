@@ -1,7 +1,7 @@
 #include <cstddef>
 #include <memory>
 #include <tuple>
-#include <vector>
+#include "autil/EnvUtil.h"
 #include "autil/Log.h"
 #include "c10/util/intrusive_ptr.h"
 #include <grpcpp/grpcpp.h>
@@ -10,7 +10,6 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
-#include "rtp_llm/cpp/config/MTPModelConfigHelper.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
@@ -22,6 +21,23 @@ using namespace std;
 namespace th = torch;
 
 namespace rtp_llm {
+
+namespace {
+
+int64_t getGrpcStopTimeoutMs() {
+    constexpr int64_t kDefaultStopTimeoutMs = 600 * 1000;
+    const auto        explicit_timeout_ms   = autil::EnvUtil::getEnv("RTP_LLM_STOP_TIMEOUT_MS", int64_t(0));
+    if (explicit_timeout_ms > 0) {
+        return explicit_timeout_ms;
+    }
+    const auto shutdown_timeout_s = autil::EnvUtil::getEnv("SHUTDOWN_TIMEOUT", int64_t(600));
+    if (shutdown_timeout_s <= 0) {
+        return kDefaultStopTimeoutMs;
+    }
+    return shutdown_timeout_s * 1000;
+}
+
+}  // namespace
 
 std::unique_ptr<ProposeModelEngineInitParams>
 prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const EngineInitParams& base_params) {
@@ -35,22 +51,29 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
     // Get model_config from model (only difference between propose and score models)
     auto model_config = sp_model.attr("model_config").cast<ModelConfig>();
 
-    py::object   py_layers_weights     = sp_model.attr("weight").attr("weights");
-    py::object   py_global_weights     = sp_model.attr("weight").attr("global_weights");
-    auto         convert               = WeightsConverter(false, model_config.quant_algo);
-    auto         py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
-    const size_t weight_count          = py_layers_weights_vec.size();
-    size_t       gen_num_per_cycle     = base_params.sp_config.gen_num_per_cycle;
-    if (gen_num_per_cycle > 1 && weight_count == 1) {
+    py::object py_layers_weights     = sp_model.attr("weight").attr("weights");
+    py::object py_global_weights     = sp_model.attr("weight").attr("global_weights");
+    auto       convert               = WeightsConverter(false, model_config.quant_algo);
+    auto       py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
+    size_t     model_num             = py_layers_weights_vec.size();
+    size_t     gen_num_per_cycle     = base_params.sp_config.gen_num_per_cycle;
+    if (gen_num_per_cycle > 1 && py_layers_weights_vec.size() == 1) {
         RTP_LLM_LOG_WARNING("duplicate py_layers_weights_vec from 1 to sp_config.gen_num_per_cycle: %ld",
                             gen_num_per_cycle);
+        for (size_t i = 1; i < gen_num_per_cycle; i++) {
+            py_layers_weights_vec.push_back(py_layers_weights_vec[0]);
+        }
+        model_num = gen_num_per_cycle;
     }
-    if (gen_num_per_cycle != weight_count && !(gen_num_per_cycle > 1 && weight_count == 1)) {
-        RTP_LLM_LOG_WARNING(
-            "sp_config.gen_num_per_cycle: %ld  != py_layers_weights_vec.size(): %ld", gen_num_per_cycle, weight_count);
+    if (gen_num_per_cycle != py_layers_weights_vec.size()) {
+        RTP_LLM_LOG_WARNING("sp_config.gen_num_per_cycle: %ld  != py_layers_weights_vec.size(): %ld",
+                            gen_num_per_cycle,
+                            py_layers_weights_vec.size());
+        model_num = std::min(model_num, size_t(gen_num_per_cycle));
     }
-    const auto module_plan = buildMTPModuleConfigPlan(model_config, weight_count, gen_num_per_cycle, sp_type);
-    const auto model_num   = module_plan.module_configs.size();
+    if (sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3) {
+        model_num = 1;
+    }
 
     // Get py_eplb if available (from model)
     py::object py_eplb = py::none();
@@ -58,18 +81,17 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         py_eplb = sp_model.attr("py_eplb");
     }
 
-    for (size_t i = 0; i < model_num; i++) {
-        const auto source_layer = module_plan.source_layer_indices[i];
-        RTP_LLM_CHECK_WITH_INFO(source_layer < py_layers_weights_vec.size(),
-                                "missing MTP layer weight for module %zu source layer %zu",
-                                i,
-                                source_layer);
-        auto     layer_weigths = py_layers_weights_vec[source_layer];
+    // Create a temporary ModelConfig with num_layers = 1 for MTP
+    ModelConfig temp_model_config = model_config;
+    temp_model_config.num_layers  = 1;
+
+    for (int i = 0; i < model_num; i++) {
+        auto     layer_weigths = py_layers_weights_vec[i];
         py::list tmp;
         tmp.append(layer_weigths);
         auto gpt_weight = convert.createGptWeights(tmp, py_global_weights);
         mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
-                                                                           module_plan.module_configs[i],
+                                                                           temp_model_config,
                                                                            base_params.parallelism_config,
                                                                            base_params.runtime_config,
                                                                            base_params.pd_sep_config,
@@ -102,9 +124,9 @@ RtpLLMOp::RtpLLMOp() {}
 void RtpLLMOp::init(py::object model,
                     py::object engine_config,
                     py::object vit_config,
+                    py::object mm_process_engine,
                     py::object propose_model,
-                    py::object token_processor,
-                    py::object mm_process_engine) {
+                    py::object token_processor) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     EngineInitParams params = initModel(model, engine_config, vit_config);
@@ -123,9 +145,9 @@ void RtpLLMOp::init(py::object model,
     grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer,
                                       this,
                                       std::move(params),
+                                      std::move(mm_process_engine),
                                       std::move(propose_params),
-                                      std::move(token_processor),
-                                      std::move(mm_process_engine));
+                                      std::move(token_processor));
     grpc_server_thread_.detach();
     while (!is_server_ready_) {
         sleep(1);  // wait 1s for server ready
@@ -155,11 +177,12 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         auto misc_config            = engine_config.attr("misc_config").cast<MiscellaneousConfig>();
         auto arpc_config            = engine_config.attr("arpc_config").cast<ArpcConfig>();
         auto grpc_config            = engine_config.attr("grpc_config").cast<GrpcConfig>();
+        auto grammar_config         = engine_config.attr("grammar_config").cast<GrammarConfig>();
 
         // Extract vit_config
         VitConfig vit_config_cpp;
         if (!vit_config.is_none()) {
-            vit_config_cpp.vit_separation = static_cast<VitSeparation>(vit_config.attr("vit_separation").cast<int>());
+            vit_config_cpp.vit_separation = vit_config.attr("vit_separation").cast<VitSeparation>();
         }
 
         py::object py_layers_weights = model.attr("weight").attr("weights");
@@ -202,6 +225,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
                                 py_model,
                                 weight_manager,
                                 py_eplb);
+        params.grammar_config   = grammar_config;
         params.nccl_comm_config = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
         params.server_config    = engine_config.attr("server_config");
         model_id_++;
@@ -277,9 +301,9 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
 }
 
 void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_init_params,
+                             py::object                                    mm_process_engine,
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                             py::object                                    token_processor,
-                             py::object                                    mm_process_engine) {
+                             py::object                                    token_processor) {
     std::string server_address;
     {
         pybind11::gil_scoped_acquire acquire;
@@ -294,7 +318,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
             model_rpc_service_.reset(new LocalRpcServiceImpl());
         }
         grpc::Status grpc_status =
-            model_rpc_service_->init(maga_init_params, std::move(propose_params), mm_process_engine);
+            model_rpc_service_->init(maga_init_params, std::move(mm_process_engine), std::move(propose_params));
         if (!grpc_status.ok()) {
             RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
         }
@@ -317,6 +341,10 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
     for (auto it = server_config.begin(); it != server_config.end(); ++it) {
         RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);
         builder.AddChannelArgument(it->first, it->second);
+    }
+    if (grpc_config.max_server_pollers > 0) {
+        builder.SetSyncServerOption(grpc::ServerBuilder::MAX_POLLERS, grpc_config.max_server_pollers);
+        RTP_LLM_LOG_INFO("grpc sync server MAX_POLLERS: %d", grpc_config.max_server_pollers);
     }
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(model_rpc_service_.get());
@@ -346,14 +374,16 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
 }
 
 void RtpLLMOp::stop() {
-    int64_t STOP_TIMEOUT_MS = 60 * 1000;
+    const int64_t stop_timeout_ms = getGrpcStopTimeoutMs();
     if (!is_server_shutdown_) {
         if (grpc_server_) {
             auto begin_wait_us = autil::TimeUtility::currentTimeInMicroSeconds();
             while (auto onflight_request = model_rpc_service_->onflightRequestNum()) {
-                RTP_LLM_LOG_INFO("rpc service has [%lu] onflight request, waiting 1s", onflight_request);
+                RTP_LLM_LOG_INFO("rpc service has [%lu] onflight request, waiting 1s, stop_timeout_ms=%ld",
+                                 onflight_request,
+                                 stop_timeout_ms);
                 sleep(1);
-                if (autil::TimeUtility::currentTimeInMicroSeconds() - begin_wait_us > STOP_TIMEOUT_MS * 1000) {
+                if (autil::TimeUtility::currentTimeInMicroSeconds() - begin_wait_us > stop_timeout_ms * 1000) {
                     RTP_LLM_LOG_INFO("rpc service wait timeout, no more waiting");
                     break;
                 }
@@ -399,9 +429,9 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("model"),
              py::arg("engine_config"),
              py::arg("vit_config"),
+             py::arg("mm_process_engine"),
              py::arg("propose_model"),
-             py::arg("token_processor"),
-             py::arg("mm_process_engine"))
+             py::arg("token_processor"))
         .def("start_http_server",
              &RtpLLMOp::startHttpServer,
              py::arg("model_weights_loader"),

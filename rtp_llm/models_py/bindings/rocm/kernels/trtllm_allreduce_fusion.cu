@@ -8,6 +8,7 @@
 #include <vector>
 #include <array>
 #include <tuple>
+
 #include "rtp_llm/models_py/bindings/rocm/kernels/hip_float8_impl.h"
 
 #include <hip/hip_bf16.h>
@@ -75,7 +76,6 @@ __device__ __forceinline__ int ld_flag(int* addr) {
 #define gpuStreamCaptureStatus hipStreamCaptureStatus
 #define gpuStreamIsCapturing hipStreamIsCapturing
 #define gpuStreamCaptureStatusActive hipStreamCaptureStatusActive
-#define gpuStreamCaptureStatusNone hipStreamCaptureStatusNone
 
 namespace kernel_utils {
 
@@ -271,17 +271,6 @@ struct CommPtrs {
     void* data_ptrs[MAX_RANKS];
 };
 
-// Cached IPC slot entry: pairs the device-side CommPtrs pointer with the
-// allocation range that was current when the slot was registered.  On cache
-// hit we re-query the HIP runtime and compare — if the caching allocator
-// freed and reused the same data_ptr inside a different allocation block,
-// range_start / range_size will differ and we invalidate the stale entry.
-struct CachedSlot {
-    CommPtrs* comm_ptrs;
-    void*     range_start;
-    size_t    range_size;
-};
-
 template<int NRanks>
 struct SyncComm {
     __device__ __forceinline__ SyncComm(CommDeviceMeta<NRanks>& meta) {
@@ -467,7 +456,6 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_fusion_kernel_1stage(
     *reinterpret_cast<vec_t_*>(reinterpret_cast<T*>(params.residual_out) + idx) = vec;
     auto gamma = *reinterpret_cast<vec_t_*>(reinterpret_cast<T*>(params.rms_gamma) + access_id_in_token);
     epilogue<T, VEC_SIZE, false, BLOCK_SIZE, QUANT_TYPE>(params, vec, gamma, idx, tidx);
-    comm.sync();  // exit barrier: protect slow-path shared workspace from next invocation's memcpy
 }
 
 template<typename T, int NRanks, int BLOCK_SIZE, int QUANT_TYPE>
@@ -502,7 +490,6 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_kernel_1stage(AllRedu
         vec.data[v] = (T)acc.data[v];
     }
     *reinterpret_cast<vec_t_*>(reinterpret_cast<T*>(params.residual_out) + idx) = vec;
-    comm.sync();  // exit barrier: protect slow-path shared workspace from next invocation's memcpy
 }
 
 // ============================================================================
@@ -600,7 +587,6 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1)
         vec_add_<T, VEC_SIZE>(val, res);
         epilogue<T, VEC_SIZE, true, BLOCK_SIZE, QUANT_TYPE>(params, val, gamma, idx, tidx);
     }
-    comm.sync();  // exit barrier: protect slow-path shared workspace from next invocation's memcpy
 }
 
 template<typename T, int NRanks, int BLOCK_SIZE, int QUANT_TYPE>
@@ -655,7 +641,6 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1)
         val.load(reinterpret_cast<T*>(cptrs->data_ptrs[0]) + idx);
         val.store(reinterpret_cast<T*>(params.residual_out) + idx);
     }
-    comm.sync();  // exit barrier: protect slow-path shared workspace from next invocation's memcpy
 }
 
 // ============================================================================
@@ -1087,49 +1072,20 @@ public:
         meta.nranks     = world_size_;
 
         CommPtrs* cptrs;
-        bool      cache_hit = false;
         auto      it = ptr_to_comm_ptrs_.find(ptr);
         if (it != ptr_to_comm_ptrs_.end()) {
-            // Validate that the allocation backing this data_ptr hasn't
-            // changed (freed + reused by the caching allocator).  If the
-            // range no longer matches, the cached IPC slot is stale.
-            auto& slot = it->second;
-            void*  cur_start = nullptr;
-            size_t cur_size  = 0;
-            hipPointerGetAttribute(
-                &cur_start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR,
-                reinterpret_cast<hipDeviceptr_t>(ptr));
-            hipPointerGetAttribute(
-                &cur_size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE,
-                reinterpret_cast<hipDeviceptr_t>(ptr));
-            if (cur_start == slot.range_start && cur_size == slot.range_size) {
-                cptrs = slot.comm_ptrs;
-                cache_hit = true;
-            } else {
-                // Stale entry — allocation was recycled.  Erase so we fall
-                // through to the capture / copy-fallback path below.
-                ptr_to_comm_ptrs_.erase(it);
-            }
-        }
-        if (!cache_hit) {
-            // Restore fast-path: during graph capture, assign each allreduce
-            // invocation its own comm_ptrs slot and record the input tensor's
-            // data_ptr for later IPC handle exchange (consume_capture).
-            // Verified: ROCm hipGraph capture retains caching-allocator block
-            // references, so IPC handles stay valid across replay.
-            // (ROCm 6.x, PyTorch 2.6, 8×MI300X, 50+ round identical-prompt
-            //  decode + 24h whole-cluster soak with trtallreduce enabled.)
-            gpuStreamCaptureStatus status = gpuStreamCaptureStatusNone;
-            if (gpuStreamIsCapturing(stream, &status) != gpuSuccess)
-                status = gpuStreamCaptureStatusNone;
-            // size_in_bytes_ is the workspace buffer size; tensors beyond it
-            // fall back to the copy path because they cannot fit in a single
-            // comm_ptrs slot's IPC-registered region.
-            int remaining = comm_ptrs_buf_len_ - used_comm_ptrs_ - static_cast<int>(unregistered_ptrs_.size());
-            if (status == gpuStreamCaptureStatusActive && size < size_in_bytes_ && remaining > 0) {
+            cptrs = it->second;
+        } else {
+            gpuStreamCaptureStatus status;
+            gpuStreamIsCapturing(stream, &status);
+            int remaining = comm_ptrs_buf_len_ - used_comm_ptrs_ - unregistered_ptrs_.size();
+            if (status == gpuStreamCaptureStatusActive && size < 1024 * 4096 * 16 && remaining > 0) {
                 unregistered_ptrs_.push_back(ptr);
-                cptrs = comm_ptrs_ + used_comm_ptrs_ + static_cast<int>(unregistered_ptrs_.size()) - 1;
+                cptrs = comm_ptrs_ + used_comm_ptrs_ + unregistered_ptrs_.size() - 1;
             } else {
+                // Fallback: copy input into the IPC-shared data_ buffer and use
+                // comm_ptrs_[0] whose data_ptrs[rank_] already points to data_.
+                // Other ranks will read from their own IPC view of the same memory.
                 cptrs = comm_ptrs_ + 0;
                 gpuMemcpyAsync(data_, ptr, size, gpuMemcpyDeviceToDevice, stream);
             }
@@ -1175,57 +1131,6 @@ public:
     void open_captured_handles(std::vector<Tensor>& handles, std::vector<int64_t>& offsets, int64_t ptr_idx) {
         void*              ptr      = unregistered_ptrs_[ptr_idx];
         void*              base_ptr = unregistered_base_ptrs_[ptr_idx];
-
-        // Defensive check: verify the cached pointer still belongs to a valid
-        // device allocation.  The caching allocator may have freed and re-used
-        // the underlying block between capture and consume.
-        // TORCH_CHECK hard-fails instead of early-return because the captured
-        // graph already has kernel launches bound to this comm_ptrs slot; an
-        // early return would leave the slot uninitialised AND desync
-        // used_comm_ptrs_ across ranks, corrupting every subsequent slot.
-        // The caller must discard and re-capture the graph on failure.
-        //
-        // Note: hipPointerAttribute_t does NOT have an allocationSize field
-        // (unlike cudaPointerAttributes).  We use hipPointerGetAttribute with
-        // HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR / HIP_POINTER_ATTRIBUTE_RANGE_SIZE
-        // to query the allocation range on ROCm.
-        hipPointerAttribute_t ptr_attrs = {};
-        hipError_t attr_err = hipPointerGetAttributes(&ptr_attrs, base_ptr);
-        TORCH_CHECK(attr_err == hipSuccess,
-                    "[TrtllmAllreduce] cached base_ptr ", base_ptr,
-                    " (ptr_idx=", ptr_idx, ") failed hipPointerGetAttributes (err=",
-                    static_cast<int>(attr_err), "). The pointer is no longer valid — "
-                    "discard the captured graph and re-capture.");
-        TORCH_CHECK(ptr_attrs.type == hipMemoryTypeDevice || ptr_attrs.type == hipMemoryTypeUnified,
-                    "[TrtllmAllreduce] cached base_ptr ", base_ptr,
-                    " (ptr_idx=", ptr_idx, ") is not device memory (type=",
-                    static_cast<int>(ptr_attrs.type), "). The underlying allocation "
-                    "may have been freed. Discard the captured graph and re-capture.");
-
-        // Query allocation base address and size via hipPointerGetAttribute.
-        void*  range_start = nullptr;
-        size_t range_size  = 0;
-        hipError_t start_err = hipPointerGetAttribute(
-            &range_start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR,
-            reinterpret_cast<hipDeviceptr_t>(base_ptr));
-        hipError_t size_err = hipPointerGetAttribute(
-            &range_size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE,
-            reinterpret_cast<hipDeviceptr_t>(base_ptr));
-        TORCH_CHECK(start_err == hipSuccess && size_err == hipSuccess
-                    && range_start != nullptr && range_size > 0,
-                    "[TrtllmAllreduce] failed to query allocation range for base_ptr ",
-                    base_ptr, " (ptr_idx=", ptr_idx, ", start_err=",
-                    static_cast<int>(start_err), ", size_err=",
-                    static_cast<int>(size_err), "). Discard the captured graph "
-                    "and re-capture.");
-        TORCH_CHECK(reinterpret_cast<char*>(base_ptr) >= reinterpret_cast<char*>(range_start)
-                    && reinterpret_cast<char*>(ptr) < reinterpret_cast<char*>(range_start) + range_size,
-                    "[TrtllmAllreduce] cached ptr ", ptr, " (base_ptr=", base_ptr,
-                    ", ptr_idx=", ptr_idx, ") falls outside the current allocation "
-                    "[", range_start, ", +", range_size,
-                    "). The allocation was likely freed and re-used. "
-                    "Discard the captured graph and re-capture.");
-
         std::vector<void*> ipc_data;
         ipc_details::open_handles(rank_, handles, base_ptr, ipc_data);
         // Store opened IPC handles so they can be closed in the destructor.
@@ -1239,73 +1144,8 @@ public:
             cptrs.data_ptrs[i] = ipc_data[r];
         }
         gpuMemcpy(comm_ptrs_ + used_comm_ptrs_, &cptrs, sizeof(CommPtrs), gpuMemcpyHostToDevice);
-
-        // Record allocation range at registration time so that cache hits
-        // can detect freed-and-reused data_ptrs (same address, different
-        // allocation block).
-        void*  reg_start = nullptr;
-        size_t reg_size  = 0;
-        hipPointerGetAttribute(
-            &reg_start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR,
-            reinterpret_cast<hipDeviceptr_t>(ptr));
-        hipPointerGetAttribute(
-            &reg_size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE,
-            reinterpret_cast<hipDeviceptr_t>(ptr));
-        ptr_to_comm_ptrs_[ptr] = CachedSlot{
-            comm_ptrs_ + used_comm_ptrs_, reg_start, reg_size};
-
-        // Track every ptr registered in this session (vector, NOT set) so
-        // that duplicate data_ptrs are counted correctly for rollback.
-        pending_capture_ptrs_.push_back(ptr);
+        ptr_to_comm_ptrs_[ptr] = comm_ptrs_ + used_comm_ptrs_;
         used_comm_ptrs_++;
-    }
-
-    // Called after a fully successful consume: promote pending captured slots
-    // to committed state.  After this call, invalidate_capture() will NOT
-    // touch these slots — only future (failed) capture sessions are rolled back.
-    void commit_capture() {
-        pending_capture_ptrs_.clear();
-        // Reset snapshot — nothing to roll back.
-        capture_snapshot_used_       = used_comm_ptrs_;
-        capture_snapshot_ipc_count_  = static_cast<int>(captured_ipc_handles_.size());
-    }
-
-    // Begin a new capture session: snapshot the current high-water marks so
-    // that invalidate_capture() can rewind to exactly this point.
-    // Called from Python before the per-handle open loop begins.
-    void begin_capture_session() {
-        capture_snapshot_used_      = used_comm_ptrs_;
-        capture_snapshot_ipc_count_ = static_cast<int>(captured_ipc_handles_.size());
-        pending_capture_ptrs_.clear();
-    }
-
-    // Transactional rollback: undo IPC slot registrations made during the
-    // *current* capture session only, using the watermark snapshot taken at
-    // begin_capture_session().  Previously committed sessions are left intact.
-    //
-    // This handles duplicate data_ptrs correctly: we roll back by the
-    // watermark difference (slot count), not by set cardinality.
-    void invalidate_capture() {
-        // 1. Rewind used_comm_ptrs_ to the snapshot watermark.
-        used_comm_ptrs_ = capture_snapshot_used_;
-
-        // 2. Erase ptr_to_comm_ptrs_ entries registered in this session.
-        //    Use the vector (may contain duplicates — erase is idempotent).
-        for (void* ptr : pending_capture_ptrs_) {
-            ptr_to_comm_ptrs_.erase(ptr);
-        }
-        pending_capture_ptrs_.clear();
-
-        // 3. Close and remove IPC handles opened during this session.
-        while (static_cast<int>(captured_ipc_handles_.size()) > capture_snapshot_ipc_count_) {
-            auto& last = captured_ipc_handles_.back();
-            for (void* ipc_ptr : last) {
-                if (ipc_ptr) {
-                    hipIpcCloseMemHandle(ipc_ptr);
-                }
-            }
-            captured_ipc_handles_.pop_back();
-        }
     }
 
 private:
@@ -1326,10 +1166,7 @@ private:
     std::vector<std::vector<void*>>      captured_ipc_handles_;
     CommPtrs*                            comm_ptrs_;
     int                                  used_comm_ptrs_;
-    std::unordered_map<void*, CachedSlot> ptr_to_comm_ptrs_;
-    std::vector<void*>                   pending_capture_ptrs_;      // ptrs registered in current session (allows duplicates)
-    int                                  capture_snapshot_used_ = 0;       // used_comm_ptrs_ at session start
-    int                                  capture_snapshot_ipc_count_ = 0;  // captured_ipc_handles_.size() at session start
+    std::unordered_map<void*, CommPtrs*> ptr_to_comm_ptrs_;
 };
 
 // ============================================================================
@@ -1379,21 +1216,6 @@ void open_ar_fusion_data_handles(fptr_t fptr, std::vector<Tensor> handles) {
 void ar_fusion_capture_clear(fptr_t fptr) {
     auto ptr = reinterpret_cast<CommWorkspace*>(fptr);
     ptr->capture_clear();
-}
-
-void ar_fusion_invalidate_capture(fptr_t fptr) {
-    auto ptr = reinterpret_cast<CommWorkspace*>(fptr);
-    ptr->invalidate_capture();
-}
-
-void ar_fusion_commit_capture(fptr_t fptr) {
-    auto ptr = reinterpret_cast<CommWorkspace*>(fptr);
-    ptr->commit_capture();
-}
-
-void ar_fusion_begin_capture_session(fptr_t fptr) {
-    auto ptr = reinterpret_cast<CommWorkspace*>(fptr);
-    ptr->begin_capture_session();
 }
 
 std::vector<Tensor> get_ar_fusion_captured_handles(fptr_t fptr) {

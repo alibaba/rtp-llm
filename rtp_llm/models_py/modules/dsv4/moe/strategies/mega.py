@@ -17,7 +17,9 @@ import os
 from typing import Dict, Optional
 
 import torch
+import torch.nn.functional as F
 
+from ..._profiler import record_function_range
 from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from ..input_packer import get_mega_moe_input_packer
 from ..mega_buf import (
@@ -33,13 +35,49 @@ from ..mega_jit_warmup import (
     parse_mega_moe_jit_warmup_tokens_override,
 )
 from ..shared_expert import strict_fused_moe_enabled
-from ..warmup_sync import sync_cuda_graph_warmup_ranks
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
+from ..warmup_sync import sync_cuda_graph_warmup_ranks
 
 _MEGA_MOE_JIT_WARMED_KEYS: set[tuple] = set()
+_MEGA_MOE_NVCC_TMPDIR_ENV = "DSV4_MEGA_MOE_NVCC_TMPDIR"
 _PRE_KERNEL_BARRIER_ENV = "DSV4_MEGA_MOE_PRE_KERNEL_BARRIER"
 _PRE_KERNEL_BARRIER_VERBOSE_ENV = "DSV4_MEGA_MOE_PRE_KERNEL_BARRIER_VERBOSE"
 _PRE_KERNEL_BARRIER_LOGGED_KEYS: set[tuple[int, int]] = set()
+_GATE_PACK_KERNELS = None
+_GATE_PACK_KERNELS_UNAVAILABLE = False
+
+
+def _get_gate_pack_kernels():
+    global _GATE_PACK_KERNELS, _GATE_PACK_KERNELS_UNAVAILABLE
+    if _GATE_PACK_KERNELS_UNAVAILABLE:
+        return None
+    if _GATE_PACK_KERNELS is not None:
+        return _GATE_PACK_KERNELS
+    try:
+        from .._mega_gate_pack_triton import (
+            fused_mega_moe_gate_pack_hash,
+            fused_mega_moe_gate_pack_nonhash,
+            fused_mega_moe_gate_pack_supported,
+            triton,
+        )
+    except Exception:
+        _GATE_PACK_KERNELS_UNAVAILABLE = True
+        return None
+    if triton is None:
+        _GATE_PACK_KERNELS_UNAVAILABLE = True
+        return None
+    _GATE_PACK_KERNELS = (
+        fused_mega_moe_gate_pack_nonhash,
+        fused_mega_moe_gate_pack_hash,
+        fused_mega_moe_gate_pack_supported,
+    )
+    return _GATE_PACK_KERNELS
+
+
+def _gate_pack_input_packer_env_allows() -> bool:
+    mode = os.environ.get("DSV4_MEGA_MOE_INPUT_PACKER", "fused").strip().lower()
+    impl = os.environ.get("DSV4_MEGA_MOE_INPUT_PACKER_IMPL", "optimized").strip().lower()
+    return mode in ("auto", "fused") and impl == "optimized"
 
 
 def _mega_output_capacity(buf, requested_capacity: int) -> int:
@@ -49,6 +87,45 @@ def _mega_output_capacity(buf, requested_capacity: int) -> int:
     if aligned_capacity is not None:
         capacity = max(capacity, int(aligned_capacity))
     return capacity
+
+
+def _mega_moe_rank_nvcc_tmpdir(rank: int) -> str:
+    base_dir = (
+        os.environ.get(_MEGA_MOE_NVCC_TMPDIR_ENV)
+        or os.environ.get("DG_JIT_CACHE_DIR")
+        or os.environ.get("TRITON_CACHE_DIR")
+        or "/tmp"
+    )
+    return os.path.join(
+        base_dir,
+        "rtp_llm_dsv4_mega_moe_nvcc",
+        f"rank_{int(rank)}",
+    )
+
+
+def _activate_mega_moe_rank_nvcc_tmpdir(rank: int) -> tuple[str, str | None]:
+    """Use a rank-local nvcc temp dir during MegaMoE warmup compilation."""
+
+    previous_tmpdir = os.environ.get("TMPDIR")
+    tmpdir = _mega_moe_rank_nvcc_tmpdir(rank)
+    try:
+        os.makedirs(tmpdir, exist_ok=True)
+    except Exception:
+        tmpdir = os.path.join(
+            "/tmp",
+            "rtp_llm_dsv4_mega_moe_nvcc",
+            f"rank_{int(rank)}",
+        )
+        os.makedirs(tmpdir, exist_ok=True)
+    os.environ["TMPDIR"] = tmpdir
+    return tmpdir, previous_tmpdir
+
+
+def _restore_tmpdir(previous_tmpdir: str | None) -> None:
+    if previous_tmpdir is None:
+        os.environ.pop("TMPDIR", None)
+    else:
+        os.environ["TMPDIR"] = previous_tmpdir
 
 
 def _pre_kernel_barrier_enabled() -> bool:
@@ -285,6 +362,12 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             cfg.swiglu_limit,
             num_sms,
             tuple(token_counts),
+            bool(getattr(self, "_gate_pack_warmup_enabled", False)),
+            (
+                float(getattr(self, "_gate_pack_route_scale", 1.0))
+                if getattr(self, "_gate_pack_warmup_enabled", False)
+                else None
+            ),
         )
         if warmup_key in _MEGA_MOE_JIT_WARMED_KEYS:
             return
@@ -305,7 +388,13 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                 cfg.moe_inter_dim,
                 num_sms,
             )
-        self.warmup_jit(token_counts)
+        tmpdir, previous_tmpdir = _activate_mega_moe_rank_nvcc_tmpdir(rank)
+        try:
+            if rank == 0:
+                logging.info("[DSV4 MegaMoE] rank-local nvcc TMPDIR=%s", tmpdir)
+            self.warmup_jit(token_counts)
+        finally:
+            _restore_tmpdir(previous_tmpdir)
         _MEGA_MOE_JIT_WARMED_KEYS.add(warmup_key)
         if rank == 0:
             logging.info(
@@ -342,6 +431,75 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             )
             torch.cuda.synchronize(device)
         dist.barrier()
+        self._warmup_gate_pack_jit(token_counts)
+
+    def _warmup_gate_pack_jit(self, token_counts: list[int]) -> None:
+        if not getattr(self, "_gate_pack_warmup_enabled", False):
+            return
+        kernels = _get_gate_pack_kernels()
+        if kernels is None:
+            return
+        fused_mega_moe_gate_pack_nonhash, fused_mega_moe_gate_pack_hash, _ = kernels
+
+        counts = [int(t) for t in token_counts if int(t) > 0]
+        if not counts:
+            return
+
+        cfg = self.cfg
+        device = self._mega_l1_w.device
+        max_tokens = max(counts)
+        x = torch.zeros((max_tokens, cfg.dim), dtype=torch.bfloat16, device=device)
+        scores = torch.zeros(
+            (max_tokens, cfg.n_routed_experts),
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        bias = torch.zeros((cfg.n_routed_experts,), dtype=torch.float32, device=device)
+        input_ids = torch.zeros((max_tokens,), dtype=torch.long, device=device)
+        tid2eid = (
+            torch.arange(cfg.n_activated_experts, dtype=torch.long, device=device)
+            .view(1, -1)
+            .contiguous()
+        )
+        buf = self._mega_buf
+        route_scale = float(getattr(self, "_gate_pack_route_scale", 1.0))
+
+        for token_count in counts:
+            fused_mega_moe_gate_pack_nonhash(
+                x[:token_count],
+                scores[:token_count],
+                bias,
+                buf.x[:token_count],
+                buf.x_sf[:token_count],
+                buf.topk_idx[:token_count],
+                buf.topk_weights[:token_count],
+                route_scale=route_scale,
+                norm_eps=1.0e-12,
+            )
+            fused_mega_moe_gate_pack_hash(
+                x[:token_count],
+                scores[:token_count],
+                input_ids[:token_count],
+                tid2eid,
+                buf.x[:token_count],
+                buf.x_sf[:token_count],
+                buf.topk_idx[:token_count],
+                buf.topk_weights[:token_count],
+                route_scale=route_scale,
+                norm_eps=1.0e-12,
+            )
+            torch.cuda.synchronize(device)
+
+    def can_use_gate_pack_static(self, gate) -> bool:
+        return (
+            os.environ.get("DSV4_GATE_FUSED", "1") != "0"
+            and os.environ.get("DSV4_GATE_FP32", "0") != "1"
+            and gate.score_func == "sqrtsoftplus"
+            and 1 <= int(gate.topk) <= 32
+            and self.cfg.dim % 128 == 0
+            and _gate_pack_input_packer_env_allows()
+            and _get_gate_pack_kernels() is not None
+        )
 
     def forward(
         self,
@@ -415,6 +573,93 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         )
         return y
 
+    def forward_with_gate_pack(
+        self,
+        x: torch.Tensor,
+        gate,
+        input_ids: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Run MegaMoE with router gate + input pack fused together."""
+        kernels = _get_gate_pack_kernels()
+        if kernels is None:
+            raise RuntimeError(
+                "MegaMoE gate-pack was selected but kernels are unavailable"
+            )
+        (
+            fused_mega_moe_gate_pack_nonhash,
+            fused_mega_moe_gate_pack_hash,
+            _,
+        ) = kernels
+
+        T = x.size(0)
+        buf = self._mega_buf
+        if T > buf.num_max_tokens_per_rank:
+            raise RuntimeError(
+                f"Mega MoE input tokens={T} exceeds num_max_tokens_per_rank="
+                f"{buf.num_max_tokens_per_rank} (derived from max_seq_len / "
+                f"max_tokens_per_rank). Raise the budget at startup."
+            )
+        if T > self._mega_y.size(0):
+            raise RuntimeError(
+                f"Mega MoE output buffer rows={self._mega_y.size(0)} is smaller "
+                f"than input tokens={T}. This indicates inconsistent aligned "
+                "MegaMoE buffer sizing."
+            )
+        y = self._mega_y[:T]
+        import deep_gemm
+
+        with record_function_range("dsv4.moe.gate_linear_bf16"):
+            scores_bf16 = F.linear(x, gate._weight_bf16())
+
+        with record_function_range("dsv4.moe.mega_gate_pack"):
+            if gate.hash:
+                assert input_ids is not None
+                fused_mega_moe_gate_pack_hash(
+                    x,
+                    scores_bf16.contiguous(),
+                    input_ids.reshape(-1).contiguous(),
+                    gate.tid2eid.contiguous(),
+                    buf.x[:T],
+                    buf.x_sf[:T],
+                    buf.topk_idx[:T],
+                    buf.topk_weights[:T],
+                    route_scale=float(gate.route_scale),
+                    norm_eps=1.0e-12,
+                )
+            else:
+                assert gate.bias is not None
+                fused_mega_moe_gate_pack_nonhash(
+                    x,
+                    scores_bf16.contiguous(),
+                    gate.bias.contiguous(),
+                    buf.x[:T],
+                    buf.x_sf[:T],
+                    buf.topk_idx[:T],
+                    buf.topk_weights[:T],
+                    route_scale=float(gate.route_scale),
+                    norm_eps=1.0e-12,
+                )
+
+        self._maybe_pre_kernel_barrier(T)
+        sync_cuda_graph_warmup_ranks(
+            f"dsv4.mega_moe.layer{self.cfg.layer_id}.before_deepgemm",
+            x.device,
+        )
+
+        deep_gemm.fp8_fp4_mega_moe(
+            y,
+            (self._mega_l1_w, self._mega_l1_sf),
+            (self._mega_l2_w, self._mega_l2_sf),
+            buf,
+            recipe=(1, 1, FP4_BLOCK),
+            activation="swiglu",
+            activation_clamp=(
+                self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
+            ),
+            fast_math=True,
+        )
+        return y
+
     def _maybe_pre_kernel_barrier(self, tokens: int) -> None:
         """Optional host-side rendezvous before the DeepGEMM MegaMoE kernel.
 
@@ -444,7 +689,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         rank = dist.get_rank(group)
         world_size = dist.get_world_size(group)
         device = self._mega_l1_w.device
-        _log_pre_kernel_barrier("enter", cfg.layer_id, rank, world_size, tokens, device)
+        _log_pre_kernel_barrier(
+            "enter", cfg.layer_id, rank, world_size, tokens, device
+        )
 
         if device.type == "cuda":
             with torch.cuda.device(device):
@@ -459,4 +706,6 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         else:
             dist.barrier(group=group)
 
-        _log_pre_kernel_barrier("leave", cfg.layer_id, rank, world_size, tokens, device)
+        _log_pre_kernel_barrier(
+            "leave", cfg.layer_id, rank, world_size, tokens, device
+        )

@@ -1,81 +1,89 @@
-"""DSV4 KV-cache lookup utilities."""
+"""DSV4 KV-cache lookup utilities.
+
+Generic ``(layer, region_name) -> block_table`` helpers shared between
+prefill and decode. Kept separate from region-name constants (pure int
+constants, no torch) and from path-specific forward helpers in
+:mod:`prefill.forward` / :mod:`decode.forward`.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Optional
 
 import torch
-
-from rtp_llm.models_py.modules.dsv4.attn_type import TAG_BY_ATTN_TYPE
-
-ATTN_TYPE_BY_TAG = {tag: attn_type for attn_type, tag in TAG_BY_ATTN_TYPE.items()}
-
-
-def iter_tagged_attention_inputs(
-    kv_cache: Optional[Any], attention_inputs: Any
-) -> Iterable[tuple[str, Any]]:
-    """Iterate model cache inputs by semantic tag.
-
-    Multi-group inputs must carry their tags in the mapping itself. The plain
-    ``PyAttentionInputs`` form is the 1:1 fast path and is accepted only when
-    the cache topology exposes exactly one group tag.
-    """
-    if attention_inputs is None:
-        return []
-
-    if isinstance(attention_inputs, Mapping):
-        if not attention_inputs:
-            raise RuntimeError("DSV4 attention input tag mapping must not be empty")
-        return [(str(tag), value) for tag, value in attention_inputs.items()]
-
-    group_tags = list(getattr(kv_cache, "group_tags", None) or [])
-    if len(group_tags) != 1:
-        raise RuntimeError(
-            "plain DSV4 attention inputs require a single-group cache topology; "
-            f"group_tags={group_tags!r}"
-        )
-    return [(str(group_tags[0]), attention_inputs)]
-
-
-def _iter_group_block_tables(
-    kv_cache: Optional[Any], attention_inputs: Any
-) -> Iterable[tuple[int, torch.Tensor]]:
-    if kv_cache is None or attention_inputs is None:
-        return []
-
-    result = []
-    for tag, attn_inputs in iter_tagged_attention_inputs(kv_cache, attention_inputs):
-        attn_type = ATTN_TYPE_BY_TAG.get(tag)
-        if attn_type is None:
-            continue
-        block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
-        if block_table is None or block_table.numel() == 0:
-            continue
-        result.append((attn_type, block_table))
-    return result
 
 
 def build_block_tables(
     kv_cache: Optional[Any],
-    attention_inputs: Any,
+    attn_inputs: Any,
     batch_offset: int = 0,
 ) -> Optional[Dict[int, torch.Tensor]]:
-    """Build per-attn-type block tables for one prefill request."""
-    block_tables_by_attn_type: Dict[int, torch.Tensor] = {}
-    for attn_type, block_table in _iter_group_block_tables(kv_cache, attention_inputs):
-        block_tables_by_attn_type[attn_type] = block_table[
+    """Build the per-region-name block-table dict for one prefill request.
+
+    The framework emits per-request block tables as a list indexed by
+    ``group_id`` (``attn_inputs.kv_cache_kernel_block_id_device_by_group``,
+    one entry per pool group in the order declared by
+    ``CacheConfig::group_region_names``). This helper joins that list
+    against ``kv_cache.group_region_names`` to produce a dict keyed by
+    ``KVCacheRegionName`` integer value instead of group id.
+
+    The ``batch_offset`` arg slices out a single-request row
+    ``[batch_offset : batch_offset + 1]`` so the returned block table is
+    per-request, matching how ``DeepSeekV4Model.forward`` unrolls batched
+    prefill into one-request-at-a-time layer calls.
+
+    Returns ``None`` when no block tables are available (warmup / paged-KV
+    disabled / missing framework state).
+    """
+    if kv_cache is None or attn_inputs is None:
+        return None
+    by_group = getattr(attn_inputs, "kv_cache_kernel_block_id_device_by_group", None)
+    if by_group is None or len(by_group) == 0:
+        return None
+    group_region_names = getattr(kv_cache, "group_region_names", None)
+    if not group_region_names:
+        return None
+    block_tables_by_region_name: Dict[int, torch.Tensor] = {}
+    for group_id, region_name in enumerate(group_region_names):
+        if group_id >= len(by_group):
+            continue
+        group_block_table = by_group[group_id]
+        if group_block_table is None or group_block_table.numel() == 0:
+            continue
+        block_tables_by_region_name[int(region_name)] = group_block_table[
             batch_offset : batch_offset + 1
         ]
-    return block_tables_by_attn_type or None
+    return block_tables_by_region_name or None
 
 
 def build_block_tables_batched(
     kv_cache: Optional[Any],
-    attention_inputs: Any,
+    attn_inputs: Any,
 ) -> Optional[Dict[int, torch.Tensor]]:
-    """Build per-attn-type block tables for an entire prefill batch."""
-    block_tables_by_attn_type: Dict[int, torch.Tensor] = {}
-    for attn_type, block_table in _iter_group_block_tables(kv_cache, attention_inputs):
-        block_tables_by_attn_type[attn_type] = block_table
-    return block_tables_by_attn_type or None
+    """Build the per-region-name block-table dict for an entire prefill batch.
+
+    Same semantics as :func:`build_block_tables` but returns the full
+    ``[B, max_blocks]`` block table per region name (no ``batch_offset`` slice).
+    Used by the batched ``forward_prefill`` main path so a single ``v4()`` call
+    can cover the whole batch.
+
+    Returns ``None`` when no block tables are available (warmup / paged-KV
+    disabled / missing framework state).
+    """
+    if kv_cache is None or attn_inputs is None:
+        return None
+    by_group = getattr(attn_inputs, "kv_cache_kernel_block_id_device_by_group", None)
+    if by_group is None or len(by_group) == 0:
+        return None
+    group_region_names = getattr(kv_cache, "group_region_names", None)
+    if not group_region_names:
+        return None
+    block_tables_by_region_name: Dict[int, torch.Tensor] = {}
+    for group_id, region_name in enumerate(group_region_names):
+        if group_id >= len(by_group):
+            continue
+        group_block_table = by_group[group_id]
+        if group_block_table is None or group_block_table.numel() == 0:
+            continue
+        block_tables_by_region_name[int(region_name)] = group_block_table
+    return block_tables_by_region_name or None

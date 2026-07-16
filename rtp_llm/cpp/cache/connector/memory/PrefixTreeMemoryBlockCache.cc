@@ -4,7 +4,6 @@
 #include <mutex>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
@@ -36,8 +35,8 @@ bool PrefixTreeMemoryBlockCache::contains(CacheKeyType cache_key, CacheBlockKind
     return contains(cache_key, kind, empty_required_mask);
 }
 
-bool PrefixTreeMemoryBlockCache::contains(CacheKeyType                cache_key,
-                                          CacheBlockKind              kind,
+bool PrefixTreeMemoryBlockCache::contains(CacheKeyType                 cache_key,
+                                          CacheBlockKind               kind,
                                           const std::vector<uint8_t>& required_slot_mask) const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
     auto                                it = nodes_.find(cache_key);
@@ -48,13 +47,16 @@ bool PrefixTreeMemoryBlockCache::contains(CacheKeyType                cache_key,
     return state.has_value && !state.detached && slotMaskCovers(state.slot_valid_mask, required_slot_mask);
 }
 
-PrefixTreeMemoryBlockCache::MatchResult PrefixTreeMemoryBlockCache::match(CacheKeyType cache_key, CacheBlockKind kind) {
+PrefixTreeMemoryBlockCache::MatchResult
+PrefixTreeMemoryBlockCache::match(CacheKeyType cache_key, CacheBlockKind kind) {
     static const std::vector<uint8_t> empty_required_mask;
     return match(cache_key, kind, empty_required_mask);
 }
 
-PrefixTreeMemoryBlockCache::MatchResult PrefixTreeMemoryBlockCache::match(
-    CacheKeyType cache_key, CacheBlockKind kind, const std::vector<uint8_t>& required_slot_mask) {
+PrefixTreeMemoryBlockCache::MatchResult
+PrefixTreeMemoryBlockCache::match(CacheKeyType                 cache_key,
+                                  CacheBlockKind               kind,
+                                  const std::vector<uint8_t>& required_slot_mask) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto                                it = nodes_.find(cache_key);
     if (it == nodes_.end() || !validKind(kind)) {
@@ -75,14 +77,16 @@ PrefixTreeMemoryBlockCache::MatchResult PrefixTreeMemoryBlockCache::match(
             state.slot_valid_mask};
 }
 
-PrefixTreeMemoryBlockCache::MatchResult PrefixTreeMemoryBlockCache::matchAndMarkInFlight(CacheKeyType   cache_key,
-                                                                                         CacheBlockKind kind) {
+PrefixTreeMemoryBlockCache::MatchResult
+PrefixTreeMemoryBlockCache::matchAndMarkInFlight(CacheKeyType cache_key, CacheBlockKind kind) {
     static const std::vector<uint8_t> empty_required_mask;
     return matchAndMarkInFlight(cache_key, kind, empty_required_mask);
 }
 
-PrefixTreeMemoryBlockCache::MatchResult PrefixTreeMemoryBlockCache::matchAndMarkInFlight(
-    CacheKeyType cache_key, CacheBlockKind kind, const std::vector<uint8_t>& required_slot_mask) {
+PrefixTreeMemoryBlockCache::MatchResult
+PrefixTreeMemoryBlockCache::matchAndMarkInFlight(CacheKeyType                 cache_key,
+                                                 CacheBlockKind               kind,
+                                                 const std::vector<uint8_t>& required_slot_mask) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto                                it = nodes_.find(cache_key);
     if (it == nodes_.end() || !validKind(kind)) {
@@ -105,14 +109,16 @@ PrefixTreeMemoryBlockCache::MatchResult PrefixTreeMemoryBlockCache::matchAndMark
             state.slot_valid_mask};
 }
 
-std::pair<bool, std::optional<PrefixTreeMemoryBlockCache::CacheItem>> PrefixTreeMemoryBlockCache::putCommitted(
-    CacheKeyType cache_key, const BlockDependency& dependency, const CacheItem& input_item) {
+std::pair<bool, std::optional<PrefixTreeMemoryBlockCache::CacheItem>>
+PrefixTreeMemoryBlockCache::putCommitted(CacheKeyType            cache_key,
+                                          const BlockDependency&  dependency,
+                                          const CacheItem&        input_item) {
     RTP_LLM_CHECK_WITH_INFO(validKind(input_item.kind), "invalid prefix-tree memory kind");
     RTP_LLM_CHECK_WITH_INFO(input_item.cache_key == cache_key, "cache key mismatch");
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto&                               node  = upsertNodeLocked(cache_key, dependency);
     auto&                               state = node.kinds[kindIndex(input_item.kind)];
-    std::optional<CacheItem>            old_item;
+    std::optional<CacheItem> old_item;
     if (state.has_value && !state.detached) {
         if (slotMaskCovers(state.slot_valid_mask, input_item.slot_valid_mask)) {
             return {false, std::nullopt};
@@ -148,11 +154,11 @@ std::pair<bool, std::optional<PrefixTreeMemoryBlockCache::CacheItem>> PrefixTree
 
 std::optional<PrefixTreeMemoryBlockCache::CacheItem>
 PrefixTreeMemoryBlockCache::detachIfMatch(CacheKeyType     cache_key,
-                                          CacheBlockKind   kind,
-                                          CacheBackingType backing_type,
-                                          BlockIdxType     expected_block_index,
-                                          int32_t          expected_disk_slot,
-                                          uint64_t         expected_generation) {
+                                           CacheBlockKind   kind,
+                                           CacheBackingType backing_type,
+                                           BlockIdxType     expected_block_index,
+                                           int32_t          expected_disk_slot,
+                                           uint64_t         expected_generation) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto                                it = nodes_.find(cache_key);
     if (it == nodes_.end() || !validKind(kind)) {
@@ -178,13 +184,13 @@ PrefixTreeMemoryBlockCache::detachIfMatch(CacheKeyType     cache_key,
     decrementAncestorsLocked(cache_key, kind);
     const auto descendant_ref_count = state.subtree_ref_count;
     if (state.in_flight_ref == 0) {
-        state                   = KindState{};
+        state = KindState{};
         state.subtree_ref_count = descendant_ref_count;
         pruneLocked(cache_key);
         return item;
     }
     it->second.retired_items[kindIndex(kind)].push_back(RetiredItem{*item, state.in_flight_ref});
-    state                   = KindState{};
+    state = KindState{};
     state.subtree_ref_count = descendant_ref_count;
     pruneLocked(cache_key);
     return std::nullopt;
@@ -240,7 +246,7 @@ PrefixTreeMemoryBlockCache::releaseInFlight(CacheKeyType     cache_key,
     }
     if (state.detached && state.in_flight_ref == 0) {
         auto released = toItemLocked(it->second, kind);
-        state         = KindState{};
+        state = KindState{};
         pruneLocked(cache_key);
         return released;
     } else if (!state.detached && state.in_flight_ref == 0) {
@@ -342,7 +348,7 @@ PrefixTreeMemoryBlockCache::popOldestStateOrChainEvictable(CacheBackingType back
 }
 
 std::vector<CacheKeyType> PrefixTreeMemoryBlockCache::cacheKeys() const {
-    std::shared_lock<std::shared_mutex>            lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     std::vector<std::pair<uint64_t, CacheKeyType>> entries;
     for (const auto& [key, node] : nodes_) {
         uint64_t latest = 0;
@@ -369,9 +375,24 @@ std::vector<CacheKeyType> PrefixTreeMemoryBlockCache::cacheKeys() const {
     return keys;
 }
 
+std::vector<CacheKeyType> PrefixTreeMemoryBlockCache::cacheKeysUnorderedForStatus() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::vector<CacheKeyType>           keys;
+    keys.reserve(nodes_.size());
+    for (const auto& [key, node] : nodes_) {
+        for (const auto& state : node.kinds) {
+            if (state.has_value && !state.detached) {
+                keys.push_back(key);
+                break;
+            }
+        }
+    }
+    return keys;
+}
+
 size_t PrefixTreeMemoryBlockCache::size() const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
-    size_t                              count = 0;
+    size_t count = 0;
     for (const auto& [_, node] : nodes_) {
         for (const auto& state : node.kinds) {
             if (state.has_value && !state.detached) {
@@ -382,17 +403,17 @@ size_t PrefixTreeMemoryBlockCache::size() const {
     return count;
 }
 
-PrefixTreeMemoryBlockCache::Node& PrefixTreeMemoryBlockCache::upsertNodeLocked(CacheKeyType           cache_key,
-                                                                               const BlockDependency& dependency) {
+PrefixTreeMemoryBlockCache::Node&
+PrefixTreeMemoryBlockCache::upsertNodeLocked(CacheKeyType cache_key, const BlockDependency& dependency) {
     auto it = nodes_.find(cache_key);
     if (it == nodes_.end()) {
         Node node;
-        node.cache_key        = cache_key;
-        node.parent_key       = dependency.parent_key;
-        node.has_parent       = dependency.has_parent && dependency.parent_key != cache_key;
-        node.ordinal          = dependency.ordinal;
+        node.cache_key  = cache_key;
+        node.parent_key = dependency.parent_key;
+        node.has_parent = dependency.has_parent && dependency.parent_key != cache_key;
+        node.ordinal    = dependency.ordinal;
         auto [inserted_it, _] = nodes_.emplace(cache_key, std::move(node));
-        it                    = inserted_it;
+        it = inserted_it;
     } else {
         if (it->second.has_parent
             && (it->second.parent_key != dependency.parent_key || !dependency.has_parent
@@ -426,14 +447,8 @@ PrefixTreeMemoryBlockCache::Node& PrefixTreeMemoryBlockCache::upsertNodeLocked(C
 }
 
 void PrefixTreeMemoryBlockCache::incrementAncestorsLocked(CacheKeyType cache_key, CacheBlockKind kind) {
-    CacheKeyType cur   = cache_key;
-    size_t       steps = 0;
+    CacheKeyType cur = cache_key;
     while (true) {
-        if (++steps > nodes_.size()) {
-            RTP_LLM_LOG_WARNING("PrefixTreeMemoryBlockCache ancestor cycle detected while incrementing key=%ld",
-                                cache_key);
-            break;
-        }
         auto it = nodes_.find(cur);
         if (it == nodes_.end()) {
             break;
@@ -448,14 +463,8 @@ void PrefixTreeMemoryBlockCache::incrementAncestorsLocked(CacheKeyType cache_key
 }
 
 void PrefixTreeMemoryBlockCache::decrementAncestorsLocked(CacheKeyType cache_key, CacheBlockKind kind) {
-    CacheKeyType cur   = cache_key;
-    size_t       steps = 0;
+    CacheKeyType cur = cache_key;
     while (true) {
-        if (++steps > nodes_.size()) {
-            RTP_LLM_LOG_WARNING("PrefixTreeMemoryBlockCache ancestor cycle detected while decrementing key=%ld",
-                                cache_key);
-            break;
-        }
         auto it = nodes_.find(cur);
         if (it == nodes_.end()) {
             break;
@@ -473,14 +482,8 @@ void PrefixTreeMemoryBlockCache::decrementAncestorsLocked(CacheKeyType cache_key
 }
 
 void PrefixTreeMemoryBlockCache::addSubtreeRefsToAncestorsLocked(CacheKeyType ancestor_key, const Node& child) {
-    CacheKeyType cur   = ancestor_key;
-    size_t       steps = 0;
+    CacheKeyType cur = ancestor_key;
     while (true) {
-        if (++steps > nodes_.size()) {
-            RTP_LLM_LOG_WARNING("PrefixTreeMemoryBlockCache ancestor cycle detected while adding refs key=%ld",
-                                ancestor_key);
-            break;
-        }
         auto it = nodes_.find(cur);
         if (it == nodes_.end()) {
             break;
@@ -503,14 +506,8 @@ void PrefixTreeMemoryBlockCache::addSubtreeRefsToAncestorsLocked(CacheKeyType an
 }
 
 void PrefixTreeMemoryBlockCache::subtractSubtreeRefsFromAncestorsLocked(CacheKeyType ancestor_key, const Node& child) {
-    CacheKeyType cur   = ancestor_key;
-    size_t       steps = 0;
+    CacheKeyType cur = ancestor_key;
     while (true) {
-        if (++steps > nodes_.size()) {
-            RTP_LLM_LOG_WARNING("PrefixTreeMemoryBlockCache ancestor cycle detected while subtracting refs key=%ld",
-                                ancestor_key);
-            break;
-        }
         auto it = nodes_.find(cur);
         if (it == nodes_.end()) {
             break;
@@ -565,7 +562,7 @@ void PrefixTreeMemoryBlockCache::attachPendingChildrenLocked(Node& node) {
 
 void PrefixTreeMemoryBlockCache::touchLocked(Node& node, CacheBlockKind kind) {
     eraseEvictKeyLocked(node, kind);
-    auto& state           = node.kinds[kindIndex(kind)];
+    auto& state = node.kinds[kindIndex(kind)];
     state.last_access_seq = ++access_seq_;
     insertEvictKeyLocked(node, kind);
 }
@@ -636,16 +633,9 @@ PrefixTreeMemoryBlockCache::toItemLocked(const Node& node, CacheBlockKind kind) 
     if (!state.has_value) {
         return std::nullopt;
     }
-    return CacheItem{node.cache_key,
-                     kind,
-                     state.backing_type,
-                     state.block_index,
-                     state.disk_slot,
-                     state.block_size,
-                     state.is_resident,
-                     state.generation,
-                     state.created_time_us,
-                     state.slot_valid_mask};
+    return CacheItem{
+        node.cache_key, kind, state.backing_type, state.block_index, state.disk_slot, state.block_size,
+        state.is_resident, state.generation, state.created_time_us, state.slot_valid_mask};
 }
 
 bool PrefixTreeMemoryBlockCache::isKindLeafLocked(const Node& node, CacheBlockKind kind) const {
@@ -691,17 +681,14 @@ PrefixTreeMemoryBlockCache::popStateOnlyFromChainLocked(const CacheKeyType& leaf
         if (!state.has_value || state.detached || state.backing_type != backing_type || state.is_resident
             || state.in_flight_ref > 0) {
             continue;
-        }
-        auto item = toItemLocked(node_it->second, CacheBlockKind::STATE_SWA_KV);
-        if (!item.has_value()) {
-            continue;
-        }
-        eraseEvictKeyLocked(node_it->second, CacheBlockKind::STATE_SWA_KV);
-        state.detached = true;
-        decrementAncestorsLocked(item->cache_key, CacheBlockKind::STATE_SWA_KV);
-        const auto descendant_ref_count = state.subtree_ref_count;
-        state                           = KindState{};
-        state.subtree_ref_count         = descendant_ref_count;
+	        }
+	        auto item = toItemLocked(node_it->second, CacheBlockKind::STATE_SWA_KV);
+	        eraseEvictKeyLocked(node_it->second, CacheBlockKind::STATE_SWA_KV);
+	        state.detached = true;
+	        decrementAncestorsLocked(item->cache_key, CacheBlockKind::STATE_SWA_KV);
+	        const auto descendant_ref_count = state.subtree_ref_count;
+	        state                           = KindState{};
+	        state.subtree_ref_count         = descendant_ref_count;
         pruneLocked(item->cache_key);
         return item;
     }
@@ -711,7 +698,7 @@ PrefixTreeMemoryBlockCache::popStateOnlyFromChainLocked(const CacheKeyType& leaf
 std::vector<PrefixTreeMemoryBlockCache::CacheItem>
 PrefixTreeMemoryBlockCache::popChainLocked(const CacheKeyType& leaf_key, CacheBackingType backing_type) {
     std::vector<CacheItem> items;
-    auto                   leaf_it = nodes_.find(leaf_key);
+    auto                  leaf_it = nodes_.find(leaf_key);
     if (leaf_it == nodes_.end()) {
         return items;
     }
@@ -760,17 +747,17 @@ PrefixTreeMemoryBlockCache::popChainLocked(const CacheKeyType& leaf_key, CacheBa
             if (!state.has_value || state.detached || state.backing_type != backing_type || state.is_resident
                 || state.in_flight_ref > 0) {
                 continue;
-            }
-            auto item = toItemLocked(node_it->second, kind);
-            if (!item.has_value()) {
-                continue;
-            }
-            eraseEvictKeyLocked(node_it->second, kind);
-            state.detached = true;
-            decrementAncestorsLocked(item->cache_key, kind);
-            const auto descendant_ref_count = state.subtree_ref_count;
-            state                           = KindState{};
-            state.subtree_ref_count         = descendant_ref_count;
+	            }
+	            auto item = toItemLocked(node_it->second, kind);
+	            if (!item.has_value()) {
+	                continue;
+	            }
+	            eraseEvictKeyLocked(node_it->second, kind);
+	            state.detached = true;
+	            decrementAncestorsLocked(item->cache_key, kind);
+	            const auto descendant_ref_count = state.subtree_ref_count;
+	            state                           = KindState{};
+	            state.subtree_ref_count         = descendant_ref_count;
             items.push_back(*item);
         }
         pruneLocked(*chain_it);

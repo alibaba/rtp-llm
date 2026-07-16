@@ -59,48 +59,31 @@ class DenseMLP(nn.Module):
                 )
             else:
                 self.up_proj = LinearFactory.create_linear_from_weights(
-                    weights,
-                    W.ffn_w13,
-                    W.ffn_s13,
-                    W.ffn_b13,
-                    quant_config=quant_config,
-                    hw_kernel_config=hw_kernel_config,
+                    weights, W.ffn_w13, W.ffn_s13, W.ffn_b13,
+                    quant_config=quant_config, hw_kernel_config=hw_kernel_config,
                     weight_scale_2_key=W.ffn_w13_s2,
                     input_scale_key=W.ffn_w13_i_s,
                 )
 
         else:
             self.up_proj = LinearFactory.create_linear_from_weights(
-                weights,
-                W.ffn_w3,
-                W.ffn_s3,
-                W.ffn_b3,
-                quant_config=quant_config,
-                hw_kernel_config=hw_kernel_config,
+                weights, W.ffn_w3, W.ffn_s3, W.ffn_b3,
+                quant_config=quant_config, hw_kernel_config=hw_kernel_config,
                 weight_scale_2_key=W.ffn_w3_s2,
                 input_scale_key=W.ffn_w3_i_s,
             )
 
         self.down_proj = LinearFactory.create_linear_from_weights(
-            weights,
-            W.ffn_w2,
-            W.ffn_s2,
-            W.ffn_b2,
-            quant_config=quant_config,
-            hw_kernel_config=hw_kernel_config,
+            weights, W.ffn_w2, W.ffn_s2, W.ffn_b2,
+            quant_config=quant_config, hw_kernel_config=hw_kernel_config,
             weight_scale_2_key=W.ffn_w2_s2,
-            input_scale_key=W.ffn_w2_i_s,
+            input_scale_key=W.ffn_w2_i_s
         )
 
-    def forward(self, x: torch.Tensor, skip_allreduce: bool = False) -> torch.Tensor:
-        if not self.is_gated and self.activation_type == ActivationType.Gelu:
-            activated = self.up_proj.forward_with_bias_gelu(x)
-        else:
-            up = self.up_proj(x)
-            activated = self.act_fn(up)
-
-        ffn_tp_size = self.parallelism_config.get_ffn_tp_size()
+    def forward(self, x: torch.Tensor):
+        up = self.up_proj(x)
+        activated = self.act_fn(up)
         output = self.down_proj(activated)
-        if not skip_allreduce and ffn_tp_size > 1:
+        if self.parallelism_config.get_ffn_tp_size() > 1:
             output = all_reduce(output, group=Group.TP)
         return output

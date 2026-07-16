@@ -517,3 +517,42 @@ class DeepSeekV4Detector(BaseFormatDetector):
             end="</｜DSML｜invoke>",
             trigger=f"<｜DSML｜invoke",
         )
+
+    def tool_call_structural_tag(
+        self,
+        tools: List[Tool],
+        *,
+        stop_after_first: bool,
+    ) -> Dict[str, Any]:
+        """Build DeepSeek-V4 native structural_tag for forced tool-call decoding."""
+        get_structure_info = self.structure_info()
+        invoke_tags = []
+        for tool in tools:
+            function = tool.function
+            info = get_structure_info(function.name)
+            invoke_tags.append(
+                {
+                    "type": "tag",
+                    "begin": info.begin,
+                    "content": {
+                        "type": "json_schema",
+                        "json_schema": function.parameters or {},
+                    },
+                    "end": info.end,
+                }
+            )
+
+        return {
+            "format": {
+                "type": "tag",
+                "begin": f"{self.bot_token}\n",
+                "content": {
+                    "type": "tags_with_separator",
+                    "tags": invoke_tags,
+                    "separator": "\n",
+                    "at_least_one": True,
+                    "stop_after_first": stop_after_first,
+                },
+                "end": f"\n{self.eot_token}",
+            }
+        }

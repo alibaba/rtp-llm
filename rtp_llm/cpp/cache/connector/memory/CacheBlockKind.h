@@ -3,8 +3,8 @@
 namespace rtp_llm {
 
 enum class CacheBlockKind {
-    COMPLETE      = 0,
-    INCOMPLETE    = 1,
+    COMPLETE   = 0,
+    INCOMPLETE = 1,
     COMPRESSED_KV = 2,
     STATE_SWA_KV  = 3,
 };

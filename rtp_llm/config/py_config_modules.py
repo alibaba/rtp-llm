@@ -1,4 +1,3 @@
-import logging
 import os
 import time
 from typing import Optional
@@ -11,10 +10,12 @@ from rtp_llm.ops import (
     ArpcConfig,
     CacheStoreConfig,
     ConcurrencyConfig,
+    DashScGrpcConfig,
     DeviceResourceConfig,
     EPLBConfig,
     FfnDisAggregateConfig,
     FMHAConfig,
+    GrammarConfig,
     GrpcConfig,
     HWKernelConfig,
     MiscellaneousConfig,
@@ -35,26 +36,23 @@ print(f"import rtp_llm.ops took {consume_s:.2f}s")
 
 DEFAULT_START_PORT = 8088
 COORDINATOR_INFO_PORT_NUM = 11
-MIN_WORKER_INFO_PORT_NUM = 8
+MIN_WORKER_INFO_PORT_NUM = 9
 WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
+DASH_SC_GRPC_SERVER_PORT_OFFSET = 8
 
 
 class ServerConfig:
-    """Port layout : base = start_port + rank_id * worker_info_port_num, then +0..+7."""
+    """Port layout: base = start_port + rank_id * worker_info_port_num."""
 
     def __init__(self):
         self.frontend_server_count = 4
-        self.vit_server_count = 1
         self.start_port = DEFAULT_START_PORT
         self.timeout_keep_alive = 5
         self.frontend_server_id = 0
-        self.vit_server_id = 0
         self.rank_id = 0
         self.ip: str = ""
         self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
-        self.shutdown_timeout: int = (
-            50  # Default timeout in seconds, -1 means wait indefinitely
-        )
+        self.shutdown_timeout: int = 600  # graceful drain budget (seconds)
         self.monitor_interval: int = 1  # Monitor interval in seconds
 
     def _server_base(self) -> int:
@@ -85,6 +83,11 @@ class ServerConfig:
     def embedding_rpc_server_port(self) -> int:
         return self._server_base() + 7
 
+    @property
+    def dash_sc_grpc_server_port(self) -> int:
+        """DashSc gRPC listen port (ModelStreamInfer, wire: predict_v2.proto)."""
+        return self._server_base() + DASH_SC_GRPC_SERVER_PORT_OFFSET
+
     def set_local_rank(self, local_rank: int):
         """Update rank_id in place; server_port-related properties reflect new values."""
         self.rank_id = local_rank
@@ -95,11 +98,9 @@ class ServerConfig:
     def to_string(self):
         return (
             f"frontend_server_count: {self.frontend_server_count}\n"
-            f"vit_server_count: {self.vit_server_count}\n"
             f"start_port: {self.start_port}\n"
             f"timeout_keep_alive: {self.timeout_keep_alive}\n"
             f"frontend_server_id: {self.frontend_server_id}\n"
-            f"vit_server_id: {self.vit_server_id}\n"
             f"rank_id: {self.rank_id}\n"
             f"worker_info_port_num: {self.worker_info_port_num}\n"
             f"shutdown_timeout: {self.shutdown_timeout}\n"
@@ -109,7 +110,8 @@ class ServerConfig:
             f"cache_store_listen_port: {self.cache_store_listen_port}\n"
             f"cache_store_rdma_listen_port: {self.cache_store_rdma_listen_port}\n"
             f"http_port: {self.http_port}\n"
-            f"embedding_rpc_server_port: {self.embedding_rpc_server_port}"
+            f"embedding_rpc_server_port: {self.embedding_rpc_server_port}\n"
+            f"dash_sc_grpc_server_port: {self.dash_sc_grpc_server_port}"
         )
 
 
@@ -242,15 +244,6 @@ class VitConfig:
         self.igraph_vipserver: int = 0
         self.igraph_table_name: str = ""
         self.default_key: Optional[str] = None
-        self.mm_preprocess_max_workers: int = 4
-        self.biencoder_preprocess: bool = False
-        self.extra_input_in_mm_embedding = ""
-        self.mm_timeout_ms: Optional[int] = None
-        self.extra_data_path: str = ""
-        self.local_extra_data_path: str = ""
-        self.disable_access_log: bool = False
-        self.use_local_preprocess: bool = False
-        self.vit_proxy_load_balance_strategy: str = "round_robin"
 
     def to_string(self):
         return (
@@ -265,16 +258,7 @@ class VitConfig:
             f"igraph_search_dom: {self.igraph_search_dom}\n"
             f"igraph_vipserver: {self.igraph_vipserver}\n"
             f"igraph_table_name: {self.igraph_table_name}\n"
-            f"igraph_default_key: {self.default_key}\n"
-            f"mm_preprocess_max_workers: {self.mm_preprocess_max_workers}\n"
-            f"biencoder_preprocess: {self.biencoder_preprocess}\n"
-            f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}\n"
-            f"mm_timeout_ms: {self.mm_timeout_ms}\n"
-            f"extra_data_path: {self.extra_data_path}\n"
-            f"local_extra_data_path: {self.local_extra_data_path}\n"
-            f"disable_access_log: {self.disable_access_log}\n"
-            f"use_local_preprocess: {self.use_local_preprocess}\n"
-            f"vit_proxy_load_balance_strategy: {self.vit_proxy_load_balance_strategy}"
+            f"igraph_default_key: {self.default_key}"
         )
 
 
@@ -287,6 +271,7 @@ class GenerateEnvConfig:
         self.stop_words_list: Optional[str] = None
         self.stop_words_str: Optional[str] = None
         self.think_start_tag: str = "<think>\n"
+        self.think_terminate_token_id: int = 1
         self.generation_config_path: Optional[str] = None
 
     def to_string(self):
@@ -298,7 +283,26 @@ class GenerateEnvConfig:
             f"stop_words_list: {self.stop_words_list}\n"
             f"stop_words_str: {self.stop_words_str}\n"
             f"think_start_tag: {self.think_start_tag}\n"
+            f"think_terminate_token_id: {self.think_terminate_token_id}\n"
             f"generation_config_path: {self.generation_config_path}"
+        )
+
+
+class RepetitionDetectionConfig:
+    def __init__(self):
+        self.tool_call_loop_monitor: bool = True
+        self.tool_call_loop_threshold: int = 5
+        self.tool_call_loop_max_span_tokens: int = 16384
+        self.tool_call_loop_begin_marker: str = ""
+        self.tool_call_loop_end_marker: str = ""
+
+    def to_string(self):
+        return (
+            f"tool_call_loop_monitor: {self.tool_call_loop_monitor}\n"
+            f"tool_call_loop_threshold: {self.tool_call_loop_threshold}\n"
+            f"tool_call_loop_max_span_tokens: {self.tool_call_loop_max_span_tokens}\n"
+            f"tool_call_loop_begin_marker: {self.tool_call_loop_begin_marker}\n"
+            f"tool_call_loop_end_marker: {self.tool_call_loop_end_marker}"
         )
 
 
@@ -332,9 +336,13 @@ class QuantizationConfig:
 class EmbeddingConfig:
     def __init__(self):
         self.embedding_model: int = 0
+        self.extra_input_in_mm_embedding = ""
 
     def to_string(self):
-        return f"embedding_model: {self.embedding_model}"
+        return (
+            f"embedding_model: {self.embedding_model}\n"
+            f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}"
+        )
 
 
 class RoleConfig:
@@ -397,15 +405,19 @@ class MasterConfig:
 
 class JITConfig:
     def __init__(self):
-        self.remote_jit_dir: str = ""
+        self.remote_jit_read_dir: str = ""
+        self.warm_up_jit_and_write_remote: str = ""
 
     def to_string(self):
-        return f"remote_jit_dir: {self.remote_jit_dir}"
+        return (
+            f"remote_jit_read_dir: {self.remote_jit_read_dir}\n"
+            f"warm_up_jit_and_write_remote: {self.warm_up_jit_and_write_remote}"
+        )
 
 
 class DeepEPConfig:
     """
-    Configuration for DeepEP / MoriEP settings.
+    Configuration for DeepEP settings.
     Used to track whether user has explicitly set these values.
     If all are None, auto_configure_deepep will be called.
     Otherwise, these values will be copied to moe_config.
@@ -415,14 +427,12 @@ class DeepEPConfig:
         self.use_deepep_moe: Optional[bool] = None
         self.use_deepep_internode: Optional[bool] = None
         self.use_deepep_low_latency: Optional[bool] = None
-        self.use_mori_ep: Optional[bool] = None
 
     def to_string(self):
         return (
             f"use_deepep_moe: {self.use_deepep_moe}\n"
             f"use_deepep_internode: {self.use_deepep_internode}\n"
-            f"use_deepep_low_latency: {self.use_deepep_low_latency}\n"
-            f"use_mori_ep: {self.use_mori_ep}"
+            f"use_deepep_low_latency: {self.use_deepep_low_latency}"
         )
 
 
@@ -439,6 +449,9 @@ class PyEnvConfigs:
         self.distribute_config: DistributeConfig = DistributeConfig()
         self.vit_config: VitConfig = VitConfig()
         self.generate_env_config: GenerateEnvConfig = GenerateEnvConfig()
+        self.repetition_detection_config: RepetitionDetectionConfig = (
+            RepetitionDetectionConfig()
+        )
         self.quantization_config: QuantizationConfig = QuantizationConfig()
         self.eplb_config: EPLBConfig = EPLBConfig()
         self.kv_cache_config: KVCacheConfig = KVCacheConfig()
@@ -464,6 +477,8 @@ class PyEnvConfigs:
         self.cache_store_config = CacheStoreConfig()
         self.arpc_config = ArpcConfig()
         self.grpc_config = GrpcConfig()
+        self.dash_sc_grpc_config = DashScGrpcConfig()
+        self.grammar_config = GrammarConfig()
         self.deep_ep_config = DeepEPConfig()
         self.prefill_cp_config = PrefillCPConfig()
 
@@ -481,6 +496,9 @@ class PyEnvConfigs:
             "[distribute_config]\n" + self.distribute_config.to_string() + "\n\n"
             "[vit_config]\n" + self.vit_config.to_string() + "\n\n"
             "[generate_env_config]\n" + self.generate_env_config.to_string() + "\n\n"
+            "[repetition_detection_config]\n"
+            + self.repetition_detection_config.to_string()
+            + "\n\n"
             "[quantization_config]\n" + self.quantization_config.to_string() + "\n\n"
             "[eplb_config]\n" + self.eplb_config.to_string() + "\n\n"
             "[kv_cache_config]\n" + self.kv_cache_config.to_string() + "\n\n"
@@ -515,5 +533,7 @@ class PyEnvConfigs:
             + self.runtime_config.fifo_scheduler_config.to_string()
             + "\n\n"
             "[grpc_config]\n" + self.grpc_config.to_string() + "\n\n"
+            "[dash_sc_grpc_config]\n" + self.dash_sc_grpc_config.to_string() + "\n\n"
+            "[grammar_config]\n" + self.grammar_config.to_string() + "\n\n"
             "[prefill_cp_config]\n" + self.prefill_cp_config.to_string() + "\n\n"
         )

@@ -29,20 +29,16 @@ The eager path is unchanged.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.attn_type import TAG_BY_ATTN_TYPE
 from rtp_llm.models_py.modules.dsv4.decode.decode_attn_metadata import (
     DSv4DecodeAttnMetadata,
     allocate_decode_metadata,
     update_decode_metadata_in_place,
 )
-
-_ATTN_TYPE_BY_TAG = {tag: attn_type for attn_type, tag in TAG_BY_ATTN_TYPE.items()}
 
 
 @dataclass
@@ -61,12 +57,20 @@ class DSv4DecodeFmhaImplConfig:
     # Phase 2 paged-decode wiring. When provided, the impl pre-allocates
     # per-attn_type block_table + slot_mapping buffers in the metadata
     # and ``prepare`` populates them from
-    # the selected group's ``attn_inputs.kv_cache_kernel_block_id_device``.
+    # ``attn_inputs.kv_cache_kernel_block_id_device_by_group``.
     #
     # ``paged_pool_specs[attn_type] =
     # (entries_per_block, tokens_per_block, max_blocks_per_req)``.
     # If empty, the legacy register_buffer-only path is used.
     paged_pool_specs: Dict[int, Tuple[int, int, int]] = field(default_factory=dict)
+
+    # Snapshot of ``kv_cache.group_region_names`` (framework-owned group
+    # ordering, one attn_type per entry). Position = group id. ``prepare``
+    # iterates this to index ``attn_inputs.kv_cache_kernel_block_id_device_by_group``
+    # without needing a live ``kv_cache`` (the CUDA-graph replay path
+    # doesn't hand one in). Static for the allocator's lifetime, so
+    # snapshot-at-construct is safe.
+    group_region_names: List[int] = field(default_factory=list)
 
 
 class DSv4DecodeFmhaImpl:
@@ -126,16 +130,7 @@ class DSv4DecodeFmhaImpl:
         Then update the persistent metadata in place, including paged
         block_table snapshot when configured.
         """
-        if isinstance(attn_inputs, Mapping):
-            if not attn_inputs:
-                raise RuntimeError("DSV4 attention input tag mapping must not be empty")
-            attn_base = next(iter(attn_inputs.values()))
-            tagged_inputs = attn_inputs.items()
-        else:
-            attn_base = attn_inputs
-            tagged_inputs = ()
-
-        seq_lens = attn_base.sequence_lengths
+        seq_lens = attn_inputs.sequence_lengths
         if seq_lens.device != self.device:
             seq_lens = seq_lens.to(self.device)
         start_pos = seq_lens.to(torch.int32)
@@ -145,31 +140,27 @@ class DSv4DecodeFmhaImpl:
         max_s = self.config.max_seq_len
         start_pos = torch.clamp(start_pos, min=0, max=max(0, max_s - 1))
 
+        # Phase 2: pull per-attn_type block_tables from the framework's
+        # by_group list. Empty paged_pool_specs ⇒ skip (legacy path).
         paged_block_tables: Optional[Dict[int, torch.Tensor]] = None
-        if self._paged_entries_per_block:
-            paged_block_tables = {}
-            if not isinstance(attn_inputs, Mapping):
-                if len(self.config.paged_pool_specs) != 1:
-                    raise RuntimeError(
-                        "plain DSV4 attention inputs require exactly one paged cache group"
-                    )
-                tagged_inputs = ((None, attn_inputs),)
-            for tag, group_attn_inputs in tagged_inputs:
-                attn_type = (
-                    next(iter(self.config.paged_pool_specs))
-                    if tag is None
-                    else _ATTN_TYPE_BY_TAG.get(str(tag))
-                )
-                group_block_table = getattr(
-                    group_attn_inputs, "kv_cache_kernel_block_id_device", None
-                )
-                if (
-                    attn_type in self.config.paged_pool_specs
-                    and group_block_table is not None
-                    and group_block_table.numel() > 0
-                ):
+        if self._paged_entries_per_block and self.config.group_region_names:
+            by_group = getattr(
+                attn_inputs,
+                "kv_cache_kernel_block_id_device_by_group",
+                None,
+            )
+            if by_group is not None and len(by_group) > 0:
+                paged_block_tables = {}
+                # Position IS the group id; entry IS the attn_type (int).
+                for group_id, attn_type in enumerate(self.config.group_region_names):
+                    if group_id >= len(by_group):
+                        continue
+                    if attn_type not in self.config.paged_pool_specs:
+                        continue
+                    group_block_table = by_group[group_id]
+                    if group_block_table is None or group_block_table.numel() == 0:
+                        continue
                     paged_block_tables[attn_type] = group_block_table
-            paged_block_tables = paged_block_tables or None
 
         update_decode_metadata_in_place(
             self.metadata,

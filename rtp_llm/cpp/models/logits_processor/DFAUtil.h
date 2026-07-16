@@ -136,10 +136,6 @@ public:
         return input_list_[input_list_.size() - 1] == prefixToCandidateTokensPtr_->endTokenId();
     }
 
-    bool hasError() const {
-        return error_;
-    }
-
     std::string status() {
         return status_;
     }
@@ -149,7 +145,7 @@ public:
     }
 
     std::string next(InputType input) override {
-        if (isFinished() || error_) {
+        if (isFinished()) {
             return status_;
         }
         std::string new_status = prefixToCandidateTokensPtr_->generateNextKey(status_, input);
@@ -158,18 +154,14 @@ public:
             input_list_.push_back(input);
             status_ = new_status;
         } else {
-            RTP_LLM_LOG_WARNING("TreeDFA invalid transition: status[%s] input_id[%zu], entering error state",
-                                status_.c_str(),
-                                static_cast<size_t>(input));
-            error_ = true;
+            std::stringstream ss;
+            ss << "Generated invalid status, status[" << status_ << "], input_id[" << input << "]";
+            throw std::runtime_error(ss.str());
         }
         return status_;
     }
 
     std::vector<size_t> getCandidateTokenIds() {
-        if (error_) {
-            return {static_cast<size_t>(prefixToCandidateTokensPtr_->endTokenId())};
-        }
         std::vector<size_t> token_ids;
         for (auto token_id : prefixToCandidateTokensPtr_->getCandidateTokens(status_)) {
             if (token_id >= 0) {
@@ -188,7 +180,6 @@ private:
     PrefixToCandidateTokensPtr prefixToCandidateTokensPtr_;
     std::string                status_;
     std::vector<InputType>     input_list_;
-    bool                       error_ = false;
 };
 
 }  // namespace rtp_llm

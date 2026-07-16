@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/Interface.h"
+#include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 #include "autil/LockFreeThreadPool.h"
@@ -30,7 +31,8 @@ std::shared_ptr<NormalCacheStore> NormalCacheStore::createNormalCacheStore(const
 }
 
 bool NormalCacheStore::init(const CacheStoreInitParams& params) {
-    params_ = params;
+    params_    = params;
+    device_id_ = params.device_id;
 
     if (params_.memory_util != nullptr) {
         memory_util_ = params.memory_util;
@@ -53,6 +55,8 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     messager_init_params.rdma_worker_thread_count     = params.rdma_worker_thread_count;
     messager_init_params.io_thread_count              = params.messager_io_thread_count;
     messager_init_params.worker_thread_count          = params.messager_worker_thread_count;
+    messager_init_params.worker_queue_size            = params.queue_size;
+    messager_init_params.device_id                    = params.device_id;
 
     if (!messager_->init(messager_init_params)) {
         RTP_LLM_LOG_ERROR("normal cache store init failed : init messager failed");
@@ -67,6 +71,7 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     }
 
     auto check_task_readiness = [this]() {
+        pinThreadToDeviceOnce(this->device_id_);
         while (!thread_pool_close_) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
@@ -114,6 +119,7 @@ void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_
         metrics_reporter_, request_block_buffer->getBlocksCount(), request_block_buffer->getBlocksSize());
     // task 只在threadpool中运行, threadpool退出前会清理所有running task, 用this是安全的
     auto task = [this, request_block_buffer, callback, collector]() {
+        pinThreadToDeviceOnce(this->device_id_);
         this->runStoreTask(request_block_buffer, callback, collector);
     };
 
@@ -192,6 +198,7 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
                  collector,
                  partition_count,
                  partition_id]() {
+        pinThreadToDeviceOnce(this->device_id_);
         this->runLoadTask(
             request_block_buffer, callback, ip, port, rdma_port, timeout_ms, collector, partition_count, partition_id);
     };

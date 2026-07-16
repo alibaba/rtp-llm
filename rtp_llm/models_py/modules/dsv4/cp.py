@@ -45,21 +45,16 @@ if TYPE_CHECKING:
 _DEFAULT_CP_PROFILE_NAME = "dsv4.cp.all_gather"
 
 
-# CP gather roles — which workspace buffer backs a given gather. All three
-# roles are workspace-backed (sub-region per role; sizes pre-computed from
+# CP gather roles — which workspace buffer backs a given compressor gather.
+# Both roles are workspace-backed (sub-region per role; sizes pre-computed from
 # ``V4Args`` so no fresh allocation is needed in the hot path):
 #   * ``main``        — the CSA/HCA compressor's fused ``[kv|score]`` gather.
-#                       fp32, on the compressor side stream.
+#                       fp32, on the serialized CP communication stream.
 #   * ``indexer``     — the nested indexer compressor's gather (distinct buffer
 #                       so it can be in flight alongside ``main`` under overlap).
-#                       fp32, same side stream as ``main``.
-#   * ``swa_kv_full`` — the SWA ``kv_full`` gather. bf16, on its own side
-#                       stream (overlaps ``compute_qr``). Width is fixed at
-#                       ``args.head_dim``; rows == ``seq_len_full`` like the
-#                       others.
+#                       fp32, same serialized CP stream as ``main``.
 _CP_ROLE_MAIN = "main"
 _CP_ROLE_INDEXER = "indexer"
-_CP_ROLE_SWA_KV_FULL = "swa_kv_full"
 
 
 @dataclass
@@ -208,7 +203,6 @@ class CudaAsyncCPGatherImpl:
         assert cp_role in (
             _CP_ROLE_MAIN,
             _CP_ROLE_INDEXER,
-            _CP_ROLE_SWA_KV_FULL,
         ), f"unknown cp_role {cp_role!r}"
         profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.async"
         local_2d = _cp_gather_2d(local_2d, cp_ctx)
@@ -227,28 +221,23 @@ class CudaAsyncCPGatherImpl:
             )
 
         gather_rows = world_size * local_2d.size(0)
-        # All three roles draw from the per-forward workspace (a dedicated pair
-        # each, reused across layers). Main / indexer share the compressor side
-        # stream and may be in flight back-to-back under the overlap
-        # orchestrator; SWA runs on its own side stream and can be in flight
-        # alongside both. Distinct sub-regions guarantee they never alias.
+        # Both compressor roles draw from the per-forward workspace (a dedicated
+        # pair each, reused across layers) and share the serialized compressor
+        # side stream. Distinct sub-regions guarantee the roles never alias.
         with record_function_range(f"{profile_name}.alloc"):
             if cp_role == _CP_ROLE_MAIN:
                 gathered = workspace.cp_gather_main(
                     gather_rows, local_2d.size(1), local_2d.dtype
                 )
-            elif cp_role == _CP_ROLE_INDEXER:
+            else:
                 gathered = workspace.cp_gather_idx(
-                    gather_rows, local_2d.size(1), local_2d.dtype
-                )
-            else:  # _CP_ROLE_SWA_KV_FULL
-                gathered = workspace.cp_gather_swa(
                     gather_rows, local_2d.size(1), local_2d.dtype
                 )
 
         current_stream = torch.cuda.current_stream(local_2d.device)
-        gather_stream = stream or torch.cuda.Stream(device=local_2d.device)
-        gather_stream.wait_stream(current_stream)
+        gather_stream = stream if stream is not None else current_stream
+        if stream is not None:
+            gather_stream.wait_stream(current_stream)
         # ``local_2d`` is allocated on ``current_stream`` but read by the NCCL
         # kernel on ``gather_stream``. Without ``record_stream`` the caching
         # allocator can reuse its storage before NCCL finishes, corrupting the
@@ -310,15 +299,13 @@ class CudaAsyncCPGatherImpl:
             dtype = handle.gathered.dtype
             if handle.cp_role == _CP_ROLE_MAIN:
                 out_buf = handle.workspace.cp_restore_main(rows, dim, dtype)
-            elif handle.cp_role == _CP_ROLE_INDEXER:
+            else:
                 out_buf = handle.workspace.cp_restore_idx(rows, dim, dtype)
-            else:  # _CP_ROLE_SWA_KV_FULL
-                out_buf = handle.workspace.cp_restore_swa(rows, dim, dtype)
         with record_function_range(f"{handle.profile_name}.restore"):
             full = _cp_restore_gathered_full_2d(
                 handle.gathered, handle.cp_ctx, out=out_buf
             )
-        # All three roles' gather/restore buffers come from the per-forward
+        # Compressor gather/restore buffers come from the per-forward
         # ``PrefillWorkspace`` union — they are reused across layers (never
         # freed mid-forward) and cross-layer reuse is serialized by the
         # ``gather_stream.wait_stream(current_stream)`` edge in ``start``. No
@@ -624,15 +611,15 @@ def cp_all_gather_full_async(
 ) -> Any:
     """Start CP gather for flattened ``[T_local, H]`` input.
 
-    The production implementation is CUDA/NCCL async and has no implicit
-    fallback. CPU/reference tests can instantiate ``SyncCPGatherImpl``
-    directly.
+    The production implementation is CUDA/NCCL async. Callers that want side
+    stream overlap must pass an explicit stream; otherwise the current stream is
+    used so helper fallback paths do not allocate profiler-visible streams.
 
     ``workspace`` is the per-forward :class:`PrefillWorkspace` (required, never
-    None) that backs the gather AND restore scratch for every role.
+    None) that backs the gather AND restore scratch for every compressor role.
 
     ``cp_role`` selects which workspace buffer pair backs this gather:
-    ``_CP_ROLE_MAIN`` / ``_CP_ROLE_INDEXER`` / ``_CP_ROLE_SWA_KV_FULL``.
+    ``_CP_ROLE_MAIN`` / ``_CP_ROLE_INDEXER``.
     """
     return CudaAsyncCPGatherImpl().start(
         local_2d,
@@ -651,6 +638,26 @@ def cp_wait_gather_full(handle: Any) -> torch.Tensor:
     if isinstance(handle, CPCudaAsyncGatherHandle):
         return CudaAsyncCPGatherImpl().wait(handle)
     raise TypeError(f"unsupported CP gather handle type: {type(handle)!r}")
+
+
+def _cp_all_gather_into_empty(tensor: torch.Tensor, group: Group) -> torch.Tensor:
+    """DSV4-local all-gather with an uninitialized output buffer.
+
+    ``torch.distributed.all_gather_into_tensor`` writes every output element.
+    The generic ``collective_torch.all_gather`` zero-initializes its output for
+    broader safety, but the CP varlen hot path does not need that memset.
+    """
+    if not torch.distributed.is_initialized():
+        return all_gather(tensor, group=group)
+    process_group = collective_torch._get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+    gathered = torch.empty(
+        [world_size * tensor.shape[0]] + list(tensor.shape)[1:],
+        device=tensor.device,
+        dtype=tensor.dtype,
+    )
+    torch.distributed.all_gather_into_tensor(gathered, tensor, group=process_group)
+    return gathered
 
 
 def cp_all_gather_full_varlen(
@@ -681,7 +688,7 @@ def cp_all_gather_full_varlen(
     trailing = local_flat.shape[1:]
     local_2d = local_flat.reshape(cp_ctx.chunk_length, -1).contiguous()
     with record_function_range(f"{profile_name}.launch"):
-        gathered = all_gather(local_2d, group=Group.TP)
+        gathered = _cp_all_gather_into_empty(local_2d, group=Group.TP)
     with record_function_range(f"{profile_name}.restore"):
         full = _cp_restore_gathered_full_2d(gathered, cp_ctx)
     return full.view((cp_ctx.seq_len_full,) + trailing)
@@ -921,14 +928,14 @@ def build_cp_full_prefill_positions(
         pos = torch.empty((0,), dtype=torch.long, device=device)
         req = torch.empty((0,), dtype=torch.long, device=device)
 
-    zero = torch.zeros(1, dtype=torch.int32, device=device)
+    zero = torch.zeros(1, dtype=torch.long, device=device)
     cu_seq = torch.cat(
-        [zero, torch.cumsum(lengths.to(torch.int32), dim=0)]
+        [zero, torch.cumsum(lengths.to(torch.long), dim=0)]
     ).contiguous()
     return (
         pos,
         req,
-        prefixes.to(device=device, dtype=torch.int32).contiguous(),
+        prefixes.to(device=device, dtype=torch.long).contiguous(),
         cu_seq,
     )
 
@@ -1134,7 +1141,8 @@ def cp_gather_request_pool_blocks(
 
     # NCCL all_gather. Each rank contributes [L, *block_shape] -> output is
     # [cp_size * L, *block_shape] rank-major.
-    gathered = all_gather(local_owned, group=Group.TP)
+    with record_function_range("dsv4.cp.all_gather.pool_blocks.launch"):
+        gathered = all_gather(local_owned, group=Group.TP)
 
     return cp_interleave_gathered_pool_blocks(gathered, cp_size, total_logical_blocks)
 

@@ -43,9 +43,9 @@ std::string PrefillCPConfig::to_string() const {
             oss << "UNKNOWN";
             break;
     }
-    oss << "\n comm_buffer_size: " << comm_buffer_size << "\n"
-        << " kv_cache_sharded: " << kv_cache_sharded << "\n"
-        << " prefill_cp_size: " << prefill_cp_size << "\n";
+    oss << "\n comm_buffer_size: " << comm_buffer_size
+        << "\n kv_cache_sharded: " << (kv_cache_sharded ? "true" : "false") << "\n prefill_cp_size: " << prefill_cp_size
+        << "\n";
     return oss.str();
 }
 
@@ -67,6 +67,7 @@ std::string ParallelismConfig::to_string() const {
         << "ffn_tp_size: " << ffn_tp_size << "\n"
         << "ffn_tp_rank: " << ffn_tp_rank << "\n"
         << "enable_sp: " << enable_sp << "\n"
+        << "role_type: " << static_cast<int>(role_type) << "\n"
         << "ffn_disaggregate_config: {\n"
         << ffn_disaggregate_config.to_string() << "\n}\n"
         << "prefill_cp_config: {\n"
@@ -125,6 +126,7 @@ std::string KVCacheConfig::to_string() const {
         << "memory_cache_disk_buffered_io: " << memory_cache_disk_buffered_io << "\n"
         << "memory_cache_disk_sync_timeout_ms: " << memory_cache_disk_sync_timeout_ms << "\n"
         << "linear_step: " << linear_step << "\n"
+        << "int8_kv_cache: " << int8_kv_cache << "\n"
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
         << "ssm_state_dtype: " << ssm_state_dtype << "\n"
         << "kv_cache_mem_mb: " << kv_cache_mem_mb << "\n"
@@ -137,8 +139,16 @@ std::string KVCacheConfig::to_string() const {
         << "enable_remote_cache: " << enable_remote_cache << "\n"
         << "write_cache_sync: " << write_cache_sync << "\n"
         << "enable_tiered_memory_cache: " << enable_tiered_memory_cache << "\n"
+        << "enable_gpu_prefix_tree: " << enable_gpu_prefix_tree << "\n"
+        << "enable_prefix_tree_memory_cache: " << enable_prefix_tree_memory_cache << "\n"
+        << "enable_legacy_memory_connector_fallback: " << enable_legacy_memory_connector_fallback << "\n"
+        << "prefix_tree_memory_state_swa_pool_ratio: " << prefix_tree_memory_state_swa_pool_ratio << "\n"
+        << "enable_dsv4_state_block_independent_eviction: " << enable_dsv4_state_block_independent_eviction << "\n"
         << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n"
-        << "load_cache_retry_times: " << load_cache_retry_times << "\n";
+        << "load_cache_retry_times: " << load_cache_retry_times << "\n"
+        << "dsv4_fixed_pool_blocks: " << dsv4_fixed_pool_blocks << "\n"
+        << "dsv4_hca_state_pool_blocks: " << dsv4_hca_state_pool_blocks << "\n"
+        << "dsv4_fixed_pool_use_memory: " << dsv4_fixed_pool_use_memory << "\n";
     return oss.str();
 }
 
@@ -150,16 +160,14 @@ std::string ProfilingDebugLoggingConfig::to_string() const {
         << "ft_core_dump_on_exception: " << ft_core_dump_on_exception << "\n"
         << "ft_alog_conf_path: " << ft_alog_conf_path << "\n"
         << "gen_timeline_sync: " << gen_timeline_sync << "\n"
-        << "timeline_start_step: " << timeline_start_step << "\n"
-        << "timeline_num_steps: " << timeline_num_steps << "\n"
-        << "timeline_trace_name: " << timeline_trace_name << "\n"
         << "torch_cuda_profiler_dir: " << torch_cuda_profiler_dir << "\n"
         << "log_file_backup_count: " << log_file_backup_count << "\n"
         << "debug_load_server: " << debug_load_server << "\n"
         << "hack_layer_num: " << hack_layer_num << "\n"
         << "debug_start_fake_process: " << debug_start_fake_process << "\n"
         << "enable_detail_log: " << enable_detail_log << "\n"
-        << "check_nan: " << check_nan << "\n";
+        << "check_nan: " << check_nan << "\n"
+        << "enable_model_inputs_log: " << enable_model_inputs_log << "\n";
     return oss.str();
 }
 
@@ -178,7 +186,8 @@ std::string LinearAttentionConfig::to_string() const {
 // HybridAttentionConfig
 std::string HybridAttentionConfig::to_string() const {
     std::ostringstream oss;
-    oss << "enable_hybrid_attention: " << enable_hybrid_attention << "\n";
+    oss << "enable_hybrid_attention: " << enable_hybrid_attention << "\n"
+        << "enable_independent_kv_cache_pools: " << enable_independent_kv_cache_pools << "\n";
     return oss.str();
 }
 
@@ -187,6 +196,7 @@ std::string HWKernelConfig::to_string() const {
     std::ostringstream oss;
     oss << "deep_gemm_num_sm: " << deep_gemm_num_sm << "\n"
         << "arm_gemm_use_kai: " << arm_gemm_use_kai << "\n"
+        << "enable_stable_scatter_add: " << enable_stable_scatter_add << "\n"
         << "enable_multi_block_mode: " << enable_multi_block_mode << "\n"
         << "ft_disable_custom_ar: " << ft_disable_custom_ar << "\n"
         << "rocm_hipblaslt_config: " << rocm_hipblaslt_config << "\n"
@@ -198,7 +208,9 @@ std::string HWKernelConfig::to_string() const {
         << "prefill_capture_seq_lens size: " << prefill_capture_seq_lens.size() << "\n"
         << "decode_capture_batch_sizes size: " << decode_capture_batch_sizes.size() << "\n"
         << "disable_dpc_random: " << disable_dpc_random << "\n"
-        << "rocm_disable_custom_ag: " << rocm_disable_custom_ag;
+        << "rocm_disable_custom_ag: " << rocm_disable_custom_ag << "\n"
+        << "deterministic_gemm: " << deterministic_gemm << "\n"
+        << "deterministic_attn: " << deterministic_attn;
     return oss.str();
 }
 
@@ -220,7 +232,6 @@ std::string MoeConfig::to_string() const {
         << "use_deepep_internode: " << use_deepep_internode << "\n"
         << "use_deepep_low_latency: " << use_deepep_low_latency << "\n"
         << "use_deepep_p2p_low_latency: " << use_deepep_p2p_low_latency << "\n"
-        << "use_mori_ep: " << use_mori_ep << "\n"
         << "fake_balance_expert: " << fake_balance_expert << "\n"
         << "hack_moe_expert: " << hack_moe_expert << "\n"
         << "deep_ep_num_sm: " << deep_ep_num_sm << "\n"
@@ -235,7 +246,7 @@ std::string MoeConfig::to_string() const {
 // ModelSpecificConfig
 std::string ModelSpecificConfig::to_string() const {
     std::ostringstream oss;
-    // Empty struct — no fields remaining.
+    oss << "load_python_model: " << load_python_model;
     return oss.str();
 }
 
@@ -357,22 +368,23 @@ std::string BatchDecodeSchedulerConfig::to_string() const {
 }
 
 // FIFOSchedulerConfig
-PDFusionSchedulerMode parsePDFusionSchedulerMode(const std::string& mode) {
-    if (mode.empty()) {
-        return PDFusionSchedulerMode::DEFAULT;
-    }
-    if (mode == "ratio") {
-        return PDFusionSchedulerMode::RATIO;
-    }
-    return PDFusionSchedulerMode::UNKNOWN;
-}
-
 std::string FIFOSchedulerConfig::to_string() const {
     std::ostringstream oss;
     oss << "max_context_batch_size: " << max_context_batch_size << "\n"
         << "max_batch_tokens_size: " << max_batch_tokens_size << "\n"
-        << "pdfusion_scheduler_mode: " << pdfusion_scheduler_mode << "\n"
-        << "decode_prefill_ratio: " << decode_prefill_ratio;
+        << "cp_force_single_prefill: " << cp_force_single_prefill << "\n"
+        << "max_inited_kv_cache_streams: " << max_inited_kv_cache_streams;
+    return oss.str();
+}
+
+// GrammarConfig
+std::string GrammarConfig::to_string() const {
+    std::ostringstream oss;
+    oss << "grammar_backend: " << grammar_backend << "\n"
+        << "constrained_json_disable_any_whitespace: " << constrained_json_disable_any_whitespace << "\n"
+        << "num_workers: " << num_workers << "\n"
+        << "tokenizer_info_json_size: " << tokenizer_info_json.size() << "\n"
+        << "override_stop_tokens_size: " << override_stop_tokens.size();
     return oss.str();
 }
 
@@ -385,6 +397,7 @@ std::string RuntimeConfig::to_string() const {
         << "warm_up: " << warm_up << "\n"
         << "warm_up_with_loss: " << warm_up_with_loss << "\n"
         << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
+        << "use_gather_batch_scheduler: " << use_gather_batch_scheduler << "\n"
         << "batch_decode_scheduler_config: {\n"
         << batch_decode_scheduler_config.to_string() << "\n}\n"
         << "fifo_scheduler_config: {\n"
@@ -417,41 +430,21 @@ std::string ArpcConfig::to_string() const {
     return oss.str();
 }
 
-GrpcConfig::GrpcConfig(const std::string& json_str) {
-    from_json(json_str);
+static int parse_optional_root_int_json(const std::string& json_str, const char* key, int default_value) {
+    try {
+        std::string pat = std::string("\"") + key + "\"\\s*:\\s*(\\d+)";
+        std::regex  re(pat);
+        std::smatch m;
+        if (std::regex_search(json_str, m, re) && m.size() > 1) {
+            return std::stoi(m[1].str());
+        }
+    } catch (...) {}
+    return default_value;
 }
 
-std::string GrpcConfig::to_string() const {
-    std::ostringstream oss;
-
-    // Output client config
-    oss << "Client Config:\n";
-    for (auto it = client_config.begin(); it != client_config.end(); ++it) {
-        oss << "  " << it->first << ": " << it->second << "\n";
-    }
-
-    // Output server config
-    oss << "Server Config:\n";
-    for (auto it = server_config.begin(); it != server_config.end(); ++it) {
-        oss << "  " << it->first << ": " << it->second << "\n";
-    }
-
-    return oss.str();
-}
-
-void GrpcConfig::from_json(const std::string& json_str) {
-    if (json_str.empty()) {
-        return;
-    }
-
-    // Clear existing configs
-    client_config.clear();
-    server_config.clear();
-
-    // Parse 2-level JSON structure
-    // Expected format: {"client_config": {"key1": value1, ...}, "server_config": {"key2": value2, ...}}
-
-    // Find client_config section
+static void parse_grpc_client_server_maps_json(const std::string&          json_str,
+                                               std::map<std::string, int>& client_config,
+                                               std::map<std::string, int>& server_config) {
     std::regex  client_section_pattern("\"client_config\"\\s*:\\s*\\{([^}]+)\\}");
     std::smatch client_match;
     if (std::regex_search(json_str, client_match, client_section_pattern)) {
@@ -468,7 +461,6 @@ void GrpcConfig::from_json(const std::string& json_str) {
         }
     }
 
-    // Find server_config section
     std::regex  server_section_pattern("\"server_config\"\\s*:\\s*\\{([^}]+)\\}");
     std::smatch server_match;
     if (std::regex_search(json_str, server_match, server_section_pattern)) {
@@ -484,6 +476,64 @@ void GrpcConfig::from_json(const std::string& json_str) {
             ++iter;
         }
     }
+}
+
+static void append_grpc_maps_to_stream(std::ostringstream& oss, const GrpcMapsConfig& maps) {
+    oss << "Client Config:\n";
+    for (auto it = maps.client_config.begin(); it != maps.client_config.end(); ++it) {
+        oss << "  " << it->first << ": " << it->second << "\n";
+    }
+    oss << "Server Config:\n";
+    for (auto it = maps.server_config.begin(); it != maps.server_config.end(); ++it) {
+        oss << "  " << it->first << ": " << it->second << "\n";
+    }
+}
+
+GrpcConfig::GrpcConfig(const std::string& json_str) {
+    from_json(json_str);
+}
+
+std::string GrpcConfig::to_string() const {
+    std::ostringstream oss;
+    append_grpc_maps_to_stream(oss, *this);
+    oss << "max_server_pollers: " << max_server_pollers << "\n";
+    return oss.str();
+}
+
+void GrpcConfig::from_json(const std::string& json_str) {
+    if (json_str.empty()) {
+        return;
+    }
+
+    client_config.clear();
+    server_config.clear();
+    max_server_pollers = 0;
+
+    parse_grpc_client_server_maps_json(json_str, client_config, server_config);
+    max_server_pollers = parse_optional_root_int_json(json_str, "max_server_pollers", 0);
+}
+
+DashScGrpcConfig::DashScGrpcConfig(const std::string& json_str) {
+    from_json(json_str);
+}
+
+std::string DashScGrpcConfig::to_string() const {
+    std::ostringstream oss;
+    append_grpc_maps_to_stream(oss, *this);
+    oss << "max_server_workers: " << max_server_workers << "\n";
+    return oss.str();
+}
+
+void DashScGrpcConfig::from_json(const std::string& json_str) {
+    if (json_str.empty()) {
+        return;
+    }
+    client_config.clear();
+    server_config.clear();
+    max_server_workers = 4;
+    parse_grpc_client_server_maps_json(json_str, client_config, server_config);
+    int mw             = parse_optional_root_int_json(json_str, "max_server_workers", 4);
+    max_server_workers = mw > 0 ? mw : 4;
 }
 
 // FfnDisAggregateConfig

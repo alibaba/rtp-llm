@@ -1,5 +1,5 @@
 load("//:def.bzl", "rocm_copts", "any_cuda_copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//rtp_llm:__subpackages__"])
 
 rocm_deps = [
@@ -32,14 +32,8 @@ cc_library(
 
 cc_library(
     name = "rocm_fused_qk_rmsnorm",
-    srcs = [
-        "fused_qk_rmsnorm.cu",
-        "fused_qk_rmsnorm_v2.cu",
-    ],
-    hdrs = [
-        "fused_qk_rmsnorm.h",
-        "fused_qk_rmsnorm_v2.h",
-    ],
+    srcs = ["fused_qk_rmsnorm.cu"],
+    hdrs = ["fused_qk_rmsnorm.h"],
     deps = rocm_deps + [
         "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
     ],

@@ -18,9 +18,11 @@ from rtp_llm.ops import (
     ArpcConfig,
     CacheStoreConfig,
     ConcurrencyConfig,
+    DashScGrpcConfig,
     DeviceResourceConfig,
     FfnDisAggregateConfig,
     FMHAConfig,
+    GrammarConfig,
     GrpcConfig,
     HWKernelConfig,
     MiscellaneousConfig,
@@ -68,6 +70,8 @@ class EngineConfig:
     misc_config: MiscellaneousConfig
     arpc_config: ArpcConfig
     grpc_config: GrpcConfig
+    dash_sc_grpc_config: DashScGrpcConfig
+    grammar_config: GrammarConfig
     load_config: LoadConfig
 
     def to_string(self) -> str:
@@ -173,6 +177,24 @@ class EngineConfig:
         else:
             lines.append(str(self.arpc_config))
 
+        lines.append("\n[GrpcConfig]")
+        if hasattr(self.grpc_config, "to_string"):
+            lines.append(self.grpc_config.to_string())
+        else:
+            lines.append(str(self.grpc_config))
+
+        lines.append("\n[DashScGrpcConfig]")
+        if hasattr(self.dash_sc_grpc_config, "to_string"):
+            lines.append(self.dash_sc_grpc_config.to_string())
+        else:
+            lines.append(str(self.dash_sc_grpc_config))
+
+        lines.append("\n[GrammarConfig]")
+        if hasattr(self.grammar_config, "to_string"):
+            lines.append(self.grammar_config.to_string())
+        else:
+            lines.append(str(self.grammar_config))
+
         lines.append("\n[LoadConfig]")
         if hasattr(self.load_config, "to_string"):
             lines.append(self.load_config.to_string())
@@ -226,13 +248,24 @@ class EngineConfig:
         cache_store_config = py_env_configs.cache_store_config
         arpc_config = py_env_configs.arpc_config
         grpc_config = py_env_configs.grpc_config
+        dash_sc_grpc_config = py_env_configs.dash_sc_grpc_config
+        grammar_config = py_env_configs.grammar_config
         load_config = py_env_configs.load_config
 
-        # role_config.role_type property automatically converts string to RoleType enum
-        pd_sep_config.role_type = py_env_configs.role_config.role_type
-        # Cache topology construction consumes the role from ParallelismConfig.
-        # Keep it aligned with the PD role so prefill CP builds rank-local
-        # STATE/SWA layouts while decode builds the corresponding full layout.
+        # Setup pd_sep_config role_type based on vit_separation
+        if (
+            py_env_configs.vit_config.vit_separation
+            == VitSeparation.VIT_SEPARATION_ROLE
+        ):
+            pd_sep_config.role_type = RoleType.VIT
+        else:
+            # role_config.role_type property automatically converts string to RoleType enum
+            pd_sep_config.role_type = py_env_configs.role_config.role_type
+
+        # Mirror role into parallelism_config so model construction can read it
+        # via parallelism_config.role_type instead of os.environ["ROLE_TYPE"].
+        # Mirrors the vit_separation override above so VIT rank also surfaces
+        # as RoleType::VIT to model code.
         parallelism_config.role_type = pd_sep_config.role_type
 
         if nccl_comm_config is None:
@@ -263,6 +296,8 @@ class EngineConfig:
             misc_config=misc_config,
             arpc_config=arpc_config,
             grpc_config=grpc_config,
+            dash_sc_grpc_config=dash_sc_grpc_config,
+            grammar_config=grammar_config,
             load_config=load_config,
         )
 

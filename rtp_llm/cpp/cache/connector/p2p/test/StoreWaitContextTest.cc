@@ -2,6 +2,8 @@
 #include <memory>
 #include <thread>
 #include <chrono>
+#include <optional>
+
 #include "rtp_llm/cpp/cache/connector/p2p/StoreWaitContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -38,8 +40,8 @@ TEST_F(StoreWaitContextTest, CheckerCheckOnce_NoEvent_TreatedAsReady) {
     int64_t deadline_ms = getDeadlineMs();
     auto    collector   = std::make_shared<PrefillWorkerStoreMetricsCollector>();
 
-    // Empty event is treated as ready.
-    StoreWaitContext context(request_id, nullptr, buffer, deadline_ms, collector);
+    // nullopt event is treated as ready
+    StoreWaitContext context(request_id, std::nullopt, buffer, deadline_ms, collector);
     checker.addContext(std::move(context));
 
     EXPECT_EQ(checker.getContextCount(), 1);
@@ -58,8 +60,8 @@ TEST_F(StoreWaitContextTest, CheckerCheckOnce_Timeout) {
     int64_t deadline_ms = currentTimeMs() - 100;  // already expired
     auto    collector   = std::make_shared<PrefillWorkerStoreMetricsCollector>();
 
-    // Even with no event, timeout takes precedence.
-    StoreWaitContext context(request_id, nullptr, buffer, deadline_ms, collector);
+    // Even with nullopt, timeout takes precedence
+    StoreWaitContext context(request_id, std::nullopt, buffer, deadline_ms, collector);
     checker.addContext(std::move(context));
 
     EXPECT_EQ(checker.getContextCount(), 1);

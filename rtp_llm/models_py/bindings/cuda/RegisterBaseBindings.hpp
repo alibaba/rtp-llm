@@ -5,6 +5,7 @@
 #include "rtp_llm/models_py/bindings/common/FusedQKRmsNorm.h"
 #include "rtp_llm/models_py/bindings/common/WriteCacheStoreOp.h"
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
+#include "rtp_llm/models_py/bindings/cuda/FlashInferOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FlashInferMlaParams.h"
 #include "rtp_llm/models_py/bindings/cuda/SelectTopkOp.h"
 #include "rtp_llm/models_py/bindings/cuda/GroupTopKOp.h"
@@ -144,16 +145,8 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("fuse_silu_and_mul"),
                   py::arg("masked_m"));
 
-    rtp_ops_m.def("embedding",
-                  &embedding,
-                  "Embedding lookup kernel",
-                  py::arg("output"),
-                  py::arg("input"),
-                  py::arg("weight"),
-                  py::arg("position_ids")     = py::none(),
-                  py::arg("token_type_ids")   = py::none(),
-                  py::arg("text_tokens_mask") = py::none());
-
+    rtp_ops_m.def(
+        "embedding", &embedding, "Embedding lookup kernel", py::arg("output"), py::arg("input"), py::arg("weight"));
     rtp_ops_m.def("embedding_bert",
                   &embeddingBert,
                   "EmbeddingBert lookup kernel",
@@ -228,29 +221,6 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("row_starts"),
                   py::arg("top_k"));
 
-    rtp_ops_m.def("dsv4_persistent_topk",
-                  &dsv4_persistent_topk,
-                  "DSv4 persistent radix-select TopK",
-                  py::arg("logits"),
-                  py::arg("lengths"),
-                  py::arg("output"),
-                  py::arg("workspace"),
-                  py::arg("k"),
-                  py::arg("max_seq_len"));
-
-    rtp_ops_m.def("dsv4_top_k_per_row_prefill",
-                  &dsv4_top_k_per_row_prefill,
-                  "Per-row TopK for DSv4 indexer prefill",
-                  py::arg("logits"),
-                  py::arg("row_starts"),
-                  py::arg("row_ends"),
-                  py::arg("indices_out"),
-                  py::arg("num_rows"),
-                  py::arg("stride0"),
-                  py::arg("stride1"),
-                  py::arg("top_k"),
-                  py::arg("force_radix_sort") = false);
-
     rtp_ops_m.def("fast_topk_transform_fused",
                   &fast_topk_transform_fused,
                   "Fast TopK Transform Fused kernel",
@@ -269,6 +239,48 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("topk_indices_ragged"),
                   py::arg("topk_indices_offset"),
                   py::arg("row_starts") = py::none());
+
+    rtp_ops_m.def("persistent_topk",
+                  &persistent_topk,
+                  "Persistent TopK kernel",
+                  py::arg("logits"),
+                  py::arg("lengths"),
+                  py::arg("output"),
+                  py::arg("workspace"),
+                  py::arg("k"),
+                  py::arg("max_seq_len"));
+
+    // Vendored from vLLM (csrc/persistent_topk.cuh + csrc/topk.cu @ b55d830).
+    // DSv4-specific variant of the radix-select TopK kernel registered above:
+    // writes -1 padding past per-row ``lengths`` directly into the output
+    // buffer (folds the previous fill_/copy_/masked_fill_ chain). Used by
+    // the FP8 indexer decode hot path; see kernels/dsv4_persistent_topk.h.
+    rtp_ops_m.def("dsv4_persistent_topk",
+                  &dsv4_persistent_topk,
+                  "DSv4 persistent radix-select TopK (K∈{512,1024,2048})",
+                  py::arg("logits"),
+                  py::arg("lengths"),
+                  py::arg("output"),
+                  py::arg("workspace"),
+                  py::arg("k"),
+                  py::arg("max_seq_len"));
+
+    // Vendored from vLLM (csrc/sampler.cu::top_k_per_row_prefill).
+    // Per-row TopK over [row_starts[r], row_ends[r]); returned indices
+    // are relative to row_starts[r], padded with -1 past the per-row
+    // valid count. CUDA-only.
+    rtp_ops_m.def("dsv4_top_k_per_row_prefill",
+                  &dsv4_top_k_per_row_prefill,
+                  "Per-row TopK for DSv4 indexer prefill",
+                  py::arg("logits"),
+                  py::arg("row_starts"),
+                  py::arg("row_ends"),
+                  py::arg("indices_out"),
+                  py::arg("num_rows"),
+                  py::arg("stride0"),
+                  py::arg("stride1"),
+                  py::arg("top_k"),
+                  py::arg("force_radix_sort") = false);
 
     rtp_ops_m.def("indexer_k_quant_and_cache",
                   &rtp_llm::indexer_k_quant_and_cache,

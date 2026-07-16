@@ -1,11 +1,10 @@
-load("@arch_config//:arch_select.bzl", "requirement")
+load("//bazel:arch_select.bzl", "requirement")
 
 py_library(
     name = "utils",
     srcs = glob([
         "utils/*.py",
     ]),
-    visibility = ["//visibility:public"],
 )
 
 # flashinfer-python is only available for CUDA12
@@ -27,14 +26,6 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
-filegroup(
-    name = "rocm_fp8_ptpc_hipb_solutions",
-    srcs = [
-        "modules/factory/linear/impl/rocm/data/fp8_ptpc_hipb_solutions.json",
-    ],
-    visibility = ["//visibility:public"],
-)
-
 py_library(
     name = "tile_kernels_mhc",
     srcs = glob([
@@ -51,20 +42,18 @@ py_library(
         "modules/*.py",
         "modules/**/*.py",
     ]),
-    data = [
-        ":cutlass_moe_config",
-        ":rocm_fp8_ptpc_hipb_solutions",
-    ],
+    data = [":cutlass_moe_config"],
     deps = [
         ":utils",
         ":tile_kernels_mhc",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
-        "//rtp_llm/models_py/distributed:moriep_wrapper",
         "//rtp_llm/models_py/distributed:collective_torch",
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
+        # cuda13 lock omits flashinfer-python and deep_ep → only deep_gemm.
         "@//:using_cuda13_x86": ["deep_gemm"],
+        "@//:using_cuda13_arm": ["deep_gemm"],
         "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,
         "@//:using_rocm": [
@@ -73,20 +62,38 @@ py_library(
         ],
         "//conditions:default": [],
     }) + select({
+        # cuda13 lock currently ships flash-mla + tilelang (no fast-hadamard).
         "@//:using_cuda13_x86": ["flash-mla", "tilelang"],
+        "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashmla,
+        "@//:using_cuda12_arm": flashmla,
         "//conditions:default": [],
     }) + select({
+        # rtp_kernel built from gitlab cuda_extension main against torch 2.11+cu130.
         "@//:using_cuda13_x86": rtp_kernel,
+        "@//:using_cuda13_arm": rtp_kernel,
         "@//:using_cuda12_9_x86": rtp_kernel,
         "@//:using_cuda12_arm": rtp_kernel,
         "//conditions:default": [],
     }) + select({
+        # flash_attn / flash_attn_3: deferred rebuild.
         "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
         "//conditions:default": [],
     }),
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "dsv4_fused_kernel_sources",
+    srcs = [
+        "modules/dsv4/_fused_inv_rope_fp8_quant_triton.py",
+        "modules/dsv4/_fused_rmsnorm_rope_triton.py",
+        "modules/dsv4/_rope_only_triton.py",
+        "modules/dsv4/moe/_mega_input_pack_triton.py",
+    ],
     visibility = ["//visibility:public"],
 )
 

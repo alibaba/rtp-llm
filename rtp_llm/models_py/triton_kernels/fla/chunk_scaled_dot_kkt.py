@@ -9,8 +9,7 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
-from rtp_llm.models_py.triton_kernels.fla.op import exp2, safe_exp
-from rtp_llm.models_py.triton_kernels.fla.utils import is_amd
+from rtp_llm.models_py.triton_kernels.fla.op import safe_exp
 
 
 @triton.heuristics(
@@ -44,7 +43,6 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
-    IS_LOG2: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -84,15 +82,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         )
         b_g = tl.load(p_g, boundary_check=(0,))
         b_g_diff = b_g[:, None] - b_g[None, :]
-        if IS_LOG2:
-            # AMD path: g is in log2 domain (scaled by RCP_LN2 in
-            # chunk_local_cumsum). b_g_diff ≤ 0 within each chunk
-            # (cumsum of logsigmoid ≤ 0), so exp2 ∈ (0, 1].
-            b_A = b_A * exp2(b_g_diff)
-        else:
-            # NVIDIA path: g is in natural-log domain (no RCP_LN2 scaling),
-            # keep the original safe_exp to preserve bit-level semantics.
-            b_A = b_A * safe_exp(b_g_diff)
+        b_A = b_A * safe_exp(b_g_diff)
 
     b_A *= b_beta[:, None]
     b_A = tl.where(o_t[:, None] > o_t[None, :], b_A, 0)
@@ -155,7 +145,6 @@ def chunk_scaled_dot_kkt_fwd(
         K=K,
         BT=BT,
         BK=64,
-        IS_LOG2=is_amd,
         num_warps=8,
         num_stages=3,
     )

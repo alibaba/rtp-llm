@@ -16,17 +16,16 @@ from rtp_llm.config.model_config import (
     update_stop_words_from_env,
     update_tokenizer_special_tokens,
 )
-from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import SpecialTokens, TaskType
 from rtp_llm.server.misc import format_exception
-from rtp_llm.structure.request_extractor import request_id_field_name
+from rtp_llm.server.request_headers import extract_request_headers
+from rtp_llm.structure.request_constants import request_id_field_name
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -83,7 +82,6 @@ class FrontendServer(object):
             embedding_config=self.py_env_configs.embedding_config,
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
-            vit_config=self.py_env_configs.vit_config,
         )
 
         # Create a temporary tokenizer to initialize special_tokens
@@ -131,9 +129,21 @@ class FrontendServer(object):
             )
             self.is_embedding = True
 
-    def stop(self):
+    async def close(self):
         if self._frontend_worker is not None:
-            self._frontend_worker.stop()
+            close = getattr(self._frontend_worker, "close", None)
+            if close is not None:
+                maybe = close()
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+
+    def stop(self):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.close())
+        else:
+            loop.create_task(self.close())
 
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         start_time = time.time()
@@ -198,6 +208,13 @@ class FrontendServer(object):
                 request, response
             )
         except asyncio.CancelledError as e:
+            try:
+                await response.aclose()
+            except Exception as close_error:
+                logging.warning(
+                    "close streaming response after cancellation failed: %s",
+                    close_error,
+                )
             self._access_logger.log_exception_access(request, e)
             kmonitor.report(
                 AccMetrics.CANCEL_QPS_METRIC,
@@ -208,10 +225,11 @@ class FrontendServer(object):
                     "source": request.get("source", "unkown"),
                 },
             )
+            raise
         except BaseException as e:
             # 捕获非Cancel以外所有的异常,所以使用BaseException
-            self._access_logger.log_exception_access(request, e)
             format_e = format_exception(e)
+            self._access_logger.log_exception_access(request, e, format_e)
             kmonitor.report(
                 AccMetrics.ERROR_QPS_METRIC,
                 1,
@@ -229,6 +247,7 @@ class FrontendServer(object):
             self._global_controller.decrement()
 
     async def inference(self, req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
+        request_headers: Dict[str, str] = {}
         try:
             if isinstance(req, str):
                 req = json.loads(req)
@@ -240,16 +259,19 @@ class FrontendServer(object):
                 self.server_id,
                 sequence,
             )
+            request_headers = extract_request_headers(raw_request.headers)
         except Exception as e:
             return self._handle_exception(req, e)
 
         def generate_call():
             assert self._frontend_worker is not None
+            if request_headers:
+                return self._frontend_worker.inference(**req, headers=request_headers)
             return self._frontend_worker.inference(**req)
 
         try:
             rep = await self._infer_wrap(req, raw_request, generate_call)
-        except Exception as e:
+        except BaseException as e:
             self._global_controller.decrement()
             raise e
 
@@ -292,16 +314,10 @@ class FrontendServer(object):
             return response
 
         try:
-            if request.prompt_logprobs is not None:
-                request.stream = False
-            elif request.extra_configs is not None and getattr(
-                request.extra_configs, "return_prompt_logits", False
-            ):
-                request.stream = False
             request_dict = request.model_dump(exclude_none=True)
             request_dict[request_id_field_name] = request_id
             rep = await self._infer_wrap(request_dict, raw_request, generate_call)
-        except Exception as e:
+        except BaseException as e:
             self._global_controller.decrement()
             raise e
 
@@ -309,56 +325,6 @@ class FrontendServer(object):
             self._global_controller.decrement()
 
         return rep
-
-    async def batch_chat_completion(self, request, raw_request: Request):
-        from rtp_llm.openai.api_datatype import BatchChatCompletionResponse
-
-        sequence = self._global_controller.increment() % 4096
-        request_id = generate_request_id(
-            self.py_env_configs.server_config.ip,
-            self.py_env_configs.server_config.server_port,
-            self.server_id,
-            sequence,
-        )
-        try:
-            assert self._openai_endpoint is not None
-            responses = await self._openai_endpoint.batch_chat_completion(
-                request_id, request
-            )
-            return ORJSONResponse(
-                content=BatchChatCompletionResponse(
-                    responses=[r.model_dump(exclude_none=True) for r in responses]
-                ).model_dump()
-            )
-        finally:
-            self._global_controller.decrement()
-
-    async def batch_infer(self, req: dict, raw_request: Request):
-        from rtp_llm.frontend.frontend_worker import BatchPipelineResponse
-
-        # Concurrency accounting: a batch counts as ONE scheduling unit because the engine
-        # atomically enqueues all prompts via BatchGenerateCall. Per-item counting would over-
-        # reject under the same concurrency_limit; the trade-off is that a large batch occupies
-        # only one slot regardless of N.
-        sequence = self._global_controller.increment() % 4096
-        request_id = generate_request_id(
-            self.py_env_configs.server_config.ip,
-            self.py_env_configs.server_config.server_port,
-            self.server_id,
-            sequence,
-        )
-        try:
-            assert self._frontend_worker is not None
-            prompts = req.get("prompt_batch", [])
-            generate_config = req.get("generate_config", {})
-            result = await self._frontend_worker.batch_infer(
-                prompts=prompts,
-                request_id=request_id,
-                generate_config=generate_config,
-            )
-            return ORJSONResponse(content=result.model_dump(exclude_none=True))
-        finally:
-            self._global_controller.decrement()
 
     async def chat_render(self, request: ChatCompletionRequest, raw_request: Request):
         try:
@@ -384,6 +350,7 @@ class FrontendServer(object):
             )
             self._access_logger.log_exception_access(request, e)
         else:
+            self._access_logger.log_exception_access(request, e, exception_json)
             kmonitor.report(
                 AccMetrics.ERROR_QPS_METRIC,
                 1,
@@ -394,7 +361,6 @@ class FrontendServer(object):
                     "error_code": error_code_str,
                 },
             )
-            self._access_logger.log_exception_access(request, e)
 
         rep = ORJSONResponse(exception_json, status_code=500)
         return rep

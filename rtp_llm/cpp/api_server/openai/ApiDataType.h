@@ -98,6 +98,7 @@ public:
     std::optional<std::vector<GPTFunctionDefinition>> functions;
     std::optional<float>                              temperature = 0.7;
     std::optional<float>                              top_p       = 1.0;
+    std::optional<int>                                top_k;
     std::optional<int>                                max_tokens;
     std::optional<std::variant<std::string, std::vector<std::string>>> stop;
     std::optional<bool>                                                stream;
@@ -105,7 +106,6 @@ public:
     std::optional<int>                                                 seed;
     std::optional<int>                                                 n;
     std::optional<bool>                                                logprobs;
-    std::optional<std::string>                                         logprobs_mode;
     std::optional<int>                                                 top_logprobs;
 
     // These params are hacked for our framework, not standard.

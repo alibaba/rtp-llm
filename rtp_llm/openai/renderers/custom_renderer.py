@@ -9,6 +9,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
 
 import torch
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
@@ -31,45 +32,21 @@ from rtp_llm.openai.api_datatype import (
     TopLogprob,
     UsageInfo,
 )
-from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
-    MMUrlType,
 )
-from rtp_llm.utils.prompt_logits_utils import build_prompt_logits_dict
+from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType, MultimodalInput
 from rtp_llm.utils.util import has_overlap_kmp
 from rtp_llm.utils.word_util import (
     get_stop_word_slices,
     is_truncated,
     truncate_response_with_stop_words,
 )
-
-
-def _build_prompt_tokens_details(
-    cached_tokens: int = 0,
-    multimodal_lengths: Optional[Dict[int, int]] = None,
-) -> Optional[PromptTokensDetails]:
-    image_tokens = (
-        multimodal_lengths.get(MMUrlType.IMAGE) if multimodal_lengths else None
-    )
-    video_tokens = (
-        multimodal_lengths.get(MMUrlType.VIDEO) if multimodal_lengths else None
-    )
-    audio_tokens = (
-        multimodal_lengths.get(MMUrlType.AUDIO) if multimodal_lengths else None
-    )
-    if cached_tokens > 0 or image_tokens or video_tokens or audio_tokens:
-        return PromptTokensDetails(
-            cached_tokens=cached_tokens if cached_tokens > 0 else None,
-            image_tokens=image_tokens,
-            video_tokens=video_tokens,
-            audio_tokens=audio_tokens,
-        )
-    return None
 
 
 def _get_think_config(generate_env_config):
@@ -215,7 +192,6 @@ class StreamResponseObject:
     usage: Optional[UsageInfo] = None
     aux_info: Optional[AuxInfo] = None
     extra_outputs: Optional[ChatCompletionExtraOutputs] = None
-    prompt_logits: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -250,7 +226,6 @@ class OutputDelta:
     input_length: int
     output_length: int
     reuse_length: int
-    multimodal_lengths: Optional[Dict[int, int]] = None
     extra_outputs: Optional[ChatCompletionExtraOutputs] = None
 
 
@@ -287,18 +262,14 @@ class RenderedInputs:
             )
 
         if len(preprocess_configs) == 0:
-            preprocess_configs = [
-                MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
-            ] * len(input_urls)
-        elif len(preprocess_configs) != len(input_urls):
+            preprocess_configs = [MMPreprocessConfig()] * len(input_urls)
+        elif len(preprocess_configs) != len(preprocess_configs):
             raise Exception(
                 f"the number of multimodal preprocess config must match url, now types {len(preprocess_configs)} urls {len(input_urls)}"
             )
 
         for url, type, config in zip(input_urls, input_urls_type, preprocess_configs):
-            self.multimodal_inputs.append(
-                MultimodalInput(url, type, torch.empty(0), config)
-            )
+            self.multimodal_inputs.append(MultimodalInput(url, type, config))
 
 
 class CustomChatRenderer:
@@ -425,6 +396,18 @@ class CustomChatRenderer:
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         raise NotImplementedError
 
+    def apply_chat_completion_constraints(
+        self, request: ChatCompletionRequest, generate_config: GenerateConfig
+    ) -> None:
+        tool_choice = getattr(request, "tool_choice", None)
+        if tool_choice is None or tool_choice in ("auto", "none"):
+            return
+        raise FtRuntimeException(
+            ExceptionType.INVALID_PARAMS,
+            f"tool_choice={tool_choice!r} is not supported by "
+            f"{self.__class__.__name__}",
+        )
+
     async def generate_choice(
         self,
         request_id: int,
@@ -433,6 +416,7 @@ class CustomChatRenderer:
         generate_config: GenerateConfig,
         backend_rpc_server_visitor: BackendRPCServerVisitor,
         request: ChatCompletionRequest,
+        headers: Optional[Dict[str, str]] = None,
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
@@ -446,58 +430,19 @@ class CustomChatRenderer:
                     generate_config=generate_config,
                     tokenizer=self.tokenizer,
                     token_type_ids=token_type_ids,
+                    headers=normalize_request_headers(headers),
                 )
             )
         )
-
-        prompt_logits_data = None
-        if generate_config.return_prompt_logits:
-            output_generator, prompt_logits_data = await self._extract_prompt_logits(
-                output_generator
-            )
 
         # 处理非流式请求的合并逻辑
         if not generate_config.is_streaming:
             output_generator = await self._merge_non_streaming_outputs(output_generator)
 
-        if generate_config.return_prompt_logits:
-            last_response = None
-            async for response in self.render_response_stream(
-                output_generator, request, generate_config
-            ):
-                if last_response is not None:
-                    yield last_response
-                last_response = response
-            if last_response is not None:
-                if prompt_logits_data is not None:
-                    last_response.prompt_logits = prompt_logits_data
-                yield last_response
-        else:
-            async for response in self.render_response_stream(
-                output_generator, request, generate_config
-            ):
-                yield response
-
-    async def _extract_prompt_logits(
-        self, output_generator: AsyncGenerator[GenerateOutputs, None]
-    ) -> Tuple[AsyncGenerator[GenerateOutputs, None], Optional[Dict[str, Any]]]:
-        # Safe to drain: prompt scoring forces max_new_tokens=1 + non-streaming,
-        # so the generator yields only a single output. Memory overhead is negligible.
-        collected = []
-        prompt_logits_data = None
-        async for outputs in output_generator:
-            if prompt_logits_data is None:
-                for out in outputs.generate_outputs:
-                    if out.prompt_logits is not None:
-                        prompt_logits_data = build_prompt_logits_dict(out.prompt_logits)
-                        break
-            collected.append(outputs)
-
-        async def replay():
-            for o in collected:
-                yield o
-
-        return replay(), prompt_logits_data
+        async for response in self.render_response_stream(
+            output_generator, request, generate_config
+        ):
+            yield response
 
     async def _merge_non_streaming_outputs(
         self, output_generator: AsyncGenerator[GenerateOutputs, None]
@@ -579,7 +524,6 @@ class CustomChatRenderer:
             input_length=aux_info.input_len,
             output_length=aux_info.output_len,
             reuse_length=aux_info.reuse_len,
-            multimodal_lengths=aux_info.multimodal_lengths,
         )
 
     async def _generate_log_probs(
@@ -902,13 +846,20 @@ class CustomChatRenderer:
                     if think_status_list[0].enable_think_mode > 0
                     else None
                 ),
-                prompt_tokens_details=_build_prompt_tokens_details(
-                    reuse_lengths, items[0].multimodal_lengths
+                prompt_tokens_details=(
+                    PromptTokensDetails(cached_tokens=reuse_lengths)
+                    if reuse_lengths > 0
+                    else None
                 ),
             ),
             # TODO(zhangjianning.zjn): merge all extra outputs for streaming request
             extra_outputs=items[-1].extra_outputs,
         )
+
+    def _should_yield_stream_response(
+        self, response: StreamResponseObject, is_final: bool = False
+    ) -> bool:
+        return True
 
     async def _flush_buffer(
         self,
@@ -932,7 +883,6 @@ class CustomChatRenderer:
                     aux_info.input_len,
                     aux_info.output_len,
                     aux_info.reuse_len,
-                    multimodal_lengths=aux_info.multimodal_lengths,
                 )
             )
         return await self._generate_stream_response(output_items, think_status_list)
@@ -946,7 +896,6 @@ class CustomChatRenderer:
         input_token_length = 0
         output_token_length = 0
         reuse_length = 0
-        multimodal_lengths = {}
         aux_info = None
         for i, buffer in enumerate(buffer_list):
             if buffer.output is None:
@@ -969,7 +918,6 @@ class CustomChatRenderer:
             if i == 0:
                 input_token_length = buffer.output.aux_info.input_len
                 reuse_length = buffer.output.aux_info.reuse_len
-                multimodal_lengths = buffer.output.aux_info.multimodal_lengths
                 aux_info = buffer.output.aux_info if request.aux_info else None
             output_token_length += buffer.output.aux_info.output_len
         return StreamResponseObject(
@@ -996,8 +944,10 @@ class CustomChatRenderer:
                     if think_status_list[0].enable_think_mode
                     else None
                 ),
-                prompt_tokens_details=_build_prompt_tokens_details(
-                    reuse_length, multimodal_lengths
+                prompt_tokens_details=(
+                    PromptTokensDetails(cached_tokens=reuse_length)
+                    if reuse_length > 0
+                    else None
                 ),
             ),
             aux_info=aux_info,
@@ -1067,17 +1017,27 @@ class CustomChatRenderer:
                         output, generate_config
                     )
                 delta_list.append(delta)
-            yield await self._generate_stream_response(delta_list, think_status_list)
+            stream_response = await self._generate_stream_response(
+                delta_list, think_status_list
+            )
+            if self._should_yield_stream_response(stream_response):
+                yield stream_response
             if self._check_all_finished(status_list):
                 break
         if index != 0:
-            yield await self._flush_buffer(
+            flush_response = await self._flush_buffer(
                 status_list,
                 generate_config.stop_words_str,
                 generate_config.is_streaming,
                 think_status_list,
             )
-            yield await self._generate_final(status_list, request, think_status_list)
+            if self._should_yield_stream_response(flush_response):
+                yield flush_response
+            final_response = await self._generate_final(
+                status_list, request, think_status_list
+            )
+            if self._should_yield_stream_response(final_response, is_final=True):
+                yield final_response
 
     def _create_empty_delta_sync(self, input_len: int, output_len: int, reuse_len: int):
         return OutputDelta(
@@ -1243,8 +1203,10 @@ class CustomChatRenderer:
                 prompt_tokens=input_lengths,
                 total_tokens=input_lengths + output_lengths,
                 completion_tokens=output_lengths,
-                prompt_tokens_details=_build_prompt_tokens_details(
-                    reuse_lengths, items[0].multimodal_lengths
+                prompt_tokens_details=(
+                    PromptTokensDetails(cached_tokens=reuse_lengths)
+                    if reuse_lengths > 0
+                    else None
                 ),
             ),
         )
@@ -1319,9 +1281,10 @@ class CustomChatRenderer:
                 prompt_tokens=input_token_length,
                 total_tokens=input_token_length + output_token_length,
                 completion_tokens=output_token_length,
-                prompt_tokens_details=_build_prompt_tokens_details(
-                    reuse_length,
-                    aux_info.multimodal_lengths if aux_info is not None else None,
+                prompt_tokens_details=(
+                    PromptTokensDetails(cached_tokens=reuse_length)
+                    if reuse_length > 0
+                    else None
                 ),
             ),
             aux_info=aux_info,

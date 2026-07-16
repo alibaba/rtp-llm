@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts", "cuda_copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "torch_deps", "fa_deps")
 
 package(default_visibility=["//rtp_llm:__subpackages__"])
 
@@ -61,6 +61,8 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+fa_deps()
+
 cc_library(
     name = "trt_v2_attn",
     srcs = [
@@ -72,6 +74,7 @@ cc_library(
         "cufmha/TRTAttn.h",
     ],
     deps = [
+        ":fa_hdrs",
         ":cuda_host_utils",
         "//rtp_llm/models_py/bindings/core:types",
         "//rtp_llm/models_py/bindings/core:types_hdr",
@@ -86,6 +89,36 @@ cc_library(
     ],
     # for fused_multihead_attention_utils.h: alpha = reinterpret_cast<uint32_t const&>(h2)
     copts = copts() + ["-fno-strict-aliasing"],
+)
+
+cc_library(
+    name = "cufmha",
+    srcs = [
+        "cufmha/cufmha.cc",
+        ":fa",
+    ],
+    hdrs = [
+        "cufmha/cufmha.h",
+        "cufmha/fmha_profiling_interface.h"
+    ],
+    deps = [
+        ":fa_hdrs",
+        ":cuda_host_utils",
+        "//rtp_llm/models_py/bindings/core:types",
+        "//rtp_llm/models_py/bindings/core:types_hdr",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:model_config",
+        "//rtp_llm/cpp/config:special_tokens",
+        "//rtp_llm/models_py/bindings/common/kernels:kernels_tensor_ops",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+        "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_header",
+        "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
+        "//rtp_llm/models_py/bindings/core:device_data",
+        ":trt_v2_attn"
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -107,7 +140,7 @@ cc_library(
     srcs = [
     ],
     deps = [
-        ":trt_v2_attn",
+        ":cufmha",
         ":cuda_host_utils",
         "//rtp_llm/cpp/utils:core_utils",
         "@local_config_cuda//cuda:cuda_headers",
@@ -189,11 +222,14 @@ cc_library(
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/models_py/bindings/core:types_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
+        "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_ep_util",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_kv_cache",
         "//rtp_llm/models_py/bindings/cuda/kernels:fast_topk",
+        "//rtp_llm/models_py/bindings/cuda/kernels:persistent_topk",
         "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_persistent_topk",
         "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_top_k_per_row_prefill",
+        "//rtp_llm/models_py/bindings/cuda/kernels:mha_paged_attn_plan",
         "//rtp_llm/models_py/bindings/cuda/kernels:mla_quant_kernel",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common:common",

@@ -48,18 +48,6 @@ void TrtllmArFusionHandle::capture_clear() {
     ar_fusion_capture_clear(fptr_);
 }
 
-void TrtllmArFusionHandle::invalidate_capture() {
-    ar_fusion_invalidate_capture(fptr_);
-}
-
-void TrtllmArFusionHandle::commit_capture() {
-    ar_fusion_commit_capture(fptr_);
-}
-
-void TrtllmArFusionHandle::begin_capture_session() {
-    ar_fusion_begin_capture_session(fptr_);
-}
-
 std::vector<torch::Tensor> TrtllmArFusionHandle::get_captured_handles() {
     return get_ar_fusion_captured_handles(fptr_);
 }
@@ -111,9 +99,6 @@ void registerTrtllmArFusionHandle(py::module& module) {
         .def("open_data_handles", &TrtllmArFusionHandle::open_data_handles, py::arg("handles"))
         // CUDA Graph capture support
         .def("capture_clear", &TrtllmArFusionHandle::capture_clear)
-        .def("invalidate_capture", &TrtllmArFusionHandle::invalidate_capture)
-        .def("commit_capture", &TrtllmArFusionHandle::commit_capture)
-        .def("begin_capture_session", &TrtllmArFusionHandle::begin_capture_session)
         .def("get_captured_handles", &TrtllmArFusionHandle::get_captured_handles)
         .def("get_captured_offsets", &TrtllmArFusionHandle::get_captured_offsets)
         .def("open_captured_handles",

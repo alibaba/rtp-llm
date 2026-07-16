@@ -1,5 +1,5 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "torch_deps")
 load("//bazel:device_defs.bzl",
     "device_impl_target", "device_test_envs")
 
@@ -29,7 +29,6 @@ test_deps = [
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
     "//rtp_llm/cpp/model_rpc:model_rpc_server",
-    "//rtp_llm/cpp/testing:test_log_capture",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
     "@havenask//aios/autil:base64",
@@ -81,10 +80,14 @@ cc_test(
 )
 
 cc_test(
-    name = "decode_rpc_server_test",
-    srcs = ["DecodeRpcServerTest.cc"],
+    name = "recent_cache_key_window_test",
+    srcs = [
+        "RecentCacheKeyWindowTest.cc",
+    ],
     copts = test_copts,
-    deps = test_deps,
-    env = {},
-    exec_properties = {'gpu':'H20'},
+    deps = [
+        "//rtp_llm/cpp/cache:recent_cache_key_window",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
 )

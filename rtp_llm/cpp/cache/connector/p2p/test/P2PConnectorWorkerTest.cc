@@ -15,7 +15,6 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
 #include "rtp_llm/cpp/cache/connector/p2p/ComputedLayerCacheBuffer.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PKeyUtil.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
@@ -45,7 +44,6 @@ public:
         uint32_t    port;
         std::string layer_key;
         int         layer_id;  // parsed from layer_key
-        int         group_id;
         int64_t     deadline_ms = 0;
     };
 
@@ -60,7 +58,6 @@ public:
         info.port        = request.port;
         info.layer_key   = request.unique_key;
         info.layer_id    = parseLayerId(request.unique_key);
-        info.group_id    = parseGroupId(request.unique_key);
         info.deadline_ms = request.deadline_ms;
 
         {
@@ -126,7 +123,6 @@ public:
 
 private:
     /// @brief Parse layer_id from layer_key = base_key + "_" + layer_id + "_" + partition_id
-    /// or base_key + "_" + layer_id + "_g" + group_id + "_" + partition_id.
     static int parseLayerId(const std::string& layer_key) {
         auto last = layer_key.rfind('_');
         if (last == std::string::npos || last == 0) {
@@ -136,32 +132,8 @@ private:
         if (second_last == std::string::npos) {
             return -1;
         }
-        auto third_last = layer_key.rfind('_', second_last - 1);
         try {
-            const auto layer_begin =
-                layer_key.compare(second_last + 1, 1, "g") == 0 && third_last != std::string::npos ? third_last + 1 :
-                                                                                                     second_last + 1;
-            const auto layer_end = layer_key.compare(second_last + 1, 1, "g") == 0 ? second_last : last;
-            return std::stoi(layer_key.substr(layer_begin, layer_end - layer_begin));
-        } catch (...) {
-            return -1;
-        }
-    }
-
-    static int parseGroupId(const std::string& layer_key) {
-        auto last = layer_key.rfind('_');
-        if (last == std::string::npos || last == 0) {
-            return -1;
-        }
-        auto second_last = layer_key.rfind('_', last - 1);
-        if (second_last == std::string::npos) {
-            return -1;
-        }
-        try {
-            if (layer_key.compare(second_last + 1, 1, "g") != 0) {
-                return 0;
-            }
-            return std::stoi(layer_key.substr(second_last + 2, last - second_last - 2));
+            return std::stoi(layer_key.substr(second_last + 1, last - second_last - 1));
         } catch (...) {
             return -1;
         }
@@ -305,13 +277,13 @@ protected:
     }
 
     KVCacheResourcePtr createKVCacheResource(int layer_id, int num_blocks = 2) {
-        auto                          resource  = std::make_shared<KVCacheResource>();
-        int                           layer_num = static_cast<int>(worker_config_.layer_all_num);
-        std::vector<std::vector<int>> layer_to_group_ids(layer_num);
+        auto             resource  = std::make_shared<KVCacheResource>();
+        int              layer_num = static_cast<int>(worker_config_.layer_all_num);
+        std::vector<int> layer_to_group(layer_num);
         for (int i = 0; i < layer_num; ++i) {
-            layer_to_group_ids[i] = {i};
+            layer_to_group[i] = i;
         }
-        resource->initGroups(layer_num, layer_num, layer_to_group_ids);
+        resource->initGroups(layer_num, layer_num, layer_to_group);
 
         for (int i = 0; i < layer_num; ++i) {
             if (i == layer_id) {
@@ -333,13 +305,13 @@ protected:
         return std::nullopt;  // nullopt means "immediately ready" in StoreWaitContext logic
     }
 
-    void addComputedBuffer(int64_t request_id, int layer_id, int64_t deadline_ms, int group_id = 0) {
-        auto layer_cache_buffer = createLayerCacheBuffer(layer_id, group_id);
+    void addComputedBuffer(int64_t request_id, int layer_id, int64_t deadline_ms) {
+        auto layer_cache_buffer = createLayerCacheBuffer(layer_id);
         computed_buffers_->addBuffer(request_id, layer_cache_buffer, deadline_ms);
     }
 
-    std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id, int group_id = 0, int num_blocks = 2) {
-        auto buffer = std::make_shared<LayerCacheBuffer>(layer_id, group_id);
+    std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id, int num_blocks = 2) {
+        auto buffer = std::make_shared<LayerCacheBuffer>(layer_id);
         for (int i = 0; i < num_blocks; ++i) {
             int64_t cache_key = layer_id * 1000 + i;
             int     block_id  = i;
@@ -350,8 +322,7 @@ protected:
 
     void simulateTaskDone(const std::string& base_key, const std::vector<int>& layer_ids, bool all_success = true) {
         for (int layer_id : layer_ids) {
-            std::string layer_key =
-                P2PKeyUtil::makePartitionLayerGroupKey(base_key, layer_id, /*group_id=*/2, /*partition_id=*/0);
+            std::string layer_key = base_key + "_" + std::to_string(layer_id) + "_0";
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             mock_receiver_->setTaskDone(layer_key, all_success);
         }
@@ -515,37 +486,6 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_PartialLayersTransferFaile
     EXPECT_EQ(transferred_layers.size(), 2u);
     EXPECT_TRUE(transferred_layers.find(0) != transferred_layers.end());
     EXPECT_TRUE(transferred_layers.find(1) != transferred_layers.end());
-}
-
-TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnTrue_SendsAllGroupsForSameLayer) {
-    int64_t     request_id  = 2006;
-    std::string unique_key  = "test_same_layer_groups";
-    int64_t     deadline_ms = currentTimeMs() + 5000;
-
-    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
-    decode_transfer_servers.push_back({"127.0.0.1", 12345});
-
-    mock_sender_->setShouldSucceed(true);
-    mock_sender_->setAsyncCallback(false);
-
-    addComputedBuffer(request_id, 0, deadline_ms, 0);
-    addComputedBuffer(request_id, 0, deadline_ms, 1);
-    addComputedBuffer(request_id, 1, deadline_ms, 0);
-
-    ErrorInfo result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, decode_transfer_servers);
-    EXPECT_TRUE(result.ok());
-    EXPECT_EQ(mock_sender_->getTransferCallCount(), 3);
-
-    auto                          calls = mock_sender_->getTransferCalls();
-    std::set<std::pair<int, int>> transferred_layer_groups;
-    for (const auto& call : calls) {
-        transferred_layer_groups.insert({call.layer_id, call.group_id});
-        EXPECT_TRUE(call.layer_key.substr(0, unique_key.size()) == unique_key);
-        EXPECT_EQ(call.ip, "127.0.0.1");
-    }
-    EXPECT_TRUE(transferred_layer_groups.count({0, 0}));
-    EXPECT_TRUE(transferred_layer_groups.count({0, 1}));
-    EXPECT_TRUE(transferred_layer_groups.count({1, 0}));
 }
 
 TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_SomeLayersNotTransferred) {
@@ -1065,12 +1005,12 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_CallbackWaitTimeout) {
 class LayerCacheBufferUtilTest: public ::testing::Test {
 protected:
     KVCacheResourcePtr createResource(int num_layers, int blocks_per_layer) {
-        auto                          resource = std::make_shared<KVCacheResource>();
-        std::vector<std::vector<int>> layer_to_group_ids(num_layers);
+        auto             resource = std::make_shared<KVCacheResource>();
+        std::vector<int> layer_to_group(num_layers);
         for (int i = 0; i < num_layers; ++i) {
-            layer_to_group_ids[i] = {i};
+            layer_to_group[i] = i;
         }
-        resource->initGroups(num_layers, num_layers, layer_to_group_ids);
+        resource->initGroups(num_layers, num_layers, layer_to_group);
         for (int layer = 0; layer < num_layers; ++layer) {
             for (int i = 0; i < blocks_per_layer; ++i) {
                 resource->mutableBlockIds(layer).add({i});

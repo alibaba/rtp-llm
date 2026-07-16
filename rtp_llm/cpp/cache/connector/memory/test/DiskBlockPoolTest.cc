@@ -121,7 +121,7 @@ TEST(DiskBlockPoolTest, MountGuardAllowsTwoPoolsOnSameMountWithoutDeletingFirst)
 }
 
 TEST(DiskBlockPoolTest, ReserveCommitAbortAndFreeSlots) {
-    TempDir        temp_dir;
+    TempDir       temp_dir;
     DiskMountGuard guard;
     ASSERT_TRUE(guard.init(temp_dir.path()));
     DiskBlockPool pool(makeConfig(guard.workDir()));
@@ -141,7 +141,7 @@ TEST(DiskBlockPoolTest, ReserveCommitAbortAndFreeSlots) {
 }
 
 TEST(DiskBlockPoolTest, RequestRefPreventsReuseUntilReleased) {
-    TempDir        temp_dir;
+    TempDir       temp_dir;
     DiskMountGuard guard;
     ASSERT_TRUE(guard.init(temp_dir.path()));
     DiskBlockPool pool(makeConfig(guard.workDir()));
@@ -161,7 +161,7 @@ TEST(DiskBlockPoolTest, RequestRefPreventsReuseUntilReleased) {
 }
 
 TEST(DiskBlockPoolTest, ReadWriteFullSlot) {
-    TempDir        temp_dir;
+    TempDir       temp_dir;
     DiskMountGuard guard;
     ASSERT_TRUE(guard.init(temp_dir.path()));
     DiskBlockPool pool(makeConfig(guard.workDir()));
@@ -180,7 +180,7 @@ TEST(DiskBlockPoolTest, ReadWriteFullSlot) {
 }
 
 TEST(DiskBlockPoolTest, FullPoolReturnsNullopt) {
-    TempDir        temp_dir;
+    TempDir       temp_dir;
     DiskMountGuard guard;
     ASSERT_TRUE(guard.init(temp_dir.path()));
     DiskBlockPool pool(makeConfig(guard.workDir(), 2 * 4096));

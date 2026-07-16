@@ -1,9 +1,5 @@
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
 
-#include <exception>
-
-#include "rtp_llm/cpp/utils/Logger.h"
-
 namespace rtp_llm {
 
 // ----------------------------- MemoryAsyncMatchContext ---------------------------------
@@ -47,9 +43,6 @@ bool MemoryAsyncContext::done() const {
 }
 
 bool MemoryAsyncContext::successLocked() const {
-    if (failed_) {
-        return false;
-    }
     if (!broadcast_result_ || !broadcast_result_->success()) {
         return false;
     }
@@ -83,56 +76,27 @@ void MemoryAsyncContext::waitDone() {
         result      = broadcast_result_;
     }
 
-    auto record_failure = [this](const std::string& reason) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        failed_ = true;
-        if (!reason.empty()) {
-            failure_reason_ = reason;
-        }
-    };
-
-    auto finalize = [this]() {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            already_done_.store(true);
-            finalizing_ = false;
-        }
-        cv_.notify_all();
-    };
-
     if (result) {
-        try {
-            result->waitDone();
-        } catch (const std::exception& e) {
-            RTP_LLM_LOG_WARNING("MemoryAsyncContext::waitDone broadcast wait failed: %s", e.what());
-            record_failure(e.what());
-        } catch (...) {
-            RTP_LLM_LOG_WARNING("MemoryAsyncContext::waitDone broadcast wait failed with unknown exception");
-            record_failure("unknown broadcast wait exception");
-        }
+        result->waitDone();
     }
 
-    bool                      ok = false;
+    bool ok = false;
     std::function<void(bool)> done_callback;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         ok            = successLocked();
         done_callback = std::move(done_callback_);
     }
-
     if (done_callback) {
-        try {
-            done_callback(ok);
-        } catch (const std::exception& e) {
-            RTP_LLM_LOG_WARNING("MemoryAsyncContext::waitDone callback failed: %s", e.what());
-            record_failure(e.what());
-        } catch (...) {
-            RTP_LLM_LOG_WARNING("MemoryAsyncContext::waitDone callback failed with unknown exception");
-            record_failure("unknown done callback exception");
-        }
+        done_callback(ok);
     }
 
-    finalize();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        already_done_.store(true);
+        finalizing_ = false;
+    }
+    cv_.notify_all();
 }
 
 void MemoryAsyncContext::setBroadcastResult(
@@ -141,16 +105,6 @@ void MemoryAsyncContext::setBroadcastResult(
         std::lock_guard<std::mutex> lock(mutex_);
         broadcast_result_ = result;
         result_ready_     = true;
-    }
-    cv_.notify_all();
-}
-
-void MemoryAsyncContext::markFailed(const std::string& reason) {
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        failed_         = true;
-        failure_reason_ = reason;
-        result_ready_   = true;
     }
     cv_.notify_all();
 }

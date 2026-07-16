@@ -6,7 +6,7 @@ namespace rtp_llm {
 
 // ==================== LayerCacheBuffer ====================
 
-LayerCacheBuffer::LayerCacheBuffer(int layer_id, int group_id): layer_id_(layer_id), group_id_(group_id) {}
+LayerCacheBuffer::LayerCacheBuffer(int layer_id): layer_id_(layer_id) {}
 
 void LayerCacheBuffer::addBlockId(int64_t key, int block_id) {
     block_id_map_[key] = block_id;

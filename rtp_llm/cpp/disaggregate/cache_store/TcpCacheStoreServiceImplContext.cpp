@@ -23,15 +23,12 @@ void TcpCacheStoreServiceImplContext::loadBlockOnTcp(bool ok, const std::vector<
         }
 
         if (unloaded_block_info->len() != block->len / partition_count_) {
-            RTP_LLM_LOG_WARNING("PD_CP_READ_RECEIVE_MISMATCH key=%s expected_len=%d remote_registered_len=%d "
-                                "partition_count=%d partition_id=%d remote_effective_len=%d peer=%s",
-                                block->key.c_str(),
-                                unloaded_block_info->len(),
-                                block->len,
-                                partition_count_,
-                                partition_id_,
-                                block->len / partition_count_,
-                                peer_ip_.c_str());
+            RTP_LLM_LOG_WARNING(
+                "cache store service load block not match expect block len, key: %s, len %d vs %d, peer is %s",
+                block->key.c_str(),
+                unloaded_block_info->len(),
+                block->len / partition_count_,
+                peer_ip_.c_str());
             runFailed(KvCacheStoreServiceErrorCode::EC_FAILED_INVALID_REQ);
             return;
         }

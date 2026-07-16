@@ -5,8 +5,11 @@ import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.StrategyConfigs;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.TaskInfo;
@@ -45,20 +48,21 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     private final EngineHealthReporter engineHealthReporter;
     private final CacheAwareService cacheAwareService;
     private final ResourceMeasureFactory resourceMeasureFactory;
+    private final ConfigService configService;
 
-    private static final int MIN_CANDIDATE_COUNT = 1;
-    private static final double CANDIDATE_PERCENTAGE = 0.3;
     private static final double TTFT_THRESHOLD_PERCENTAGE = 0.1;
     private static final double STDDEV_THRESHOLD_FACTOR = 0.5;
 
     public ShortestTTFTStrategy(EngineWorkerStatus engineWorkerStatus,
                                 EngineHealthReporter engineHealthReporter,
                                 CacheAwareService cacheAwareService,
-                                ResourceMeasureFactory resourceMeasureFactory) {
+                                ResourceMeasureFactory resourceMeasureFactory,
+                                ConfigService configService) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.engineHealthReporter = engineHealthReporter;
         this.cacheAwareService = cacheAwareService;
         this.resourceMeasureFactory = resourceMeasureFactory;
+        this.configService = configService;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, this);
     }
 
@@ -122,16 +126,20 @@ public class ShortestTTFTStrategy implements LoadBalancer {
 
         // Calculate cache match results for each engine
         Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
+        reportCandidateRoutingCacheMatchMetrics(roleType, availableWorkers, cacheMatchResults, balanceContext.getRequest());
 
         List<ScoredWorker> scoredWorkers = scoreWorkers(availableWorkers, cacheMatchResults, seqLen);
 
-        ScoredWorker bestWorker = selectBestWorker(scoredWorkers);
+        StrategyConfigs.CandidatePoolConfig candidatePoolConfig = configService.getStrategyConfigs()
+                .getShortestTtft()
+                .getCandidatePool();
+        ScoredWorker bestWorker = selectBestWorker(scoredWorkers, candidatePoolConfig);
         if (bestWorker == null) {
             Logger.warn("Failed to find best worker for role: {}", roleType);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
-        return finalizeWorkerSelection(bestWorker, balanceContext, roleType, requestId, seqLen);
+        return finalizeWorkerSelection(bestWorker, balanceContext, roleType, requestId, seqLen, cacheMatchResults);
     }
 
     /**
@@ -219,11 +227,13 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                                                  BalanceContext balanceContext,
                                                  RoleType roleType,
                                                  long requestId,
-                                                 long seqLen) {
+                                                 long seqLen,
+                                                 Map<String, Integer> cacheMatchResults) {
         WorkerStatus workerStatus = selectedWorker.worker();
 
         logWorkerSelection(selectedWorker, roleType);
         reportCacheHitMetrics(roleType, workerStatus.getIp(), selectedWorker.hitCacheTokens(), seqLen);
+        reportSelectedRoutingCacheMatchMetrics(roleType, workerStatus, cacheMatchResults, balanceContext.getRequest());
 
         TaskInfo task = createTaskInfo(requestId, balanceContext.getRequest().getSeqLen(), selectedWorker.hitCacheTokens());
         workerStatus.putLocalTask(requestId, task);
@@ -260,6 +270,49 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         engineHealthReporter.reportCacheHitMetrics(roleType, ip, hitCacheTokens, hitRate);
     }
 
+    private void reportCandidateRoutingCacheMatchMetrics(RoleType roleType,
+                                                         List<WorkerStatus> availableWorkers,
+                                                         Map<String, Integer> cacheMatchResults,
+                                                         Request request) {
+        if (MapUtils.isEmpty(cacheMatchResults) || request == null || request.getSeqLen() <= 0L) {
+            return;
+        }
+
+        Map<String, WorkerStatus> workerStatusByIpPort = availableWorkers.stream()
+                .collect(Collectors.toMap(WorkerStatus::getIpPort, workerStatus -> workerStatus, (left, right) -> left));
+        for (Map.Entry<String, Integer> entry : cacheMatchResults.entrySet()) {
+            String engineIpPort = entry.getKey();
+            long hitTokens = calculateRoutingCacheMatchTokens(
+                    entry.getValue(),
+                    request,
+                    workerStatusByIpPort.get(engineIpPort));
+            engineHealthReporter.reportRoutingCandidateCacheMatchMetrics(
+                    roleType,
+                    engineIp(engineIpPort),
+                    hitTokens,
+                    request.getSeqLen());
+        }
+    }
+
+    private void reportSelectedRoutingCacheMatchMetrics(RoleType roleType,
+                                                        WorkerStatus selectedWorker,
+                                                        Map<String, Integer> cacheMatchResults,
+                                                        Request request) {
+        if (selectedWorker == null || cacheMatchResults == null || request == null || request.getSeqLen() <= 0L) {
+            return;
+        }
+
+        long hitTokens = calculateRoutingCacheMatchTokens(
+                cacheMatchResults.get(selectedWorker.getIpPort()),
+                request,
+                selectedWorker);
+        engineHealthReporter.reportRoutingSelectedCacheMatchMetrics(
+                roleType,
+                selectedWorker.getIp(),
+                hitTokens,
+                request.getSeqLen());
+    }
+
     /**
      * Create task information
      *
@@ -279,22 +332,29 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     /**
      * Select best worker considering TTFT and scheduling fairness
      *
-     * <p>Algorithm: 1. Sort workers by TTFT 2. Select top 30% as candidates (at least 1) 3. Among candidates with similar TTFT, prioritize recently unscheduled workers
+     * <p>Algorithm: 1. Sort workers by TTFT 2. Select strategy-configured candidates 3. Among candidates with similar TTFT, prioritize recently unscheduled workers
      *
      * @param scoredWorkers List of scored workers
+     * @param candidatePoolConfig candidate pool config
      * @return Best worker
      */
-    private ScoredWorker selectBestWorker(List<ScoredWorker> scoredWorkers) {
+    private ScoredWorker selectBestWorker(List<ScoredWorker> scoredWorkers,
+                                          StrategyConfigs.CandidatePoolConfig candidatePoolConfig) {
         if (scoredWorkers.isEmpty()) {
             return null;
         }
 
         List<ScoredWorker> sortedWorkers = sortByTTFT(scoredWorkers);
-        List<ScoredWorker> candidates = selectTopCandidates(sortedWorkers);
+        List<ScoredWorker> candidates = selectTopCandidates(sortedWorkers, candidatePoolConfig);
         Logger.debug("Select best worker, sortedWorkers size: {}, candidates size: {}", sortedWorkers.size(), candidates.size());
 
         if (candidates.isEmpty()) {
             return null;
+        }
+
+        if (candidates.size() == 1) {
+            Logger.debug("Select best worker with single candidate shortcut, sortedWorkers size: {}", sortedWorkers.size());
+            return candidates.getFirst();
         }
 
         long minTTFT = candidates.getFirst().ttft();
@@ -327,8 +387,9 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param sortedWorkers Sorted worker list
      * @return Candidate worker list
      */
-    private List<ScoredWorker> selectTopCandidates(List<ScoredWorker> sortedWorkers) {
-        int candidateCount = Math.max(MIN_CANDIDATE_COUNT, (int) (sortedWorkers.size() * CANDIDATE_PERCENTAGE));
+    private List<ScoredWorker> selectTopCandidates(List<ScoredWorker> sortedWorkers,
+                                                   StrategyConfigs.CandidatePoolConfig candidatePoolConfig) {
+        int candidateCount = candidatePoolConfig.resolveCandidateCount(sortedWorkers.size());
         return sortedWorkers.stream().limit(candidateCount).toList();
     }
 
@@ -453,5 +514,35 @@ public class ShortestTTFTStrategy implements LoadBalancer {
 
         long blockSize = workerStatus.getCacheStatus().getBlockSize();
         return blockSize * prefixMatchLength;
+    }
+
+    private long calculateRoutingCacheMatchTokens(Integer prefixMatchLength, Request request, WorkerStatus workerStatus) {
+        if (prefixMatchLength == null || prefixMatchLength <= 0 || request == null || request.getSeqLen() <= 0L) {
+            return 0L;
+        }
+
+        // Page-RR routes one canonical key per virtual block, so the frontend sends
+        // cache_key_block_size as seq_size_per_block * cp_size in that mode.
+        long blockSize = request.getCacheKeyBlockSize();
+        if (blockSize <= 0L && workerStatus != null && workerStatus.getCacheStatus() != null) {
+            blockSize = workerStatus.getCacheStatus().getBlockSize();
+        }
+        if (blockSize <= 0L) {
+            return 0L;
+        }
+
+        long hitTokens = blockSize * prefixMatchLength;
+        if (hitTokens < 0L) {
+            return request.getSeqLen();
+        }
+        return Math.min(request.getSeqLen(), hitTokens);
+    }
+
+    private String engineIp(String engineIpPort) {
+        if (engineIpPort == null) {
+            return "";
+        }
+        int delimiter = engineIpPort.indexOf(':');
+        return delimiter < 0 ? engineIpPort : engineIpPort.substring(0, delimiter);
     }
 }

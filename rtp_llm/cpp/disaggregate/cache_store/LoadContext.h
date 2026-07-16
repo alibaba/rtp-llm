@@ -27,10 +27,9 @@ public:
 
     void waitDone();
 
-    bool                     success() const;
-    const ErrorInfo&         getErrorInfo() const;
-    std::string              getErrorInfoString() const;
-    std::vector<std::string> failedBlockDebugInfos() const;
+    bool             success() const;
+    const ErrorInfo& getErrorInfo() const;
+    std::string      getErrorInfoString() const;
 
     void
     updateResult(bool success, CacheStoreErrorCode ec, const std::shared_ptr<RequestBlockBuffer>& request_block_buffer);
@@ -43,12 +42,10 @@ protected:
     bool                      combine_load_ = false;
 
     std::vector<std::shared_ptr<RequestBlockBuffer>> request_block_buffers_;
-    std::vector<std::shared_ptr<RequestBlockBuffer>> failed_request_block_buffers_;
     ErrorInfo                                        error_info_;
 
     int64_t         start_time_ms_     = 0;
     int64_t         deadline_ms_       = 0;
-    bool            timed_out_         = false;
     CheckCancelFunc check_cancel_func_ = nullptr;
 
     mutable std::mutex      mutex_;

@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_group_quant_fp8
 from rtp_llm.ops import HWKernelConfig
 
-
 class RocmFp8DeepGEMMLinear(LinearBase):
     """ROCm FP8 DeepGEMM quantized Linear"""
 
@@ -23,7 +22,7 @@ class RocmFp8DeepGEMMLinear(LinearBase):
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
-        hw_kernel_config: Optional["HWKernelConfig"] = None,
+        hw_kernel_config: Optional['HWKernelConfig'] = None,
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
@@ -37,7 +36,7 @@ class RocmFp8DeepGEMMLinear(LinearBase):
 
         # Check quantization method - handle FP8 methods that are NOT PTPC
         quant_method = quant_config.get_method()
-        return quant_method in ("FP8_PER_BLOCK", "FP8_PER_BLOCK_QUARK")
+        return quant_method == "FP8_PER_BLOCK"
 
     def __init__(
         self,
@@ -48,9 +47,8 @@ class RocmFp8DeepGEMMLinear(LinearBase):
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
     ):
-        super().__init__(
-            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
-        )
+        super().__init__(weight, weight_scales, input_scales,
+                         bias, quant_config, weight_scale_2)
         self.hidden_size = weight.shape[0]  # k
         self.output_size = weight.shape[1]  # n
         self.weight = weight.reshape([weight.shape[1], weight.shape[0]])
@@ -82,14 +80,14 @@ class RocmFp8DeepGEMMLinear(LinearBase):
         input_scales = torch.clamp(input_scales, min=min_scale_threshold)
         input_scales = input_scales.to(torch.float32)
 
-        # bpreshuffle kernel
-        x_scales = input_scales.transpose(0, 1).contiguous().view(*input_scales.shape)
+        # Use per-token-block scales directly (M, K/128)
+        x_scales = input_scales
         w_scales = self.weight_scales
 
-        output = aiter.gemm_a8w8_blockscale_bpreshuffle(
+        output = aiter.gemm_a8w8_blockscale(
             input_fp8,  # XQ
-            self.weight,  # WQ (pre-shuffled layout)
-            x_scales,  # x_scale (bpreshuffle layout)
+            self.weight,  # WQ
+            x_scales,  # x_scale
             w_scales,  # w_scale
         )
 

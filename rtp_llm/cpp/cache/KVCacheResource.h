@@ -75,8 +75,7 @@ private:
     size_t           kernel_blocks_per_kv_block_ = 1;
 };
 
-using GroupBlockIds = std::vector<std::shared_ptr<BlockIds>>;
-// Legacy per-layer view. Valid only when each layer maps to exactly one group.
+using GroupBlockIds     = std::vector<std::shared_ptr<BlockIds>>;
 using LayerBlockIds     = std::vector<std::shared_ptr<BlockIds>>;
 using LayerAttnBlockIds = std::vector<std::vector<std::shared_ptr<BlockIds>>>;
 
@@ -84,28 +83,28 @@ class KVCacheResource {
 public:
     void initGroups(int                                  group_num,
                     int                                  layer_num,
-                    const std::vector<std::vector<int>>& layer_group_ids                  = {},
-                    size_t                               kernel_blocks_per_kv_block       = 1,
-                    const std::vector<CacheGroupType>&   group_types                      = {},
-                    const std::vector<size_t>&           group_kernel_blocks_per_kv_block = {});
+                    const std::vector<int>&              layer_to_group_id          = {},
+                    size_t                               kernel_blocks_per_kv_block = 1,
+                    const std::vector<CacheGroupType>&   group_types                = {},
+                    const std::vector<std::vector<int>>& layer_region_to_group_id   = {});
     void resizeBlocks(int reserver_blocks, int value = 0);
 
     int                     blocksNum(int group_id = 0) const;
     const BlockIndicesType& blocks(int group_id = 0) const;
-    const BlockIndicesType& blocks(int layer_id, int group_id) const;
+    const BlockIndicesType& blocks(int layer_id, KVCacheRegionName region_name) const;
     const BlockIndicesType& kernelBlocks(int group_id = 0) const;
-    const BlockIndicesType& kernelBlocks(int layer_id, int group_id) const;
+    const BlockIndicesType& kernelBlocks(int layer_id, KVCacheRegionName region_name) const;
     BlockIds&               mutableBlockIds(int group_id = 0) const;
-    BlockIds&               mutableBlockIds(int layer_id, int group_id) const;
+    BlockIds&               mutableBlockIds(int layer_id, KVCacheRegionName region_name) const;
 
     int groupNums() const;
 
     GroupBlockIds&       groupBlocks();
     const GroupBlockIds& groupBlocks() const;
 
-    LayerBlockIds            layerBlocks() const;
-    const LayerAttnBlockIds& layerGroupBlocks() const;
-    int                      groupId(int layer_id, int group_id) const;
+    const LayerBlockIds&     layerBlocks() const;
+    const LayerAttnBlockIds& layerAttnBlocks() const;
+    int                      groupId(int layer_id, KVCacheRegionName region_name) const;
 
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
@@ -158,13 +157,15 @@ public:
     std::string debugString() const;
 
 private:
-    // layer_id -> group_id -> block_indices
-    LayerAttnBlockIds layer_group_block_ids;
+    // layer_id -> block_indices
+    LayerBlockIds layer_block_ids;
+    // layer_id -> region_name -> block_indices
+    LayerAttnBlockIds layer_region_block_ids;
     // group_id -> block_indices
-    GroupBlockIds         group_block_ids;
-    CacheKeysType         cache_keys;
+    GroupBlockIds group_block_ids;
+    CacheKeysType cache_keys;
     BlockDependenciesType block_dependencies;
-    bool                  cache_keys_are_cp_canonical_{false};
+    bool cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};

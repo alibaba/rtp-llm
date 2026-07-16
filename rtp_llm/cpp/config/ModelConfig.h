@@ -11,14 +11,11 @@
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/SpecialTokens.h"
-#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include <vector>
 #include <string>
 #include <map>
 
 namespace rtp_llm {
-
-using LayerKVCacheSpecDescs = std::vector<std::vector<KVCacheSpecDesc>>;
 
 enum TaskType {
     DENSE_EMBEDDING    = 0,
@@ -97,11 +94,15 @@ public:
     int64_t              scoring_func    = 0;
     std::vector<int64_t> moe_layer_index = {};
 
-    // DeepSeek-V4 specific.
+    // DeepSeek-V4 specific
+    // mHC residual hyper-parameters (Eq. 2-8): n_hc multiplier, Sinkhorn iterations, eps.
+    // Default 1 means "no head-channel expansion" — pre-output residual is plain [T, hidden_size].
     int64_t hc_mult           = 1;
     int64_t hc_sinkhorn_iters = 0;
     double  hc_eps            = 1e-6;
+    // Clamp limit for SwiGLU (linear in [-limit,limit], gate <= limit). 0 disables clamp.
     double  swiglu_limit      = 0.0;
+    // Number of leading MoE layers that route via deterministic token-id hash.
     int64_t num_hash_layers   = 0;
 
     bool   has_positional_encoding    = false;
@@ -131,10 +132,6 @@ public:
 
     // Multimodal model configuration
     MMModelConfig mm_model_config;
-
-    // Declarative per-model KV cache layout. C++ cache config consumes this
-    // and performs runtime finalization such as block/ring sizing.
-    LayerKVCacheSpecDescs kv_cache_spec_descs;
 
     // Fields merged from PyModelConfig
     std::string extra_data_path       = "";

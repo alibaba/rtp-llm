@@ -1,5 +1,7 @@
 package org.flexlb.dao.loadbalance;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Getter;
 import lombok.Setter;
@@ -10,6 +12,7 @@ import java.util.List;
 @Getter
 @Setter
 @ToString
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class Request {
     @ToString.Exclude
     @JsonProperty("block_cache_keys")
@@ -17,6 +20,9 @@ public class Request {
 
     @JsonProperty("seq_len")
     private long seqLen;
+
+    @JsonProperty("cache_key_block_size")
+    private long cacheKeyBlockSize;
 
     @JsonProperty("request_id")
     private long requestId;
@@ -26,4 +32,9 @@ public class Request {
 
     @JsonProperty("request_time_ms")
     private long requestTimeMs;
+
+    @JsonProperty("api_key")
+    @JsonAlias({"apikey", "apiKey"})
+    @ToString.Exclude
+    private String apiKey;
 }

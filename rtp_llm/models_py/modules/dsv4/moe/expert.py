@@ -69,9 +69,7 @@ class Expert(nn.Module):
         # storage="fp4" → QuantizedLinear with bound weight/scale (accepts N-D).
         self._uses_fp8_linear = storage == "fp8"
 
-        assert (
-            expert_weights is not None
-        ), "Expert requires expert_weights (descriptor path)"
+        assert expert_weights is not None, "Expert requires expert_weights (descriptor path)"
 
         if self._uses_fp8_linear:
             from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear

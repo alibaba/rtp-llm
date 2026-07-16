@@ -43,10 +43,12 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         inp = PyAttentionInputs()
         inp.is_cuda_graph = with_copy_params
         inp.is_prefill = True
-        inp.input_lengths = torch.tensor(input_lengths, dtype=torch.int32).pin_memory()
+        inp.input_lengths = torch.tensor(
+            input_lengths, dtype=torch.int32, device="cuda"
+        )
         inp.prefix_lengths = torch.tensor(
-            prefix_lengths, dtype=torch.int32
-        ).pin_memory()
+            prefix_lengths, dtype=torch.int32, device="cuda"
+        )
         seq_lengths = [p + i for p, i in zip(prefix_lengths, input_lengths)]
         inp.sequence_lengths = torch.tensor(seq_lengths, dtype=torch.int32).pin_memory()
 
@@ -55,11 +57,11 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
             cu.append(cu[-1] + il)
 
         if with_copy_params:
-            inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32).pin_memory()
-            inp.cu_kv_seqlens_device = torch.tensor(cu, dtype=torch.int32).pin_memory()
+            inp.cu_seqlens = torch.tensor(cu, dtype=torch.int32).pin_memory()
+            inp.cu_kv_seqlens = torch.tensor(cu, dtype=torch.int32).pin_memory()
         else:
-            inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
-            inp.cu_kv_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
+            inp.cu_seqlens = torch.tensor(cu, dtype=torch.int32, device="cuda")
+            inp.cu_kv_seqlens = torch.tensor(cu, dtype=torch.int32, device="cuda")
 
         max_blocks = max(math.ceil(s / PAGE_SIZE) for s in seq_lengths)
         block_ids = torch.zeros(batch_size, max_blocks, dtype=torch.int32)
@@ -68,7 +70,7 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
             nb = math.ceil(s / PAGE_SIZE)
             block_ids[i, :nb] = torch.arange(offset, offset + nb)
             offset += nb
-        inp.kv_cache_kernel_block_id = block_ids
+        inp.kv_cache_kernel_block_id_host = block_ids
 
         if with_copy_params:
             ms = max_seq_len if max_seq_len > 0 else max(input_lengths)

@@ -235,9 +235,7 @@ class PersistentIndexerTopKBackend(IndexerTopKBackend):
             (flat.shape[0], int(topk)), dtype=torch.int32, device=flat.device
         )
         workspace = torch.empty((1 << 20,), dtype=torch.uint8, device=flat.device)
-        persistent_topk(
-            flat, lengths_i32, out, workspace, int(topk), int(flat.shape[1])
-        )
+        persistent_topk(flat, lengths_i32, out, workspace, int(topk), int(flat.shape[1]))
         out = _apply_offset(out, offset)
         if _canonicalize_enabled():
             out = _sort_valid_indices(out)
@@ -307,9 +305,7 @@ class AutoIndexerTopKBackend(IndexerTopKBackend):
             and int(topk) in _PERSISTENT_TOPK_VALUES
         ):
             try:
-                return self._persistent.select(
-                    score, topk, lengths=lengths, offset=offset
-                )
+                return self._persistent.select(score, topk, lengths=lengths, offset=offset)
             except (ImportError, AttributeError):
                 pass
         return self._torch.select(score, topk, lengths=lengths, offset=offset)

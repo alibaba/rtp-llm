@@ -30,11 +30,12 @@ one and avoids ``B`` Triton kernel launches.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
     cp_actual_owned_kv_lens,
@@ -164,6 +165,19 @@ class CPShardConfig:
             )
 
 
+@dataclass
+class CPShardedPoolReadHandle:
+    gathered: torch.Tensor
+    work: Any
+    completion_event: torch.cuda.Event
+    stream: torch.cuda.Stream
+    out: torch.Tensor
+    seq_lens: torch.Tensor
+    offset: int
+    done_event: Optional[torch.cuda.Event] = None
+    work_waited: bool = False
+
+
 class CPShardedPoolReader(CompressedKPoolReader):
     """Per-iteration: gather owned packed FP8 → all_gather → restore → dequant."""
 
@@ -181,20 +195,195 @@ class CPShardedPoolReader(CompressedKPoolReader):
         block_size: int,
         offset: int,
     ) -> None:
+        self._validate_call(block_size=block_size, gather_lens=gather_lens)
+        device = out.device
+
+        local_flat = self._build_local_flat(
+            k_cache=k_cache,
+            block_table=block_table,
+            block_size=block_size,
+            device=device,
+        )
+
+        # Step 3: all_gather across cp ranks → [cp_size * total_local_kv, 584].
+        # Use raw rank-major all_gather; cp_all_gather_full_async asserts
+        # T_local == cp_ctx.chunk_length (prefill-token space), but
+        # local_flat lives in KV-pool-entry space (block-aligned).
+        # INVARIANT: the compressor writer (cp_wait_gather_full + _launch)
+        # always lands its pool writes on the current stream, so NCCL
+        # stream-ordering alone suffices for visibility. No CPU-blocking
+        # synchronize() here — at ~60 layers × per-fill it would serialize
+        # the prefill pipeline. If the writer ever moves to a side stream,
+        # add ``current_stream.wait_event(writer_event)`` instead.
+        with record_function_range("dsv4.cp.all_gather.pool_reader.gather_cmp.launch"):
+            gathered = all_gather(local_flat, group=Group.TP)
+        # gathered shape is rank-major: [cp_size * total_local_kv, 584].
+
+        # Step 4: restore to request-concatenated logical order.
+        self._restore_dequant_scatter(gathered, out, seq_lens, offset)
+
+    def start_fill_async(
+        self,
+        *,
+        out: torch.Tensor,
+        k_cache: torch.Tensor,
+        seq_lens: torch.Tensor,
+        gather_lens: Optional[torch.Tensor],
+        block_table: torch.Tensor,
+        block_size: int,
+        offset: int,
+        stream: torch.cuda.Stream,
+    ) -> Optional[CPShardedPoolReadHandle]:
+        """Launch only the CP all-gather stage on ``stream``.
+
+        The local pack stays on the caller's current stream.  The communication
+        stream waits for it, and ``prepare_fill_async`` later queues restore /
+        dequant / scatter on the shared post stream.
+        """
+        self._validate_call(block_size=block_size, gather_lens=gather_lens)
+        if (
+            stream is None
+            or not out.is_cuda
+            or not torch.distributed.is_initialized()
+            or torch.cuda.is_current_stream_capturing()
+        ):
+            return None
+
         cfg = self.cfg
-        if cfg.block_size != block_size:
+        device = out.device
+        local_flat = self._build_local_flat(
+            k_cache=k_cache,
+            block_table=block_table,
+            block_size=block_size,
+            device=device,
+        )
+
+        from rtp_llm.models_py.distributed import collective_torch
+
+        process_group = collective_torch._get_group(Group.TP)
+        world_size = torch.distributed.get_world_size(process_group)
+        if world_size != cfg.cp_ctx.cp_size:
+            raise RuntimeError(
+                f"CP pool reader world_size({world_size}) != cp_size({cfg.cp_ctx.cp_size})"
+            )
+
+        current_stream = torch.cuda.current_stream(device)
+        stream.wait_stream(current_stream)
+        local_flat.record_stream(stream)
+        with torch.cuda.stream(stream):
+            gathered = torch.empty(
+                (world_size * int(local_flat.shape[0]), ENTRY_BYTES),
+                dtype=local_flat.dtype,
+                device=device,
+            )
+            with record_function_range(
+                "dsv4.cp.all_gather.pool_reader.gather_cmp.launch"
+            ):
+                work = torch.distributed.all_gather_into_tensor(
+                    gathered,
+                    local_flat,
+                    group=process_group,
+                    async_op=True,
+                )
+            try:
+                completion_event = torch.cuda.Event()
+                completion_event.record(stream)
+            except Exception:
+                # Drain the in-flight NCCL Work before propagating; the
+                # caller never sees the pending handle, so nothing else
+                # would wait it.
+                work.wait()
+                raise
+
+        return CPShardedPoolReadHandle(
+            gathered=gathered,
+            work=work,
+            completion_event=completion_event,
+            stream=stream,
+            out=out,
+            seq_lens=seq_lens,
+            offset=offset,
+        )
+
+    def prepare_fill_async(
+        self,
+        handle: CPShardedPoolReadHandle,
+        *,
+        stream: torch.cuda.Stream,
+    ) -> None:
+        if handle.done_event is not None:
+            return
+        if stream is None:
+            raise ValueError("prepare_fill_async requires an explicit stream")
+        current_stream = torch.cuda.current_stream(handle.out.device)
+        # ``out`` is the caller's workspace.  Queue postprocess after any
+        # current-stream writes to that workspace; otherwise disjoint-looking
+        # range updates can still race through a future caller change.
+        stream.wait_stream(current_stream)
+        with torch.cuda.stream(stream):
+            stream.wait_event(handle.completion_event)
+            # NCCL Work.wait() is stream-affine: call it while the consumer
+            # stream is current so restore/scatter below is fenced correctly.
+            with record_function_range(
+                "dsv4.cp.all_gather.pool_reader.gather_cmp.wait_work"
+            ):
+                self._wait_fill_work_once(handle)
+            handle.gathered.record_stream(stream)
+            handle.out.record_stream(stream)
+            try:
+                self._restore_dequant_scatter(
+                    handle.gathered,
+                    handle.out,
+                    handle.seq_lens,
+                    handle.offset,
+                )
+            finally:
+                handle.done_event = torch.cuda.Event()
+                handle.done_event.record(stream)
+
+    def wait_fill_async(self, handle: CPShardedPoolReadHandle) -> None:
+        done_event = handle.done_event
+        current_stream = torch.cuda.current_stream(handle.out.device)
+        if done_event is not None:
+            current_stream.wait_event(done_event)
+        else:
+            current_stream.wait_event(handle.completion_event)
+        self._wait_fill_work_once(handle)
+
+    def discard_fill_async(self, handle: CPShardedPoolReadHandle) -> None:
+        self.wait_fill_async(handle)
+
+    @staticmethod
+    def _wait_fill_work_once(handle: CPShardedPoolReadHandle) -> None:
+        if not handle.work_waited:
+            handle.work.wait()
+            handle.work_waited = True
+
+    def _validate_call(
+        self,
+        *,
+        block_size: int,
+        gather_lens: Optional[torch.Tensor],
+    ) -> None:
+        if self.cfg.block_size != block_size:
             raise ValueError(
-                f"block_size mismatch: cfg={cfg.block_size} call={block_size}"
+                f"block_size mismatch: cfg={self.cfg.block_size} call={block_size}"
             )
         if gather_lens is not None:
             raise NotImplementedError(
                 "CPShardedPoolReader does not support gather_lens yet; "
                 "pass full per-request seq_lens or add suffix-aware restore/scatter."
             )
-        cp_ctx = cfg.cp_ctx
-        device = out.device
-        D = out.shape[-1]
 
+    def _build_local_flat(
+        self,
+        *,
+        k_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        block_size: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        cfg = self.cfg
         # Step 1: gather owned slice into packed [total_local_kv, 584] uint8.
         # Two distinct per-rank lengths matter here:
         #   * padded — what each rank's local buffer is sized for; uniform
@@ -237,39 +426,36 @@ class CPShardedPoolReader(CompressedKPoolReader):
                 offset=0,
             )
         # Step 2: pack to flat [total_local_kv, 584] (drop per-row padding).
-        local_flat = _pack_padded_to_flat(
-            local_packed, local_seq_lens_padded, cfg.total_local_kv, ENTRY_BYTES
+        return _pack_padded_to_flat(
+            local_packed,
+            local_seq_lens_padded,
+            cfg.total_local_kv,
+            ENTRY_BYTES,
         )
 
-        # Step 3: all_gather across cp ranks → [cp_size * total_local_kv, 584].
-        # Use raw rank-major all_gather; cp_all_gather_full_async asserts
-        # T_local == cp_ctx.chunk_length (prefill-token space), but
-        # local_flat lives in KV-pool-entry space (block-aligned).
-        # INVARIANT: the compressor writer (cp_wait_gather_full + _launch)
-        # always lands its pool writes on the current stream, so NCCL
-        # stream-ordering alone suffices for visibility. No CPU-blocking
-        # synchronize() here — at ~60 layers × per-fill it would serialize
-        # the prefill pipeline. If the writer ever moves to a side stream,
-        # add ``current_stream.wait_event(writer_event)`` instead.
-        gathered = all_gather(local_flat, group=Group.TP)
-        # gathered shape is rank-major: [cp_size * total_local_kv, 584].
+    def _restore_dequant_scatter(
+        self,
+        gathered: torch.Tensor,
+        out: torch.Tensor,
+        seq_lens: torch.Tensor,
+        offset: int,
+    ) -> None:
+        cfg = self.cfg
+        D = out.shape[-1]
+        with record_function_range("dsv4.cp.all_gather.pool_reader.gather_cmp.restore"):
+            restored_packed = gathered[cfg.restore_indices].contiguous()
 
-        # Step 4: restore to request-concatenated logical order.
-        restored_packed = gathered[cfg.restore_indices].contiguous()  # [sum(T_r), 584]
+            # Step 5: dequant locally after communication. This keeps NCCL payload
+            # at 584B/token instead of 1024B/token BF16 [512].
+            restored = torch.empty(
+                (int(restored_packed.shape[0]), D),
+                dtype=out.dtype,
+                device=out.device,
+            )
+            dequantize_packed_k_cache_flat(restored, restored_packed)
 
-        # Step 5: dequant locally after communication. This keeps NCCL payload
-        # at 584B/token instead of 1024B/token BF16 [512].
-        restored = torch.empty(
-            (int(restored_packed.shape[0]), D), dtype=out.dtype, device=device
-        )
-        dequantize_packed_k_cache_flat(restored, restored_packed)
-
-        # Step 6: scatter restored into out[r, offset:offset+T_r, :].
-        _scatter_flat_to_workspace(restored, out, seq_lens, offset)
-
-
-_compute_local_seq_lens = cp_padded_local_kv_lens
-_compute_local_owned_kv_lens = cp_actual_owned_kv_lens
+            # Step 6: scatter restored into out[r, offset:offset+T_r, :].
+            _scatter_flat_to_workspace(restored, out, seq_lens, offset)
 
 
 def _pack_padded_to_flat(
@@ -354,8 +540,8 @@ def make_compressed_k_pool_reader(
     if per_req_total_kv_lens is None or block_size is None:
         raise ValueError(
             "kv_cache_sharded + cp_size>1 requires per_req_total_kv_lens and "
-            "block_size; got None. Pass torch.zeros(B, dtype=int64) for a "
-            "guaranteed-cold prefill iteration."
+            "block_size; got None. Pass torch.zeros(B, dtype=int64) only when "
+            "this iteration has no compressed-K rows to restore."
         )
     if not torch.any(per_req_total_kv_lens > 0):
         return LocalPoolReader()
@@ -375,6 +561,9 @@ def make_compressed_k_pool_reader(
     local_actual_lens = cp_actual_owned_kv_lens(
         per_req_total_kv_lens, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
     )
+    # Host scalars are needed to size the per-layer flat gather buffers. Keep
+    # these syncs in metadata construction; the read/restore hot path below must
+    # stay kernel-only aside from the single NCCL wait.
     total_local = int(local_lens.sum().item())
     if not local_lens.numel():
         max_local = 0

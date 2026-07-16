@@ -19,6 +19,7 @@ import torch
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from .local_loop import LocalLoopStrategy
 
+
 # ACCL-EP's intranode dispatch kernel has a compile-time switch over
 # ``num_topk`` that only covers {2, 4, 8, 16} (asserts false on others —
 # intranode.cu:2237 "Unsupported num_topk"). V4-Flash uses
@@ -83,7 +84,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
 
     def forward(
         self,
-        x: torch.Tensor,  # [N, D] local rank's tokens (BF16)
+        x: torch.Tensor,        # [N, D] local rank's tokens (BF16)
         weights: torch.Tensor,  # [N, k] fp32
         indices: torch.Tensor,  # [N, k] int64 global expert IDs
     ) -> torch.Tensor:

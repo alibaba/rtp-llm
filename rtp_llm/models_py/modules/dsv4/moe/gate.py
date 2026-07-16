@@ -101,9 +101,7 @@ class Gate(nn.Module):
 
         from rtp_llm.utils.model_weight import W
 
-        assert (
-            layer_weights is not None
-        ), "Gate requires layer_weights (descriptor path)"
+        assert layer_weights is not None, "Gate requires layer_weights (descriptor path)"
         self.weight = layer_weights[W.v4_router_w]
         if self.hash:
             assert vocab_size > 0

@@ -1,41 +1,22 @@
 load("//:def.bzl", "copts", "cc_test_wrapper")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 test_copts = [
     "-fno-access-control",
 ] + copts()
 
-exec_ops_test_deps = [
-    "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
-    "//rtp_llm/models_py/bindings/common:common",
-    "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
-    "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
-    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
-    "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
-    "//rtp_llm/cpp/testing:test_log_capture",
-    "@com_google_googletest//:gtest_main",
-] + torch_deps()
-
-cache_store_test_filter = "ExecOpsTest.testWriteCacheStore*:ExecOpsTest.testLoadContextFailureDebugInfo*"
-
 cc_test(
     name = "exec_ops_test",
     srcs = ["ExecOpsTest.cc"],
-    args = ["--gtest_filter=-" + cache_store_test_filter],
-    deps = exec_ops_test_deps,
+    deps = [
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
     copts = test_copts,
     tags = ["manual"],
-)
-
-# Run focused cache-store coverage in default wildcard test gates while keeping
-# the broader GPU-linked ExecOps suite manual.
-cc_test(
-    name = "cache_store_op_test",
-    srcs = ["ExecOpsTest.cc"],
-    args = ["--gtest_filter=" + cache_store_test_filter],
-    deps = exec_ops_test_deps,
-    copts = test_copts,
-    exec_properties = {"gpu": "H20"},
 )
 
 cc_test(

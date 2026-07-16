@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//:__subpackages__"])
 
@@ -47,18 +47,13 @@ cc_library(
 
 cc_library(
     name = "model_config",
-    hdrs = [
-        "MTPModelConfigHelper.h",
-        "ModelConfig.h",
-    ],
+    hdrs = ["ModelConfig.h"],
     srcs = ["ModelConfig.cc"],
     deps = [
         ":eplb_config",
         ":special_tokens",
         ":config_modules",
-        "//rtp_llm/cpp/cache:kvcache_spec_desc",
         "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings/core:types",
         "//rtp_llm/models_py/bindings/core:type_convert"
     ],

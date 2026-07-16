@@ -1,9 +1,10 @@
-"""Validation helpers for DSV4 FP8 invalid KV/state cache access."""
+"""Debug gates for DSV4 FP8 invalid KV/state cache access."""
 
 from __future__ import annotations
 
 import os
 
+DSV4_TRAP_INVALID_KV_ACCESS_ENV = "DSV4_TRAP_INVALID_KV_ACCESS"
 DSV4_VALIDATE_INVALID_KV_ACCESS_ENV = "DSV4_VALIDATE_INVALID_KV_ACCESS"
 DSV4_INVALID_KV_ACCESS_DUMP_LIMIT_ENV = "DSV4_INVALID_KV_ACCESS_DUMP_LIMIT"
 
@@ -16,13 +17,10 @@ def _env_flag(name: str, default: bool) -> bool:
 
 
 def trap_invalid_kv_access_enabled() -> bool:
-    """Keep device-side invalid-access traps enabled in every kernel specialization."""
-    return True
+    return _env_flag(DSV4_TRAP_INVALID_KV_ACCESS_ENV, True)
 
 
 def invalid_kv_access_validation_enabled() -> bool:
-    # This diagnostic performs tensor scans and GPU-to-CPU synchronization at
-    # every call site, so keep it opt-in rather than part of the serving path.
     return _env_flag(DSV4_VALIDATE_INVALID_KV_ACCESS_ENV, False)
 
 
@@ -94,15 +92,11 @@ def validate_block_table_lookup(
 
     rows = int(block_table.shape[0])
     cols = int(block_table.shape[1])
-    invalid_index = mask & (
-        (req < 0) | (req >= rows) | (blk_idx < 0) | (blk_idx >= cols)
-    )
+    invalid_index = mask & ((req < 0) | (req >= rows) | (blk_idx < 0) | (blk_idx >= cols))
     safe_req = req.clamp(0, max(rows - 1, 0))
     safe_blk_idx = blk_idx.clamp(0, max(cols - 1, 0))
     table_vals = block_table[safe_req, safe_blk_idx]
-    invalid_value = (
-        mask & ~invalid_index & ((table_vals < 0) | (table_vals >= num_blocks))
-    )
+    invalid_value = mask & ~invalid_index & ((table_vals < 0) | (table_vals >= num_blocks))
     invalid = invalid_index | invalid_value
     if not bool(invalid.any().item()):
         return

@@ -8,12 +8,12 @@ from typing import Optional
 import torch
 from transformers import AutoTokenizer
 
-import rtp_llm.models
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.models_py.utils.kvcache import SingleGroupKVCacheAdapter
 from rtp_llm.ops.compute_ops import (
+    CacheGroupType,
+    KVCache,
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
@@ -58,7 +58,6 @@ class AutoModel:
             embedding_config=self.py_env_configs.embedding_config,
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
-            vit_config=self.py_env_configs.vit_config,
         )
 
         # Update engine_config based on model_config
@@ -71,7 +70,7 @@ class AutoModel:
         self.gpt_model = ModelFactory._create_model(
             model_config=model_config,
             engine_config=engine_config,
-            vit_config=self.py_env_configs.vit_config,
+            vit_config=None,
             merge_lora=False,
         )
 
@@ -124,10 +123,20 @@ class AutoModel:
         self.py_env_configs = PyEnvConfigs()
 
     def _init_kv_cache(self):
+        self.kv_cache = KVCache()
         self.layer_num = self.model_config.num_layers
         self.kv_head_num = self.model_config.attn_config.kv_head_num
         self.size_per_head = self.model_config.attn_config.size_per_head
         self.tokens_per_block = self.model_config.attn_config.tokens_per_block
+
+        self.kv_cache.seq_size_per_block = self.tokens_per_block
+        self.kv_cache.kernel_seq_size_per_block = self.tokens_per_block
+        self.kv_cache.num_kv_heads = self.kv_head_num
+        self.kv_cache.head_dim = self.size_per_head
+        # Explicitly mark every layer as full-attention.
+        self.kv_cache.layer_attn_types = [
+            CacheGroupType.FULL for _ in range(self.layer_num)
+        ]
 
         per_layer_shape = [
             self.block_nums,
@@ -136,18 +145,17 @@ class AutoModel:
             self.tokens_per_block,
             self.size_per_head,
         ]
-        layer_tensors = [
+        self.kv_cache.kv_cache_base_by_layer = [
             torch.zeros(per_layer_shape, dtype=self.compute_dtype, device=self.device)
             for _ in range(self.layer_num)
         ]
-        self.kv_cache = SingleGroupKVCacheAdapter(layer_tensors, self.tokens_per_block)
 
     def _prepare_prefill_attention_inputs(self, input_length: int) -> PyAttentionInputs:
         need_block_nums = self._check_block_nums(input_length)
         attention_inputs = PyAttentionInputs()
         attention_inputs.input_lengths = torch.tensor([input_length], dtype=torch.int32)
         attention_inputs.sequence_lengths = torch.tensor([], dtype=torch.int32)
-        attention_inputs.cu_seqlens_device = torch.tensor(
+        attention_inputs.cu_seqlens = torch.tensor(
             [0, input_length], dtype=torch.int32, device=self.device
         )
         attention_inputs.prefix_lengths = torch.tensor([0], dtype=torch.int32)
@@ -162,13 +170,13 @@ class AutoModel:
         attention_inputs.kv_cache_kernel_block_id_device = (
             attention_inputs.kv_cache_block_id_device
         )
-        attention_inputs.kv_cache_block_id = torch.tensor(
+        attention_inputs.kv_cache_block_id_host = torch.tensor(
             [[i for i in range(1, need_block_nums + 1)]], dtype=torch.int32
         )
-        attention_inputs.kv_cache_kernel_block_id = attention_inputs.kv_cache_block_id
-        attention_inputs.dtype = get_typemeta(
-            self.kv_cache.get_layer_cache(0).kv_cache_base
+        attention_inputs.kv_cache_kernel_block_id_host = (
+            attention_inputs.kv_cache_block_id_host
         )
+        attention_inputs.dtype = get_typemeta(self.kv_cache.kv_cache_base_by_layer[0])
         attention_inputs.is_prefill = True
         return attention_inputs
 
@@ -201,13 +209,13 @@ class AutoModel:
         attention_inputs.kv_cache_kernel_block_id_device = (
             attention_inputs.kv_cache_block_id_device
         )
-        attention_inputs.kv_cache_block_id = torch.tensor(
+        attention_inputs.kv_cache_block_id_host = torch.tensor(
             [[i for i in range(1, need_block_nums + 1)]], dtype=torch.int32
         )
-        attention_inputs.kv_cache_kernel_block_id = attention_inputs.kv_cache_block_id
-        attention_inputs.dtype = get_typemeta(
-            self.kv_cache.get_layer_cache(0).kv_cache_base
+        attention_inputs.kv_cache_kernel_block_id_host = (
+            attention_inputs.kv_cache_block_id_host
         )
+        attention_inputs.dtype = get_typemeta(self.kv_cache.kv_cache_base_by_layer[0])
         return attention_inputs
 
     def generate(
