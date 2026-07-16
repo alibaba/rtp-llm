@@ -277,9 +277,16 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
     const uint32_t csa_state_dim = 2 * head_dim;
     const uint32_t hca_state_dim = head_dim;
 
-    const bool     fp8_kv              = (attn.kv_cache_dtype == KvCacheDataType::FP8);
-    const uint32_t kv_entry_bytes      = fp8_kv ? kDsv4KvEntryBytesFp8 : kDsv4KvEntryBytesBf16;
-    const auto     indexer_layout      = resolveIndexerKVLayout(model_config, attn, kv_cache_config);
+    const bool     fp8_kv         = (attn.kv_cache_dtype == KvCacheDataType::FP8);
+    const uint32_t kv_entry_bytes = fp8_kv ? kDsv4KvEntryBytesFp8 : kDsv4KvEntryBytesBf16;
+    // The V4 MTP draft is a single SWA-only layer and has no INDEXER_KV
+    // consumers.  Do not validate or select the target-only ATOM 144B indexer
+    // layout for an empty CSA pool: the global server option is shared by the
+    // target and draft ModelConfigs, while the draft model_type is
+    // deepseek_v4_mtp by design.
+    const auto indexer_layout = sets.csa_layers.empty()
+                                    ? DSV4IndexerKVLayout::BF16
+                                    : resolveIndexerKVLayout(model_config, attn, kv_cache_config);
     const uint32_t indexer_entry_bytes = indexerKVEntryBytesForLayout(indexer_layout);
     RTP_LLM_LOG_INFO("DSV4 INDEXER_KV layout=%s entry_elems=%u global_fp8_kv=%d rocm_atom_indexer_fp8=%d",
                      dsv4IndexerKVLayoutName(indexer_layout),
