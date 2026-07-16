@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
+#include "rtp_llm/cpp/cache/NumaMemoryPolicy.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
@@ -29,6 +30,7 @@ namespace {
 
 bool shouldPinHostBlockPool();
 bool shouldRegisterHostBlockPool();
+bool shouldInterleaveRegisteredHostBlockPool();
 
 const bool kShouldPinHostBlockPool = []() {
     const char* value = std::getenv("RTP_LLM_PIN_HOST_BLOCK_POOL");
@@ -92,11 +94,51 @@ bool shouldRegisterHostBlockPool() {
                                 + "', expected 'register' or 'allocator'");
 }
 
-torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes) {
+bool shouldInterleaveRegisteredHostBlockPool() {
+    const char* value = std::getenv("RTP_LLM_HOST_BLOCK_POOL_NUMA_POLICY");
+    if (value == nullptr || std::string(value) == "interleave") {
+        return true;
+    }
+    if (std::string(value) == "none") {
+        return false;
+    }
+    throw std::invalid_argument(std::string("invalid RTP_LLM_HOST_BLOCK_POOL_NUMA_POLICY='") + value
+                                + "', expected 'interleave' or 'none'");
+}
+
+torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool interleave_numa_nodes) {
 #if USING_CUDA
     void* ptr = mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (ptr == MAP_FAILED) {
         throw std::runtime_error(std::string("anonymous mmap failed: ") + std::strerror(errno));
+    }
+    if (interleave_numa_nodes) {
+        const auto numa_result = applyAllowedNumaInterleavePolicy(ptr, size_bytes);
+        if (!numa_result.success) {
+            (void)munmap(ptr, size_bytes);
+            throw std::runtime_error("failed to set NUMA policy for registered host block pool: "
+                                     + numa_result.error_message);
+        }
+        if (numa_result.applied) {
+            std::string nodes;
+            for (size_t i = 0; i < numa_result.allowed_nodes.size(); ++i) {
+                if (i != 0) {
+                    nodes += ",";
+                }
+                nodes += std::to_string(numa_result.allowed_nodes[i]);
+            }
+            RTP_LLM_LOG_INFO("registered host block pool NUMA policy applied: policy=interleave nodes=%s ptr=%p "
+                             "size=%zu",
+                             nodes.c_str(),
+                             ptr,
+                             size_bytes);
+        } else {
+            RTP_LLM_LOG_INFO("registered host block pool NUMA interleave skipped: only allowed node=%d ptr=%p "
+                             "size=%zu",
+                             numa_result.allowed_nodes.front(),
+                             ptr,
+                             size_bytes);
+        }
     }
     const auto err = cudaHostRegister(ptr, size_bytes, cudaHostRegisterDefault);
     if (err != cudaSuccess) {
@@ -195,10 +237,12 @@ void BlockPool::initializeCacheBuffer() {
         if (shouldPinHostBlockPool()) {
             // Parse the mode outside the allocation fallback. Invalid configuration
             // must fail fast instead of silently changing pinned memory to pageable.
-            const bool use_registered_host = shouldRegisterHostBlockPool();
+            const bool use_registered_host   = shouldRegisterHostBlockPool();
+            const bool interleave_numa_nodes = use_registered_host ? shouldInterleaveRegisteredHostBlockPool() : false;
             try {
                 if (use_registered_host) {
-                    cache_aligned_buffer_         = allocateRegisteredCpuTensor(config_.total_size_bytes);
+                    cache_aligned_buffer_ =
+                        allocateRegisteredCpuTensor(config_.total_size_bytes, interleave_numa_nodes);
                     cache_buffer_registered_host_ = true;
                 } else {
                     cache_aligned_buffer_ =

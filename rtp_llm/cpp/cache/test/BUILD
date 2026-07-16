@@ -170,6 +170,37 @@ cc_test(
 )
 
 cc_test(
+    name = "numa_memory_policy_test",
+    srcs = [
+        "NumaMemoryPolicyTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "RTP_LLM_PIN_HOST_BLOCK_POOL": "1",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "pinned_host_kv_write_stress_test",
+    srcs = [
+        "PinnedHostKVWriteStressTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "RTP_LLM_HOST_BLOCK_POOL_NUMA_POLICY": "interleave",
+        "RTP_LLM_HOST_BLOCK_POOL_PIN_MODE": "register",
+        "RTP_LLM_PIN_HOST_BLOCK_POOL": "1",
+    },
+    exec_properties = {'gpu':'H20'},
+    tags = ["manual"],
+)
+
+cc_test(
     name = "memory_layout_strategy_test",
     srcs = [
         "MemoryLayoutStrategyTest.cc",
