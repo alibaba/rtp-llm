@@ -65,6 +65,18 @@ cc_binary(
     deps = [":cache_config_creator_py_test_lib"],
 )
 
+cc_test(
+    name = "cache_config_creator_test",
+    srcs = ["CacheConfigCreatorTest.cc"],
+    copts = test_copts,
+    deps = [
+        ":cache_config_test_utils",
+        "//rtp_llm/cpp/cache:cache_types",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "block_pool_test_helper",
     hdrs = [
