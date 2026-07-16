@@ -142,9 +142,10 @@ private:
     BlockCachePtr block_cache_;
 
     torch::Tensor               cache_aligned_buffer_;
-    void*                       cache_base_ptr_  = nullptr;
-    bool                        kvcache_reg_mr_  = false;
-    int64_t                     mr_cost_time_ms_ = 0;
+    void*                       cache_base_ptr_               = nullptr;
+    bool                        cache_buffer_registered_host_ = false;
+    bool                        kvcache_reg_mr_               = false;
+    int64_t                     mr_cost_time_ms_              = 0;
     std::shared_ptr<CacheStore> cache_store_;
 
     std::vector<std::unique_ptr<MemoryLayoutStrategy>> layout_strategies_;
