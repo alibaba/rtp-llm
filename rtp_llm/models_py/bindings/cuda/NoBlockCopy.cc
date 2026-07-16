@@ -127,20 +127,18 @@ void releaseMetadataScratch(StagedMemoryCopyScratch& scratch) {
     scratch.meta_capacity = 0;
 }
 
-bool ensureStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch,
-                                   int                      device_index,
-                                   size_t                   host_bytes,
-                                   size_t                   tile_num) {
+bool ensureStagedMemoryCopyScratch(
+    StagedMemoryCopyScratch& scratch, int device_index, size_t host_bytes, bool need_host_staging, size_t tile_num) {
     if (scratch.device_index >= 0 && scratch.device_index != device_index) {
         releaseStagedMemoryCopyScratch(scratch);
     }
     check_cuda_value(cudaSetDevice(device_index));
     scratch.device_index = device_index;
 
-    if (scratch.host_capacity < host_bytes) {
+    if (need_host_staging && scratch.host_capacity < host_bytes) {
         if (scratch.host_staging != nullptr) {
             (void)cudaFreeHost(scratch.host_staging);
-            scratch.host_staging = nullptr;
+            scratch.host_staging  = nullptr;
             scratch.host_capacity = 0;
         }
         auto err = cudaHostAlloc(&scratch.host_staging, host_bytes, cudaHostAllocDefault);
@@ -157,8 +155,7 @@ bool ensureStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch,
         auto err = cudaMalloc(&scratch.device_staging, host_bytes);
         if (err != cudaSuccess) {
             scratch.device_capacity = 0;
-            RTP_LLM_LOG_WARNING("execStagedMemoryCopy failed to allocate device staging: %s",
-                                cudaGetErrorString(err));
+            RTP_LLM_LOG_WARNING("execStagedMemoryCopy failed to allocate device staging: %s", cudaGetErrorString(err));
             return false;
         }
         scratch.device_capacity = host_bytes;
@@ -175,13 +172,58 @@ bool ensureStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch,
         }
         if (err != cudaSuccess) {
             releaseMetadataScratch(scratch);
-            RTP_LLM_LOG_WARNING("execStagedMemoryCopy failed to allocate device metadata: %s",
-                                cudaGetErrorString(err));
+            RTP_LLM_LOG_WARNING("execStagedMemoryCopy failed to allocate device metadata: %s", cudaGetErrorString(err));
             return false;
         }
         scratch.meta_capacity = tile_num;
     }
     return true;
+}
+
+cudaError_t
+copyPinnedHostSegmentsToDeviceStaging(const StagedMemoryCopyParams& params, void* device_staging, cudaStream_t stream) {
+    if (params.host_segments.empty()) {
+        return cudaSuccess;
+    }
+#if CUDART_VERSION >= 12080
+    std::vector<void*>       dsts;
+    std::vector<const void*> srcs;
+    std::vector<size_t>      sizes;
+    dsts.reserve(params.host_segments.size());
+    srcs.reserve(params.host_segments.size());
+    sizes.reserve(params.host_segments.size());
+    auto* device_base = static_cast<char*>(device_staging);
+    for (const auto& segment : params.host_segments) {
+        dsts.push_back(device_base + segment.host_offset);
+        srcs.push_back(segment.host);
+        sizes.push_back(segment.bytes);
+    }
+    cudaMemcpyAttributes attr{};
+    attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
+    size_t attr_idx     = 0;
+#if CUDART_VERSION >= 13000
+    return cudaMemcpyBatchAsync(dsts.data(), srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, stream);
+#else
+    std::vector<void*> mutable_srcs;
+    mutable_srcs.reserve(srcs.size());
+    for (auto* src : srcs) {
+        mutable_srcs.push_back(const_cast<void*>(src));
+    }
+    size_t fail_idx = 0;
+    return cudaMemcpyBatchAsync(
+        dsts.data(), mutable_srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, &fail_idx, stream);
+#endif
+#else
+    auto* device_base = static_cast<char*>(device_staging);
+    for (const auto& segment : params.host_segments) {
+        const auto err = cudaMemcpyAsync(
+            device_base + segment.host_offset, segment.host, segment.bytes, cudaMemcpyHostToDevice, stream);
+        if (err != cudaSuccess) {
+            return err;
+        }
+    }
+    return cudaSuccess;
+#endif
 }
 
 }  // namespace
@@ -258,7 +300,7 @@ bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
     check_cuda_value(cudaSetDevice(params.device_index));
     auto stream = getNoBlockCopyStream().stream();
 
-    const size_t tile_num = params.tiles.size();
+    const size_t             tile_num = params.tiles.size();
     std::vector<void*>       dsts;
     std::vector<const void*> srcs;
     std::vector<size_t>      sizes;
@@ -289,7 +331,7 @@ bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
         mutable_srcs.push_back(const_cast<void*>(src));
     }
     size_t fail_idx = 0;
-    auto   err = cudaMemcpyBatchAsync(
+    auto   err      = cudaMemcpyBatchAsync(
         dsts.data(), mutable_srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, &fail_idx, stream);
 #endif
     if (err == cudaSuccess) {
@@ -317,6 +359,11 @@ bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopy
                             params.host_base,
                             params.host_bytes,
                             params.host_segments.size());
+        return false;
+    }
+    if (params.direct_pinned_host_segments
+        && (params.direction != StagedMemoryCopyDirection::H2D || params.host_segments.empty())) {
+        RTP_LLM_LOG_WARNING("execStagedMemoryCopy failed: direct pinned segments require non-empty H2D segments");
         return false;
     }
     const auto host_coverage = checkHostCoverage(params);
@@ -356,15 +403,16 @@ bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopy
     }
 
     StagedMemoryCopyScratch local_scratch;
-    auto*                   work_scratch = scratch != nullptr ? scratch : &local_scratch;
-    auto cleanup_local_scratch = [&]() {
+    auto*                   work_scratch          = scratch != nullptr ? scratch : &local_scratch;
+    auto                    cleanup_local_scratch = [&]() {
         if (scratch == nullptr) {
             releaseStagedMemoryCopyScratch(local_scratch);
         }
     };
 
     const size_t tile_num = h_ptrs.size();
-    if (!ensureStagedMemoryCopyScratch(*work_scratch, params.device_index, params.host_bytes, tile_num)) {
+    if (!ensureStagedMemoryCopyScratch(
+            *work_scratch, params.device_index, params.host_bytes, !params.direct_pinned_host_segments, tile_num)) {
         cleanup_local_scratch();
         return false;
     }
@@ -372,11 +420,8 @@ bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopy
     auto err = cudaMemcpyAsync(
         work_scratch->device_ptrs, h_ptrs.data(), tile_num * sizeof(void*), cudaMemcpyHostToDevice, stream);
     if (err == cudaSuccess) {
-        err = cudaMemcpyAsync(work_scratch->device_offsets,
-                              h_offsets.data(),
-                              tile_num * sizeof(size_t),
-                              cudaMemcpyHostToDevice,
-                              stream);
+        err = cudaMemcpyAsync(
+            work_scratch->device_offsets, h_offsets.data(), tile_num * sizeof(size_t), cudaMemcpyHostToDevice, stream);
     }
     if (err == cudaSuccess) {
         err = cudaMemcpyAsync(
@@ -384,12 +429,16 @@ bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopy
     }
 
     if (err == cudaSuccess && params.direction == StagedMemoryCopyDirection::H2D) {
-        copyHostToPinnedStaging(params, work_scratch->host_staging);
-        err = cudaMemcpyAsync(work_scratch->device_staging,
-                              work_scratch->host_staging,
-                              params.host_bytes,
-                              cudaMemcpyHostToDevice,
-                              stream);
+        if (params.direct_pinned_host_segments) {
+            err = copyPinnedHostSegmentsToDeviceStaging(params, work_scratch->device_staging, stream);
+        } else {
+            copyHostToPinnedStaging(params, work_scratch->host_staging);
+            err = cudaMemcpyAsync(work_scratch->device_staging,
+                                  work_scratch->host_staging,
+                                  params.host_bytes,
+                                  cudaMemcpyHostToDevice,
+                                  stream);
+        }
         if (err == cudaSuccess) {
             sDevMPS::launch_dsv4_memory_cache_scatter_copy_var_nooffset(
                 work_scratch->device_staging,
@@ -397,7 +446,7 @@ bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopy
                 reinterpret_cast<const size_t*>(work_scratch->device_sizes),
                 reinterpret_cast<void**>(work_scratch->device_ptrs),
                 static_cast<int>(tile_num),
-                0,
+                params.sm_copy_block_num,
                 stream);
             err = cudaGetLastError();
         }
@@ -408,7 +457,7 @@ bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopy
             reinterpret_cast<const size_t*>(work_scratch->device_offsets),
             work_scratch->device_staging,
             static_cast<int>(tile_num),
-            0,
+            params.sm_copy_block_num,
             stream);
         err = cudaGetLastError();
         if (err == cudaSuccess) {

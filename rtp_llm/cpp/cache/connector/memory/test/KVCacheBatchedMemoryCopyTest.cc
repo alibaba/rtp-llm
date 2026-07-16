@@ -322,6 +322,39 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     return config;
 }
 
+CacheConfig makeLargeUntypedMemoryCopyConfig() {
+    constexpr size_t kMemoryBlockBytes = 3984128;
+    CacheConfig      config;
+    config.dtype                       = rtp_llm::DataType::TYPE_UINT8;
+    config.layer_num                   = 1;
+    config.layer_all_num               = 1;
+    config.block_num                   = 64;
+    config.seq_size_per_block          = 1;
+    config.kernel_seq_size_per_block   = 1;
+    config.kv_block_stride_bytes       = kMemoryBlockBytes;
+    config.kv_scale_stride_bytes       = 0;
+    config.kv_block_size_bytes         = kMemoryBlockBytes;
+    config.kv_scale_size_bytes         = 0;
+    config.block_size_bytes            = kMemoryBlockBytes;
+    config.layer_ids                   = {{0}};
+    config.global_layer_ids            = config.layer_ids;
+    config.layer_to_group_id           = {0};
+    config.layer_to_group_ids          = {{0}};
+    config.layer_group_types           = {CacheGroupType::FULL};
+    config.layer_to_block_stride_bytes = {static_cast<int>(kMemoryBlockBytes)};
+    config.group_types                 = {CacheGroupType::FULL};
+    config.group_region_names          = {KVCacheRegionName::DEFAULT};
+    config.group_block_nums            = {config.block_num};
+    config.group_seq_size_per_block    = {config.seq_size_per_block};
+    config.group_kv_block_stride_bytes = {kMemoryBlockBytes};
+    config.group_kv_scale_stride_bytes = {0};
+    config.group_block_size_bytes      = {kMemoryBlockBytes};
+    config.layer_region_to_group_id.assign(1,
+                                           std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
+    config.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::DEFAULT)] = 0;
+    return config;
+}
+
 char copyTag(size_t index) {
     return static_cast<char>(33 + (index % 90));
 }
@@ -583,6 +616,63 @@ TEST(KVCacheBatchedMemoryCopyTest, StagedCopyEligibilityRequiresDsv4TypedLayout)
         pro_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
     EXPECT_EQ(pro_config.layer_num, 61u);
     EXPECT_TRUE(pro_connector->isDsv4TypedCacheLayout(pro_connector->layerRegionSlots()));
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, LargeUntypedPinnedMemoryRoundTripUsesD2HBatchAndH2DStaging) {
+    ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+    constexpr size_t kBlockCount = 51;
+
+    auto          config = makeLargeUntypedMemoryCopyConfig();
+    KVCacheConfig kv_config;
+    kv_config.memory_cache_size_mb            = 384;
+    kv_config.memory_cache_sync_timeout_ms    = 1000;
+    kv_config.enable_prefix_tree_memory_cache = false;
+
+    auto                     allocator    = std::make_shared<FakeTypedKVCacheAllocator>(config);
+    std::vector<std::string> server_addrs = {"127.0.0.1:1"};
+    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
+    ASSERT_TRUE(connector->init());
+
+    const auto slots = connector->layerRegionSlots();
+    ASSERT_EQ(slots.size(), 1u);
+    ASSERT_FALSE(connector->hasTypedLayerRegionSlots(slots));
+    auto memory_pool = connector->isDualPool() ? connector->complete_pool_ : connector->block_pool_;
+    ASSERT_NE(memory_pool, nullptr);
+    ASSERT_EQ(memory_pool->where(), MemoryType::MEMORY_CPU_PINNED);
+    auto mem_blocks = memory_pool->malloc(kBlockCount);
+    ASSERT_EQ(mem_blocks.size(), kBlockCount);
+
+    MemoryOperationRequestPB request;
+    for (size_t block_idx = 0; block_idx < kBlockCount; ++block_idx) {
+        auto* item = request.add_copy_items();
+        item->set_mem_block(mem_blocks[block_idx]);
+        item->set_backing_type(MemoryOperationRequestPB::MEMORY);
+        item->set_is_complete(true);
+        item->add_gpu_blocks(static_cast<BlockIdxType>(block_idx + 1));
+        setBlockInfosContent(allocator->convertIndexToBuffer(
+                                 /*layer_id=*/0, KVCacheRegionName::DEFAULT, static_cast<int>(block_idx + 1)),
+                             copyTag(block_idx));
+    }
+
+    ASSERT_TRUE(
+        connector->tryCopyCacheWithBatchedMemoryCopy(request, KVCacheMemoryConnector::CopyDirection::D2H, slots));
+    for (size_t block_idx = 0; block_idx < kBlockCount; ++block_idx) {
+        const auto mem_buffers = memory_pool->convertIndexToBuffer(/*layer_id=*/0, mem_blocks[block_idx]);
+        ASSERT_EQ(mem_buffers.size(), 1u);
+        verifyBlockBytesEq(mem_buffers[0], 0, mem_buffers[0].size_bytes, copyTag(block_idx));
+        setBlockBytes(mem_buffers[0], 0, mem_buffers[0].size_bytes, copyTag(1000 + block_idx));
+        setBlockInfosContent(allocator->convertIndexToBuffer(
+                                 /*layer_id=*/0, KVCacheRegionName::DEFAULT, static_cast<int>(block_idx + 1)),
+                             0);
+    }
+
+    ASSERT_TRUE(
+        connector->tryCopyCacheWithStagedMemoryCopy(request, KVCacheMemoryConnector::CopyDirection::H2D, slots));
+    for (size_t block_idx = 0; block_idx < kBlockCount; ++block_idx) {
+        verifyBlockInfosContent(allocator->convertIndexToBuffer(
+                                    /*layer_id=*/0, KVCacheRegionName::DEFAULT, static_cast<int>(block_idx + 1)),
+                                copyTag(1000 + block_idx));
+    }
 }
 
 void runDsv4TypedStagedCopyRoundTrip(const std::set<KVCacheRegionName>& host_regions) {
