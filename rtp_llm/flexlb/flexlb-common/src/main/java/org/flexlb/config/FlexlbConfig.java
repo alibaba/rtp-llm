@@ -86,6 +86,13 @@ public class FlexlbConfig {
     private double shortestTtftSimilarityThresholdRatio = 0.2;
 
     /**
+     * Extra queue work tolerated by CACHE_AFFINITY_FIRST per token of cache lead.
+     * A value above 1 strengthens cache affinity; the request spills to the shortest-TTFT
+     * worker once the additional queue exceeds the cache saving multiplied by this factor.
+     */
+    private double cacheAffinityFirstQueueToleranceFactor = 2.0;
+
+    /**
      * KV cache available threshold for DECODE role (percentage)
      * When Worker's KV cache usage is below this threshold, the Worker is considered available
      * Range: 1-100, default 90 means Worker is unavailable when usage exceeds 90%

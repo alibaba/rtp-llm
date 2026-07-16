@@ -49,6 +49,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     private final EngineHealthReporter engineHealthReporter;
     private final CacheAwareService cacheAwareService;
     private final ResourceMeasureFactory resourceMeasureFactory;
+    private final LoadBalanceStrategyEnum strategy;
 
     private static final int SMALL_CLUSTER_SIZE = 3;
     private static final int MIN_CANDIDATE_COUNT = 2;
@@ -59,11 +60,26 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                                 EngineHealthReporter engineHealthReporter,
                                 CacheAwareService cacheAwareService,
                                 ResourceMeasureFactory resourceMeasureFactory) {
+        this(
+                engineWorkerStatus,
+                engineHealthReporter,
+                cacheAwareService,
+                resourceMeasureFactory,
+                LoadBalanceStrategyEnum.SHORTEST_TTFT);
+    }
+
+    protected ShortestTTFTStrategy(
+            EngineWorkerStatus engineWorkerStatus,
+            EngineHealthReporter engineHealthReporter,
+            CacheAwareService cacheAwareService,
+            ResourceMeasureFactory resourceMeasureFactory,
+            LoadBalanceStrategyEnum strategy) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.engineHealthReporter = engineHealthReporter;
         this.cacheAwareService = cacheAwareService;
         this.resourceMeasureFactory = resourceMeasureFactory;
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, this);
+        this.strategy = strategy;
+        LoadBalanceStrategyFactory.register(strategy, this);
     }
 
     /**
@@ -114,7 +130,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         String requestId = balanceContext.getRequestId();
         long seqLen = balanceContext.getRequest().getSeqLen();
 
-        Logger.debug("Starting shortest TTFT selection for role: {}", roleType);
+        Logger.debug("Starting {} selection for role: {}", strategy.getName(), roleType);
 
         // Get available worker list
         FlexlbConfig config = balanceContext.getConfig();
@@ -313,7 +329,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param scoredWorkers List of scored workers
      * @return Best worker
      */
-    private ScoredWorker selectBestWorker(
+    protected ScoredWorker selectBestWorker(
             List<ScoredWorker> scoredWorkers,
             BalanceContext balanceContext,
             RoleType roleType,
@@ -471,7 +487,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param workers Worker list
      * @return Sorted worker list in ascending order
      */
-    private List<ScoredWorker> sortByTTFT(List<ScoredWorker> workers) {
+    protected List<ScoredWorker> sortByTTFT(List<ScoredWorker> workers) {
         // Two-level sorting
         // 1. Primary sort: by TTFT (Time-To-First-Token) in ascending order
         // 2. Secondary sort: when TTFT is equal, by lastSelectedTime in ascending order
@@ -585,15 +601,15 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     /**
      * Prevent concurrent scheduler threads that observed the same queue snapshot from all
      * selecting one worker. The algorithm's preferred worker is tried first; only a concurrent
-     * claim causes another similar-TTFT worker to be considered.
+     * claim causes another eligible worker to be considered.
      */
-    private ScoredWorker claimPreferredWorker(
+    protected ScoredWorker claimPreferredWorker(
             ScoredWorker preferredWorker,
-            List<ScoredWorker> similarWorkers,
+            List<ScoredWorker> candidateWorkers,
             ScoredWorker fallbackWorker) {
-        List<ScoredWorker> claimOrder = new ArrayList<>(similarWorkers.size());
+        List<ScoredWorker> claimOrder = new ArrayList<>(candidateWorkers.size());
         claimOrder.add(preferredWorker);
-        similarWorkers.stream()
+        candidateWorkers.stream()
                 .filter(worker -> !worker.equals(preferredWorker))
                 .sorted(Comparator.comparingLong(ScoredWorker::ttft))
                 .forEach(claimOrder::add);
