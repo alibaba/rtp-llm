@@ -459,7 +459,9 @@ class DispatcherE2ETest {
             pb.add("p" + i);
         }
 
-        JsonNode resp = client.post().uri("/dispatcher/_dryrun/batch_infer")
+        // Stamped chunks require the explicit opt-in: dry-run is side-effect-free by default, and
+        // resolving BE targets advances master's RR cursor.
+        JsonNode resp = client.post().uri("/dispatcher/_dryrun/batch_infer?pre_assign=true")
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(body)
                 .exchange()

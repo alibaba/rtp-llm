@@ -10,6 +10,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpHeaders;
 import org.junit.jupiter.api.Timeout;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.netty.resources.ConnectionProvider;
@@ -48,7 +49,7 @@ class FeClientTest {
         body.put("prompt_batch", JSONArray.of("hi"));
 
         String base = "http://" + server.getHostName() + ":" + server.getPort();
-        StepVerifier.create(client.postBytes(base, "/batch_infer", JSON.toJSONBytes(body)))
+        StepVerifier.create(client.postBytes(base, "/batch_infer", JSON.toJSONBytes(body), new HttpHeaders(), null))
                 .assertNext(bytes -> {
                     JSONObject parsed = JSON.parseObject(bytes);
                     Assertions.assertEquals("ok",
@@ -76,7 +77,7 @@ class FeClientTest {
         FeClient client = new FeClient(WebClient.builder(), connectionProvider, cfg);
 
         String base = "http://" + server.getHostName() + ":" + server.getPort();
-        StepVerifier.create(client.postBytes(base, "/batch_infer", "{}".getBytes()))
+        StepVerifier.create(client.postBytes(base, "/batch_infer", "{}".getBytes(), new HttpHeaders(), null))
                 .expectErrorSatisfies(e ->
                         Assertions.assertEquals(500, DispatcherResponses.httpStatusOf(e)))
                 .verify(java.time.Duration.ofSeconds(5));
@@ -96,7 +97,7 @@ class FeClientTest {
         FeClient client = new FeClient(WebClient.builder(), connectionProvider, cfg);
 
         String base = "http://" + server.getHostName() + ":" + server.getPort();
-        StepVerifier.create(client.postBytes(base, "/batch_infer", "{}".getBytes()))
+        StepVerifier.create(client.postBytes(base, "/batch_infer", "{}".getBytes(), new HttpHeaders(), null))
                 .expectError()
                 .verify(java.time.Duration.ofSeconds(5));
     }
@@ -117,7 +118,7 @@ class FeClientTest {
         FeClient client = new FeClient(WebClient.builder(), connectionProvider, cfg);
 
         String base = "http://" + server.getHostName() + ":" + server.getPort();
-        StepVerifier.create(client.postBytes(base, "/batch_infer", "{}".getBytes()))
+        StepVerifier.create(client.postBytes(base, "/batch_infer", "{}".getBytes(), new HttpHeaders(), null))
                 .expectErrorSatisfies(e -> {
                     Assertions.assertInstanceOf(java.util.concurrent.TimeoutException.class, e,
                             "the whole-call cap must fire — each 50ms trickle resets the per-read responseTimeout");

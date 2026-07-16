@@ -3,6 +3,7 @@ package org.flexlb.dispatcher;
 import io.netty.channel.ChannelOption;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.stereotype.Component;
@@ -66,16 +67,33 @@ public class FeClient {
      * {@code batchTimeoutMs + bodyReadMarginMs}; a timeout surfaces as a transport failure
      * for that chunk only.
      */
-    public Mono<byte[]> postBytes(String feBaseUrl, String fePath, byte[] body) {
-        if (uriCache.size() >= URI_CACHE_MAX) {
-            uriCache.clear();
-        }
+    public Mono<byte[]> postBytes(String feBaseUrl, String fePath, byte[] body,
+                                  HttpHeaders inboundHeaders, String rawQuery) {
         return webClient.post()
-                .uri(uriCache.computeIfAbsent(feBaseUrl + fePath, URI::create))
+                .uri(resolveUri(feBaseUrl, fePath, rawQuery))
+                // End-to-end headers first (Authorization, tenant, tracing — the caller's request
+                // must not lose them just because it took the split path), then the content type of
+                // the chunk body we re-serialized, which overrides any inbound value.
+                .headers(h -> DispatcherHeaders.copyEndToEnd(inboundHeaders, h, DispatcherHeaders.FANOUT_SKIP))
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(body)
                 .retrieve()
                 .bodyToMono(byte[].class)
                 .timeout(overallTimeout);
+    }
+
+    /**
+     * Query-less calls (the overwhelmingly common case) hit the memo. A request that carries a
+     * query string is built fresh: query strings vary per request, so caching them would thrash the
+     * memo and defeat the bound.
+     */
+    private URI resolveUri(String feBaseUrl, String fePath, String rawQuery) {
+        if (rawQuery != null && !rawQuery.isEmpty()) {
+            return URI.create(feBaseUrl + fePath + "?" + rawQuery);
+        }
+        if (uriCache.size() >= URI_CACHE_MAX) {
+            uriCache.clear();
+        }
+        return uriCache.computeIfAbsent(feBaseUrl + fePath, URI::create);
     }
 }

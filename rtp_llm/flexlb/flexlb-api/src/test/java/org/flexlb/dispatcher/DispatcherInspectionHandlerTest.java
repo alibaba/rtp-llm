@@ -31,6 +31,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 /**
  * Unit tests for the combined inspection surface — {@code GET /dispatcher/_snapshot} and
@@ -227,15 +228,19 @@ class DispatcherInspectionHandlerTest {
         }
 
         @Test
-        void noQueryParamUsesConfigDefault() {
+        void noQueryParamIsSideEffectFreeEvenWhenConfigDefaultIsOn() {
+            // A diagnostic must not perturb production: resolving BE targets advances master's RR
+            // cursor, so an unqualified dry-run never does it — not even when preAssignBe=true.
             BatchScheduleClient client = mock(BatchScheduleClient.class);
             when(client.requestTargets(anyInt())).thenReturn(Mono.just(List.of(target("10.0.0.1"))));
             DispatcherInspectionHandler handler = handlerWith(true, client);
 
             ObjectNode out = invokeDryRun(handler, null, List.of("a"));
-            assertTrue(out.get("preAssignConfigDefault").asBoolean());
-            assertTrue(out.get("preAssignEffective").asBoolean(),
-                    "absent query param must fall back to config default");
+            assertTrue(out.get("preAssignConfigDefault").asBoolean(),
+                    "the config default is still reported for operators");
+            assertFalse(out.get("preAssignEffective").asBoolean(),
+                    "absent pre_assign must not resolve targets, whatever the config default says");
+            verifyNoInteractions(client);
         }
 
         @Test
@@ -399,7 +404,8 @@ class DispatcherInspectionHandlerTest {
 
             assertResponse(handler.dryRun(req), HttpStatus.INTERNAL_SERVER_ERROR, out -> {
                 assertEquals("dryrun_internal_error", out.get("error").asText());
-                assertTrue(out.get("message").asText().contains("simulated coordinator failure"));
+                assertFalse(out.get("message").asText().contains("simulated coordinator failure"),
+                        "the upstream exception text must stay in the log, not the client body");
             });
         }
     }

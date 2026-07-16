@@ -84,7 +84,11 @@ public class BatchHandler {
                     .flatMap(targets -> {
                         BatchChunkAssembler.stampPreAssignedBe(chunkBodies, targets);
                         long fanoutStart = System.currentTimeMillis();
-                        return fanoutService.dispatchChunks(spec.getPath(), chunkBodies, spec)
+                        // Relay the caller's end-to-end headers and query to every chunk: the split
+                        // path must not silently change auth/tenancy/tracing semantics relative to
+                        // the passthrough path for the same route.
+                        return fanoutService.dispatchChunks(spec.getPath(), chunkBodies, spec,
+                                        request.headers().asHttpHeaders(), request.uri().getRawQuery())
                                 .doOnNext(subs -> metricsReporter.reportFanoutRt(
                                         System.currentTimeMillis() - fanoutStart))
                                 .map(subs -> ResponseMerger.merge(subs, spec))
@@ -107,7 +111,10 @@ public class BatchHandler {
                 return DispatcherResponses.error(413, "request_body_too_large",
                         "batch body exceeds the server limit; see MAX_IN_MEMORY_SIZE");
             }
-            return DispatcherResponses.error(500, "dispatch_failed", String.valueOf(e.getMessage()));
+            // Stable, non-revealing text: the exception message can carry the FE address or
+            // upstream response detail, which must not cross the client boundary. The full
+            // reason is in the WARN above and in pv.log.
+            return DispatcherResponses.error(500, "dispatch_failed", "batch dispatch failed");
         }).doOnNext(resp -> pv.setHttpStatus(resp.rawStatusCode()))
           .doFinally(signal -> {
               if (!delegatedToPassthrough.get()) {

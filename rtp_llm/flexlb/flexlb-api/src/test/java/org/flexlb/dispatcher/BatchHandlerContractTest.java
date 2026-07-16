@@ -29,6 +29,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
@@ -64,6 +65,11 @@ class BatchHandlerContractTest {
     void setUp() {
         lenient().when(cfg.getSubBatchSpec()).thenReturn(SubBatchSpec.parse("count:2"));
         lenient().when(cfg.isPreAssignBe()).thenReturn(false);
+        // BatchHandler now relays the caller's end-to-end headers + query to each chunk.
+        ServerRequest.Headers headers = mock(ServerRequest.Headers.class);
+        lenient().when(headers.asHttpHeaders()).thenReturn(new org.springframework.http.HttpHeaders());
+        lenient().when(serverRequest.headers()).thenReturn(headers);
+        lenient().when(serverRequest.uri()).thenReturn(java.net.URI.create("http://master/dispatcher/batch_infer"));
         handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient,
                 DispatcherTestSupport.noopMetrics());
     }
@@ -162,14 +168,14 @@ class BatchHandlerContractTest {
     void stringListEmbeddingsInputStillSplits() {
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/v1/embeddings");
         stubBody("{\"model\":\"m\",\"input\":[\"a\",\"b\",\"c\"]}");
-        when(fanoutService.dispatchChunks(anyString(), anyList(), any()))
+        when(fanoutService.dispatchChunks(anyString(), anyList(), any(), any(), any()))
                 .thenReturn(Mono.just(List.of(SubBatchResult.failed(3, 0, "fe_http_500"))));
 
         handler.handle(serverRequest, spec).block();
 
         verifyNoInteractions(passthroughClient);
         org.mockito.Mockito.verify(fanoutService)
-                .dispatchChunks(eq("/v1/embeddings"), anyList(), eq(spec));
+                .dispatchChunks(eq("/v1/embeddings"), anyList(), eq(spec), any(), any());
     }
 
     @Test
@@ -183,7 +189,7 @@ class BatchHandlerContractTest {
                 DispatcherTestSupport.noopMetrics());
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/v1/batch/chat/completions");
         stubBody("{\"requests\":[{\"messages\":[]},{\"messages\":[]}]}");
-        when(fanoutService.dispatchChunks(anyString(), anyList(), any()))
+        when(fanoutService.dispatchChunks(anyString(), anyList(), any(), any(), any()))
                 .thenReturn(Mono.just(List.of(SubBatchResult.failed(2, 0, "fe_http_500"))));
 
         handler.handle(serverRequest, spec).block();
@@ -200,7 +206,7 @@ class BatchHandlerContractTest {
         stubBody("{\"prompt_batch\":[\"a\",\"b\"]}");
         when(batchScheduleClient.requestTargets(anyInt()))
                 .thenReturn(Mono.just(List.of()));
-        when(fanoutService.dispatchChunks(anyString(), anyList(), any()))
+        when(fanoutService.dispatchChunks(anyString(), anyList(), any(), any(), any()))
                 .thenReturn(Mono.just(List.of(SubBatchResult.failed(2, 0, "fe_http_500"))));
 
         handler.handle(serverRequest, spec).block();
@@ -243,10 +249,10 @@ class BatchHandlerContractTest {
     void allChunksFailedReturns500WithDedupedReasons() {
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
         stubBody("{\"prompt_batch\":[\"a\",\"b\",\"c\",\"d\"]}");
-        when(fanoutService.dispatchChunks(anyString(), anyList(), any()))
+        when(fanoutService.dispatchChunks(anyString(), anyList(), any(), any(), any()))
                 .thenReturn(Mono.just(List.of(
-                        SubBatchResult.failed(2, 0, "fe_http_500"),
-                        SubBatchResult.failed(2, 2, "fe_http_500"))));
+                        SubBatchResult.failed(2, 0, "boom", 500),
+                        SubBatchResult.failed(2, 2, "boom", 500))));
 
         ServerResponse out = handler.handle(serverRequest, spec).block();
 
@@ -261,7 +267,8 @@ class BatchHandlerContractTest {
         assertEquals(2, body.get("total_chunks").asInt());
         assertEquals(1, body.get("failed_reasons").size(),
                 "identical reasons must be deduplicated: " + body.get("failed_reasons"));
-        assertEquals("fe_http_500", body.get("failed_reasons").get(0).asText());
+        assertEquals("fe_server_error", body.get("failed_reasons").get(0).asText(),
+                "deduped reason is the bounded public code derived from the FE status");
         verifyNoInteractions(passthroughClient);
     }
 
@@ -272,7 +279,7 @@ class BatchHandlerContractTest {
         // client that sent a bad batch gets a 4xx, not a misleading server error.
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
         stubBody("{\"prompt_batch\":[\"a\",\"b\",\"c\",\"d\"]}");
-        when(fanoutService.dispatchChunks(anyString(), anyList(), any()))
+        when(fanoutService.dispatchChunks(anyString(), anyList(), any(), any(), any()))
                 .thenReturn(Mono.just(List.of(
                         SubBatchResult.failed(2, 0, "fe_http_400", 400),
                         SubBatchResult.failed(2, 2, "fe_http_400", 400))));

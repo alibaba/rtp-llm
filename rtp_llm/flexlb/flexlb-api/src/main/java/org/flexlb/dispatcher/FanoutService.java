@@ -6,6 +6,7 @@ import com.alibaba.fastjson2.JSONWriter;
 import lombok.RequiredArgsConstructor;
 import org.flexlb.util.RateLimitedWarn;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -46,7 +47,9 @@ public class FanoutService {
 
     public Mono<List<SubBatchResult>> dispatchChunks(String fePath,
                                                      List<JSONObject> chunkBodies,
-                                                     BatchEndpointSpec spec) {
+                                                     BatchEndpointSpec spec,
+                                                     HttpHeaders inboundHeaders,
+                                                     String rawQuery) {
         JSONWriter.Feature[] features = spec.isFanoutWriteNulls() ? WRITE_NULLS : NO_FEATURES;
         String arrayField = spec.getRequestArrayField();
         List<ChunkPlan> plans = new ArrayList<>(chunkBodies.size());
@@ -57,7 +60,8 @@ public class FanoutService {
             start += chunkSize;
         }
         return Flux.fromIterable(plans)
-                .flatMapSequential(plan -> dispatchOne(fePath, plan, features, spec), FANOUT_MAX_CONCURRENCY)
+                .flatMapSequential(plan -> dispatchOne(fePath, plan, features, spec, inboundHeaders, rawQuery),
+                        FANOUT_MAX_CONCURRENCY)
                 .collectList()
                 .publishOn(Schedulers.parallel());
     }
@@ -76,11 +80,11 @@ public class FanoutService {
      * parse and downstream merge are offloaded.
      */
     private Mono<SubBatchResult> dispatchOne(String fePath, ChunkPlan plan, JSONWriter.Feature[] features,
-                                             BatchEndpointSpec spec) {
+                                             BatchEndpointSpec spec, HttpHeaders inboundHeaders, String rawQuery) {
         return Mono.fromCallable(() -> new Pick(fePool.next(), JSON.toJSONBytes(plan.body(), features)))
                 .flatMap(pick -> {
                     long start = System.currentTimeMillis();
-                    return feClient.postBytes(pick.feUrl(), fePath, pick.payload())
+                    return feClient.postBytes(pick.feUrl(), fePath, pick.payload(), inboundHeaders, rawQuery)
                             .publishOn(Schedulers.parallel())
                             .map(bytes -> {
                                 // Parse before reporting: a 200 with a non-JSON body must count

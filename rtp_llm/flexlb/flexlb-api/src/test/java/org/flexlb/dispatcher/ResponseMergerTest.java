@@ -55,6 +55,23 @@ class ResponseMergerTest {
     }
 
     @Test
+    void clientFacingReasonNeverEchoesTheInternalExceptionText() {
+        // SubBatchResult.reason carries "SimpleName: message" from the transport failure, which for
+        // reactor-netty embeds the FE address. It must not reach the client body.
+        String leaky = "WebClientRequestException: Connection refused: /10.0.0.7:8088";
+        ResponseMerger.MergedResponse merged = ResponseMerger.merge(
+                List.of(SubBatchResult.ok(envelopeBatchInfer("r0"), 1, 0),
+                        SubBatchResult.failed(1, 1, leaky)),
+                BATCH_INFER);
+
+        String body = merged.body().toJSONString();
+        assertFalse(body.contains("10.0.0.7"), "FE address must not leak into the client body");
+        assertFalse(body.contains("WebClientRequestException"),
+                "exception type must not leak into the client body");
+        assertEquals(List.of("fe_unavailable"), merged.failedReasons());
+    }
+
+    @Test
     void outOfOrderSubBatchesAreStitchedByAbsoluteIndex() {
         // Sub-batches may complete in any order; merge orders by startIndex so the stitched array
         // and the _partial_failure indices still line up with absolute input positions.
@@ -85,7 +102,8 @@ class ResponseMergerTest {
         assertEquals(0, merged.succeededChunks());
         assertEquals(2, merged.totalChunks());
         assertEquals(List.of(0, 1, 2, 3, 4), merged.failedIndices());
-        assertEquals(List.of("no_route", "no_route"), merged.failedReasons());
+        assertEquals(List.of("fe_unavailable", "fe_unavailable"), merged.failedReasons(),
+                "client-facing reasons are bounded codes, never the internal reason text");
         // No FE HTTP status available (transport-level failures) -> server error.
         assertEquals(500, merged.errorStatus());
     }
@@ -137,7 +155,8 @@ class ResponseMergerTest {
         assertEquals(2, out.size());
         JSONObject placeholder = (JSONObject) out.get(1);
         assertEquals(1, placeholder.getIntValue("index"));
-        assertEquals("timeout", placeholder.getJSONObject("error").getString("message"));
+        assertEquals("fe_unavailable", placeholder.getJSONObject("error").getString("message"),
+                "the placeholder carries a bounded code, not the internal reason");
     }
 
     @Test
