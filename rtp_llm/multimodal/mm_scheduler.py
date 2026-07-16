@@ -203,9 +203,6 @@ class MMScheduler:
         # defaults to cuda:0; without pinning, a non-zero local rank would run the
         # forward on the wrong device. None (tests / CPU) skips pinning.
         self._device = device
-        # One-shot guard: log only the FIRST cross-request merge to keep the hot
-        # path quiet. Only ever written from the single executor thread.
-        self._logged_merge = False
         # Optional per-forward profiling hook: a factory returning a context
         # manager, entered on THIS executor thread around the forward so the GPU
         # compute is actually captured (torch.profiler doesn't span threads). None
@@ -574,20 +571,10 @@ class MMScheduler:
             return
 
         # Actual composition of this forward (after cancellations). The batch-size
-        # metric is reported every forward for continuous monitoring. The log is
-        # a bounded one-shot: only the FIRST cross-request merge is logged, so the
-        # hot path stays quiet while smoke still has a greppable signal that
-        # batching happened at least once.
+        # metric is reported every forward for continuous monitoring via kmonitor
+        # (VIT_EMBEDDING_BATCH_SIZE_METRIC); no per-merge logging on the hot path.
         batch_size = len(batch)
         kmonitor.report(GaugeMetrics.VIT_EMBEDDING_BATCH_SIZE_METRIC, batch_size)
-        if batch_size > 1 and not self._logged_merge:
-            self._logged_merge = True
-            logging.info(
-                "MMScheduler: forward batch=%d requests, images=%d "
-                "(first cross-request merge)",
-                batch_size,
-                sum(req.n_images for req in batch),
-            )
 
         items = [wi for req in batch for wi in req.work_items]
         # Profile the forward on this executor thread (per forward/batch) when a
