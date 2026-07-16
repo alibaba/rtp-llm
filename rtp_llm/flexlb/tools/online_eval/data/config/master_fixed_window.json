@@ -20,10 +20,6 @@
       "args": [],
       "envs": [
         [
-          "FLEXLB_MONITOR_ENABLED",
-          "true"
-        ],
-        [
           "CACHE_HIT_MAX_CACHE_KEYS",
           "80000000"
         ],

@@ -331,6 +331,7 @@ class MockEngineState:
             "grpc_addr": f"{self.host}:{self.grpc_port}",
             "http_addr": self.http_ip_port,
             "running": len(self._running),
+            "waiting": max(self._injected_queue_depth, self._prefill_waiting),
             "accepted": self._accepted,
             "completed": self._completed,
             "cache_keys": len(self.cache.keys),
@@ -1177,6 +1178,11 @@ class MockEngineCluster:
         metrics_meta = [
             ("mock_engine_up", "1 if engine is running, 0 if stopped", "gauge"),
             ("mock_engine_running", "current running requests", "gauge"),
+            (
+                "mock_engine_waiting",
+                "current waiting requests (queued but not yet processing)",
+                "gauge",
+            ),
             ("mock_engine_accepted_total", "total accepted requests", "counter"),
             ("mock_engine_completed_total", "total completed requests", "counter"),
             ("mock_engine_cancelled_total", "total cancelled requests", "counter"),
@@ -1238,6 +1244,7 @@ class MockEngineCluster:
             is_up = 0 if state.name in self._stopped else 1
             lines.append(f"mock_engine_up{{{labels}}} {is_up}")
             lines.append(f'mock_engine_running{{{labels}}} {snap["running"]}')
+            lines.append(f'mock_engine_waiting{{{labels}}} {snap["waiting"]}')
             lines.append(f'mock_engine_accepted_total{{{labels}}} {snap["accepted"]}')
             lines.append(f'mock_engine_completed_total{{{labels}}} {snap["completed"]}')
             lines.append(

@@ -20,7 +20,7 @@ TRACE_FILE = str(SCRIPT_DIR / "data/online_logs/trace_30min.jsonl")
 PERFORMANCE_FILE = str(
     SCRIPT_DIR / "data/performance/dsv4_flash_performance.sample.json"
 )
-PROCESS_CONFIG_FILE = str(SCRIPT_DIR / "data/config/master_fixed_window_220ms_4g.json")
+PROCESS_CONFIG_FILE = str(SCRIPT_DIR / "data/config/master_fixed_window_4g.json")
 FLEXLB_JAR = str(FLEXLB_DIR / "flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar")
 
 EXPERIMENT_DIR = SCRIPT_DIR / "run" / "inflight_experiment"

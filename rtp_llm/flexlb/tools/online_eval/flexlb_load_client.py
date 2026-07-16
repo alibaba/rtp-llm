@@ -153,6 +153,8 @@ class LoadClient:
         self._sent_count: int = 0
         self._actual_sent_count: int = 0
         self._inflight_count: int = 0
+        self._success_count: int = 0
+        self._error_count: int = 0
         self._last_gradient_log: float = 0.0
         if getattr(args, "endpoints_file", None):
             self._load_fallback_endpoints(args.endpoints_file)
@@ -469,6 +471,10 @@ class LoadClient:
 
         async with self._write_lock:
             self._results.append(result)
+            if result.get("status") in ("ok", "scheduled"):
+                self._success_count += 1
+            else:
+                self._error_count += 1
             with self.per_request_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(result, separators=(",", ":")) + "\n")
 
@@ -835,10 +841,18 @@ class LoadClient:
             "scheduled": len(scheduled),
             "completed": len(ok),
             "errors": len(self._results) - len(scheduled),
+            "success_count": self._success_count,
+            "error_count": self._error_count,
             "offered_qps": (
                 round(len(self._results) / elapsed_s, 3) if elapsed_s > 0 else 0.0
             ),
             "completed_qps": round(len(ok) / elapsed_s, 3) if elapsed_s > 0 else 0.0,
+            "success_qps": (
+                round(self._success_count / elapsed_s, 3) if elapsed_s > 0 else 0.0
+            ),
+            "error_qps": (
+                round(self._error_count / elapsed_s, 3) if elapsed_s > 0 else 0.0
+            ),
             "send_duration_s": round(send_duration_s, 3),
             "sent_count": self._sent_count,
             "actual_sent_count": self._actual_sent_count,
@@ -917,6 +931,12 @@ class LoadClient:
         )
         lines.append(
             f'flexlb_client_completed_total{{route_path="master"}} {len(self._results)}'
+        )
+        lines.append(
+            f'flexlb_client_success_total{{route_path="master"}} {self._success_count}'
+        )
+        lines.append(
+            f'flexlb_client_error_total{{route_path="master"}} {self._error_count}'
         )
 
         # Semaphore inflight count

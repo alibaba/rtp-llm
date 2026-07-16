@@ -27,7 +27,7 @@ After completion, the important outputs are:
 Common overrides:
 
 ```bash
-PROCESS_CONFIG_FILE=rtp_llm/flexlb/tools/online_eval/data/config/master_fixed_window_220ms.json \
+PROCESS_CONFIG_FILE=rtp_llm/flexlb/tools/online_eval/data/config/master_fixed_window.json \
 DURATION_S=300 \
 LIMIT=5000 \
 REPLAY_SPEED=20 \
@@ -56,7 +56,7 @@ It also defaults to `MAVEN_PROFILES=opensource,!internal` so an adjacent `intern
 - `data/online_logs/pod1_arrivals.tsv`: arrival analysis source.
 - `data/online_logs/sample_access.json`: sample raw access log row.
 - `data/performance/dsv4_flash_performance.sample.json`: mock latency model.
-- `data/config/master_fixed_window_220ms.json`: master process env config for the fixed-window baseline.
+- `data/config/master_fixed_window.json`: master process env config for the fixed-window baseline.
 
 ## Manual flow
 

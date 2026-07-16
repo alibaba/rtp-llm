@@ -667,7 +667,7 @@ def generate_report(runs: List[SpeedRunData], sla_ms: float, speeds: List[int]) 
     L.append("  - ZERO_OUTPUT_POLICY=one (trace ol=0, set to 1)")
     L.append("  - LIMIT=0 (unlimited, full 8332 requests)")
     L.append("  - DURATION_S=0 (complete trace)")
-    L.append("  - MAX_INFLIGHT_BATCHES=2, WAIT_MS=220ms, PREDICT_THRESHOLD_MS=550ms")
+    L.append("  - MAX_INFLIGHT_BATCHES=2, WAIT_MS=10ms, PREDICT_THRESHOLD_MS=550ms")
     L.append("  - MONITOR_INTERVAL=2s")
     L.append("")
 
@@ -1040,7 +1040,7 @@ def generate_report(runs: List[SpeedRunData], sla_ms: float, speeds: List[int]) 
     if not suggestions:
         suggestions.append("- 所有 speed 下系统表现稳定，未检测到明显瓶颈")
         suggestions.append(
-            "- 当前配置 (MAX_INFLIGHT_BATCHES=2, WAIT_MS=220ms) "
+            "- 当前配置 (MAX_INFLIGHT_BATCHES=2, WAIT_MS=10ms) "
             "在测试流量范围内表现良好"
         )
 

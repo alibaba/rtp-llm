@@ -47,7 +47,7 @@ class RequestShape:
 # Prefill formula — parsed from the Master PREFILL_TIME_FORMULA config string.
 #
 # The formula string lives in ONE place: the master config JSON
-# (data/config/master_fixed_window_220ms.json, env var PREFILL_TIME_FORMULA).
+# (data/config/master_fixed_window.json, env var PREFILL_TIME_FORMULA).
 # The mock engine reads it from there (via --master-config) and parses it
 # here, so there is no duplicate copy of the coefficients in Python.
 #
