@@ -329,6 +329,47 @@ class DSparkModelGoldenTest(unittest.TestCase):
             rtol=5e-2, atol_scale=5e-2,
         )
 
+    # ---- Incremental (decode-tail) injection window ----------------------
+
+    def test_incremental_ctx_injection_window(self):
+        """ctx_lengths=[1] must write exactly position prefix-1 and leave the
+        already-injected prefix untouched (decode-tail incremental semantics,
+        including overwrite of the block forward's temporary KV there)."""
+        from rtp_llm.ops.compute_ops import PyAttentionInputs
+
+        pos = self.ctx_len  # inject one new position right after the dump's ctx
+        aux_row = self.golden["aux_concat"][:1].to(device="cuda", dtype=torch.bfloat16)
+
+        before = {
+            i: (self._read_cache(i, 0).clone(), self._read_cache(i, 1).clone())
+            for i in range(self.config.num_layers)
+        }
+
+        ai = PyAttentionInputs()
+        ai.prefix_lengths = torch.tensor([pos + 1], dtype=torch.int32, device="cpu")
+        ai.kv_cache_block_id_host = self.inputs.attention_inputs.kv_cache_block_id_host
+        ctx_lengths = torch.tensor([1], dtype=torch.int32)
+        with torch.no_grad():
+            fused = self.model.combine_hidden_states(aux_row)
+            self.model.inject_context_kv(fused, ai, ctx_lengths)
+
+            positions = torch.tensor([pos], dtype=torch.int32, device="cuda")
+            page_size = self.model.attn_configs.kernel_tokens_per_block
+            for i in range(self.config.num_layers):
+                want_k, want_v = self.model.project_context_kv(fused, positions, i)
+                base = self.layer_caches[i].kv_cache_base
+                got_k = base[pos // page_size, 0, :, pos % page_size, :]
+                got_v = base[pos // page_size, 1, :, pos % page_size, :]
+                torch.testing.assert_close(
+                    got_k.float(), want_k[0].float(), atol=2e-2, rtol=2e-2
+                )
+                torch.testing.assert_close(
+                    got_v.float(), want_v[0].float(), atol=2e-2, rtol=2e-2
+                )
+                # already-injected prefix untouched
+                self.assertTrue(torch.equal(self._read_cache(i, 0), before[i][0]))
+                self.assertTrue(torch.equal(self._read_cache(i, 1), before[i][1]))
+
     # ---- Engine-facing forward() output contract -------------------------
 
     def test_forward_fills_draft_proposal_outputs(self):

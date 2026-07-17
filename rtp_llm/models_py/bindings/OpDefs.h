@@ -232,6 +232,10 @@ struct PyModelInputs {
     PyMultimodalInputs  multimodal_inputs;
     PyAttentionInputs   attention_inputs;
     BertEmbeddingInputs bert_embedding_inputs;
+    // dspark/dflash incremental feature injection window: int32 [batch] rows
+    // of input_hiddens per request, ending at the request's prefix length.
+    // Undefined = inject the whole prefix (prefill seeding semantics).
+    torch::Tensor dspark_ctx_lengths;
 };
 
 struct PyModelOutputs {

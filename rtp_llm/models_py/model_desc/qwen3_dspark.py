@@ -405,6 +405,13 @@ class Qwen3DSparkModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
+        if ctx_lengths is None:
+            # Executor channel for the incremental (decode-tail) injection
+            # window; unset means "whole prefix" (prefill seeding).
+            ctx_from_inputs = getattr(inputs, "dspark_ctx_lengths", None)
+            if ctx_from_inputs is not None and ctx_from_inputs.numel() > 0:
+                ctx_lengths = ctx_from_inputs.cpu()
+
         aux = inputs.input_hiddens
         if aux is not None and aux.numel() > 0:
             fused = self.combine_hidden_states(aux)

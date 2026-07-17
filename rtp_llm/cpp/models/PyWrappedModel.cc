@@ -789,6 +789,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                         multimodal_inputs,
                                                         attention_inputs_,
                                                         bert_embedding_inputs});
+        py_model_inputs.dspark_ctx_lengths        = inputs.dspark_ctx_lengths;
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 

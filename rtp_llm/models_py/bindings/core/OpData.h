@@ -46,6 +46,11 @@ struct GptModelInputs {
     // for mtp model
     torch::Tensor last_hidden_states;
 
+    // dspark/dflash incremental feature injection window: int32 [batch],
+    // rows of last_hidden_states (aux features) per request, ending at the
+    // request's prefix length.  Undefined = inject the whole prefix (seeding).
+    torch::Tensor dspark_ctx_lengths;
+
     torch::Tensor attention_mask;  // [batch_size, seq_len, seq_len]
 
     // - single-type cache: [batch_size, block_nums]
