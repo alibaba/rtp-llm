@@ -60,6 +60,26 @@ py_test(
 )
 
 py_test(
+    name = "cuda_graph_target_verify_padding",
+    srcs = [
+        "cuda_graph_target_verify_padding.py",
+    ],
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    env = {
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
+py_test(
     name = "cuda_graph_prefill",
     srcs = [
         "cuda_graph_prefill.py",

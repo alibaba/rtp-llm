@@ -549,6 +549,8 @@ class TestRefreshPrefillParamsForCudaGraph(unittest.TestCase):
             prefix_lengths=prefix_lengths,
             cu_seqlens=cu_seqlens,
             cu_kv_seqlens=cu_kv_seqlens,
+            cu_seqlens_device=cu_seqlens,
+            cu_kv_seqlens_device=cu_kv_seqlens,
             kv_cache_kernel_block_id_device=kv_block_id,
         )
         return inputs
@@ -626,6 +628,53 @@ class TestRefreshPrefillParamsForCudaGraph(unittest.TestCase):
         self.assertEqual(p.max_seqlen_k, 105)
         # prefill_seqlen_k_int32 must be derived from live cu_seqlens_k
         self.assertEqual(p.prefill_seqlen_k_int32.tolist(), [105, 105])
+
+    def test_live_cu_seqlens_with_zero_length_padded_rows(self):
+        """Rounded-up graph rows must have repeated cumulative tail values."""
+        stub = self._make_stub(batch_size=8)
+        cu_q = torch.tensor([0, 4, 8, 12, 16, 20, 24, 24, 24], dtype=torch.int32)
+        cu_k = torch.tensor(
+            [0, 8000, 16000, 24000, 32000, 40000, 53504, 53504, 53504],
+            dtype=torch.int32,
+        )
+        inputs = self._make_attn_inputs(
+            [4, 4, 4, 4, 4, 4, 0, 0],
+            cu_seqlens=cu_q,
+            cu_kv_seqlens=cu_k,
+        )
+
+        self._call_update(stub, inputs)
+
+        self.assertEqual(stub.fmha_params.cu_seqlens_q.tolist(), cu_q.tolist())
+        self.assertEqual(stub.fmha_params.cu_seqlens_k.tolist(), cu_k.tolist())
+        self.assertEqual(
+            stub.fmha_params.prefill_seqlen_k_int32.tolist(),
+            [8000, 8000, 8000, 8000, 8000, 13504, 0, 0],
+        )
+
+    def test_stale_cumulative_tail_exceeding_workspace_raises(self):
+        """Reject the graph-8/replay-6 corruption that caused the ROCm OOB."""
+        from types import SimpleNamespace
+
+        stub = self._make_stub(batch_size=8)
+        stub.triton_prefill_impl = SimpleNamespace(context_partition_size=256)
+        stub.fmha_params.exp_sums = torch.empty((8, 2, 160, 24))
+        cu_q = torch.tensor([0, 4, 8, 12, 16, 20, 24, 24, 24], dtype=torch.int32)
+        cu_k = torch.tensor(
+            [0, 8000, 16000, 24000, 32000, 40000, 53504, 286720, 327680],
+            dtype=torch.int32,
+        )
+        inputs = self._make_attn_inputs(
+            [4, 4, 4, 4, 4, 4, 0, 0],
+            cu_seqlens=cu_q,
+            cu_kv_seqlens=cu_k,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "required_partitions=911, workspace_partitions=160",
+        ):
+            self._call_update(stub, inputs)
 
     def test_prefix_batch_size_mismatch_raises(self):
         """prefix_lengths batch size != expected_batch raises ValueError."""

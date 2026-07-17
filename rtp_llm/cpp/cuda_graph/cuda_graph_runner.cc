@@ -313,25 +313,46 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         }
     }
 
-    // Reset unused batch portions to prevent stale data (prefill only)
-    if (is_prefill_cuda_graph_mode_) {
-        if (state.current_batch_size < max_bs_) {
-            py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
-            py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
-            py_model_inputs_.attention_inputs.prefix_lengths_device.slice(0, state.current_batch_size, max_bs_)
+    // Target verification uses a prefill attention layout in the decode graph runner.
+    // Sanitize every padded row before attention metadata is refreshed; otherwise a
+    // rounded-up graph key can retain capture-time cumulative lengths in its tail.
+    const bool uses_prefill_layout = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
+    if (uses_prefill_layout) {
+        const int captured_batch_size = py_model_inputs_.attention_inputs.input_lengths.size(0);
+        if (state.current_batch_size < captured_batch_size) {
+            py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, captured_batch_size)
                 .fill_(0);
-            py_model_inputs_.attention_inputs.input_lengths_device.slice(0, state.current_batch_size, max_bs_).fill_(0);
+            if (py_model_inputs_.attention_inputs.input_lengths_device.defined()) {
+                py_model_inputs_.attention_inputs.input_lengths_device
+                    .slice(0, state.current_batch_size, captured_batch_size)
+                    .fill_(0);
+            }
+            if (py_model_inputs_.attention_inputs.prefix_lengths.defined()
+                && py_model_inputs_.attention_inputs.prefix_lengths.numel() > 0) {
+                py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, captured_batch_size)
+                    .fill_(0);
+            }
+            if (py_model_inputs_.attention_inputs.prefix_lengths_device.defined()
+                && py_model_inputs_.attention_inputs.prefix_lengths_device.numel() > 0) {
+                py_model_inputs_.attention_inputs.prefix_lengths_device
+                    .slice(0, state.current_batch_size, captured_batch_size)
+                    .fill_(0);
+            }
         }
 
-        int last_valid_q = state.current_seq_len;
-        int last_valid_kv =
-            last_valid_q
-            + inputs.attention_inputs.prefix_lengths.slice(0, 0, state.current_batch_size).sum().item<int>();
-        py_model_inputs_.attention_inputs.cu_seqlens.slice(0, state.current_batch_size + 1, max_bs_ + 1)
+        const int last_valid_q  = is_prefill_cuda_graph_mode_ ? state.current_seq_len : state.seq_len_sum;
+        int       last_valid_kv = last_valid_q;
+        if (inputs.attention_inputs.prefix_lengths.defined() && inputs.attention_inputs.prefix_lengths.numel() > 0) {
+            last_valid_kv +=
+                inputs.attention_inputs.prefix_lengths.slice(0, 0, state.current_batch_size).sum().item<int>();
+        }
+        py_model_inputs_.attention_inputs.cu_seqlens.slice(0, state.current_batch_size + 1, captured_batch_size + 1)
             .fill_(last_valid_q);
-        py_model_inputs_.attention_inputs.cu_seqlens_device.slice(0, state.current_batch_size + 1, max_bs_ + 1)
+        py_model_inputs_.attention_inputs.cu_seqlens_device
+            .slice(0, state.current_batch_size + 1, captured_batch_size + 1)
             .fill_(last_valid_q);
-        py_model_inputs_.attention_inputs.cu_kv_seqlens_device.slice(0, state.current_batch_size + 1, max_bs_ + 1)
+        py_model_inputs_.attention_inputs.cu_kv_seqlens_device
+            .slice(0, state.current_batch_size + 1, captured_batch_size + 1)
             .fill_(last_valid_kv);
     }
 
