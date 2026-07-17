@@ -884,18 +884,22 @@ static void expectExecuteFunctionRoutesTransferLocally(const std::shared_ptr<KVC
     FunctionRequestPB         request;
     MemoryOperationRequestPB* memory_request = request.mutable_mem_request();
     ASSERT_NE(memory_request, nullptr);
-    ASSERT_TRUE(BlockTreeTransferConverter::appendTransfer(descriptor, *memory_request));
+    BlockTreeCachePtr block_tree_cache = kv_cache_manager->blockTreeCache();
+    ASSERT_NE(block_tree_cache, nullptr);
+    ASSERT_TRUE(
+        BlockTreeTransferConverter::appendTransfer(descriptor, block_tree_cache->componentGroups(), *memory_request));
 
     FunctionResponsePB response;
-    // Factory does not build component layouts yet; the structured failure confirms local CopyEngine routing.
-    EXPECT_FALSE(kv_cache_manager->executeFunction(request, response));
+    EXPECT_TRUE(kv_cache_manager->executeFunction(request, response));
     ASSERT_TRUE(response.has_mem_response());
-    EXPECT_FALSE(response.mem_response().success());
+    EXPECT_TRUE(response.mem_response().success());
 }
 
 TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesTransferLocally) {
     CacheConfig   cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 1;
 
     std::shared_ptr<KVCacheManager> kv_cache_manager =
         std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);

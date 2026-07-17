@@ -480,24 +480,6 @@ TEST_F(BlockTreeCacheTest, ReusableReclaimDoesNotAllocateHostBlock) {
     EXPECT_EQ(ce_cache->getStats().tree_node_count, 0u);
 }
 
-TEST_F(BlockTreeCacheTest, DiskRequiresHostValidation) {
-    auto tree                             = std::make_unique<BlockTree>(1);
-    auto full                             = std::make_shared<FullComponentGroup>();
-    full->component_group_id              = 0;
-    std::vector<ComponentGroupPtr> groups = {full};
-
-    BlockTreeCacheConfig config;
-    config.eviction_thread_pool_size = 2;
-    config.enable_device_cache       = true;
-    config.enable_memory_cache       = false;
-    config.enable_disk_cache         = true;
-    config.enable_remote_cache       = false;
-
-    std::unique_ptr<BlockTreeCache> cache = BlockTreeCacheTestUtil::makeBlockTreeCache(
-        std::move(tree), std::move(groups), std::vector<Component>{}, std::move(config));
-    EXPECT_EQ(cache, nullptr);
-}
-
 TEST_F(BlockTreeCacheTest, ReclaimDisabledTierReturnsZero) {
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
@@ -675,25 +657,6 @@ TEST_F(BlockTreeCacheTest, MatchKeepsAggregatedDevicePoolsSeparate) {
     EXPECT_EQ(result.matched_blocks, 2u);
     EXPECT_EQ(result.group_block_indices.at(0), (BlockIndicesType{10, 11}));
     EXPECT_EQ(result.group_block_indices.at(1), (BlockIndicesType{20, 21}));
-}
-
-TEST_F(BlockTreeCacheTest, InitializationRequiresPerTagMapping) {
-    std::unique_ptr<BlockTree>          tree = std::make_unique<BlockTree>(1);
-    std::shared_ptr<FullComponentGroup> full = std::make_shared<FullComponentGroup>();
-    full->component_group_id                 = 0;
-    full->setDevicePools({DeviceBlockPoolPtr{}});
-
-    std::vector<ComponentGroupPtr>  component_groups = {full};
-    std::unique_ptr<BlockTreeCache> cache =
-        std::make_unique<BlockTreeCache>(std::move(tree),
-                                         std::move(component_groups),
-                                         std::vector<Component>{},
-                                         BlockTreeCacheConfig{},
-                                         std::shared_ptr<StorageBackend>{},
-                                         std::shared_ptr<BroadcastManager>{},
-                                         std::vector<DeviceKVCacheGroupPtr>{nullptr},
-                                         std::vector<BlockTreeCache::PerTagMapping>{});
-    EXPECT_FALSE(cache->init());
 }
 
 TEST_F(BlockTreeCacheTest, MatchRequiresSWAWindowAfterGap) {

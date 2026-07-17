@@ -660,7 +660,8 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
 
     for (int item_index = 0; item_index < memory_request.copy_items_size(); ++item_index) {
         TransferDescriptor descriptor;
-        const bool         decoded = BlockTreeTransferConverter::decodeTransfer(memory_request, item_index, descriptor);
+        const bool decoded = BlockTreeTransferConverter::decodeTransfer(
+            memory_request, item_index, block_tree_cache_->componentGroups(), descriptor);
         if (!decoded) {
             RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid transfer item, index=%d", item_index);
             return false;

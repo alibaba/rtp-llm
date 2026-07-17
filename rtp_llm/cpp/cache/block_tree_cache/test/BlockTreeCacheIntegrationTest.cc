@@ -265,6 +265,33 @@ TEST_F(BlockTreeCacheIntegrationTest, LoadBackDeviceAllocationFailureRollsBackAl
     EXPECT_EQ(exhausted_device_pool->freeBlocksNum(), 1u);
 }
 
+TEST_F(BlockTreeCacheIntegrationTest, UncommittedLoadBackTicketReleasesSourceReferences) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    std::unique_ptr<FullSWAEnvironment> environment = FullSWAEnvironment::create();
+    environment->insertRequestPath();
+    environment->releaseRequestRefs();
+    demoteTo(*environment, Tier::HOST);
+
+    BlockTreeMatchResult result = environment->cache->match(environment->keys);
+    ASSERT_NE(result.load_back_ticket, nullptr);
+    EXPECT_FALSE(result.load_back_ticket->empty());
+    expectPlanningSourceRefCounts(*environment, Tier::HOST);
+
+    result.load_back_ticket.reset();
+    for (size_t path_index = 0; path_index < environment->keys.size(); ++path_index) {
+        const std::vector<GroupSlot> slots = environment->slotsForPathNode(path_index);
+        ASSERT_EQ(slots.size(), 2u);
+        for (size_t group_id = 0; group_id < slots.size(); ++group_id) {
+            EXPECT_EQ(environment->host_pools[group_id]->refCount(slots[group_id].host_block), 1u);
+        }
+    }
+
+    environment->reclaimAll();
+    environment->expectFullyReclaimed();
+}
+
 TEST_F(BlockTreeCacheIntegrationTest, Evictor_SkipsRequestPinnedBlock) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";

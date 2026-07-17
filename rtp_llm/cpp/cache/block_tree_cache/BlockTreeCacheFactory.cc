@@ -228,6 +228,53 @@ AggregationPlan buildAggregationPlan(const CacheConfig& cache_config) {
     return plan;
 }
 
+bool validateBlockTreeCacheParameters(
+    const std::vector<ComponentGroupPtr>&             component_groups,
+    const std::vector<DeviceKVCacheGroupPtr>&         per_tag_device_groups,
+    const std::vector<BlockTreeCache::PerTagMapping>& per_tag_mapping) {
+    if (per_tag_mapping.empty()) {
+        RTP_LLM_LOG_ERROR("createBlockTreeCache: per_tag_mapping must not be empty");
+        return false;
+    }
+    if (per_tag_mapping.size() != per_tag_device_groups.size()) {
+        RTP_LLM_LOG_ERROR("createBlockTreeCache: per-tag mapping and device group counts must match, mapping=%zu, "
+                          "device_groups=%zu",
+                          per_tag_mapping.size(),
+                          per_tag_device_groups.size());
+        return false;
+    }
+    for (size_t component_group_index = 0; component_group_index < component_groups.size(); ++component_group_index) {
+        const ComponentGroupPtr& component_group = component_groups[component_group_index];
+        if (component_group == nullptr
+            || component_group->component_group_id != static_cast<int>(component_group_index)) {
+            RTP_LLM_LOG_ERROR("createBlockTreeCache: component group must be non-null and indexed by id, index=%zu",
+                              component_group_index);
+            return false;
+        }
+    }
+    for (size_t tag_group_index = 0; tag_group_index < per_tag_mapping.size(); ++tag_group_index) {
+        const BlockTreeCache::PerTagMapping& mapping = per_tag_mapping[tag_group_index];
+        const bool non_reusable_mapping =
+            mapping.component_group_id == -1 && mapping.local_pool_index == -1;
+        if (non_reusable_mapping) {
+            continue;
+        }
+        if (mapping.component_group_id < 0
+            || static_cast<size_t>(mapping.component_group_id) >= component_groups.size()
+            || mapping.local_pool_index < 0
+            || static_cast<size_t>(mapping.local_pool_index)
+                   >= component_groups[static_cast<size_t>(mapping.component_group_id)]->devicePoolCount()) {
+            RTP_LLM_LOG_ERROR("createBlockTreeCache: invalid per-tag mapping, tag_group_index=%zu, "
+                              "component_group_id=%d, local_pool_index=%d",
+                              tag_group_index,
+                              mapping.component_group_id,
+                              mapping.local_pool_index);
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 bool shouldPinHostBlockPool() {
@@ -268,6 +315,10 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                        std::shared_ptr<BroadcastManager>        broadcast_manager) {
     const int group_num = cache_config.groupNums();
     RTP_LLM_CHECK_WITH_INFO(group_num > 0, "cache_config must have at least one group");
+    if (kv_cache_config.enable_memory_cache_disk && !kv_cache_config.enable_memory_cache) {
+        RTP_LLM_LOG_ERROR("createBlockTreeCache: enable_memory_cache_disk requires enable_memory_cache = true");
+        return nullptr;
+    }
 
     // 1. Aggregate per-tag groups by group_type (REUSABLE only). component_group_id is
     // per-group_type; the per-tag pool/component space is preserved for the allocator.
@@ -372,6 +423,10 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                 createDeviceKVCacheGroup(static_cast<int>(type), gid, cache_config, pool);
         }
         per_tag_mapping[static_cast<size_t>(gid)] = {-1, -1};
+    }
+
+    if (!validateBlockTreeCacheParameters(component_groups, per_tag_device_groups, per_tag_mapping)) {
+        return nullptr;
     }
 
     // 6. Create per-ComponentGroup Host pools (L2). All groups share a unified usable block

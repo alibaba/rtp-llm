@@ -75,6 +75,16 @@ private:
     int                                           listen_port_{0};
 };
 
+class MetadataDeviceBlockPool: public DeviceBlockPool {
+public:
+    explicit MetadataDeviceBlockPool(const std::shared_ptr<const DeviceBlockPoolConfig>& config):
+        DeviceBlockPool(config) {}
+
+    void initMetadata() {
+        markInitialized();
+    }
+};
+
 static std::shared_ptr<BroadcastManager>
 makeBroadcastManager(const std::vector<BlockTreeBroadcastRpcConfig>&            configs,
                      std::vector<std::unique_ptr<BlockTreeBroadcastRpcServer>>& servers) {
@@ -110,6 +120,29 @@ static std::unique_ptr<BlockTreeCache> makeBroadcastCache(const std::shared_ptr<
                                      BlockTreeCacheConfig{},
                                      /*storage_backend=*/nullptr,
                                      broadcast_manager);
+}
+
+static BlockIdxType prepareDeviceTarget(const std::shared_ptr<FullComponentGroup>& group,
+                                        const std::string&                         pool_name) {
+    MemoryLayoutConfig memory_layout;
+    memory_layout.layer_num                = 1;
+    memory_layout.block_num                = 9;
+    memory_layout.kv_block_pool_size_bytes = 9 * 256;
+
+    std::shared_ptr<DeviceBlockPoolConfig> device_config = std::make_shared<DeviceBlockPoolConfig>();
+    device_config->pool_type                             = BlockPoolType::DEVICE;
+    device_config->pool_name                             = pool_name;
+    device_config->physical_block_count                  = 9;
+    device_config->memory_layouts                        = {memory_layout};
+    std::shared_ptr<MetadataDeviceBlockPool> device_pool = std::make_shared<MetadataDeviceBlockPool>(device_config);
+    device_pool->initMetadata();
+    const BlockIdxType device_block = poolMalloc(*device_pool);
+    if (isNullBlockIdx(device_block)) {
+        return NULL_BLOCK_IDX;
+    }
+    device_pool->incRef(device_block);
+    group->setDevicePools({device_pool});
+    return device_block;
 }
 
 static MemoryOperationRequestPB makeBroadcastRequest() {
@@ -227,6 +260,8 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastHostLoadBackCommitsDeviceSlot) {
     std::shared_ptr<FullComponentGroup> group     = std::make_shared<FullComponentGroup>();
     group->component_group_id                     = 0;
     group->setHostPool(host_pool);
+    const BlockIdxType device_block = prepareDeviceTarget(group, "broadcast_host_load_back_success");
+    ASSERT_NE(device_block, NULL_BLOCK_IDX);
     const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
@@ -247,13 +282,13 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastHostLoadBackCommitsDeviceSlot) {
 
     group->referenceBlocks(GroupBlockSet{0, Tier::HOST, {{host_block}}});
     ASSERT_TRUE(cache->evictor_.beginLoadBack(find_result.matched_node, 0, Tier::HOST));
-    BlockTreeCache::LoadBackItem item{find_result.matched_node, 0, Tier::HOST, {host_block}, {7}};
+    BlockTreeCache::LoadBackItem item{find_result.matched_node, 0, Tier::HOST, {host_block}, {device_block}};
     cache->performLoadBack({item}, /*ctx=*/nullptr);
 
     const GroupSlot& slot = find_result.matched_node->group_slots[0];
     EXPECT_EQ(slot.transfer_state, SlotTransferState::IDLE);
     EXPECT_FALSE(slot.has_value(Tier::HOST));
-    EXPECT_EQ(slot.device_blocks, (std::vector<BlockIdxType>{7}));
+    EXPECT_EQ(slot.device_blocks, (std::vector<BlockIdxType>{device_block}));
     EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
     EXPECT_EQ(cache->getStats().host_heap_total_size, 0u);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
@@ -265,7 +300,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastHostLoadBackCommitsDeviceSlot) {
         EXPECT_EQ(worker_request.copy_direction(), MemoryOperationRequestPB::H2D);
         EXPECT_EQ(worker_request.copy_items(0).mem_block(), host_block);
         ASSERT_EQ(worker_request.copy_items(0).gpu_blocks_size(), 1);
-        EXPECT_EQ(worker_request.copy_items(0).gpu_blocks(0), 7);
+        EXPECT_EQ(worker_request.copy_items(0).gpu_blocks(0), device_block);
     }
 }
 
@@ -283,6 +318,8 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastHostLoadBackFailureKeepsSourceSlot)
     std::shared_ptr<FullComponentGroup> group     = std::make_shared<FullComponentGroup>();
     group->component_group_id                     = 0;
     group->setHostPool(host_pool);
+    const BlockIdxType device_block = prepareDeviceTarget(group, "broadcast_host_load_back_failure");
+    ASSERT_NE(device_block, NULL_BLOCK_IDX);
     const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
@@ -303,7 +340,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastHostLoadBackFailureKeepsSourceSlot)
 
     group->referenceBlocks(GroupBlockSet{0, Tier::HOST, {{host_block}}});
     ASSERT_TRUE(cache->evictor_.beginLoadBack(find_result.matched_node, 0, Tier::HOST));
-    BlockTreeCache::LoadBackItem item{find_result.matched_node, 0, Tier::HOST, {host_block}, {7}};
+    BlockTreeCache::LoadBackItem item{find_result.matched_node, 0, Tier::HOST, {host_block}, {device_block}};
     cache->performLoadBack({item}, /*ctx=*/nullptr);
 
     const GroupSlot& slot = find_result.matched_node->group_slots[0];
@@ -321,7 +358,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastHostLoadBackFailureKeepsSourceSlot)
         ASSERT_EQ(worker_request.copy_items_size(), 1);
         EXPECT_EQ(worker_request.copy_direction(), MemoryOperationRequestPB::H2D);
         EXPECT_EQ(worker_request.copy_items(0).mem_block(), host_block);
-        EXPECT_EQ(worker_request.copy_items(0).gpu_blocks(0), 7);
+        EXPECT_EQ(worker_request.copy_items(0).gpu_blocks(0), device_block);
     }
 }
 
@@ -341,6 +378,8 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastDiskLoadBackUsesTwoTransferStages) 
     group->component_group_id                     = 0;
     group->setHostPool(host_pool);
     group->setDiskPool(disk_pool);
+    const BlockIdxType device_block = prepareDeviceTarget(group, "broadcast_disk_load_back");
+    ASSERT_NE(device_block, NULL_BLOCK_IDX);
     const BlockIdxType disk_block = group->allocateSingleBlock(Tier::DISK);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
@@ -362,13 +401,13 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastDiskLoadBackUsesTwoTransferStages) 
 
     group->referenceBlocks(GroupBlockSet{0, Tier::DISK, {{disk_block}}});
     ASSERT_TRUE(cache->evictor_.beginLoadBack(find_result.matched_node, 0, Tier::DISK));
-    BlockTreeCache::LoadBackItem item{find_result.matched_node, 0, Tier::DISK, {disk_block}, {7}};
+    BlockTreeCache::LoadBackItem item{find_result.matched_node, 0, Tier::DISK, {disk_block}, {device_block}};
     cache->performLoadBack({item}, /*ctx=*/nullptr);
 
     const GroupSlot& slot = find_result.matched_node->group_slots[0];
     EXPECT_EQ(slot.transfer_state, SlotTransferState::IDLE);
     EXPECT_FALSE(slot.has_value(Tier::DISK));
-    EXPECT_EQ(slot.device_blocks, (std::vector<BlockIdxType>{7}));
+    EXPECT_EQ(slot.device_blocks, (std::vector<BlockIdxType>{device_block}));
     EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 4u);
     EXPECT_EQ(cache->getStats().disk_heap_total_size, 0u);
@@ -388,7 +427,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastDiskLoadBackUsesTwoTransferStages) 
             staging_host_block = request_item.mem_block();
         } else if (worker_request.copy_direction() == MemoryOperationRequestPB::H2D) {
             ++host_to_device_count;
-            EXPECT_EQ(request_item.gpu_blocks(0), 7);
+            EXPECT_EQ(request_item.gpu_blocks(0), device_block);
             if (!isNullBlockIdx(staging_host_block)) {
                 EXPECT_EQ(request_item.mem_block(), staging_host_block);
             }
@@ -517,6 +556,21 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastEvictionFailureRollsBackPlan) {
 }
 
 TEST_F(BlockTreeCacheBroadcastTest, BuildEvictionTransferRequestIncludesPrimaryAndCascades) {
+    std::shared_ptr<HostBlockPool> host_pool = makeHostPool(256, 8);
+    std::shared_ptr<DiskBlockPool> disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
+    std::shared_ptr<FullComponentGroup> primary_group = std::make_shared<FullComponentGroup>();
+    primary_group->component_group_id                 = 0;
+    primary_group->setHostPool(host_pool);
+    primary_group->setDiskPool(disk_pool);
+    std::shared_ptr<FullComponentGroup> cascade_group = std::make_shared<FullComponentGroup>();
+    cascade_group->component_group_id                 = 1;
+    cascade_group->setHostPool(host_pool);
+    cascade_group->setDiskPool(disk_pool);
+    std::vector<ComponentGroupPtr> groups = {primary_group, cascade_group};
+    std::unique_ptr<BlockTreeCache> cache  = makeBlockTreeCacheForTest(
+        std::make_unique<BlockTree>(2), std::move(groups), std::vector<Component>{});
+    ASSERT_NE(cache, nullptr);
+
     BlockTreeEvictor::EvictionPlan plan;
     plan.primary.component_group_id = 0;
     plan.primary.source_tier        = Tier::HOST;
@@ -533,7 +587,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BuildEvictionTransferRequestIncludesPrimaryA
     plan.cascade_moves.push_back(cascade);
 
     MemoryOperationRequestPB request;
-    ASSERT_TRUE(cache_->buildEvictionTransferRequest(plan, request));
+    ASSERT_TRUE(cache->buildEvictionTransferRequest(plan, request));
     ASSERT_EQ(request.copy_items_size(), 2);
     EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::H2DISK);
     EXPECT_EQ(request.copy_items(0).src_mem_block(), 3);

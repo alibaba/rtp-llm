@@ -69,50 +69,6 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>         tree,
         config_.enable_reverse_eviction) {}
 
 bool BlockTreeCache::init() {
-    if (per_tag_mapping_.empty()) {
-        RTP_LLM_LOG_ERROR("BlockTreeCache::init: per_tag_mapping must not be empty");
-        return false;
-    }
-    if (per_tag_mapping_.size() != per_tag_device_groups_.size()) {
-        RTP_LLM_LOG_ERROR("BlockTreeCache::init: per-tag mapping and device group counts must match, mapping=%zu, "
-                          "device_groups=%zu",
-                          per_tag_mapping_.size(),
-                          per_tag_device_groups_.size());
-        return false;
-    }
-    for (size_t component_group_index = 0; component_group_index < component_groups_.size(); ++component_group_index) {
-        const ComponentGroupPtr& component_group = component_groups_[component_group_index];
-        if (component_group == nullptr
-            || component_group->component_group_id != static_cast<int>(component_group_index)) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache::init: component group must be non-null and indexed by id, index=%zu",
-                              component_group_index);
-            return false;
-        }
-    }
-    for (size_t tag_group_index = 0; tag_group_index < per_tag_mapping_.size(); ++tag_group_index) {
-        const PerTagMapping& mapping              = per_tag_mapping_[tag_group_index];
-        const bool           non_reusable_mapping = mapping.component_group_id == -1 && mapping.local_pool_index == -1;
-        if (non_reusable_mapping) {
-            continue;
-        }
-        if (mapping.component_group_id < 0
-            || static_cast<size_t>(mapping.component_group_id) >= component_groups_.size()
-            || mapping.local_pool_index < 0
-            || static_cast<size_t>(mapping.local_pool_index)
-                   >= component_groups_[static_cast<size_t>(mapping.component_group_id)]->devicePoolCount()) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache::init: invalid per-tag mapping, tag_group_index=%zu, "
-                              "component_group_id=%d, local_pool_index=%d",
-                              tag_group_index,
-                              mapping.component_group_id,
-                              mapping.local_pool_index);
-            return false;
-        }
-    }
-
-    if (config_.enable_disk_cache && !config_.enable_memory_cache) {
-        RTP_LLM_LOG_ERROR("BlockTreeCache::init: enable_disk_cache requires enable_memory_cache = true");
-        return false;
-    }
     copy_engine_ = std::make_shared<CopyEngine>(component_groups_, components_);
     if (!evictor_.init(components_,
                        config_.device_eviction_policy,
@@ -587,68 +543,10 @@ std::shared_ptr<AsyncContext> BlockTreeCache::commitLoadBack(const std::vector<P
         return nullptr;
     }
 
-    class LoadBackRollbackGuard {
-    public:
-        LoadBackRollbackGuard(std::vector<ComponentGroupPtr>&         component_groups,
-                              BlockTreeEvictor&                       evictor,
-                              const std::vector<PendingLoadBackItem>& pending_items,
-                              const std::vector<LoadBackItem>&        allocated_items,
-                              const size_t&                          claimed_count):
-            component_groups_(component_groups),
-            evictor_(evictor),
-            pending_items_(pending_items),
-            allocated_items_(allocated_items),
-            claimed_count_(claimed_count) {}
-
-        ~LoadBackRollbackGuard() {
-            if (!rollback_required_) {
-                return;
-            }
-            for (const LoadBackItem& item : allocated_items_) {
-                if (item.group_id < 0 || static_cast<size_t>(item.group_id) >= component_groups_.size()) {
-                    continue;
-                }
-                ComponentGroupPtr& component_group = component_groups_[static_cast<size_t>(item.group_id)];
-                if (component_group != nullptr) {
-                    component_group->unreferenceBlocks(
-                        GroupBlockSet{item.group_id, Tier::DEVICE, {item.target_device_blocks}});
-                }
-            }
-            for (size_t index = 0; index < pending_items_.size(); ++index) {
-                const PendingLoadBackItem& item = pending_items_[index];
-                if (item.group_id < 0 || static_cast<size_t>(item.group_id) >= component_groups_.size()) {
-                    continue;
-                }
-                ComponentGroupPtr& component_group = component_groups_[static_cast<size_t>(item.group_id)];
-                if (component_group != nullptr) {
-                    GroupBlockSet source_set{item.group_id, item.source_tier, {item.source_blocks}, {item.node}};
-                    component_group->unreferenceBlocks(source_set);
-                    if (index < claimed_count_) {
-                        evictor_.finishLoadBack(item.node, item.group_id, item.source_tier, false);
-                    } else {
-                        evictor_.refreshCandidatesAfterRelease(source_set);
-                    }
-                }
-            }
-        }
-        void dismiss() {
-            rollback_required_ = false;
-        }
-
-    private:
-        std::vector<ComponentGroupPtr>&         component_groups_;
-        BlockTreeEvictor&                       evictor_;
-        const std::vector<PendingLoadBackItem>& pending_items_;
-        const std::vector<LoadBackItem>&        allocated_items_;
-        const size_t&                           claimed_count_;
-        bool                                    rollback_required_{true};
-    };
-
-    auto async_items = std::make_shared<std::vector<LoadBackItem>>();
+    std::shared_ptr<std::vector<LoadBackItem>> async_items = std::make_shared<std::vector<LoadBackItem>>();
     async_items->reserve(items.size());
-    size_t                claimed_count = 0;
-    LoadBackRollbackGuard rollback_guard(component_groups_, evictor_, items, *async_items, claimed_count);
-    bool                  allocation_succeeded = true;
+    size_t started_item_count = 0;
+    bool   allocation_succeeded = true;
     for (const PendingLoadBackItem& item : items) {
         if (item.group_id < 0 || static_cast<size_t>(item.group_id) >= component_groups_.size() || item.node == nullptr
             || item.source_tier == Tier::NONE || item.source_blocks.empty()) {
@@ -671,7 +569,7 @@ std::shared_ptr<AsyncContext> BlockTreeCache::commitLoadBack(const std::vector<P
             allocation_succeeded = false;
             break;
         }
-        ++claimed_count;
+        ++started_item_count;
 
         // Allocate the target after allocator malloc succeeds.
         // Keep the slot unchanged until the copy succeeds.
@@ -691,6 +589,7 @@ std::shared_ptr<AsyncContext> BlockTreeCache::commitLoadBack(const std::vector<P
         RTP_LLM_LOG_WARNING("BlockTreeCache::commitLoadBack: device allocation failed, "
                             "rolled back all %zu load_back items",
                             items.size());
+        abortLoadBackUnsafe(items, *async_items, started_item_count);
         return nullptr;
     }
 
@@ -705,26 +604,46 @@ std::shared_ptr<AsyncContext> BlockTreeCache::commitLoadBack(const std::vector<P
     const autil::ThreadPool::ERROR_TYPE error     = thread_pool_->pushWorkItem(work_item);
     if (error != autil::ThreadPool::ERROR_NONE) {
         work_item->destroy();
+        abortLoadBackUnsafe(items, *async_items, started_item_count);
         lb_ctx->onTaskComplete(false);
         taskFinished();
         return lb_ctx;
     }
-    rollback_guard.dismiss();
     return lb_ctx;
 }
 
 void BlockTreeCache::abortLoadBack(const std::vector<PendingLoadBackItem>& items) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (const auto& item : items) {
-        auto gid = static_cast<size_t>(item.group_id);
+    std::lock_guard<std::mutex>     lock(mutex_);
+    const std::vector<LoadBackItem> allocated_items;
+    abortLoadBackUnsafe(items, allocated_items, 0);
+}
+
+void BlockTreeCache::abortLoadBackUnsafe(const std::vector<PendingLoadBackItem>& pending_items,
+                                         const std::vector<LoadBackItem>&        allocated_items,
+                                         size_t                                  started_item_count) {
+    for (const LoadBackItem& item : allocated_items) {
+        if (item.group_id < 0 || static_cast<size_t>(item.group_id) >= component_groups_.size()) {
+            continue;
+        }
+        ComponentGroupPtr& component_group = component_groups_[static_cast<size_t>(item.group_id)];
+        if (component_group != nullptr) {
+            component_group->unreferenceBlocks(GroupBlockSet{item.group_id, Tier::DEVICE, {item.target_device_blocks}});
+        }
+    }
+
+    for (size_t index = 0; index < pending_items.size(); ++index) {
+        const PendingLoadBackItem& item = pending_items[index];
+        const size_t               gid  = static_cast<size_t>(item.group_id);
         if (gid >= component_groups_.size()) {
             continue;
         }
-        // Release the source reference taken while preparing the match.
-        // No device block was allocated, so there is nothing else to undo.
         GroupBlockSet source_set{item.group_id, item.source_tier, {item.source_blocks}, {item.node}};
         component_groups_[gid]->unreferenceBlocks(source_set);
-        evictor_.refreshCandidatesAfterRelease(source_set);
+        if (index < started_item_count) {
+            evictor_.finishLoadBack(item.node, item.group_id, item.source_tier, false);
+        } else {
+            evictor_.refreshCandidatesAfterRelease(source_set);
+        }
     }
 }
 
@@ -751,7 +670,7 @@ bool BlockTreeCache::executeLoadBackTransferBatch(const std::vector<TransferDesc
 
     MemoryOperationRequestPB request;
     for (const TransferDescriptor& descriptor : descriptors) {
-        const bool appended = BlockTreeTransferConverter::appendTransfer(descriptor, request);
+        const bool appended = BlockTreeTransferConverter::appendTransfer(descriptor, component_groups_, request);
         if (!appended) {
             RTP_LLM_LOG_WARNING("BlockTreeCache::executeLoadBackTransferBatch: failed to encode transfer, "
                                 "group=%d source=%s target=%s",
@@ -927,14 +846,14 @@ bool BlockTreeCache::buildEvictionTransferRequest(const BlockTreeEvictor::Evicti
                                                   MemoryOperationRequestPB&             request) const {
     TransferDescriptor primary_descriptor;
     if (!BlockTreeEvictor::buildTransferDescriptor(plan.primary, primary_descriptor)
-        || !BlockTreeTransferConverter::appendTransfer(primary_descriptor, request)) {
+        || !BlockTreeTransferConverter::appendTransfer(primary_descriptor, component_groups_, request)) {
         return false;
     }
 
     for (const EvictionMove& cascade_move : plan.cascade_moves) {
         TransferDescriptor cascade_descriptor;
         if (!BlockTreeEvictor::buildTransferDescriptor(cascade_move, cascade_descriptor)
-            || !BlockTreeTransferConverter::appendTransfer(cascade_descriptor, request)) {
+            || !BlockTreeTransferConverter::appendTransfer(cascade_descriptor, component_groups_, request)) {
             return false;
         }
     }

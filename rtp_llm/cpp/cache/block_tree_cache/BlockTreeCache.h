@@ -262,6 +262,9 @@ private:
 
     std::shared_ptr<AsyncContext> commitLoadBack(const std::vector<PendingLoadBackItem>& items);
     void                          abortLoadBack(const std::vector<PendingLoadBackItem>& items);
+    void                          abortLoadBackUnsafe(const std::vector<PendingLoadBackItem>& pending_items,
+                                                      const std::vector<LoadBackItem>&        allocated_items,
+                                                      size_t                                  started_item_count);
     bool executeLoadBackTransferBatch(const std::vector<TransferDescriptor>& descriptors, int timeout_ms);
     void performLoadBack(std::vector<LoadBackItem> items, std::shared_ptr<AsyncContext> ctx);
 

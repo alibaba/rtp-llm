@@ -75,6 +75,19 @@ TEST(BlockTreeCacheFactoryTest, ResolveDiskMountPathRejectsOutOfRangeRank) {
     StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
 }
 
+TEST(BlockTreeCacheFactoryTest, RejectsDiskCacheWithoutMemoryCache) {
+    CacheConfig cache_config;
+    cache_config.groups.resize(1);
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache      = false;
+    kv_cache_config.enable_memory_cache_disk = true;
+
+    BlockTreeCachePtr cache = createBlockTreeCache(
+        cache_config, kv_cache_config, std::shared_ptr<KVCacheAllocator>{}, ParallelismConfig{});
+    EXPECT_EQ(cache, nullptr);
+}
+
 // BTC-ISSUE-19: Factory creates one managed DiskBlockPool per component group on the
 // same mount path. The second pool cannot acquire DiskMountGuard's exclusive .lock.
 // Re-enable when a Full+SWA factory product can share one mount safely while keeping
