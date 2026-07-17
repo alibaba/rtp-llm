@@ -10,6 +10,7 @@ import org.flexlb.exception.ServiceDiscoveryException;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.util.RateLimitedWarn;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.util.CollectionUtils;
@@ -67,6 +68,14 @@ public class EngineSyncRunner implements Runnable {
      */
     private final long discoveryFailureGraceUs;
 
+    /**
+     * Rate limiter for the discovery-gap log line. A 20ms tick against a fast-failing discovery
+     * is ~50 lines/s otherwise. Owned by the long-lived synchronizer like
+     * {@link #lastDiscoverySuccessUs} — a per-runner instance would be recreated every round and
+     * never suppress anything.
+     */
+    private final RateLimitedWarn discoveryGapWarn;
+
     public EngineSyncRunner(String modelName,
                             Map<String, WorkerStatus> workerStatusMap,
                             WorkerAddressService workerAddressService,
@@ -80,10 +89,12 @@ public class EngineSyncRunner implements Runnable {
                             Long syncEngineStatusInterval,
                             EngineType engineType,
                             long discoveryFailureGraceMs,
-                            Map<String, Long> lastDiscoverySuccessUs) {
+                            Map<String, Long> lastDiscoverySuccessUs,
+                            RateLimitedWarn discoveryGapWarn) {
 
         this.discoveryFailureGraceUs = discoveryFailureGraceMs * 1000L;
         this.lastDiscoverySuccessUs = lastDiscoverySuccessUs;
+        this.discoveryGapWarn = discoveryGapWarn;
         this.modelName = modelName;
         this.workerAddressService = workerAddressService;
         this.workerStatusMap = workerStatusMap;
@@ -161,24 +172,50 @@ public class EngineSyncRunner implements Runnable {
 
     /**
      * Discovery could not tell us who is alive — it either threw or handed back an empty list for a
-     * fleet we know is not empty. Refresh the staleness clock of the known workers so they ride out
-     * a transient outage, bounded by {@code discoveryFailureGraceUs}; past the window they age out
-     * normally.
+     * fleet we know is not empty. Membership stays frozen for the outage (no additions, no
+     * removals), bounded by {@code discoveryFailureGraceUs}; past the window the workers age out
+     * normally. What keeps the frozen fleet from being evicted meanwhile depends on the engine:
+     *
+     * <ul>
+     * <li>LLM: liveness never came from discovery — the gRPC probes are the health signal and
+     * their success path refreshes {@code statusLastUpdateTime} itself. So keep probing the known
+     * workers rather than refreshing their clocks wholesale: a worker that dies mid-outage fails
+     * its probes and ages out via ExpirationCleaner as designed, instead of taking traffic until
+     * the grace window ends.</li>
+     * <li>EMBEDDING: there is no probe, so refreshing the staleness clock here is the only thing
+     * standing between a transient discovery outage and ExpirationCleaner evicting the whole
+     * fleet. Only currently-alive workers are refreshed — one already marked dead by an earlier
+     * authoritative round ages out normally.</li>
+     * </ul>
      */
     private void rideOutDiscoveryGap(String reason) {
         long nowUs = System.nanoTime() / 1000;
         Long lastSuccessUs = lastDiscoverySuccessUs.get(discoveryKey());
         boolean withinGrace = lastSuccessUs != null && nowUs - lastSuccessUs <= discoveryFailureGraceUs;
-        if (withinGrace) {
-            for (WorkerStatus workerStatus : workerStatusMap.values()) {
-                workerStatus.getStatusLastUpdateTime().set(nowUs);
-            }
-            logger.error("service discovery unusable, keeping previous worker state within grace, model={}, role={}, reason:{}",
-                    modelName, roleType, reason);
-        } else {
-            logger.error("service discovery unusable beyond grace ({}ms), letting workers age out, model={}, role={}, reason:{}",
+        if (!withinGrace) {
+            discoveryGapWarn.warn("service discovery unusable beyond grace ({}ms), letting workers age out, model={}, role={}, reason:{}",
                     discoveryFailureGraceUs / 1000, modelName, roleType, reason);
+            return;
         }
+        if (engineType == EngineType.EMBEDDING) {
+            for (WorkerStatus workerStatus : workerStatusMap.values()) {
+                if (workerStatus.isAlive()) {
+                    workerStatus.getStatusLastUpdateTime().set(nowUs);
+                }
+            }
+        } else {
+            for (Map.Entry<String, WorkerStatus> entry : workerStatusMap.entrySet()) {
+                WorkerStatus workerStatus = entry.getValue();
+                try {
+                    submitProbes(entry.getKey(), workerStatus.getSite(), workerStatus.getGroup(), workerStatus);
+                } catch (Exception e) {
+                    logger.error("skip worker with submit failure during discovery gap, model={}, role={}, ipPort={}, error:{}",
+                            modelName, roleType, entry.getKey(), e.getMessage());
+                }
+            }
+        }
+        discoveryGapWarn.warn("service discovery unusable, keeping previous worker state within grace, model={}, role={}, reason:{}",
+                modelName, roleType, reason);
     }
 
     /**
@@ -219,7 +256,6 @@ public class EngineSyncRunner implements Runnable {
 
     private void submitStatusChecks(WorkerHost host) {
         String workerIpPort = host.getIpPort();
-        String site = host.getSite();
         WorkerStatus workerStatus = getOrCreateWorkerStatus(workerStatusMap, workerIpPort);
 
         if (engineType == EngineType.EMBEDDING) {
@@ -227,10 +263,14 @@ public class EngineSyncRunner implements Runnable {
             return;
         }
 
+        submitProbes(workerIpPort, host.getSite(), host.getGroup(), workerStatus);
+    }
+
+    private void submitProbes(String workerIpPort, String site, String group, WorkerStatus workerStatus) {
         if (workerStatus.getStatusCheckInProgress().compareAndSet(false, true)) {
             logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
             GrpcWorkerStatusRunner grpcWorkerStatusRunner
-                    = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
+                    = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, group,
                     workerStatus, engineHealthReporter, engineGrpcService,
                     syncRequestTimeoutMs);
             submitOrReset(grpcWorkerStatusRunner, workerStatus.getStatusCheckInProgress(), workerIpPort, "status");

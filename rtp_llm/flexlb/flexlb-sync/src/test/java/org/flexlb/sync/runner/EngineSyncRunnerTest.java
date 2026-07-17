@@ -10,6 +10,7 @@ import org.flexlb.exception.ServiceDiscoveryException;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.util.RateLimitedWarn;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -20,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -94,7 +96,8 @@ class EngineSyncRunnerTest {
                 syncEngineStatusInterval,
                 engineType,
                 discoveryFailureGraceMs,
-                lastDiscoverySuccessUs
+                lastDiscoverySuccessUs,
+                new RateLimitedWarn(1, TimeUnit.SECONDS)
         );
     }
 
@@ -287,7 +290,7 @@ class EngineSyncRunnerTest {
     }
 
     @Test
-    void discovery_failure_within_grace_refreshes_staleness_clock_so_workers_survive_expiration() {
+    void embedding_discovery_failure_within_grace_refreshes_staleness_clock_so_workers_survive_expiration() {
         WorkerStatus alive = new WorkerStatus();
         alive.setIp("10.0.0.9");
         alive.setPort(23950);
@@ -296,20 +299,104 @@ class EngineSyncRunnerTest {
         workerStatusMap.put("10.0.0.9:23950", alive);
 
         // A prior successful round establishes the discovery-grace baseline; the immediately
-        // following failure is well within the grace window.
+        // following failure is well within the grace window. Embedding workers have no probe, so
+        // the clock refresh is the only thing keeping ExpirationCleaner from evicting the fleet.
+        when(workerAddressService.getEngineWorkerList(modelName, roleType))
+                .thenReturn(List.of(host("10.0.0.9", 23950)))
+                .thenThrow(new ServiceDiscoveryException(
+                        BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, "vipserver down", null));
+
+        EngineSyncRunner runner = newRunner(EngineType.EMBEDDING);
+        runner.run();
+        long beforeUs = System.nanoTime() / 1000;
+        runner.run();
+
+        assertTrue(workerStatusMap.containsKey("10.0.0.9:23950"));
+        assertTrue(alive.getStatusLastUpdateTime().get() >= beforeUs,
+                "a discovery failure within the grace window must refresh the retained embedding workers' "
+                        + "staleness clock so the independent ExpirationCleaner does not evict a healthy fleet");
+    }
+
+    @Test
+    void embedding_worker_already_marked_dead_is_not_kept_fresh_during_the_gap() {
+        WorkerStatus dead = new WorkerStatus();
+        dead.setIp("10.0.0.9");
+        dead.setPort(23950);
+        dead.setAlive(false);
+        dead.getStatusLastUpdateTime().set(1L);
+        workerStatusMap.put("10.0.0.9:23950", dead);
+        WorkerStatus alive = new WorkerStatus();
+        alive.setIp("10.0.0.1");
+        alive.setPort(23950);
+        alive.setAlive(true);
+        alive.getStatusLastUpdateTime().set(1L);
+        workerStatusMap.put("10.0.0.1:23950", alive);
+
+        when(workerAddressService.getEngineWorkerList(modelName, roleType))
+                .thenReturn(List.of(host("10.0.0.1", 23950)))
+                .thenThrow(new ServiceDiscoveryException(
+                        BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, "vipserver down", null));
+
+        EngineSyncRunner runner = newRunner(EngineType.EMBEDDING);
+        runner.run();
+        runner.run();
+
+        assertEquals(1L, dead.getStatusLastUpdateTime().get(),
+                "a worker an earlier authoritative round already marked dead must age out normally — "
+                        + "the gap ride-out only protects workers that were alive when discovery broke");
+    }
+
+    @Test
+    void llm_empty_discovery_list_within_grace_keeps_probing_known_workers_without_touching_membership() {
+        when(workerAddressService.getEngineWorkerList(modelName, roleType))
+                .thenReturn(List.of(host("10.0.0.9", 23950)))
+                .thenReturn(List.of());
+
+        engineSyncRunner.run();
+        Long baselineUs = lastDiscoverySuccessUs.get(modelName + "/" + roleType);
+        assertNotNull(baselineUs, "the successful round must stamp the grace baseline");
+
+        WorkerStatus known = workerStatusMap.get("10.0.0.9:23950");
+        assertNotNull(known);
+        // The mocked executor never runs the probes, so complete them by hand — otherwise the
+        // in-progress flags from the first round would make the gap round skip its submissions.
+        known.getStatusCheckInProgress().set(false);
+        known.getCacheCheckInProgress().set(false);
+        known.getStatusLastUpdateTime().set(1L);
+
+        engineSyncRunner.run();
+
+        verify(statusCheckExecutor, org.mockito.Mockito.times(4)).submit(any(Runnable.class));
+        assertTrue(workerStatusMap.containsKey("10.0.0.9:23950"),
+                "membership stays frozen during the gap — no removals");
+        assertEquals(1, workerStatusMap.size(), "membership stays frozen during the gap — no additions");
+        assertEquals(baselineUs, lastDiscoverySuccessUs.get(modelName + "/" + roleType),
+                "an empty result is an outage, not a success — it must not restart the grace clock");
+        assertEquals(1L, known.getStatusLastUpdateTime().get(),
+                "LLM workers get no artificial clock refresh: the probes themselves refresh it on "
+                        + "success, so a worker that died mid-outage fails its probes and ages out");
+    }
+
+    @Test
+    void llm_discovery_failure_within_grace_keeps_probing_instead_of_refreshing_clocks() {
         when(workerAddressService.getEngineWorkerList(modelName, roleType))
                 .thenReturn(List.of(host("10.0.0.9", 23950)))
                 .thenThrow(new ServiceDiscoveryException(
                         BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, "vipserver down", null));
 
         engineSyncRunner.run();
-        long beforeUs = System.nanoTime() / 1000;
+        WorkerStatus known = workerStatusMap.get("10.0.0.9:23950");
+        assertNotNull(known);
+        known.getStatusCheckInProgress().set(false);
+        known.getCacheCheckInProgress().set(false);
+        known.getStatusLastUpdateTime().set(1L);
+
         engineSyncRunner.run();
 
-        assertTrue(workerStatusMap.containsKey("10.0.0.9:23950"));
-        assertTrue(alive.getStatusLastUpdateTime().get() >= beforeUs,
-                "a discovery failure within the grace window must refresh the retained workers' staleness "
-                        + "clock so the independent ExpirationCleaner does not evict a healthy fleet");
+        verify(statusCheckExecutor, org.mockito.Mockito.times(4)).submit(any(Runnable.class));
+        assertEquals(1L, known.getStatusLastUpdateTime().get(),
+                "gRPC probing is the LLM health signal during a discovery gap — the sync loop must "
+                        + "not overwrite the staleness clock the probes maintain");
     }
 
     @Test

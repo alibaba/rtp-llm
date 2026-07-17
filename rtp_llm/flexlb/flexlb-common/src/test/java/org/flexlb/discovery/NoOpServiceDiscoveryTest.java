@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -80,6 +81,16 @@ class NoOpServiceDiscoveryTest {
     @Test
     void blankAddressMeansEmptyFleetNotFailure() {
         assertTrue(NoOpServiceDiscovery.getInstance().getHosts(" ", Map.of()).isEmpty());
+    }
+
+    @Test
+    void listenSwallowsAMalformedConfigAndPushesNothing() {
+        // getHosts throws on this input (missing port); listen is a registration, not a lookup,
+        // so the same failure must be logged and swallowed — and no host list may be pushed.
+        AtomicReference<List<WorkerHost>> pushed = new AtomicReference<>();
+        assertDoesNotThrow(() -> NoOpServiceDiscovery.getInstance()
+                .listen(ADDRESS, pushed::set, env("10.0.0.1")));
+        assertNull(pushed.get(), "a failed resolve must not be pushed as if it were a fleet");
     }
 
     @Test

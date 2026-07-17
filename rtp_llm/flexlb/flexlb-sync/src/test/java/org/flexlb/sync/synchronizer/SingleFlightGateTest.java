@@ -95,6 +95,27 @@ class SingleFlightGateTest {
     }
 
     @Test
+    void throwingTaskReleasesTheKey() throws Exception {
+        CountDownLatch threw = new CountDownLatch(1);
+        assertTrue(gate.submit("m/PDFUSION", executor, () -> {
+            threw.countDown();
+            throw new RuntimeException("sync round blew up");
+        }));
+        assertTrue(threw.await(5, TimeUnit.SECONDS));
+
+        // The release lives in a finally inside the wrapper; give it a moment to run, then the
+        // key must accept work again — otherwise one bad round would stop a model/role forever.
+        boolean resubmitted = false;
+        for (int spin = 0; spin < 5000 && !resubmitted; spin++) {
+            resubmitted = gate.submit("m/PDFUSION", executor, () -> { });
+            if (!resubmitted) {
+                Thread.sleep(1);
+            }
+        }
+        assertTrue(resubmitted, "a task that throws must still release its key");
+    }
+
+    @Test
     void rejectedSubmissionReleasesTheKey() {
         ExecutorService rejecting = Executors.newFixedThreadPool(1);
         rejecting.shutdown();

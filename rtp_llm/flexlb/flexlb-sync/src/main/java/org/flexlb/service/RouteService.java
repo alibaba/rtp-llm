@@ -1,7 +1,7 @@
 package org.flexlb.service;
 
-import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.scheduler.QueueManager;
+import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;

@@ -23,9 +23,18 @@ import java.util.Map;
  * {@code false}, never errors (deliberate backward compatibility with live deployments). A
  * malformed <em>enum</em> override fails fast instead: an unknown categorical value (e.g. a
  * mistyped {@code ENGINE_TYPE}) must not silently fall back to the default and run the wrong mode.
+ *
+ * <p>On the empty-prefix path the bare names are dangerously generic ({@code ENGINE_TYPE},
+ * {@code DEPLOY}, ...) and can collide with unrelated variables lingering in the container, so a
+ * {@code FLEXLB_}-prefixed form of each name is consulted first and wins over the bare form.
+ * Callers that already pass a namespace prefix (e.g. {@code DISPATCH_}) are collision-safe and
+ * get no extra prefixing.
  */
 @Slf4j
 public final class EnvConfigOverrides {
+
+    /** Namespaced fallback for the empty-prefix path; see the class javadoc. */
+    private static final String GLOBAL_PREFIX = "FLEXLB_";
 
     private EnvConfigOverrides() {
     }
@@ -48,6 +57,14 @@ public final class EnvConfigOverrides {
             }
             String envName = prefix + camelToUpperSnakeCase(field.getName());
             String raw = env.get(envName);
+            if (prefix.isEmpty()) {
+                String prefixedName = GLOBAL_PREFIX + envName;
+                String prefixedRaw = env.get(prefixedName);
+                if (prefixedRaw != null && !prefixedRaw.trim().isEmpty()) {
+                    envName = prefixedName;
+                    raw = prefixedRaw;
+                }
+            }
             if (raw == null) {
                 continue;
             }
@@ -60,7 +77,9 @@ public final class EnvConfigOverrides {
                 Object oldValue = field.get(config);
                 Object parsed = parseValue(value, type);
                 field.set(config, parsed);
-                log.info("env override: {} = {} (field: {}, old: {})",
+                // WARN, not info: an override silently flipping behavior is exactly what an
+                // upgrade postmortem needs to see, including which env name matched.
+                log.warn("env override: {} = {} (field: {}, old: {})",
                         envName, parsed, field.getName(), oldValue);
             } catch (Exception e) {
                 if (type.isEnum()) {
