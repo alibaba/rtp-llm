@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 import torch
 import torch.nn as nn
+
 from rtp_llm.models_py.layers.activation import silu_and_mul
 from rtp_llm.models_py.layers.embedding import ParallelLMHead, VocabParallelEmbedding
 from rtp_llm.models_py.layers.linear import (

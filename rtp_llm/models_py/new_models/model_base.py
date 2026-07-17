@@ -1,5 +1,6 @@
-from typing import Any, Optional
+from typing import Optional
 
+from rtp_llm.models_py.model_desc.module_base import required_config_value
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 
 
@@ -27,14 +28,3 @@ def select_block_map_for_layer(
             attention_inputs.kv_cache_kernel_block_id_by_group[gid]
         )
     return gid
-
-
-def required_config_value(config: Any, *names: str) -> Any:
-    for name in names:
-        if isinstance(config, dict):
-            value = config.get(name)
-        else:
-            value = getattr(config, name, None)
-        if value is not None:
-            return value
-    raise ValueError(f"Model config requires one of {names}")

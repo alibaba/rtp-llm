@@ -1,6 +1,8 @@
 import logging
 from typing import TYPE_CHECKING, Any, Optional
 
+from torch import Tensor
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.module_base import RtpModule
@@ -12,13 +14,12 @@ from rtp_llm.ops.compute_ops import (
     PyModelInputs,
     PyModelOutputs,
 )
-from torch import Tensor
 
 if TYPE_CHECKING:
     from rtp_llm.model_loader.model_weight_info import ModelWeights
 
 
-def _required_config_value(config: Any, *names: str) -> Any:
+def required_config_value(config: Any, *names: str) -> Any:
     for name in names:
         value = (
             config.get(name)
@@ -35,8 +36,8 @@ class GptModelBase(RtpModule):
         self,
         config: ModelConfig,
         parallelism_config,
-        weight: Optional["ModelWeights"],
-        max_generate_batch_size: int,
+        weight: Optional["ModelWeights"] = None,
+        max_generate_batch_size: int = 0,
         fmha_config=None,  # Optional FMHAConfig
         py_hw_kernel_config=None,  # Optional HWKernelConfig
         device_resource_config: Optional[
@@ -55,10 +56,10 @@ class GptModelBase(RtpModule):
             and device_resource_config.enable_layer_micro_batch == 0
             else 2
         )
-        self.layer_num = _required_config_value(
+        self.layer_num = required_config_value(
             config, "num_layers", "num_hidden_layers"
         )
-        self.vocab_size = _required_config_value(config, "vocab_size")
+        self.vocab_size = required_config_value(config, "vocab_size")
 
         self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device_type()
@@ -94,11 +95,13 @@ class GptModelBase(RtpModule):
         replay_batch_size: int,
         capture_batch_size: int,
         seq_size_per_block: int,
-    ):
-        assert capture_batch_size in self.params_dict
-        params_ptr = self.params_dict[capture_batch_size]
-        assert params_ptr is not None
-        params_ptr.fillParams(
+    ) -> None:
+        if capture_batch_size not in self.params_dict:
+            raise ValueError(f"No captured FMHA params for batch {capture_batch_size}")
+        params = self.params_dict[capture_batch_size]
+        if params is None:
+            raise RuntimeError("Captured FMHA params cannot be None")
+        params.fillParams(
             sequence_lengths,
             input_lengths,
             kv_cache_block_id_host,

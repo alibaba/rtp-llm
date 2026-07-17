@@ -5,12 +5,13 @@ import unittest
 from unittest.mock import patch
 
 import torch
+from safetensors.torch import save_file
+
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.qwen3.language import Qwen3ForCausalLM
-from safetensors.torch import save_file
 
 
 def _model_config():
@@ -74,6 +75,22 @@ def _weights():
 
 
 class Qwen3BaseModelIntegrationTest(unittest.TestCase):
+    def test_gpt_runtime_base_rejects_invalid_graph_capture_state(self):
+        runtime = GptModelBase(
+            config=_model_config(),
+            parallelism_config=_parallelism_config(),
+            weight=None,
+            max_generate_batch_size=0,
+        )
+        empty = torch.empty(0, dtype=torch.int32)
+
+        with self.assertRaisesRegex(ValueError, "No captured FMHA params"):
+            runtime.fill_params(empty, empty, empty, 1, 4, 16)
+
+        runtime.params_dict[4] = None
+        with self.assertRaisesRegex(RuntimeError, "cannot be None"):
+            runtime.fill_params(empty, empty, empty, 1, 4, 16)
+
     def test_base_model_entry_loads_registered_qwen_runtime(self):
         config = _model_config()
         base_model = object.__new__(BaseModel)
