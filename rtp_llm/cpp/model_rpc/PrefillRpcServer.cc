@@ -104,10 +104,15 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
     return grpc::Status::OK;
 }
 
-ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
+ErrorInfo PrefillRpcServer::waitStreamBeforeRun(PrefillGenerateContext& prefill_context) {
+    auto       stream              = prefill_context.getStream();
     static int max_wait_timeout_us = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms * 1000;
     auto       begin_time_us       = currentTimeUs();
     while (!stream->hasError() && stream->getStatus() == StreamState::WAITING) {
+        if (prefill_context.isRequestCancelled()) {
+            stream->reportError(ErrorCode::CANCELLED, "request cancelled while waiting");
+            return ErrorInfo(ErrorCode::CANCELLED, "request cancelled while waiting to run");
+        }
         usleep(100);
         auto current_time_us = currentTimeUs();
         auto cost_time_us    = current_time_us - begin_time_us;
@@ -278,7 +283,7 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
 void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
-    prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
+    prefill_context.error_info = waitStreamBeforeRun(prefill_context);
     if (prefill_context.error_info.hasError()) {
         prefill_context.error_status =
             serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);

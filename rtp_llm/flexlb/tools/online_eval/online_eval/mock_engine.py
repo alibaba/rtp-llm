@@ -477,7 +477,10 @@ class MockRpcServicer:
             raise
         finally:
             if handler_cancelled or context.cancelled():
-                await self.state.cancel(request_id)
+                try:
+                    await self.state.cancel(request_id)
+                except Exception:
+                    pass
 
     async def GenerateStreamCall(self, request, context):
         async for output in self.state.generate_stream(request):
