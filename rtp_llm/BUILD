@@ -132,6 +132,15 @@ requirement([
     "pybind11_stubgen",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
+py_library(
+    name = "torch_memory_saver",
+    deps = select({
+        "@//:using_cuda12_9_x86": ["@pip_gpu_cuda12_9_torch//torch_memory_saver:pkg"],
+        "@//:cuda_pre_12_9": ["@pip_gpu_cuda12_torch//torch_memory_saver:pkg"],
+        "//conditions:default": [],
+    }),
+)
+
 
 py_library(
     name = "empty_target",
@@ -153,6 +162,7 @@ py_library(
         ":cpm_kernels",
         ":prettytable",
         ":psutil",
+        ":frontend_sleep_validation",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
     ] + internal_deps()
 )
@@ -230,8 +240,10 @@ py_library(
         "@//:using_arm": [],
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cpu": [],
+        "@//:cuda_pre_12_9": ["flash_attn"],
+        "@//:using_cuda12_9_x86": ["flash_attn"],
         "@//:using_cuda12_arm": [],
-        "//conditions:default": ["flash_attn"]
+        "//conditions:default": [],
     }) + arch_dep,
 )
 
@@ -399,6 +411,29 @@ py_library(
     deps = [
         ":openai_api"
     ]
+)
+
+py_library(
+    name = "frontend_sleep_routes",
+    srcs = ["frontend/sleep_routes.py"],
+    deps = [
+        ":fastapi",
+        ":frontend_sleep_validation",
+    ],
+)
+
+py_library(
+    name = "frontend_sleep_validation",
+    srcs = ["frontend/sleep_validation.py"],
+    deps = [],
+)
+
+py_library(
+    name = "frontend_worker_address_utils",
+    srcs = ["frontend/worker_address_utils.py"],
+    deps = [
+        ":frontend_sleep_validation",
+    ],
 )
 
 py_library(

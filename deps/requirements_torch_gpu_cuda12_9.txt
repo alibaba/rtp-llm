@@ -11,6 +11,7 @@ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_attn-2.8
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/torch-2.8.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/torchvision-0.23.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl
+torch_memory_saver==0.0.9.post1
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/deep_ep-1.2.1.10%2Bd7d7b48-cp310-cp310-linux_x86_64.whl
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/deep_gemm-2.1.1%2Blocal-cp310-cp310-linux_x86_64.whl
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260714/flashinfer_python-0.6.9-py3-none-any.whl
