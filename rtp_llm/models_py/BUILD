@@ -120,10 +120,26 @@ py_library(
         "module_base.py",
         "registry.py",
         "weight_mapper.py",
-    ],
+    ] + glob([
+        "layers/*.py",
+        "new_models/*.py",
+        "new_models/qwen3/*.py",
+        "quant_methods/*.py",
+    ]),
     deps = [
+        ":modules",
+        "//rtp_llm:_ft_pickler",
+        "//rtp_llm:config",
+        "//rtp_llm:device",
+        "//rtp_llm:ops",
         "//rtp_llm:safetensors",
         "//rtp_llm:torch",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    data = [
+        "//:rtp_compute_ops",
+        "//:th_transformer",
+        "//:th_transformer_config",
     ],
     visibility = ["//visibility:public"],
 )
@@ -139,6 +155,7 @@ py_library(
         ":modules",
         ":kernels",
         ":configs",
+        ":new_weight_loader",
         "//rtp_llm/model_loader:loader",
     ] + select({
         "@//:using_cuda12": [
