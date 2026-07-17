@@ -25,10 +25,13 @@ import java.util.Map;
  * mistyped {@code ENGINE_TYPE}) must not silently fall back to the default and run the wrong mode.
  *
  * <p>On the empty-prefix path the bare names are dangerously generic ({@code ENGINE_TYPE},
- * {@code DEPLOY}, ...) and can collide with unrelated variables lingering in the container, so a
- * {@code FLEXLB_}-prefixed form of each name is consulted first and wins over the bare form.
- * Callers that already pass a namespace prefix (e.g. {@code DISPATCH_}) are collision-safe and
- * get no extra prefixing.
+ * {@code DEPLOY}, ...) and can collide with unrelated variables lingering in the container. Bare
+ * names still apply — live deployments set them — so the collision is not closed here: a
+ * {@code FLEXLB_}-prefixed form of each name is consulted first and wins when present, giving a
+ * deployment that hits a collision a way out without renaming anything else. Absent the prefixed
+ * form an unrelated bare {@code ENGINE_TYPE} still takes effect, and being an enum still fails
+ * startup. Callers that already pass a namespace prefix (e.g. {@code DISPATCH_}) are collision-safe
+ * and get no extra prefixing.
  */
 @Slf4j
 public final class EnvConfigOverrides {

@@ -209,7 +209,10 @@ class DispatcherFePoolRefresherTest {
         DispatcherFePoolRefresher r = new DispatcherFePoolRefresher(discovery, cfg, configService);
 
         assertEquals(1, r.currentSize());
-        org.mockito.Mockito.verify(configService).loadBalanceConfig();
+        // The resolved window, not the interaction: reading the config and then dropping the value
+        // (or reading a different knob) would silently leave the 5-minute default in force.
+        assertEquals(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(60_000), r.graceNanos(),
+                "the configured discoveryFailureGraceMs must be the window this refresher applies");
     }
 
     @Test

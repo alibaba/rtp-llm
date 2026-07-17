@@ -168,6 +168,11 @@ public class DispatcherFePoolRefresher {
         return fePoolUrls.get().size();
     }
 
+    /** Visible for tests. The resolved grace window in nanos, as this instance will apply it. */
+    long graceNanos() {
+        return emptyDiscoveryGraceNanos;
+    }
+
     /**
      * Periodic poll. Re-reads the FE pool from {@link ServiceDiscovery} on the shared
      * Spring {@code task-scheduler} pool, matching the cadence sync's

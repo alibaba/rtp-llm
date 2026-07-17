@@ -323,7 +323,11 @@ class EngineSyncRunnerTest {
         dead.setIp("10.0.0.9");
         dead.setPort(23950);
         dead.setAlive(false);
-        dead.getStatusLastUpdateTime().set(1L);
+        // Fresh clock: round 1 drops it from discovery, and only a clock past the removal
+        // threshold would evict it there — this worker has to still be in the map for round 2's
+        // gap ride-out to have anything to decide about.
+        long deadClockUs = System.nanoTime() / 1000;
+        dead.getStatusLastUpdateTime().set(deadClockUs);
         workerStatusMap.put("10.0.0.9:23950", dead);
         WorkerStatus alive = new WorkerStatus();
         alive.setIp("10.0.0.1");
@@ -339,11 +343,17 @@ class EngineSyncRunnerTest {
 
         EngineSyncRunner runner = newRunner(EngineType.EMBEDDING);
         runner.run();
+        assertTrue(workerStatusMap.containsKey("10.0.0.9:23950"),
+                "the dead worker must survive round 1 — otherwise the gap round never sees it");
+        long beforeGapUs = System.nanoTime() / 1000;
         runner.run();
 
-        assertEquals(1L, dead.getStatusLastUpdateTime().get(),
+        assertTrue(workerStatusMap.containsKey("10.0.0.9:23950"));
+        assertEquals(deadClockUs, dead.getStatusLastUpdateTime().get(),
                 "a worker an earlier authoritative round already marked dead must age out normally — "
                         + "the gap ride-out only protects workers that were alive when discovery broke");
+        assertTrue(alive.getStatusLastUpdateTime().get() >= beforeGapUs,
+                "the still-alive worker is the one the gap ride-out exists for and must be refreshed");
     }
 
     @Test
@@ -400,7 +410,7 @@ class EngineSyncRunnerTest {
     }
 
     @Test
-    void discovery_failure_beyond_grace_stops_refreshing_so_workers_can_age_out() {
+    void llm_discovery_failure_beyond_grace_stops_probing_so_workers_can_age_out() {
         EngineSyncRunner zeroGraceRunner = newRunner(EngineType.LLM, 0L);
         WorkerStatus alive = new WorkerStatus();
         alive.setIp("10.0.0.9");
@@ -415,8 +425,17 @@ class EngineSyncRunnerTest {
                         BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, "vipserver down", null));
 
         zeroGraceRunner.run();
+        // The mocked executor never runs the probes, so complete them by hand — otherwise the
+        // in-progress flags alone would suppress the gap round's submissions and hide whether the
+        // grace window is what stopped them.
+        alive.getStatusCheckInProgress().set(false);
+        alive.getCacheCheckInProgress().set(false);
         zeroGraceRunner.run();
 
+        // Probing is the only thing an LLM gap round does, so it is the only way to tell a
+        // beyond-grace round from a within-grace one: the sibling test pins 4 submits over two
+        // rounds, this one pins that round 2 contributes none.
+        verify(statusCheckExecutor, org.mockito.Mockito.times(2)).submit(any(Runnable.class));
         assertEquals(1L, alive.getStatusLastUpdateTime().get(),
                 "once a discovery outage outlasts the grace window the staleness clock must stop being "
                         + "refreshed, so ExpirationCleaner can eventually evict workers a broken discovery "
