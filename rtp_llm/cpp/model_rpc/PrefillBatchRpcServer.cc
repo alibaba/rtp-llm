@@ -309,6 +309,13 @@ grpc::Status PrefillBatchRpcServer::EnqueueGroup(grpc::ServerContext* /*context*
 grpc::Status PrefillBatchRpcServer::admitGroup(const EnqueueGroupRequestPB* request,
                                                EnqueueBatchResponsePB*      response,
                                                std::vector<BatchSlot>&      slots) {
+    if (request->batch_id().empty()) {
+        for (const auto& dp_input : request->requests()) {
+            int64_t rid = dp_input.has_input() ? dp_input.input().request_id() : 0;
+            addBatchError(response, rid, grpc::StatusCode::INVALID_ARGUMENT, "EnqueueGroup batch_id is empty");
+        }
+        return grpc::Status::OK;
+    }
     std::vector<const GenerateInputPB*> all_inputs;
     all_inputs.reserve(request->requests_size());
     std::unordered_set<int64_t> seen_request_ids;
@@ -618,7 +625,6 @@ void PrefillBatchRpcServer::runSlotStream(SlotRunnerState state, int64_t request
     if (!finish_status.ok()) {
         state.prefill_context->error_status = finish_status;
     }
-    state.prefill_context.reset();
     response_registry_.finish(request_id, state.entry, finish_status);
     RTP_LLM_LOG_DEBUG("EnqueueGroup request [%ld] finishStream done, ok=%d", request_id, finish_status.ok());
 }

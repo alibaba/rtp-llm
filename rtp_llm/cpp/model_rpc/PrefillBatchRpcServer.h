@@ -112,6 +112,9 @@ private:
     // Thread pool replacing std::async / std::thread::detach.
     autil::ThreadPoolBasePtr slot_worker_pool_;  // Prepare + async response runners.
     PoolMetrics              slot_pool_metrics_;
+
+    // For unit testing of the real EnqueueGroup / FetchResponse error paths.
+    friend class TestPrefillBatchRpcServerRealGroup;
 };
 
 }  // namespace rtp_llm
