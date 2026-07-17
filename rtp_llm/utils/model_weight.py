@@ -1174,6 +1174,12 @@ class W:
     eagle3_fc_norm_gamma = "eagle3_fc.gamma"
     eagle3_input_norm_gamma = "eagle3_input.gamma"
 
+    # dspark / dflash (draft-model globals)
+    dspark_fc_w = "dspark_fc.weight"
+    dspark_hidden_norm_gamma = "dspark_hidden_norm.gamma"
+    dspark_markov_w1 = "dspark_markov_w1.weight"
+    dspark_markov_w2 = "dspark_markov_w2.weight"
+
     # attn
     pre_ln_gamma = "pre_layernorm_weights.gamma"
     pre_ln_beta = "pre_layernorm_weights.beta"
@@ -1416,6 +1422,10 @@ class W:
         eagle3_fc_proj: sp_id,
         eagle3_fc_norm_gamma: sp_id,
         eagle3_input_norm_gamma: sp_id,
+        dspark_fc_w: sp_id,
+        dspark_hidden_norm_gamma: sp_id,
+        dspark_markov_w1: sp_id,
+        dspark_markov_w2: sp_id,
         pre_attn_ln_gamma: sp_id,
         pre_attn_ln_beta: sp_id,
         qk_ln_gamma: sp_head_qk_norm,

@@ -56,6 +56,7 @@ class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
     _python_fields = {
         "is_mtp",
+        "dspark_config",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
         "has_lm_head_bias",
@@ -518,6 +519,8 @@ class ModelConfig(CppModelConfig):
         super().__init__(*args, **kwargs)
         # Additional Python-only fields
         self.is_mtp: bool = False
+        # DFlash/DSpark draft extras (DSparkDraftParams), None for non-dspark models
+        self.dspark_config: Optional[Any] = None
         self.normalize_lm_head_weight: bool = False
         self.enable_fp32_lm_head: bool = True
         self.has_lm_head_bias: bool = False

@@ -14,6 +14,7 @@ from .llama import Baichuan, Llama
 from .mpt import Mpt
 from .phi import Phi
 from .qwen import QWen_1B8, QWen_7B, QWen_13B
+from .qwen_3_dspark import Qwen3DSpark
 from .qwen_v2 import QWenV2
 from .qwen_v3 import QwenV3
 from .starcoder import StarCoder
