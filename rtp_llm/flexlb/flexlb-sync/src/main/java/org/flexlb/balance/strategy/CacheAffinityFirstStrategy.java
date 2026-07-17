@@ -74,7 +74,16 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
                     coldWorker.worker().getIpPort(),
                     coldWorker.hitCacheTokens(),
                     idleTimeUs(coldWorker));
-            return claimPreferredWorker(coldWorker, sortedWorkers, shortestTtftWorker);
+            return selectAndRecordDecision(
+                    coldWorker,
+                    sortedWorkers,
+                    shortestTtftWorker,
+                    balanceContext,
+                    roleType,
+                    group,
+                    seqLen,
+                    config,
+                    "COLD_WORKER_PROBE");
         }
 
         long blockSize = cacheLeader.worker().getCacheStatus() == null
@@ -112,7 +121,51 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
                 toleratedQueueWork,
                 preferredWorker.worker().getIpPort());
 
-        return claimPreferredWorker(preferredWorker, sortedWorkers, shortestTtftWorker);
+        String selectionReason = preferredWorker.equals(cacheLeader)
+                        && !preferredWorker.equals(shortestTtftWorker)
+                ? "CACHE_LEADER"
+                : "SHORTEST_TTFT";
+        return selectAndRecordDecision(
+                preferredWorker,
+                sortedWorkers,
+                shortestTtftWorker,
+                balanceContext,
+                roleType,
+                group,
+                seqLen,
+                config,
+                selectionReason);
+    }
+
+    private ScoredWorker selectAndRecordDecision(
+            ScoredWorker preferredWorker,
+            List<ScoredWorker> sortedWorkers,
+            ScoredWorker shortestTtftWorker,
+            BalanceContext balanceContext,
+            RoleType roleType,
+            String group,
+            long seqLen,
+            FlexlbConfig config,
+            String selectionReason) {
+        ScoredWorker selectedWorker = claimPreferredWorker(
+                preferredWorker, sortedWorkers, shortestTtftWorker);
+        String effectiveReason = selectedWorker.equals(preferredWorker)
+                ? selectionReason
+                : "CONCURRENT_FALLBACK";
+        recordDecisionSnapshot(
+                balanceContext,
+                selectedWorker,
+                sortedWorkers,
+                sortedWorkers,
+                List.of(),
+                shortestTtftWorker.ttft(),
+                0,
+                roleType,
+                group,
+                seqLen,
+                config.getPrefillCacheHitDiscount(),
+                effectiveReason);
+        return selectedWorker;
     }
 
     private ScoredWorker findColdWorkerForProbe(

@@ -50,6 +50,8 @@ class PvLogDataTest {
         context.recordShortestTtftDecision(new ShortestTtftDecision(
                 RoleType.PREFILL,
                 "default",
+                "ShortestTTFT",
+                "SHORTEST_TTFT",
                 128,
                 90,
                 9.0,
@@ -99,6 +101,8 @@ class PvLogDataTest {
         assertTrue(json.contains("\"cacheMatchCount\":3"));
         assertTrue(json.contains("\"cacheMatchSelections\":[{\"role\":\"PREFILL\",\"selectedIp\":\"10.0.0.2\",\"hitCacheTokens\":512}"));
         assertTrue(json.contains("\"shortestTtftDecisions\":[{\"role\":\"PREFILL\""));
+        assertTrue(json.contains("\"strategy\":\"ShortestTTFT\""));
+        assertTrue(json.contains("\"selectionReason\":\"SHORTEST_TTFT\""));
         assertTrue(json.contains("\"estimatedTtft\":90"));
         assertTrue(json.contains("\"trackedTaskCount\":1"));
     }

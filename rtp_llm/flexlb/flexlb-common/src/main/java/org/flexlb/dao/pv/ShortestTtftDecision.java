@@ -5,11 +5,13 @@ import org.flexlb.dao.route.RoleType;
 import java.util.List;
 
 /**
- * Debug-only snapshot of the inputs used by the shortest-TTFT strategy.
+ * Debug-only snapshot of the inputs used by TTFT-based strategies.
  */
 public record ShortestTtftDecision(
         RoleType role,
         String group,
+        String strategy,
+        String selectionReason,
         long requestInputTokens,
         long minimumTtft,
         double similarTtftThreshold,

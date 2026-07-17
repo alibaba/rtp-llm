@@ -127,12 +127,25 @@ class CacheAffinityFirstStrategyTest {
                         warmWorker.getIpPort(), 16,
                         coldWorker.getIpPort(), 0));
 
-        ServerStatus first = select(strategy, cacheAffinityConfig(), "cold-warmup");
+        SelectionResult first = selectWithContext(
+                strategy, cacheAffinityConfig(), "cold-warmup");
         ServerStatus second = select(strategy, cacheAffinityConfig(), "after-warmup");
 
-        Assertions.assertEquals(coldWorker.getIp(), first.getServerIp());
+        Assertions.assertEquals(coldWorker.getIp(), first.serverStatus().getServerIp());
         Assertions.assertNotEquals(coldWorker.getIp(), second.getServerIp());
         Assertions.assertTrue(coldWorker.getRunningQueueTime().get() > 0);
+        var decision = first.balanceContext()
+                .getShortestTtftDecisionByRole()
+                .get(RoleType.PREFILL);
+        Assertions.assertNotNull(decision);
+        Assertions.assertEquals("CacheAffinityFirst", decision.strategy());
+        Assertions.assertEquals("COLD_WORKER_PROBE", decision.selectionReason());
+        Assertions.assertEquals(3, decision.workers().size());
+        Assertions.assertEquals(coldWorker.getIp(), decision.workers().stream()
+                .filter(worker -> worker.selected())
+                .findFirst()
+                .orElseThrow()
+                .ip());
     }
 
     @Test
@@ -179,6 +192,11 @@ class CacheAffinityFirstStrategyTest {
 
     private ServerStatus select(
             CacheAffinityFirstStrategy strategy, FlexlbConfig config, String requestId) {
+        return selectWithContext(strategy, config, requestId).serverStatus();
+    }
+
+    private SelectionResult selectWithContext(
+            CacheAffinityFirstStrategy strategy, FlexlbConfig config, String requestId) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(INPUT_TOKENS);
@@ -187,7 +205,8 @@ class CacheAffinityFirstStrategyTest {
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setConfig(config);
         balanceContext.setRequest(request);
-        return strategy.select(balanceContext, RoleType.PREFILL, null);
+        return new SelectionResult(
+                strategy.select(balanceContext, RoleType.PREFILL, null), balanceContext);
     }
 
     private FlexlbConfig cacheAffinityConfig() {
@@ -222,4 +241,6 @@ class CacheAffinityFirstStrategyTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
     }
+
+    private record SelectionResult(ServerStatus serverStatus, BalanceContext balanceContext) {}
 }

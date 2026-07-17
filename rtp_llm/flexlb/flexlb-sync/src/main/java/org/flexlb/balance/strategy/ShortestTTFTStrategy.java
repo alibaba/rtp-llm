@@ -362,20 +362,50 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 similarWorkers,
                 candidates,
                 config.getPrefillCachePreferenceMinBlockGap());
-        if (Logger.isDebugEnabled()) {
-            balanceContext.recordShortestTtftDecision(buildDecisionSnapshot(
-                    selectedWorker,
-                    sortedWorkers,
-                    candidates,
-                    similarWorkers,
-                    minTTFT,
-                    threshold,
-                    roleType,
-                    group,
-                    seqLen,
-                    config.getPrefillCacheHitDiscount()));
-        }
+        recordDecisionSnapshot(
+                balanceContext,
+                selectedWorker,
+                sortedWorkers,
+                candidates,
+                similarWorkers,
+                minTTFT,
+                threshold,
+                roleType,
+                group,
+                seqLen,
+                config.getPrefillCacheHitDiscount(),
+                "SHORTEST_TTFT");
         return selectedWorker;
+    }
+
+    protected void recordDecisionSnapshot(
+            BalanceContext balanceContext,
+            ScoredWorker selectedWorker,
+            List<ScoredWorker> sortedWorkers,
+            List<ScoredWorker> topCandidates,
+            List<ScoredWorker> similarWorkers,
+            long minimumTtft,
+            double similarTtftThreshold,
+            RoleType roleType,
+            String group,
+            long seqLen,
+            double cacheHitDiscount,
+            String selectionReason) {
+        if (!Logger.isDebugEnabled()) {
+            return;
+        }
+        balanceContext.recordShortestTtftDecision(buildDecisionSnapshot(
+                selectedWorker,
+                sortedWorkers,
+                topCandidates,
+                similarWorkers,
+                minimumTtft,
+                similarTtftThreshold,
+                roleType,
+                group,
+                seqLen,
+                cacheHitDiscount,
+                selectionReason));
     }
 
     private ShortestTtftDecision buildDecisionSnapshot(
@@ -388,7 +418,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             RoleType roleType,
             String group,
             long seqLen,
-            double cacheHitDiscount) {
+            double cacheHitDiscount,
+            String selectionReason) {
         List<WorkerDecision> workers = sortedWorkers.stream()
                 .map(scoredWorker -> buildWorkerDecision(
                         scoredWorker,
@@ -401,6 +432,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         return new ShortestTtftDecision(
                 roleType,
                 group,
+                strategy.getName(),
+                selectionReason,
                 seqLen,
                 minimumTtft,
                 similarTtftThreshold,
