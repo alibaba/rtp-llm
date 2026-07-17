@@ -138,7 +138,7 @@ class MMProfilerTest(TestCase):
 
     @patch("torch.cuda.is_available", return_value=False)
     def test_profile_request_noop_when_not_armed(self, _mock_cuda):
-        with self.profiler.profile_request():
+        with self.profiler.profile_forward():
             pass
         self.assertEqual(self.profiler._profiled_count, 0)
 
@@ -148,7 +148,7 @@ class MMProfilerTest(TestCase):
         with patch("torch.profiler.profile") as mock_prof:
             mock_ctx = MagicMock()
             mock_prof.return_value = mock_ctx
-            with self.profiler.profile_request():
+            with self.profiler.profile_forward():
                 pass
         self.assertEqual(self.profiler._profiled_count, 1)
         self.assertTrue(self.profiler._armed)
@@ -170,7 +170,7 @@ class MMProfilerTest(TestCase):
         self._run_profiled_request()
         self.assertTrue(self.profiler._finished)
 
-        with self.profiler.profile_request():
+        with self.profiler.profile_forward():
             pass
         self.assertEqual(self.profiler._profiled_count, 1)
 
@@ -180,7 +180,7 @@ class MMProfilerTest(TestCase):
         with patch("torch.profiler.profile") as mock_prof:
             mock_ctx = MagicMock()
             mock_prof.return_value = mock_ctx
-            with self.profiler.profile_request():
+            with self.profiler.profile_forward():
                 pass
 
         expected = os.path.join(self.tmp_dir, "timeline_0.json")
@@ -193,7 +193,7 @@ class MMProfilerTest(TestCase):
             mock_ctx = MagicMock()
             mock_ctx.export_chrome_trace.side_effect = RuntimeError("export failed")
             mock_prof.return_value = mock_ctx
-            with self.profiler.profile_request():
+            with self.profiler.profile_forward():
                 pass
         self.assertEqual(self.profiler._profiled_count, 1)
 
@@ -296,7 +296,7 @@ class MMProfilerTest(TestCase):
             if averages is not None:
                 mock_ctx.key_averages.return_value = averages
             mock_prof.return_value = mock_ctx
-            with self.profiler.profile_request():
+            with self.profiler.profile_forward():
                 pass
 
 

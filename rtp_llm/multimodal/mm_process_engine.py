@@ -19,6 +19,11 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.mm_profiler import MMProfiler
+from rtp_llm.multimodal.mm_scheduler import (
+    MMScheduler,
+    MMSchedulerError,
+    MMSchedulerRequestTooLargeError,
+)
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
 )
@@ -371,6 +376,7 @@ class MMProcessEngine:
         profiling_debug_logging_config: ProfilingDebugLoggingConfig,
         server_id: int = 0,
         is_proxy_mode: bool = False,
+        device: str = "cuda:0",
     ):
         """
         Initialize the multimodal process engine.
@@ -387,6 +393,9 @@ class MMProcessEngine:
         self.server_id = server_id
         self.vit_config = vit_config
         self.is_proxy_mode = is_proxy_mode
+        # The CUDA device this engine's weights live on; handed to the scheduler
+        # so its background thread pins the right device before every forward.
+        self.device = device
         self.contains_pos: bool = (
             model_config.mm_model_config.mm_position_ids_style != 0
         )
@@ -401,7 +410,6 @@ class MMProcessEngine:
         # threading.Lock: protects gRPC-handler-thread access within this
         # process. multiprocessing.Lock would round-trip through an OS
         # semaphore on every acquire — wasteful since no cross-process sharing.
-        self.mm_embedding_lock = threading.Lock()
         self.query_num_lock = threading.Lock()
 
         # 根据 vit_config 创建预处理执行器
@@ -424,7 +432,28 @@ class MMProcessEngine:
                 f"MMProcessEngine: Using MULTIPROCESS preprocessing mode with {vit_config.mm_preprocess_max_workers} workers"
             )
 
+        # All GPU embeddings use one scheduler path. max_batch_size=1 is the
+        # serial mode; values greater than one enable cross-request batching.
         self.profiler = MMProfiler()
+
+        try:
+            scheduler_args = vit_config.embedding_scheduler_args()
+            self._scheduler = MMScheduler(
+                mm_part=mm_part,
+                device=self.device,
+                forward_profiler=self.profiler.profile_forward,
+                **scheduler_args,
+            )
+        except Exception:
+            self.preprocess_executor.shutdown()
+            raise
+        self._stopped = False
+        logging.info(
+            f"MMProcessEngine: MMScheduler "
+            f"(configured_max_batch_size={vit_config.gpu_max_batch_size}, "
+            f"configured_batch_wait_ms={vit_config.gpu_batch_wait_ms}, "
+            f"{scheduler_args})"
+        )
 
         self.query_num: int = 0
         self._access_logger = MMAccessLogger(
@@ -490,39 +519,55 @@ class MMProcessEngine:
         """Core implementation for multimodal embedding processing."""
         logging.debug(f"{self.server_id} request received")
         try:
-            with self.profiler.profile_request():
-                with torch.profiler.record_function("mm_embedding_impl"):
-                    if not self.is_proxy_mode:
-                        kmonitor.report(
-                            AccMetrics.VIT_QPS_METRIC, 1, {"source": "mm_embedding"}
-                        )
+            with torch.profiler.record_function("mm_embedding_impl"):
+                if not self.is_proxy_mode:
+                    kmonitor.report(
+                        AccMetrics.VIT_QPS_METRIC, 1, {"source": "mm_embedding"}
+                    )
 
-                    self.inc_query_num()
-                    if not self.vit_config.disable_access_log:
-                        self._access_logger.log_query_access(mm_inputs)
+                self.inc_query_num()
+                if not self.vit_config.disable_access_log:
+                    self._access_logger.log_query_access(mm_inputs)
 
-                    with torch.profiler.record_function("preprocess"):
-                        work_items = self._create_work_items(mm_inputs)
-                        self._wait_for_preprocessing(work_items)
+                with torch.profiler.record_function("preprocess"):
+                    work_items = self._create_work_items(mm_inputs)
+                    self._wait_for_preprocessing(work_items)
 
-                    with torch.profiler.record_function("compute_embeddings"):
-                        emb_res, pos_res, extra_input_res = self._compute_embeddings(
-                            work_items
-                        )
+                # The GPU forward runs on the MMScheduler's executor thread and is
+                # profiled there, per forward/batch, via the forward_profiler hook
+                # handed to the scheduler (torch.profiler's RecordFunction callbacks
+                # don't span threads, so it must be armed on that thread). This
+                # calling-thread marker only covers the submit/wait wall time.
+                with torch.profiler.record_function("compute_embeddings"):
+                    emb_res, pos_res, extra_input_res = self._compute_embeddings(
+                        work_items
+                    )
 
-                    with torch.profiler.record_function("postprocess"):
-                        result = MMEmbeddingRes(emb_res, pos_res, extra_input_res)
+                with torch.profiler.record_function("postprocess"):
+                    result = MMEmbeddingRes(emb_res, pos_res, extra_input_res)
 
-                    if not self.vit_config.disable_access_log:
-                        self._access_logger.log_success_access(mm_inputs, str(result))
+                if not self.vit_config.disable_access_log:
+                    self._access_logger.log_success_access(mm_inputs, str(result))
 
-                    if not self.is_proxy_mode:
-                        kmonitor.report(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
+                if not self.is_proxy_mode:
+                    kmonitor.report(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
 
             return result
+        except MMSchedulerError as e:
+            # Expected control flow is propagated directly. Execution failures are
+            # also lightweight here: the scheduler worker has already logged the
+            # original traceback and completed any OOM allocator recovery before
+            # resolving the request Future.
+            if not self.is_proxy_mode:
+                kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
+            self._access_logger.log_exception_access(mm_inputs, e)
+            raise
         except Exception as e:
-            torch.cuda.empty_cache()
-            gc.collect()
+            if isinstance(e, torch.cuda.OutOfMemoryError) or isinstance(
+                e.__cause__, torch.cuda.OutOfMemoryError
+            ):
+                torch.cuda.empty_cache()
+                gc.collect()
             if not self.is_proxy_mode:
                 kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
             self._access_logger.log_exception_access(mm_inputs, e)
@@ -532,6 +577,17 @@ class MMProcessEngine:
 
     def _create_work_items(self, mm_inputs: List[MultimodalInput]) -> List[MMWorkItem]:
         """Create work items and submit preprocessing tasks."""
+        # Request-level image-count cap BEFORE any preprocessing: a request whose
+        # media count exceeds the scheduler's per-request limit can never fit a
+        # batch, so reject it up front instead of spending preprocess on it. (Serial
+        # mode's cap is sys.maxsize, i.e. no limit — matches the old behavior.)
+        max_images = self._scheduler.max_request_images
+        if len(mm_inputs) > max_images:
+            raise MMSchedulerRequestTooLargeError(
+                f"request image count {len(mm_inputs)} exceeds per-request limit "
+                f"{max_images}, request rejected"
+            )
+
         batch_size = (
             self.mm_preprocess_batch_size
             if self.mm_preprocess_batch_size != -1
@@ -559,50 +615,28 @@ class MMProcessEngine:
         self, work_items: List[MMWorkItem]
     ) -> Tuple[List[Any], List[Any], List[Any]]:
         """Compute embeddings for all work items."""
-        emb_res, pos_res, tensor_res = [], [], []
-
-        ordered_emb: List[Optional[Any]] = [None] * len(work_items)
-        ordered_pos: List[Optional[Any]] = [None] * len(work_items)
-        ordered_tensor: List[Optional[Any]] = [None] * len(work_items)
-
-        pending_items: List[Tuple[int, MMWorkItem]] = []
-        for idx, work_item in enumerate(work_items):
-            if work_item.embedding_result is not None:
-                ordered_emb[idx] = work_item.embedding_result[0]
-                ordered_pos[idx] = work_item.embedding_result[1]
-                if len(work_item.embedding_result) > 2:
-                    ordered_tensor[idx] = work_item.embedding_result[2]
-            else:
-                pending_items.append((idx, work_item))
+        pending_items = [wi for wi in work_items if wi.embedding_result is None]
 
         if pending_items:
-            batch_outputs = None
-            with Timer() as route_timer:
-                with self.mm_embedding_lock:
-                    with torch.profiler.record_function("batched_embedding"):
-                        batch_outputs = self.mm_part.batched_embedding(
-                            [wi.preprocess_result for _, wi in pending_items],
-                            [wi.mm_type for _, wi in pending_items],
-                        )
-            kmonitor.report(GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms())
+            self._scheduler.submit_and_wait(pending_items)
 
-            if batch_outputs is not None:
-                for (idx, work_item), result in zip(pending_items, batch_outputs):
-                    work_item.embedding_result = result
-                    if work_item.need_check_cache:
-                        vit_emb_cache_.insert_cache(work_item.cache_key, result)
-                    ordered_emb[idx] = result[0]
-                    ordered_pos[idx] = result[1]
-                    if len(result) > 2:
-                        ordered_tensor[idx] = result[2]
-
-        for emb, pos, tensor in zip(ordered_emb, ordered_pos, ordered_tensor):
-            emb_res.extend(self._maybe_tensor_to_list(emb, dim=2))
-            pos_res.extend(self._maybe_tensor_to_list(pos, dim=2))
-            # extra input is a flat 1-D tensor per image
-            tensor_res.extend(self._maybe_tensor_to_list(tensor, dim=1))
+        emb_res, pos_res, tensor_res = [], [], []
+        for wi in work_items:
+            result = wi.embedding_result
+            # Scheduler invariant: submit_and_wait either fills embedding_result
+            # for every pending item or raises, so it is never None here.
+            if result is None:
+                raise RuntimeError(f"embedding_result not set for work item {wi}")
+            emb_res.extend(self._maybe_tensor_to_list(result[0], dim=2))
+            pos_res.extend(self._maybe_tensor_to_list(result[1], dim=2))
+            if len(result) > 2:
+                tensor_res.extend(self._maybe_tensor_to_list(result[2], dim=1))
         return emb_res, pos_res, tensor_res
 
     def stop(self) -> None:
-        """Shutdown the preprocessing executor."""
+        """Shutdown the embedding scheduler and preprocessing executor."""
+        if self._stopped:
+            return
+        self._stopped = True
+        self._scheduler.close()
         self.preprocess_executor.shutdown()
