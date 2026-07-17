@@ -25,10 +25,6 @@ class MemoryOperationRequestPB;
 
 namespace rtp_llm {
 
-namespace block_tree_cache_test {
-class BlockTreeCacheTestPeer;
-}
-
 class BroadcastManager;
 struct CacheStats {
     size_t tree_node_count{0};
@@ -231,8 +227,6 @@ public:
     }
 
 private:
-    friend class block_tree_cache_test::BlockTreeCacheTestPeer;
-
     void taskStarted();
     void taskFinished();
     void checkWatermark();

@@ -88,10 +88,11 @@ TEST(BlockTreeCacheFactoryTest, RejectsDiskCacheWithoutMemoryCache) {
     EXPECT_EQ(cache, nullptr);
 }
 
-// BTC-ISSUE-19: Factory creates one managed DiskBlockPool per component group on the
-// same mount path. The second pool cannot acquire DiskMountGuard's exclusive .lock.
-// Re-enable when a Full+SWA factory product can share one mount safely while keeping
-// both groups' Disk pools executable.
+// BTC-ISSUE-19: the mount-lock conflict is fixed (per-group Disk pools now share one
+// DiskMountGuard), so the Factory builds both groups' Disk pools. The test still aborts
+// when executing a D2H transfer: DeviceBlockPool maps the descriptor's global layer id to
+// layout_id=-1 (DeviceBlockPool::checkLayoutValidity), so the built descriptor is not yet
+// executable. Re-enable once the factory layout wiring yields a valid device layout mapping.
 TEST(BlockTreeCacheFactoryTest, DISABLED_Factory_CreatesExecutableFullSWAConfig) {
     if (!block_tree_cache_test::cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";

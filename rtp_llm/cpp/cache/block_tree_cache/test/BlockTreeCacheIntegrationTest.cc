@@ -147,8 +147,8 @@ TEST_F(BlockTreeCacheIntegrationTest, WatermarkDemotionCopiesHostBlockToDisk) {
     cfg.enable_memory_cache = true;
     cfg.enable_disk_cache   = true;
 
-    auto cache = makeBlockTreeCacheForTest(
-        std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg));
+    auto cache =
+        makeBlockTreeCacheForTest(std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg));
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].host_block = host_block;
@@ -206,9 +206,9 @@ TEST_F(BlockTreeCacheIntegrationTest, LoadBackDeviceAllocationFailureRollsBackAl
     ASSERT_NE(first_host_block, NULL_BLOCK_IDX);
     ASSERT_NE(second_host_block, NULL_BLOCK_IDX);
 
-    std::vector<ComponentGroupPtr>  component_groups = {first_group, second_group};
+    std::vector<ComponentGroupPtr> component_groups = {first_group, second_group};
     BlockTreeCacheConfig           config;
-    config.enable_memory_cache = true;
+    config.enable_memory_cache            = true;
     std::unique_ptr<BlockTreeCache> cache = makeBlockTreeCacheForTest(
         std::make_unique<BlockTree>(2), std::move(component_groups), std::vector<Component>{}, std::move(config));
     ASSERT_NE(cache, nullptr);
@@ -378,18 +378,9 @@ TEST_P(BlockTreeCacheDemotionFailureTest, Evictor_DemotionFailure_RestoresSource
     environment->expectFullyReclaimed();
 }
 
-INSTANTIATE_TEST_SUITE_P(D2H,
+INSTANTIATE_TEST_SUITE_P(DemotionFailure,
                          BlockTreeCacheDemotionFailureTest,
-                         ::testing::Values(DemotionFailureStage::D2H),
-                         demotionFailureParamName);
-
-// BTC-ISSUE-20: after a successful H2Disk retry, Full eviction only promotes the
-// parent into the Device heap. The new Host leaf is never returned to the Host heap,
-// so only one of four nodes can be demoted and final reclaim remains incomplete.
-// Re-enable when H2Disk completion promotes the parent at the source tier.
-INSTANTIATE_TEST_SUITE_P(DISABLED_H2DiskRetry,
-                         BlockTreeCacheDemotionFailureTest,
-                         ::testing::Values(DemotionFailureStage::H2DISK),
+                         ::testing::Values(DemotionFailureStage::D2H, DemotionFailureStage::H2DISK),
                          demotionFailureParamName);
 
 class BlockTreeCacheLowerTierTest: public ::testing::TestWithParam<Tier> {};

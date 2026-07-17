@@ -20,13 +20,14 @@ cuda13_torch_link_deps = select({
 
 test_deps = [
     "//rtp_llm/cpp/cache/block_tree_cache",
-    "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_util",
+    "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
 ] + cuda13_torch_link_deps
 
 cc_test(
     name = "full_eviction_test",
+    testonly = True,
     srcs = ["FullEvictionTest.cc"],
     copts = test_copts,
     deps = test_deps,
@@ -35,6 +36,7 @@ cc_test(
 
 cc_test(
     name = "full_swa_eviction_test",
+    testonly = True,
     srcs = ["FullSWAEvictionTest.cc"],
     copts = test_copts,
     deps = test_deps,
@@ -43,6 +45,7 @@ cc_test(
 
 cc_test(
     name = "full_linear_eviction_test",
+    testonly = True,
     srcs = ["FullLinearEvictionTest.cc"],
     copts = test_copts,
     deps = test_deps,
@@ -51,6 +54,7 @@ cc_test(
 
 cc_test(
     name = "full_swa_linear_eviction_test",
+    testonly = True,
     srcs = ["FullSWALinearEvictionTest.cc"],
     copts = test_copts,
     deps = test_deps,
