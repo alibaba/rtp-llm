@@ -12,7 +12,7 @@
 
 本手册只测 Master 调度能力：
 
-- 必须使用 `SCHEDULE_MODE=batch` 和 `SCHEDULE_ONLY=1`。
+- 必须使用 `SCHEDULE_MODE=batch`、`SCHEDULE_ONLY=1`、`FLEXLB_BATCH_ALGORITHM=fixed_window` 和 `FLEXLB_BATCH_FIXED_WAIT_MS=10`。
 - 不调用 `FetchResponse`。Fetch 是 frontend 的后续动作，不属于 Master Schedule 性能。
 - 吞吐以 Master 服务端的 `server_arrival_qps` 为准。
 - 延迟以 Master 服务端的 `schedule_latency_ms` 为准，不以 client RTT 作为最终报告口径。
@@ -179,6 +179,8 @@ PERFORMANCE_FILE="$PWD/data/performance/dsv4_flash_performance.fast_ab.json" \
 PROCESS_CONFIG_FILE="$PWD/data/config/master_fixed_window.json" \
 SCHEDULE_MODE=batch \
 SCHEDULE_ONLY=1 \
+FLEXLB_BATCH_ALGORITHM=fixed_window \
+FLEXLB_BATCH_FIXED_WAIT_MS=10 \
 SCHEDULE_WORKER_SIZE=16 \
 LOAD_CLIENT_WORKERS=1 \
 REPLAY_SPEED=13 \
@@ -215,6 +217,8 @@ BASE_ENV=(
   "PROCESS_CONFIG_FILE=$PWD/data/config/master_fixed_window.json"
   SCHEDULE_MODE=batch
   SCHEDULE_ONLY=1
+  FLEXLB_BATCH_ALGORITHM=fixed_window
+  FLEXLB_BATCH_FIXED_WAIT_MS=10
   SCHEDULE_WORKER_SIZE=16
   DURATION_S=60
   LOOP=1
@@ -404,6 +408,8 @@ performance model:
 n_prefill/n_decode:
 schedule mode:
 schedule_only:
+batch algorithm:
+fixed window wait ms:
 schedule workers:
 load client workers:
 replay speed:
@@ -443,7 +449,7 @@ artifact directory:
 
 - [ ] Java 21 和两个 jar 校验通过。
 - [ ] 使用 Java mock、750 prefill、500 decode 和 `fast_ab`。
-- [ ] 使用 batch、`SCHEDULE_ONLY=1`，没有 FetchResponse。
+- [ ] 使用 batch、`SCHEDULE_ONLY=1`、fixed-window 10 ms，没有 FetchResponse。
 - [ ] endpoint 全部 ready 后预热至少 10 秒。
 - [ ] 从约 100 QPS 开始，按阶梯逐级加压。
 - [ ] QPS 和延迟均取 Master 服务端指标。
