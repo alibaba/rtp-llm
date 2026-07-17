@@ -1,11 +1,9 @@
 import logging
-from typing import Any, Optional
-
-from torch import Tensor, nn
+from typing import TYPE_CHECKING, Any, Optional
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
-from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
@@ -14,15 +12,30 @@ from rtp_llm.ops.compute_ops import (
     PyModelInputs,
     PyModelOutputs,
 )
-from rtp_llm.utils.model_weight import W
+from torch import Tensor
+
+if TYPE_CHECKING:
+    from rtp_llm.model_loader.model_weight_info import ModelWeights
 
 
-class GptModelBase(nn.Module):
+def _required_config_value(config: Any, *names: str) -> Any:
+    for name in names:
+        value = (
+            config.get(name)
+            if isinstance(config, dict)
+            else getattr(config, name, None)
+        )
+        if value is not None:
+            return value
+    raise ValueError(f"Model config requires one of {names}")
+
+
+class GptModelBase(RtpModule):
     def __init__(
         self,
         config: ModelConfig,
         parallelism_config,
-        weight: ModelWeights,
+        weight: Optional["ModelWeights"],
         max_generate_batch_size: int,
         fmha_config=None,  # Optional FMHAConfig
         py_hw_kernel_config=None,  # Optional HWKernelConfig
@@ -42,8 +55,10 @@ class GptModelBase(nn.Module):
             and device_resource_config.enable_layer_micro_batch == 0
             else 2
         )
-        self.layer_num: int = config.num_layers
-        self.vocab_size: int = config.vocab_size
+        self.layer_num = _required_config_value(
+            config, "num_layers", "num_hidden_layers"
+        )
+        self.vocab_size = _required_config_value(config, "vocab_size")
 
         self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device_type()

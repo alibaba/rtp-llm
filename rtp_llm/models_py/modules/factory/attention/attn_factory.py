@@ -1,7 +1,8 @@
-import logging
-from typing import Callable, Dict, List, Optional, Union
+from __future__ import annotations
 
-from rtp_llm.model_loader.model_weight_info import ModelWeights
+import logging
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Union
+
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAImplBase,
     MlaImplBase,
@@ -15,6 +16,9 @@ from rtp_llm.ops import (
 )
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
+
+if TYPE_CHECKING:
+    from rtp_llm.model_loader.model_weight_info import ModelWeights
 
 # Lists to store registered implementations
 PREFILL_MHA_IMPS: List[type[FMHAImplBase]] = []
@@ -44,7 +48,8 @@ def get_mla_impl(
         # TODO: support fast path for cp prefill
         use_fast_path = (
             attn_inputs.is_prefill
-            and attn_inputs.cu_kv_seqlens_device.max().item() <= attn_configs.indexer_topk
+            and attn_inputs.cu_kv_seqlens_device.max().item()
+            <= attn_configs.indexer_topk
             and not (
                 parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
             )

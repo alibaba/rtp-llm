@@ -5,11 +5,12 @@ import unittest
 from unittest.mock import patch
 
 import torch
-from safetensors.torch import save_file
-
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.models.base_model import BaseModel
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.qwen3.language import Qwen3ForCausalLM
+from safetensors.torch import save_file
 
 
 def _model_config():
@@ -98,6 +99,8 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
                 base_model.load()
 
         self.assertIsInstance(base_model.py_model, Qwen3ForCausalLM)
+        self.assertIsInstance(base_model.py_model, GptModelBase)
+        self.assertIsInstance(base_model.py_model, RtpModule)
         self.assertFalse(base_model.py_model.training)
         self.assertIs(base_model.py_model.weight, base_model.weight)
         self.assertIs(base_model.weight_manager, None)
