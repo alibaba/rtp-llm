@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <stdexcept>
+
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -65,6 +68,41 @@ public:
         runner_ = CudaGraphRunner::createForDecode(std::move(py_instance), std::move(params));
     }
 
+    void init_target_verify(py::object       py_instance,
+                            int64_t          hidden_size,
+                            int64_t          max_seq_len,
+                            int64_t          tokens_per_block,
+                            int64_t          kernel_tokens_per_block,
+                            int64_t          num_tokens_per_bs,
+                            std::vector<int> decode_capture_batch_sizes) {
+        reset_runner();
+        if (decode_capture_batch_sizes.empty()) {
+            throw std::invalid_argument("decode_capture_batch_sizes must not be empty");
+        }
+        GraphParams params;
+        params.enable_cuda_graph_debug_mode = false;
+        params.is_prefill_cuda_graph_mode   = false;
+        params.is_target_verify             = true;
+        params.max_seq_len                  = static_cast<int>(max_seq_len);
+        params.tokens_per_block             = static_cast<int>(tokens_per_block);
+        params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
+        params.num_tokens_per_bs            = static_cast<int>(num_tokens_per_bs);
+        params.hidden_size                  = static_cast<size_t>(hidden_size);
+        params.model_data_type              = c10::ScalarType::BFloat16;
+        params.max_context_batch_size =
+            *std::max_element(decode_capture_batch_sizes.begin(), decode_capture_batch_sizes.end());
+        params.decode_capture_batch_sizes = std::move(decode_capture_batch_sizes);
+        params.kv_cache_group_tags      = {};
+
+        runner_ = CudaGraphRunner::createForDecode(std::move(py_instance), std::move(params));
+    }
+
+    void initDeviceLengthInputs(torch_ext::PyModelInputs& inputs) {
+        auto& attn                 = inputs.attention_inputs;
+        attn.input_lengths_device  = attn.input_lengths.cuda();
+        attn.prefix_lengths_device = attn.prefix_lengths.cuda();
+    }
+
     bool canRun(torch_ext::PyModelInputs& inputs) {
         return runner_ != nullptr && runner_->canRun(inputs, state_);
     }
@@ -75,6 +113,11 @@ public:
 
     int getCurrentRealGraphSize() {
         return runner_ != nullptr ? runner_->getCurrentRealGraphBs(state_) : 0;
+    }
+
+    void reset() {
+        reset_runner();
+        state_ = {};
     }
 
     ~CudaGraphTestRunner() {
@@ -119,7 +162,18 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("decode_capture_batch_sizes"),
              py::arg("group_tags")       = std::vector<std::string>{},
              py::arg("is_target_verify") = false)
+        .def("init_target_verify",
+             &CudaGraphTestRunner::init_target_verify,
+             py::arg("py_instance"),
+             py::arg("hidden_size"),
+             py::arg("max_seq_len"),
+             py::arg("tokens_per_block"),
+             py::arg("kernel_tokens_per_block"),
+             py::arg("num_tokens_per_bs"),
+             py::arg("decode_capture_batch_sizes"))
         .def("canRun", &CudaGraphTestRunner::canRun)
+        .def("initDeviceLengthInputs", &CudaGraphTestRunner::initDeviceLengthInputs)
         .def("forward", &CudaGraphTestRunner::forward)
-        .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
+        .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize)
+        .def("reset", &CudaGraphTestRunner::reset);
 }
