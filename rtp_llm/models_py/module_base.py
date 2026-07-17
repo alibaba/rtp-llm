@@ -160,6 +160,35 @@ class RtpModule(nn.Module):
         _mark_loaded(module, name)
         return True
 
+    def _mark_weight_loaded(self, name: str) -> None:
+        parameter = self._parameters.get(name)
+        buffer = self._buffers.get(name)
+        is_parameter = isinstance(parameter, nn.Parameter)
+        is_persistent_buffer = (
+            isinstance(buffer, torch.Tensor)
+            and name not in self._non_persistent_buffers_set
+        )
+        if not is_parameter and not is_persistent_buffer:
+            raise KeyError(
+                f"{type(self).__name__} has no loadable parameter or persistent "
+                f"buffer named {name!r}"
+            )
+        _mark_loaded(self, name)
+
+    @staticmethod
+    def _fused_shard_target(module: nn.Module, shard_name: str):
+        matches = []
+        for child in module.children():
+            shard_names = getattr(child, "shard_names", ())
+            if shard_name in shard_names:
+                matches.append(child)
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"Ambiguous fused shard {shard_name!r} under "
+                f"{type(module).__name__}"
+            )
+        return matches[0] if matches else None
+
     def _dispatch_to_module_list(
         self, module_list: nn.ModuleList, name: str, tensor: torch.Tensor
     ) -> bool:
@@ -184,6 +213,11 @@ class RtpModule(nn.Module):
             return self._assign_weight(module, name, tensor)
         prefix, rest = name.split(".", 1)
         child = module._modules.get(prefix)
+        if child is None:
+            child = self._fused_shard_target(module, prefix)
+            if child is not None:
+                child.load_weights({name: tensor})
+                return True
         if isinstance(child, nn.ModuleList):
             return self._dispatch_to_module_list(child, rest, tensor)
         if not isinstance(child, nn.Module):
