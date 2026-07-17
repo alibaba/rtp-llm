@@ -1,5 +1,9 @@
 #include "gtest/gtest.h"
 
+#include <chrono>
+#include <cstdlib>
+#include <iostream>
+
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 
 namespace rtp_llm::test {
@@ -414,6 +418,59 @@ TEST(SharedBlockCacheTest, SelectAndEvictForGroupDoesNotPruneWhenTargetAncestorB
     EXPECT_TRUE(cache.contains(2));
     EXPECT_TRUE(cache.contains(3));
     EXPECT_TRUE(cache.contains(4));
+}
+
+// Manual performance regression benchmark. Keep disabled because it builds a
+// large synthetic prefix forest and is intended for local scaling checks rather
+// than every CI invocation.
+//
+// Example: set RTP_LLM_EVICT_BENCH_SIZE=10000, then run the test binary with
+// --gtest_also_run_disabled_tests and the filter below.
+TEST(SharedBlockCacheTest, DISABLED_SelectAndEvictForGroupLongChainBenchmark) {
+    const char* size_env = std::getenv("RTP_LLM_EVICT_BENCH_SIZE");
+    const size_t node_count = size_env == nullptr ? 10000 : std::stoull(size_env);
+    ASSERT_GT(node_count, 0);
+
+    const char* target_count_env = std::getenv("RTP_LLM_EVICT_BENCH_TARGETS");
+    const size_t requested_target_count =
+        target_count_env == nullptr ? size_t{137} : static_cast<size_t>(std::stoull(target_count_env));
+    const size_t target_count = std::min(node_count, requested_target_count);
+    ASSERT_GT(target_count, 0);
+
+    const char* chain_length_env = std::getenv("RTP_LLM_EVICT_BENCH_CHAIN_LENGTH");
+    const size_t requested_chain_length =
+        chain_length_env == nullptr ? node_count : static_cast<size_t>(std::stoull(chain_length_env));
+    const size_t chain_length = std::min(node_count, requested_chain_length);
+    ASSERT_GT(chain_length, 0);
+
+    SharedBlockCache cache;
+    const auto build_begin = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < node_count; ++i) {
+        const auto key = static_cast<CacheKeyType>(i + 1);
+        const bool has_target_slot = i + target_count >= node_count;
+        const bool is_chain_root = i % chain_length == 0;
+        cache.put(key,
+                  std::vector<BlockIdxType>{static_cast<BlockIdxType>(key),
+                                            has_target_slot ? static_cast<BlockIdxType>(key + node_count) :
+                                                              NULL_BLOCK_IDX},
+                  /*is_resident=*/false,
+                  SharedBlockCache::kGpuLogicalNamespace,
+                  is_chain_root ? rootDep(0) : childDep(key - 1, static_cast<uint32_t>(i % chain_length)));
+    }
+    const auto build_end = std::chrono::steady_clock::now();
+
+    const auto evict_begin = std::chrono::steady_clock::now();
+    const auto evicted = cache.selectAndEvictForGroup(/*group_id=*/1, target_count);
+    const auto evict_end = std::chrono::steady_clock::now();
+
+    const auto build_ms = std::chrono::duration_cast<std::chrono::milliseconds>(build_end - build_begin).count();
+    const auto evict_ms = std::chrono::duration_cast<std::chrono::milliseconds>(evict_end - evict_begin).count();
+    std::cerr << "SharedBlockCache prefix-tree benchmark: nodes=" << node_count << ", chain_length=" << chain_length
+              << ", targets=" << target_count << ", build_ms=" << build_ms << ", evict_ms=" << evict_ms
+              << std::endl;
+
+    EXPECT_GE(evicted.evicted_keys.size(), target_count);
+    EXPECT_EQ(cache.size() + evicted.evicted_keys.size(), node_count);
 }
 
 }  // namespace rtp_llm::test

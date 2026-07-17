@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <memory>
+#include <random>
 #include <thread>
 
 using namespace std;
@@ -184,6 +185,78 @@ TEST_F(LRUCacheTest, testGetUpdatesLRUOrder) {
 
     ASSERT_FALSE(cache.contains(key(2, 2)));
     ASSERT_TRUE(cache.contains(key(1, 1)));
+}
+
+TEST_F(LRUCacheTest, testPeekDoesNotUpdateLRUOrder) {
+    LRUCache<IntPair, std::string, IntPairHash, IntPairEqual> cache(3);
+
+    cache.put(key(1, 1), "A");
+    cache.put(key(2, 2), "B");
+    cache.put(key(3, 3), "C");
+
+    const auto* value = cache.peek(key(1, 1));
+    ASSERT_NE(value, nullptr);
+    EXPECT_EQ(*value, "A");
+    EXPECT_EQ(cache.peek(key(9, 9)), nullptr);
+
+    // peek() must not promote (1,1), so inserting a fourth item still evicts it.
+    cache.put(key(4, 4), "D");
+    EXPECT_FALSE(cache.contains(key(1, 1)));
+}
+
+TEST_F(LRUCacheTest, testPeekMatchesLinearLookupAcrossRandomMutations) {
+    LRUCache<IntPair, std::string, IntPairHash, IntPairEqual> cache(16);
+    std::mt19937                                               rng(20260717);
+
+    for (int step = 0; step < 10000; ++step) {
+        const int id = static_cast<int>(rng() % 24);
+        const auto k = key(id, id * 10);
+        switch (rng() % 4) {
+            case 0:
+                cache.put(k, std::to_string(step));
+                break;
+            case 1:
+                cache.get(k);
+                break;
+            case 2:
+                cache.remove(k);
+                break;
+            default:
+                if (!cache.empty()) {
+                    cache.pop();
+                }
+                break;
+        }
+
+        std::vector<IntPair> order_before;
+        for (const auto& [item_key, value] : cache.items()) {
+            (void)value;
+            order_before.push_back(item_key);
+        }
+
+        for (int candidate = 0; candidate < 24; ++candidate) {
+            const auto candidate_key = key(candidate, candidate * 10);
+            const std::string* expected = nullptr;
+            for (const auto& [item_key, value] : cache.items()) {
+                if (item_key == candidate_key) {
+                    expected = &value;
+                    break;
+                }
+            }
+            const auto* actual = cache.peek(candidate_key);
+            ASSERT_EQ(actual == nullptr, expected == nullptr);
+            if (expected != nullptr) {
+                EXPECT_EQ(*actual, *expected);
+            }
+        }
+
+        std::vector<IntPair> order_after;
+        for (const auto& [item_key, value] : cache.items()) {
+            (void)value;
+            order_after.push_back(item_key);
+        }
+        EXPECT_EQ(order_after, order_before);
+    }
 }
 
 }  // namespace rtp_llm

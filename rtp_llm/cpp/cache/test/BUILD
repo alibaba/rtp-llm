@@ -155,6 +155,24 @@ cc_test(
     exec_properties = {'gpu':'H20'},
 )
 
+# SharedBlockCache eviction is CPU metadata work. This lean target avoids the
+# CUDA implementation dependencies of shared_block_cache_test so the manual
+# scaling reproducer can run without a GPU or model runtime.
+cc_test(
+    name = "shared_block_cache_cpu_test",
+    srcs = [
+        "SharedBlockCacheTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:block_pool",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
 cc_test(
     name = "block_pool_test",
     srcs = [
