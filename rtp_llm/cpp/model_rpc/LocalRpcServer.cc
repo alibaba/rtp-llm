@@ -291,13 +291,13 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
             task_details +=
                 "  req_id=" + std::to_string(task.request_id) + " batch_id=" + std::to_string(task.batch_id) + "\n";
         }
-        RTP_LLM_LOG_INFO("GetWorkerStatus response: request_latest_finished_version=%ld, "
-                         "response_latest_finished_version=%ld, "
-                         "finished_tasks_count=%ld\n%s",
-                         latest_finished_version,
-                         status_info.latest_finished_version,
-                         engine_schedule_info.finished_task_info_list.size(),
-                         task_details.c_str());
+        RTP_LLM_LOG_DEBUG("GetWorkerStatus response: request_latest_finished_version=%ld, "
+                          "response_latest_finished_version=%ld, "
+                          "finished_tasks_count=%ld\n%s",
+                          latest_finished_version,
+                          status_info.latest_finished_version,
+                          engine_schedule_info.finished_task_info_list.size(),
+                          task_details.c_str());
     }
 
     response->set_dp_size(status_info.dp_size);
