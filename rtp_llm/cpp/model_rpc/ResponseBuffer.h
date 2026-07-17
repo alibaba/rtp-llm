@@ -48,7 +48,7 @@ private:
     std::function<void()>         cancel_producer;
     std::mutex                    mu;
     std::condition_variable       cv;
-    int64_t                       last_activity_us{0};
+    std::atomic<int64_t>          last_activity_us{0};
     size_t                        queue_bytes_{0};
     std::atomic<size_t>           dropped_count_{0};
 };

@@ -83,6 +83,26 @@ public class BalanceContext {
 
     private String errorMessage;
 
+    //===================== Cancellation ===================//
+
+    /**
+     * Cancel flag set by gRPC CancellationListener when the client disconnects.
+     * Read by batcher algorithms (processQueue / pickFirstN) to skip cancelled
+     * items and by flushItems to prevent dispatch of cancelled requests.
+     */
+    private final java.util.concurrent.atomic.AtomicBoolean cancelled =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /** Mark request as cancelled. */
+    public void cancel() {
+        cancelled.compareAndSet(false, true);
+    }
+
+    /** Check if request has been cancelled. */
+    public boolean isCancelled() {
+        return cancelled.get();
+    }
+
     //===================== Decode Release ===================//
 
     /**

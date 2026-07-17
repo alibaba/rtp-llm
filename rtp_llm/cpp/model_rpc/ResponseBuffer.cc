@@ -38,7 +38,7 @@ bool ResponseBufferEntry::write(const GenerateOutputsPB& outputs) {
         } else {
             queue.push_back(outputs);
             queue_bytes_ += msg_bytes;
-            last_activity_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            last_activity_us.store(autil::TimeUtility::currentTimeInMicroSeconds());
         }
     }
     if (overflow) {
@@ -80,8 +80,8 @@ void ResponseBufferEntry::finish(const grpc::Status& status) {
             error_status = status;
         }
         done.store(true);
-        last_activity_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        cancel_producer  = nullptr;
+        last_activity_us.store(autil::TimeUtility::currentTimeInMicroSeconds());
+        cancel_producer = nullptr;
     }
     cv.notify_all();
 }
@@ -94,8 +94,8 @@ void ResponseBufferEntry::cancel() {
             return;
         }
         cancelled.store(true);
-        last_activity_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        producer         = std::move(cancel_producer);
+        last_activity_us.store(autil::TimeUtility::currentTimeInMicroSeconds());
+        producer = std::move(cancel_producer);
     }
     if (producer) {
         producer();
@@ -117,7 +117,7 @@ size_t ResponseBufferEntry::droppedCount() const {
 
 bool ResponseBufferEntry::discardIfProducerDoneAndIdle(int64_t now_us, int64_t ttl_us) {
     std::lock_guard<std::mutex> lock(mu);
-    if (!done.load() || (now_us - last_activity_us) < ttl_us) {
+    if (!done.load() || (now_us - last_activity_us.load()) < ttl_us) {
         return false;
     }
     std::deque<GenerateOutputsPB>().swap(queue);
@@ -132,8 +132,8 @@ std::shared_ptr<ResponseBufferEntry> ResponseBufferRegistry::reserve(int64_t req
     if (it != map_.end()) {
         return nullptr;
     }
-    auto entry              = std::make_shared<ResponseBufferEntry>();
-    entry->last_activity_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    auto entry = std::make_shared<ResponseBufferEntry>();
+    entry->last_activity_us.store(autil::TimeUtility::currentTimeInMicroSeconds());
     map_.emplace(request_id, Record{entry, State::PENDING, false});
     return entry;
 }
@@ -141,7 +141,10 @@ std::shared_ptr<ResponseBufferEntry> ResponseBufferRegistry::reserve(int64_t req
 void ResponseBufferRegistry::publish(int64_t request_id, const std::shared_ptr<ResponseBufferEntry>& expected_entry) {
     std::lock_guard<std::mutex> lock(mu_);
     auto                        it = map_.find(request_id);
-    RTP_LLM_CHECK_WITH_INFO(it != map_.end(), "publish missing response entry for request_id=%ld", request_id);
+    if (it == map_.end()) {
+        RTP_LLM_LOG_WARNING("publish: response entry not found for request_id=%ld, already GC'd", request_id);
+        return;
+    }
     RTP_LLM_CHECK_WITH_INFO(
         it->second.entry == expected_entry, "publish response entry identity mismatch for request_id=%ld", request_id);
     RTP_LLM_CHECK_WITH_INFO(it->second.state == State::PENDING,
@@ -169,7 +172,10 @@ void ResponseBufferRegistry::finish(int64_t                                     
                                     const grpc::Status&                         status) {
     std::lock_guard<std::mutex> lock(mu_);
     auto                        it = map_.find(request_id);
-    RTP_LLM_CHECK_WITH_INFO(it != map_.end(), "finish missing response entry for request_id=%ld", request_id);
+    if (it == map_.end()) {
+        RTP_LLM_LOG_WARNING("finish: response entry not found for request_id=%ld, already GC'd", request_id);
+        return;
+    }
     RTP_LLM_CHECK_WITH_INFO(
         it->second.entry == expected_entry, "finish response entry identity mismatch for request_id=%ld", request_id);
     RTP_LLM_CHECK_WITH_INFO(
@@ -184,7 +190,10 @@ void ResponseBufferRegistry::releaseClaim(int64_t                               
                                           const std::shared_ptr<ResponseBufferEntry>& expected_entry) {
     std::lock_guard<std::mutex> lock(mu_);
     auto                        it = map_.find(request_id);
-    RTP_LLM_CHECK_WITH_INFO(it != map_.end(), "release missing response entry for request_id=%ld", request_id);
+    if (it == map_.end()) {
+        RTP_LLM_LOG_WARNING("releaseClaim: response entry not found for request_id=%ld, already GC'd", request_id);
+        return;
+    }
     RTP_LLM_CHECK_WITH_INFO(
         it->second.entry == expected_entry, "release response entry identity mismatch for request_id=%ld", request_id);
     RTP_LLM_CHECK_WITH_INFO(it->second.state == State::FETCH_CLAIMED,
@@ -203,7 +212,10 @@ void ResponseBufferRegistry::releaseClaim(int64_t                               
 void ResponseBufferRegistry::abort(int64_t request_id, const std::shared_ptr<ResponseBufferEntry>& expected_entry) {
     std::lock_guard<std::mutex> lock(mu_);
     auto                        it = map_.find(request_id);
-    RTP_LLM_CHECK_WITH_INFO(it != map_.end(), "abort missing response entry for request_id=%ld", request_id);
+    if (it == map_.end()) {
+        RTP_LLM_LOG_WARNING("abort: response entry not found for request_id=%ld, already GC'd", request_id);
+        return;
+    }
     RTP_LLM_CHECK_WITH_INFO(
         it->second.entry == expected_entry, "abort response entry identity mismatch for request_id=%ld", request_id);
     RTP_LLM_CHECK_WITH_INFO(it->second.state == State::PENDING,
@@ -230,21 +242,55 @@ void ResponseBufferRegistry::cancelAll() {
 }
 
 size_t ResponseBufferRegistry::gc(std::chrono::microseconds ttl) {
-    const int64_t now_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    const int64_t ttl_us = ttl.count();
-    size_t        swept  = 0;
+    const int64_t now_us         = autil::TimeUtility::currentTimeInMicroSeconds();
+    const int64_t ttl_us         = ttl.count();
+    const int64_t pending_ttl_us = 5 * 60 * 1000 * 1000LL;  // 5 minutes for orphaned PENDING entries
+    size_t        swept          = 0;
 
     std::lock_guard<std::mutex> lock(mu_);
     for (auto it = map_.begin(); it != map_.end();) {
-        const auto& record = it->second;
-        if (record.state != State::READY) {
+        const auto&   record  = it->second;
+        const auto&   entry   = record.entry;
+        const int64_t idle_us = now_us - entry->last_activity_us.load();
+
+        if (record.state == State::PENDING) {
+            // Orphaned PENDING entry whose producer never published.
+            // Cancel first (in case a producer started late), then erase.
+            if (idle_us >= pending_ttl_us) {
+                entry->cancel();
+                it = map_.erase(it);
+                ++swept;
+            } else {
+                ++it;
+            }
+            continue;
+        }
+
+        if (record.state == State::FETCH_CLAIMED) {
+            // Fetch in progress but idle past TTL — cancel but don't erase.
+            // The FetchResponse path will call releaseClaim() which performs the erase.
+            if (idle_us >= ttl_us) {
+                entry->cancel();
+            }
             ++it;
             continue;
         }
-        if (record.entry->discardIfProducerDoneAndIdle(now_us, ttl_us)) {
-            it = map_.erase(it);
-            ++swept;
+
+        // State::READY
+        if (entry->producerDone()) {
+            // Producer finished — sweep if idle past TTL.
+            if (entry->discardIfProducerDoneAndIdle(now_us, ttl_us)) {
+                it = map_.erase(it);
+                ++swept;
+            } else {
+                ++it;
+            }
         } else {
+            // READY but producer still running and idle past TTL — cancel but don't erase.
+            // The producer's finish() path will erase when it completes.
+            if (idle_us >= ttl_us) {
+                entry->cancel();
+            }
             ++it;
         }
     }

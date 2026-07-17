@@ -2,6 +2,8 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.util.Logger;
 
 import java.util.ArrayList;
@@ -43,6 +45,28 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
             return;
         }
 
+        // 0. Clear cancelled/done items from the head before any dispatch logic.
+        //    A cancelled request must never be dispatched. Completing its future
+        //    here prevents BatchItem.future() from hanging when onExpired() cannot
+        //    reach the inflight entry — the cancel path may have already finished
+        //    the entry (removed from inflight, published to terminalStates), in
+        //    which case onExpired() only rolls back decode resources and leaves
+        //    the future pending forever.
+        BatchItem head = ctx.peek();
+        while (head != null && (head.future().isDone() || head.ctx().isCancelled())) {
+            if (!head.future().isDone()) {
+                Response cancelled = Response.error(StrategyErrorType.REQUEST_CANCELLED);
+                cancelled.setErrorMessage("Request cancelled by client");
+                head.future().complete(cancelled);
+            }
+            Logger.warn("flexlb_batch_drop request_id={} reason=request_cancelled_in_queue", head.requestId());
+            ctx.dropHead(head);
+            head = ctx.peek();
+        }
+        if (head == null) {
+            return;
+        }
+
         long windowMs = ctx.cfg().getFlexlbBatchWindowMs();
         int minBatchSize = ctx.cfg().getFlexlbBatchMinSize();
         long emergencyBudgetMs = ctx.cfg().getFlexlbBatchEmergencyBudgetMs();
@@ -50,10 +74,6 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
         int batchMaxTokens = ctx.cfg().getFlexlbBatchMaxCapacity();
         int batchMaxCount = Math.max(1, ctx.cfg().getFlexlbBatchSizeMax());
 
-        BatchItem head = ctx.peek();
-        if (head == null) {
-            return;
-        }
         long now = ctx.now();
         long budgetMs = head.deadlineMs() - now;
 
@@ -148,9 +168,16 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
         long headPredMs = Math.max(0, (long) predictor.predictBatchMsUncached(picked));
         long maxPredMs = headPredMs + Math.max(0, budgetMs);
         int scanned = 0;
+        List<BatchItem> cancelled = new ArrayList<>();
 
         for (BatchItem c : ctx.sortedItems()) {
             if (c == head) {
+                continue;
+            }
+            // Skip cancelled/done items; clean them up after the scan so they
+            // are not dispatched and their futures do not hang.
+            if (c.future().isDone() || c.ctx().isCancelled()) {
+                cancelled.add(c);
                 continue;
             }
             if (scanned >= maxScan || picked.size() >= batchMaxCount) {
@@ -172,6 +199,19 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
                 sumTokens = nextTokens;
             }
         }
+        // Remove cancelled/done items that were skipped during selection.
+        // Complete the future explicitly (same rationale as the head-clearing
+        // loop in processQueue) so onExpired() does not leave it pending.
+        for (BatchItem item : cancelled) {
+            if (!item.future().isDone()) {
+                Response cancelledResp = Response.error(StrategyErrorType.REQUEST_CANCELLED);
+                cancelledResp.setErrorMessage("Request cancelled by client");
+                item.future().complete(cancelledResp);
+            }
+            ctx.remove(item);
+            ctx.handler().onExpired(item);
+        }
+
         return new BatchPick(picked, headPredMs, Math.max(headPredMs, (long) predictor.predictBatchMs(picked)));
     }
 

@@ -1,6 +1,8 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.strategy.PrefillTimePredictor;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
@@ -85,7 +87,24 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
             return;
         }
 
+        // 0. Clear cancelled/done items from the head before any dispatch logic.
+        //    A cancelled request must never be dispatched. Completing its future
+        //    here prevents BatchItem.future() from hanging when onExpired() cannot
+        //    reach the inflight entry — the cancel path may have already finished
+        //    the entry (removed from inflight, published to terminalStates), in
+        //    which case onExpired() only rolls back decode resources and leaves
+        //    the future pending forever.
         BatchItem head = ctx.peek();
+        while (head != null && (head.future().isDone() || head.ctx().isCancelled())) {
+            if (!head.future().isDone()) {
+                Response cancelled = Response.error(StrategyErrorType.REQUEST_CANCELLED);
+                cancelled.setErrorMessage("Request cancelled by client");
+                head.future().complete(cancelled);
+            }
+            Logger.warn("flexlb_batch_drop request_id={} reason=request_cancelled_in_queue", head.requestId());
+            ctx.dropHead(head);
+            head = ctx.peek();
+        }
         if (head == null) {
             return;
         }
