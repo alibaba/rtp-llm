@@ -111,6 +111,24 @@ class DispatchConfigTest {
     }
 
     @Test
+    void negativeBodyReadMarginMsFailsValidation() {
+        // A negative margin drags FeClient's whole-call cap below the headers budget and every
+        // fanout sub-call times out instantly — must fail at boot, not on the first request.
+        assertThrows(IllegalArgumentException.class,
+                () -> load("{\"fePoolServiceId\":\"x\",\"bodyReadMarginMs\":-1}"));
+        // Zero is legal: it just removes the extra body-read budget.
+        assertEquals(0L, load("{\"fePoolServiceId\":\"x\",\"bodyReadMarginMs\":0}").getBodyReadMarginMs());
+    }
+
+    @Test
+    void nonPositiveBatchTimeoutMsFailsValidation() {
+        assertThrows(IllegalArgumentException.class,
+                () -> load("{\"fePoolServiceId\":\"x\",\"batchTimeoutMs\":0}"));
+        assertThrows(IllegalArgumentException.class,
+                () -> load("{\"fePoolServiceId\":\"x\",\"batchTimeoutMs\":-5}"));
+    }
+
+    @Test
     void envOverridesDefaultsWhenNoJson() {
         Map<String, String> env = mutableEnv(
                 "DISPATCH_FE_POOL_SERVICE_ID", "from.env",

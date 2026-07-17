@@ -227,6 +227,21 @@ class BatchHandlerContractTest {
     }
 
     @Test
+    void nonObjectGenerateConfigIsRejectedWith400NotMaskedAs500() {
+        // Chunk assembly copies generate_config per chunk; a string value would throw a
+        // JSONException there and the catch-all would report it as a 500 dispatch failure —
+        // but the client sent a deterministically bad request, so it must get a 400.
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
+        stubBody("{\"prompt_batch\":[\"a\",\"b\"],\"generate_config\":\"oops\"}");
+
+        ServerResponse out = handler.handle(serverRequest, spec).block();
+
+        assertNotNull(out);
+        assertEquals(HttpStatus.BAD_REQUEST, out.statusCode());
+        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+    }
+
+    @Test
     void oversizedBodyMapsTo413WithStableErrorCode() {
         // DataBufferLimitException (body over the codec's max-in-memory-size) is a deterministic
         // client error: it must surface as 413 with a stable error code instead of a 500 that

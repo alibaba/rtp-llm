@@ -132,6 +132,8 @@ class DispatcherFePoolRefresherTest {
         // Scale-to-zero must converge. Without the grace bound the pool would hold the removed
         // FEs forever, FeHealthChecker would mark them all dead, and FePool.next()'s all-dead
         // fallback would keep shoveling every request at hosts that no longer exist.
+        // Unconfigured grace here — this doubles as the guard that the default stays 5 minutes:
+        // 1 minute of emptiness keeps the pool, 6 minutes drains it.
         java.util.concurrent.atomic.AtomicLong clock = new java.util.concurrent.atomic.AtomicLong(0);
         StubServiceDiscovery discovery = new StubServiceDiscovery(
                 "svc.fe", WorkerHost.of("10.0.0.1", 8088), WorkerHost.of("10.0.0.2", 8088));
@@ -153,6 +155,61 @@ class DispatcherFePoolRefresherTest {
         org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class, pool::next,
                 "with the pool drained, FePool must fail fast instead of timing out against "
                         + "removed hosts");
+    }
+
+    @Test
+    void configuredGraceDrivesTheDrainPointInsteadOfTheHardcodedFiveMinutes() {
+        // The grace window follows FlexlbConfig.discoveryFailureGraceMs, the same knob the sync
+        // side reads — an operator who shortened it to 60s must see the FE pool drain on the
+        // same schedule as the worker side, not 4 minutes later.
+        java.util.concurrent.atomic.AtomicLong clock = new java.util.concurrent.atomic.AtomicLong(0);
+        StubServiceDiscovery discovery = new StubServiceDiscovery(
+                "svc.fe", WorkerHost.of("10.0.0.1", 8088));
+        DispatcherFePoolRefresher r = refresher(discovery, "svc.fe", 60_000, clock::get);
+        assertEquals(1, r.currentSize());
+
+        discovery.setHosts(List.of());
+        clock.addAndGet(java.util.concurrent.TimeUnit.SECONDS.toNanos(30));
+        r.refresh();
+        assertEquals(1, r.currentSize(), "within the configured 60s grace the known FEs are kept");
+
+        clock.addAndGet(java.util.concurrent.TimeUnit.SECONDS.toNanos(90));
+        r.refresh();
+        assertEquals(0, r.currentSize(),
+                "past the configured grace the empty result is accepted and the pool drains");
+    }
+
+    @Test
+    void nonPositiveConfiguredGraceFallsBackToFiveMinuteDefault() {
+        // A zero/negative discoveryFailureGraceMs is a misconfiguration, not a request to drain
+        // the FE pool on the first discovery hiccup.
+        assertEquals(java.util.concurrent.TimeUnit.MINUTES.toNanos(5),
+                DispatcherFePoolRefresher.resolveGraceNanos(0));
+        assertEquals(java.util.concurrent.TimeUnit.MINUTES.toNanos(5),
+                DispatcherFePoolRefresher.resolveGraceNanos(-1));
+        assertEquals(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(60_000),
+                DispatcherFePoolRefresher.resolveGraceNanos(60_000));
+    }
+
+    @Test
+    void springConstructorSourcesGraceFromTheSharedFlexlbConfig() {
+        // Plumbing guard: the @Autowired constructor must read discoveryFailureGraceMs off the
+        // same ConfigService/FlexlbConfig the sync side uses, so the two discovery consumers
+        // cannot drift apart on which knob governs the window.
+        StubServiceDiscovery discovery = new StubServiceDiscovery(
+                "svc.fe", WorkerHost.of("10.0.0.1", 8088));
+        DispatchConfig cfg = new DispatchConfig();
+        cfg.setFePoolServiceId("svc.fe");
+        org.flexlb.config.FlexlbConfig flexlbConfig = new org.flexlb.config.FlexlbConfig();
+        flexlbConfig.setDiscoveryFailureGraceMs(60_000);
+        org.flexlb.config.ConfigService configService =
+                org.mockito.Mockito.mock(org.flexlb.config.ConfigService.class);
+        org.mockito.Mockito.when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
+
+        DispatcherFePoolRefresher r = new DispatcherFePoolRefresher(discovery, cfg, configService);
+
+        assertEquals(1, r.currentSize());
+        org.mockito.Mockito.verify(configService).loadBalanceConfig();
     }
 
     @Test

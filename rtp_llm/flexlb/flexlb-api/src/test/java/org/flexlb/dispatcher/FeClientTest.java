@@ -64,6 +64,68 @@ class FeClientTest {
     }
 
     @Test
+    void relaysEndToEndHeadersAndQueryStringToEveryChunkRequest() throws Exception {
+        // The split path must not silently change auth/tenancy/tracing semantics relative to the
+        // passthrough path: Authorization, custom end-to-end headers, and the original query
+        // string all have to reach the FE-side chunk request.
+        server.enqueue(new MockResponse()
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"response_batch\":[]}"));
+        DispatchConfig cfg = new DispatchConfig();
+        cfg.setBatchTimeoutMs(5000);
+        FeClient client = new FeClient(WebClient.builder(), connectionProvider, cfg);
+
+        HttpHeaders inbound = new HttpHeaders();
+        inbound.add("Authorization", "Bearer x");
+        inbound.add("X-Trace-Id", "trace-keep-me");
+
+        String base = "http://" + server.getHostName() + ":" + server.getPort();
+        StepVerifier.create(client.postBytes(base, "/batch_infer", "{}".getBytes(), inbound, "role=PREFILL&verbose=1"))
+                .expectNextCount(1)
+                .verifyComplete();
+
+        RecordedRequest rec = server.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS);
+        Assertions.assertNotNull(rec, "FE never received the chunk request within 5s");
+        Assertions.assertEquals("/batch_infer?role=PREFILL&verbose=1", rec.getPath(),
+                "the caller's query string must survive the split path");
+        Assertions.assertEquals("Bearer x", rec.getHeader("Authorization"),
+                "Authorization must be relayed to every chunk request");
+        Assertions.assertEquals("trace-keep-me", rec.getHeader("X-Trace-Id"),
+                "custom end-to-end headers must be relayed to every chunk request");
+    }
+
+    @Test
+    void dropsAcceptEncodingAndInboundContentTypeOnChunkRequests() throws Exception {
+        // The fanout path parses each FE body as raw bytes and re-serializes each chunk body as
+        // JSON, so an inbound accept-encoding (a gzipped FE body would break the parse) must be
+        // dropped and an inbound content-type must not describe the re-serialized entity.
+        server.enqueue(new MockResponse()
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"response_batch\":[]}"));
+        DispatchConfig cfg = new DispatchConfig();
+        cfg.setBatchTimeoutMs(5000);
+        FeClient client = new FeClient(WebClient.builder(), connectionProvider, cfg);
+
+        HttpHeaders inbound = new HttpHeaders();
+        inbound.add("Accept-Encoding", "gzip");
+        inbound.add("Content-Type", "text/plain");
+
+        String base = "http://" + server.getHostName() + ":" + server.getPort();
+        StepVerifier.create(client.postBytes(base, "/batch_infer", "{}".getBytes(), inbound, null))
+                .expectNextCount(1)
+                .verifyComplete();
+
+        RecordedRequest rec = server.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS);
+        Assertions.assertNotNull(rec, "FE never received the chunk request within 5s");
+        Assertions.assertNull(rec.getHeader("Accept-Encoding"),
+                "accept-encoding must not be relayed — the fanout parses the FE body as plain bytes");
+        String contentType = rec.getHeader("Content-Type");
+        Assertions.assertNotNull(contentType);
+        Assertions.assertTrue(contentType.startsWith("application/json"),
+                "chunk bodies are re-serialized JSON; the inbound content-type must not win: " + contentType);
+    }
+
+    @Test
     void feNon2xxResponseErrorsWithExtractableStatus() {
         // .retrieve() turns a 5xx into a WebClientResponseException; the fanout path relies on
         // DispatcherResponses.httpStatusOf recovering the status so a chunk degrades to a failed

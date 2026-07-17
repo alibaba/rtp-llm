@@ -116,6 +116,12 @@ public class DispatcherConfiguration {
         if (c.getBatchTimeoutMs() <= 0) {
             throw new IllegalArgumentException("batchTimeoutMs must be > 0, got " + c.getBatchTimeoutMs());
         }
+        // A negative margin would make FeClient's whole-call cap (batchTimeoutMs + margin) fall
+        // below the headers budget — every fanout sub-call would time out instantly with no
+        // boot-time signal. Zero is legal: it just removes the extra body-read budget.
+        if (c.getBodyReadMarginMs() < 0) {
+            throw new IllegalArgumentException("bodyReadMarginMs must be >= 0, got " + c.getBodyReadMarginMs());
+        }
         if (c.getProbePath() == null || c.getProbePath().isBlank()) {
             throw new IllegalArgumentException(
                     "probePath must not be blank — set DISPATCH_PROBE_PATH=/frontend_health (rtp_llm) "

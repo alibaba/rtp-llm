@@ -75,6 +75,13 @@ public class BatchHandler {
                 emptyEnvelope.put(spec.getResponseArrayField(), new JSONArray());
                 return DispatcherResponses.jsonBytes(200, BatchBodyParser.serialize(emptyEnvelope));
             }
+            // Chunk assembly copies generate_config per chunk, so a non-object value (e.g. a
+            // string) is a deterministic client error — reject it here instead of letting the
+            // JSONException fall into the catch-all and masquerade as a 500 dispatch failure.
+            Object generateConfig = body.get("generate_config");
+            if (generateConfig != null && !(generateConfig instanceof JSONObject)) {
+                return badRequest("generate_config must be a JSON object");
+            }
             pv.setTotalItems(arr.size());
             List<JSONArray> chunks = BatchChunkAssembler.split(arr, subBatch);
             pv.setChunkCount(chunks.size());

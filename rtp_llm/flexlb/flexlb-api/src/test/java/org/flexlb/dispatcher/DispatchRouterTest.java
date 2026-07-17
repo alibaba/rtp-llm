@@ -15,6 +15,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import static org.flexlb.dispatcher.BatchEndpointSpec.FailedItemFactory;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -123,6 +124,45 @@ class DispatchRouterTest {
 
         assertEquals(0, counter.getCount(),
                 "token must be released on the error path, otherwise a leaked in-flight token blocks graceful drain forever");
+    }
+
+    @Test
+    void responseDiscardedByCancelBeforeWriteToStillReleasesDrainToken() {
+        // A client that disconnects after the handler produced the response but before WebFlux
+        // subscribes writeTo means writeTo's doFinally never runs — the token must be released
+        // by the chain itself (doOnCancel and/or the doOnDiscard hook; either may fire depending
+        // on where the response is dropped). Zero downstream demand parks the emitted response
+        // inside the tracked chain, so cancelling from there exercises that window
+        // deterministically and pins the invariant "no writeTo still means no leaked token".
+        ActiveRequestCounter counter = new ActiveRequestCounter();
+        BatchHandler batch = mock(BatchHandler.class);
+        when(batch.handle(any(), eq(BATCH_INFER))).thenReturn(ServerResponse.ok().bodyValue("ok"));
+        PassthroughClient passthrough = mock(PassthroughClient.class);
+        RouterFunction<ServerResponse> routes = new DispatchRouter(
+                batch, passthrough, mock(DispatcherInspectionHandler.class), counter, List.of(BATCH_INFER)).routes();
+
+        org.springframework.mock.web.server.MockServerWebExchange exchange =
+                org.springframework.mock.web.server.MockServerWebExchange.from(
+                        org.springframework.mock.http.server.reactive.MockServerHttpRequest
+                                .post("http://master/dispatcher/batch_infer"));
+        org.springframework.web.reactive.function.server.ServerRequest request =
+                org.springframework.web.reactive.function.server.ServerRequest.create(exchange,
+                        org.springframework.web.reactive.function.server.HandlerStrategies
+                                .withDefaults().messageReaders());
+        org.springframework.web.reactive.function.server.HandlerFunction<ServerResponse> handler =
+                routes.route(request).block();
+        assertNotNull(handler, "route table must match POST /dispatcher/batch_infer");
+
+        reactor.test.StepVerifier.create(handler.handle(request), 0)
+                .expectSubscription()
+                .then(() -> assertEquals(1, counter.getCount(),
+                        "request must be counted while the response is parked awaiting demand"))
+                .thenCancel()
+                .verify();
+
+        assertEquals(0, counter.getCount(),
+                "a response discarded before writeTo must still release its drain token, "
+                        + "otherwise graceful drain waits out its full timeout");
     }
 
     @Test

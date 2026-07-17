@@ -91,11 +91,18 @@ public class DispatchRouter {
      */
     private Mono<ServerResponse> tracked(Supplier<Mono<ServerResponse>> handler) {
         return Mono.fromSupplier(activeRequestCounter::acquire).flatMap(token ->
-                Mono.defer(handler::get)
-                        .<ServerResponse>map(response -> new DrainTrackedResponse(response, token))
-                        .switchIfEmpty(Mono.<ServerResponse>fromRunnable(token::close))
-                        .doOnError(e -> token.close())
-                        .doOnCancel(token::close));
+                        Mono.defer(handler::get)
+                                .<ServerResponse>map(response -> new DrainTrackedResponse(response, token))
+                                .switchIfEmpty(Mono.<ServerResponse>fromRunnable(token::close))
+                                .doOnError(e -> token.close())
+                                .doOnCancel(token::close))
+                // Belt and braces for the emitted-but-never-written window: a client disconnect
+                // after the handler produced the response but before WebFlux subscribes writeTo
+                // drops the wrapped response, and then writeTo's doFinally never fires. A cancel
+                // that reaches this chain still fires doOnCancel above, but a drop surfaced only
+                // as a discard (e.g. an operator clearing a held value) must close the token too.
+                // Token close is idempotent, so overlapping paths cannot double-release.
+                .doOnDiscard(DrainTrackedResponse.class, DrainTrackedResponse::closeToken);
     }
 
     /**
@@ -111,6 +118,11 @@ public class DispatchRouter {
         DrainTrackedResponse(ServerResponse delegate, ActiveRequestCounter.RequestToken token) {
             this.delegate = delegate;
             this.token = token;
+        }
+
+        /** Releases the drain token when this response is discarded before {@code writeTo} ran. */
+        void closeToken() {
+            token.close();
         }
 
         @Override

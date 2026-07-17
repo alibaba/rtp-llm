@@ -9,6 +9,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -30,6 +31,16 @@ import java.util.concurrent.TimeUnit;
 @RequiredArgsConstructor
 public class BatchScheduleClient {
 
+    /**
+     * Whole-call bound on the pre-assign resolution. Pre-assignment is a routing optimization
+     * the request degrades away from, so it must never pin a {@code /dispatcher} request behind
+     * a hung transport (slave forwarding to a wedged master). Local resolution is sub-ms and a
+     * healthy master round-trip is a few ms, so 3s is generous headroom while staying far below
+     * the request's own FE budget ({@code batchTimeoutMs}); a fire maps into the same
+     * degrade-to-empty path as any other failure.
+     */
+    static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(3);
+
     private final BatchScheduleCoordinator coordinator;
     /**
      * A misconfigured deployment (multi-role fleet, master unreachable) fails pre-assignment on
@@ -42,6 +53,7 @@ public class BatchScheduleClient {
         BatchScheduleRequest req = new BatchScheduleRequest();
         req.setBatchCount(count);
         return coordinator.schedule(req)
+                .timeout(REQUEST_TIMEOUT)
                 .map(resp -> {
                     if (!resp.isSuccess() || resp.getServerStatus() == null) {
                         noTargetsWarn.warn("dispatcher batch_schedule returned no targets: count={}, success={}, msg={}",

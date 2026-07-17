@@ -26,11 +26,13 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.Bean;
+import org.springframework.core.codec.DecodingException;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
+import org.springframework.web.server.ServerWebInputException;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
@@ -121,7 +123,11 @@ public class HttpLoadBalanceServer {
                 })
                 .onErrorResume(e -> {
                     Logger.error("Batch schedule request processing error", e);
-                    return batchError(bctx, StrategyErrorType.INVALID_REQUEST, e);
+                    // A malformed/empty body is a deterministic client error: a 500 would invite
+                    // pointless retries and pollute the server error rate. Anything else escaping
+                    // here is a genuine server-side failure and keeps the 500.
+                    int status = isClientInputError(e) ? 400 : 500;
+                    return batchError(bctx, status, StrategyErrorType.INVALID_REQUEST, e);
                 })
                 .doFinally(signal -> finalizeBatchContext(bctx));
     }
@@ -133,17 +139,37 @@ public class HttpLoadBalanceServer {
                     if (!response.isSuccess()) {
                         Logger.error("[BatchSchedule] failed: {}", response.getErrorMessage());
                     }
-                    return json(response.isSuccess() ? 200 : 500, response);
+                    return json(statusOf(response), response);
                 })
                 .onErrorResume(BatchScheduleTransportException.class,
-                        e -> batchError(bctx, StrategyErrorType.NO_AVAILABLE_WORKER, e));
+                        e -> batchError(bctx, 500, StrategyErrorType.NO_AVAILABLE_WORKER, e));
+    }
+
+    /**
+     * HTTP status for a business response. INVALID_REQUEST rejections (batch_count out of range,
+     * multi-role deployment, null request) are deterministic client errors → 400; every other
+     * failure (NO_AVAILABLE_WORKER etc.) is a server-side condition and stays 500.
+     */
+    private static int statusOf(BatchScheduleResponse response) {
+        if (response.isSuccess()) {
+            return 200;
+        }
+        return response.getCode() == StrategyErrorType.INVALID_REQUEST.getErrorCode() ? 400 : 500;
+    }
+
+    /** Whether the error is a deterministic client-input failure (body decode / validation). */
+    private static boolean isClientInputError(Throwable e) {
+        return e instanceof ServerWebInputException
+                || e instanceof DecodingException
+                || e instanceof IllegalArgumentException;
     }
 
     /** Builds the error response and stamps it on the context; pv success/error derive from it. */
-    private Mono<ServerResponse> batchError(BatchScheduleContext bctx, StrategyErrorType type, Throwable e) {
+    private Mono<ServerResponse> batchError(BatchScheduleContext bctx, int httpStatus,
+                                            StrategyErrorType type, Throwable e) {
         BatchScheduleResponse errorResponse = BatchScheduleResponse.error(type, e.getMessage());
         bctx.setBatchResponse(errorResponse);
-        return json(500, errorResponse);
+        return json(httpStatus, errorResponse);
     }
 
     private Mono<ServerResponse> processScheduledRequest(BalanceContext ctx, Request req) {

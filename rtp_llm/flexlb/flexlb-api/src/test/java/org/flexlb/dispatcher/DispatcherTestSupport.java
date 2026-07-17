@@ -108,19 +108,24 @@ final class DispatcherTestSupport {
 
     /**
      * Build a DispatcherFePoolRefresher with an explicit serviceId. {@link DispatchConfig} is a
-     * pure POJO, so we set the field directly.
+     * pure POJO, so we set the field directly. Grace stays at the unconfigured default
+     * (non-positive → 5 minutes).
      */
     static DispatcherFePoolRefresher refresher(ServiceDiscovery sd, String serviceId) {
-        DispatchConfig cfg = new DispatchConfig();
-        cfg.setFePoolServiceId(serviceId);
-        return new DispatcherFePoolRefresher(sd, cfg);
+        return refresher(sd, serviceId, 0, System::nanoTime);
     }
 
     /** Overload with a controllable monotonic clock, for exercising the empty-discovery grace window. */
     static DispatcherFePoolRefresher refresher(ServiceDiscovery sd, String serviceId, java.util.function.LongSupplier nanoClock) {
+        return refresher(sd, serviceId, 0, nanoClock);
+    }
+
+    /** Overload additionally configuring the empty-discovery grace, mirroring discoveryFailureGraceMs. */
+    static DispatcherFePoolRefresher refresher(ServiceDiscovery sd, String serviceId,
+            long emptyDiscoveryGraceMs, java.util.function.LongSupplier nanoClock) {
         DispatchConfig cfg = new DispatchConfig();
         cfg.setFePoolServiceId(serviceId);
-        return new DispatcherFePoolRefresher(sd, cfg, nanoClock);
+        return new DispatcherFePoolRefresher(sd, cfg, emptyDiscoveryGraceMs, nanoClock);
     }
 
     /**

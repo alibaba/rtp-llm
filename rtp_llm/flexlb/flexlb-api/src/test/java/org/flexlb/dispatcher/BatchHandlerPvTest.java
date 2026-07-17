@@ -104,4 +104,29 @@ class BatchHandlerPvTest {
                 "failedChunks must count chunks (1), not failed items (2): " + pvJson);
         assertFalse(pvJson.contains("\"failedChunks\":2"), pvJson);
     }
+
+    @Test
+    void pv_client_cancel_before_response_is_recorded_as_499() {
+        // A client that disconnects mid-fanout terminates the chain with CANCEL and no response
+        // ever gets a status; the pv record must say 499 / "client cancelled" instead of the
+        // 0 that would read as "request never finished" in pv.log.
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
+        when(fanoutService.dispatchChunks(anyString(), anyList(), any(), any(), any()))
+                .thenReturn(Mono.never());
+        byte[] body = "{\"prompt_batch\":[\"a\",\"b\"]}".getBytes(StandardCharsets.UTF_8);
+        when(serverRequest.bodyToMono(byte[].class)).thenReturn(Mono.just(body));
+
+        BatchHandler handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient,
+                DispatcherTestSupport.noopMetrics());
+        reactor.test.StepVerifier.create(handler.handle(serverRequest, spec))
+                .thenCancel()
+                .verify();
+
+        assertEquals(1, pvAppender.list.size(), "exactly one pv record per request, even on cancel");
+        String pvJson = pvAppender.list.get(0).getFormattedMessage();
+        assertTrue(pvJson.contains("\"httpStatus\":499"),
+                "a cancelled request must be recorded with the 499 convention: " + pvJson);
+        assertTrue(pvJson.contains("client cancelled"),
+                "a cancelled request must carry the stable cancel reason: " + pvJson);
+    }
 }
