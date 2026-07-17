@@ -35,12 +35,41 @@ from flashinfer.cascade import merge_state
 from flashinfer.page import append_paged_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
 
+# FlashAttention-4 paged attention (Blackwell). Replaces trtllm_batch_context in
+# the non-prefix CP paged path (links A/B); reads the HND pool via a zero-copy
+# transpose view and, unlike trtllm, supports fp8 KV cache paged.
+try:
+    from flash_attn.cute import flash_attn_varlen_func as _fa4_varlen_func
+
+    _HAS_FA4 = True
+except Exception:  # pragma: no cover - FA4 only shipped on cuda13 x86 (Blackwell)
+    _fa4_varlen_func = None
+    _HAS_FA4 = False
+
+
+def _use_fa4_cp_paged() -> bool:
+    """FA4 replaces trtllm for the CP paged-context path unless disabled."""
+    return _HAS_FA4 and os.environ.get(
+        "RTP_LLM_CP_PREFILL_FA4", "1"
+    ).strip().lower() not in ("0", "false", "no", "off")
+
+
+def _match_q_to_kv(q: torch.Tensor, kv: torch.Tensor) -> torch.Tensor:
+    """FA4 requires q/k/v to share one dtype. The KV cache is stored in its
+    configured dtype (fp8 for the fp8-KV-cache layers, else bf16) and is read
+    as-is (never re-cast); q is the bf16 model activation, so cast it to match
+    the KV dtype. => fp8 cache yields uniform-fp8 attention automatically
+    (scale=1.0, no descale); bf16 cache stays bf16.
+    """
+    return q if q.dtype == kv.dtype else q.to(kv.dtype)
+
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     cast_kv_for_cache_append,
     fill_fp8_kv_cache_scale,
-    generate_full_causal_kv_indices,
-    generate_q_indices,
     plan_prefix_paged_attention,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.fmha_cp_kv_triton import (
+    triton_build_dual_prefix_extend,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     get_py_flashinfer_workspace_buffer,
@@ -104,6 +133,75 @@ def _fused_restore_packed_kv(
         BLOCK=256,
     )
     return restore_k, restore_v
+
+
+def _generate_q_indices_device(
+    cp_chunk_lengths, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Vectorized ``generate_q_indices`` returning int64 CUDA tensors.
+
+    Same first-half/second-half zigzag split as ``cp_utils.generate_q_indices``,
+    but each per-chunk range is built with ``torch.arange`` on ``device`` and
+    concatenated. This avoids the O(seq) Python ``list.extend(range(...))`` build
+    plus ``torch.tensor(list)`` H2D, which stalls the GPU for milliseconds at the
+    start of long-context prefill (65536-token part1 ranges).
+    """
+    parts0, parts1 = [], []
+    offset = 0
+    for chunk_len in cp_chunk_lengths:
+        chunk_len = int(chunk_len)
+        half0 = (chunk_len + 1) // 2
+        parts0.append(
+            torch.arange(offset, offset + half0, device=device, dtype=torch.int64)
+        )
+        parts1.append(
+            torch.arange(
+                offset + half0, offset + chunk_len, device=device, dtype=torch.int64
+            )
+        )
+        offset += chunk_len
+    empty = torch.empty(0, device=device, dtype=torch.int64)
+    return (
+        torch.cat(parts0) if parts0 else empty,
+        torch.cat(parts1) if parts1 else empty,
+    )
+
+
+def _generate_full_causal_kv_indices_device(
+    cp_chunk_lengths, cp_rank: int, cp_size: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Vectorized ``generate_full_causal_kv_indices`` returning int64 CUDA tensors.
+
+    Matches ``cp_utils.generate_full_causal_kv_indices`` exactly (full causal KV
+    range per Q-half under zigzag load balancing) but builds the contiguous
+    ranges with ``torch.arange`` on ``device`` instead of Python lists.
+    """
+    parts0, parts1 = [], []
+    seq_offset = 0
+    for chunk_len in cp_chunk_lengths:
+        chunk_len = int(chunk_len)
+        assert chunk_len % 2 == 0
+        h = chunk_len // 2
+        end_part0 = h * (cp_rank + 1)
+        if end_part0 > 0:
+            parts0.append(
+                torch.arange(
+                    seq_offset, seq_offset + end_part0, device=device, dtype=torch.int64
+                )
+            )
+        end_part1 = h * (2 * cp_size - cp_rank)
+        if end_part1 > 0:
+            parts1.append(
+                torch.arange(
+                    seq_offset, seq_offset + end_part1, device=device, dtype=torch.int64
+                )
+            )
+        seq_offset += chunk_len * cp_size
+    empty = torch.empty(0, device=device, dtype=torch.int64)
+    return (
+        torch.cat(parts0) if parts0 else empty,
+        torch.cat(parts1) if parts1 else empty,
+    )
 
 
 class PCPAllGatherAttnOp:
@@ -190,8 +288,13 @@ class PCPAllGatherAttnOp:
         value = os.environ.get("RTP_LLM_CP_PREFILL_FORWARD_OPT", "1").strip()
         if value.lower() in ("0", "false", "no", "off"):
             return False
-        if not self._can_use_trtllm_paged_context:
+        fa4 = _use_fa4_cp_paged()
+        # Paged-context backend must be available: FA4 (preferred) or trtllm.
+        if not fa4 and not self._can_use_trtllm_paged_context:
             return False
+        # fp8 KV cache stays excluded: it is a mixed bf16-Q / fp8-KV path, and
+        # FA4's flash_attn_varlen_func requires q/k/v to share one dtype (link B
+        # deferred pending a mixed-dtype path). trtllm also lacks fp8 paged here.
         if (
             self.has_prefix
             or self._kv_sharded
@@ -240,17 +343,20 @@ class PCPAllGatherAttnOp:
 
         qo_indptr = cu_seqlens // 2
 
-        q0_idx, q1_idx = generate_q_indices(self.cp_info.prefill_cp_chunk_lengths)
-        kv0_idx, kv1_idx = generate_full_causal_kv_indices(
+        q0_idx, q1_idx = _generate_q_indices_device(
+            self.cp_info.prefill_cp_chunk_lengths, self.device
+        )
+        kv0_idx, kv1_idx = _generate_full_causal_kv_indices_device(
             self.cp_info.prefill_cp_chunk_lengths,
             self.prefill_cp_rank,
             self.prefill_cp_size,
+            self.device,
         )
 
         self.kv0_idx = kv_restore_indices[kv0_idx]
         self.kv1_idx = kv_restore_indices[kv1_idx]
-        self.q0_idx = torch.tensor(q0_idx, device=self.device)
-        self.q1_idx = torch.tensor(q1_idx, device=self.device)
+        self.q0_idx = q0_idx
+        self.q1_idx = q1_idx
 
         kv_block_id_host = self.attn_inputs.kv_cache_kernel_block_id_host
         if kv_block_id_host is None:
@@ -268,7 +374,7 @@ class PCPAllGatherAttnOp:
             tokens_per_block,
         )
 
-        self._plan_ragged(qo_indptr)
+        self._plan_ragged(qo_indptr, attention_inputs.prefix_lengths)
         q_lens = qo_indptr[1:] - qo_indptr[:-1]
         self._trtllm_max_q_len = int(q_lens.max().item())
         (
@@ -302,7 +408,9 @@ class PCPAllGatherAttnOp:
             )
         return params
 
-    def _plan_ragged(self, qo_indptr: torch.Tensor) -> None:
+    def _plan_ragged(
+        self, qo_indptr: torch.Tensor, prefix_lengths: torch.Tensor
+    ) -> None:
         self.qo_indptr = qo_indptr
         kv_indptr_part0 = qo_indptr * (self.prefill_cp_rank + 1)
         kv_indptr_part1 = qo_indptr * (2 * self.prefill_cp_size - self.prefill_cp_rank)
@@ -324,6 +432,19 @@ class PCPAllGatherAttnOp:
             qo_indptr=qo_indptr,
             kv_indptr=kv_indptr_part1,
             **common_params,
+        )
+
+    def _run_ragged_part(
+        self,
+        part: str,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        return_lse: bool = False,
+    ):
+        return self.prefill_wrappers["ragged"][part].run(
+            q, k, v, return_lse=return_lse
         )
 
     def _build_trtllm_paged_context_metadata(
@@ -371,6 +492,90 @@ class PCPAllGatherAttnOp:
             out_dtype=q.dtype,
         )
         return out
+
+    def _run_fa4_paged_context(
+        self,
+        q: torch.Tensor,
+        kv_cache_tensor: torch.Tensor,
+        seq_lens: torch.Tensor,
+        max_kv_len: int,
+        block_tables: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """FA4 paged causal attention over the HND pool (drop-in for trtllm).
+
+        The HND pool ``[blocks, 2, H_kv, page, D]`` is fed to FA4 (which wants
+        ``[num_pages, page, H_kv, D]``) via a zero-copy ``transpose(1, 2)`` view;
+        FA4's TMA handles the strided K/V at full speed. Causal alignment and
+        page-table/seqlen semantics match trtllm (verified numerically).
+        """
+        if block_tables is None:
+            block_tables = self._physical_block_table()
+        # Pool read as-is (fp8 when the KV cache is fp8 — zero-copy strided view);
+        # q cast to match so fp8 cache => uniform-fp8 attention.
+        k = kv_cache_tensor[:, 0].transpose(1, 2)
+        v = kv_cache_tensor[:, 1].transpose(1, 2)
+        q = _match_q_to_kv(q, k)
+        out = _fa4_varlen_func(
+            q,
+            k,
+            v,
+            cu_seqlens_q=self.qo_indptr,
+            max_seqlen_q=self._trtllm_max_q_len,
+            max_seqlen_k=int(max_kv_len),
+            seqused_k=seq_lens,
+            page_table=block_tables,
+            causal=True,
+            softmax_scale=self.head_dim**-0.5,
+        )
+        return out[0] if isinstance(out, tuple) else out
+
+    def _run_paged_context(
+        self,
+        q: torch.Tensor,
+        kv_cache_tensor: torch.Tensor,
+        seq_lens: torch.Tensor,
+        cu_kv_pages: torch.Tensor,
+        max_kv_len: int,
+    ) -> torch.Tensor:
+        """Dispatch the CP paged-context attention to FA4 (default) or trtllm."""
+        if _use_fa4_cp_paged():
+            return self._run_fa4_paged_context(
+                q, kv_cache_tensor, seq_lens, max_kv_len
+            )
+        return self._run_trtllm_paged_context(
+            q, kv_cache_tensor, seq_lens, cu_kv_pages, max_kv_len
+        )
+
+    def _run_fa4_ragged(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+    ) -> torch.Tensor:
+        """FA4 varlen (ragged) causal attention over contiguous [prefix||extend]
+        K/V — drop-in for ``run_fmha_cp_ragged``. No page_table; k/v are the
+        per-part concatenated tensors from ``triton_build_dual_prefix_extend``.
+        Causal offset = seqlen_k - seqlen_q (bottom-right), matching fmha/trtllm.
+        """
+        max_q = int((cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max().item())
+        max_k = int((cu_seqlens_k[1:] - cu_seqlens_k[:-1]).max().item())
+        # k/v are the materialised [prefix||extend] (prefix in the cache dtype);
+        # q cast to match so an fp8 cache yields uniform-fp8 attention.
+        q = _match_q_to_kv(q, k)
+        out = _fa4_varlen_func(
+            q,
+            k,
+            v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_q,
+            max_seqlen_k=max_k,
+            causal=True,
+            softmax_scale=self.head_dim**-0.5,
+        )
+        return out[0] if isinstance(out, tuple) else out
 
     def _forward_opt(
         self,
@@ -420,14 +625,14 @@ class PCPAllGatherAttnOp:
         q1 = torch.index_select(q_reshaped, 0, self.q1_idx).contiguous()
 
         output = torch.empty_like(q_reshaped)
-        output[self.q0_idx] = self._run_trtllm_paged_context(
+        output[self.q0_idx] = self._run_paged_context(
             q0,
             kv_cache_tensor,
             self._trtllm_seq_lens_part0,
             self._trtllm_cu_kv_pages_part0,
             self._trtllm_max_kv_len_part0,
         )
-        output[self.q1_idx] = self._run_trtllm_paged_context(
+        output[self.q1_idx] = self._run_paged_context(
             q1,
             kv_cache_tensor,
             self._trtllm_seq_lens_part1,
@@ -545,15 +750,55 @@ class PCPAllGatherAttnOp:
         v0 = torch.index_select(all_values, 0, self.kv0_idx).contiguous()
         v1 = torch.index_select(all_values, 0, self.kv1_idx).contiguous()
         if self.has_prefix:
+            if _use_fa4_cp_paged():
+                # Link C (varlen): reuse the fused [prefix||extend] build, then
+                # FA4 varlen ragged per part (replaces the paged-prefix + ragged-
+                # extend + merge_state hybrid, and the fmha_sm100 ragged path).
+                prefix_lengths = self.attn_inputs.prefix_lengths
+                # The prefix comes from the cache (fp8 for the fp8-KV-cache
+                # layers); cast the bf16-gathered extend to the cache dtype so
+                # the concatenated [prefix||extend] is uniform (fp8 => uniform
+                # fp8 attention downstream). No-op for a bf16 cache.
+                kv_dtype = kv_cache_tensor.dtype
+                k0 = k0.to(kv_dtype)
+                v0 = v0.to(kv_dtype)
+                k1 = k1.to(kv_dtype)
+                v1 = v1.to(kv_dtype)
+                k0_cat, v0_cat, k1_cat, v1_cat = triton_build_dual_prefix_extend(
+                    kv_cache_tensor,
+                    prefix_lengths,
+                    self._physical_block_table().to(torch.int32),
+                    self.seq_size_per_block,
+                    k0,
+                    v0,
+                    self.kv_indptr_part0,
+                    k1,
+                    v1,
+                    self.kv_indptr_part1,
+                )
+                # cu_seqlens_k for [prefix||extend] = extend prefix-sum
+                # (kv_indptr_partX) + prefix prefix-sum.
+                pfx = torch.zeros_like(self.qo_indptr)
+                pfx[1:] = prefix_lengths.to(self.qo_indptr.dtype).cumsum(0)
+                output = torch.empty_like(q_reshaped)
+                output[self.q0_idx] = self._run_fa4_ragged(
+                    q0, k0_cat, v0_cat, self.qo_indptr, self.kv_indptr_part0 + pfx
+                )
+                output[self.q1_idx] = self._run_fa4_ragged(
+                    q1, k1_cat, v1_cat, self.qo_indptr, self.kv_indptr_part1 + pfx
+                )
+                return output
+
+            # Fallback (FA4 disabled): flashinfer paged prefix + ragged extend + LSE merge.
             prefix_out, prefix_lse = self.prefill_wrappers["paged"]["prefix"].run(
                 q_reshaped, kv_cache_tensor, return_lse=True
             )
 
-            out0, lse0 = self.prefill_wrappers["ragged"]["part0"].run(
-                q0, k0, v0, return_lse=True
+            out0, lse0 = self._run_ragged_part(
+                "part0", q0, k0, v0, return_lse=True
             )
-            out1, lse1 = self.prefill_wrappers["ragged"]["part1"].run(
-                q1, k1, v1, return_lse=True
+            out1, lse1 = self._run_ragged_part(
+                "part1", q1, k1, v1, return_lse=True
             )
             out0, _ = merge_state(
                 v_a=prefix_out[self.q0_idx],
@@ -573,10 +818,21 @@ class PCPAllGatherAttnOp:
             return output
         else:
             output = torch.empty_like(q_reshaped)
-            output[self.q0_idx] = self.prefill_wrappers["ragged"]["part0"].run(
-                q0, k0, v0
-            )
-            output[self.q1_idx] = self.prefill_wrappers["ragged"]["part1"].run(
-                q1, k1, v1
-            )
+            if _use_fa4_cp_paged():
+                # No-prefix FA4 varlen on the gathered extend K/V. Cast to the
+                # cache dtype so an fp8 KV cache yields uniform-fp8 attention
+                # (fp8-cache non-prefix lands here since it is excluded from the
+                # paged _forward_opt path); no-op for a bf16 cache.
+                kv_dtype = kv_cache_tensor.dtype
+                output[self.q0_idx] = self._run_fa4_ragged(
+                    q0, k0.to(kv_dtype), v0.to(kv_dtype),
+                    self.qo_indptr, self.kv_indptr_part0,
+                )
+                output[self.q1_idx] = self._run_fa4_ragged(
+                    q1, k1.to(kv_dtype), v1.to(kv_dtype),
+                    self.qo_indptr, self.kv_indptr_part1,
+                )
+            else:
+                output[self.q0_idx] = self._run_ragged_part("part0", q0, k0, v0)
+                output[self.q1_idx] = self._run_ragged_part("part1", q1, k1, v1)
             return output
