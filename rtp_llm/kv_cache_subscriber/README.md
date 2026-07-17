@@ -93,7 +93,10 @@ event-reporting enum value.
 ## Tests
 
 ```bash
-bazel test \
-  //rtp_llm/kv_cache_subscriber:models_test \
-  //rtp_llm/kv_cache_subscriber:service_test
+bazel test //rtp_llm/kv_cache_subscriber:tests
 ```
+
+The suite covers full-snapshot diffing, deletion debounce, uncertain partial
+reports, multi-DP aggregation and failure isolation, KVCM wire mapping and
+batching, node re-registration, heartbeat gating, periodic full replay,
+configuration validation, and manager response handling.
