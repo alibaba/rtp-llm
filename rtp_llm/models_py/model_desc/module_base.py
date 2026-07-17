@@ -12,6 +12,8 @@ from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
     select_attention_inputs_for_tag,
 )
+from rtp_llm.models_py.module_base import RtpModule
+
 from rtp_llm.models_py.model_desc.hidden_state_capture import (
     CanonicalHiddenHook,
     CaptureContext,
