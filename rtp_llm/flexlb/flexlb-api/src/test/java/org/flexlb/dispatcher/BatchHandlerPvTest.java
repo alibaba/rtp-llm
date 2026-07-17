@@ -58,7 +58,6 @@ class BatchHandlerPvTest {
         lenient().when(serverRequest.headers()).thenReturn(headers);
         lenient().when(serverRequest.uri()).thenReturn(java.net.URI.create("http://master/dispatcher/batch_infer"));
 
-
         pvLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");
         originalPvLevel = pvLogger.getLevel();
         pvLogger.setLevel(Level.INFO);

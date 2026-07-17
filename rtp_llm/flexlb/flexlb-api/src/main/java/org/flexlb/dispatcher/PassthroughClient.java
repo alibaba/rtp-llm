@@ -21,7 +21,6 @@ import java.time.Duration;
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
 public class PassthroughClient {
 
-
     /**
      * SSE body-stream inactivity cap: {@code Flux#timeout(Duration)} bounds the gap between
      * consecutive emissions, not total stream duration, so a healthy long stream that keeps
