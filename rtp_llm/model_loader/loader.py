@@ -22,6 +22,7 @@ from rtp_llm.model_loader.tensor_source import DatabaseTensorSource, TensorColle
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight, WeightModule
 from rtp_llm.ops import TaskType, VitSeparation
 from rtp_llm.utils.database import BaseDatabase, CkptDatabase
+from rtp_llm.device.device_impl import gpu_is_available
 from rtp_llm.utils.model_weight import W, WeightStyle, identity
 from rtp_llm.utils.module_util import has_module
 from rtp_llm.utils.time_util import timer_wrapper
@@ -415,11 +416,16 @@ class ModelLoader:
             else:
                 complete = weight_info.collector.store_tensor(key, loaded_tensor)
 
-            if inline_fp8 and _total_count % 500 == 0 and torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            if _total_count % 5000 == 0 and torch.cuda.is_available():
-                alloc_gb = torch.cuda.memory_allocated() / (1024**3)
-                reserved_gb = torch.cuda.memory_reserved() / (1024**3)
+            if inline_fp8 and _total_count % 500 == 0:
+                ModelLoader.force_clean_cuda_memory()
+            if _total_count % 5000 == 0 and gpu_is_available():
+                from rtp_llm.device.device_impl import _is_xpu_device
+                if _is_xpu_device():
+                    alloc_gb = torch.xpu.memory_allocated() / (1024**3)
+                    reserved_gb = torch.xpu.memory_reserved() / (1024**3)
+                else:
+                    alloc_gb = torch.cuda.memory_allocated() / (1024**3)
+                    reserved_gb = torch.cuda.memory_reserved() / (1024**3)
                 logging.info(
                     f"fastsafetensor loading progress: {_total_count} tensors, "
                     f"{_inline_count} inline-fp8, "
@@ -441,7 +447,7 @@ class ModelLoader:
                         model_weights.set_global_weight(name, tensor)
                 weight_info.collector.clear()
                 if inline_fp8:
-                    torch.cuda.empty_cache()
+                    ModelLoader.force_clean_cuda_memory()
                     gc.collect()
 
         _fallback_count = 0
@@ -558,8 +564,12 @@ class ModelLoader:
     @staticmethod
     def force_clean_cuda_memory():
         """安全清理显存，避免残留引用"""
+        from rtp_llm.device.device_impl import _is_cuda_device, _is_xpu_device
         gc.collect()
-        if torch.cuda.is_available():
+        if _is_xpu_device():
+            torch.xpu.synchronize()
+            torch.xpu.empty_cache()
+        elif _is_cuda_device():
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
 

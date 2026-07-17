@@ -126,7 +126,11 @@ class BaseModel(object):
 
     def _get_device_str(self) -> str:
         """Get device string from parallelism_config."""
-        return f"cuda:{self.parallelism_config.local_rank}"
+        # Use the resolved device type (respects RTP_LLM_DEVICE_TYPE) rather
+        # than unconditionally preferring XPU when torch.xpu is available, so a
+        # mixed XPU+CUDA host can be pinned to the operator-selected backend.
+        from rtp_llm.device.device_impl import get_device_string
+        return f"{get_device_string()}:{self.parallelism_config.local_rank}"
 
     @timer_wrapper(description="load model")
     def load(self, skip_python_model: bool = False):

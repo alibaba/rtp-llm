@@ -193,6 +193,44 @@ build:arm --copt=-Wno-array-bounds # aios
 build:arm --copt=-Wno-unused-result # grpc
 build:arm --copt=-Wno-array-parameter # boringssl
 
+build:xpu --copt="-DENABLE_BF16=1"
+build:xpu --define=using_cuda=false --define=using_cuda_nvcc=false
+build:xpu --define=using_xpu=true
+build:xpu --copt="-DUSING_CUDA=0"
+build:xpu --copt="-DUSING_XPU=1"
+build:xpu --action_env TF_NEED_CUDA="0"
+build:xpu --repo_env TF_NEED_XPU="1"
+build:xpu --host_action_env TF_NEED_CUDA="0"
+build:xpu --repo_env SYCL_TARGET="intel_gpu_pvc"
+build:xpu --crosstool_top=@local_config_xpu//crosstool:toolchain
+build:xpu --host_crosstool_top=@local_config_xpu//crosstool:toolchain
+build:xpu --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
+build:xpu --action_env LIBRARY_PATH="/lib64:/usr/lib/x86_64-linux-gnu/"
+build:xpu --host_action_env LIBRARY_PATH="/lib64:/usr/lib/x86_64-linux-gnu/"
+build:xpu --per_file_copt=external/boringssl/.*@-Wno-array-parameter
+build:xpu --per_file_copt=external/boringssl/.*@-Wno-error
+build:xpu --copt="-Wno-unused-but-set-variable"
+build:xpu --copt="-Wno-unused-private-field"
+build:xpu --copt="-Wno-deprecated-builtins"
+build:xpu --copt="-Wno-pessimizing-move"
+build:xpu --copt="-Wno-unqualified-std-cast-call"
+build:xpu --copt="-Wno-unused-value"
+build:xpu --copt="-Wno-delete-non-abstract-non-virtual-dtor"
+build:xpu --copt="-Wno-inconsistent-missing-override"
+build:xpu --copt="-Wno-invalid-source-encoding"
+build:xpu --copt="-Wno-unused-const-variable"
+build:xpu --copt="-Wno-unknown-warning-option"
+build:xpu --copt="-Wno-vla-cxx-extension"
+build:xpu --copt="-Wno-deprecated-non-prototype"
+build:xpu --copt="-Wno-array-parameter"
+build:xpu --copt="-Wno-array-bounds"
+build:xpu --copt="-Wno-error"        # TODO(xpu): narrow to specific -Wno-xxx once icpx warnings are catalogued
+build:xpu --host_copt="-Wno-error"   # TODO(xpu): same as above
+build:xpu --repo_env PYTHON_BIN_PATH="/opt/conda310/bin/python3"
+build:xpu --python_top=@local_config_xpu//:python_runtime
+build:xpu --action_env LD_LIBRARY_PATH="/lib64:/usr/lib/x86_64-linux-gnu/:/opt/intel/oneapi/compiler/latest/lib:/opt/intel/oneapi/compiler/latest/opt/compiler/lib"
+build:xpu --host_action_env LD_LIBRARY_PATH="/lib64:/usr/lib/x86_64-linux-gnu/:/opt/intel/oneapi/compiler/latest/lib:/opt/intel/oneapi/compiler/latest/opt/compiler/lib"
+
 # remote_kv_cache
 build:remote_kv_cache --define=use_remote_kv_cache=true
 
@@ -215,6 +253,7 @@ build:asan --linkopt -fsanitize=address
 
 test:rocm --test_env PATH="/opt/rocm/bin:/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/opt/conda310/condabin:/usr/share/Modules/bin:/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/usr/X11R6/bin:/opt/cmake/cmake-3.26.4/bin"
 test:rocm --test_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-12/root/usr/lib64:/opt/rocm/lib:/opt/conda310/lib/:/usr/lib64:/opt/amdgpu/lib64"
+test:xpu --test_env LD_LIBRARY_PATH="/lib64:/usr/lib/x86_64-linux-gnu/:/opt/intel/oneapi/compiler/latest/lib:/opt/intel/oneapi/compiler/latest/opt/compiler/lib:/opt/conda310/lib"
 test --test_env LD_LIBRARY_PATH="/opt/rocm/lib:/opt/conda310/lib/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/opt/amdgpu/lib64:/usr/local/cuda/extras/CUPTI/lib64"
 test --test_env OMP_NUM_THREADS=8
 test --test_env FT_SERVER_TEST="1"

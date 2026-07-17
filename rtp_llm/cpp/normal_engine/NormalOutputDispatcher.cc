@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
@@ -116,7 +117,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         auto tokens            = stream->currentExecuteTokens(0);
         auto label_tensor =
             torch::from_blob(const_cast<int*>(tokens.data() + 1), {(int64_t)(tokens.size() - 1)}, torch::kInt32)
-                .to(torch::kCUDA);
+                .to(getTorchDevice());
         auto labels_int64 = label_tensor.toType(torch::kInt64);
         loss = torch::cross_entropy_loss(all_logits_tensor, labels_int64, torch::nullopt, at::Reduction::None)
                    .to(torch::kFloat32);
@@ -158,11 +159,13 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                 int  label_end   = std::min(end_pos + 1, (int)tokens.size());
                 int  logprob_len = label_end - label_start;
                 if (logprob_len > 0) {
-                    // from_blob + to(kCUDA) is a synchronous copy; token buffer is stable during prefill.
+                    // from_blob + to(device) is a synchronous copy; token buffer is stable during prefill.
+                    // Use getTorchDevice() so labels land on the same device as sliced_logits (XPU/CUDA),
+                    // otherwise the gather below is a cross-device op (or fails to allocate on no-CUDA hosts).
                     auto label_tensor = torch::from_blob(const_cast<int*>(tokens.data() + label_start),
                                                          {(int64_t)logprob_len},
                                                          torch::kInt32)
-                                            .to(torch::kCUDA)
+                                            .to(getTorchDevice())
                                             .toType(torch::kInt64)
                                             .unsqueeze(1);
                     auto target_raw = sliced_logits.narrow(0, 0, logprob_len).gather(1, label_tensor).squeeze(1);

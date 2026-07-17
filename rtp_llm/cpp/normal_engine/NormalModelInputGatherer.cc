@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace rtp_llm {
 
@@ -172,8 +173,8 @@ void gatherMultimodalFeaturesForContextBatch(const GenerateStreamPtr&    stream,
     }
     for (int i = reuse_mm_count; i < static_cast<int>(mm_features.size()); ++i) {
         auto& mm_feature = mm_features[i];
-        if (!mm_feature.is_cuda()) {
-            gathered_mm_features.emplace_back(mm_feature.to(torch::kCUDA));
+        if (mm_feature.device() != getTorchDevice()) {
+            gathered_mm_features.emplace_back(mm_feature.to(getTorchDevice()));
         } else {
             gathered_mm_features.emplace_back(mm_feature);
         }
@@ -207,9 +208,9 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     const bool   need_cal_position_id =
         (config_.mm_position_ids_style != PositionIdsStyle::DEFAULT) || config_.has_positional_encoding;
 
-    static const auto pinned_i32  = torch::TensorOptions(torch::kInt32).pinned_memory(true);
-    static const auto pinned_i64  = torch::TensorOptions(torch::kInt64).pinned_memory(true);
-    static const auto pinned_bool = torch::TensorOptions(torch::kBool).pinned_memory(true);
+    static const auto pinned_i32  = torch::TensorOptions(torch::kInt32).pinned_memory(kPinHostMemory);
+    static const auto pinned_i64  = torch::TensorOptions(torch::kInt64).pinned_memory(kPinHostMemory);
+    static const auto pinned_bool = torch::TensorOptions(torch::kBool).pinned_memory(kPinHostMemory);
 
     GptModelInputs model_input;
     model_input.combo_tokens          = torch::empty({(int64_t)current_tokens_size}, pinned_i32);
@@ -371,7 +372,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                                         stream->multimodalFeatures().size(),
                                         stream->streamId());
                 for (int j = reuse_mm_count; j < static_cast<int>(mm_extra_input.size()); ++j) {
-                    gathered_mm_extra_input.emplace_back(mm_extra_input[j].to(torch::kCUDA));
+                    gathered_mm_extra_input.emplace_back(mm_extra_input[j].to(getTorchDevice()));
                 }
             }
 

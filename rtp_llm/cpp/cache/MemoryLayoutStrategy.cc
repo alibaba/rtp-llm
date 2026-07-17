@@ -336,7 +336,7 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createPartitionedSubBlocks(const to
 BlockInfo MemoryLayoutStrategy::makeBlockInfo(const torch::Tensor& tensor, void* addr, size_t size_bytes) const {
     auto      dev = tensor.device();
     BlockInfo info;
-    info.is_cuda      = dev.is_cuda();
+    info.is_cuda      = dev.is_cuda() || dev.is_xpu();
     info.device_index = dev.index();
     info.scalar_type  = static_cast<int32_t>(tensor.scalar_type());
     info.addr         = addr;

@@ -20,6 +20,12 @@
 #include <c10/cuda/CUDAGuard.h>
 #elif USING_ROCM
 #include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
+#elif USING_XPU
+#include <ATen/xpu/XPUContext.h>
+#include <c10/xpu/XPUCachingAllocator.h>
+#include <c10/xpu/XPUFunctions.h>
+#include <c10/xpu/impl/XPUGuardImpl.h>
+#include <sycl/sycl.hpp>
 #endif
 #include <pybind11/functional.h>
 
@@ -27,6 +33,8 @@
 using DeviceGuard = at::cuda::CUDAGuard;
 #elif USING_ROCM
 using DeviceGuard = c10::hip::HIPGuardMasqueradingAsCUDA;
+#elif USING_XPU
+using DeviceGuard = c10::DeviceGuard;
 #endif
 
 namespace rtp_llm {
@@ -98,6 +106,14 @@ void runtimeSyncAndCheck() {
     check_cuda_error();
 }
 
+#elif USING_XPU
+
+void runtimeSyncAndCheck() {
+    // PyTorch XPU's synchronize() internally checks for SYCL async errors
+    // and throws on failure, so no separate error check is needed here.
+    c10::xpu::getCurrentXPUStream().synchronize();
+}
+
 #else  // ROCm
 
 void runtimeSyncAndCheck() {
@@ -116,6 +132,14 @@ void runtimeSyncAndCheck() {
 std::shared_ptr<torch::Event> runtimeCreateEvent() {
     auto event = std::make_shared<torch::Event>(torch::kCUDA);
     event->record(at::cuda::getCurrentCUDAStream());
+    return event;
+}
+
+#elif USING_XPU
+
+std::shared_ptr<torch::Event> runtimeCreateEvent() {
+    auto event = std::make_shared<torch::Event>(torch::kXPU);
+    event->record(c10::xpu::getCurrentXPUStream());
     return event;
 }
 
@@ -322,6 +346,14 @@ torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor we
 torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale) {
     return weight;
 }
+#elif USING_XPU
+torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool user_arm_gemm_use_kai) {
+    return weight;
+}
+
+torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale) {
+    return weight;
+}
 #endif
 
 // ============================================================
@@ -340,6 +372,11 @@ void cudaCheckLastError() {
     if (err != hipSuccess) {
         RTP_LLM_LOG_ERROR("ROCm error: %s", hipGetErrorString(err));
     }
+#elif USING_XPU
+    // XPU/SYCL: errors are reported either via synchronous exceptions at
+    // submit time or via the async error handler on queue.wait(). PyTorch's
+    // XPU runtime installs an async handler that throws on errors, so
+    // explicit error polling is unnecessary here.
 #endif
 }
 
@@ -350,6 +387,8 @@ void cudaPreRun(int device_id) {
     at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream(device_id));
 #elif USING_ROCM
     hipSetDevice(device_id);
+#elif USING_XPU
+    c10::xpu::set_device(static_cast<c10::DeviceIndex>(device_id));
 #endif
 }
 
@@ -377,16 +416,66 @@ ExecStatus getGpuExecStatus() {
     RTP_LLM_CHECK(error == cudaSuccess);
 #elif USING_ROCM
     hipMemGetInfo(&mem.free_bytes, &total_bytes);
+#elif USING_XPU
+    {
+        auto device_idx = static_cast<c10::DeviceIndex>(g_device_id);
+        auto* props = at::xpu::getDeviceProperties(device_idx);
+        RTP_LLM_CHECK_WITH_INFO(props != nullptr, "at::xpu::getDeviceProperties returned null for device " + std::to_string(device_idx));
+        total_bytes = props->global_mem_size;
+
+        // Runtime headroom withheld from KV-cache sizing, overridable via
+        // XPU_MEM_RESERVE_RATIO (in [0, 1)); prefer setting kv_cache_mem_mb
+        // explicitly when exact control is required.
+        static const double reserve_ratio = []() {
+            double ratio = 0.10;
+            const char* env = std::getenv("XPU_MEM_RESERVE_RATIO");
+            if (env != nullptr) {
+                char* endptr = nullptr;
+                double parsed = std::strtod(env, &endptr);
+                if (endptr != env && *endptr == '\0' && parsed >= 0.0 && parsed < 1.0) {
+                    ratio = parsed;
+                } else {
+                    RTP_LLM_LOG_WARNING("Invalid XPU_MEM_RESERVE_RATIO='%s', using default %.2f",
+                                        env, ratio);
+                }
+            }
+            return ratio;
+        }();
+        size_t headroom = static_cast<size_t>(total_bytes * reserve_ratio);
+
+        sycl::device& raw_dev = c10::xpu::get_raw_device(device_idx);
+        if (raw_dev.has(sycl::aspect::ext_intel_free_memory)) {
+            // Driver-level actual free memory, matching torch.xpu.mem_get_info and the
+            // Python DeviceImpl._get_mem_info peer. Unlike the caching-allocator reserved
+            // bytes, this reflects memory held by the driver and by other processes/
+            // contexts on the same device, so KV-cache sizing cannot over-allocate into
+            // externally-occupied space.
+            uint64_t driver_free = raw_dev.get_info<sycl::ext::intel::info::device::free_memory>();
+            mem.free_bytes = (driver_free > headroom) ? (driver_free - headroom) : 0;
+        } else {
+            // Fallback when ext_intel_free_memory is unavailable (e.g. ZES_ENABLE_SYSMAN
+            // unset): estimate from allocator-reserved bytes. This cannot observe external
+            // usage, so it under-reports rather than over-allocating.
+            RTP_LLM_LOG_WARNING("XPU ext_intel_free_memory unavailable; KV-cache sizing falls back to a "
+                                "conservative estimate. Set ZES_ENABLE_SYSMAN=1 for accurate free memory.");
+            auto stats = c10::xpu::XPUCachingAllocator::getDeviceStats(device_idx);
+            size_t reserved = stats.reserved_bytes[static_cast<size_t>(c10::CachingAllocator::StatType::AGGREGATE)].current;
+            size_t raw_free = (total_bytes > reserved) ? (total_bytes - reserved) : 0;
+            mem.free_bytes = (raw_free > headroom) ? (raw_free - headroom) : 0;
+        }
+        // NOTE: Do NOT set max_consumed_bytes here.  The AGGREGATE peak from
+        // the caching allocator includes model-weight allocations that are
+        // already accounted for by the reduced available_bytes after warmup.
+        // Setting it would double-count weights and fail the
+        // "device_reserved > runtime_required" check in MemoryEvaluationHelper.
+        // Match the CUDA path which leaves max_consumed_bytes = 0.
+    }
 #endif
     mem.used_bytes      = total_bytes - mem.free_bytes;
     mem.available_bytes = mem.free_bytes;
     ExecStatus status;
     status.device_memory_status = mem;
     return status;
-}
-
-torch::Device getTorchCudaDevice() {
-    return torch::Device(torch::kCUDA);
 }
 
 namespace {
@@ -526,9 +615,9 @@ OverallExpertStats execCreateMoeExpertStates(const ExpertStatsParams& params) {
     states.log_exp_num             = params.log_exp_num;
     states.phy_exp_num             = params.phy_exp_num;
     states.stats_buf.log_stats_buf = torch::zeros({(int64_t)params.layer_num, (int64_t)params.log_exp_num},
-                                                  torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+                                                  torch::TensorOptions(torch::kInt32).device(getTorchDevice()));
     states.stats_buf.gpu_loads_buf = torch::zeros({(int64_t)params.layer_num, (int64_t)params.ep_size},
-                                                  torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+                                                  torch::TensorOptions(torch::kInt32).device(getTorchDevice()));
     return states;
 }
 
@@ -574,6 +663,18 @@ MlaOpsType initRuntime(size_t device_id, bool trace_memory, bool enable_comm_ove
 #elif USING_ROCM
         RTP_LLM_LOG_INFO("Initialize runtime (ROCm). device_id=%zu", device_id);
         ROCM_CHECK(hipSetDevice(device_id));
+#elif USING_XPU
+        RTP_LLM_LOG_INFO("Initialize runtime (XPU/Intel GPU). device_id=%zu", device_id);
+        c10::xpu::set_device(static_cast<c10::DeviceIndex>(device_id));
+
+        if (resolved_mla_ops_type == MlaOpsType::AUTO) {
+            resolved_mla_ops_type = MlaOpsType::MHA;
+        }
+        if (resolved_mla_ops_type != MlaOpsType::MHA) {
+            RTP_LLM_LOG_WARNING("XPU does not support MLA ops type %d, falling back to MHA",
+                                static_cast<int>(resolved_mla_ops_type));
+            resolved_mla_ops_type = MlaOpsType::MHA;
+        }
 #endif
 
         g_enable_comm_overlap = enable_comm_overlap;

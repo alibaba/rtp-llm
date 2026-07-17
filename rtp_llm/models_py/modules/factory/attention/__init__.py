@@ -28,7 +28,35 @@ from rtp_llm.models_py.modules.factory.attention.attn_factory import (
 )
 
 device_type = get_device_type()
-if device_type == DeviceType.ROCm:
+if device_type == DeviceType.Xpu:
+    # XPU hard-requires the accelerated vllm-xpu-kernels attention path,
+    # matching the CUDA and ROCm backends (no pure-PyTorch attention fallback).
+    from rtp_llm.models_py.modules.factory.attention.xpu_impl.vllm_flash_attn import (
+        XpuVllmFlashAttnPrefillImpl,
+        XpuVllmFlashAttnDecodeImpl,
+    )
+    PREFILL_MHA_IMPS.append(XpuVllmFlashAttnPrefillImpl)
+    DECODE_MHA_IMPS.append(XpuVllmFlashAttnDecodeImpl)
+
+    # FA2 preflight: XPU decode hard-requires the FA2 kernel from
+    # vllm-xpu-kernels, which is installed out-of-band (see deps/requirements_xpu.txt)
+    # and cannot be expressed as a pip dependency. Fail fast at startup with an
+    # actionable message instead of letting the service boot and only fail at the
+    # first decode step.
+    try:
+        from rtp_llm.models_py.modules.base.xpu.vllm_xpu_ops import is_fa2_available
+        _fa2_ok = is_fa2_available()
+    except Exception as _fa2_exc:  # noqa: BLE001 - normalize probe failure to unavailable
+        _fa2_ok = False
+        logging.getLogger(__name__).error(
+            "XPU FA2 preflight could not probe vllm-xpu-kernels: %s", _fa2_exc)
+    if not _fa2_ok:
+        raise RuntimeError(
+            "XPU decode attention requires the FA2 kernel from vllm-xpu-kernels, "
+            "which is not available. Install the FA2-enabled build, e.g. "
+            "`pip install vllm-xpu-kernels --find-links <url>` "
+            "(see deps/requirements_xpu.txt).")
+elif device_type == DeviceType.ROCm:
     # Import to register ROCm FMHA implementations
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
         AiterDecodeImplAsm,

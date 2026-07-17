@@ -2,7 +2,7 @@ package(default_visibility = ["//visibility:public"])
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
 load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
-load("@arch_config//:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps", "platform_deps")
+load("@arch_config//:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps", "triton_deps", "platform_deps", "filter_xpu_whl_reqs")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 
 load("@release_version//:defs.bzl", "RELEASE_VERSION")
@@ -62,12 +62,14 @@ xft_dep = select({
 arch_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
+    "@//:using_xpu": [],
     "//conditions:default": [":decord", ":av"],
 })
 
 arch_with_version_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
+    "@//:using_xpu": [],
     "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
 })
 
@@ -567,7 +569,7 @@ py_package(
     }),
 )
 
-whl_reqs = [
+_whl_reqs_static = [
     "filelock>=3.20.0",
     "jinja2",
     "sympy",
@@ -621,7 +623,9 @@ whl_reqs = [
     "portalocker",
     "concurrent_log_handler",
     "apache-tvm-ffi",
-] + whl_deps() + platform_deps() + xft_dep
+]
+
+whl_reqs = filter_xpu_whl_reqs(_whl_reqs_static) + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(
     name = "rtp_llm_frontend_whl",

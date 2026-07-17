@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/test/ModelTestUtil.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 using namespace std;
 using namespace rtp_llm;
@@ -50,6 +51,21 @@ TEST_F(SamplerTest, testFixedGreedySamplingBuffersRejectGrow) {
     Sampler sampler(SamplerInitParams{1, true});
 
     EXPECT_THROW(sampler.ensureGreedySamplingBuffers(2), rtp_llm::RTPException);
+}
+
+// Regression guard for the XPU pinned-memory contract: greedy sampling buffers
+// must follow the compile-time kPinHostMemory flag instead of unconditionally
+// requesting CUDA-style pinned host memory. On XPU (kPinHostMemory == false)
+// pinned host memory is unavailable, so the sampler must allocate plain host
+// tensors or service startup fails when the Sampler is constructed.
+TEST_F(SamplerTest, testGreedySamplingBuffersHonorPinFlag) {
+    Sampler sampler(SamplerInitParams{2, false});
+
+    for (const auto& slot : sampler.greedy_sampling_buffer_slots_) {
+        ASSERT_EQ(slot.buffers.seed_host.is_pinned(), kPinHostMemory);
+        ASSERT_EQ(slot.buffers.offset_host.is_pinned(), kPinHostMemory);
+        ASSERT_EQ(slot.buffers.output_ids_ptrs_host.is_pinned(), kPinHostMemory);
+    }
 }
 
 TEST_F(SamplerTest, testGeneralSampling) {

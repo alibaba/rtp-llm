@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace rtp_llm {
 
@@ -61,7 +62,7 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
     sampler_inputs.vocab_size = vocab_size;
     if (return_all_probs != ReturnAllProbsMode::NONE) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size_in, (int64_t)vocab_size},
-                                                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+                                                torch::TensorOptions().dtype(torch::kFloat32).device(getTorchDevice()));
         if (return_all_probs == ReturnAllProbsMode::ORIGINAL) {
             sampler_inputs.return_original_all_probs = true;
         }
@@ -117,10 +118,10 @@ SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGrou
     sampler_inputs.input_lengths  = torch::empty({bs}, torch::kInt32);
     sampler_inputs.num_beams_in   = torch::empty({bs}, torch::kLong);
     sampler_inputs.num_beams_out  = torch::empty({bs}, torch::kLong);
-    static const auto pinned_int  = torch::TensorOptions(torch::kInt).pinned_memory(true);
-    static const auto pinned_i32  = torch::TensorOptions(torch::kInt32).pinned_memory(true);
-    static const auto pinned_f32  = torch::TensorOptions(torch::kFloat32).pinned_memory(true);
-    static const auto pinned_bool = torch::TensorOptions(torch::kBool).pinned_memory(true);
+    static const auto pinned_int  = torch::TensorOptions(torch::kInt).pinned_memory(kPinHostMemory);
+    static const auto pinned_i32  = torch::TensorOptions(torch::kInt32).pinned_memory(kPinHostMemory);
+    static const auto pinned_f32  = torch::TensorOptions(torch::kFloat32).pinned_memory(kPinHostMemory);
+    static const auto pinned_bool = torch::TensorOptions(torch::kBool).pinned_memory(kPinHostMemory);
 
     sampler_inputs.top_k                = torch::empty({bs}, pinned_int);
     sampler_inputs.top_p                = torch::empty({bs}, pinned_f32);
