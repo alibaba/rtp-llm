@@ -548,6 +548,47 @@ class ModelRpcClient(object):
             if response_iterator:
                 response_iterator.cancel()
 
+    def _role_addr_target(self, input_py: GenerateInput) -> Optional[str]:
+        """Pre-assigned backend for this input, or None if it carries no usable role_addr.
+
+        Same role-matching rule as :meth:`enqueue` — a caller that routed the request (the master,
+        or the dispatcher stamping ``generate_config.role_addrs``) has already chosen the backend,
+        and honouring it is the whole point of that choice.
+        """
+        for role_addr in input_py.generate_config.role_addrs:
+            if (
+                (self._decode_entrance and role_addr.role == RoleType.DECODE)
+                or role_addr.role == RoleType.PDFUSION
+                or (not self._decode_entrance and role_addr.role == RoleType.PREFILL)
+            ):
+                if role_addr.ip != "":
+                    return role_addr.ip + ":" + str(role_addr.grpc_port)
+        return None
+
+    def _select_batch_address(self, inputs: list[GenerateInput]) -> str:
+        """Target for one batch RPC.
+
+        A batch RPC goes to a single backend, so every input in it must agree on the target. The
+        dispatcher stamps one chunk with one target and the chunk shares a single generate_config,
+        so agreement holds by construction; a disagreement means the caller mis-assembled the batch
+        and silently sending it to the first input's backend would route the rest somewhere they
+        were not scheduled for.
+        """
+        targets = {self._role_addr_target(inp) for inp in inputs}
+        if targets == {None}:
+            # Nothing pre-assigned: fall back to the static data-parallel address list.
+            if not self._addresses:
+                raise ValueError(
+                    f"No address found for batch request: {inputs[0].request_id}"
+                )
+            return self._addresses[inputs[0].request_id % len(self._addresses)]
+        if len(targets) > 1:
+            raise ValueError(
+                f"batch request: [{len(inputs)} items] has inconsistent pre-assigned "
+                f"backends {sorted(str(t) for t in targets)}; one batch RPC targets one backend"
+            )
+        return targets.pop()
+
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
         if not inputs:
             return []
@@ -561,7 +602,7 @@ class ModelRpcClient(object):
             input_pb = trans_input(inp)
             batch_input_pb.inputs.append(input_pb)
 
-        target_address = self._addresses[inputs[0].request_id % len(self._addresses)]
+        target_address = self._select_batch_address(inputs)
         logging.debug(
             f"batch request: [{len(inputs)} items] send to address: {target_address}"
         )

@@ -1,6 +1,7 @@
 import asyncio
 import struct
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 # Mock the ops module to avoid CUDA dependency in this unit test
@@ -25,7 +26,7 @@ from unittest import TestCase, main
 
 import torch
 
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.generate_config import GenerateConfig, RoleType
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
@@ -180,6 +181,65 @@ class ModelRpcClientTest(TestCase):
         logits_2 = res[2].logits.tolist()
         self.assertAlmostEqual(logits_2[0][0], 0.0, places=6)
         self.assertAlmostEqual(logits_2[0][1], 0.0, places=6)
+
+
+class BatchAddressSelectionTest(TestCase):
+    """The dispatcher stamps generate_config.role_addrs on the prompt_batch endpoints, and
+    route_ips then skips FE's own master round-trip because they are present. batch_enqueue must
+    actually send the chunk to that pre-assigned backend — otherwise the scheduling decision is
+    silently discarded and the request lands on whatever the static address list says.
+
+    rtp_llm.ops is mocked at the top of this file (no CUDA here), so RoleType is a MagicMock and a
+    real pydantic RoleAddr cannot be built. _select_batch_address only reads a few attributes, and
+    the role comparison is against that same mocked RoleType, so lightweight stubs exercise the
+    real logic faithfully.
+    """
+
+    @staticmethod
+    def _client(addresses):
+        client = ModelRpcClient.__new__(ModelRpcClient)
+        client._addresses = addresses
+        client._decode_entrance = False
+        return client
+
+    @staticmethod
+    def _addr(ip, role, grpc_port=8089):
+        return SimpleNamespace(role=role, ip=ip, http_port=8088, grpc_port=grpc_port)
+
+    @staticmethod
+    def _input(request_id, role_addrs=()):
+        return SimpleNamespace(
+            request_id=request_id,
+            generate_config=SimpleNamespace(role_addrs=list(role_addrs)),
+        )
+
+    def test_pre_assigned_role_addr_wins_over_static_addresses(self):
+        client = self._client(["10.0.0.99:100"])
+        addr = self._addr("10.0.0.7", RoleType.PDFUSION)
+        inputs = [self._input(1, [addr]), self._input(2, [addr])]
+
+        self.assertEqual("10.0.0.7:8089", client._select_batch_address(inputs))
+
+    def test_falls_back_to_static_addresses_when_nothing_pre_assigned(self):
+        client = self._client(["10.0.0.1:100", "10.0.0.2:100"])
+        inputs = [self._input(3), self._input(4)]
+
+        self.assertEqual("10.0.0.2:100", client._select_batch_address(inputs))
+
+    def test_inconsistent_pre_assignment_is_rejected_not_silently_mis_routed(self):
+        client = self._client(["10.0.0.1:100"])
+        inputs = [
+            self._input(5, [self._addr("10.0.0.7", RoleType.PDFUSION)]),
+            self._input(6, [self._addr("10.0.0.8", RoleType.PDFUSION)]),
+        ]
+
+        with self.assertRaises(ValueError):
+            client._select_batch_address(inputs)
+
+    def test_empty_static_addresses_raises_instead_of_dividing_by_zero(self):
+        client = self._client([])
+        with self.assertRaises(ValueError):
+            client._select_batch_address([self._input(7)])
 
 
 if __name__ == "__main__":
