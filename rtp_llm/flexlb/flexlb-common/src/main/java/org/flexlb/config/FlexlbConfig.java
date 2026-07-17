@@ -467,24 +467,17 @@ public class FlexlbConfig {
     /**
      * Configurable prefill-time prediction formula.
      *
-     * <p>Supported variables:
-     * {@code inputTokens, hitCacheTokens, computeTokens, hasHitCache, batchSize}
+     * <p>Batch-scoped variables:
+     * {@code batchSize, totalInputTokens, totalHitCacheTokens, totalComputeTokens,
+     * maxInputTokens, maxComputeTokens}
+     * <br>Per-request variables:
+     * {@code inputTokens, hitCacheTokens, computeTokens, hasHitCache}
      * <br>Operators: {@code + - * / ^}
      * <br>Functions: {@code sqrt(x) log(x) exp(x) abs(x) max(a,b) min(a,b) pow(a,b)}
      * <br>Batch aggregate: {@code sum(expr)} evaluates {@code expr} per request and sums it.
-     *
-     * <p>DeepSeek-V4-Flash PDFusion example:
-     * {@code "174.374677211 + 52.642812003*log(batchSize + 1)
-     * + 0.000746856881262*sum(2048*log(1 + exp((computeTokens - 8192)/2048)))
-     * + 0.0074536400604*sum(4096*log(1 + exp((computeTokens - 24576)/4096)))
-     * + 5.73664292066e-05*sum(8192*log(1 + exp((computeTokens - 65536)/8192)))
-     * + 0.00111135741393*sum(8192*log(1 + exp((computeTokens - 81920)/8192)))
-     * + 0.00424878987222*sum((hitCacheTokens/(inputTokens + 1))*(4096*log(1 + exp((computeTokens - 24576)/4096))))
-     * + 0.000489415479845*sum((log(hitCacheTokens + 1)/max(log(inputTokens + 1), 1))*(4096*log(1 + exp((computeTokens - 24576)/4096))))
-     * + 18.7646922156*(sum(hasHitCache)/batchSize)
-     * + 4.59475450657*(sum(hitCacheTokens/(inputTokens + 1))/batchSize)
-     * - 41.7583481006*(sum(log(hitCacheTokens + 1)/max(log(inputTokens + 1), 1))/batchSize)
-     * - 5.4218960925*(sum(hitCacheTokens/(hitCacheTokens + 4096))/batchSize)"}
+     * Batch-scoped variables are not valid inside {@code sum(expr)}. For example,
+     * {@code totalComputeTokens^2} is the square of the whole batch's compute-token count,
+     * whereas {@code sum(computeTokens^2)} is the sum of per-request squares.
      */
     private String costFormula = "sum(computeTokens) + 0.3*sum(hitCacheTokens)";
 

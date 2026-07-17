@@ -18,7 +18,8 @@ import java.util.Set;
  *   <li>{@link #estimateMs(long, long)} — single request:
  *       fills per-request variables and sets {@code batchSize=1}</li>
  *   <li>{@link #predictBatchMs(List)} — batch: aggregates token statistics,
- *       then evaluates {@code sum(expr)} over the batch items</li>
+ *       exposes explicit {@code total*}/{@code max*} variables and evaluates
+ *       {@code sum(expr)} over the batch items when per-request distribution is needed</li>
  * </ul>
  *
  * <p>Construction is cheap — the formula is parsed once and the AST is shared
@@ -99,7 +100,7 @@ public class FormulaPredictor implements PrefillTimePredictor {
      * Compute a hash key from the batch items' token statistics.
      * Only {@code seqLen} and {@code hitCache} participate, because these are the
      * only inputs that affect the formula result (via {@code inputTokens},
-     * {@code hitCacheTokens}, {@code computeTokens}, {@code hasHitCache}, and {@code batchSize}).
+     * {@code hitCacheTokens}, {@code computeTokens}, batch totals/maxima, and {@code batchSize}).
      */
     private long computeCacheKey(List<BatchItem> items) {
         long hash = cacheVersion;          // 纳入版本号

@@ -29,18 +29,26 @@ import java.util.function.Predicate;
  *   <tr><td>{@code computeTokens}</td><td>{@code inputTokens - hitCacheTokens}</td></tr>
  *   <tr><td>{@code hasHitCache}</td><td>1 if {@code hitCacheTokens > 0}, otherwise 0</td></tr>
  *   <tr><td>{@code batchSize}</td><td>number of requests in the batch</td></tr>
+ *   <tr><td>{@code totalInputTokens}</td><td>sum of input tokens across the batch</td></tr>
+ *   <tr><td>{@code totalHitCacheTokens}</td><td>sum of cache-hit tokens across the batch</td></tr>
+ *   <tr><td>{@code totalComputeTokens}</td><td>{@code totalInputTokens - totalHitCacheTokens}</td></tr>
+ *   <tr><td>{@code maxInputTokens}</td><td>maximum request input length in the batch</td></tr>
+ *   <tr><td>{@code maxComputeTokens}</td><td>maximum request compute length in the batch</td></tr>
  * </table>
- * <p>Use {@code sum(expr)} for batch aggregates, for example
- * {@code sum(computeTokens)}, {@code sum(computeTokens^2)}, or
- * {@code sum(computeTokens * hitCacheTokens)}.
+ * <p>Batch-scoped variables ({@code batchSize}, {@code total*}, and {@code max*}) must be used
+ * outside {@code sum(expr)}. Use the explicit {@code total*} variables for nonlinear batch-total terms. For example,
+ * {@code totalComputeTokens^2} squares the batch total, while
+ * {@code sum(computeTokens^2)} sums per-request squares. These expressions are intentionally
+ * different and must not be substituted for each other. Use {@code sum(expr)} only when the
+ * per-request distribution is part of the model.
  *
  * <h3>Example</h3>
  * <pre>{@code
- *   "174.374677211 + 52.642812003*log(batchSize + 1)
- *       + 0.000746856881262*sum(2048*log(1 + exp((computeTokens - 8192)/2048)))
- *       + 0.0074536400604*sum(4096*log(1 + exp((computeTokens - 24576)/4096)))
- *       + 18.7646922156*(sum(hasHitCache)/batchSize)
- *       - 41.7583481006*(sum(log(hitCacheTokens + 1)/max(log(inputTokens + 1), 1))/batchSize)"
+ *   "param(base, 100) + param(batch, 2)*batchSize
+ *       + param(compute, 0.01)*totalComputeTokens
+ *       + param(compute2, 1e-8)*totalComputeTokens^2
+ *       + param(maxCompute, 0.001)*maxComputeTokens
+ *       + param(distribution, 1e-8)*sum(computeTokens^2)"
  * }</pre>
  */
 public final class PrefillTimeFormula {
@@ -65,14 +73,24 @@ public final class PrefillTimeFormula {
     static final int IDX_HIT_CACHE_TOKENS = 2;
     static final int IDX_COMPUTE_TOKENS = 3;
     static final int IDX_HAS_HIT_CACHE = 4;
-    static final int VAR_COUNT = 5;
+    static final int IDX_TOTAL_INPUT_TOKENS = 5;
+    static final int IDX_TOTAL_HIT_CACHE_TOKENS = 6;
+    static final int IDX_TOTAL_COMPUTE_TOKENS = 7;
+    static final int IDX_MAX_INPUT_TOKENS = 8;
+    static final int IDX_MAX_COMPUTE_TOKENS = 9;
+    static final int VAR_COUNT = 10;
 
     private static final Map<String, Integer> VAR_INDEX_MAP = Map.of(
             "batchSize", IDX_BATCH_SIZE,
             "inputTokens", IDX_INPUT_TOKENS,
             "hitCacheTokens", IDX_HIT_CACHE_TOKENS,
             "computeTokens", IDX_COMPUTE_TOKENS,
-            "hasHitCache", IDX_HAS_HIT_CACHE
+            "hasHitCache", IDX_HAS_HIT_CACHE,
+            "totalInputTokens", IDX_TOTAL_INPUT_TOKENS,
+            "totalHitCacheTokens", IDX_TOTAL_HIT_CACHE_TOKENS,
+            "totalComputeTokens", IDX_TOTAL_COMPUTE_TOKENS,
+            "maxInputTokens", IDX_MAX_INPUT_TOKENS,
+            "maxComputeTokens", IDX_MAX_COMPUTE_TOKENS
     );
 
     private final String source;
@@ -293,6 +311,7 @@ public final class PrefillTimeFormula {
         private final Predicate<String> supportedVariable;
         private final Map<String, ParameterNode> parameters;
         private int pos;
+        private int aggregateDepth;
 
         Parser(String input, Predicate<String> supportedVariable, Map<String, ParameterNode> parameters) {
             this.input = input;
@@ -382,6 +401,9 @@ public final class PrefillTimeFormula {
                 if (!supportedVariable.test(name)) {
                     throw error("Unknown variable: " + name);
                 }
+                if (aggregateDepth > 0 && PrefillTimeVariableBindings.isBatchScoped(name)) {
+                    throw error("Batch-scoped variable cannot be used inside sum(): " + name);
+                }
                 Integer idx = VAR_INDEX_MAP.get(name);
                 if (idx == null) {
                     throw error("Variable not in index map: " + name);
@@ -432,8 +454,19 @@ public final class PrefillTimeFormula {
                 throw error("Unknown function: " + name);
             }
             skipWs();
-            Node arg0 = parseExpression();
-            if (AGGREGATE_FUNCTIONS.contains(name)) {
+            boolean aggregate = AGGREGATE_FUNCTIONS.contains(name);
+            if (aggregate) {
+                aggregateDepth++;
+            }
+            Node arg0;
+            try {
+                arg0 = parseExpression();
+            } finally {
+                if (aggregate) {
+                    aggregateDepth--;
+                }
+            }
+            if (aggregate) {
                 skipWs();
                 if (!match(')')) {
                     throw error("Expected ')' after aggregate function argument");

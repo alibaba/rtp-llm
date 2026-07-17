@@ -40,6 +40,14 @@ class FormulaPredictorTest {
                 new FormulaPredictor("c + p + sum_c + n"));
     }
 
+    @Test
+    void parseRejectsBatchScopedVariablesInsideSum() {
+        assertThrows(IllegalArgumentException.class, () ->
+                new FormulaPredictor("sum(totalComputeTokens)"));
+        assertThrows(IllegalArgumentException.class, () ->
+                new FormulaPredictor("sum(batchSize)"));
+    }
+
     // ---- estimateMs (single request) ----
 
     @Test
@@ -189,6 +197,33 @@ class FormulaPredictorTest {
         long result = (long) p.predictBatchMs(List.of(item1, item2));
 
         assertEquals(1600, result);
+    }
+
+    @Test
+    void predictBatchMsExposesExplicitBatchTotalsAndMaxima() {
+        FormulaPredictor p = new FormulaPredictor(
+                "batchSize + totalInputTokens + totalHitCacheTokens + totalComputeTokens"
+                        + " + maxInputTokens + maxComputeTokens");
+
+        BatchItem item1 = batchItem(500, 200);
+        BatchItem item2 = batchItem(300, 100);
+
+        // 2 + 800 + 300 + 500 + 500 + 300
+        assertEquals(2402, p.predictBatchMs(List.of(item1, item2)));
+        // Single-request mode binds the same explicit batch variables.
+        assertEquals(1801, p.estimateMs(500, 200));
+    }
+
+    @Test
+    void batchTotalSquareIsNotPerRequestSquareSum() {
+        FormulaPredictor p = new FormulaPredictor(
+                "totalComputeTokens^2 - sum(computeTokens^2)");
+
+        BatchItem item1 = batchItem(500, 200); // compute=300
+        BatchItem item2 = batchItem(300, 100); // compute=200
+
+        // (300 + 200)^2 - (300^2 + 200^2) = 120000.
+        assertEquals(120000, p.predictBatchMs(List.of(item1, item2)));
     }
 
     @Test
