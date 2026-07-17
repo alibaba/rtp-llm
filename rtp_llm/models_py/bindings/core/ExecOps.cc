@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <mutex>
 #include <atomic>
+#include <optional>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
 #elif USING_ROCM
@@ -446,6 +447,11 @@ py::function g_broadcast_fn;  // (tensors: list[Tensor], root: int, mode: int) -
 py::function g_allreduce_fn;  // (tensor: Tensor, op: int, mode: int, dest: Optional[Tensor]) -> Tensor
 py::function
     g_allgather_fn;  // (recv_buffers: list[Tensor], mode: int, send_buffers: list[Tensor], inplace: bool) -> None
+// Optional async comm callbacks, registered separately via register_async_comm_ops.
+// Kept apart from the required trio above so a build/runtime without the async path
+// (e.g. no sleep mode) leaves them unset and execAllReduceAsync degrades gracefully.
+py::function g_async_allreduce_fn;  // (tensor: Tensor, op: int, mode: int) -> int (opaque handle)
+py::function g_comm_poll_fn;        // (handle: int) -> bool (completed)
 }  // anonymous namespace
 
 void execBroadcast(const BroadcastParams& params) {
@@ -477,6 +483,37 @@ AllReduceOutput execAllReduce(const AllReduceParams& params) {
                      static_cast<int>(params.mode),
                      params.dest.defined() ? py::cast(params.dest) : py::none());
     return AllReduceOutput{result.cast<torch::Tensor>()};
+}
+
+uint64_t execAllReduceAsync(const AllReduceParams& params) {
+    py::function fn;
+    {
+        std::lock_guard<std::mutex> lock(g_comm_mutex);
+        fn = g_async_allreduce_fn;
+    }
+    if (!static_cast<bool>(fn)) {
+        // No async callback registered: signal "unavailable" so the caller can fall back.
+        return 0;
+    }
+    py::gil_scoped_acquire gil;
+    auto                   handle = fn(params.buffer, static_cast<int>(params.op), static_cast<int>(params.mode));
+    return handle.cast<uint64_t>();
+}
+
+bool pollAsyncComm(uint64_t handle) {
+    if (handle == 0) {
+        return true;
+    }
+    py::function fn;
+    {
+        std::lock_guard<std::mutex> lock(g_comm_mutex);
+        fn = g_comm_poll_fn;
+    }
+    if (!static_cast<bool>(fn)) {
+        return true;
+    }
+    py::gil_scoped_acquire gil;
+    return fn(handle).cast<bool>();
 }
 
 void execAllGather(const AllGatherParams& params) {
@@ -612,12 +649,25 @@ void registerExecCtxOps(pybind11::module& m) {
         "Register Python callbacks for C++ communication ops.");
 
     m.def(
+        "register_async_comm_ops",
+        [](py::function async_allreduce_fn, py::function comm_poll_fn) {
+            std::lock_guard<std::mutex> lock(g_comm_mutex);
+            g_async_allreduce_fn = std::move(async_allreduce_fn);
+            g_comm_poll_fn       = std::move(comm_poll_fn);
+        },
+        py::arg("async_allreduce_fn"),
+        py::arg("comm_poll_fn"),
+        "Register Python callbacks for async C++ communication ops (async all-reduce + poll).");
+
+    m.def(
         "clear_comm_ops",
         []() {
             std::lock_guard<std::mutex> lock(g_comm_mutex);
-            g_broadcast_fn = py::function();
-            g_allreduce_fn = py::function();
-            g_allgather_fn = py::function();
+            g_broadcast_fn       = py::function();
+            g_allreduce_fn       = py::function();
+            g_allgather_fn       = py::function();
+            g_async_allreduce_fn = py::function();
+            g_comm_poll_fn       = py::function();
         },
         "Clear registered Python communication callbacks.");
 }
