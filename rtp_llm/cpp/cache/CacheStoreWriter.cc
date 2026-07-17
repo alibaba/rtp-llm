@@ -7,7 +7,8 @@
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
-#include <vector>
+#include <algorithm>
+#include <utility>
 
 namespace rtp_llm {
 
@@ -299,47 +300,6 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                               param.layer_id);
         }
     }
-}
-
-// ============================================================
-// Static ops (weight preprocessing)
-// ============================================================
-
-#if USING_CUDA
-torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool user_arm_gemm_use_kai) {
-    return weight;
-}
-
-torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale) {
-    return weight;
-}
-#elif USING_ROCM
-torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool user_arm_gemm_use_kai) {
-    return weight;
-}
-
-torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale) {
-    return weight;
-}
-#endif
-
-// ============================================================
-// Sync / error check wrappers
-// ============================================================
-
-void cudaSyncAndCheck() {
-    runtimeSyncAndCheck();
-}
-
-void cudaCheckLastError() {
-#if USING_CUDA
-    check_cuda_error();
-#elif USING_ROCM
-    auto err = hipGetLastError();
-    if (err != hipSuccess) {
-        RTP_LLM_LOG_ERROR("ROCm error: %s", hipGetErrorString(err));
-    }
-#endif
 }
 
 void execWriteCacheStore(const CacheStoreInputs&     inputs,

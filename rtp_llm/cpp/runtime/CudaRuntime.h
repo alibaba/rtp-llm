@@ -24,7 +24,7 @@ bool    isRuntimeInitialized();
 int64_t getDeviceId();
 bool    getEnableCommOverlap();
 
-// Resolves AUTO → FLASH_MLA / FLASH_INFER based on the current GPU arch.
+// Resolves AUTO to FLASH_MLA / FLASH_INFER based on the current GPU arch.
 // Other values pass through unchanged.
 MlaOpsType resolveMlaOpsType(MlaOpsType requested);
 

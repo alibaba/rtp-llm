@@ -11,7 +11,7 @@ namespace rtp_llm {
 //
 // Currently dispatched to Python callbacks registered via
 // `register_comm_ops` (see registerCommPybindings). The callbacks
-// live as static-storage globals — this file MUST link into exactly
+// live as static-storage globals; this file MUST link into exactly
 // one .so (librtp_compute_ops.so) so that all callers share the same
 // callback table.
 // ===================================================================

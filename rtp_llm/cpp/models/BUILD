@@ -165,29 +165,59 @@ cc_library(
 )
 
 cc_library(
-    name = "sampling_ops",
+    name = "sampling_ops_hdrs",
     hdrs = ["SamplingOps.h"],
-    srcs = ["SamplingOps.cc"],
     deps = [
         "//rtp_llm/models_py/bindings/core:op_data",
     ],
     visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "sampling_ops_impl",
+    srcs = ["SamplingOps.cc"],
+    deps = [":sampling_ops_hdrs"],
     alwayslink = True,
+    visibility = [
+        "//rtp_llm/cpp/pybind:__pkg__",
+        "//rtp_llm/models_py/bindings/core:__pkg__",
+    ],
+)
+
+alias(
+    name = "sampling_ops",
+    actual = ":sampling_ops_hdrs",
+    visibility = ["//visibility:public"],
 )
 
 # Expert statistics - monitoring component
 cc_library(
-    name = "stats",
+    name = "stats_hdrs",
     hdrs = [
         "eplb/stats/ExpertStats.h",
         "eplb/stats/MoeExpertStats.h",
     ],
+    deps = torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "stats_impl",
     srcs = [
         "eplb/stats/MoeExpertStats.cc",
     ],
-    deps = torch_deps(),
-    visibility = ["//visibility:public"],
+    deps = [":stats_hdrs"] + torch_deps(),
     alwayslink = True,
+    visibility = [
+        "//rtp_llm/cpp/pybind:__pkg__",
+        "//rtp_llm/models_py/bindings/core:__pkg__",
+    ],
+)
+
+alias(
+    name = "stats",
+    actual = ":stats_hdrs",
+    visibility = ["//visibility:public"],
 )
 
 # EPLB configuration

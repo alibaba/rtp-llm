@@ -1,9 +1,11 @@
 #include <torch/library.h>
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#if USING_CUDA || USING_ROCM
 #include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/cpp/comm/CollectiveBackend.h"
 #include "rtp_llm/models_py/bindings/core/WeightPreprocess.h"
+#endif
 #include "rtp_llm/models_py/bindings/RegisterOps.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "pybind11/pybind11.h"

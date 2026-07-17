@@ -77,24 +77,38 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# Stub weight preprocess hooks — kept until upstream callers stop calling them.
+# Stub weight preprocess declarations; safe to link into every .so.
 cc_library(
-    name = "weight_preprocess",
+    name = "weight_preprocess_hdrs",
     hdrs = ["WeightPreprocess.h"],
-    srcs = ["WeightPreprocess.cc"],
     deps = torch_deps(),
     copts = copts(),
     visibility = ["//visibility:public"],
-    alwayslink = True,
 )
 
-# Dep-bundle alias: aggregates ONLY the HEADERS of every new runtime / comm /
-# copy / cache / sample home.  Engine targets (KVCacheManager etc., linked into
-# libth_transformer.so) depend on this — they must NOT pull the _impl targets,
-# because the `g_*_fn` callback trio and the CudaRuntime legacy globals live in
-# exactly one .so (librtp_compute_ops.so via th_compute_lib → :_impl).  A
-# second copy in libth_transformer.so would be unregistered → crash at
-# KVCacheManager::allocateAndSync → execAllGather assert.
+# Stateless compatibility implementation. Keep it in librtp_compute_ops.so so
+# exec_ops_hdr remains an interface-only dependency bundle.
+cc_library(
+    name = "weight_preprocess_impl",
+    srcs = ["WeightPreprocess.cc"],
+    deps = [":weight_preprocess_hdrs"] + torch_deps(),
+    copts = copts(),
+    alwayslink = True,
+    visibility = ["//rtp_llm/cpp/pybind:__pkg__"],
+)
+
+alias(
+    name = "weight_preprocess",
+    actual = ":weight_preprocess_hdrs",
+    visibility = ["//visibility:public"],
+)
+
+# Interface-only dependency bundle. Engine targets (KVCacheManager etc., linked into
+# libth_transformer.so) depend on this; they must NOT pull the stateful _impl
+# targets, because the `g_*_fn` callback trio and the CudaRuntime legacy globals
+# live in exactly one .so (librtp_compute_ops.so via th_compute_lib -> :_impl).
+# A second copy in libth_transformer.so would be unregistered -> crash at
+# KVCacheManager::allocateAndSync -> execAllGather assert.
 cc_library(
     name = "exec_ops_hdr",
     deps = [
@@ -118,7 +132,7 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# Test aggregator — tests link the _impl targets directly because they produce
+# Test aggregator; tests link the _impl targets directly because they produce
 # a single cc_test binary and need the symbol definitions locally.
 cc_library(
     name = "exec_ops_test_lib",
@@ -129,6 +143,9 @@ cc_library(
         "//rtp_llm/cpp/comm:collective_backend_impl",
         "//rtp_llm/cpp/cache:cache_store_writer_impl",
         "//rtp_llm/cpp/core:copy_ops_impl",
+        ":weight_preprocess_impl",
+        "//rtp_llm/cpp/models:sampling_ops_impl",
+        "//rtp_llm/cpp/models:stats_impl",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -163,7 +180,7 @@ filegroup(
 # exec_ctx_ops: platform sample kernels (CudaSampleOp.cc / CudaBeamSearchOp.cc).
 # Linked into librtp_compute_ops.so via cuda_impl (CUDA) or directly via
 # th_compute_lib / common (ROCm).  The legacy exec_ctx_state / exec_ctx_rocm
-# targets — which existed only to keep process-wide globals on a single .so —
+# targets, which existed only to keep process-wide globals on a single .so,
 # are gone now that those globals live in cpp/runtime + cpp/comm.
 cc_library(
     name = "exec_ctx_ops",

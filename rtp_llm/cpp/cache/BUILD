@@ -24,7 +24,7 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# Header-only — safe to link everywhere.
+# Header-only; safe to link everywhere.
 cc_library(
     name = "cache_store_writer_hdrs",
     hdrs = ["CacheStoreWriter.h"],
@@ -40,7 +40,7 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# Impl — MUST live in exactly one .so (librtp_compute_ops.so via
+# Impl; MUST live in exactly one .so (librtp_compute_ops.so via
 # th_compute_lib) so that engine-side callers (libth_transformer.so) resolve
 # writeCacheStore symbols via dynamic linker to the single canonical copy.
 cc_library(

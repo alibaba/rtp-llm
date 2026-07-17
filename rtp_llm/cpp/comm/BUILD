@@ -5,7 +5,7 @@ package(default_visibility = ["//visibility:public"])
 
 # Header-only declarations of execBroadcast / execAllReduce / execAllGather /
 # execSyncCommunication and the pybind registration entry.  Safe to link into
-# every .so — provides no symbols with state.
+# every .so; provides no symbols with state.
 cc_library(
     name = "collective_backend_hdrs",
     hdrs = ["CollectiveBackend.h"],
@@ -31,7 +31,7 @@ cc_library(
     alwayslink = True,
 )
 
-# Compat alias — most callers only need the header.  Anything that previously
+# Compat alias; most callers only need the header.  Anything that previously
 # depended on `:collective_backend` for its side of the pybind/engine boundary
 # should keep working because the impl lives in the single .so they load.
 alias(

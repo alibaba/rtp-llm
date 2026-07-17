@@ -3,7 +3,7 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//visibility:public"])
 
-# Header-only — safe to link everywhere.
+# Header-only; safe to link everywhere.
 cc_library(
     name = "bootstrap_hdrs",
     hdrs = ["Bootstrap.h"],
@@ -90,7 +90,7 @@ cc_library(
     alwayslink = True,
 )
 
-# Compat alias — header-only for generic callers.  th_compute_lib must depend
+# Compat alias; header-only for generic callers.  th_compute_lib must depend
 # on :cuda_runtime_impl explicitly.
 alias(
     name = "cuda_runtime",

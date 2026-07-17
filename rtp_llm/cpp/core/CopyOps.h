@@ -20,7 +20,7 @@ void runtimeBatchCopy(const BatchCopyParams& params);
 // In-place mask: zero out logits[b,v] where mask[v] != 0.
 void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask);
 
-// Non-blocking copy on a dedicated stream (CUDA) — for pinned-host scratch buffers.
+// Non-blocking copy on a dedicated stream (CUDA), for pinned-host scratch buffers.
 void execNoBlockCopy(const CopyParams& params);
 
 // Forwarders kept for callers that still use the exec* names.

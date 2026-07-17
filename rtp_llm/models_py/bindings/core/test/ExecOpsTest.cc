@@ -238,7 +238,7 @@ protected:
 
 TEST_F(ExecOpsTest, testInitRuntimeIdempotent) {
     auto mla = initRuntime(1, false, true, MlaOpsType::AUTO);
-    (void)mla;
+    EXPECT_EQ(mla, resolveMlaOpsType(MlaOpsType::AUTO));
     ASSERT_TRUE(isRuntimeInitialized());
     EXPECT_EQ(getDeviceId(), 0);
     EXPECT_FALSE(getEnableCommOverlap());

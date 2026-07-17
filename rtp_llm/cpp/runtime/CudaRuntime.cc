@@ -20,7 +20,7 @@
 namespace rtp_llm {
 
 // ============================================================
-// Legacy state — read by getDeviceId / getEnableCommOverlap /
+// Legacy state; read by getDeviceId / getEnableCommOverlap /
 // isRuntimeInitialized accessors. Set by initRuntime().
 // ============================================================
 
@@ -28,6 +28,7 @@ namespace {
 std::atomic<bool> g_runtime_initialized{false};
 bool              g_enable_comm_overlap = true;
 int64_t           g_device_id           = 0;
+MlaOpsType        g_mla_ops_type        = MlaOpsType::AUTO;
 std::mutex        g_runtime_mutex;
 }  // anonymous namespace
 
@@ -57,14 +58,15 @@ MlaOpsType initRuntime(std::size_t device_id, bool trace_memory, bool enable_com
     std::lock_guard<std::mutex> lock(g_runtime_mutex);
     if (g_runtime_initialized.load(std::memory_order_acquire)) {
         RTP_LLM_LOG_WARNING("Runtime is already initialized! will do nothing.");
-        return mla_ops_type;
+        return g_mla_ops_type;
     }
 
     process::bootstrap({device_id, trace_memory});
     g_enable_comm_overlap = enable_comm_overlap;
     g_device_id           = static_cast<int64_t>(device_id);
+    g_mla_ops_type        = resolveMlaOpsType(mla_ops_type);
     g_runtime_initialized.store(true, std::memory_order_release);
-    return resolveMlaOpsType(mla_ops_type);
+    return g_mla_ops_type;
 }
 
 // ============================================================
@@ -78,14 +80,18 @@ void runtimeSyncAndCheck() {
     check_cuda_error();
 }
 
-#else  // ROCm
+#elif USING_ROCM
 
 void runtimeSyncAndCheck() {
     ROCM_CHECK(hipDeviceSynchronize());
     ROCM_CHECK_ERROR();
 }
 
-#endif  // USING_CUDA
+#else
+
+void runtimeSyncAndCheck() {}
+
+#endif
 
 void cudaSyncAndCheck() {
     runtimeSyncAndCheck();
@@ -134,7 +140,7 @@ std::shared_ptr<torch::Event> runtimeCreateEvent() {
     return event;
 }
 
-#else  // ROCm
+#elif USING_ROCM
 
 std::shared_ptr<torch::Event> runtimeCreateEvent() {
     auto event = std::make_shared<torch::Event>(torch::kHIP);
@@ -142,7 +148,13 @@ std::shared_ptr<torch::Event> runtimeCreateEvent() {
     return event;
 }
 
-#endif  // USING_CUDA
+#else
+
+std::shared_ptr<torch::Event> runtimeCreateEvent() {
+    RTP_LLM_FAIL("runtimeCreateEvent requires a CUDA or ROCm build");
+}
+
+#endif
 
 // ============================================================
 // Status queries
@@ -156,6 +168,8 @@ ExecStatus getGpuExecStatus() {
     RTP_LLM_CHECK(error == cudaSuccess);
 #elif USING_ROCM
     hipMemGetInfo(&mem.free_bytes, &total_bytes);
+#else
+    RTP_LLM_FAIL("getGpuExecStatus requires a CUDA or ROCm build");
 #endif
     mem.used_bytes      = total_bytes - mem.free_bytes;
     mem.available_bytes = mem.free_bytes;

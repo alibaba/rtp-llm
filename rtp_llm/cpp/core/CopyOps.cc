@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/core/CopyOps.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -31,8 +32,6 @@ namespace rtp_llm {
 #if USING_CUDA
 using DeviceGuard = c10::cuda::CUDAGuard;
 #endif
-
-bool getEnableCommOverlap();  // defined in rtp_llm/cpp/runtime/CudaRuntime.cc.
 
 namespace {
 #if USING_CUDA
@@ -164,7 +163,7 @@ void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask) {
     }
 }
 
-#else  // ROCm / non-CUDA
+#elif USING_ROCM
 
 // ============================================================
 // Copy ops (ROCm)
@@ -234,7 +233,49 @@ void runtimeMaskLogits(torch::Tensor& /*logits*/, const torch::Tensor& /*mask*/)
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-#endif  // USING_CUDA
+#else
+
+// ============================================================
+// Copy ops (CPU / unsupported accelerator builds)
+// ============================================================
+
+void runtimeCopy(const CopyParams& params) {
+    params.check();
+    const auto& src = params.src;
+    const auto& dst = params.dst;
+    RTP_LLM_CHECK_WITH_INFO(!src.is_cuda() && !dst.is_cuda(), "runtimeCopy requires host tensors in a non-GPU build");
+    if (src.data_ptr() != dst.data_ptr()) {
+        std::memcpy(dst.data_ptr(), src.data_ptr(), src.nbytes());
+    }
+}
+
+static void multiMergeCopyImpl(const MultiMergeCopyParams& params) {
+    for (size_t i = 0; i < params.src_ptrs.size(); ++i) {
+        auto* dst = static_cast<char*>(params.dst_ptr) + params.dst_offsets[i];
+        std::memcpy(dst, params.src_ptrs[i], params.copy_size[i]);
+    }
+}
+
+static void batchCopyFallback(const BatchCopyParams& params) {
+    for (uint32_t copy_type_enum = 0; copy_type_enum < BatchCopyParams::TYPE_SIZE; ++copy_type_enum) {
+        const auto  copy_type = BatchCopyParams::CopyType(copy_type_enum);
+        const auto& buffers   = params.copy_buffers[copy_type];
+        if (buffers.sizes.empty()) {
+            continue;
+        }
+        RTP_LLM_CHECK_WITH_INFO(copy_type == BatchCopyParams::H2H,
+                                "runtimeBatchCopy only supports H2H copies in a non-GPU build");
+        for (size_t i = 0; i < buffers.sizes.size(); ++i) {
+            std::memcpy(buffers.dst_ptr[i], buffers.src_ptr[i], buffers.sizes[i]);
+        }
+    }
+}
+
+void runtimeMaskLogits(torch::Tensor& /*logits*/, const torch::Tensor& /*mask*/) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+#endif
 
 #if USING_CUDA || USING_ROCM
 void runtimeBatchCopy(const BatchCopyParams& params) {
