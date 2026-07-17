@@ -272,11 +272,71 @@ class Qwen3DSparkModel(GptModelBase):
             to_dev(last_page_len),
         )
 
+    def _inject_context_kv_dense(
+        self,
+        fused: torch.Tensor,  # [B*width, H] fused features, request-major
+        attn_inputs: PyAttentionInputs,
+        ctx_starts: torch.Tensor,  # [B] int32, window base per request
+    ) -> None:
+        """Device fast path: fixed-width window [start, start + width).
+
+        Pure-device index math (no .tolist()/.item()/D2H) and a direct
+        advanced-indexing scatter into the paged cache — flashinfer's append
+        needs a host-built ragged page_indptr, which would reintroduce the
+        sync this path exists to remove.  Shapes are fixed given (B, width),
+        so the whole pass is CUDA-graph capturable later.
+
+        Rows past a request's accept_len carry garbage (rejected-trajectory)
+        features by design: they land inside the block forward's own query
+        window, whose attention path overwrites them (write-before-read)
+        before anything reads them.  See the executor-side comment in
+        MtpBatchStreamProcessor::updateDecodePostDSparkDraftModelInput.
+        """
+        num_rows = fused.shape[0]
+        batch = ctx_starts.numel()
+        assert batch > 0 and num_rows % batch == 0, (
+            f"dense inject: rows ({num_rows}) not a multiple of batch ({batch})"
+        )
+        width = num_rows // batch
+        dev = fused.device
+        starts = ctx_starts.to(device=dev, dtype=torch.int32, non_blocking=True)
+        offsets = torch.arange(width, dtype=torch.int32, device=dev)
+        positions = (starts.unsqueeze(1) + offsets).reshape(-1)  # [B*width]
+
+        page_size = self.attn_configs.kernel_tokens_per_block
+        block_table = attn_inputs.kv_cache_block_id_device
+        if block_table is None or block_table.numel() == 0:
+            # The standard engine path only publishes the pinned host table
+            # (kv_cache_block_id_device is a trtllm_gen/headwise extra); the
+            # async H2D upload keeps this path free of D2H syncs.
+            block_table = attn_inputs.kv_cache_block_id_host.to(
+                device=dev, non_blocking=True
+            )
+        if block_table.dim() == 3:
+            # [group, batch, blocks]; single FULL group in phase-1 => group 0.
+            block_table = block_table[0]
+        batch_idx = torch.repeat_interleave(
+            torch.arange(batch, dtype=torch.int64, device=dev), width
+        )
+        pos_long = positions.long()
+        page_ids = block_table[batch_idx, pos_long // page_size].long()  # [B*width]
+        slots = pos_long % page_size
+
+        assert self.kv_cache is not None, "kv_cache required for feature injection"
+        for layer_idx in range(self.layer_num):
+            k, v = self.project_context_kv(fused, positions, layer_idx)
+            base = self.kv_cache.get_layer_cache(layer_idx).kv_cache_base
+            # base is [P, 2, nkv, page, hd] (HND); advanced indices at dims
+            # 0/1/3 broadcast to the front => LHS shape [B*width, nkv, hd].
+            base[page_ids, 0, :, slots, :] = k.to(base.dtype)
+            base[page_ids, 1, :, slots, :] = v.to(base.dtype)
+
     def inject_context_kv(
         self,
         fused: torch.Tensor,  # [T_ctx, H] fused features, request-major order
         attn_inputs: PyAttentionInputs,
         ctx_lengths: Optional[torch.Tensor] = None,  # [B]; None => whole prefix
+        ctx_starts: Optional[torch.Tensor] = None,  # [B]; window base override
     ) -> None:
         """Write feature KV into the paged cache at the ctx positions.
 
@@ -284,8 +344,17 @@ class Qwen3DSparkModel(GptModelBase):
         flashinfer append_paged_kv_cache with self-built indices.  The query
         block's own K/V are NOT written here — the block forward writes them
         at the future positions as part of its regular attention path.
+
+        With ctx_starts given, the window is [starts[i], starts[i] + width)
+        and the device fast path runs instead (dense decode-tail seeding);
+        the ragged host path below stays for prefill seeding (naturally
+        variable-length prompt suffixes, outside any graph-capture scope).
         """
         import flashinfer.page as page
+
+        if ctx_starts is not None:
+            self._inject_context_kv_dense(fused, attn_inputs, ctx_starts)
+            return
 
         if ctx_lengths is None:
             ctx_lengths = attn_inputs.prefix_lengths
@@ -388,6 +457,7 @@ class Qwen3DSparkModel(GptModelBase):
         inputs: PyModelInputs,
         fmha_impl: Any = None,
         ctx_lengths: Optional[torch.Tensor] = None,
+        ctx_starts: Optional[torch.Tensor] = None,
     ) -> DSparkProposal:
         """One draft round: inject features, block forward, correct, decide.
 
@@ -399,20 +469,34 @@ class Qwen3DSparkModel(GptModelBase):
             request-major; ctx_lengths[i] rows per request, ending at
             prefix_lengths[i].  ctx_lengths=None means the whole prefix
             (prefill seeding);
+          - ctx_starts (or inputs.dspark_ctx_starts): dense decode-tail mode —
+            1+k rows per request injected at [starts[i], starts[i] + 1 + k),
+            device fast path, ctx_lengths ignored;
           - inputs.attention_inputs: chunked-prefill metadata with
             prefix_lengths = committed_len, input_lengths = 1+k each.
         """
         width = self.dspark_params.block_width
         attention_inputs = inputs.attention_inputs
         input_lengths = attention_inputs.input_lengths
-        assert bool((input_lengths == width).all()), (
-            f"dspark block forward expects uniform input_lengths == {width}, "
-            f"got {input_lengths.tolist()}"
-        )
+        if not input_lengths.is_cuda:
+            # Host-side sanity only on CPU inputs (UT paths): a CUDA read here
+            # would D2H-sync every decode round.  The executor guarantees
+            # uniform k+1 blocks on the engine path.
+            assert bool((input_lengths == width).all()), (
+                f"dspark block forward expects uniform input_lengths == {width}, "
+                f"got {input_lengths.tolist()}"
+            )
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
-        if ctx_lengths is None:
+        # Executor channel for the dense decode-tail window base; when set,
+        # injection takes the device fast path with a fixed [B, width] window.
+        if ctx_starts is None:
+            ctx_starts = getattr(inputs, "dspark_ctx_starts", None)
+            if ctx_starts is not None and ctx_starts.numel() == 0:
+                ctx_starts = None
+
+        if ctx_lengths is None and ctx_starts is None:
             # Executor channel for the incremental (decode-tail) injection
             # window; unset means "whole prefix" (prefill seeding).
             ctx_from_inputs = getattr(inputs, "dspark_ctx_lengths", None)
@@ -422,7 +506,9 @@ class Qwen3DSparkModel(GptModelBase):
         aux = inputs.input_hiddens
         if aux is not None and aux.numel() > 0:
             fused = self.combine_hidden_states(aux)
-            self.inject_context_kv(fused, attention_inputs, ctx_lengths)
+            self.inject_context_kv(
+                fused, attention_inputs, ctx_lengths, ctx_starts=ctx_starts
+            )
 
         head_hidden = self.block_forward(inputs.input_ids, inputs, fmha_impl)
         base_logits = self.compute_base_logits(head_hidden)

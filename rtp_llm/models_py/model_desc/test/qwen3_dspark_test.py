@@ -370,6 +370,144 @@ class DSparkModelGoldenTest(unittest.TestCase):
                 self.assertTrue(torch.equal(self._read_cache(i, 0), before[i][0]))
                 self.assertTrue(torch.equal(self._read_cache(i, 1), before[i][1]))
 
+    # ---- Dense (decode-tail) injection fast path --------------------------
+
+    def _with_fresh_caches(self):
+        """Fresh zeroed caches swapped into the model; caller must restore."""
+        width = self.config.dspark_config.block_width
+        num_pages = math.ceil((self.ctx_len + width) / PAGE_SIZE)
+        caches = _make_layer_caches(
+            self.config.num_layers,
+            num_pages,
+            self.model.attn_configs.kv_head_num,
+            self.model.attn_configs.size_per_head,
+        )
+        self.model.kv_cache = _TestKVCache(caches)
+        return caches
+
+    def test_dense_scatter_matches_flashinfer_append(self):
+        """The device scatter write must produce the exact cache bytes the
+        ragged flashinfer-append path produces for the same window (layout
+        equivalence, page-crossing window)."""
+        from rtp_llm.ops.compute_ops import PyAttentionInputs
+
+        width = self.config.dspark_config.block_width
+        start = PAGE_SIZE - 3  # window crosses the page boundary
+        block_ids_host = self.inputs.attention_inputs.kv_cache_block_id_host
+        aux_rows = self.golden["aux_concat"][:width].to(
+            device="cuda", dtype=torch.bfloat16
+        )
+
+        old_kv_cache = self.model.kv_cache
+        try:
+            with torch.no_grad():
+                fused = self.model.combine_hidden_states(aux_rows)
+
+                caches_append = self._with_fresh_caches()
+                ai = PyAttentionInputs()
+                ai.prefix_lengths = torch.tensor(
+                    [start + width], dtype=torch.int32, device="cpu"
+                )
+                ai.kv_cache_block_id_host = block_ids_host
+                self.model.inject_context_kv(
+                    fused, ai, torch.tensor([width], dtype=torch.int32)
+                )
+
+                caches_scatter = self._with_fresh_caches()
+                # Host table only — the engine's standard path never fills
+                # kv_cache_block_id_device, so this exercises the H2D fallback.
+                ai_dense = PyAttentionInputs()
+                ai_dense.kv_cache_block_id_host = block_ids_host
+                self.model.inject_context_kv(
+                    fused,
+                    ai_dense,
+                    ctx_starts=torch.tensor(
+                        [start], dtype=torch.int32, device="cuda"
+                    ),
+                )
+
+            for i in range(self.config.num_layers):
+                self.assertTrue(
+                    torch.equal(
+                        caches_append[i].kv_cache_base,
+                        caches_scatter[i].kv_cache_base,
+                    ),
+                    f"layer {i}: scatter write differs from flashinfer append",
+                )
+        finally:
+            self.model.kv_cache = old_kv_cache
+
+    def test_dense_garbage_rows_have_no_reader(self):
+        """The dense path deliberately injects garbage features at the block
+        forward's own query window; the block forward must overwrite them
+        (write-before-read) so the proposal is bit-identical no matter what
+        the garbage was.  Full engine-shaped round via propose(ctx_starts=...)."""
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+            PyFlashinferPagedPrefillImpl,
+        )
+        from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
+
+        ds = self.config.dspark_config
+        width = ds.block_width
+        aux_full = self.golden["aux_concat"].to(device="cuda", dtype=torch.bfloat16)
+        anchor_id = self.manifest["anchor_id"]
+        mask_id = self.manifest["mask_token_id"]
+
+        def run_round(garbage_seed: int):
+            self._with_fresh_caches()
+            with torch.no_grad():
+                # Seed the committed prefix like prefill does (deterministic).
+                ai_seed = PyAttentionInputs()
+                ai_seed.prefix_lengths = torch.tensor(
+                    [self.ctx_len], dtype=torch.int32, device="cpu"
+                )
+                ai_seed.kv_cache_block_id_host = (
+                    self.inputs.attention_inputs.kv_cache_block_id_host
+                )
+                self.model.inject_context_kv(
+                    self.model.combine_hidden_states(aux_full), ai_seed
+                )
+
+                # Dense decode-tail round: all width rows are garbage, landing
+                # exactly on the block's query window [ctx_len, ctx_len+width).
+                torch.manual_seed(garbage_seed)
+                garbage_aux = torch.randn_like(aux_full[:width])
+                inputs = PyModelInputs()
+                inputs.input_ids = torch.tensor(
+                    [anchor_id] + [mask_id] * ds.speculative_tokens,
+                    dtype=torch.int32,
+                    device="cuda",
+                )
+                inputs.input_hiddens = garbage_aux
+                inputs.attention_inputs = _make_block_attn_inputs(self.ctx_len, width)
+                fmha_impl = PyFlashinferPagedPrefillImpl(
+                    self.model.attn_configs, inputs.attention_inputs
+                )
+                return self.model.propose(
+                    inputs,
+                    fmha_impl=fmha_impl,
+                    ctx_starts=torch.tensor(
+                        [self.ctx_len], dtype=torch.int32, device="cuda"
+                    ),
+                )
+
+        old_kv_cache = self.model.kv_cache
+        try:
+            p1 = run_round(garbage_seed=123)
+            p2 = run_round(garbage_seed=456)
+        finally:
+            self.model.kv_cache = old_kv_cache
+
+        self.assertEqual(
+            p1.draft_tokens.cpu().tolist(), p2.draft_tokens.cpu().tolist()
+        )
+        self.assertTrue(
+            torch.equal(p1.head_hidden, p2.head_hidden),
+            "block forward read pre-existing (garbage) KV at its query window",
+        )
+        self.assertTrue(torch.equal(p1.base_logits, p2.base_logits))
+        self.assertTrue(torch.equal(p1.corrected_logits, p2.corrected_logits))
+
     # ---- Engine-facing forward() output contract -------------------------
 
     def test_forward_fills_draft_proposal_outputs(self):

@@ -50,6 +50,11 @@ struct GptModelInputs {
     // rows of last_hidden_states (aux features) per request, ending at the
     // request's prefix length.  Undefined = inject the whole prefix (seeding).
     torch::Tensor dspark_ctx_lengths;
+    // Optional window base override: int32 [batch].  When defined, request i's
+    // injection window is [starts[i], starts[i] + lengths[i]) instead of the
+    // default "ends at prefix length".  Used by the dense decode-tail path,
+    // whose fixed k+1 window ends past the new committed prefix.
+    torch::Tensor dspark_ctx_starts;
 
     torch::Tensor attention_mask;  // [batch_size, seq_len, seq_len]
 

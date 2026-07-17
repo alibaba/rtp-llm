@@ -775,50 +775,62 @@ void MtpBatchStreamProcessor::updateDecodePostDSparkDraftModelInput(
     const size_t                                 batch_size,
     torch::Tensor&                               hidden_states_d_t,
     TensorHolder&                                host_holder) {
-    // Decode-tail seeding: anchor = last accepted (bonus/corrected) token,
-    // feature window = the accept_len committed rows of the verify aux export.
-    // Phase-1a runs sync-eager, so waiting for the rejection D2H here is fine.
+    // Decode-tail seeding, dense variant: pass ALL k+1 verify-window aux rows
+    // per request (fixed shapes) instead of gathering the accept_len committed
+    // rows (variable shapes + a rejection D2H sync + host-built row indices).
+    // The injection window is [old_prefix, old_prefix + k + 1), expressed via
+    // dspark_ctx_starts because it does not end at the new committed prefix.
+    //
+    // Why injecting the rejected rows' (garbage) features is safe:
+    //  - rows 0..accept_len-1 land on committed positions: valid features.
+    //  - rows accept_len..k land on [prefix_new, old_prefix + k + 1), a
+    //    subrange of the tail block forward's own query window
+    //    [prefix_new, prefix_new + k + 1).  propose() injects BEFORE the block
+    //    forward, whose attention path (rope + cache append writes each layer
+    //    before any read) overwrites those positions with its own K/V; the
+    //    block only attends to [0, prefix_new) plus in-block rows, so the
+    //    garbage has no reader before it is overwritten.
+    //  - next round the dense window shifts right, so committed positions are
+    //    always re-covered with valid features (the no-rollback overwrite
+    //    invariant), and prefix-cache reuse only takes committed positions.
+    //  - accept_len == k+1 (all accepted) means zero garbage rows.
     const int64_t width = propose_step_ + 1;
 
-    speculative_sampler_output.transfer_done_event->synchronize();
-    const auto& accept_len_cpu    = speculative_sampler_output.accept_len_cpu;
-    const auto& accept_tokens_cpu = speculative_sampler_output.accept_tokens_cpu;
-    RTP_LLM_CHECK_WITH_INFO(accept_len_cpu.defined() && accept_tokens_cpu.defined(),
-                            "dspark decode tail: accept_len/accept_tokens host copies missing");
     RTP_LLM_CHECK_WITH_INFO(model_output.aux_hidden_states.defined(),
                             "dspark decode tail: target verify did not export aux_hidden_states");
+    const auto& accept_len_gpu    = speculative_sampler_output.accept_len;
+    const auto& accept_tokens_gpu = speculative_sampler_output.accept_tokens;
+    RTP_LLM_CHECK_WITH_INFO(accept_len_gpu.defined() && accept_tokens_gpu.defined(),
+                            "dspark decode tail: accept_len/accept_tokens missing");
 
-    const auto pin_i32   = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
-    auto       combo_cpu = torch::full({(int64_t)batch_size, width}, dspark_mask_token_id_, pin_i32);
+    // anchor[i] = accept_tokens[i, accept_len[i] - 1], gathered on device
+    // (same pattern as draftModelDecode's pre_target_device_gather).
+    auto accept_len_d = toCudaInt32(accept_len_gpu, host_holder);
+    auto idx_long     = (accept_len_d.to(torch::kInt64) - 1).reshape({(int64_t)batch_size, 1});
+    auto anchors      = toCudaInt32(accept_tokens_gpu, host_holder)
+                       .reshape({(int64_t)batch_size, -1})
+                       .gather(1, idx_long)
+                       .reshape({(int64_t)batch_size});
+    auto combo_2d = fullInt32OnCuda({(int64_t)batch_size, width}, dspark_mask_token_id_);
+    combo_2d.select(1, 0).copy_(anchors);
+    model_input.combo_tokens = combo_2d.reshape({-1});
 
-    const int64_t        token_stride = accept_tokens_cpu.size(1);
-    const int32_t*       accept_len   = accept_len_cpu.data_ptr<int32_t>();
-    const int32_t*       accept_toks  = accept_tokens_cpu.data_ptr<int32_t>();
-    int32_t*             combo        = combo_cpu.data_ptr<int32_t>();
-    std::vector<int64_t> aux_row_ids;
-    aux_row_ids.reserve(batch_size * width);
-    for (int64_t i = 0; i < (int64_t)batch_size; ++i) {
-        const int len = accept_len[i];
-        RTP_LLM_CHECK_WITH_INFO(
-            len >= 1 && len <= width, "dspark decode tail: accept_len %d out of [1, %ld]", len, (long)width);
-        combo[i * width] = accept_toks[i * token_stride + len - 1];
-        for (int j = 0; j < len; ++j) {
-            aux_row_ids.push_back(i * width + j);
-        }
-    }
-    model_input.combo_tokens = toCudaInt32(combo_cpu.reshape({-1}), host_holder);
-
-    // Gather the accepted rows of the verify aux features, request-major.
-    const auto& aux   = model_output.aux_hidden_states;
-    auto        aux2d = aux.reshape({aux.size(0), -1});
-    auto        rows  = torch::tensor(aux_row_ids, torch::TensorOptions().dtype(torch::kLong)).to(torch::kCUDA);
-    model_input.last_hidden_states = aux2d.index_select(0, rows);
+    // Dense feature pass-through: all B*(k+1) verify rows, no gather.
+    const auto& aux = model_output.aux_hidden_states;
+    RTP_LLM_CHECK_WITH_INFO(aux.size(0) == (int64_t)batch_size * width,
+                            "dspark decode tail: aux rows %ld != batch*width %ld",
+                            (long)aux.size(0),
+                            (long)((int64_t)batch_size * width));
+    model_input.last_hidden_states = aux.reshape({aux.size(0), -1});
     hidden_states_d_t              = model_input.last_hidden_states;
 
-    auto accept_len_d              = toCudaInt32(speculative_sampler_output.accept_len, host_holder);
-    model_input.dspark_ctx_lengths = accept_len_d;
-    // new committed prefix = verify prefix + accept_len
-    model_input.prefix_lengths = toCudaInt32(model_input.prefix_lengths, host_holder) + accept_len_d;
+    // Window base = the verify prefix (clone: prefix_lengths is republished
+    // below and the stream may reuse the old storage); new committed prefix
+    // advances by accept_len.
+    auto old_prefix                = toCudaInt32(model_input.prefix_lengths, host_holder).clone();
+    model_input.dspark_ctx_starts  = old_prefix;
+    model_input.dspark_ctx_lengths = fullInt32OnCuda({(int64_t)batch_size}, width);
+    model_input.prefix_lengths     = old_prefix + accept_len_d;
     // input_lengths ([B] of k+1) and empty sequence_lengths carry over from
     // setVerifyPairInputs; draft logits are unused, keep them to anchor rows.
     model_input.lm_output_indexes = torch::arange(0, (int64_t)batch_size * width, width, cudaInt32Options());

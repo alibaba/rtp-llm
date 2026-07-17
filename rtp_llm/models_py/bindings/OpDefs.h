@@ -236,6 +236,10 @@ struct PyModelInputs {
     // of input_hiddens per request, ending at the request's prefix length.
     // Undefined = inject the whole prefix (prefill seeding semantics).
     torch::Tensor dspark_ctx_lengths;
+    // Optional window base override: int32 [batch].  When defined, request i's
+    // window is [starts[i], starts[i] + lengths[i]) and the model takes the
+    // device fast path (fixed shapes, no host sync) in inject_context_kv.
+    torch::Tensor dspark_ctx_starts;
 };
 
 struct PyModelOutputs {
