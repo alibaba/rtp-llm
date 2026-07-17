@@ -99,7 +99,7 @@ class DispatcherFePoolRefresherTest {
     }
 
     @Test
-    void emptyPollDoesNotDrainAPopulatedPool() {
+    void emptyPollWithinGraceDoesNotDrainAPopulatedPool() {
         StubServiceDiscovery discovery = new StubServiceDiscovery(
                 "svc.fe", WorkerHost.of("10.0.0.1", 8088), WorkerHost.of("10.0.0.2", 8088));
         DispatcherFePoolRefresher r = refresher(discovery, "svc.fe");
@@ -109,13 +109,13 @@ class DispatcherFePoolRefresherTest {
         r.refresh();
 
         assertEquals(2, r.currentSize(),
-                "an empty discovery result is indistinguishable from a swallowed lookup failure, so it "
-                        + "must not drop every FE and fail 100% of batch traffic — FeHealthChecker probes "
-                        + "the known FEs and takes out any that are genuinely gone");
+                "a fresh empty discovery result may be a swallowed lookup failure, so within the grace "
+                        + "window it must not drop every FE and fail 100% of batch traffic — "
+                        + "FeHealthChecker probes the known FEs and takes out any that are genuinely gone");
     }
 
     @Test
-    void emptyListenerPushDoesNotDrainAPopulatedPool() {
+    void emptyListenerPushWithinGraceDoesNotDrainAPopulatedPool() {
         StubServiceDiscovery discovery = new StubServiceDiscovery(
                 "svc.fe", WorkerHost.of("10.0.0.1", 8088));
         DispatcherFePoolRefresher r = refresher(discovery, "svc.fe");
@@ -125,6 +125,56 @@ class DispatcherFePoolRefresherTest {
 
         assertEquals(1, r.currentSize(),
                 "the listener path must hold the same line as the poll path");
+    }
+
+    @Test
+    void emptyDiscoveryBeyondGraceDrainsThePoolSoFePoolFailsFast() {
+        // Scale-to-zero must converge. Without the grace bound the pool would hold the removed
+        // FEs forever, FeHealthChecker would mark them all dead, and FePool.next()'s all-dead
+        // fallback would keep shoveling every request at hosts that no longer exist.
+        java.util.concurrent.atomic.AtomicLong clock = new java.util.concurrent.atomic.AtomicLong(0);
+        StubServiceDiscovery discovery = new StubServiceDiscovery(
+                "svc.fe", WorkerHost.of("10.0.0.1", 8088), WorkerHost.of("10.0.0.2", 8088));
+        DispatcherFePoolRefresher r = refresher(discovery, "svc.fe", clock::get);
+        assertEquals(2, r.currentSize());
+
+        discovery.setHosts(List.of());
+        clock.addAndGet(java.util.concurrent.TimeUnit.MINUTES.toNanos(1));
+        r.refresh();
+        assertEquals(2, r.currentSize(), "within grace the known FEs are kept");
+
+        clock.addAndGet(java.util.concurrent.TimeUnit.MINUTES.toNanos(5));
+        r.refresh();
+        assertEquals(0, r.currentSize(),
+                "an empty result persisting beyond grace is the truth (fleet scaled to zero) "
+                        + "and must drain the pool");
+
+        FePool pool = DispatcherTestSupport.fePool(r.source(), url -> true);
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class, pool::next,
+                "with the pool drained, FePool must fail fast instead of timing out against "
+                        + "removed hosts");
+    }
+
+    @Test
+    void nonEmptyResultResetsTheGraceClock() {
+        java.util.concurrent.atomic.AtomicLong clock = new java.util.concurrent.atomic.AtomicLong(0);
+        StubServiceDiscovery discovery = new StubServiceDiscovery(
+                "svc.fe", WorkerHost.of("10.0.0.1", 8088));
+        DispatcherFePoolRefresher r = refresher(discovery, "svc.fe", clock::get);
+
+        // 4 minutes of emptiness, then a real answer, then emptiness again: the second empty
+        // run measures from the last non-empty result, not from the first empty one.
+        discovery.setHosts(List.of());
+        clock.addAndGet(java.util.concurrent.TimeUnit.MINUTES.toNanos(4));
+        r.refresh();
+        discovery.setHosts(List.of(WorkerHost.of("10.0.0.2", 8088)));
+        r.refresh();
+        discovery.setHosts(List.of());
+        clock.addAndGet(java.util.concurrent.TimeUnit.MINUTES.toNanos(4));
+        r.refresh();
+
+        assertEquals(1, r.currentSize(),
+                "an intermittent non-empty result must restart the grace window");
     }
 
     @Test

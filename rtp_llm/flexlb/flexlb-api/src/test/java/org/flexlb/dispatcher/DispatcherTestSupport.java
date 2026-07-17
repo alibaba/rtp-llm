@@ -116,6 +116,13 @@ final class DispatcherTestSupport {
         return new DispatcherFePoolRefresher(sd, cfg);
     }
 
+    /** Overload with a controllable monotonic clock, for exercising the empty-discovery grace window. */
+    static DispatcherFePoolRefresher refresher(ServiceDiscovery sd, String serviceId, java.util.function.LongSupplier nanoClock) {
+        DispatchConfig cfg = new DispatchConfig();
+        cfg.setFePoolServiceId(serviceId);
+        return new DispatcherFePoolRefresher(sd, cfg, nanoClock);
+    }
+
     /**
      * Test stub returning a controllable host list and exposing the registered listener so push
      * scenarios can be exercised without a real discovery client.
