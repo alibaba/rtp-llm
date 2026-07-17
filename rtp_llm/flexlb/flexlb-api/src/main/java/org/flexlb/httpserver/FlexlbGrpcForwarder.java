@@ -16,9 +16,7 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Function;
 
 @Component
 public class FlexlbGrpcForwarder {
@@ -27,19 +25,16 @@ public class FlexlbGrpcForwarder {
     private final ConfigService configService;
     private final EngineHealthReporter engineHealthReporter;
     private final EventLoopGroup eventLoopGroup;
-    private final Executor executor;
     private final ConcurrentHashMap<String, ManagedChannel> channels = new ConcurrentHashMap<>();
 
     public FlexlbGrpcForwarder(LBStatusConsistencyService lbStatusConsistencyService,
                                ConfigService configService,
                                EngineHealthReporter engineHealthReporter,
-                               @Qualifier("managedChannelEventLoopGroup") EventLoopGroup eventLoopGroup,
-                               @Qualifier("forwarderChannelExecutor") Executor executor) {
+                               @Qualifier("managedChannelEventLoopGroup") EventLoopGroup eventLoopGroup) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.configService = configService;
         this.engineHealthReporter = engineHealthReporter;
         this.eventLoopGroup = eventLoopGroup;
-        this.executor = executor;
     }
 
     public FlexlbScheduleProtocol.FlexlbScheduleResponsePB forwardToMaster(
@@ -75,46 +70,6 @@ public class FlexlbGrpcForwarder {
         }
     }
 
-    public FlexlbScheduleProtocol.FlexlbCancelResponsePB forwardCancelToMaster(
-            FlexlbScheduleProtocol.FlexlbCancelRequestPB request) {
-        return invokeMaster("cancel", request.getRequestId(), stub -> stub.cancel(request));
-    }
-
-    public FlexlbScheduleProtocol.GetRequestStateResponsePB forwardGetRequestStateToMaster(
-            FlexlbScheduleProtocol.GetRequestStateRequestPB request) {
-        return invokeMaster("state query", request.getRequestId(),
-                stub -> stub.getRequestState(request));
-    }
-
-    private <T> T invokeMaster(String operation,
-                               long requestId,
-                               Function<FlexlbServiceGrpc.FlexlbServiceBlockingStub, T> rpc) {
-        FlexlbServiceGrpc.FlexlbServiceBlockingStub stub = masterStub();
-        if (stub == null) {
-            return null;
-        }
-        try {
-            return rpc.apply(stub);
-        } catch (RuntimeException e) {
-            Logger.warn("Failed to forward FlexLB {} to master, request_id={}",
-                    operation, requestId, e);
-            return null;
-        }
-    }
-
-    private FlexlbServiceGrpc.FlexlbServiceBlockingStub masterStub() {
-        String masterHostIpPort = lbStatusConsistencyService.getMasterHostIpPort();
-        if (masterHostIpPort == null) {
-            return null;
-        }
-        int grpcPort = resolveGrpcPort(masterHostIpPort);
-        String ip = masterHostIpPort.split(":")[0];
-        String channelKey = ip + ":" + grpcPort;
-        ManagedChannel channel = channels.computeIfAbsent(channelKey, k -> createChannel(ip, grpcPort));
-        return FlexlbServiceGrpc.newBlockingStub(channel)
-                .withDeadlineAfter(configService.loadBalanceConfig().getPrefillLbTimeoutMs(), TimeUnit.MILLISECONDS);
-    }
-
     private int resolveGrpcPort(String masterHostIpPort) {
         // Always derive gRPC port from HTTP port using the same offset as FlexlbGrpcServer.
         String[] parts = masterHostIpPort.split(":");
@@ -128,7 +83,6 @@ public class FlexlbGrpcForwarder {
         return NettyChannelBuilder.forAddress(ip, port)
                 .channelType(NioSocketChannel.class)
                 .eventLoopGroup(eventLoopGroup)
-                .executor(executor)
                 .usePlaintext()
                 .keepAliveTime(30, TimeUnit.SECONDS)
                 .keepAliveTimeout(10, TimeUnit.SECONDS)

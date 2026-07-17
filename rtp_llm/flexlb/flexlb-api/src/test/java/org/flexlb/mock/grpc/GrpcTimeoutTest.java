@@ -1,6 +1,5 @@
 package org.flexlb.mock.grpc;
 
-import org.flexlb.balance.scheduler.RequestLifecycleState;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -35,8 +34,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>When the deadline fires, the blocking call throws {@code StatusRuntimeException}
  *       with status DEADLINE_EXCEEDED</li>
  *   <li>{@link org.flexlb.balance.scheduler.DefaultBatchDispatcher} catches this in its
- *       {@code catch (Throwable)} block and calls {@code onTimeout()}</li>
- *   <li>The scheduler records a TIMED_OUT tombstone and returns BATCH_SLO_EXPIRED</li>
+ *       {@code catch (Throwable)} block and calls {@code onFailure()}</li>
+ *   <li>The scheduler returns BATCH_SLO_EXPIRED</li>
  * </ul>
  *
  * <p>Note: The mock's {@code enqueueBatch} records the request <em>before</em> sleeping,
@@ -79,8 +78,6 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
         assertFalse(response.isSuccess(), "Request should fail when EnqueueBatch times out");
         assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode(),
                 "Request should have BATCH_SLO_EXPIRED error code");
-        assertEquals(RequestLifecycleState.TIMED_OUT,
-                scheduler.getRequestState(10001L, 0).state());
 
         // 3. Verify: mock prefill received the EnqueueBatch call (recorded before sleep)
         assertTrue(mockPrefillWorker.getEnqueueCount() >= 1,

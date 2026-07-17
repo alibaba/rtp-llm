@@ -1,11 +1,10 @@
 import unittest
 
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
-    ROLE_TYPE_PREFILL,
+from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
     FlexlbScheduleResponsePB,
     FlexlbServerStatusPB,
-    GenerateInputPB,
 )
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import GenerateInputPB
 from rtp_llm.server.master_client import MasterClient
 
 
@@ -82,7 +81,7 @@ def _make_schedule_response():
         enqueued_by_master=True,
         server_status=[
             FlexlbServerStatusPB(
-                role=ROLE_TYPE_PREFILL,
+                role="PREFILL",
                 server_ip="10.0.0.7",
                 http_port=8080,
                 grpc_port=9000,

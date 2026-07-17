@@ -67,7 +67,7 @@ RuntimeConfig __getstate__ field layout (14 items):
 import pickle
 import unittest
 
-from rtp_llm.ops import PDSepConfig, RuntimeConfig
+from rtp_llm.ops import PDSepConfig, RoleType, RuntimeConfig
 
 
 def _unpickle_from_state(cls, state_tuple):
@@ -198,6 +198,76 @@ class TestPDSepConfigPickle(unittest.TestCase):
         self.assertTrue(restored.decode_entrance)
         self.assertEqual(restored.prefill_slot_pool_size, 99)
         self.assertEqual(restored.prefill_stop_stream_wait_timeout_ms, 8888)
+
+    def test_unpickle_legacy_27_items_all_fields(self):
+        """Legacy 27-item tuple correctly restores ALL 22 fields with custom values.
+
+        This is the comprehensive regression guard: every field is set to a
+        distinct non-default value, serialized into a 27-item legacy tuple
+        (with 5 removed batch-coordination fields inserted at indices 20-24),
+        and then verified after deserialization.
+        """
+        cfg = PDSepConfig()
+        # Set every field to a distinctive non-default value
+        cfg.role_type = RoleType.DECODE
+        cfg.cache_store_rdma_mode = False
+        cfg.cache_store_listen_port = 1001
+        cfg.cache_store_connect_port = 1002
+        cfg.cache_store_rdma_listen_port = 1003
+        cfg.cache_store_rdma_connect_port = 1004
+        cfg.remote_rpc_server_port = 1005
+        cfg.prefill_retry_times = 7
+        cfg.prefill_retry_timeout_ms = 80
+        cfg.prefill_max_wait_timeout_ms = 900
+        cfg.decode_retry_times = 1010
+        cfg.decode_retry_timeout_ms = 1011
+        cfg.decode_retry_interval_ms = 1012
+        cfg.decode_polling_kv_cache_step_ms = 1013
+        cfg.decode_polling_call_prefill_ms = 1014
+        cfg.rdma_connect_retry_times = 1015
+        cfg.load_cache_timeout_ms = 1016
+        cfg.max_rpc_timeout_ms = 1017
+        cfg.worker_port_offset = 1018
+        cfg.decode_entrance = True
+        cfg.prefill_slot_pool_size = 1020
+        cfg.prefill_stop_stream_wait_timeout_ms = 1021
+
+        current_state = cfg.__reduce_ex__(2)[2]  # 22 items
+
+        # Build a 27-item legacy state: 20 basic + 5 removed batch coordination + 2 new fields
+        legacy_state = list(current_state[:20])
+        legacy_state.extend(
+            [60000, 10000, 10000, 0, 0]
+        )  # removed batch coordination settings
+        legacy_state.extend(
+            current_state[20:]
+        )  # prefill_slot_pool_size, prefill_stop_stream_wait_timeout_ms
+
+        restored = _unpickle_from_state(PDSepConfig, tuple(legacy_state))
+
+        # Verify ALL 22 fields are correctly restored
+        self.assertEqual(restored.role_type, RoleType.DECODE)
+        self.assertFalse(restored.cache_store_rdma_mode)
+        self.assertEqual(restored.cache_store_listen_port, 1001)
+        self.assertEqual(restored.cache_store_connect_port, 1002)
+        self.assertEqual(restored.cache_store_rdma_listen_port, 1003)
+        self.assertEqual(restored.cache_store_rdma_connect_port, 1004)
+        self.assertEqual(restored.remote_rpc_server_port, 1005)
+        self.assertEqual(restored.prefill_retry_times, 7)
+        self.assertEqual(restored.prefill_retry_timeout_ms, 80)
+        self.assertEqual(restored.prefill_max_wait_timeout_ms, 900)
+        self.assertEqual(restored.decode_retry_times, 1010)
+        self.assertEqual(restored.decode_retry_timeout_ms, 1011)
+        self.assertEqual(restored.decode_retry_interval_ms, 1012)
+        self.assertEqual(restored.decode_polling_kv_cache_step_ms, 1013)
+        self.assertEqual(restored.decode_polling_call_prefill_ms, 1014)
+        self.assertEqual(restored.rdma_connect_retry_times, 1015)
+        self.assertEqual(restored.load_cache_timeout_ms, 1016)
+        self.assertEqual(restored.max_rpc_timeout_ms, 1017)
+        self.assertEqual(restored.worker_port_offset, 1018)
+        self.assertTrue(restored.decode_entrance)
+        self.assertEqual(restored.prefill_slot_pool_size, 1020)
+        self.assertEqual(restored.prefill_stop_stream_wait_timeout_ms, 1021)
 
     def test_unpickle_legacy_26_items(self):
         """26-item tuple (with batch config + prefill_slot_pool_size, without stop_stream_wait) deserializes."""

@@ -85,7 +85,7 @@ class FlexlbBatchSchedulerTest {
         EndpointRegistry endpointRegistry = new EndpointRegistry(configService, null, reporter);
         BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService);
         scheduler = new FlexlbBatchScheduler(configService, router, engineWorkerStatus,
-                endpointRegistry, dispatcher, reporter);
+                endpointRegistry, dispatcher, reporter, null);
 
         // Create endpoint and batcher for the worker that successRoute() returns
         String ipPort = "10.0.0.1:8080";
@@ -246,7 +246,7 @@ class FlexlbBatchSchedulerTest {
         CompletableFuture<Response> scheduleFuture = scheduler.submit(context(85));
         assertTrue(enqueueStarted.await(2, TimeUnit.SECONDS));
         FlexlbBatchScheduler.InflightEntry entry = scheduler.inflight.get(85L);
-        long batchId = entry.lifecycle.snapshot().batchId();
+        long batchId = entry.batchId;
 
         TaskInfo finished = new TaskInfo();
         finished.setRequestId(85L);
@@ -262,8 +262,6 @@ class FlexlbBatchSchedulerTest {
         Response response = scheduleFuture.get(2, TimeUnit.SECONDS);
         assertTrue(response.isSuccess());
         assertTrue(response.isEnqueuedByMaster());
-        assertEquals(RequestLifecycleState.COMPLETED,
-                scheduler.getRequestState(85L, batchId).state());
     }
 
     @Test

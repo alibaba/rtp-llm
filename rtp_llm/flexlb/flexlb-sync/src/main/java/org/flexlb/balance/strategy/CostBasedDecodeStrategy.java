@@ -72,10 +72,10 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         if (selectedEndpoint != null) {
             long prefixLength = calcPrefixMatchLength(selectedEndpoint.getStatus().getCacheStatus(), balanceContext.getRequest().getBlockCacheKeys());
             ServerStatus result = buildServerStatus(selectedEndpoint, seqLen, expectedKvTokens, prefixLength, roleType, balanceContext.getRequestId(), balanceContext.getScheduleMode());
-            // Record the release callback so cancel() can release directly without
-            // going through FlexlbBatchScheduler. Only set for DECODE role in
-            // DIRECT/QUEUE mode; PREFILL has its own cancel mechanism (cancelPrefill
-            // gRPC), and BATCH cancel goes through FlexlbBatchScheduler.cancel().
+            // Record the release callback so resource cleanup can release directly
+            // without going through FlexlbBatchScheduler. Only set for DECODE role in
+            // DIRECT/QUEUE mode; BATCH cleanup goes through FlexlbBatchScheduler
+            // via onWorkerStatusUpdate or TTL eviction.
             if (result.isSuccess() && roleType == RoleType.DECODE
                     && (balanceContext.getScheduleMode() == ScheduleModeEnum.DIRECT
                         || balanceContext.getScheduleMode() == ScheduleModeEnum.QUEUE)) {

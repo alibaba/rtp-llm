@@ -107,7 +107,7 @@ private:
     bool                    response_worker_stop_{false};
     std::mutex              response_worker_mu_;
     std::condition_variable response_worker_cv_;
-    size_t                  response_worker_count_{0};
+    std::atomic<size_t>     response_worker_count_{0};
 
     // Thread pool replacing std::async / std::thread::detach.
     autil::ThreadPoolBasePtr slot_worker_pool_;  // Prepare + async response runners.

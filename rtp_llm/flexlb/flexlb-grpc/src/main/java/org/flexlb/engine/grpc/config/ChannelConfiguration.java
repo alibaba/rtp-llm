@@ -40,27 +40,6 @@ public class ChannelConfiguration {
         );
     }
 
-    /**
-     * Dedicated executor for {@link org.flexlb.httpserver.FlexlbGrpcForwarder} channels.
-     * <p>
-     * Kept separate from {@link #managedChannelThreadPoolExecutor()} so that load
-     * from {@code EngineGrpcClient} (engine status queries) cannot saturate the
-     * Forwarder's channel callback threads. The Forwarder already has fallback
-     * logic that routes locally when forwarding fails, so {@link ThreadPoolExecutor.AbortPolicy}
-     * is acceptable under saturation.
-     */
-    @Bean
-    public ThreadPoolExecutor forwarderChannelExecutor() {
-        return new ThreadPoolExecutor(
-                16,
-                16,
-                5, TimeUnit.MINUTES,
-                new LinkedBlockingQueue<>(2000),
-                new NamedThreadFactory("flexlb-forwarder-channel-executor"),
-                new ThreadPoolExecutor.AbortPolicy()
-        );
-    }
-
     @Bean
     public EventLoopGroup managedChannelEventLoopGroup() {
         return new NioEventLoopGroup(

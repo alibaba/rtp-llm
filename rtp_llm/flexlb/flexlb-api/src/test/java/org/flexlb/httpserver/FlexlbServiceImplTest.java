@@ -1,9 +1,6 @@
 package org.flexlb.httpserver;
 
 import io.grpc.stub.StreamObserver;
-import org.flexlb.balance.scheduler.CancelReason;
-import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
-import org.flexlb.balance.scheduler.RequestLifecycleState;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -226,46 +223,6 @@ class FlexlbServiceImplTest {
         assertEquals(100L, capturedRequest.getBlockCacheKeys().get(0));
         assertEquals(200L, capturedRequest.getBlockCacheKeys().get(1));
         assertEquals(2048L, capturedRequest.getSeqLen());
-    }
-
-    @Test
-    void testSchedule_returnsBatchIdAndLifecycle() {
-        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
-        Response response = new Response();
-        response.setSuccess(true);
-        response.setCode(200);
-        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
-        when(routeService.getRequestState(700L, 0)).thenReturn(
-                new RequestLifecycleSnapshot(700L, RequestLifecycleState.ACKNOWLEDGED,
-                        1001L, 10L, 20L, "engine acknowledged batch"));
-        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
-
-        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(700L)
-                .build(), observer);
-
-        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
-                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
-        verify(observer).onNext(captor.capture());
-        assertEquals(FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_ACKNOWLEDGED,
-                captor.getValue().getLifecycle().getState());
-        assertEquals(1001L, captor.getValue().getLifecycle().getBatchId());
-    }
-
-    @Test
-    void testGetRequestState_rejectsStaleBatchIdAsNotFound() {
-        when(routeService.getRequestState(702L, 1002L)).thenReturn(null);
-        StreamObserver<FlexlbScheduleProtocol.GetRequestStateResponsePB> observer = mock(StreamObserver.class);
-
-        service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                .setRequestId(702L)
-                .setBatchId(1002L)
-                .build(), observer);
-
-        ArgumentCaptor<FlexlbScheduleProtocol.GetRequestStateResponsePB> captor =
-                ArgumentCaptor.forClass(FlexlbScheduleProtocol.GetRequestStateResponsePB.class);
-        verify(observer).onNext(captor.capture());
-        assertFalse(captor.getValue().getFound());
     }
 
 }

@@ -123,7 +123,7 @@ bool PrefillBatchRpcServer::tryStartAsyncResponseWorker() {
     if (response_worker_stop_) {
         return false;
     }
-    ++response_worker_count_;
+    response_worker_count_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
@@ -131,9 +131,10 @@ void PrefillBatchRpcServer::finishAsyncResponseWorker() {
     bool notify = false;
     {
         std::lock_guard<std::mutex> lock(response_worker_mu_);
-        RTP_LLM_CHECK_WITH_INFO(response_worker_count_ > 0, "unbalanced async response worker finish");
-        --response_worker_count_;
-        notify = response_worker_stop_ && response_worker_count_ == 0;
+        RTP_LLM_CHECK_WITH_INFO(response_worker_count_.load(std::memory_order_relaxed) > 0,
+                                "unbalanced async response worker finish");
+        response_worker_count_.fetch_sub(1, std::memory_order_relaxed);
+        notify = response_worker_stop_ && response_worker_count_.load(std::memory_order_acquire) == 0;
     }
     if (notify) {
         response_worker_cv_.notify_all();
@@ -143,22 +144,23 @@ void PrefillBatchRpcServer::finishAsyncResponseWorker() {
 void PrefillBatchRpcServer::stopAsyncResponseWorkers() {
     std::unique_lock<std::mutex> lock(response_worker_mu_);
     response_worker_stop_ = true;
-    const bool stopped =
-        response_worker_cv_.wait_for(lock, std::chrono::minutes(10), [this] { return response_worker_count_ == 0; });
+    const bool stopped    = response_worker_cv_.wait_for(
+        lock, std::chrono::minutes(10), [this] { return response_worker_count_.load(std::memory_order_acquire) == 0; });
     if (!stopped) {
         RTP_LLM_LOG_WARNING("timed out waiting for %zu async response workers; cancelling remaining responses",
-                            response_worker_count_);
+                            response_worker_count_.load(std::memory_order_acquire));
     }
     lock.unlock();
 
     if (!stopped) {
         response_registry_.cancelAll();
         lock.lock();
-        const bool cancelled_stopped =
-            response_worker_cv_.wait_for(lock, std::chrono::minutes(5), [this] { return response_worker_count_ == 0; });
+        const bool cancelled_stopped = response_worker_cv_.wait_for(lock, std::chrono::minutes(5), [this] {
+            return response_worker_count_.load(std::memory_order_acquire) == 0;
+        });
         RTP_LLM_CHECK_WITH_INFO(cancelled_stopped,
                                 "timed out waiting for %zu async response workers five minutes after cancellation",
-                                response_worker_count_);
+                                response_worker_count_.load(std::memory_order_acquire));
     }
 }
 
@@ -189,7 +191,7 @@ void PrefillBatchRpcServer::reportPoolMetrics() {
     size_t response_worker_count = 0;
     {
         std::lock_guard<std::mutex> lock(response_worker_mu_);
-        response_worker_count = response_worker_count_;
+        response_worker_count = response_worker_count_.load(std::memory_order_relaxed);
     }
     // Report to kmonitor (called every 10s from GC thread)
     reportPoolMetricsToKmonitor(metrics_reporter_, "slot", slot_pool_metrics_);
@@ -309,7 +311,7 @@ grpc::Status PrefillBatchRpcServer::EnqueueGroup(grpc::ServerContext* /*context*
 grpc::Status PrefillBatchRpcServer::admitGroup(const EnqueueGroupRequestPB* request,
                                                EnqueueBatchResponsePB*      response,
                                                std::vector<BatchSlot>&      slots) {
-    if (request->batch_id().empty()) {
+    if (request->batch_id() == 0) {
         for (const auto& dp_input : request->requests()) {
             int64_t rid = dp_input.has_input() ? dp_input.input().request_id() : 0;
             addBatchError(response, rid, grpc::StatusCode::INVALID_ARGUMENT, "EnqueueGroup batch_id is empty");

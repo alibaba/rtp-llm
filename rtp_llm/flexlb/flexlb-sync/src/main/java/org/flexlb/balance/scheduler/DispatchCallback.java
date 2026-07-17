@@ -33,9 +33,4 @@ public interface DispatchCallback {
      * @param error the underlying error
      */
     void onFailure(BatchItem item, Throwable error);
-
-    /** Dispatch deadline elapsed before an acknowledgement could be reconciled. */
-    default void onTimeout(BatchItem item, Throwable error) {
-        onFailure(item, error);
-    }
 }

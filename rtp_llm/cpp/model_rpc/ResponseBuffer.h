@@ -19,6 +19,7 @@ namespace rtp_llm {
 
 struct ResponseBufferEntry {
     static constexpr size_t kMaxQueueSize = 10240;
+    static size_t           kMaxQueueBytes;  // 512MB per entry, defined in .cc (mutable for testability)
 
     struct DrainResult {
         std::deque<GenerateOutputsPB> outputs;
@@ -31,6 +32,7 @@ struct ResponseBufferEntry {
     DrainResult waitAndDrain(std::chrono::milliseconds timeout);
     void        cancel();
     bool        isCancelled() const;
+    size_t      droppedCount() const;
 
 private:
     friend class ResponseBufferRegistry;
@@ -47,6 +49,8 @@ private:
     std::mutex                    mu;
     std::condition_variable       cv;
     int64_t                       last_activity_us{0};
+    size_t                        queue_bytes_{0};
+    std::atomic<size_t>           dropped_count_{0};
 };
 
 class ResponseBufferRegistry {

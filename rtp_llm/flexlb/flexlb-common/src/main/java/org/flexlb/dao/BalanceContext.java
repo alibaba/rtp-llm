@@ -88,7 +88,7 @@ public class BalanceContext {
     /**
      * Callback to release the decode KV reservation for DIRECT/QUEUE paths.
      * Set by CostBasedDecodeStrategy.select() after a successful DECODE reserve.
-     * Executed by RouteService.cancel() so each path releases its own reservation
+     * Executed by resource cleanup so each path releases its own reservation
      * directly, without going through FlexlbBatchScheduler.
      *
      * <p>Uses Runnable (not DecodeEndpoint) because BalanceContext lives in

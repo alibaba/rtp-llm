@@ -194,7 +194,7 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
                             if (Status.fromThrowable(cause).getCode() == Status.Code.DEADLINE_EXCEEDED) {
                                 prefillEp.releaseBatch(batchId);
                                 for (BatchItem item : items) {
-                                    callback.onTimeout(item, cause);
+                                    callback.onFailure(item, cause);
                                 }
                             } else {
                                 failItems(items, prefillEp, batchId,

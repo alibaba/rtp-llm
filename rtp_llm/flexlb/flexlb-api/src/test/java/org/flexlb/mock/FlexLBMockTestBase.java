@@ -17,6 +17,8 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -31,6 +33,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -294,10 +297,18 @@ public abstract class FlexLBMockTestBase {
     }
 
     /**
-     * Cancel a request by ID.
+     * Simulate decode completion to release inflight resources for a request.
+     * (Cancel functionality was removed; this provides equivalent cleanup for tests.)
      */
     protected void cancelRequest(long requestId) {
-        scheduler.cancel(requestId);
+        WorkerStatus ws = new WorkerStatus();
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRole(RoleType.DECODE);
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(requestId);
+        task.setErrorCode(0);
+        response.setFinishedTaskInfo(Map.of(String.valueOf(requestId), task));
+        scheduler.onWorkerStatusUpdate(ws, response);
     }
 
     /**
