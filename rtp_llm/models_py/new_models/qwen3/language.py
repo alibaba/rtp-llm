@@ -14,9 +14,9 @@ from rtp_llm.models_py.layers.linear import (
     RowParallelLinear,
 )
 from rtp_llm.models_py.layers.norm import RMSNorm
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.model_base import (
-    NewLoaderModelBase,
     required_config_value,
     select_block_map_for_layer,
 )
@@ -423,7 +423,7 @@ def _validate_supported_parallelism(parallelism_config: Any) -> None:
         )
 
 
-class Qwen3ForCausalLM(NewLoaderModelBase):
+class Qwen3ForCausalLM(GptModelBase):
 
     WEIGHTS_MAPPER = WeightsMapper(
         prefix_mapping={"model.": ""},
@@ -479,6 +479,8 @@ class Qwen3ForCausalLM(NewLoaderModelBase):
         super().__init__(
             config=model_config,
             parallelism_config=parallelism_config,
+            weight=None,
+            max_generate_batch_size=0,
             fmha_config=fmha_config,
             device_resource_config=device_resource_config,
         )
