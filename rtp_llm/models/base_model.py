@@ -350,6 +350,11 @@ class BaseModel(object):
                 "force_cpu_load_weights is not supported by the Qwen dense "
                 "newloader slice"
             )
+        device_resource_config = getattr(self, "device_resource_config", None)
+        if getattr(device_resource_config, "enable_layer_micro_batch", 0) != 0:
+            raise ValueError(
+                "layer micro-batch is not supported by the Qwen dense newloader slice"
+            )
         if getattr(self.model_config, "ptuning_path", None):
             raise ValueError("p-tuning is not supported by this newloader slice")
         if getattr(self.model_config, "lora_infos", None):

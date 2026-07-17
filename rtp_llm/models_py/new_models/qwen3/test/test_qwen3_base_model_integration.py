@@ -117,6 +117,26 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "p-tuning is not supported"):
             base_model._load_with_new_loader()
 
+    def test_layer_micro_batch_is_rejected_by_public_load(self):
+        config = _model_config()
+        base_model = object.__new__(BaseModel)
+        base_model.model_config = config
+        base_model.parallelism_config = _parallelism_config()
+        base_model.force_cpu_load_weights = False
+        base_model.load_method = LoadMethod.SCRATCH
+        base_model.fmha_config = None
+        base_model.tokenizer = None
+        base_model.hw_kernel_config = types.SimpleNamespace(enable_cuda_graph=False)
+        base_model.device_resource_config = types.SimpleNamespace(
+            enable_layer_micro_batch=1
+        )
+
+        with patch.dict(os.environ, {"USE_NEW_LOADER": "1"}, clear=False):
+            with self.assertRaisesRegex(
+                ValueError, "layer micro-batch is not supported"
+            ):
+                base_model.load()
+
 
 if __name__ == "__main__":
     unittest.main()
