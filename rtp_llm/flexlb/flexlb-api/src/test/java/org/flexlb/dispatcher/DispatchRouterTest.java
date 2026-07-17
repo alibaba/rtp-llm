@@ -129,11 +129,14 @@ class DispatchRouterTest {
     @Test
     void responseDiscardedByCancelBeforeWriteToStillReleasesDrainToken() {
         // A client that disconnects after the handler produced the response but before WebFlux
-        // subscribes writeTo means writeTo's doFinally never runs — the token must be released
-        // by the chain itself (doOnCancel and/or the doOnDiscard hook; either may fire depending
-        // on where the response is dropped). Zero downstream demand parks the emitted response
-        // inside the tracked chain, so cancelling from there exercises that window
-        // deterministically and pins the invariant "no writeTo still means no leaked token".
+        // subscribes writeTo means writeTo's doFinally never runs — the token must be released by
+        // the chain itself. Zero downstream demand parks the emitted response inside the tracked
+        // chain, so cancelling from there exercises that window deterministically.
+        //
+        // What this pins is the invariant, not the mechanism: the cancel reaches the inner chain,
+        // so doOnCancel is what releases the token here and removing it turns this red. The
+        // doOnDiscard hook stays green through this case — it covers drops that surface only as a
+        // discard, which this route cannot produce — so nothing here holds it in place.
         ActiveRequestCounter counter = new ActiveRequestCounter();
         BatchHandler batch = mock(BatchHandler.class);
         when(batch.handle(any(), eq(BATCH_INFER))).thenReturn(ServerResponse.ok().bodyValue("ok"));

@@ -26,7 +26,6 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.Bean;
-import org.springframework.core.codec.DecodingException;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.RouterFunction;
@@ -113,7 +112,7 @@ public class HttpLoadBalanceServer {
     public Mono<ServerResponse> batchScheduleRequest(ServerRequest request) {
         BatchScheduleContext bctx = new BatchScheduleContext();
         return request.bodyToMono(BatchScheduleRequest.class)
-                .switchIfEmpty(Mono.error(new IllegalArgumentException("empty request body")))
+                .switchIfEmpty(Mono.error(new ServerWebInputException("empty request body")))
                 .flatMap(batchRequest -> {
                     bctx.setBatchRequest(batchRequest);
                     return Mono.using(
@@ -123,11 +122,7 @@ public class HttpLoadBalanceServer {
                 })
                 .onErrorResume(e -> {
                     Logger.error("Batch schedule request processing error", e);
-                    // A malformed/empty body is a deterministic client error: a 500 would invite
-                    // pointless retries and pollute the server error rate. Anything else escaping
-                    // here is a genuine server-side failure and keeps the 500.
-                    int status = isClientInputError(e) ? 400 : 500;
-                    return batchError(bctx, status, StrategyErrorType.INVALID_REQUEST, e);
+                    return batchError(bctx, errorTypeOf(bctx), e);
                 })
                 .doFinally(signal -> finalizeBatchContext(bctx));
     }
@@ -142,13 +137,19 @@ public class HttpLoadBalanceServer {
                     return json(statusOf(response), response);
                 })
                 .onErrorResume(BatchScheduleTransportException.class,
-                        e -> batchError(bctx, 500, StrategyErrorType.NO_AVAILABLE_WORKER, e));
+                        e -> batchError(bctx, StrategyErrorType.NO_AVAILABLE_WORKER, e));
     }
 
     /**
      * HTTP status for a business response. INVALID_REQUEST rejections (batch_count out of range,
      * multi-role deployment, null request) are deterministic client errors → 400; every other
      * failure (NO_AVAILABLE_WORKER etc.) is a server-side condition and stays 500.
+     *
+     * <p>The body's error type is the single source of truth for the status, because a slave
+     * forwarding to the master reconstructs the response from the body alone
+     * ({@code BatchScheduleCoordinator#forwardToMaster}) and re-derives the status here. Deriving
+     * the two independently would let a forwarded 500 arrive at the caller as a 400 — a retryable
+     * server fault reported as "your request is bad".
      */
     private static int statusOf(BatchScheduleResponse response) {
         if (response.isSuccess()) {
@@ -157,19 +158,24 @@ public class HttpLoadBalanceServer {
         return response.getCode() == StrategyErrorType.INVALID_REQUEST.getErrorCode() ? 400 : 500;
     }
 
-    /** Whether the error is a deterministic client-input failure (body decode / validation). */
-    private static boolean isClientInputError(Throwable e) {
-        return e instanceof ServerWebInputException
-                || e instanceof DecodingException
-                || e instanceof IllegalArgumentException;
+    /**
+     * Classifies a failure by the stage it escaped, not by its exception type: everything up to
+     * and including the body decode can only fail on what the caller sent, while the same
+     * exception type raised once scheduling is under way (an {@link IllegalArgumentException} from
+     * a malformed elected-master address, say) is a server fault that must alert and be retried.
+     * The decoded request is the marker — the flatMap stamps it before anything else can fail.
+     */
+    private static StrategyErrorType errorTypeOf(BatchScheduleContext bctx) {
+        return bctx.getBatchRequest() == null
+                ? StrategyErrorType.INVALID_REQUEST
+                : StrategyErrorType.NO_AVAILABLE_WORKER;
     }
 
     /** Builds the error response and stamps it on the context; pv success/error derive from it. */
-    private Mono<ServerResponse> batchError(BatchScheduleContext bctx, int httpStatus,
-                                            StrategyErrorType type, Throwable e) {
+    private Mono<ServerResponse> batchError(BatchScheduleContext bctx, StrategyErrorType type, Throwable e) {
         BatchScheduleResponse errorResponse = BatchScheduleResponse.error(type, e.getMessage());
         bctx.setBatchResponse(errorResponse);
-        return json(httpStatus, errorResponse);
+        return json(statusOf(errorResponse), errorResponse);
     }
 
     private Mono<ServerResponse> processScheduledRequest(BalanceContext ctx, Request req) {

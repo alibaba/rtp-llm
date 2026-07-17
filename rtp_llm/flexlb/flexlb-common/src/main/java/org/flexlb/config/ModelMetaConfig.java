@@ -29,7 +29,7 @@ public class ModelMetaConfig {
      * {@link #putServiceRoute}/{@link #removeServiceRoute} (startup and tests), while the union
      * is read per {@code /batch_schedule} request — recomputing the set walk per request is
      * pure waste. The version tag keeps a computation that raced a table mutation from being
-     * served or published: it is only valid while the version it snapshotted is still current.
+     * published: it is only valid while the version it snapshotted is still current.
      */
     private static volatile VersionedRoleTypes configuredRoleTypesCache;
 

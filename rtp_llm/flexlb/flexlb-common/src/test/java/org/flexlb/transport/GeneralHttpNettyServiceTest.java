@@ -3,6 +3,7 @@ package org.flexlb.transport;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.DefaultHttpContent;
 import io.netty.handler.codec.http.DefaultHttpResponse;
@@ -45,12 +46,15 @@ class GeneralHttpNettyServiceTest {
     private EmbeddedChannel channel;
     private GeneralHttpNettyService service;
 
+    /** When set, {@code connect()} hands back this promise instead of an already-succeeded one. */
+    private ChannelPromise pendingConnect;
+
     @BeforeEach
     void setUp() {
         HttpNettyClientHandler handler = new HttpNettyClientHandler(new Bootstrap()) {
             @Override
             public ChannelFuture connect(String host, int port) {
-                return channel.newSucceededFuture();
+                return pendingConnect != null ? pendingConnect : channel.newSucceededFuture();
             }
         };
         channel = new EmbeddedChannel(handler);
@@ -140,6 +144,48 @@ class GeneralHttpNettyServiceTest {
         ExecutionException e = assertThrows(ExecutionException.class, () -> result.get(5, TimeUnit.SECONDS));
         assertInstanceOf(EngineAbnormalDisconnectException.class, e.getCause(),
                 "the 200 aggregation path has the same LastHttpContent dependency as the non-200 path");
+    }
+
+    @Test
+    void disconnectBeforeTheSinkExistsFailsTheCallerInsteadOfHangingForever() throws Exception {
+        // The window the disconnect guard exists for: the channel dies after the connect but
+        // before the request thread installs the sink, so the inactive callback finds no sink to
+        // terminate and hands the duty to whoever installs one. Held open deterministically by
+        // gating the connect on a promise this test completes by hand — unlike sendRequest(),
+        // which deliberately pumps past this window.
+        ChannelPromise connectPromise = channel.newPromise();
+        pendingConnect = connectPromise;
+
+        CompletableFuture<EchoResponse> result = service
+                .request(Map.of("k", "v"), URI.create("http://backend:8080"), "/path", EchoResponse.class)
+                .toFuture();
+
+        // Context is bound to the channel by now, but nothing has subscribed the sink yet.
+        channel.close();
+        channel.runPendingTasks();
+        connectPromise.setSuccess();
+
+        ExecutionException e = assertThrows(ExecutionException.class, () -> result.get(5, TimeUnit.SECONDS));
+        assertInstanceOf(EngineAbnormalDisconnectException.class, e.getCause(),
+                "a disconnect that lands before the sink exists must still fail the caller — the "
+                        + "inactive callback had no sink, so nothing else will ever terminate it");
+    }
+
+    @Test
+    void writeOntoAnAlreadyDeadChannelFailsTheCallerInsteadOfHangingForever() throws Exception {
+        // The channel dies before the context is even bound to it, so channelInactive finds no
+        // context and the guard never sees the disconnect. Nothing inbound will arrive and the
+        // read-timeout handler is already destroyed, leaving the failed write as the only signal.
+        channel.close();
+        channel.runPendingTasks();
+
+        CompletableFuture<EchoResponse> result = service
+                .request(Map.of("k", "v"), URI.create("http://backend:8080"), "/path", EchoResponse.class)
+                .toFuture();
+
+        ExecutionException e = assertThrows(ExecutionException.class, () -> result.get(5, TimeUnit.SECONDS));
+        assertInstanceOf(EngineAbnormalDisconnectException.class, e.getCause(),
+                "a write that never reaches the peer must fail the sink; nothing else can");
     }
 
     @Test
