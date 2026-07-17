@@ -394,7 +394,6 @@ public class MetricConstant {
     /**
      * Cancellation QPS
      */
-    public static final String ROUTING_QUEUE_CANCELLED_QPS = "app.routing.queue.cancelled.qps";
 
     /**
      * Wait time in milliseconds

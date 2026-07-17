@@ -8,7 +8,6 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.enums.ScheduleModeEnum;
 
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -36,8 +35,6 @@ public class BalanceContext {
     //======================== Queue ========================//
 
     private CompletableFuture<Response> future;
-
-    private AtomicBoolean cancelled = new AtomicBoolean(false);
 
     private final AtomicInteger retryCount = new AtomicInteger(0);
 
@@ -104,20 +101,6 @@ public class BalanceContext {
 
     public long getRequestId() {
         return request.getRequestId();
-    }
-
-    /**
-     * Mark request as cancelled
-     */
-    public void cancel() {
-        cancelled.compareAndSet(false, true);
-    }
-
-    /**
-     * Check if request has been cancelled
-     */
-    public boolean isCancelled() {
-        return cancelled.get();
     }
 
     /**

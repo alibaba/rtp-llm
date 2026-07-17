@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
@@ -25,8 +24,6 @@ import org.junit.jupiter.api.Test;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -40,7 +37,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -86,13 +82,10 @@ class FlexlbBatchSchedulerTest {
                     sentBatches.add(request);
                     return CompletableFuture.completedFuture(ackFor(request));
                 });
-        when(grpcClient.cancel(anyString(), anyInt(), anyLong(), anyLong()))
-                .thenReturn(EngineRpcService.EmptyPB.getDefaultInstance());
-
         EndpointRegistry endpointRegistry = new EndpointRegistry(configService, null, reporter);
-        BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
-        scheduler = new FlexlbBatchScheduler(configService, router, grpcClient, engineWorkerStatus,
-                endpointRegistry, dispatcher, reporter, null);
+        BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService);
+        scheduler = new FlexlbBatchScheduler(configService, router, engineWorkerStatus,
+                endpointRegistry, dispatcher, reporter);
 
         // Create endpoint and batcher for the worker that successRoute() returns
         String ipPort = "10.0.0.1:8080";
@@ -295,56 +288,14 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
-    void cancel_removes_request_before_batch_enqueue() throws Exception {
-        CompletableFuture<Response> future = scheduler.submit(context(11));
+    void duplicate_active_request_id_is_rejected_before_rerouting() {
+        scheduler.submit(context(14));
 
-        scheduler.cancel(11L);
+        Response duplicate = scheduler.submit(context(14)).getNow(null);
 
-        assertTrue(future.isDone());
-        Response response = future.get(1, TimeUnit.SECONDS);
-        assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), response.getCode());
-        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
-    }
-
-    @Test
-    void cancel_inflight_waits_for_enqueue_ack_before_engine_cancel() throws Exception {
-        config.setFlexlbBatchSizeMax(1);
-        CountDownLatch batchStarted = new CountDownLatch(1);
-        CountDownLatch releaseAck = new CountDownLatch(1);
-        CountDownLatch cancelSeen = new CountDownLatch(1);
-
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
-                .thenAnswer(inv -> {
-                    EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
-                    sentBatches.add(request);
-                    batchStarted.countDown();
-                    assertTrue(releaseAck.await(2, TimeUnit.SECONDS));
-                    return CompletableFuture.completedFuture(ackFor(request));
-                });
-        when(grpcClient.cancel(anyString(), anyInt(), anyLong(), anyLong()))
-                .thenAnswer(inv -> {
-                    cancelSeen.countDown();
-                    return EngineRpcService.EmptyPB.getDefaultInstance();
-                });
-
-        CompletableFuture<Response> future = scheduler.submit(context(12));
-
-        assertTrue(batchStarted.await(2, TimeUnit.SECONDS));
-        RequestLifecycleSnapshot cancellation = scheduler.cancel(
-                12L, CancelReason.CLIENT_CANCELLED, 0);
-
-        Response response = future.get(2, TimeUnit.SECONDS);
-        assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), response.getCode());
-        assertEquals(RequestLifecycleState.CANCEL_REQUESTED, cancellation.state());
-        verify(grpcClient, never()).cancel(anyString(), anyInt(), anyLong(), anyLong());
-
-        releaseAck.countDown();
-        assertTrue(cancelSeen.await(2, TimeUnit.SECONDS));
-        verify(grpcClient, atLeastOnce()).cancel(anyString(), anyInt(), anyLong(), anyLong());
-        assertEquals(RequestLifecycleState.CANCELLED,
-                scheduler.getRequestState(12L, cancellation.batchId()).state());
+        assertFalse(duplicate.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), duplicate.getCode());
+        verify(router).route(any(BalanceContext.class));
     }
 
     @Test
@@ -524,82 +475,6 @@ class FlexlbBatchSchedulerTest {
         Response response = future.get(2, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
-    }
-
-    // ==================== cancel / onRequestsFinished → Decode endpoint release ====================
-
-    @Test
-    void cancel_releases_decode_endpoint_resource() {
-        // Register a DecodeEndpoint at the address the router returns for DECODE
-        WorkerStatus decodeStatus = new WorkerStatus();
-        decodeStatus.setIp("10.0.0.2");
-        decodeStatus.setPort(8081);
-        decodeStatus.setGrpcPort(8082);
-        DecodeEndpoint decodeEp = scheduler.endpointRegistry.ensureDecodeEndpoint(
-                "10.0.0.2:8081", decodeStatus);
-
-        // Simulate strategy having reserved resources on the decode endpoint
-        decodeEp.calibrate(null, null, 10000);
-        decodeEp.reserve(17L, 500, 500);
-        assertEquals(1, decodeEp.getInflightCount());
-
-        // Submit a request — router returns decode at 10.0.0.2:8081
-        CompletableFuture<Response> future = scheduler.submit(context(17));
-
-        // Cancel before batch is dispatched
-        scheduler.cancel(17L);
-
-        // Decode endpoint resource should be released
-        assertEquals(0, decodeEp.getInflightCount(),
-                "Cancel should propagate to DecodeEndpoint.release()");
-        assertTrue(future.isDone());
-        assertFalse(future.getNow(null).isSuccess());
-    }
-
-
-    @Test
-    void cancel_with_decode_endpoint_not_registered_is_noop() throws Exception {
-        // No DecodeEndpoint registered at 10.0.0.2:8081 — cancel should not throw
-        CompletableFuture<Response> future = scheduler.submit(context(20));
-
-        scheduler.cancel(20L);
-
-        assertTrue(future.isDone());
-        Response response = future.get(1, TimeUnit.SECONDS);
-        assertFalse(response.isSuccess());
-        // No exception thrown — passes
-    }
-
-    // ==================== BatchIdGenerator Snowflake uniqueness ====================
-
-    @Test
-    void batchIdGeneratorProducesUniqueIds() {
-        BatchIdGenerator gen = new BatchIdGenerator("10.0.0.1", 7001);
-        Set<Long> ids = new HashSet<>();
-        for (int i = 0; i < 4000; i++) {
-            long id = gen.nextBatchId();
-            assertTrue(id > 0, "batch_id must be positive (not -1 default)");
-            ids.add(id);
-        }
-        assertEquals(4000, ids.size());
-    }
-
-    @Test
-    void batchIdGeneratorDifferentiatesMasters() {
-        // Two masters with different IP:port should produce non-overlapping IDs
-        BatchIdGenerator gen1 = new BatchIdGenerator("10.0.0.1", 7001);
-        BatchIdGenerator gen2 = new BatchIdGenerator("10.0.0.2", 7001);
-
-        // Even if called at the same millisecond, master_id bits differ
-        Set<Long> ids1 = new HashSet<>();
-        Set<Long> ids2 = new HashSet<>();
-        for (int i = 0; i < 100; i++) {
-            ids1.add(gen1.nextBatchId());
-            ids2.add(gen2.nextBatchId());
-        }
-        // No overlap between two different masters
-        ids1.retainAll(ids2);
-        assertTrue(ids1.isEmpty(), "Different masters must not produce overlapping batch IDs");
     }
 
     private static EngineRpcService.EnqueueBatchResponsePB ackFor(EngineRpcService.EnqueueBatchRequestPB request) {

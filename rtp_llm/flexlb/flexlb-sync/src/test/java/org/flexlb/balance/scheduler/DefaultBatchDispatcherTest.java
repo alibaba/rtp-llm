@@ -105,29 +105,11 @@ class DefaultBatchDispatcherTest {
     }
 
     @Test
-    void dispatchRejectsAckWithDifferentBatchId() throws Exception {
-        PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(8L, 500, 200, prefillEp);
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong())).thenReturn(
-                CompletableFuture.completedFuture(EngineRpcService.EnqueueBatchResponsePB.newBuilder()
-                        .setBatchId(87L)
-                        .addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder().setRequestId(8L))
-                        .build()));
-
-        dispatcher.dispatch(List.of(item), prefillEp, 88L,
-                100, "batch_id_mismatch", callback);
-
-        assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
-        assertEquals(0, callback.successCount.get());
-        assertEquals(1, callback.failureCount.get());
-    }
-
-    @Test
-    void dispatchKeepsCommittedItemsEvenIfCancellationRacesWithSend() throws Exception {
+    void dispatchFiltersCompletedItemsBeforeSend() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         BatchItem active = createBatchItem(1L, 500, 200, prefillEp);
-        BatchItem cancelled = createBatchItem(2L, 300, 100, prefillEp);
-        cancelled.ctx().cancel(); // mark as cancelled
+        BatchItem completed = createBatchItem(2L, 300, 100, prefillEp);
+        completed.future().complete(Response.error(StrategyErrorType.BATCH_SLO_EXPIRED));
 
         AtomicReference<EngineRpcService.EnqueueBatchRequestPB> captured = new AtomicReference<>();
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
@@ -136,13 +118,14 @@ class DefaultBatchDispatcherTest {
                     return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L, 2L)));
                 });
 
-        dispatcher.dispatch(List.of(active, cancelled), prefillEp, 1L, 100, "test", callback);
+        dispatcher.dispatch(List.of(active, completed), prefillEp, 1L, 100, "test", callback);
 
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
+        assertEquals(1, callback.failureCount.get());
         EngineRpcService.EnqueueBatchRequestPB sent = captured.get();
         assertNotNull(sent);
-        // Scheduler committed both requests before handing them to the dispatcher.
-        // Dropping one here could let Cancel arrive before Enqueue and be lost.
+        // Only 1 request should be in the batch (the completed one is filtered out)
         long sentCount = sent.getDpSlotsList().stream()
                 .mapToLong(slot -> slot.getRequestsCount())
                 .sum();

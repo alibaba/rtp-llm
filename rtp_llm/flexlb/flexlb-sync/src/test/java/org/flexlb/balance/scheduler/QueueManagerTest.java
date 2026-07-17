@@ -89,20 +89,6 @@ class QueueManagerTest {
     }
 
     @Test
-    void takeRequest_shouldSkipCancelledRequests() {
-        BalanceContext cancelled = createContext(1L);
-        queueManager.tryRouteAsync(cancelled);
-        cancelled.cancel();
-
-        BalanceContext valid = createContext(2L);
-        queueManager.tryRouteAsync(valid);
-
-        BalanceContext taken = queueManager.takeRequest(false, 0);
-        assertNotNull(taken);
-        assertEquals(2L, taken.getRequestId());
-    }
-
-    @Test
     void offerToHead_shouldRequeueAtFront() {
         BalanceContext first = createContext(1L);
         queueManager.tryRouteAsync(first);

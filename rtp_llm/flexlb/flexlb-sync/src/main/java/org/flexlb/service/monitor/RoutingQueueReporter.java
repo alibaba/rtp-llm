@@ -11,7 +11,6 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PostConstruct;
 
 import static org.flexlb.constant.MetricConstant.ROUTING_FAILURE_QPS;
-import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_CANCELLED_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_ENTRY_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_REJECTED_QPS;
@@ -48,7 +47,6 @@ public class RoutingQueueReporter {
         monitor.register(ROUTING_QUEUE_ENTRY_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_QUEUE_TIMEOUT_QPS, FlexMetricType.QPS);
         monitor.register(ROUTING_QUEUE_REJECTED_QPS, FlexMetricType.QPS);
-        monitor.register(ROUTING_QUEUE_CANCELLED_QPS, FlexMetricType.QPS);
         monitor.register(ROUTING_QUEUE_WAIT_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_ROUTE_EXECUTION_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
@@ -78,10 +76,6 @@ public class RoutingQueueReporter {
 
     public void reportRejected() {
         monitor.report(ROUTING_QUEUE_REJECTED_QPS, tags, 1.0);
-    }
-
-    public void reportCancelled() {
-        monitor.report(ROUTING_QUEUE_CANCELLED_QPS, tags, 1.0);
     }
 
     /**

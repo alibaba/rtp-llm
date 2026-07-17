@@ -207,7 +207,7 @@ class BackendRPCServerVisitor:
         self, input: GenerateInput
     ) -> Optional[FlexlbResponse]:
         """
-        Resolve role addrs from FlexLB master (and slave on connection failure).
+        Resolve role addrs from the FlexLB master.
         Returns None on success; on failure returns FlexlbResponse for routing decisions.
         request_id is frontend-generated and is not overwritten.
         """

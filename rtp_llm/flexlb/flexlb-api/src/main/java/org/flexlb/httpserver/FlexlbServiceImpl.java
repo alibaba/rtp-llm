@@ -140,51 +140,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
     }
 
-    @Override
-    public void cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
-                       StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseObserver) {
-        try {
-            FlexlbScheduleProtocol.FlexlbCancelResponsePB response = null;
-            if (shouldForwardToMaster()) {
-                response = grpcForwarder.forwardCancelToMaster(request);
-            }
-            RequestLifecycleSnapshot snapshot = routeService.cancelByRequestId(
-                    request.getRequestId(), toCancelReason(request.getReason()),
-                    request.getBatchId());
-            if (snapshot != null || response == null) {
-                response = toCancelResponse(snapshot);
-            }
-            responseObserver.onNext(response);
-            responseObserver.onCompleted();
-        } catch (Exception e) {
-            Logger.error("FlexlbService.cancel error, request_id={}", request.getRequestId(), e);
-            responseObserver.onError(io.grpc.Status.INTERNAL
-                    .withDescription(e.getMessage())
-                    .asRuntimeException());
-        }
-    }
-
-    @Override
-    public void getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB request,
-                                StreamObserver<FlexlbScheduleProtocol.GetRequestStateResponsePB> responseObserver) {
-        if (shouldForwardToMaster()) {
-            FlexlbScheduleProtocol.GetRequestStateResponsePB forwarded =
-                    grpcForwarder.forwardGetRequestStateToMaster(request);
-            if (forwarded != null && forwarded.getFound()) {
-                responseObserver.onNext(forwarded);
-                responseObserver.onCompleted();
-                return;
-            }
-        }
-        RequestLifecycleSnapshot snapshot = routeService.getRequestState(
-                request.getRequestId(), request.getBatchId());
-        FlexlbScheduleProtocol.GetRequestStateResponsePB.Builder response =
-                FlexlbScheduleProtocol.GetRequestStateResponsePB.newBuilder().setFound(snapshot != null);
-        if (snapshot != null) {
-            response.setLifecycle(toLifecycleProto(snapshot));
-        }
-        responseObserver.onNext(response.build());
-        responseObserver.onCompleted();
+    private EngineRpcService.FlexlbScheduleResponsePB routeLocally(BalanceContext ctx) {
+        Response response = routeService.route(ctx).block();
+        return toProtoResponse(response);
     }
 
     private CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeLocally(BalanceContext ctx) {

@@ -93,64 +93,6 @@ public class RouteService {
         });
     }
 
-    /**
-     * Cancel a specified request
-     * @param balanceContext Load balancing context
-     */
-    public void cancel(BalanceContext balanceContext) {
-        cancel(balanceContext, CancelReason.CLIENT_CANCELLED);
-    }
-
-    public void cancel(BalanceContext balanceContext, CancelReason reason) {
-        balanceContext.cancel();
-        ScheduleModeEnum mode = balanceContext.getScheduleMode();
-        switch (mode) {
-            case BATCH -> {
-                if (flexlbBatchScheduler != null && balanceContext.getRequest() != null) {
-                    flexlbBatchScheduler.cancel(balanceContext.getRequest().getRequestId(), reason, 0);
-                }
-            }
-            case QUEUE -> queueManager.cancel(balanceContext);
-            case DIRECT -> {
-                // DIRECT path has no dedicated manager class; inline the release logic.
-                Runnable releaseCallback = balanceContext.getDecodeReleaseCallback();
-                if (releaseCallback != null) {
-                    releaseCallback.run();
-                } else {
-                    long rid = balanceContext.getRequestId();
-                    for (DecodeEndpoint ep : endpointRegistry.getDecodeEndpoints().values()) {
-                        ep.release(rid);
-                    }
-                }
-            }
-            default -> { /* AUTO should already be resolved by route() */ }
-        }
-        balanceContext.setSuccess(false);
-        balanceContext.setErrorMessage("request cancelled");
-    }
-
-    public RequestLifecycleSnapshot cancelByRequestId(long requestId,
-                                                      CancelReason reason,
-                                                      long expectedBatchId) {
-        RequestLifecycleSnapshot snapshot = null;
-        if (flexlbBatchScheduler != null) {
-            snapshot = flexlbBatchScheduler.cancel(requestId, reason, expectedBatchId);
-        }
-        if (snapshot == null) {
-            // Not in BATCH inflight — likely a DIRECT/QUEUE request whose decode
-            // KV reservation is not tracked by the batch scheduler. Release it
-            // via QueueManager, which brute-force iterates all decode endpoints.
-            queueManager.cancelByRequestId(requestId);
-        }
-        return snapshot;
-    }
-
-    public RequestLifecycleSnapshot getRequestState(long requestId,
-                                                    long expectedBatchId) {
-        return flexlbBatchScheduler == null ? null
-                : flexlbBatchScheduler.getRequestState(requestId, expectedBatchId);
-    }
-
     boolean shouldUseFlexlbBatch(BalanceContext ctx, FlexlbConfig config) {
         if (flexlbBatchScheduler == null || config == null) {
             return false;

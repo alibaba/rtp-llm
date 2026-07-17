@@ -701,10 +701,6 @@ message FetchRequestPB {
     int64 request_id = 1;
 }
 
-message CancelRequestPB {
-    int64 request_id = 1;
-}
-
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
@@ -740,4 +736,47 @@ service MultimodalRpcService {
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputsPB);
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
+}
+
+enum FlexlbScheduleModePB {
+    FLEXLB_SCHEDULE_AUTO = 0;
+    FLEXLB_SCHEDULE_BATCH = 1;
+    FLEXLB_SCHEDULE_DIRECT = 2;
+}
+
+message FlexlbScheduleRequestPB {
+    int64 request_id = 1;
+    GenerateInputPB generate_input = 2;
+    repeated int64 block_cache_keys = 3;
+    int64 seq_len = 4;
+    int64 generate_timeout = 5;
+    int64 request_time_ms = 6;
+    int32 max_new_tokens = 7;
+    int32 num_beams = 8;
+    bool force_disable_sp_run = 9;
+    string model = 10;
+    string api_key = 11;
+    FlexlbScheduleModePB schedule_mode = 12;
+    int64 cache_key_block_size = 13;
+}
+
+message FlexlbServerStatusPB {
+    RoleTypePB role = 1;
+    string server_ip = 2;
+    int32 http_port = 3;
+    int32 grpc_port = 4;
+}
+
+message FlexlbScheduleResponsePB {
+    bool success = 1;
+    int32 code = 2;
+    string error_message = 3;
+    repeated FlexlbServerStatusPB server_status = 4;
+    string real_master_host = 5;
+    int32 queue_length = 6;
+    bool enqueued_by_master = 7;
+}
+
+service FlexlbService {
+    rpc Schedule(FlexlbScheduleRequestPB) returns (FlexlbScheduleResponsePB);
 }

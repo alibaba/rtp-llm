@@ -311,16 +311,6 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
     }
 
     /**
-     * Cancel a request previously submitted through EnqueueBatch.
-     */
-    public EngineRpcService.EmptyPB cancel(String ip, int port, long requestId, long requestTimeoutMs) {
-        EngineRpcService.CancelRequestPB request = EngineRpcService.CancelRequestPB.newBuilder()
-                .setRequestId(requestId)
-                .build();
-        return executeGrpcCall(ip, port, stub -> stub.getRpcServiceStub().cancel(request), requestTimeoutMs, ServiceType.CANCEL);
-    }
-
-    /**
      * Get worker status via gRPC (async)
      */
     public CompletableFuture<EngineRpcService.WorkerStatusPB> getWorkerStatusAsync(String ip, int port, EngineRpcService.StatusVersionPB request, long requestTimeoutMs) {

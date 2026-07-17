@@ -741,8 +741,17 @@ class MockRpcServicer:
         return await self.state.enqueue_batch(batch)
 
     async def FetchResponse(self, request, context):
-        async for output in self.state.fetch_response(int(request.request_id)):
-            yield output
+        request_id = int(request.request_id)
+        handler_cancelled = False
+        try:
+            async for output in self.state.fetch_response(request_id):
+                yield output
+        except asyncio.CancelledError:
+            handler_cancelled = True
+            raise
+        finally:
+            if handler_cancelled or context.cancelled():
+                await self.state.cancel(request_id)
 
     async def GenerateStreamCall(self, request, context):
         async for output in self.state.generate_stream(request):
@@ -761,10 +770,6 @@ class MockRpcServicer:
         return self.pb2.EmptyPB()
 
     async def RemoteFinishNew(self, request, context):
-        return self.pb2.EmptyPB()
-
-    async def Cancel(self, request, context):
-        await self.state.cancel(int(request.request_id))
         return self.pb2.EmptyPB()
 
     async def SetPause(self, request, context):
