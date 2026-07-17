@@ -241,6 +241,8 @@ class DSparkModelGoldenTest(unittest.TestCase):
         with torch.no_grad():
             cls.proposal = model.propose(inputs, fmha_impl=fmha_impl)
         cls.ctx_len = ctx_len
+        cls.inputs = inputs
+        cls.fmha_impl = fmha_impl
 
     # ---- helpers ------------------------------------------------------
 
@@ -325,6 +327,28 @@ class DSparkModelGoldenTest(unittest.TestCase):
             self.golden["corrected_logits"],
             "corrected_logits",
             rtol=5e-2, atol_scale=5e-2,
+        )
+
+    # ---- Engine-facing forward() output contract -------------------------
+
+    def test_forward_fills_draft_proposal_outputs(self):
+        """forward() must expose draft_tokens/draft_probs on PyModelOutputs
+        (G3: sampling lives in the model).  Re-running is safe: the feature
+        injection overwrites the same cache positions with the same values."""
+        with torch.no_grad():
+            outputs = self.model.forward(self.inputs, fmha_impl=self.fmha_impl)
+        k = self.config.dspark_config.speculative_tokens
+        vocab = self.config.vocab_size
+        self.assertEqual(tuple(outputs.draft_tokens.shape), (1, k))
+        self.assertEqual(
+            outputs.draft_tokens.squeeze(0).cpu().tolist(),
+            self.golden["draft_tokens"].tolist(),
+        )
+        self.assertEqual(tuple(outputs.draft_probs.shape), (1, k, vocab))
+        sums = outputs.draft_probs.sum(dim=-1)
+        torch.testing.assert_close(
+            sums, torch.ones_like(sums), atol=1e-4, rtol=0,
+            msg="draft_probs rows must be a probability distribution",
         )
 
 

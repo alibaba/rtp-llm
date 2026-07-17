@@ -104,6 +104,10 @@ struct GptModelOutputs {
     // Optional [token, num_capture_layers, hidden] target features for the
     // DFlash/DSpark draft (undefined unless aux capture is configured).
     torch::Tensor aux_hidden_states;
+    // Optional dspark/dflash draft proposal (undefined for other models):
+    // draft_tokens [batch, k] int64, draft_probs [batch, k, vocab] fp32.
+    torch::Tensor draft_tokens;
+    torch::Tensor draft_probs;
 
     std::vector<torch::Tensor> moe_gating;
 };

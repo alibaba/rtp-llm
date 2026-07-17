@@ -805,9 +805,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
             hidden_states = py_model_outputs.hidden_states.clone();
-            if (py_model_outputs.aux_hidden_states.defined()) {
-                // Graph output buffers are reused across replays; detach a copy.
-                py_model_outputs.aux_hidden_states = py_model_outputs.aux_hidden_states.clone();
+            // Graph output buffers are reused across replays; detach copies of
+            // the optional dspark outputs.
+            for (torch::Tensor* t :
+                 {&py_model_outputs.aux_hidden_states, &py_model_outputs.draft_tokens, &py_model_outputs.draft_probs}) {
+                if (t->defined()) {
+                    *t = t->clone();
+                }
             }
         } else {
             py::gil_scoped_acquire gil;
@@ -837,10 +841,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // this by reusing the standard "has any context stream" test
         // already used by callForwardPostLayers.
         const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
-        // Carry the optional dspark/dflash aux feature export through to the
-        // executor-facing output struct (undefined unless capture is on).
+        // Carry the optional dspark/dflash outputs (aux feature export +
+        // in-model draft proposal) through to the executor-facing struct
+        // (all undefined unless the model fills them).
         auto attach_aux = [&py_model_outputs](GptModelOutputs outs) {
             outs.aux_hidden_states = py_model_outputs.aux_hidden_states;
+            outs.draft_tokens      = py_model_outputs.draft_tokens;
+            outs.draft_probs       = py_model_outputs.draft_probs;
             return outs;
         };
         if (device_props_.enable_prefill_cp && has_context_request) {

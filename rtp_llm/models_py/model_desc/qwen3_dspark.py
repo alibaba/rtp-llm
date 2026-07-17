@@ -422,15 +422,22 @@ class Qwen3DSparkModel(GptModelBase):
         )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        """Engine entry: full pipeline, returns the block hidden states.
+        """Engine entry: full pipeline, returns hidden states + proposal.
 
-        Draft tokens/probs consumption is wired at the executor level (the
-        DraftProposer splice); this keeps the GptModelBase contract intact.
+        G3 contract: draft sampling lives in the model, so the outputs carry
+        draft_tokens [B, k] and draft_probs [B, k, V] (Markov-corrected
+        softmax q) alongside the block hidden states.  Request temperature
+        plumbing for the probabilistic q arrives with the executor splice;
+        until then probs are softmax at T=1 (greedy verification is exact
+        token match and does not read them).
         """
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         proposal = self.propose(inputs, fmha_impl)
-        return PyModelOutputs(proposal.head_hidden, fmha_impl.fmha_params)
+        outputs = PyModelOutputs(proposal.head_hidden, fmha_impl.fmha_params)
+        outputs.draft_tokens = proposal.draft_tokens
+        outputs.draft_probs = torch.softmax(proposal.corrected_logits, dim=-1)
+        return outputs
 
 
 __all__ = [

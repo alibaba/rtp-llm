@@ -206,7 +206,13 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer")
         .def_readwrite("aux_hidden_states",
                        &PyModelOutputs::aux_hidden_states,
-                       "Optional [token, layers, hidden] aux hidden states for dspark/dflash draft");
+                       "Optional [token, layers, hidden] aux hidden states for dspark/dflash draft")
+        .def_readwrite("draft_tokens",
+                       &PyModelOutputs::draft_tokens,
+                       "Optional [batch, k] dspark draft tokens (sampling lives in the model)")
+        .def_readwrite("draft_probs",
+                       &PyModelOutputs::draft_probs,
+                       "Optional [batch, k, vocab] dspark draft probs for the rejection sampler");
 }
 
 }  // namespace torch_ext

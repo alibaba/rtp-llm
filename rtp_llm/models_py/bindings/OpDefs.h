@@ -242,6 +242,12 @@ struct PyModelOutputs {
     // [token, num_capture_layers, hidden], undefined unless the target model
     // was configured to capture aux hidden states (G1, dspark-phase1 design).
     torch::Tensor aux_hidden_states;
+    // Optional dspark/dflash draft proposal (G3: sampling lives in the model):
+    // draft_tokens [batch, k] int64, draft_probs [batch, k, vocab] fp32
+    // (Markov-corrected softmax q for the rejection sampler).  Undefined for
+    // every non-dspark model.
+    torch::Tensor draft_tokens;
+    torch::Tensor draft_probs;
 
     PyModelOutputs() = default;
 
