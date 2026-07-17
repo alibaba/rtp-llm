@@ -14,6 +14,7 @@ py_test (
     srcs = ["model_rpc_client_test.py"],
     deps = [
         "//rtp_llm/cpp/model_rpc:model_rpc_client",
+        "//rtp_llm/server:server",
         "//rtp_llm:testlib",
         "//rtp_llm/test/model_test/test_util:test_util",
     ],
