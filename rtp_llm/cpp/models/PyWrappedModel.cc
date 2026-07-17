@@ -544,7 +544,27 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 
     RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
 
-    return callForwardPostLayers(hidden_states, inputs, false);
+    // Merge the optional dspark/dflash aux feature export across micro
+    // batches (token-dim concat, mirroring the hidden_states handling).
+    torch::Tensor aux_hidden_states;
+    if (py_model_outputs[0].aux_hidden_states.defined()) {
+        if (!micro_batch_plan.enable) {
+            aux_hidden_states = py_model_outputs[0].aux_hidden_states;
+        } else {
+            std::vector<torch::Tensor> aux_parts;
+            aux_parts.reserve(py_model_outputs.size());
+            for (auto& out : py_model_outputs) {
+                RTP_LLM_CHECK_WITH_INFO(out.aux_hidden_states.defined(),
+                                        "aux_hidden_states must be set on every micro batch when capture is on");
+                aux_parts.push_back(out.aux_hidden_states);
+            }
+            aux_hidden_states = torch::cat(aux_parts, 0);
+        }
+    }
+
+    auto outs              = callForwardPostLayers(hidden_states, inputs, false);
+    outs.aux_hidden_states = aux_hidden_states;
+    return outs;
 }
 
 torch_ext::PyEmbeddingInputs PyWrappedModel::buildPyEmbeddingInputs(const GptModelInputs& inputs) {
@@ -785,6 +805,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
             hidden_states = py_model_outputs.hidden_states.clone();
+            if (py_model_outputs.aux_hidden_states.defined()) {
+                // Graph output buffers are reused across replays; detach a copy.
+                py_model_outputs.aux_hidden_states = py_model_outputs.aux_hidden_states.clone();
+            }
         } else {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
@@ -813,11 +837,17 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // this by reusing the standard "has any context stream" test
         // already used by callForwardPostLayers.
         const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+        // Carry the optional dspark/dflash aux feature export through to the
+        // executor-facing output struct (undefined unless capture is on).
+        auto attach_aux = [&py_model_outputs](GptModelOutputs outs) {
+            outs.aux_hidden_states = py_model_outputs.aux_hidden_states;
+            return outs;
+        };
         if (device_props_.enable_prefill_cp && has_context_request) {
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
+            return attach_aux(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens));
         }
-        return callForwardPostLayers(hidden_states, inputs, true);
+        return attach_aux(callForwardPostLayers(hidden_states, inputs, true));
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());

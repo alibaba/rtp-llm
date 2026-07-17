@@ -2,7 +2,7 @@ import json
 import logging
 import math
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 
@@ -57,6 +57,7 @@ class ModelConfig(CppModelConfig):
     _python_fields = {
         "is_mtp",
         "dspark_config",
+        "capture_aux_hidden_layer_ids",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
         "has_lm_head_bias",
@@ -521,6 +522,11 @@ class ModelConfig(CppModelConfig):
         self.is_mtp: bool = False
         # DFlash/DSpark draft extras (DSparkDraftParams), None for non-dspark models
         self.dspark_config: Optional[Any] = None
+        # Target-side aux hidden capture for the dspark/dflash draft: 0-based
+        # decoder layer indices whose OUTPUT (post-residual stream) to export.
+        # Conversion from the draft ckpt's 1-based aux_hidden_state_layer_ids
+        # (ids = [j - 1 for j in aux_ids]) happens where the draft ckpt is read.
+        self.capture_aux_hidden_layer_ids: Optional[List[int]] = None
         self.normalize_lm_head_weight: bool = False
         self.enable_fp32_lm_head: bool = True
         self.has_lm_head_bias: bool = False

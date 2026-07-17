@@ -101,6 +101,9 @@ struct GptModelOutputs {
     torch::Tensor all_hidden_states;
     torch::Tensor all_logits;
     torch::Tensor softmax_result;
+    // Optional [token, num_capture_layers, hidden] target features for the
+    // DFlash/DSpark draft (undefined unless aux capture is configured).
+    torch::Tensor aux_hidden_states;
 
     std::vector<torch::Tensor> moe_gating;
 };

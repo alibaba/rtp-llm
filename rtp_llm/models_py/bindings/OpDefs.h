@@ -238,6 +238,10 @@ struct PyModelOutputs {
     torch::Tensor          hidden_states;
     rtp_llm::ParamsBasePtr params_ptr{nullptr};
     py::object             py_attn_params{py::none()};
+    // Optional multi-layer feature export for DFlash/DSpark draft models:
+    // [token, num_capture_layers, hidden], undefined unless the target model
+    // was configured to capture aux hidden states (G1, dspark-phase1 design).
+    torch::Tensor aux_hidden_states;
 
     PyModelOutputs() = default;
 

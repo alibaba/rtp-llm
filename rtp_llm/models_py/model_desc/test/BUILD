@@ -9,6 +9,19 @@ py_test(
     exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
 )
 
+# G1 aux-hidden-state capture for the dspark/dflash draft (tiny random
+# weights, self-contained).
+py_test(
+    name = "qwen3_aux_capture_test",
+    srcs = ["qwen3_aux_capture_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20"],
+    exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
+)
+
 # DSpark draft model vs dense reference golden.  Needs the converted draft
 # ckpt + golden dump on local disk (skips gracefully when absent), so it is
 # a local/manual gate rather than a CI-portable test.

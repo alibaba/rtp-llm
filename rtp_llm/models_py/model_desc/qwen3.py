@@ -127,6 +127,10 @@ class Qwen3Model(GptModelBase):
         hidden_states = inputs_embeds
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
+        # dspark/dflash draft feature export: 0-based layer ids whose output
+        # (full residual stream) to capture; None => zero overhead.
+        capture_ids = getattr(self.config, "capture_aux_hidden_layer_ids", None)
+        aux_hidden_states = [] if capture_ids else None
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, i)
             hidden_states = decoder_layer(
@@ -134,8 +138,19 @@ class Qwen3Model(GptModelBase):
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
+            if aux_hidden_states is not None and i in capture_ids:
+                aux_hidden_states.append(hidden_states)
         hidden_states = self.norm(hidden_states)
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        outputs = PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        if aux_hidden_states is not None:
+            assert len(aux_hidden_states) == len(capture_ids), (
+                f"captured {len(aux_hidden_states)} aux hidden states, "
+                f"expected {len(capture_ids)}; check capture_aux_hidden_layer_ids "
+                f"{capture_ids} against layer_num {self.layer_num}"
+            )
+            # [token, num_capture_layers, hidden]
+            outputs.aux_hidden_states = torch.stack(aux_hidden_states, dim=1)
+        return outputs
 
 
 __all__ = [
