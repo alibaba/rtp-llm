@@ -48,6 +48,12 @@ class NewLoaderConfig:
     parallelism_config: Any = None
     fmha_config: Any = None
     device_resource_config: Any = None
+    attn_tp_size: Optional[int] = None
+    attn_tp_rank: Optional[int] = None
+    ffn_tp_size: Optional[int] = None
+    ffn_tp_rank: Optional[int] = None
+    lm_head_tp_size: Optional[int] = None
+    lm_head_tp_rank: Optional[int] = None
 
     def __post_init__(self) -> None:
         if isinstance(self.load_method, str):
@@ -76,6 +82,27 @@ class NewLoaderConfig:
             raise ValueError(
                 f"Invalid TP partition: rank={self.tp_rank}, size={self.tp_size}"
             )
+        for prefix in ("attn_tp", "ffn_tp", "lm_head_tp"):
+            size_name = f"{prefix}_size"
+            rank_name = f"{prefix}_rank"
+            size = getattr(self, size_name)
+            rank = getattr(self, rank_name)
+            if size is None and rank is None:
+                size, rank = self.tp_size, self.tp_rank
+                object.__setattr__(self, size_name, size)
+                object.__setattr__(self, rank_name, rank)
+            elif size is None or rank is None:
+                raise ValueError(
+                    f"{size_name} and {rank_name} must be configured together"
+                )
+            if isinstance(size, bool) or not isinstance(size, int):
+                raise TypeError(f"{size_name} must be an integer")
+            if isinstance(rank, bool) or not isinstance(rank, int):
+                raise TypeError(f"{rank_name} must be an integer")
+            if size <= 0 or not 0 <= rank < size:
+                raise ValueError(
+                    f"Invalid {prefix} partition: rank={rank}, size={size}"
+                )
         if self.ep_size <= 0 or not 0 <= self.ep_rank < self.ep_size:
             raise ValueError(
                 f"Invalid EP partition: rank={self.ep_rank}, size={self.ep_size}"
@@ -104,6 +131,33 @@ class NewLoaderConfig:
                         f"match NewLoaderConfig: parallelism="
                         f"({configured_rank}, {configured_size}) loader="
                         f"({expected[1]}, {expected[0]})"
+                    )
+            topology_getters = {
+                "attn_tp": ("get_attn_tp_size", "get_attn_tp_rank"),
+                "ffn_tp": ("get_ffn_tp_size", "get_ffn_tp_rank"),
+                "lm_head_tp": ("tp_size", "tp_rank"),
+            }
+            for prefix, (
+                size_getter_name,
+                rank_getter_name,
+            ) in topology_getters.items():
+                size_source = getattr(self.parallelism_config, size_getter_name, None)
+                rank_source = getattr(self.parallelism_config, rank_getter_name, None)
+                if callable(size_source) and callable(rank_source):
+                    actual = (size_source(), rank_source())
+                elif size_source is not None and rank_source is not None:
+                    actual = (size_source, rank_source)
+                else:
+                    continue
+                expected = (
+                    getattr(self, f"{prefix}_size"),
+                    getattr(self, f"{prefix}_rank"),
+                )
+                if actual != expected:
+                    raise ValueError(
+                        f"parallelism_config {prefix} partition does not match "
+                        f"NewLoaderConfig: parallelism=({actual[1]}, {actual[0]}) "
+                        f"loader=({expected[1]}, {expected[0]})"
                     )
 
 
@@ -247,10 +301,18 @@ class NewModelLoader:
         method = self._resolve_load_method()
         if method != NewLoaderLoadMethod.SCRATCH:
             raise RuntimeError(f"Resolved unsupported load method: {method}")
+        checkpoint_files = self._checkpoint_files()
         model = self._create_model()
+        if weight_mapper.is_rank_local_checkpoint(checkpoint_files) and not bool(
+            getattr(model, "supports_rank_local_checkpoint", False)
+        ):
+            raise ValueError(
+                f"{type(model).__name__} does not support rank-local consolidated "
+                "checkpoints; use a global HF checkpoint"
+            )
         started = time.time()
         model.load_weights(
-            weight_mapper.get_all_weights(self._checkpoint_files(), device="cpu")
+            weight_mapper.get_all_weights(checkpoint_files, device="cpu")
         )
         self._validate_loaded_weights(model)
         logger.info("Streamed checkpoint tensors in %.2fs", time.time() - started)

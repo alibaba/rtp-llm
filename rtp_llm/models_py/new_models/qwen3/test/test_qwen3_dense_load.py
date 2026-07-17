@@ -4,9 +4,11 @@ import unittest
 from unittest.mock import patch
 
 import torch
+import torch.nn.functional as F
 from safetensors.torch import save_file
 
 from rtp_llm.models_py.layers.linear import (
+    ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
@@ -15,6 +17,7 @@ from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import collect_loaded_tensor_ids
 from rtp_llm.models_py.new_models.qwen3.language import Qwen3ForCausalLM
 from rtp_llm.models_py.quant_methods import QuantizationConfig
+from rtp_llm.ops.compute_ops import PyModelInputs
 
 
 def _validate(module) -> None:
@@ -22,6 +25,15 @@ def _validate(module) -> None:
 
 
 class LinearPartitionTest(unittest.TestCase):
+    def test_column_parallel_rejects_unimplemented_gather_output(self):
+        with self.assertRaisesRegex(ValueError, "gather_output is not supported"):
+            ColumnParallelLinear(
+                input_size=2,
+                output_size=4,
+                gather_output=True,
+                params_dtype=torch.float32,
+            )
+
     def test_merged_separate_and_fused_weights_match_for_tp(self):
         gate = torch.arange(8, dtype=torch.float32).reshape(4, 2)
         up = torch.arange(8, 16, dtype=torch.float32).reshape(4, 2)
@@ -166,11 +178,55 @@ class Qwen3LoadTest(unittest.TestCase):
             ),
             layernorm_eps=1e-6,
             enable_fp32_lm_head=False,
+            tie_word_embeddings=True,
         )
 
-    def _load_config(self):
-        parallelism = types.SimpleNamespace(tp_size=1, tp_rank=0)
+    def _load_config(
+        self,
+        tp_size=1,
+        tp_rank=0,
+        attn_tp_size=None,
+        attn_tp_rank=None,
+        ffn_tp_size=None,
+        ffn_tp_rank=None,
+        lm_head_tp_size=None,
+        lm_head_tp_rank=None,
+        cp_enabled=False,
+        prefill_cp_enabled=False,
+        ffn_disaggregate=False,
+    ):
+        attn_tp_size = tp_size if attn_tp_size is None else attn_tp_size
+        attn_tp_rank = tp_rank if attn_tp_rank is None else attn_tp_rank
+        ffn_tp_size = tp_size if ffn_tp_size is None else ffn_tp_size
+        ffn_tp_rank = tp_rank if ffn_tp_rank is None else ffn_tp_rank
+        lm_head_tp_size = tp_size if lm_head_tp_size is None else lm_head_tp_size
+        lm_head_tp_rank = tp_rank if lm_head_tp_rank is None else lm_head_tp_rank
+        parallelism = types.SimpleNamespace(
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            ep_size=1,
+            ep_rank=0,
+            prefill_cp_config=types.SimpleNamespace(
+                is_enabled=lambda: cp_enabled,
+                is_prefill_enabled=lambda: prefill_cp_enabled,
+            ),
+            ffn_disaggregate_config=types.SimpleNamespace(
+                enable_ffn_disaggregate=ffn_disaggregate
+            ),
+            get_attn_tp_size=lambda: attn_tp_size,
+            get_attn_tp_rank=lambda: attn_tp_rank,
+            get_ffn_tp_size=lambda: ffn_tp_size,
+            get_ffn_tp_rank=lambda: ffn_tp_rank,
+        )
         return NewLoaderConfig(
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            attn_tp_size=attn_tp_size,
+            attn_tp_rank=attn_tp_rank,
+            ffn_tp_size=ffn_tp_size,
+            ffn_tp_rank=ffn_tp_rank,
+            lm_head_tp_size=lm_head_tp_size,
+            lm_head_tp_rank=lm_head_tp_rank,
             compute_dtype=torch.float32,
             device="cpu",
             quant_config=QuantizationConfig("none"),
@@ -220,6 +276,118 @@ class Qwen3LoadTest(unittest.TestCase):
             {"embedding", "final_layernorm.gamma", "lm_head"},
         )
 
+    def test_untied_model_rejects_missing_lm_head(self):
+        config = self._config()
+        config.tie_word_embeddings = False
+        model = Qwen3ForCausalLM(config, self._load_config())
+
+        model.load_weights(self._weights())
+
+        with self.assertRaisesRegex(RuntimeError, "ParallelLMHead.*weight"):
+            _validate(model)
+
+    def test_untied_model_loads_explicit_lm_head(self):
+        config = self._config()
+        config.tie_word_embeddings = False
+        model = Qwen3ForCausalLM(config, self._load_config())
+        weights = self._weights()
+        weights["lm_head.weight"] = torch.arange(32, 64, dtype=torch.float32).reshape(
+            8, 4
+        )
+
+        model.load_weights(weights)
+        _validate(model)
+
+        torch.testing.assert_close(model.lm_head.weight, weights["lm_head.weight"])
+
+    def test_checkpoint_lm_head_must_use_global_vocab_shape(self):
+        config = self._config()
+        config.tie_word_embeddings = False
+        model = Qwen3ForCausalLM(config, self._load_config(tp_size=2))
+        weights = self._weights()
+        weights["lm_head.weight"] = torch.ones(4, 4)
+
+        with self.assertRaisesRegex(ValueError, "checkpoint rows must be 8"):
+            model.load_weights(weights)
+
+    def test_parallel_topologies_are_applied_to_their_owners(self):
+        model = Qwen3ForCausalLM(
+            self._config(), self._load_config(tp_size=2, tp_rank=1)
+        )
+
+        self.assertEqual(
+            (model.embed_tokens.tp_size, model.embed_tokens.tp_rank), (2, 1)
+        )
+        self.assertEqual(
+            (
+                model.layers[0].self_attn.qkv_proj.tp_size,
+                model.layers[0].self_attn.qkv_proj.tp_rank,
+            ),
+            (2, 1),
+        )
+        self.assertEqual(
+            (
+                model.layers[0].mlp.gate_up_proj.tp_size,
+                model.layers[0].mlp.gate_up_proj.tp_rank,
+            ),
+            (2, 1),
+        )
+        self.assertEqual((model.lm_head.tp_size, model.lm_head.tp_rank), (2, 1))
+
+    def test_legacy_negative_one_kv_head_sentinel_uses_q_head_count(self):
+        config = self._config()
+        config.attn_config.kv_head_num = -1
+
+        model = Qwen3ForCausalLM(config, self._load_config())
+
+        self.assertEqual(model.layers[0].self_attn.num_kv_heads, 2)
+
+    def test_context_parallel_topology_is_rejected(self):
+        load_config = self._load_config(
+            tp_size=2,
+            tp_rank=1,
+            attn_tp_size=1,
+            attn_tp_rank=0,
+            ffn_tp_size=1,
+            ffn_tp_rank=0,
+            cp_enabled=True,
+        )
+
+        with self.assertRaisesRegex(ValueError, "Context parallelism"):
+            Qwen3ForCausalLM(self._config(), load_config)
+
+    def test_prefill_context_parallel_mode_is_rejected(self):
+        load_config = self._load_config(prefill_cp_enabled=True)
+
+        with self.assertRaisesRegex(ValueError, "Context parallelism"):
+            Qwen3ForCausalLM(self._config(), load_config)
+
+    def test_independent_ffn_topology_is_rejected(self):
+        load_config = self._load_config(
+            tp_size=2,
+            tp_rank=1,
+            ffn_tp_size=1,
+            ffn_tp_rank=0,
+        )
+
+        with self.assertRaisesRegex(ValueError, "Independent FFN"):
+            Qwen3ForCausalLM(self._config(), load_config)
+
+    def test_ffn_disaggregation_is_rejected(self):
+        load_config = self._load_config(ffn_disaggregate=True)
+
+        with self.assertRaisesRegex(ValueError, "FFN disaggregation"):
+            Qwen3ForCausalLM(self._config(), load_config)
+
+    def test_separate_lm_head_topology_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "lm_head_tp partition"):
+            self._load_config(
+                tp_size=2,
+                tp_rank=1,
+                lm_head_tp_size=1,
+                lm_head_tp_rank=0,
+            )
+
     def test_new_model_loader_streams_real_safetensors(self):
         with tempfile.TemporaryDirectory() as model_path:
             save_file(self._weights(), f"{model_path}/model.safetensors")
@@ -234,6 +402,80 @@ class Qwen3LoadTest(unittest.TestCase):
         self.assertIsInstance(model, Qwen3ForCausalLM)
         self.assertFalse(model.training)
         torch.testing.assert_close(model.lm_head.weight, model.embed_tokens.weight)
+
+    def test_rank_local_consolidated_checkpoint_is_rejected_explicitly(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            torch.save(self._weights(), f"{model_path}/consolidated.00.pth")
+            loader = NewModelLoader(
+                self._config(),
+                self._load_config(),
+                model_path=model_path,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError, "does not support rank-local consolidated checkpoints"
+            ):
+                loader.load()
+
+    def test_real_model_forward_matches_cpu_reference(self):
+        weights = self._weights()
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(weights, f"{model_path}/model.safetensors")
+            model = NewModelLoader(
+                self._config(), self._load_config(), model_path=model_path
+            ).load()
+
+        class QOnlyFmha:
+            fmha_params = None
+
+            def __init__(self, q_size):
+                self.q_size = q_size
+
+            def forward(self, qkv, kv_cache, layer_idx):
+                return qkv[..., : self.q_size]
+
+        def rms_norm(x, weight, eps=1e-6):
+            normalized = x.float() * torch.rsqrt(
+                x.float().pow(2).mean(dim=-1, keepdim=True) + eps
+            )
+            return (normalized * weight).to(x.dtype)
+
+        input_ids = torch.tensor([0, 3, 7], dtype=torch.int32)
+        fmha = QOnlyFmha(model.layers[0].self_attn.q_size)
+        inputs = PyModelInputs(input_ids=input_ids)
+        with patch(
+            "rtp_llm.models_py.new_models.qwen3.language.select_block_map_for_layer"
+        ) as select_block_map:
+            outputs = model(inputs, fmha_impl=fmha)
+        select_block_map.assert_called_once_with(inputs.attention_inputs, 0)
+
+        hidden = F.embedding(input_ids.long(), weights["model.embed_tokens.weight"])
+        residual = hidden
+        hidden = rms_norm(hidden, weights["model.layers.0.input_layernorm.weight"])
+        q = F.linear(hidden, weights["model.layers.0.self_attn.q_proj.weight"])
+        q = q.reshape(-1, 2, 2)
+        q = rms_norm(q, weights["model.layers.0.self_attn.q_norm.weight"])
+        q = q.reshape(-1, 4)
+        hidden = F.linear(q, weights["model.layers.0.self_attn.o_proj.weight"])
+        hidden = residual + hidden
+        residual = hidden
+        hidden = rms_norm(
+            hidden, weights["model.layers.0.post_attention_layernorm.weight"]
+        )
+        gate = F.linear(hidden, weights["model.layers.0.mlp.gate_proj.weight"])
+        up = F.linear(hidden, weights["model.layers.0.mlp.up_proj.weight"])
+        hidden = F.linear(
+            F.silu(gate.float()) * up.float(),
+            weights["model.layers.0.mlp.down_proj.weight"],
+        )
+        hidden = residual + hidden
+        expected = rms_norm(hidden, weights["model.norm.weight"])
+
+        torch.testing.assert_close(outputs.hidden_states, expected)
+        torch.testing.assert_close(
+            model.lm_head(outputs.hidden_states),
+            F.linear(expected, weights["model.embed_tokens.weight"]),
+        )
 
     def test_unknown_checkpoint_tensor_fails(self):
         model = self._model()
@@ -273,6 +515,7 @@ class Qwen3LoadTest(unittest.TestCase):
             "head_dim": 2,
             "rms_norm_eps": 1e-6,
             "enable_fp32_lm_head": False,
+            "tie_word_embeddings": True,
         }
 
         model = Qwen3ForCausalLM(config, self._load_config())

@@ -6,10 +6,37 @@ from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
+    PyAttentionInputs,
     PyModelInitResources,
     PyModelInputs,
     PyModelOutputs,
 )
+
+
+def select_block_map_for_layer(
+    attention_inputs: PyAttentionInputs, layer_idx: int
+) -> Optional[int]:
+    if attention_inputs.kv_cache_kernel_block_id_device_by_group is None:
+        return
+
+    gid = 0
+    if attention_inputs.kv_cache_layer_to_group is not None:
+        gid = int(attention_inputs.kv_cache_layer_to_group[layer_idx].item())
+
+    if attention_inputs.kv_cache_kernel_block_id_device_by_group is not None and len(
+        attention_inputs.kv_cache_kernel_block_id_device_by_group
+    ):
+        attention_inputs.kv_cache_kernel_block_id_device = (
+            attention_inputs.kv_cache_kernel_block_id_device_by_group[gid]
+        )
+
+    if attention_inputs.kv_cache_kernel_block_id_by_group is not None and len(
+        attention_inputs.kv_cache_kernel_block_id_by_group
+    ):
+        attention_inputs.kv_cache_kernel_block_id = (
+            attention_inputs.kv_cache_kernel_block_id_by_group[gid]
+        )
+    return gid
 
 
 def required_config_value(config: Any, *names: str) -> Any:
@@ -25,6 +52,8 @@ def required_config_value(config: Any, *names: str) -> Any:
 
 class NewLoaderModelBase(RtpModule):
     """Runtime base for models whose parameters are owned by the PyModel."""
+
+    supports_rank_local_checkpoint = False
 
     def __init__(
         self,

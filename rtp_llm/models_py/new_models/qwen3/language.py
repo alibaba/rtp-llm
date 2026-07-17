@@ -16,6 +16,7 @@ from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.model_base import (
     NewLoaderModelBase,
     required_config_value,
+    select_block_map_for_layer,
 )
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.weight_mapper import WeightsMapper
@@ -213,8 +214,10 @@ class Qwen3DecoderLayer(RtpModule):
         intermediate_size: int,
         head_dim: int,
         layer_idx: int = 0,
-        tp_size: int = 1,
-        tp_rank: int = 0,
+        attn_tp_size: int = 1,
+        attn_tp_rank: int = 0,
+        ffn_tp_size: int = 1,
+        ffn_tp_rank: int = 0,
         quant_config: Optional[QuantizationConfig] = None,
         params_dtype: torch.dtype = torch.float16,
         rms_norm_eps: float = 1e-6,
@@ -229,8 +232,8 @@ class Qwen3DecoderLayer(RtpModule):
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
             layer_idx=layer_idx,
-            tp_size=tp_size,
-            tp_rank=tp_rank,
+            tp_size=attn_tp_size,
+            tp_rank=attn_tp_rank,
             quant_config=quant_config,
             params_dtype=params_dtype,
             rms_norm_eps=rms_norm_eps,
@@ -241,8 +244,8 @@ class Qwen3DecoderLayer(RtpModule):
         self.mlp = Qwen3MLP(
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
-            tp_size=tp_size,
-            tp_rank=tp_rank,
+            tp_size=ffn_tp_size,
+            tp_rank=ffn_tp_rank,
             quant_config=quant_config,
             params_dtype=params_dtype,
         )
@@ -308,6 +311,8 @@ def _extract_config_values(model_config: Any, load_config: Any):
         if attn_config is not None:
             num_heads = required_config_value(attn_config, "head_num")
             num_kv_heads = getattr(attn_config, "kv_head_num", num_heads)
+            if num_kv_heads == -1:
+                num_kv_heads = num_heads
             head_dim = _resolve_head_dim(
                 hidden_size,
                 num_heads,
@@ -327,6 +332,12 @@ def _extract_config_values(model_config: Any, load_config: Any):
 
     tp_size = required_config_value(load_config, "tp_size")
     tp_rank = required_config_value(load_config, "tp_rank")
+    attn_tp_size = required_config_value(load_config, "attn_tp_size")
+    attn_tp_rank = required_config_value(load_config, "attn_tp_rank")
+    ffn_tp_size = required_config_value(load_config, "ffn_tp_size")
+    ffn_tp_rank = required_config_value(load_config, "ffn_tp_rank")
+    lm_head_tp_size = required_config_value(load_config, "lm_head_tp_size")
+    lm_head_tp_rank = required_config_value(load_config, "lm_head_tp_rank")
     quant_config = getattr(load_config, "quant_config", None)
     params_dtype = getattr(load_config, "compute_dtype", torch.float16)
     enable_fp32_lm_head = (
@@ -346,6 +357,29 @@ def _extract_config_values(model_config: Any, load_config: Any):
     }
     for name, value in dimensions.items():
         _positive_int(value, name)
+    for name, size, rank in (
+        ("TP", tp_size, tp_rank),
+        ("attention TP", attn_tp_size, attn_tp_rank),
+        ("FFN TP", ffn_tp_size, ffn_tp_rank),
+        ("LM head TP", lm_head_tp_size, lm_head_tp_rank),
+    ):
+        _positive_int(size, f"{name} size")
+        if isinstance(rank, bool) or not isinstance(rank, int) or not 0 <= rank < size:
+            raise ValueError(f"Invalid {name} partition: rank={rank}, size={size}")
+    if (attn_tp_size, attn_tp_rank) != (tp_size, tp_rank):
+        raise ValueError(
+            "Context parallelism is not supported by the Qwen dense newloader slice"
+        )
+    if (ffn_tp_size, ffn_tp_rank) != (attn_tp_size, attn_tp_rank):
+        raise ValueError(
+            "Independent FFN TP/sequence parallelism is not supported by the "
+            "Qwen dense newloader slice"
+        )
+    if (lm_head_tp_size, lm_head_tp_rank) != (tp_size, tp_rank):
+        raise ValueError(
+            "A separate LM head topology is not supported by the Qwen dense "
+            "newloader slice"
+        )
 
     return dict(
         hidden_size=hidden_size,
@@ -358,10 +392,33 @@ def _extract_config_values(model_config: Any, load_config: Any):
         rms_norm_eps=rms_norm_eps,
         tp_size=tp_size,
         tp_rank=tp_rank,
+        attn_tp_size=attn_tp_size,
+        attn_tp_rank=attn_tp_rank,
+        ffn_tp_size=ffn_tp_size,
+        ffn_tp_rank=ffn_tp_rank,
+        lm_head_tp_size=lm_head_tp_size,
+        lm_head_tp_rank=lm_head_tp_rank,
         quant_config=quant_config,
         params_dtype=params_dtype,
         lm_head_params_dtype=torch.float32 if enable_fp32_lm_head else params_dtype,
     )
+
+
+def _validate_supported_parallelism(parallelism_config: Any) -> None:
+    prefill_cp = getattr(parallelism_config, "prefill_cp_config", None)
+    if prefill_cp is not None:
+        for checker_name in ("is_enabled", "is_prefill_enabled"):
+            checker = getattr(prefill_cp, checker_name, None)
+            if callable(checker) and bool(checker()):
+                raise ValueError(
+                    "Context parallelism is not supported by the Qwen dense "
+                    "newloader slice"
+                )
+    ffn_disaggregate = getattr(parallelism_config, "ffn_disaggregate_config", None)
+    if bool(getattr(ffn_disaggregate, "enable_ffn_disaggregate", False)):
+        raise ValueError(
+            "FFN disaggregation is not supported by the Qwen dense newloader slice"
+        )
 
 
 class Qwen3ForCausalLM(NewLoaderModelBase):
@@ -390,12 +447,12 @@ class Qwen3ForCausalLM(NewLoaderModelBase):
         # Qwen3 small variants (e.g. Qwen3-0.6B) tie lm_head to embed_tokens.
         # Mirror HF transformers: when no lm_head.weight is in the ckpt, copy
         # the embedding weights into lm_head so the projection isn't random.
-        if not has_lm_head:
+        if not has_lm_head and self.tie_word_embeddings:
             logging.info(
                 "[Qwen3ForCausalLM] lm_head.weight not found in ckpt; "
                 "tying lm_head to embed_tokens (tie_word_embeddings)"
             )
-            self.lm_head._copy_weight(self.embed_tokens.weight.data)
+            self.lm_head._copy_local_tied_weight(self.embed_tokens.weight.data)
 
     def __init__(self, model_config: Any, load_config: Any):
         parallelism_config = getattr(load_config, "parallelism_config", None)
@@ -412,12 +469,18 @@ class Qwen3ForCausalLM(NewLoaderModelBase):
         )
 
         cfg = _extract_config_values(model_config, load_config)
+        _validate_supported_parallelism(parallelism_config)
+        self.tie_word_embeddings = (
+            bool(model_config.get("tie_word_embeddings", False))
+            if isinstance(model_config, dict)
+            else bool(getattr(model_config, "tie_word_embeddings", False))
+        )
 
         self.embed_tokens = VocabParallelEmbedding(
             vocab_size=cfg["vocab_size"],
             embedding_dim=cfg["hidden_size"],
-            tp_size=cfg["tp_size"],
-            tp_rank=cfg["tp_rank"],
+            tp_size=cfg["attn_tp_size"],
+            tp_rank=cfg["attn_tp_rank"],
             params_dtype=cfg["params_dtype"],
         )
         self.layers = nn.ModuleList(
@@ -429,8 +492,10 @@ class Qwen3ForCausalLM(NewLoaderModelBase):
                     intermediate_size=cfg["intermediate_size"],
                     head_dim=cfg["head_dim"],
                     layer_idx=i,
-                    tp_size=cfg["tp_size"],
-                    tp_rank=cfg["tp_rank"],
+                    attn_tp_size=cfg["attn_tp_size"],
+                    attn_tp_rank=cfg["attn_tp_rank"],
+                    ffn_tp_size=cfg["ffn_tp_size"],
+                    ffn_tp_rank=cfg["ffn_tp_rank"],
                     quant_config=cfg["quant_config"],
                     params_dtype=cfg["params_dtype"],
                     rms_norm_eps=cfg["rms_norm_eps"],
@@ -446,8 +511,8 @@ class Qwen3ForCausalLM(NewLoaderModelBase):
         self.lm_head = ParallelLMHead(
             vocab_size=cfg["vocab_size"],
             hidden_size=cfg["hidden_size"],
-            tp_size=cfg["tp_size"],
-            tp_rank=cfg["tp_rank"],
+            tp_size=cfg["lm_head_tp_size"],
+            tp_rank=cfg["lm_head_tp_rank"],
             params_dtype=cfg["lm_head_params_dtype"],
         )
 
@@ -464,6 +529,7 @@ class Qwen3ForCausalLM(NewLoaderModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         for i, layer in enumerate(self.layers):
+            select_block_map_for_layer(inputs.attention_inputs, i)
             hidden_states = layer(
                 hidden_states,
                 fmha_impl,

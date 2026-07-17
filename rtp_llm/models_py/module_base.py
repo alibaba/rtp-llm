@@ -163,11 +163,15 @@ class RtpModule(nn.Module):
     def _mark_weight_loaded(self, name: str) -> None:
         parameter = self._parameters.get(name)
         buffer = self._buffers.get(name)
-        if not isinstance(parameter, nn.Parameter) and not isinstance(
-            buffer, torch.Tensor
-        ):
+        is_parameter = isinstance(parameter, nn.Parameter)
+        is_persistent_buffer = (
+            isinstance(buffer, torch.Tensor)
+            and name not in self._non_persistent_buffers_set
+        )
+        if not is_parameter and not is_persistent_buffer:
             raise KeyError(
-                f"{type(self).__name__} has no parameter or buffer named {name!r}"
+                f"{type(self).__name__} has no loadable parameter or persistent "
+                f"buffer named {name!r}"
             )
         _mark_loaded(self, name)
 

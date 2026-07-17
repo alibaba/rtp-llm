@@ -9,12 +9,22 @@ from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 
 
+def _require_positive_int(value: int, label: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{label} must be a positive integer, got {value!r}")
+
+
 def _validate_parallel_partition(size: int, rank: int, label: str) -> None:
-    if size <= 0 or not 0 <= rank < size:
+    _require_positive_int(size, f"{label} size")
+    if isinstance(rank, bool) or not isinstance(rank, int):
+        raise ValueError(f"{label} rank must be an integer, got {rank!r}")
+    if not 0 <= rank < size:
         raise ValueError(f"Invalid {label} partition: rank={rank}, size={size}")
 
 
 def _require_divisible(value: int, divisor: int, label: str) -> None:
+    _require_positive_int(value, label)
+    _require_positive_int(divisor, "divisor")
     if value % divisor != 0:
         raise ValueError(f"{label}={value} must be divisible by {divisor}")
 
@@ -47,6 +57,8 @@ class LinearBase(RtpModule):
     ):
         super().__init__()
         _validate_parallel_partition(tp_size, tp_rank, "TP")
+        _require_positive_int(input_size, "input_size")
+        _require_positive_int(output_size, "output_size")
         self.input_size = input_size
         self.output_size = output_size
         self.tp_size = tp_size
@@ -119,6 +131,11 @@ class ColumnParallelLinear(LinearBase):
         gather_output: bool = False,
         params_dtype: torch.dtype = torch.float16,
     ):
+        _validate_parallel_partition(tp_size, tp_rank, "TP")
+        if gather_output:
+            raise ValueError(
+                "gather_output is not supported by the Qwen dense newloader slice"
+            )
         _require_divisible(output_size, tp_size, "output_size")
         self.output_size_per_partition = output_size // tp_size
         self.gather_output = gather_output
@@ -164,6 +181,7 @@ class RowParallelLinear(LinearBase):
         reduce_output: bool = True,
         params_dtype: torch.dtype = torch.float16,
     ):
+        _validate_parallel_partition(tp_size, tp_rank, "TP")
         _require_divisible(input_size, tp_size, "input_size")
         self.input_size_per_partition = input_size // tp_size
         self.reduce_output = reduce_output
@@ -331,8 +349,10 @@ class QKVParallelLinear(ColumnParallelLinear):
         params_dtype: torch.dtype = torch.float16,
     ):
         _validate_parallel_partition(tp_size, tp_rank, "TP")
-        if num_heads <= 0 or num_kv_heads <= 0 or head_dim <= 0:
-            raise ValueError("QKV head counts and head_dim must be positive")
+        _require_positive_int(hidden_size, "hidden_size")
+        _require_positive_int(num_heads, "num_heads")
+        _require_positive_int(num_kv_heads, "num_kv_heads")
+        _require_positive_int(head_dim, "head_dim")
         _require_divisible(num_heads, num_kv_heads, "num_heads")
         _require_divisible(num_heads, tp_size, "num_heads")
         if num_kv_heads >= tp_size:

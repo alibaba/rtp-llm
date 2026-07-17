@@ -7,10 +7,17 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.module_base import RtpModule
 
 
+def _positive_int(value: int, label: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{label} must be a positive integer, got {value!r}")
+
+
 def _validate_vocab_partition(vocab_size: int, tp_size: int, tp_rank: int) -> None:
-    if vocab_size <= 0:
-        raise ValueError(f"vocab_size must be positive, got {vocab_size}")
-    if tp_size <= 0 or not 0 <= tp_rank < tp_size:
+    _positive_int(vocab_size, "vocab_size")
+    _positive_int(tp_size, "tp_size")
+    if isinstance(tp_rank, bool) or not isinstance(tp_rank, int):
+        raise ValueError(f"tp_rank must be an integer, got {tp_rank!r}")
+    if not 0 <= tp_rank < tp_size:
         raise ValueError(f"Invalid TP partition: rank={tp_rank}, size={tp_size}")
     if vocab_size % tp_size != 0:
         raise ValueError(
@@ -29,8 +36,7 @@ class VocabParallelEmbedding(RtpModule):
     ):
         super().__init__()
         _validate_vocab_partition(vocab_size, tp_size, tp_rank)
-        if embedding_dim <= 0:
-            raise ValueError(f"embedding_dim must be positive, got {embedding_dim}")
+        _positive_int(embedding_dim, "embedding_dim")
 
         self.vocab_size = vocab_size
         self.embedding_dim = embedding_dim
@@ -87,8 +93,7 @@ class ParallelLMHead(RtpModule):
     ):
         super().__init__()
         _validate_vocab_partition(vocab_size, tp_size, tp_rank)
-        if hidden_size <= 0:
-            raise ValueError(f"hidden_size must be positive, got {hidden_size}")
+        _positive_int(hidden_size, "hidden_size")
 
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
@@ -105,16 +110,24 @@ class ParallelLMHead(RtpModule):
         )
 
     def _copy_weight(self, tensor: torch.Tensor) -> None:
-        if tensor.shape[0] == self.vocab_size:
-            start = self.tp_rank * self.vocab_size_per_partition
-            tensor = tensor[start : start + self.vocab_size_per_partition]
-        elif tensor.shape[0] != self.vocab_size_per_partition:
+        if tensor.shape[0] != self.vocab_size:
             raise ValueError(
-                f"LM head rows must be {self.vocab_size} or "
-                f"{self.vocab_size_per_partition}, got {tensor.shape[0]}"
+                f"LM head checkpoint rows must be {self.vocab_size}, "
+                f"got {tensor.shape[0]}"
             )
+        start = self.tp_rank * self.vocab_size_per_partition
+        tensor = tensor[start : start + self.vocab_size_per_partition]
         if not self._assign_weight(self, "weight", tensor.contiguous()):
             raise RuntimeError("Failed to assign LM head weight")
+
+    def _copy_local_tied_weight(self, tensor: torch.Tensor) -> None:
+        if tuple(tensor.shape) != tuple(self.weight.shape):
+            raise ValueError(
+                f"Tied LM head shard must have shape {tuple(self.weight.shape)}, "
+                f"got {tuple(tensor.shape)}"
+            )
+        if not self._assign_weight(self, "weight", tensor.contiguous()):
+            raise RuntimeError("Failed to assign tied LM head weight")
 
     def load_weights(self, weights: Dict[str, torch.Tensor]) -> None:
         for name, tensor in weights.items():

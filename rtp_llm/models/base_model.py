@@ -350,8 +350,43 @@ class BaseModel(object):
                 "force_cpu_load_weights is not supported by the Qwen dense "
                 "newloader slice"
             )
+        if getattr(self.model_config, "ptuning_path", None):
+            raise ValueError("p-tuning is not supported by this newloader slice")
         if getattr(self.model_config, "lora_infos", None):
             raise ValueError("LoRA loading is not supported by this newloader slice")
+
+        parallelism = self.parallelism_config
+        attn_tp = (
+            parallelism.get_attn_tp_size(),
+            parallelism.get_attn_tp_rank(),
+        )
+        ffn_tp = (
+            parallelism.get_ffn_tp_size(),
+            parallelism.get_ffn_tp_rank(),
+        )
+        physical_tp = (parallelism.tp_size, parallelism.tp_rank)
+        prefill_cp = getattr(parallelism, "prefill_cp_config", None)
+        cp_enabled = False
+        if prefill_cp is not None:
+            for checker_name in ("is_enabled", "is_prefill_enabled"):
+                checker = getattr(prefill_cp, checker_name, None)
+                if callable(checker) and bool(checker()):
+                    cp_enabled = True
+                    break
+        if cp_enabled or attn_tp != physical_tp:
+            raise ValueError(
+                "Context parallelism is not supported by the Qwen dense newloader slice"
+            )
+        if ffn_tp != attn_tp:
+            raise ValueError(
+                "Independent FFN TP/sequence parallelism is not supported by the "
+                "Qwen dense newloader slice"
+            )
+        ffn_disaggregate = getattr(parallelism, "ffn_disaggregate_config", None)
+        if bool(getattr(ffn_disaggregate, "enable_ffn_disaggregate", False)):
+            raise ValueError(
+                "FFN disaggregation is not supported by the Qwen dense newloader slice"
+            )
 
         self.custom_module = self._init_custom_module()
         if self.custom_module is not None:
@@ -363,8 +398,14 @@ class BaseModel(object):
         load_method = NewLoaderLoadMethod(str(configured_method).lower())
         device = self._get_device_str()
         load_config = NewLoaderConfig(
-            tp_size=self.parallelism_config.tp_size,
-            tp_rank=self.parallelism_config.tp_rank,
+            tp_size=physical_tp[0],
+            tp_rank=physical_tp[1],
+            attn_tp_size=attn_tp[0],
+            attn_tp_rank=attn_tp[1],
+            ffn_tp_size=ffn_tp[0],
+            ffn_tp_rank=ffn_tp[1],
+            lm_head_tp_size=physical_tp[0],
+            lm_head_tp_rank=physical_tp[1],
             ep_size=getattr(self.parallelism_config, "ep_size", 1),
             ep_rank=getattr(self.parallelism_config, "ep_rank", 0),
             compute_dtype=self.model_config.compute_dtype,
@@ -383,6 +424,7 @@ class BaseModel(object):
         self.device = device
         self.py_model = loader.load()
         self.weight = self._build_new_loader_weight_view(self.py_model)
+        self.py_model.weight = self.weight
         self.model_weights_loader = loader
         self.weight_manager = None
         self.py_eplb = None
