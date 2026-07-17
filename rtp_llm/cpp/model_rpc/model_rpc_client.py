@@ -583,9 +583,12 @@ class ModelRpcClient(object):
                 )
             return self._addresses[inputs[0].request_id % len(self._addresses)]
         if len(targets) > 1:
-            raise ValueError(
+            # Typed so the HTTP layer reports a deterministic client-error code instead
+            # of a generic 500: a mixed batch is a caller assembly error, not our fault.
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
                 f"batch request: [{len(inputs)} items] has inconsistent pre-assigned "
-                f"backends {sorted(str(t) for t in targets)}; one batch RPC targets one backend"
+                f"backends {sorted(str(t) for t in targets)}; one batch RPC targets one backend",
             )
         return targets.pop()
 

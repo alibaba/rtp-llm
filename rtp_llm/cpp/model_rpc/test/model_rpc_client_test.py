@@ -26,6 +26,7 @@ from unittest import TestCase, main
 
 import torch
 
+from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, RoleType
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
@@ -234,13 +235,38 @@ class BatchAddressSelectionTest(TestCase):
             self._input(6, [self._addr("10.0.0.8", RoleType.PDFUSION)]),
         ]
 
-        with self.assertRaises(ValueError):
+        # Typed (not a bare ValueError) so the HTTP layer reports a deterministic
+        # client-error code for a caller-assembled mixed batch.
+        with self.assertRaises(FtRuntimeException):
             client._select_batch_address(inputs)
 
     def test_empty_static_addresses_raises_instead_of_dividing_by_zero(self):
         client = self._client([])
         with self.assertRaises(ValueError):
             client._select_batch_address([self._input(7)])
+
+    def test_decode_entrance_honours_decode_role_addr(self):
+        client = self._client(["10.9.9.9:1"])
+        client._decode_entrance = True
+        inputs = [
+            self._input(
+                8,
+                [
+                    self._addr("10.0.0.5", RoleType.PREFILL),
+                    self._addr("10.0.0.6", RoleType.DECODE, grpc_port=9000),
+                ],
+            )
+        ]
+
+        self.assertEqual("10.0.0.6:9000", client._select_batch_address(inputs))
+
+    def test_role_addr_with_empty_ip_is_skipped_not_selected(self):
+        client = self._client(["10.0.0.1:100", "10.0.0.2:100"])
+        inputs = [self._input(9, [self._addr("", RoleType.PDFUSION)])]
+
+        # An empty-ip role_addr is a placeholder, not an assignment: the batch must
+        # fall back to the static address list exactly like an unrouted input.
+        self.assertEqual("10.0.0.2:100", client._select_batch_address(inputs))
 
 
 class BatchEnqueueRoutingTest(TestCase):
@@ -268,11 +294,11 @@ class BatchEnqueueRoutingTest(TestCase):
         visitor.model_rpc_client = SimpleNamespace(batch_enqueue=fake_batch_enqueue)
         route_calls = []
 
-        async def fake_route_ips(inp):
+        async def fake_route_ips(inp, seq_len_hint=None):
             inp.generate_config.role_addrs = [
                 master_rotation[len(route_calls) % len(master_rotation)]
             ]
-            route_calls.append(inp)
+            route_calls.append((inp, seq_len_hint))
 
         visitor.route_ips = fake_route_ips
         return visitor, route_calls, sent
@@ -304,6 +330,11 @@ class BatchEnqueueRoutingTest(TestCase):
         self.assertEqual(
             1, len(route_calls), "a batch is one scheduling unit: one master round-trip"
         )
+        # The single routing call must carry the batch's aggregate weight — otherwise
+        # the master accounts one request's load while N inputs land on the worker.
+        self.assertEqual(
+            sum(inp.prompt_length for inp in inputs), route_calls[0][1]
+        )
         # Every input carries the first routing decision, and the whole batch resolves to a
         # single target through the real _select_batch_address — the exact seam that a
         # per-input routing loop breaks under a round-robin master.
@@ -334,6 +365,37 @@ class BatchEnqueueRoutingTest(TestCase):
         client._addresses = []
         client._decode_entrance = False
         self.assertEqual("10.0.0.7:8089", client._select_batch_address(inputs))
+
+    def test_mixed_batch_converges_when_master_agrees_with_pre_assignment(self):
+        # A caller-assembled batch mixing pre-assigned and unrouted inputs is legal
+        # exactly when everything ends up on one backend: the unrouted subset gets one
+        # routing call, and if the master picks the same worker the batch goes through.
+        shared = self._addr("10.0.0.7")
+        visitor, route_calls, sent = self._visitor([shared])
+        inputs = [self._input(0, [shared]), self._input(1), self._input(2)]
+
+        asyncio.run(visitor.batch_enqueue(inputs))
+
+        self.assertEqual(1, len(route_calls))
+        client = ModelRpcClient.__new__(ModelRpcClient)
+        client._addresses = []
+        client._decode_entrance = False
+        self.assertEqual("10.0.0.7:8089", client._select_batch_address(inputs))
+
+    def test_mixed_batch_is_rejected_when_master_disagrees_with_pre_assignment(self):
+        # ...and when the master picks a different worker, the batch must fail loudly
+        # (typed error) instead of silently shipping the pre-assigned input to the
+        # wrong backend.
+        visitor, route_calls, sent = self._visitor([self._addr("10.0.0.9")])
+        inputs = [self._input(0, [self._addr("10.0.0.7")]), self._input(1)]
+
+        asyncio.run(visitor.batch_enqueue(inputs))
+
+        client = ModelRpcClient.__new__(ModelRpcClient)
+        client._addresses = []
+        client._decode_entrance = False
+        with self.assertRaises(FtRuntimeException):
+            client._select_batch_address(inputs)
 
 
 if __name__ == "__main__":

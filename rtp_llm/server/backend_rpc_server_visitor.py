@@ -123,12 +123,14 @@ class BackendRPCServerVisitor:
         return role_list
 
     async def get_master_route_addrs(
-        self, input: GenerateInput
+        self, input: GenerateInput, seq_len_hint: Optional[int] = None
     ) -> Optional[FlexlbResponse]:
         """
         Resolve role addrs from FlexLB master (and slave on connection failure).
         Returns None on success; on failure returns FlexlbResponse for routing decisions.
         request_id is frontend-generated and is not overwritten.
+        seq_len_hint: see MasterClient.get_backend_role_addrs — aggregate weight when this
+        one routing call stands in for a whole batch.
         """
         token_ids = (
             input.token_ids.tolist()[0]
@@ -142,6 +144,7 @@ class BackendRPCServerVisitor:
                 block_cache_keys=block_cache_keys,
                 input=input,
                 request_id=input.request_id,
+                seq_len_hint=seq_len_hint,
             )
         except BaseException as e:
             exception_json = format_exception(e)
@@ -197,7 +200,9 @@ class BackendRPCServerVisitor:
                 missing_roles,
             )
 
-    async def route_ips(self, input: GenerateInput):
+    async def route_ips(
+        self, input: GenerateInput, seq_len_hint: Optional[int] = None
+    ):
         # proactive rejection: check cached queue length before making request to master
         if self.master_config:
             threshold = self.master_config.master_queue_reject_threshold
@@ -225,7 +230,9 @@ class BackendRPCServerVisitor:
             master_route_result: Optional[FlexlbResponse] = None
             if not role_addrs_specified and master_addr and not input_token_batched:
                 with Timer() as master_route_timer:
-                    master_route_result = await self.get_master_route_addrs(input)
+                    master_route_result = await self.get_master_route_addrs(
+                        input, seq_len_hint
+                    )
                 kmonitor.report(
                     GaugeMetrics.MASTER_ROUTE_RT_METRIC, master_route_timer.cost_ms()
                 )
@@ -334,7 +341,15 @@ class BackendRPCServerVisitor:
                 inp for inp in inputs if not inp.generate_config.role_addrs
             ]
             if unrouted:
-                await self.route_ips(unrouted[0])
+                # Report the batch's aggregate prompt length, not the first input's:
+                # this one /schedule call is the only load signal the master gets for
+                # the whole batch, and under-reporting it as a single request would
+                # make load-aware strategies (SHORTEST_TTFT) pile followers onto the
+                # worker that just absorbed N inputs.
+                await self.route_ips(
+                    unrouted[0],
+                    seq_len_hint=sum(inp.prompt_length for inp in inputs),
+                )
                 for inp in unrouted[1:]:
                     inp.generate_config.role_addrs = list(
                         unrouted[0].generate_config.role_addrs
