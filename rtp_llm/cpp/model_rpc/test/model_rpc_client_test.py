@@ -39,6 +39,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateOutputsPB,
     TensorPB,
 )
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
 
 
@@ -240,6 +241,99 @@ class BatchAddressSelectionTest(TestCase):
         client = self._client([])
         with self.assertRaises(ValueError):
             client._select_batch_address([self._input(7)])
+
+
+class BatchEnqueueRoutingTest(TestCase):
+    """A batch RPC is one scheduling unit — one BatchGenerateCall to one backend. If the visitor
+    routed each input separately, a multi-worker master could legally stamp a different backend
+    on every input, and _select_batch_address would (rightly) reject the batch as having no
+    single valid target. So BackendRPCServerVisitor.batch_enqueue must route once and propagate
+    the same assignment to every unrouted input.
+    """
+
+    @staticmethod
+    def _visitor(master_rotation):
+        """Visitor stub whose route_ips simulates a round-robin master: each call stamps the
+        next address from master_rotation, exactly what a real multi-worker master may do."""
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.max_seq_len = 1024
+        visitor.sp_config = None
+        visitor.host_service = SimpleNamespace(service_available=True)
+        sent = {}
+
+        async def fake_batch_enqueue(inputs):
+            sent["inputs"] = inputs
+            return []
+
+        visitor.model_rpc_client = SimpleNamespace(batch_enqueue=fake_batch_enqueue)
+        route_calls = []
+
+        async def fake_route_ips(inp):
+            inp.generate_config.role_addrs = [
+                master_rotation[len(route_calls) % len(master_rotation)]
+            ]
+            route_calls.append(inp)
+
+        visitor.route_ips = fake_route_ips
+        return visitor, route_calls, sent
+
+    @staticmethod
+    def _addr(ip):
+        return SimpleNamespace(
+            role=RoleType.PDFUSION, ip=ip, http_port=8088, grpc_port=8089
+        )
+
+    @staticmethod
+    def _input(request_id, role_addrs=()):
+        return SimpleNamespace(
+            request_id=request_id,
+            prompt_length=8,
+            generate_config=SimpleNamespace(
+                role_addrs=list(role_addrs), max_new_tokens=16
+            ),
+        )
+
+    def test_round_robin_master_cannot_scatter_a_batch_across_backends(self):
+        visitor, route_calls, sent = self._visitor(
+            [self._addr("10.0.0.1"), self._addr("10.0.0.2")]
+        )
+        inputs = [self._input(i) for i in range(4)]
+
+        asyncio.run(visitor.batch_enqueue(inputs))
+
+        self.assertEqual(
+            1, len(route_calls), "a batch is one scheduling unit: one master round-trip"
+        )
+        # Every input carries the first routing decision, and the whole batch resolves to a
+        # single target through the real _select_batch_address — the exact seam that a
+        # per-input routing loop breaks under a round-robin master.
+        client = ModelRpcClient.__new__(ModelRpcClient)
+        client._addresses = ["10.9.9.9:1"]
+        client._decode_entrance = False
+        self.assertEqual("10.0.0.1:8089", client._select_batch_address(inputs))
+        self.assertIs(inputs, sent["inputs"])
+        # Propagated as copies: one input's later mutation must not silently retarget siblings.
+        self.assertIsNot(
+            inputs[0].generate_config.role_addrs,
+            inputs[1].generate_config.role_addrs,
+        )
+
+    def test_dispatcher_pre_assigned_chunk_never_touches_the_master(self):
+        visitor, route_calls, sent = self._visitor([self._addr("10.0.0.9")])
+        stamped = self._addr("10.0.0.7")
+        inputs = [self._input(i, [stamped]) for i in range(3)]
+
+        asyncio.run(visitor.batch_enqueue(inputs))
+
+        self.assertEqual(
+            0,
+            len(route_calls),
+            "pre-assigned chunks carry the dispatcher's decision; re-routing would discard it",
+        )
+        client = ModelRpcClient.__new__(ModelRpcClient)
+        client._addresses = []
+        client._decode_entrance = False
+        self.assertEqual("10.0.0.7:8089", client._select_batch_address(inputs))
 
 
 if __name__ == "__main__":

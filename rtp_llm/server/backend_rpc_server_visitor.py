@@ -324,8 +324,21 @@ class BackendRPCServerVisitor:
             self.check_sp_supported(input)
 
         if self.host_service.service_available:
-            for input in inputs:
-                await self.route_ips(input)
+            # A batch RPC is one scheduling unit: every input goes to the same backend in a
+            # single BatchGenerateCall (ModelRpcClient._select_batch_address enforces this).
+            # Routing each input separately would let the master legally scatter them across
+            # workers, leaving the batch with no single valid target — so route once and stamp
+            # the same assignment on the rest. Inputs that already carry role_addrs (the
+            # dispatcher pre-assigns whole chunks) keep them and skip routing entirely.
+            unrouted = [
+                inp for inp in inputs if not inp.generate_config.role_addrs
+            ]
+            if unrouted:
+                await self.route_ips(unrouted[0])
+                for inp in unrouted[1:]:
+                    inp.generate_config.role_addrs = list(
+                        unrouted[0].generate_config.role_addrs
+                    )
 
         return await self.model_rpc_client.batch_enqueue(inputs)
 
