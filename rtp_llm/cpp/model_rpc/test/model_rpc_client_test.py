@@ -398,6 +398,82 @@ class BatchEnqueueRoutingTest(TestCase):
             client._select_batch_address(inputs)
 
 
+class SchedulePayloadSeqLenTest(TestCase):
+    """The aggregate-weight fix is only worth anything at its last hop: the seq_len that
+    actually reaches the master in the /schedule payload. Everything upstream of this
+    (batch_enqueue -> route_ips -> get_master_route_addrs -> get_backend_role_addrs) is
+    plumbing that a refactor can silently drop while every other test stays green.
+    """
+
+    @staticmethod
+    def _client():
+        from rtp_llm.server.master_client import MasterClient
+
+        client = MasterClient.__new__(MasterClient)
+        client.host_service = SimpleNamespace(
+            get_master_addr=lambda: "10.0.0.1:8090",
+            get_slave_addr=lambda: None,
+        )
+        client.master_config = SimpleNamespace(master_default_timeout_ms=3000)
+        sent = {}
+
+        async def fake_send(addr, payload, generate_timeout_ms, request_id):
+            sent["payload"] = payload
+            return SimpleNamespace(
+                connection_failed=False,
+                result=None,
+                error_code=None,
+                error_message=None,
+            )
+
+        client._send_schedule_request = fake_send
+        return client, sent
+
+    @staticmethod
+    def _input(prompt_length):
+        return SimpleNamespace(
+            request_id=1,
+            prompt_length=prompt_length,
+            generate_config=SimpleNamespace(
+                role_addrs=[], timeout_ms=3000, ttft_timeout_ms=None
+            ),
+        )
+
+    def test_seq_len_hint_is_what_reaches_the_master(self):
+        client, sent = self._client()
+
+        asyncio.run(
+            client.get_backend_role_addrs(
+                block_cache_keys=[], input=self._input(7), request_id=1, seq_len_hint=210
+            )
+        )
+
+        self.assertEqual(210, sent["payload"]["seq_len"])
+
+    def test_without_a_hint_the_single_input_length_is_reported(self):
+        client, sent = self._client()
+
+        asyncio.run(
+            client.get_backend_role_addrs(
+                block_cache_keys=[], input=self._input(7), request_id=1
+            )
+        )
+
+        self.assertEqual(7, sent["payload"]["seq_len"])
+
+    def test_a_zero_hint_is_honoured_rather_than_treated_as_absent(self):
+        # `if seq_len_hint else` would silently fall back here; the guard must be `is not None`.
+        client, sent = self._client()
+
+        asyncio.run(
+            client.get_backend_role_addrs(
+                block_cache_keys=[], input=self._input(7), request_id=1, seq_len_hint=0
+            )
+        )
+
+        self.assertEqual(0, sent["payload"]["seq_len"])
+
+
 if __name__ == "__main__":
     setup_logging()
     main()

@@ -583,8 +583,10 @@ class ModelRpcClient(object):
                 )
             return self._addresses[inputs[0].request_id % len(self._addresses)]
         if len(targets) > 1:
-            # Typed so the HTTP layer reports a deterministic client-error code instead
-            # of a generic 500: a mixed batch is a caller assembly error, not our fault.
+            # Typed as INVALID_PARAMS to name the fault: a mixed batch is a caller assembly
+            # error. Note /batch_infer currently has no exception handler above this, so the
+            # wire response is Starlette's bare 500 either way — the type buys an accurate
+            # error_code for whoever adds one, and a message without a traceback stapled on.
             raise FtRuntimeException(
                 ExceptionType.INVALID_PARAMS,
                 f"batch request: [{len(inputs)} items] has inconsistent pre-assigned "
