@@ -66,7 +66,16 @@ cc_test(
     ],
     env = select({
         "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM",},
+        "@//:using_xpu": {"TEST_USING_DEVICE": "XPU",},
         "//conditions:default": {"TEST_USING_DEVICE": "CUDA",},
     }),
-    exec_properties = {'gpu':'H20'},
+    exec_properties = select({
+        # TODO(xpu): set the XPU CI machine label once the XPU test pool is
+        # provisioned. NOTE: the target also cannot build under --config=xpu
+        # yet because test_deps transitively compile CUDA kernels
+        # (//rtp_llm/models_py/bindings/common/kernels:kernels_moe); that dep
+        # graph must be de-CUDA-ified before this XPU lane executes.
+        "@//:using_xpu": {},
+        "//conditions:default": {'gpu':'H20'},
+    }),
 )
