@@ -8,6 +8,8 @@
 
 namespace rtp_llm {
 
+size_t ResponseBufferEntry::kMaxQueueBytes = 512 * 1024 * 1024;  // 512MB per entry
+
 void ResponseBufferEntry::installCancelProducer(std::function<void()> producer) {
     {
         std::lock_guard<std::mutex> lock(mu);
@@ -29,15 +31,18 @@ bool ResponseBufferEntry::write(const GenerateOutputsPB& outputs) {
         if (cancelled.load()) {
             return false;
         }
-        queue_size = queue.size();
-        if (queue_size >= kMaxQueueSize) {
+        queue_size             = queue.size();
+        const size_t msg_bytes = outputs.ByteSizeLong();
+        if (queue_size >= kMaxQueueSize || queue_bytes_ + msg_bytes >= kMaxQueueBytes) {
             overflow = true;
         } else {
             queue.push_back(outputs);
+            queue_bytes_ += msg_bytes;
             last_activity_us = autil::TimeUtility::currentTimeInMicroSeconds();
         }
     }
     if (overflow) {
+        dropped_count_.fetch_add(1, std::memory_order_relaxed);
         RTP_LLM_LOG_ERROR("response queue overflow for request_id=%ld, queue_size=%zu, cancelling request",
                           outputs.request_id(),
                           queue_size);
@@ -55,6 +60,7 @@ ResponseBufferEntry::DrainResult ResponseBufferEntry::waitAndDrain(std::chrono::
         return !queue.empty() || done.load() || cancelled.load() || error_status.has_value();
     });
     result.outputs.swap(queue);
+    queue_bytes_ = 0;
     if (cancelled.load()) {
         result.terminal        = true;
         result.terminal_status = grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
@@ -105,12 +111,17 @@ bool ResponseBufferEntry::isCancelled() const {
     return cancelled.load();
 }
 
+size_t ResponseBufferEntry::droppedCount() const {
+    return dropped_count_.load(std::memory_order_relaxed);
+}
+
 bool ResponseBufferEntry::discardIfProducerDoneAndIdle(int64_t now_us, int64_t ttl_us) {
     std::lock_guard<std::mutex> lock(mu);
     if (!done.load() || (now_us - last_activity_us) < ttl_us) {
         return false;
     }
     std::deque<GenerateOutputsPB>().swap(queue);
+    queue_bytes_    = 0;
     cancel_producer = nullptr;
     return true;
 }

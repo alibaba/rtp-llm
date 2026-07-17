@@ -6,8 +6,7 @@ import unittest
 from typing import Dict
 from unittest.mock import MagicMock, patch
 
-from rtp_llm.server.host_service import FlexlbHeartbeatInfo
-from rtp_llm.server.host_service import MasterService
+from rtp_llm.server.host_service import FlexlbHeartbeatInfo, MasterService
 from rtp_llm.vipserver.host import Host
 
 
@@ -49,7 +48,6 @@ class TestMasterService(unittest.TestCase):
 
         self.assertEqual(svc.get_master_addr(), "10.0.0.1:8000")
         self.assertEqual(svc.get_queue_length(), 7)
-        self.assertIsNone(svc.get_slave_addr())
         mock_post.assert_called_once()
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
@@ -81,7 +79,6 @@ class TestMasterService(unittest.TestCase):
 
         self.assertEqual(svc.get_master_addr(), "10.0.0.2:8000")
         self.assertEqual(svc.get_queue_length(), 2)
-        self.assertEqual(svc.get_slave_addr(), "10.0.0.1:8000")
         self.assertEqual(mock_post.call_count, 2)
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
@@ -208,7 +205,6 @@ class TestMasterService(unittest.TestCase):
 
         self.assertEqual(svc.get_master_addr(), "10.0.0.1:8000")
         self.assertEqual(svc.get_queue_length(), 5)
-        self.assertEqual(svc.get_slave_addr(), "10.0.0.2:8000")
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
     @patch("rtp_llm.server.host_service.requests.post")

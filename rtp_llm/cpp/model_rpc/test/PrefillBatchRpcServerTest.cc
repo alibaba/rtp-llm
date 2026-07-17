@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/model_rpc/PrefillBatchRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/ResponseBuffer.h"
 
 namespace rtp_llm {
 namespace {
@@ -165,6 +166,93 @@ TEST(PrefillBatchRpcServerTest, FailsFastWhenEnqueueGroupOmitsAResult) {
     EXPECT_ANY_THROW(server.EnqueueBatch(nullptr, &request, &response));
     EXPECT_EQ(server.enqueue_group_calls, 1);
     EXPECT_EQ(response.successes_size() + response.errors_size(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Real EnqueueGroup / FetchResponse pipeline tests (no mock override).
+// ---------------------------------------------------------------------------
+
+class TestPrefillBatchRpcServerRealGroup: public PrefillBatchRpcServer {
+public:
+    void setParallelism(int64_t dp_size, int64_t dp_rank) {
+        maga_init_params_.parallelism_config.dp_size = dp_size;
+        maga_init_params_.parallelism_config.dp_rank = dp_rank;
+    }
+};
+
+TEST(PrefillBatchRpcServerTest, AdmitGroupRejectsEmptyBatchId) {
+    TestPrefillBatchRpcServerRealGroup server;
+    server.setParallelism(/*dp_size=*/1, /*dp_rank=*/0);
+
+    EnqueueGroupRequestPB request;
+    request.set_batch_id("");
+    request.set_dp_rank(0);
+    auto* group_input = request.add_requests();
+    group_input->mutable_input()->set_request_id(100);
+
+    EnqueueBatchResponsePB response;
+    auto                   status = server.EnqueueGroup(nullptr, &request, &response);
+
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ(response.successes_size(), 0);
+    ASSERT_EQ(response.errors_size(), 1);
+    EXPECT_EQ(response.errors(0).request_id(), 100);
+    EXPECT_EQ(response.errors(0).error_info().error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+TEST(PrefillBatchRpcServerTest, AdmitGroupRejectsDuplicateRequestId) {
+    TestPrefillBatchRpcServerRealGroup server;
+    server.setParallelism(/*dp_size=*/1, /*dp_rank=*/0);
+
+    EnqueueGroupRequestPB request;
+    request.set_batch_id("batch-dup");
+    request.set_dp_rank(0);
+    auto* input1 = request.add_requests();
+    input1->mutable_input()->set_request_id(200);
+    auto* input2 = request.add_requests();
+    input2->mutable_input()->set_request_id(200);
+
+    EnqueueBatchResponsePB response;
+    auto                   status = server.EnqueueGroup(nullptr, &request, &response);
+
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ(response.successes_size(), 0);
+    ASSERT_EQ(response.errors_size(), 2);
+    EXPECT_EQ(response.errors(0).request_id(), 200);
+    EXPECT_EQ(response.errors(0).error_info().error_code(), grpc::StatusCode::ALREADY_EXISTS);
+    EXPECT_EQ(response.errors(1).request_id(), 200);
+    EXPECT_EQ(response.errors(1).error_info().error_code(), grpc::StatusCode::ALREADY_EXISTS);
+}
+
+TEST(PrefillBatchRpcServerTest, FetchResponseReturnsNotFoundForUnknownBatchId) {
+    TestPrefillBatchRpcServerRealGroup server;
+
+    FetchRequestPB request;
+    request.set_request_id(999);
+
+    auto status = server.FetchResponse(nullptr, &request, nullptr);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::NOT_FOUND);
+}
+
+TEST(PrefillBatchRpcServerTest, FetchResponseReturnsAlreadyClaimedForClaimedEntry) {
+    TestPrefillBatchRpcServerRealGroup server;
+
+    const int64_t request_id = 888;
+    // Reserve + publish an entry, then claim it to simulate a concurrent FetchResponse.
+    auto entry = server.response_registry_.reserve(request_id);
+    ASSERT_TRUE(entry != nullptr);
+    server.response_registry_.publish(request_id, entry);
+    auto claim_result = server.response_registry_.claim(request_id);
+    ASSERT_EQ(claim_result.status, ResponseBufferRegistry::ClaimStatus::SUCCESS);
+
+    // A second FetchResponse should see ALREADY_CLAIMED and return immediately.
+    FetchRequestPB request;
+    request.set_request_id(request_id);
+
+    auto status = server.FetchResponse(nullptr, &request, nullptr);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::ALREADY_EXISTS);
 }
 
 }  // namespace

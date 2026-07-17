@@ -44,6 +44,8 @@ public:
                                const FetchRequestPB*                  request,
                                grpc::ServerWriter<GenerateOutputsPB>* writer);
 
+    grpc::Status Cancel(grpc::ServerContext* context, const CancelRequestPB* request, EmptyPB* response);
+
 private:
     // One accepted request inside a group; carried across the EnqueueGroup phase methods.
     struct BatchSlot {
@@ -107,11 +109,14 @@ private:
     bool                    response_worker_stop_{false};
     std::mutex              response_worker_mu_;
     std::condition_variable response_worker_cv_;
-    size_t                  response_worker_count_{0};
+    std::atomic<size_t>     response_worker_count_{0};
 
     // Thread pool replacing std::async / std::thread::detach.
     autil::ThreadPoolBasePtr slot_worker_pool_;  // Prepare + async response runners.
     PoolMetrics              slot_pool_metrics_;
+
+    // For unit testing of the real EnqueueGroup / FetchResponse error paths.
+    friend class TestPrefillBatchRpcServerRealGroup;
 };
 
 }  // namespace rtp_llm

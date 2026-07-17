@@ -69,6 +69,15 @@ public:
         return prefill_server_->FetchResponse(context, request, writer);
     }
 
+    grpc::Status Cancel(grpc::ServerContext* context, const CancelRequestPB* request, EmptyPB* response) override {
+        if (!prefill_server_) {
+            auto error_msg = "server not implement Cancel";
+            RTP_LLM_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
+        }
+        return prefill_server_->Cancel(context, request, response);
+    }
+
     grpc::Status RemoteLoad(grpc::ServerContext*          context,
                             const BroadcastLoadRequestPB* request,
                             BroadcastLoadResponsePB*      response) override {

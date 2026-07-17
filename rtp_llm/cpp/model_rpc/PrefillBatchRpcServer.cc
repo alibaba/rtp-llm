@@ -101,7 +101,7 @@ void PrefillBatchRpcServer::startResponseRegistryGc() {
             lock.unlock();
             reportPoolMetrics();
             gc_counter++;
-            if (gc_counter >= 6) {  // GC every 60 seconds
+            if (gc_counter >= 3) {  // GC every 30 seconds
                 response_registry_.gc(std::chrono::minutes(10));
                 gc_counter = 0;
             }
@@ -123,7 +123,7 @@ bool PrefillBatchRpcServer::tryStartAsyncResponseWorker() {
     if (response_worker_stop_) {
         return false;
     }
-    ++response_worker_count_;
+    response_worker_count_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
@@ -131,9 +131,10 @@ void PrefillBatchRpcServer::finishAsyncResponseWorker() {
     bool notify = false;
     {
         std::lock_guard<std::mutex> lock(response_worker_mu_);
-        RTP_LLM_CHECK_WITH_INFO(response_worker_count_ > 0, "unbalanced async response worker finish");
-        --response_worker_count_;
-        notify = response_worker_stop_ && response_worker_count_ == 0;
+        RTP_LLM_CHECK_WITH_INFO(response_worker_count_.load(std::memory_order_relaxed) > 0,
+                                "unbalanced async response worker finish");
+        response_worker_count_.fetch_sub(1, std::memory_order_relaxed);
+        notify = response_worker_stop_ && response_worker_count_.load(std::memory_order_acquire) == 0;
     }
     if (notify) {
         response_worker_cv_.notify_all();
@@ -143,22 +144,23 @@ void PrefillBatchRpcServer::finishAsyncResponseWorker() {
 void PrefillBatchRpcServer::stopAsyncResponseWorkers() {
     std::unique_lock<std::mutex> lock(response_worker_mu_);
     response_worker_stop_ = true;
-    const bool stopped =
-        response_worker_cv_.wait_for(lock, std::chrono::minutes(10), [this] { return response_worker_count_ == 0; });
+    const bool stopped    = response_worker_cv_.wait_for(
+        lock, std::chrono::minutes(10), [this] { return response_worker_count_.load(std::memory_order_acquire) == 0; });
     if (!stopped) {
         RTP_LLM_LOG_WARNING("timed out waiting for %zu async response workers; cancelling remaining responses",
-                            response_worker_count_);
+                            response_worker_count_.load(std::memory_order_acquire));
     }
     lock.unlock();
 
     if (!stopped) {
         response_registry_.cancelAll();
         lock.lock();
-        const bool cancelled_stopped =
-            response_worker_cv_.wait_for(lock, std::chrono::minutes(5), [this] { return response_worker_count_ == 0; });
+        const bool cancelled_stopped = response_worker_cv_.wait_for(lock, std::chrono::minutes(5), [this] {
+            return response_worker_count_.load(std::memory_order_acquire) == 0;
+        });
         RTP_LLM_CHECK_WITH_INFO(cancelled_stopped,
                                 "timed out waiting for %zu async response workers five minutes after cancellation",
-                                response_worker_count_);
+                                response_worker_count_.load(std::memory_order_acquire));
     }
 }
 
@@ -189,7 +191,7 @@ void PrefillBatchRpcServer::reportPoolMetrics() {
     size_t response_worker_count = 0;
     {
         std::lock_guard<std::mutex> lock(response_worker_mu_);
-        response_worker_count = response_worker_count_;
+        response_worker_count = response_worker_count_.load(std::memory_order_relaxed);
     }
     // Report to kmonitor (called every 10s from GC thread)
     reportPoolMetricsToKmonitor(metrics_reporter_, "slot", slot_pool_metrics_);
@@ -309,6 +311,13 @@ grpc::Status PrefillBatchRpcServer::EnqueueGroup(grpc::ServerContext* /*context*
 grpc::Status PrefillBatchRpcServer::admitGroup(const EnqueueGroupRequestPB* request,
                                                EnqueueBatchResponsePB*      response,
                                                std::vector<BatchSlot>&      slots) {
+    if (request->batch_id() == 0) {
+        for (const auto& dp_input : request->requests()) {
+            int64_t rid = dp_input.has_input() ? dp_input.input().request_id() : 0;
+            addBatchError(response, rid, grpc::StatusCode::INVALID_ARGUMENT, "EnqueueGroup batch_id is empty");
+        }
+        return grpc::Status::OK;
+    }
     std::vector<const GenerateInputPB*> all_inputs;
     all_inputs.reserve(request->requests_size());
     std::unordered_set<int64_t> seen_request_ids;
@@ -618,7 +627,6 @@ void PrefillBatchRpcServer::runSlotStream(SlotRunnerState state, int64_t request
     if (!finish_status.ok()) {
         state.prefill_context->error_status = finish_status;
     }
-    state.prefill_context.reset();
     response_registry_.finish(request_id, state.entry, finish_status);
     RTP_LLM_LOG_DEBUG("EnqueueGroup request [%ld] finishStream done, ok=%d", request_id, finish_status.ok());
 }
@@ -687,6 +695,30 @@ grpc::Status PrefillBatchRpcServer::FetchResponse(grpc::ServerContext*          
             return drained.terminal_status;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cancel — cancel a published (READY) response entry by request_id
+// ---------------------------------------------------------------------------
+
+grpc::Status
+PrefillBatchRpcServer::Cancel(grpc::ServerContext* context, const CancelRequestPB* request, EmptyPB* response) {
+    (void)context;
+    (void)response;
+    RTP_LLM_PROFILE_FUNCTION();
+    const auto request_id = request->request_id();
+    // Try to claim the response entry. Only READY entries (published but not yet
+    // being fetched) can be cancelled through this path. PENDING entries (not yet
+    // published) and FETCH_CLAIMED entries (already being streamed) are handled by
+    // other means — the former will be aborted by EnqueueGroup if preparation fails,
+    // the latter will detect cancellation when the client disconnects the fetch stream.
+    auto claim_result = response_registry_.claim(request_id);
+    if (claim_result.status == ResponseBufferRegistry::ClaimStatus::SUCCESS) {
+        claim_result.entry->cancel();
+        response_registry_.releaseClaim(request_id, claim_result.entry);
+    }
+    // Idempotent: return OK whether or not the entry was found.
+    return grpc::Status::OK;
 }
 
 }  // namespace rtp_llm

@@ -149,6 +149,24 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
 
     private void doDispatchInternal(List<BatchItem> items, PrefillEndpoint prefillEp,
                                     long batchId, long predMs, String reason, DispatchCallback callback) {
+        // Filter out items that reached a terminal state before dispatch
+        List<BatchItem> active = new ArrayList<>();
+        for (BatchItem item : items) {
+            if (!item.future().isDone()) {
+                active.add(item);
+            } else {
+                Logger.debug("Skipping completed item in dispatch: request_id={}, batch_id={}",
+                        item.requestId(), batchId);
+                callback.onFailure(item, new IllegalStateException("request completed before EnqueueBatch was sent"));
+            }
+        }
+
+        if (active.isEmpty()) {
+            Logger.debug("All items completed before dispatch, batch_id={}", batchId);
+            prefillEp.releaseBatch(batchId);
+            return;
+        }
+
         // 1. Build gRPC request
         EngineRpcService.EnqueueBatchRequestPB request;
         try {

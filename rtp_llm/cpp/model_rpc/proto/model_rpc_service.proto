@@ -741,6 +741,7 @@ service RpcService {
     rpc EnqueueBatch(EnqueueBatchRequestPB) returns (EnqueueBatchResponsePB);
     rpc EnqueueGroup(EnqueueGroupRequestPB) returns (EnqueueBatchResponsePB);
     rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
+    rpc Cancel(CancelRequestPB) returns (EmptyPB);
 }
 
 service MultimodalRpcService {

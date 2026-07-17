@@ -43,7 +43,7 @@ protected:
 
 private:
     grpc::Status syncPrefix(PrefillGenerateContext& prefill_context);
-    ErrorInfo    waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream);
+    ErrorInfo    waitStreamBeforeRun(PrefillGenerateContext& prefill_context);
     void         getRpcConnection(PrefillGenerateContext& prefill_context);
     void         multimodalProcess(PrefillGenerateContext& prefill_context);
     void         remoteAllocateResource(PrefillGenerateContext& prefill_context);

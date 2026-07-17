@@ -1777,11 +1777,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.prefill_slot_pool_size              = t[20].cast<int64_t>();
                         c.prefill_stop_stream_wait_timeout_ms = t[21].cast<int64_t>();
                     } else {
-                        // Older tuples contain removed batch coordination settings and omit
-                        // prefill_stop_stream_wait_timeout_ms. The oldest supported layout additionally has
-                        // batch_dispatch_timeout_ms at index 20.
+                        // Older tuples contain removed batch coordination settings.
+                        // The oldest supported layout additionally has batch_dispatch_timeout_ms at index 20.
                         const size_t batch_config_offset = t.size() >= 26 ? 1 : 0;
                         c.prefill_slot_pool_size         = t[24 + batch_config_offset].cast<int64_t>();
+                        // prefill_stop_stream_wait_timeout_ms is present only in 27-item legacy
+                        // tuples (at index 25 + batch_config_offset). For 25/26-item tuples it
+                        // keeps its default value (2000) from default construction.
+                        if (t.size() >= 26 + batch_config_offset) {
+                            c.prefill_stop_stream_wait_timeout_ms = t[25 + batch_config_offset].cast<int64_t>();
+                        }
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PDSepConfig unpickle error: ") + e.what());
