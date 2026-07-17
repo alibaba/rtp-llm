@@ -176,17 +176,18 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     if (reserve_blocks > 0 && estimated_blocks > 0) {
         const int actual_blocks = std::max(estimated_blocks - reuse_blocks, 0);
         if (actual_blocks > 0) {
-            const size_t available_blocks = availableBlocksNum();
-            if (available_blocks < static_cast<size_t>(actual_blocks) + reserve_blocks) {
+            const size_t required_blocks = static_cast<size_t>(actual_blocks) + reserve_blocks;
+            const size_t free_blocks = freeBlocksNum();
+            if (free_blocks < required_blocks) {
                 if (malloc_info.verbose) {
                     RTP_LLM_LOG_INFO("SingleTypeKVCacheAllocator initMalloc rejected by reserve blocks: request_id=%ld "
-                                     "need_blocks=%d reuse_blocks=%d adjusted_need_blocks=%d available_blocks=%zu "
+                                     "need_blocks=%d reuse_blocks=%d adjusted_need_blocks=%d free_blocks=%zu "
                                      "reserve_blocks=%zu",
                                      malloc_info.request_id,
                                      estimated_blocks,
                                      reuse_blocks,
                                      actual_blocks,
-                                     available_blocks,
+                                     free_blocks,
                                      reserve_blocks);
                 }
                 return {false, 0};
@@ -279,7 +280,7 @@ void SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
     }
 
     auto all_blocks = kv_cache_resource->getAllBatchBlocks();
-    for (const auto& blocks : all_blocks) {
+    for (auto& blocks : all_blocks) {
         fullGroup()->free(blocks);
     }
     kv_cache_resource->clearBlocks();

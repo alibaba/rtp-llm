@@ -549,14 +549,15 @@ bool HybridKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& mall
     if (need_blocks <= 0) {
         return true;
     }
-    const size_t available_blocks = availableBlocksNum();
-    const bool   accepted         = available_blocks >= static_cast<size_t>(need_blocks) + reserve_blocks;
+    const size_t required_blocks = static_cast<size_t>(need_blocks) + reserve_blocks;
+    const size_t free_blocks = freeBlocksNum();
+    const bool accepted = free_blocks >= required_blocks;
     if (!accepted && malloc_info.verbose) {
         RTP_LLM_LOG_INFO("Hybrid initMalloc rejected by reserve blocks: request_id=%ld "
-                         "need_blocks=%d available_blocks=%zu reserve_blocks=%zu",
+                         "need_blocks=%d free_blocks=%zu reserve_blocks=%zu",
                          malloc_info.request_id,
                          need_blocks,
-                         available_blocks,
+                         free_blocks,
                          reserve_blocks);
     }
     return accepted;

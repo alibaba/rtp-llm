@@ -28,9 +28,8 @@ namespace {
 struct GlobalCacheMetricsSnapshot {
     RtpLLMCacheMetricsCollector collector;
     size_t                      total_blocks         = 0;
-    size_t                      available_blocks     = 0;
-    size_t                      request_ref_blocks   = 0;
-    size_t                      connector_ref_blocks = 0;
+    size_t                      free_blocks               = 0;
+    size_t                      active_tree_cached_blocks = 0;
 };
 
 GlobalCacheMetricsSnapshot collectGlobalCacheMetrics(const KVCacheAllocatorPtr& allocator) {
@@ -38,21 +37,18 @@ GlobalCacheMetricsSnapshot collectGlobalCacheMetrics(const KVCacheAllocatorPtr& 
     auto                       block_tree_cache = allocator->blockTreeCache();
 
     snapshot.total_blocks         = allocator->totalBlocksNum();
-    snapshot.available_blocks     = allocator->availableBlocksNum();
-    snapshot.request_ref_blocks   = allocator->requestRefBlocksNum();
-    snapshot.connector_ref_blocks = allocator->connectorRefBlocksNum();
+    snapshot.free_blocks               = allocator->freeBlocksNum();
+    snapshot.active_tree_cached_blocks = allocator->activeTreeCachedBlocksNum();
 
     auto& collector = snapshot.collector;
     collector.kv_cache_item_num =
         block_tree_cache ? static_cast<int64_t>(block_tree_cache->getStats().tree_node_count) : 0;
     collector.kv_cache_left_seq             = static_cast<int64_t>(allocator->availableTokensNum());
-    collector.kv_cache_available_blocks     = static_cast<int64_t>(snapshot.available_blocks);
-    collector.kv_cache_request_ref_blocks   = static_cast<int64_t>(snapshot.request_ref_blocks);
-    collector.kv_cache_connector_ref_blocks = static_cast<int64_t>(snapshot.connector_ref_blocks);
-    collector.kv_cache_free_blocks          = static_cast<int64_t>(allocator->freeBlocksNum());
+    collector.kv_cache_free_blocks          = static_cast<int64_t>(snapshot.free_blocks);
+    collector.kv_cache_active_blocks        = static_cast<int64_t>(snapshot.active_tree_cached_blocks);
     collector.kv_cache_used_ratio           = (snapshot.total_blocks == 0) ?
                                                   0.0f :
-                                                  static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
+                                                  static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.free_blocks)
                                                            / static_cast<double>(snapshot.total_blocks));
     collector.mr_cost_time_ms               = allocator->getMrCostTimeMs();
 
@@ -60,12 +56,10 @@ GlobalCacheMetricsSnapshot collectGlobalCacheMetrics(const KVCacheAllocatorPtr& 
 }
 
 void logGlobalCacheMetrics(const GlobalCacheMetricsSnapshot& snapshot) {
-    RTP_LLM_LOG_INFO("kvc raw global: total=%zu avail=%zu req_ref=%zu con_ref=%zu free=%zu items=%ld ratio=%.4f%%",
+    RTP_LLM_LOG_INFO("kvc raw global: total=%zu free=%zu active_tree_cached=%zu items=%ld ratio=%.4f%%",
                      snapshot.total_blocks,
-                     snapshot.available_blocks,
-                     snapshot.request_ref_blocks,
-                     snapshot.connector_ref_blocks,
-                     static_cast<size_t>(snapshot.collector.kv_cache_free_blocks),
+                     snapshot.free_blocks,
+                     snapshot.active_tree_cached_blocks,
                      static_cast<long>(snapshot.collector.kv_cache_item_num),
                      snapshot.collector.kv_cache_used_ratio);
 }
@@ -74,23 +68,18 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
                             const KVCachePoolMetricsSnapshot&   pool_snapshot,
                             bool                                should_log) {
     if (should_log) {
-        RTP_LLM_LOG_INFO("kvc raw pool[%s]: total=%zu avail=%zu req_ref=%zu con_ref=%zu free=%zu reserve=%zu "
-                         "ratio=%.4f%%",
+        RTP_LLM_LOG_INFO("kvc raw pool[%s]: total=%zu free=%zu active_tree_cached=%zu reserve=%zu ratio=%.4f%%",
                          pool_snapshot.pool_name.c_str(),
                          pool_snapshot.total_blocks,
-                         pool_snapshot.available_blocks,
-                         pool_snapshot.request_ref_blocks,
-                         pool_snapshot.connector_ref_blocks,
                          pool_snapshot.free_blocks,
+                         pool_snapshot.active_tree_cached_blocks,
                          pool_snapshot.reserve_blocks,
                          pool_snapshot.used_ratio);
     }
 
     RtpLLMCachePoolMetricsCollector pool_collector;
     pool_collector.free_blocks          = static_cast<int64_t>(pool_snapshot.free_blocks);
-    pool_collector.available_blocks     = static_cast<int64_t>(pool_snapshot.available_blocks);
-    pool_collector.request_ref_blocks   = static_cast<int64_t>(pool_snapshot.request_ref_blocks);
-    pool_collector.connector_ref_blocks = static_cast<int64_t>(pool_snapshot.connector_ref_blocks);
+    pool_collector.active_blocks        = static_cast<int64_t>(pool_snapshot.active_tree_cached_blocks);
     pool_collector.total_blocks         = static_cast<int64_t>(pool_snapshot.total_blocks);
     pool_collector.reserve_blocks       = static_cast<int64_t>(pool_snapshot.reserve_blocks);
     pool_collector.used_ratio           = pool_snapshot.used_ratio;
@@ -532,22 +521,6 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
 
 size_t KVCacheManager::freeBlocksNum() const {
     return allocator_->freeBlocksNum();
-}
-
-size_t KVCacheManager::availableBlocksNum() const {
-    return allocator_->availableBlocksNum();
-}
-
-size_t KVCacheManager::notInUseBlocksNum() const {
-    return allocator_->notInUseBlocksNum();
-}
-
-BatchKVCacheResourcePtr KVCacheManager::popBlocksFromCache(size_t min_blocks_to_free) {
-    return allocator_->popBlocksFromCache(min_blocks_to_free);
-}
-
-void KVCacheManager::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource) {
-    allocator_->blockCacheFree(batch_kv_cache_resource);
 }
 
 size_t KVCacheManager::availableTokensNum() const {

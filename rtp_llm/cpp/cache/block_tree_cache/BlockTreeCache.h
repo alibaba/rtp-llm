@@ -145,10 +145,6 @@ public:
     // Block content is discarded rather than moved down to a lower tier.
     int reclaimBlocks(size_t num_blocks, Tier tier = Tier::DEVICE);
 
-    // Number of device blocks currently held only by the cache (refcount == 1) for one
-    // component group, i.e. blocks that can be reclaimed without evicting live requests.
-    size_t evictableBlocksNum(int component_group_id) const;
-
     // Directly reclaim up to num_blocks device blocks belonging to a single component
     // group (target_tier = NONE, content dropped). Returns the number actually freed.
     int evictForGroup(int component_group_id, size_t num_blocks);

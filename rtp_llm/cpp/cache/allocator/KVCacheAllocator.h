@@ -26,9 +26,7 @@ struct KVCachePoolMetricsSnapshot {
     size_t      pool_index           = 0;
     std::string pool_name            = "unnamed";
     size_t      free_blocks          = 0;
-    size_t      available_blocks     = 0;
-    size_t      request_ref_blocks   = 0;
-    size_t      connector_ref_blocks = 0;
+    size_t      active_tree_cached_blocks = 0;
     size_t      total_blocks         = 0;
     size_t      reserve_blocks       = 0;
     float       used_ratio           = 0.0f;
@@ -126,13 +124,7 @@ public:
     virtual void                    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
     virtual int64_t                 getMrCostTimeMs() const;
     virtual size_t                  freeBlocksNum() const;
-    virtual size_t                  availableBlocksNum() const;
-    virtual BatchKVCacheResourcePtr popBlocksFromCache(size_t min_blocks_to_free);
-    virtual void                    blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource);
-    virtual size_t                  requestRefBlocksNum() const;
-    virtual size_t                  connectorRefBlocksNum() const;
-    virtual size_t                  blockCacheRefBlocksNum() const;
-    virtual size_t                  notInUseBlocksNum() const;
+    virtual size_t                  activeTreeCachedBlocksNum() const;
     virtual size_t                  availableTokensNum() const;
     virtual size_t                  totalTokensNum() const;
     virtual size_t                  totalBlocksNum() const;

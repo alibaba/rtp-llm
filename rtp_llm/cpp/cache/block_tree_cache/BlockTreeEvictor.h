@@ -71,7 +71,6 @@ public:
     // and must run under BlockTreeCache's mutex. performCopy is a lock-free phase.
     std::optional<EvictionMove> chooseVictim(Tier tier);
     std::optional<EvictionMove> chooseVictim(int component_group_id, Tier tier);
-    size_t                      evictableBlocksNum(int component_group_id, Tier tier) const;
     std::vector<EvictionMove>   chooseWatermarkVictims(ComponentGroup& group, Tier tier, double watermark_ratio);
     std::optional<EvictionPlan>   buildPlan(EvictionMove eviction_move);
     CopyResultSet                 performCopy(const EvictionPlan& plan);

@@ -29,13 +29,7 @@ public:
     CacheLayerLayout allLayerCacheBase() const override;
 
     size_t                  freeBlocksNum() const override;
-    size_t                  availableBlocksNum() const override;
-    BatchKVCacheResourcePtr popBlocksFromCache(size_t min_blocks_to_free) override;
-    void                    blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource) override;
-    size_t                  requestRefBlocksNum() const override;
-    size_t                  connectorRefBlocksNum() const override;
-    size_t                  blockCacheRefBlocksNum() const override;
-    size_t                  notInUseBlocksNum() const override;
+    size_t                  activeTreeCachedBlocksNum() const override;
     size_t                  availableTokensNum() const override;
     size_t                  totalTokensNum() const override;
     size_t                  totalBlocksNum() const override;
@@ -59,14 +53,9 @@ private:
 
     int validateGroupIdForLayer(int layer_id, int group_id) const;
     int defaultGroupIdForLayer(int layer_id) const;
-    size_t minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
-    size_t totalReservableAvailableBlocks() const;
-    size_t reserveBlocksForPool(size_t gid, size_t reserve_blocks, size_t total_reservable_available_blocks) const;
-
-    // available = free + cache-evictable (cache-only, refCount==1). Single-count pools
-    // cannot report this alone (holder type is not distinguishable at the pool), so the
-    // allocator combines pool free blocks with SharedBlockCache's evictable count.
-    size_t perPoolAvailableBlocks(int gid) const;
+    size_t minTokenCapacity(bool use_free_blocks, bool full_groups_only) const;
+    size_t totalReservableFreeBlocks() const;
+    size_t reserveBlocksForPool(size_t gid, size_t reserve_blocks, size_t total_reservable_free_blocks) const;
 
     std::vector<DeviceBlockPoolPtr> group_block_pools_;
     RoleType                        role_type_{RoleType::PDFUSION};

@@ -387,7 +387,7 @@ public:
 
 ### KVCacheAllocator 修改
 
-`KVCacheAllocator` 的公开接口不变，内部替换 `SharedBlockCachePtr` 为 `BlockTreeCachePtr`。
+`KVCacheAllocator` 内部替换 `SharedBlockCachePtr` 为 `BlockTreeCachePtr`。
 
 ```cpp
 class KVCacheAllocator {
@@ -405,10 +405,6 @@ private:
     // insertIntoCache 中的 put 逻辑:
     //   旧: shared_block_cache_->put(cache_key, slots, is_resident)
     //   新: block_tree_cache_->insert(cache_keys, slots)
-    //
-    // popBlocksFromCache 中的驱逐:
-    //   旧: shared_block_cache_->selectAndEvict(min_blocks)
-    //   新: block_tree_cache_->evict(min_blocks, Tier::DEVICE)
 };
 ```
 

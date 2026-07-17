@@ -336,30 +336,6 @@ std::optional<EvictionMove> BlockTreeEvictor::chooseVictim(int component_group_i
     return chooseVictimInGroup(*group, tier);
 }
 
-size_t BlockTreeEvictor::evictableBlocksNum(int component_group_id, Tier tier) const {
-    if (component_group_id < 0 || static_cast<size_t>(component_group_id) >= component_groups_.size()) {
-        return 0;
-    }
-    const auto& group = component_groups_[static_cast<size_t>(component_group_id)];
-    const auto* heap  = heapFor(component_group_id, tier);
-    if (group == nullptr || group->component_group_id != component_group_id || heap == nullptr) {
-        return 0;
-    }
-
-    size_t count = 0;
-    for (TreeNode* node : heap->nodes()) {
-        const auto gid = static_cast<size_t>(component_group_id);
-        if (node == nullptr || gid >= node->group_slots.size()) {
-            continue;
-        }
-        const auto& slot = node->group_slots[gid];
-        if (slot.transfer_state == SlotTransferState::IDLE && group->isSlotEvictable(*node, tier)) {
-            ++count;
-        }
-    }
-    return count;
-}
-
 std::vector<EvictionMove>
 BlockTreeEvictor::chooseWatermarkVictims(ComponentGroup& group, Tier tier, double watermark_ratio) {
     std::vector<EvictionMove> victims;

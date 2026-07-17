@@ -373,12 +373,6 @@ int BlockTreeCache::reclaimBlocks(size_t num_blocks, Tier tier) {
     return total_reclaimed;
 }
 
-size_t BlockTreeCache::evictableBlocksNum(int component_group_id) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const int                   resolved = resolveComponentGroupId(component_group_id);
-    return resolved < 0 ? 0 : evictor_.evictableBlocksNum(resolved, Tier::DEVICE);
-}
-
 int BlockTreeCache::evictForGroup(int component_group_id, size_t num_blocks) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!config_.isTierEnabled(Tier::DEVICE)) {

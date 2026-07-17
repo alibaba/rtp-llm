@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
-#include <unordered_set>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
@@ -15,16 +14,15 @@ namespace rtp_llm {
 bool KVCacheAllocator::init() {
     RTP_LLM_CHECK_WITH_INFO(doInit(), "init failed");
 
-    // NOTE: `availableBlocksNum()` depends on `block_pool_` and must be queried after `doInit()`.
     const int64_t reserve_ratio = reserve_block_ratio_;
     if (reserve_ratio > 0) {
-        const size_t available_blocks = availableBlocksNum();
-        const size_t reserve_blocks = static_cast<size_t>(reserve_ratio) * available_blocks / static_cast<size_t>(100);
+        const size_t free_blocks    = freeBlocksNum();
+        const size_t reserve_blocks = static_cast<size_t>(reserve_ratio) * free_blocks / static_cast<size_t>(100);
         reserve_block_num_          = reserve_blocks;
-        RTP_LLM_LOG_INFO("KVCacheAllocator set reserve blocks: ratio=%ld%% reserve_blocks=%zu available_blocks=%zu",
+        RTP_LLM_LOG_INFO("KVCacheAllocator set reserve blocks: ratio=%ld%% reserve_blocks=%zu free_blocks=%zu",
                          reserve_ratio,
                          reserve_blocks,
-                         available_blocks);
+                         free_blocks);
     } else {
         reserve_block_num_ = 0;
     }
@@ -242,72 +240,16 @@ size_t KVCacheAllocator::freeBlocksNum() const {
     return block_pool_ ? block_pool_->freeBlocksNum() : 0;
 }
 
+size_t KVCacheAllocator::activeTreeCachedBlocksNum() const {
+    return block_pool_ ? block_pool_->activeTreeCachedBlocksNum() : 0;
+}
+
 int64_t KVCacheAllocator::getMrCostTimeMs() const {
     return block_pool_ ? block_pool_->getMrCostTimeMs() : 0;
 }
 
-size_t KVCacheAllocator::availableBlocksNum() const {
-    if (!block_pool_) {
-        return 0;
-    }
-    const size_t free_blocks = block_pool_->freeBlocksNum();
-    const size_t evictable   = block_tree_cache_ ? block_tree_cache_->evictableBlocksNum(/*component_group_id=*/0) : 0;
-    return free_blocks + evictable;
-}
-
-BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_to_free) {
-    if (!block_tree_cache_ || min_blocks_to_free == 0) {
-        return nullptr;
-    }
-    // BlockTreeCache reclaims device blocks directly (content dropped, no demotion here).
-    // The freed capacity is returned to the pool internally, so there is no evicted-key
-    // batch to hand back; callers only use the result to know whether space was freed.
-    const int reclaimed = block_tree_cache_->reclaimBlocks(min_blocks_to_free, Tier::DEVICE);
-    RTP_LLM_LOG_DEBUG(
-        "KVCacheAllocator::popBlocksFromCache: reclaimed %d/%zu device blocks", reclaimed, min_blocks_to_free);
-    return nullptr;
-}
-
-void KVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource) {
-    if (!block_pool_ || !batch_kv_cache_resource) {
-        return;
-    }
-
-    BlockIndicesType                 blocks_to_free;
-    std::unordered_set<BlockIdxType> seen_blocks;
-    for (int batch_id = 0; batch_id < batch_kv_cache_resource->batchSize(); ++batch_id) {
-        for (int gid = 0; gid < batch_kv_cache_resource->groupNums(); ++gid) {
-            for (const auto block_idx : batch_kv_cache_resource->blocks(batch_id, gid)) {
-                if (isNullBlockIdx(block_idx) || !seen_blocks.insert(block_idx).second) {
-                    continue;
-                }
-                blocks_to_free.push_back(block_idx);
-            }
-        }
-    }
-    if (!blocks_to_free.empty()) {
-        block_pool_->decRef(blocks_to_free);
-    }
-}
-
-size_t KVCacheAllocator::requestRefBlocksNum() const {
-    return 0;  // single-count pool: holder-type split is not recoverable
-}
-
-size_t KVCacheAllocator::connectorRefBlocksNum() const {
-    return 0;  // single-count pool: holder-type split is not recoverable
-}
-
-size_t KVCacheAllocator::blockCacheRefBlocksNum() const {
-    return 0;  // single-count pool: holder-type split is not recoverable
-}
-
-size_t KVCacheAllocator::notInUseBlocksNum() const {
-    return block_pool_ ? block_pool_->freeBlocksNum() : 0;  // conservative: excludes connector in-flight
-}
-
 size_t KVCacheAllocator::availableTokensNum() const {
-    return block_pool_ ? (availableBlocksNum() * logicalSeqSizePerBlockForCapacity(/*gid=*/0)) : 0;
+    return block_pool_ ? (block_pool_->freeBlocksNum() * logicalSeqSizePerBlockForCapacity(/*gid=*/0)) : 0;
 }
 
 size_t KVCacheAllocator::totalTokensNum() const {
@@ -354,8 +296,8 @@ int KVCacheAllocator::deviceCacheMetricTokensPerBlock() const {
 
 KVCacheTokenCapacity KVCacheAllocator::tokenCapacity(size_t default_seq_size_per_block) const {
     const size_t total_blocks     = totalBlocksNum();
-    const size_t available_blocks = availableBlocksNum();
-    return {total_blocks * default_seq_size_per_block, available_blocks * default_seq_size_per_block};
+    const size_t free_blocks  = freeBlocksNum();
+    return {total_blocks * default_seq_size_per_block, free_blocks * default_seq_size_per_block};
 }
 
 std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots() const {
