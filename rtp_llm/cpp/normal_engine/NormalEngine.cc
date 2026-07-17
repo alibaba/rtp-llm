@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "autil/EnvUtil.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -27,6 +28,7 @@
 #include <random>
 
 #if USING_CUDA
+#include "c10/cuda/CUDAGuard.h"
 #include "c10/cuda/CUDACachingAllocator.h"
 #endif
 
@@ -87,6 +89,62 @@ void blockTerminationSignalsInEngineThread() {
     pthread_sigmask(SIG_BLOCK, &signal_set, nullptr);
 #endif
 }
+
+#if USING_CUDA
+constexpr size_t kMiB = 1024 * 1024;
+
+void preallocateTorchCudaPoolForPrefill(RoleType role_type, int device_id) {
+    if (role_type != RoleType::PREFILL) {
+        return;
+    }
+
+    const int64_t max_mb    = autil::EnvUtil::getEnv("TORCH_CUDA_POOL_PREALLOC_MB", int64_t(-1));
+    const int64_t safety_mb = autil::EnvUtil::getEnv("TORCH_CUDA_POOL_PREALLOC_SAFETY_MB", int64_t(8192));
+    RTP_LLM_CHECK_WITH_INFO(max_mb >= -1 && safety_mb >= 0, "invalid Torch CUDA pool preallocation config");
+    if (max_mb == 0) {
+        return;
+    }
+
+    c10::cuda::CUDAGuard device_guard(device_id);
+    size_t              cuda_free  = 0;
+    size_t              cuda_total = 0;
+    RTP_LLM_CHECK_WITH_INFO(cudaMemGetInfo(&cuda_free, &cuda_total) == cudaSuccess, "cudaMemGetInfo failed");
+
+    // Match large_segment_size_mb=1024: never let allocator rounding consume the safety margin.
+    constexpr int64_t allocation_granularity_mb = 1024;
+    int64_t target_mb = std::max<int64_t>(0, static_cast<int64_t>(cuda_free / kMiB) - safety_mb);
+    if (max_mb > 0) {
+        target_mb = std::min(target_mb, max_mb);
+    }
+    target_mb = target_mb / allocation_granularity_mb * allocation_granularity_mb;
+    if (target_mb == 0) {
+        RTP_LLM_LOG_WARNING("skip Torch CUDA pool preallocation: free=%zu MiB safety=%ld MiB",
+                            cuda_free / kMiB,
+                            safety_mb);
+        return;
+    }
+
+    const int64_t target_bytes = target_mb * static_cast<int64_t>(kMiB);
+    {
+        auto buffer = torch::empty(
+            {target_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA, device_id));
+    }
+
+    const auto stats        = c10::cuda::CUDACachingAllocator::getDeviceStats(device_id);
+    const auto cached_bytes = stats.reserved_bytes[0].current - stats.allocated_bytes[0].current;
+    RTP_LLM_CHECK_WITH_INFO(cached_bytes >= target_bytes,
+                            "Torch CUDA pool preallocation failed: target=%ld MiB cached=%ld MiB",
+                            target_mb,
+                            cached_bytes / static_cast<int64_t>(kMiB));
+    RTP_LLM_LOG_INFO("Torch CUDA pool ready: device=%d target=%ld MiB cached=%ld MiB free_before=%zu MiB "
+                     "safety=%ld MiB",
+                     device_id,
+                     target_mb,
+                     cached_bytes / static_cast<int64_t>(kMiB),
+                     cuda_free / kMiB,
+                     safety_mb);
+}
+#endif
 }  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
@@ -500,6 +558,12 @@ absl::Status NormalEngine::startLoop() {
         THROW_IF_STATUS_ERROR(initSystemPrompt());
         RTP_LLM_LOG_INFO("init system prompt done");
     }
+#if USING_CUDA
+    // Run after KV cache, executor, scheduler and system-prompt initialization,
+    // but before the engine loop can accept work. The temporary torch::Tensor is
+    // released into the same CUDACachingAllocator used by Prefill model forwards.
+    preallocateTorchCudaPoolForPrefill(pd_sep_config.role_type, getDeviceId());
+#endif
     RTP_LLM_LOG_INFO("start normal engine loop");
     running_     = true;
     loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
