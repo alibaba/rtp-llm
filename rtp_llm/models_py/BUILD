@@ -153,6 +153,7 @@ py_library(
     srcs = [
         "__init__.py",
         "model_loader.py",
+        "model_desc/module_base.py",
         "module_base.py",
         "registry.py",
         "weight_mapper.py",
