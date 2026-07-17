@@ -31,6 +31,9 @@ cc_library(
         "@//:using_rocm": [
             "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
         ],
+        "@//:using_xpu": [
+            "//rtp_llm/models_py/bindings/core:exec_ctx_xpu",
+        ],
         "//conditions:default": [
             "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
             "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",

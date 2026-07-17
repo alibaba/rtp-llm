@@ -359,6 +359,23 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Combined target for XPU — mirrors exec_ctx_rocm. Pulls the pure-PyTorch XPU
+# sample/beam-search ops (exec_ctx_ops) plus the global runtime state
+# (exec_ctx_state) without any CUDA kernel dependency, so device-side tests can
+# link the Sampler under --config=xpu.
+cc_library(
+    name = "exec_ctx_xpu",
+    hdrs = [
+        "ExecOps.h",
+    ],
+    deps = [
+        ":exec_ctx_state",
+        ":exec_ctx_ops",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "cache_store_async_writer",
     hdrs = ["CacheStoreAsyncWriter.h"],

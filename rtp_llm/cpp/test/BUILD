@@ -71,10 +71,12 @@ cc_test(
     }),
     exec_properties = select({
         # TODO(xpu): set the XPU CI machine label once the XPU test pool is
-        # provisioned. NOTE: the target also cannot build under --config=xpu
-        # yet because test_deps transitively compile CUDA kernels
-        # (//rtp_llm/models_py/bindings/common/kernels:kernels_moe); that dep
-        # graph must be de-CUDA-ified before this XPU lane executes.
+        # provisioned. The CUDA transitive dependency has been removed — under
+        # --config=xpu the sampler now links the pure-PyTorch XPU sample/beam
+        # ops via //rtp_llm/models_py/bindings/core:exec_ctx_xpu (see
+        # rtp_llm/cpp/testing/BUILD) instead of cuda_impl/kernels_moe, so the
+        # target compiles cleanly. Executing it still requires an XPU runner
+        # with the oneAPI (oneMKL/oneCCL) runtime available to link libtorch_xpu.
         "@//:using_xpu": {},
         "//conditions:default": {'gpu':'H20'},
     }),

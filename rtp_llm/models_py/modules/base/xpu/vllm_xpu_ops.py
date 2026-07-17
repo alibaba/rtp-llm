@@ -61,6 +61,14 @@ def is_moe_available():
 # rejects them.
 _FA2_MIN_VERSION = "0.1.10"
 
+# Escape hatch for source builds / custom wheels that legitimately cannot expose
+# version metadata (no dist-info, no __version__). Off by default so the
+# preflight fails closed: an unverifiable FA2 is rejected rather than silently
+# admitted. Set RTP_LLM_XPU_ALLOW_UNVERIFIED_FA2=1 to bypass the gate at your own
+# risk; unset it to roll back to the safe default.
+_FA2_ALLOW_UNVERIFIED = (
+    os.environ.get("RTP_LLM_XPU_ALLOW_UNVERIFIED_FA2", "0") == "1")
+
 
 def _get_vllm_xpu_version():
     """Best-effort resolution of the installed vllm-xpu-kernels version."""
@@ -90,10 +98,19 @@ def check_fa2_requirements():
         return "vllm-xpu-kernels FA2 module (_vllm_fa2_C) is not importable"
     ver = _get_vllm_xpu_version()
     if ver is None:
-        logger.warning(
-            "vllm-xpu-kernels version could not be determined; skipping the "
-            "FA2 >= %s version gate", _FA2_MIN_VERSION)
-        return None
+        if _FA2_ALLOW_UNVERIFIED:
+            logger.warning(
+                "vllm-xpu-kernels version is undeterminable but "
+                "RTP_LLM_XPU_ALLOW_UNVERIFIED_FA2=1 is set; proceeding WITHOUT "
+                "the FA2 >= %s stride-capability gate. Old FA2 builds can "
+                "produce silently-wrong decode output.", _FA2_MIN_VERSION)
+            return None
+        return (
+            "vllm-xpu-kernels version could not be determined, so the FA2 >= "
+            f"{_FA2_MIN_VERSION} non-contiguous paged K/V stride capability "
+            "cannot be verified. Install a wheel that exposes version metadata, "
+            "or set RTP_LLM_XPU_ALLOW_UNVERIFIED_FA2=1 to bypass this gate at "
+            "your own risk")
     try:
         from packaging.version import Version
         if Version(ver) < Version(_FA2_MIN_VERSION):
@@ -102,8 +119,17 @@ def check_fa2_requirements():
                 f"{_FA2_MIN_VERSION}; it lacks the non-contiguous paged K/V "
                 "stride capability that XPU decode requires")
     except Exception as exc:  # noqa: BLE001 - packaging missing or unparsable version
-        logger.warning(
-            "vllm-xpu-kernels version gate skipped (detected=%s, error=%s)", ver, exc)
+        if _FA2_ALLOW_UNVERIFIED:
+            logger.warning(
+                "vllm-xpu-kernels version gate skipped (detected=%s, error=%s); "
+                "proceeding because RTP_LLM_XPU_ALLOW_UNVERIFIED_FA2=1", ver, exc)
+            return None
+        return (
+            f"vllm-xpu-kernels version '{ver}' could not be parsed to enforce "
+            f"the FA2 >= {_FA2_MIN_VERSION} gate ({exc}). Install the "
+            "'packaging' library and a wheel with a valid version, or set "
+            "RTP_LLM_XPU_ALLOW_UNVERIFIED_FA2=1 to bypass this gate at your own "
+            "risk")
     return None
 
 
