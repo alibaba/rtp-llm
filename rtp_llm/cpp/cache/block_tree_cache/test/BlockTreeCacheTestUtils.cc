@@ -208,9 +208,9 @@ uint8_t payloadPattern(size_t tag_id, size_t path_index) {
 }
 
 void fillDeviceBlock(const DeviceBlockPoolPtr& pool, BlockIdxType block, uint8_t pattern) {
-    for (const auto& buffer : pool->blockBuffers(/*layer_id=*/0, block)) {
+    for (const auto& buffer : pool->convertIndexToBuffer(0, block)) {
         auto view = torch::from_blob(buffer.addr,
-                                     {static_cast<int64_t>(buffer.bytes)},
+                                     {static_cast<int64_t>(buffer.size_bytes)},
                                      torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
         view.fill_(pattern);
         // Materialize once on Host so the pattern is visible before an eviction worker
@@ -220,13 +220,13 @@ void fillDeviceBlock(const DeviceBlockPoolPtr& pool, BlockIdxType block, uint8_t
 }
 
 void expectDeviceBlock(const DeviceBlockPoolPtr& pool, BlockIdxType block, uint8_t pattern) {
-    for (const auto& buffer : pool->blockBuffers(/*layer_id=*/0, block)) {
+    for (const auto& buffer : pool->convertIndexToBuffer(0, block)) {
         auto                view = torch::from_blob(buffer.addr,
-                                                    {static_cast<int64_t>(buffer.bytes)},
+                                                    {static_cast<int64_t>(buffer.size_bytes)},
                                      torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
         const torch::Tensor host = view.cpu();
         const auto*         data = host.data_ptr<uint8_t>();
-        for (size_t index = 0; index < buffer.bytes; ++index) {
+        for (size_t index = 0; index < buffer.size_bytes; ++index) {
             EXPECT_EQ(data[index], pattern);
         }
     }

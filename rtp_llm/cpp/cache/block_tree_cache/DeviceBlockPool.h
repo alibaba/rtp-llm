@@ -28,20 +28,9 @@ struct DeviceBlockPoolConfig: public BlockPoolConfigBase {
     bool                            use_cuda_malloc_backing{false};
 };
 
-struct DeviceBlockBuffer {
-    BlockIdxType block;
-    void*        addr;
-    size_t       bytes;
-};
-
 class DeviceBlockPool;
 using DeviceBlockPoolPtr = std::shared_ptr<DeviceBlockPool>;
 
-// DeviceBlockPool is the device (GPU) block pool: a single contiguous backing tensor
-// sliced per MemoryLayoutConfig into per-layer KV (and optional scale) tensors, with the
-// malloc/free/incRef/decRef/refCount lifecycle inherited from IBlockPool. Per-block access
-// uses blockBuffers(); getBaseAddress()/getTotalSizeBytes() are the only raw byte-level
-// accessors, exposed so RDMA can register the whole backing buffer.
 class DeviceBlockPool: public IBlockPool {
 public:
     explicit DeviceBlockPool(std::shared_ptr<const DeviceBlockPoolConfig> config);
@@ -68,9 +57,6 @@ public:
     std::vector<BlockInfo> convertIndexToBuffer(int layer_id, BlockIdxType block) const;
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, BlockIdxType block, int partition_count, int partition_id) const;
-    std::vector<DeviceBlockBuffer> blockBuffers(int layer_id, BlockIdxType block) const;
-    std::vector<DeviceBlockBuffer>
-    blockBuffers(int layer_id, BlockIdxType block, int partition_count, int partition_id) const;
 
     void* getBaseAddress() const {
         return cache_base_ptr_;
@@ -105,8 +91,6 @@ private:
                                   torch::Tensor&            kv_cache_tensor,
                                   torch::Tensor&            kv_scale_tensor);
     void processLayerTensors(size_t layout_idx, const MemoryLayoutConfig& layout_cfg, size_t& global_layer_begin);
-
-    std::vector<DeviceBlockBuffer> toDeviceBlockBuffers(const std::vector<BlockInfo>& infos, BlockIdxType block) const;
 
     // Helper functions for regUserMr/deregUserMr
     void registerUserMrForBuffer(std::shared_ptr<MemoryUtil> memory_util,

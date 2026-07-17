@@ -70,10 +70,6 @@ public:
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
 
-    std::vector<DeviceBlockBuffer> blockBuffers(int layer_id, int block_id) const;
-    std::vector<DeviceBlockBuffer>
-    blockBuffers(int layer_id, int block_id, int partition_count, int partition_id) const;
-
     size_t                  freeBlocksNum() const;
     bool                    ensureFreeBlocks(int need_blocks);
     int                     seqSizePerBlock() const;

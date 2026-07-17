@@ -266,8 +266,6 @@ void DeviceBlockPool::initializeLayoutStrategy(size_t                    layout_
 void DeviceBlockPool::processLayerTensors(size_t                    layout_idx,
                                     const MemoryLayoutConfig& layout_cfg,
                                     size_t&                   global_layer_begin) {
-    // Build the global layer -> (layout_index, local_layer_id) mapping used by blockBuffers()/
-    // convertIndexToBuffer(), and cache the per-global-layer KV / KV-scale tensor views.
     auto&      strategy      = layout_strategies_[layout_idx];
     const auto layer_tensors = strategy->getLayerCacheTensors();
     const auto scale_tensors = strategy->getLayerScaleCacheTensors();
@@ -411,16 +409,6 @@ std::pair<int, int> DeviceBlockPool::mapGlobalLayerIdToLocal(int global_layer_id
     return global_layer_to_local_[static_cast<size_t>(global_layer_id)];
 }
 
-std::vector<DeviceBlockBuffer>
-DeviceBlockPool::toDeviceBlockBuffers(const std::vector<BlockInfo>& infos, BlockIdxType block) const {
-    std::vector<DeviceBlockBuffer> buffers;
-    buffers.reserve(infos.size());
-    for (const auto& info : infos) {
-        buffers.push_back(DeviceBlockBuffer{block, info.addr, info.size_bytes});
-    }
-    return buffers;
-}
-
 std::vector<torch::Tensor> DeviceBlockPool::allLayerCacheBase() const {
     return global_layer_kv_tensors_;
 }
@@ -450,19 +438,6 @@ DeviceBlockPool::convertIndexToBuffer(int layer_id, BlockIdxType block, int part
     checkLayoutValidity(layout_index);
     return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToBuffer(
         local_layer_id, block, partition_count, partition_id);
-}
-
-std::vector<DeviceBlockBuffer> DeviceBlockPool::blockBuffers(int layer_id, BlockIdxType block) const {
-    RTP_LLM_CHECK(initialized());
-    RTP_LLM_CHECK(validBlock(block));
-    return toDeviceBlockBuffers(convertIndexToBuffer(layer_id, block), block);
-}
-
-std::vector<DeviceBlockBuffer>
-DeviceBlockPool::blockBuffers(int layer_id, BlockIdxType block, int partition_count, int partition_id) const {
-    RTP_LLM_CHECK(initialized());
-    RTP_LLM_CHECK(validBlock(block));
-    return toDeviceBlockBuffers(convertIndexToBuffer(layer_id, block, partition_count, partition_id), block);
 }
 
 MemoryType DeviceBlockPool::where() const {

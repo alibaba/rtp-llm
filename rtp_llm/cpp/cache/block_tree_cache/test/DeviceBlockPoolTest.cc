@@ -80,7 +80,7 @@ TEST(DeviceBlockPoolTest, InitKeepsBlockZeroInvalid) {
     EXPECT_NE(*block, 0);
 }
 
-TEST(DeviceBlockPoolTest, BlockBuffersCarryBlockIdxAndBytes) {
+TEST(DeviceBlockPoolTest, ConvertIndexToBufferReturnsBlockInfo) {
     auto      config = makeConfig();
     DeviceBlockPool pool(config);
     ASSERT_TRUE(pool.init());
@@ -89,16 +89,15 @@ TEST(DeviceBlockPoolTest, BlockBuffersCarryBlockIdxAndBytes) {
     ASSERT_TRUE(block.has_value());
     EXPECT_NE(*block, 0);
 
-    auto buffers = pool.blockBuffers(0, *block);
+    auto buffers = pool.convertIndexToBuffer(0, *block);
     ASSERT_FALSE(buffers.empty());
     for (const auto& buffer : buffers) {
-        EXPECT_EQ(buffer.block, *block);
         EXPECT_NE(buffer.addr, nullptr);
-        EXPECT_GT(buffer.bytes, 0u);
+        EXPECT_GT(buffer.size_bytes, 0u);
     }
 }
 
-TEST(DeviceBlockPoolTest, PartitionedBlockBuffersCarryBlockIdx) {
+TEST(DeviceBlockPoolTest, PartitionedConvertIndexToBufferReturnsBlockInfo) {
     auto      config = makeConfig();
     DeviceBlockPool pool(config);
     ASSERT_TRUE(pool.init());
@@ -106,12 +105,11 @@ TEST(DeviceBlockPoolTest, PartitionedBlockBuffersCarryBlockIdx) {
     auto block = pool.malloc();
     ASSERT_TRUE(block.has_value());
 
-    auto buffers = pool.blockBuffers(0, *block, /*partition_count=*/1, /*partition_id=*/0);
+    auto buffers = pool.convertIndexToBuffer(0, *block, 1, 0);
     ASSERT_FALSE(buffers.empty());
     for (const auto& buffer : buffers) {
-        EXPECT_EQ(buffer.block, *block);
         EXPECT_NE(buffer.addr, nullptr);
-        EXPECT_GT(buffer.bytes, 0u);
+        EXPECT_GT(buffer.size_bytes, 0u);
     }
 }
 
@@ -146,7 +144,7 @@ TEST(DeviceBlockPoolTest, LifecycleUsesIBlockPoolSemantics) {
     EXPECT_FALSE(pool.isAllocated(*block));
 }
 
-TEST(DeviceBlockPoolTest, ExposesAllocatorFacingLayerTensorsAndDeviceBlockViews) {
+TEST(DeviceBlockPoolTest, ExposesAllocatorFacingLayerTensorsAndBuffers) {
     auto config = makeConfig();
     DeviceBlockPool pool(config);
     ASSERT_TRUE(pool.init());
@@ -160,16 +158,10 @@ TEST(DeviceBlockPoolTest, ExposesAllocatorFacingLayerTensorsAndDeviceBlockViews)
     auto addr = pool.convertIndexToAddr(/*layer_id=*/0, *block);
     EXPECT_NE(addr.kv_addr, nullptr);
 
-    auto buffers = pool.blockBuffers(/*layer_id=*/0, *block);
-    ASSERT_FALSE(buffers.empty());
-    EXPECT_NE(buffers[0].addr, nullptr);
-    EXPECT_GT(buffers[0].bytes, 0u);
-    EXPECT_EQ(buffers[0].block, *block);
-
     auto infos = pool.convertIndexToBuffer(/*layer_id=*/0, *block);
-    ASSERT_EQ(infos.size(), buffers.size());
-    EXPECT_EQ(infos[0].addr, buffers[0].addr);
-    EXPECT_EQ(infos[0].size_bytes, buffers[0].bytes);
+    ASSERT_FALSE(infos.empty());
+    EXPECT_NE(infos[0].addr, nullptr);
+    EXPECT_GT(infos[0].size_bytes, 0u);
     EXPECT_TRUE(infos[0].is_cuda);
 }
 

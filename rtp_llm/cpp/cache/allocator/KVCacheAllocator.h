@@ -91,15 +91,6 @@ public:
         return empty;
     }
 
-    // Device-copy view of one (layer[, group], block). Fail-fast defaults so mocks and
-    // transfer-facing test doubles stay concrete; device-copy allocators override as needed.
-    virtual std::vector<DeviceBlockBuffer> blockBuffers(int layer_id, int block_id) const;
-    virtual std::vector<DeviceBlockBuffer>
-    blockBuffers(int layer_id, int block_id, int partition_count, int partition_id) const;
-    virtual std::vector<DeviceBlockBuffer> blockBuffers(int layer_id, int group_id, int block_id) const;
-    virtual std::vector<DeviceBlockBuffer>
-    blockBuffers(int layer_id, int group_id, int block_id, int partition_count, int partition_id) const;
-
     // Injected after init() by KVCacheManager (BlockTreeCache is built from the pools
     // produced by init()). The base setter records the pointer and forwards it to the
     // owned groups via the virtual hook implemented by each subclass.

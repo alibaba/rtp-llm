@@ -88,10 +88,10 @@ static void fillDeviceLayer(const DeviceBlockPoolPtr&   pool,
                             int                         layer_id,
                             BlockIdxType                block,
                             const std::vector<uint8_t>& patterns) {
-    auto buffers = pool->blockBuffers(layer_id, block);
+    auto buffers = pool->convertIndexToBuffer(layer_id, block);
     ASSERT_EQ(buffers.size(), patterns.size());
     for (size_t i = 0; i < buffers.size(); ++i) {
-        makePoolByteTensor(buffers[i].addr, buffers[i].bytes).fill_(patterns[i]);
+        makePoolByteTensor(buffers[i].addr, buffers[i].size_bytes).fill_(patterns[i]);
     }
     if (pool->where() == MemoryType::MEMORY_GPU) {
         cudaDeviceSynchronize();
@@ -99,15 +99,15 @@ static void fillDeviceLayer(const DeviceBlockPoolPtr&   pool,
 }
 
 static void fillDeviceLayerSequential(const DeviceBlockPoolPtr& pool, int layer_id, BlockIdxType block) {
-    auto buffers = pool->blockBuffers(layer_id, block);
+    auto buffers = pool->convertIndexToBuffer(layer_id, block);
     for (const auto& buffer : buffers) {
-        std::vector<uint8_t> cpu_data(buffer.bytes);
-        for (size_t i = 0; i < buffer.bytes; ++i) {
+        std::vector<uint8_t> cpu_data(buffer.size_bytes);
+        for (size_t i = 0; i < buffer.size_bytes; ++i) {
             cpu_data[i] = static_cast<uint8_t>(i & 0xFF);
         }
         auto cpu_tensor =
-            torch::from_blob(cpu_data.data(), {static_cast<int64_t>(buffer.bytes)}, torch::kUInt8).clone();
-        makePoolByteTensor(buffer.addr, buffer.bytes).copy_(cpu_tensor);
+            torch::from_blob(cpu_data.data(), {static_cast<int64_t>(buffer.size_bytes)}, torch::kUInt8).clone();
+        makePoolByteTensor(buffer.addr, buffer.size_bytes).copy_(cpu_tensor);
     }
     if (pool->where() == MemoryType::MEMORY_GPU) {
         cudaDeviceSynchronize();
@@ -120,12 +120,12 @@ static std::vector<uint8_t> readDeviceLayer(const DeviceBlockPoolPtr& pool, int 
     }
 
     std::vector<uint8_t> out;
-    auto                 buffers = pool->blockBuffers(layer_id, block);
+    auto                 buffers = pool->convertIndexToBuffer(layer_id, block);
     for (const auto& buffer : buffers) {
-        auto  tensor = makePoolByteTensor(buffer.addr, buffer.bytes);
+        auto  tensor = makePoolByteTensor(buffer.addr, buffer.size_bytes);
         auto  cpu    = tensor.cpu();
         auto* ptr    = cpu.data_ptr<uint8_t>();
-        out.insert(out.end(), ptr, ptr + buffer.bytes);
+        out.insert(out.end(), ptr, ptr + buffer.size_bytes);
     }
     return out;
 }
@@ -501,8 +501,6 @@ TEST_F(CopyEngineTest, UnusableCopyBufferReturnsDeviceIoError) {
     BlockIdxType host_block = poolMalloc(*host_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
-    // Corrupt only the test fixture's resolved buffer size so blockBuffers() returns an
-    // unusable zero-byte device buffer without issuing an invalid CUDA operation.
     device_pool_->layout_strategies_[0]->config_.kv_block_stride_bytes = 0;
     expectStatus(copy_engine_,
                  makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block),
@@ -869,20 +867,21 @@ TEST_F(CopyEngineStrategyTest, BatchNotApplicableFallsBackToGeneric) {
     installStrategyRecorders(executor, counters);
 
     fillDeviceLayer(device_pool_, 0, device_block_, {0x71});
-    auto device_buffer = device_pool_->blockBuffers(0, device_block_).front();
+    auto device_buffer = device_pool_->convertIndexToBuffer(0, device_block_).front();
     auto host_block    = poolMalloc(*host_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     auto* host_data = static_cast<uint8_t*>(host_pool_->blockBuffer(host_block).addr);
-    std::memset(host_data, 0, device_buffer.bytes);
+    std::memset(host_data, 0, device_buffer.size_bytes);
 
     DeviceHostCopyPlan plan;
     plan.device_to_host     = true;
     plan.single_device      = true;
     plan.component_group_id = 0;
-    plan.host               = {host_data, device_buffer.bytes};
-    plan.copy_tiles.push_back(DeviceHostCopyTile{host_data, device_buffer.addr, 0, device_buffer.bytes, -1, 0, 0});
+    plan.host               = {host_data, device_buffer.size_bytes};
+    plan.copy_tiles.push_back(
+        DeviceHostCopyTile{host_data, device_buffer.addr, 0, device_buffer.size_bytes, -1, 0, 0});
     EXPECT_EQ(executor.executeStrategies(plan), CopyStatus::OK);
-    for (size_t i = 0; i < device_buffer.bytes; ++i)
+    for (size_t i = 0; i < device_buffer.size_bytes; ++i)
         EXPECT_EQ(host_data[i], 0x71);
     EXPECT_EQ(counters[1].not_applicable, 1);
     EXPECT_EQ(counters[2].done, 1);

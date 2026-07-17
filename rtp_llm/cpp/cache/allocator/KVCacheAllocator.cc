@@ -152,34 +152,6 @@ std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(
     return convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
 }
 
-std::vector<DeviceBlockBuffer> KVCacheAllocator::blockBuffers(int layer_id, int block_id) const {
-    (void)layer_id;
-    (void)block_id;
-    RTP_LLM_FAIL("this allocator does not support the device block buffer view");
-    return {};
-}
-
-std::vector<DeviceBlockBuffer>
-KVCacheAllocator::blockBuffers(int layer_id, int block_id, int partition_count, int partition_id) const {
-    (void)layer_id;
-    (void)block_id;
-    (void)partition_count;
-    (void)partition_id;
-    RTP_LLM_FAIL("this allocator does not support the device block buffer view");
-    return {};
-}
-
-std::vector<DeviceBlockBuffer> KVCacheAllocator::blockBuffers(int layer_id, int group_id, int block_id) const {
-    (void)group_id;
-    return blockBuffers(layer_id, block_id);
-}
-
-std::vector<DeviceBlockBuffer>
-KVCacheAllocator::blockBuffers(int layer_id, int group_id, int block_id, int partition_count, int partition_id) const {
-    (void)group_id;
-    return blockBuffers(layer_id, block_id, partition_count, partition_id);
-}
-
 BlockAddrInfo KVCacheAllocator::convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const {
     const int group_id = config_.groupIdForLayerTag(layer_id, tag);
     return convertIndexToAddr(layer_id, group_id, block_id);

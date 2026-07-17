@@ -132,10 +132,10 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
                 continue;
             }
 
-            auto   buffers           = device_pool.blockBuffers(slot.layer_id, device_block);
+            auto   buffers           = device_pool.convertIndexToBuffer(slot.layer_id, device_block);
             size_t slot_device_bytes = 0;
             for (const auto& buffer : buffers) {
-                if (!buffer.addr || buffer.bytes == 0) {
+                if (!buffer.addr || buffer.size_bytes == 0) {
                     RTP_LLM_LOG_WARNING("null device buffer layer=%d block=%d", slot.layer_id, device_block);
                     out_status = CopyStatus::DEVICE_IO_ERROR;
                     return plan;
@@ -144,12 +144,12 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
                 tile.host_addr       = slot_host_addr + slot_device_bytes;
                 tile.device_addr     = buffer.addr;
                 tile.host_offset     = host_offset + slot_device_bytes;
-                tile.bytes           = buffer.bytes;
+                tile.bytes           = buffer.size_bytes;
                 tile.device_index    = pool_device_index;
                 tile.component_index = component.component_index;
                 tile.layer_id        = slot.layer_id;
                 plan.copy_tiles.push_back(tile);
-                slot_device_bytes += buffer.bytes;
+                slot_device_bytes += buffer.size_bytes;
             }
 
             if (slot_device_bytes != slot.stride_bytes) {
