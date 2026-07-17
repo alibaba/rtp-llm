@@ -26,6 +26,7 @@ cc_library(
         "@//:using_rocm": ["@local_config_rocm//rocm:rocm_headers",
                            "@local_config_rocm//rocm:rocm",
                            "//rtp_llm/models_py/bindings/rocm:rocm_types_hdr"],
+        "@//:using_xpu": [],
         "//conditions:default": [],
     }),
     copts = copts(),
@@ -92,6 +93,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_util",
     ] + torch_deps() + select({
         "@//:using_rocm": ["@local_config_rocm//rocm:rocm_headers"],
+        "@//:using_xpu": [],
         "//conditions:default": [],
     }),
     copts = copts(),
@@ -135,11 +137,14 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
-        "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
         "@havenask//aios/autil:stack_tracer",
         "@havenask//aios/autil:string_helper",
         "@havenask//aios/autil:scope",
-    ] + torch_deps(),
+    ] + torch_deps() + select({
+        "@//:using_cuda": ["//rtp_llm/models_py/bindings/common/kernels:kernels_sampling"],
+        "@//:using_rocm": ["//rtp_llm/models_py/bindings/common/kernels:kernels_sampling"],
+        "//conditions:default": [],
+    }),
     copts = copts(),
     visibility = ["//visibility:public"],
     alwayslink = 1,
@@ -211,20 +216,26 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
-        "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
         "@havenask//aios/autil:stack_tracer",
         "@havenask//aios/autil:string_helper",
         "@havenask//aios/autil:scope",
     ] + torch_deps() + select({
+        "@//:using_cuda": [
+            "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
+            "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
+        ],
         "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
             "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
             "//rtp_llm/models_py/bindings/rocm:rocm_host_utils",
             "@local_config_rocm//rocm:rocm_headers",
             "@local_config_rocm//rocm:rocm",
         ],
-        "@//:using_cuda": [
-            "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
-        ],
+        "@//:using_xpu": [],
+        "//conditions:default": [],
+    }),
+    features = select({
+        "@//:using_xpu": ["xpu_sycl_compile"],
         "//conditions:default": [],
     }),
     copts = copts(),
@@ -234,11 +245,24 @@ cc_library(
 
 cc_library(
     name = "exec_ctx_ops",
-    srcs = [
-        "CudaOps.cc",
-        "CudaSampleOp.cc",
-        "CudaBeamSearchOp.cc",
-    ],
+    srcs = select({
+        "@//:using_cuda": [
+            "CudaOps.cc",
+            "CudaSampleOp.cc",
+            "CudaBeamSearchOp.cc",
+        ],
+        "@//:using_rocm": [
+            "CudaOps.cc",
+            "CudaSampleOp.cc",
+            "CudaBeamSearchOp.cc",
+        ],
+        "@//:using_xpu": [
+            "CudaOps.cc",
+            "CudaSampleOp.cc",
+            "CudaBeamSearchOp.cc",
+        ],
+        "//conditions:default": [],
+    }),
     deps = [
         ":exec_ops_hdr",
         ":device_data",
@@ -259,12 +283,17 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
-        "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
         "@havenask//aios/autil:stack_tracer",
         "@havenask//aios/autil:string_helper",
         "@havenask//aios/autil:scope",
     ] + torch_deps() + select({
+        "@//:using_cuda": [
+            "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
+            "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
+            "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
+        ],
         "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
             "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
             "//rtp_llm/models_py/bindings/rocm:speculative_sampling",
             "//rtp_llm/models_py/bindings/rocm:rocm_host_utils",
@@ -273,10 +302,11 @@ cc_library(
             "@local_config_rocm//rocm:rocm_headers",
             "@local_config_rocm//rocm:rocm",
         ],
-        "@//:using_cuda": [
-            "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
-            "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
-        ],
+        "@//:using_xpu": [],
+        "//conditions:default": [],
+    }),
+    features = select({
+        "@//:using_xpu": ["xpu_sycl_compile"],
         "//conditions:default": [],
     }),
     copts = copts(),
@@ -318,6 +348,23 @@ cc_library(
 # Combined target for backward compatibility — pulls in both state + ops.
 cc_library(
     name = "exec_ctx_rocm",
+    hdrs = [
+        "ExecOps.h",
+    ],
+    deps = [
+        ":exec_ctx_state",
+        ":exec_ctx_ops",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+# Combined target for XPU — mirrors exec_ctx_rocm. Pulls the pure-PyTorch XPU
+# sample/beam-search ops (exec_ctx_ops) plus the global runtime state
+# (exec_ctx_state) without any CUDA kernel dependency, so device-side tests can
+# link the Sampler under --config=xpu.
+cc_library(
+    name = "exec_ctx_xpu",
     hdrs = [
         "ExecOps.h",
     ],

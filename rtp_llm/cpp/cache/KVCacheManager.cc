@@ -17,6 +17,7 @@
 
 namespace rtp_llm {
 
+
 KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                bool                               warmup,
                                const kmonitor::MetricsReporterPtr metrics_reporter,
@@ -191,8 +192,8 @@ bool KVCacheManager::setKVBlockValue(int                  block_index,
         }
 
         auto* dst_ptr    = static_cast<char*>(dst_block.addr) + dst_byte_offset;
-        auto  dst_device = dst_block.is_cuda ? torch::kCUDA : torch::kCPU;
-        auto  src_device = src_tensor.is_cuda() ? torch::kCUDA : torch::kCPU;
+        auto  dst_device = dst_block.is_cuda ? getTorchDevice() : torch::kCPU;
+        auto  src_device = (src_tensor.is_cuda() || src_tensor.is_xpu()) ? getTorchDevice() : torch::kCPU;
         auto  dst_t      = torch::from_blob(
             dst_ptr, {(int64_t)src_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(dst_device));
         auto src_t = torch::from_blob(src_tensor.data_ptr(),
@@ -531,7 +532,7 @@ void KVCacheManager::allocateAndSync() {
     size_t world_size = parallelism_config_.tp_size * parallelism_config_.dp_size;
     if (world_size > 1) {
         size_t local_rank    = parallelism_config_.tp_size * parallelism_config_.dp_rank + parallelism_config_.tp_rank;
-        auto   block_num_t   = torch::empty({(int64_t)world_size}, torch::kInt32).pin_memory();
+        auto   block_num_t   = maybePinMemory(torch::empty({(int64_t)world_size}, torch::kInt32));
         auto   block_num_ptr = block_num_t.data_ptr<int>();
         block_num_ptr[local_rank] = config_.block_num;
         execAllGather({{block_num_t}, ParallelMode::DP_AND_TP});

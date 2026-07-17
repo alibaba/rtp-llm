@@ -22,6 +22,8 @@
 
 #if USING_CUDA
 #include "c10/cuda/CUDACachingAllocator.h"
+#elif USING_XPU
+#include <c10/xpu/XPUCachingAllocator.h>
 #endif
 
 #ifdef __linux__
@@ -80,16 +82,22 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                        + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
 #if !USING_CUDA
-    // On ROCm, this constructor runs on a gRPC handler thread that defaults to
+    // On ROCm/XPU, this constructor runs on a gRPC handler thread that defaults to
     // GPU 0. Set the correct device so all GPU allocations (KV cache, etc.) go
     // to the right device.  The guard is scoped to the constructor body.
+#if USING_XPU
+    c10::DeviceGuard ctor_device_guard(
+        c10::Device(c10::kXPU, static_cast<c10::DeviceIndex>(parallelism_config.local_rank)));
+    RTP_LLM_LOG_INFO("XPU NormalEngine ctor: set device to %d", parallelism_config.local_rank);
+#else
     c10::DeviceGuard ctor_device_guard(
         c10::Device(c10::kCUDA, static_cast<c10::DeviceIndex>(parallelism_config.local_rank)));
     RTP_LLM_LOG_INFO("ROCm NormalEngine ctor: set device to %d", parallelism_config.local_rank);
 #endif
+#endif
 
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
-#if USING_CUDA
+#if USING_CUDA || USING_XPU
     if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal)
         && !ffn_disaggregate_config.enable_ffn_disaggregate) {
         // warm up
@@ -108,7 +116,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         RTP_LLM_LOG_INFO("skip warm up.");
     }
 #else
-    RTP_LLM_LOG_INFO("skip warm up on non-CUDA platform.");
+    RTP_LLM_LOG_INFO("skip warm up on non-CUDA/XPU platform.");
 #endif
     initCacheManager(warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager done");
@@ -255,7 +263,7 @@ std::shared_ptr<GenerateInput> NormalEngine::makeFakeInput(size_t seq_len) {
 }
 
 WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
-#if !USING_CUDA
+#if !USING_CUDA && !USING_XPU
     RTP_LLM_FAIL("prefillWarmUp is not supported on non-CUDA platforms");
     return {};
 #else
@@ -269,15 +277,22 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
+#if USING_CUDA
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
+#elif USING_XPU
+    // XPU currently uses a single stream per device; synchronizing the current
+    // stream is sufficient to ensure all work is complete before emptyCache().
+    c10::xpu::getCurrentXPUStream().synchronize();
+    c10::xpu::XPUCachingAllocator::emptyCache();
+#endif
     const auto device_status = getGpuExecStatus();
     return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
 #endif
 }
 
 WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
-#if !USING_CUDA
+#if !USING_CUDA && !USING_XPU
     RTP_LLM_FAIL("decodeWarmUp is not supported on non-CUDA platforms");
     return {};
 #else
@@ -310,8 +325,15 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
+#if USING_CUDA
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
+#elif USING_XPU
+    // XPU currently uses a single stream per device; synchronizing the current
+    // stream is sufficient to ensure all work is complete before emptyCache().
+    c10::xpu::getCurrentXPUStream().synchronize();
+    c10::xpu::XPUCachingAllocator::emptyCache();
+#endif
     const auto device_status = getGpuExecStatus();
     return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
 #endif

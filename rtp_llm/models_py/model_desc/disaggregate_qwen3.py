@@ -25,6 +25,7 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
+from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.utils.util import check_with_info
 
 
@@ -467,6 +468,7 @@ class Qwen3AttnModel(DisaggregateModelBase):
         self.send_mirco_batch_split_info(mirco_batch_inputs)
         for i, layer in enumerate(self.attention_layers[: self.layer_num]):
             for idx, mirco_batch_input in enumerate(mirco_batch_inputs):
+                select_block_map_for_layer(mirco_batch_input.attention_inputs, i)
                 inputs = self.recv_from_ffn_service(
                     mirco_batch_input.input_ids.shape[0]
                 )

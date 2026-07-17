@@ -58,7 +58,35 @@ void cudaProfilerEnd();
 // ===================================================================
 
 ExecStatus    getGpuExecStatus();
-torch::Device getTorchCudaDevice();
+
+inline torch::Device getTorchDevice() {
+#if USING_XPU
+    return torch::Device(torch::kXPU, static_cast<c10::DeviceIndex>(getDeviceId()));
+#elif USING_CUDA || USING_ROCM
+    return torch::Device(torch::kCUDA);
+#else
+    return torch::Device(torch::kCPU);
+#endif
+}
+inline torch::Device getTorchCudaDevice() { return getTorchDevice(); }
+
+inline torch::Tensor maybePinMemory(torch::Tensor t) {
+#if !USING_XPU
+    return t.pin_memory();
+#else
+    return t;
+#endif
+}
+
+// Compile-time flag for allocating pinned (page-locked) host memory. XPU does
+// not support CUDA-style pinned host memory, so pinning must be disabled there.
+// Resolved at preprocessor time to avoid using USING_XPU in a C++ expression.
+#if USING_XPU
+inline constexpr bool kPinHostMemory = false;
+#else
+inline constexpr bool kPinHostMemory = true;
+#endif
+
 void          setTraceMemory(bool trace_memory);
 
 // ===================================================================

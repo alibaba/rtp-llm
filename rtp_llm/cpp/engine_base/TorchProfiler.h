@@ -38,7 +38,11 @@ private:
     std::string                 output_dir_;
     static std::atomic<size_t>  count_;
     tpi::ProfilerConfig         config_ = tpi::ProfilerConfig(tpi::ProfilerState::KINETO, /*report_input_shapes=*/true);
+#if USING_XPU
+    std::set<tpi::ActivityType> activities_{tpi::ActivityType::CPU, tpi::ActivityType::XPU};
+#else
     std::set<tpi::ActivityType> activities_{tpi::ActivityType::CPU, tpi::ActivityType::CUDA};
+#endif
     bool                        stopped_ = true;
 };
 

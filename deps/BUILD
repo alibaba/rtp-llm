@@ -3,6 +3,7 @@ load("@rules_python//python:packaging.bzl", "py_package")
 load("@rules_python//python:pip.bzl", "compile_pip_requirements")
 load(":pip.bzl", "PIP_EXTRA_ARGS")
 exports_files(["requirements_base.txt"])
+exports_files(["requirements_lock_xpu.txt"])
 
 py_package(
     name = "extension_package",
@@ -77,5 +78,13 @@ compile_pip_requirements(
     extra_args = PIP_EXTRA_ARGS,
     extra_data = ["//:requirements_base.txt"],
     requirements_txt = "requirements_lock_rocm.txt",
+    tags = ["manual"],
+)
+
+compile_pip_requirements(
+    name = "requirements_xpu",
+    src = "requirements_xpu.txt",
+    extra_args = PIP_EXTRA_ARGS + ["--extra-index-url=https://download.pytorch.org/whl/xpu"],
+    requirements_txt = "requirements_lock_xpu.txt",
     tags = ["manual"],
 )

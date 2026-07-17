@@ -23,7 +23,9 @@ Sampler::Sampler(const SamplerInitParams& params):
 void Sampler::allocateGreedySamplingBuffers(size_t max_batch_size) {
     waitGreedySamplingBufferEvents();
     max_batch_size_ = max_batch_size;
-    auto pinned_i64 = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
+    // XPU does not support CUDA-style pinned host memory; kPinHostMemory resolves
+    // to false there so the greedy sampling buffers allocate as plain host tensors.
+    auto pinned_i64 = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(kPinHostMemory);
     for (auto& slot : greedy_sampling_buffer_slots_) {
         auto& buffers                = slot.buffers;
         buffers.seed_host            = torch::empty({(int64_t)max_batch_size_}, pinned_i64);
@@ -120,17 +122,17 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     // Keep success on CUDA to avoid a blocking D2H copy: the GPU sampling kernel writes success
     // directly, and callers that need CPU access should call .cpu() explicitly.
     auto all_success =
-        torch::empty({(int64_t)inputs.batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
+        torch::empty({(int64_t)inputs.batch_size}, torch::TensorOptions().dtype(torch::kBool).device(getTorchDevice()));
     auto all_beam_indices =
         has_num_beams ? torch::empty({(int64_t)inputs.batch_size_out}, torch::kInt32) : torch::Tensor();
     // Move token_ids to CUDA once so sampleGreedy writes GPU→GPU (no blocking D2H sync).
     // Callers that need CPU access should call .cpu() explicitly.
     // Use blocking transfer: on ROCm, hipMemcpyAsync from pageable memory is truly async
     // and can cause memory access faults if a kernel reads the buffer before transfer completes.
-    auto inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA);
+    auto inputs_token_ids_cuda = inputs.token_ids.to(getTorchDevice());
     auto all_token_ids_out     = variable_num_beams ?
                                      torch::empty({(int64_t)inputs.batch_size_out, (int64_t)max_seq_len},
-                                              torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA)) :
+                                              torch::TensorOptions().dtype(torch::kInt32).device(getTorchDevice())) :
                                      inputs_token_ids_cuda;
     auto all_cum_log_probs_out = variable_num_beams && inputs.cum_log_probs.defined() ?
                                      torch::empty({(int64_t)inputs.batch_size_out}, torch::kFloat32) :
@@ -242,6 +244,15 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                 }
             } else {
                 success.fill_(true);
+#if USING_XPU
+                // XPU's greedy sampler returns an undefined `success` tensor but
+                // still writes valid ids into token_ids_in (params.token_ids).
+                // Mirror the success-defined branch so variable-beam batches are
+                // populated. Guarded so CUDA/ROCm behavior stays byte-identical.
+                if (variable_num_beams) {
+                    token_ids_out.copy_(token_ids_in);
+                }
+#endif
             }
         } else {
             RTP_LLM_LOG_DEBUG("current_num_beams_in is %d", cur_num_beams_in);
@@ -268,11 +279,11 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                     cum_log_probs_in.reshape({(int64_t)beam_batch_size, (int64_t)cur_num_beams_in}) :
                     torch::zeros({(int64_t)beam_batch_size, (int64_t)cur_num_beams_in});
 
-            auto logits_t           = logits_reshaped.to(torch::kCUDA);
-            auto token_ids_in_t     = token_ids_in_reshaped.to(torch::kCUDA);
-            auto input_lengths_t    = input_lengths_reshaped.to(torch::kCUDA);
-            auto sequence_lengths_t = sequence_lengths_reshaped.to(torch::kCUDA);
-            auto cum_log_probs_in_t = cum_log_probs_in_reshaped.to(torch::kCUDA);
+            auto logits_t           = logits_reshaped.to(getTorchDevice());
+            auto token_ids_in_t     = token_ids_in_reshaped.to(getTorchDevice());
+            auto input_lengths_t    = input_lengths_reshaped.to(getTorchDevice());
+            auto sequence_lengths_t = sequence_lengths_reshaped.to(getTorchDevice());
+            auto cum_log_probs_in_t = cum_log_probs_in_reshaped.to(getTorchDevice());
 
             auto output = execSampleBeamSearch({logits_t,
                                                 token_ids_in_t,

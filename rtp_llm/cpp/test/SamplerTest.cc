@@ -1,11 +1,20 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/test/ModelTestUtil.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 using namespace std;
 using namespace rtp_llm;
 
-// TODO: make this test device-independent
+// TODO(xpu): finish enabling this suite on real XPU CI. Done here: the test
+// body is device-portable (getTorchDevice() + maybePinMemory()) and the
+// BUILD declares an XPU env branch. Still blocked: the target's transitive
+// deps compile CUDA kernels (//rtp_llm/models_py/bindings/common/kernels:
+// kernels_moe -> moe_kernels.cu), so `--config=xpu` cannot build it yet;
+// the test dependency graph must be de-CUDA-ified first. Once it runs on XPU,
+// add CPU-reference comparison cases for seed determinism, all_probs output,
+// and beam search (sampleBeamSearch) alongside the existing greedy/top-k/
+// top-p/penalty/mixed-batch coverage.
 class SamplerTest: public DeviceTestBase {
 public:
     void SetUp() override {
@@ -52,11 +61,26 @@ TEST_F(SamplerTest, testFixedGreedySamplingBuffersRejectGrow) {
     EXPECT_THROW(sampler.ensureGreedySamplingBuffers(2), rtp_llm::RTPException);
 }
 
+// Regression guard for the XPU pinned-memory contract: greedy sampling buffers
+// must follow the compile-time kPinHostMemory flag instead of unconditionally
+// requesting CUDA-style pinned host memory. On XPU (kPinHostMemory == false)
+// pinned host memory is unavailable, so the sampler must allocate plain host
+// tensors or service startup fails when the Sampler is constructed.
+TEST_F(SamplerTest, testGreedySamplingBuffersHonorPinFlag) {
+    Sampler sampler(SamplerInitParams{2, false});
+
+    for (const auto& slot : sampler.greedy_sampling_buffer_slots_) {
+        ASSERT_EQ(slot.buffers.seed_host.is_pinned(), kPinHostMemory);
+        ASSERT_EQ(slot.buffers.offset_host.is_pinned(), kPinHostMemory);
+        ASSERT_EQ(slot.buffers.output_ids_ptrs_host.is_pinned(), kPinHostMemory);
+    }
+}
+
 TEST_F(SamplerTest, testGeneralSampling) {
     size_t batch_size = 5;
     size_t vocab_size = 8;
 
-    // logits must be on CUDA (GPU kernel operates on them directly)
+    // logits live on the compute device (the sampling kernel operates on them directly)
     auto logits = torch::tensor(
                       {
                           0.1f, 0.1f, 0.2f,  0.1f,  0.3f,  0.1f,  0.1f,  0.1f,  1.0f,  2.0f,  3.0f,  4.0f,  5.0f, 6.0f,
@@ -65,7 +89,7 @@ TEST_F(SamplerTest, testGeneralSampling) {
                       },
                       torch::kFloat32)
                       .reshape({(int64_t)batch_size, (int64_t)vocab_size})
-                      .to(torch::kCUDA);
+                      .to(getTorchDevice());
 
     int32_t step = 3;  // also max_input_length - 1
 
@@ -81,17 +105,18 @@ TEST_F(SamplerTest, testGeneralSampling) {
     auto num_beams_out = torch::tensor({1L, 1L, 1L, 1L, 1L}, torch::kLong);
 
     // cum_log_probs on CUDA (kernel writes to it)
-    auto cum_log_probs = torch::tensor({-1.0f, -1.0f, -1.0f, -1.0f, -1.0f}, torch::kFloat32).to(torch::kCUDA);
+    auto cum_log_probs = torch::tensor({-1.0f, -1.0f, -1.0f, -1.0f, -1.0f}, torch::kFloat32).to(getTorchDevice());
 
-    // These are read from CPU (std::any_of) AND from GPU (flashinfer kernels).
-    // Must use pin_memory() for dual CPU+GPU access (like original cudaMallocHost).
-    auto repetition_penalty = torch::tensor({1.0f, 1.0f, 1.0f, 10000.0f, 1.0f}, torch::kFloat32).pin_memory();
-    auto presence_penalty   = torch::tensor({0.0f, 0.0f, 0.0f, 0.0f, 0.0f}, torch::kFloat32).pin_memory();
-    auto frequency_penalty  = torch::tensor({0.0f, 0.0f, 0.0f, 0.0f, 0.0f}, torch::kFloat32).pin_memory();
+    // These are read from CPU (std::any_of) AND from the device (flashinfer kernels).
+    // Use maybePinMemory() so CUDA/ROCm get pinned host memory (dual CPU+GPU access,
+    // like the original cudaMallocHost) while XPU gets a plain host tensor.
+    auto repetition_penalty = maybePinMemory(torch::tensor({1.0f, 1.0f, 1.0f, 10000.0f, 1.0f}, torch::kFloat32));
+    auto presence_penalty   = maybePinMemory(torch::tensor({0.0f, 0.0f, 0.0f, 0.0f, 0.0f}, torch::kFloat32));
+    auto frequency_penalty  = maybePinMemory(torch::tensor({0.0f, 0.0f, 0.0f, 0.0f, 0.0f}, torch::kFloat32));
 
-    auto top_k       = torch::tensor({1, 4, 0, 0, 8}, torch::kInt32).pin_memory();
-    auto top_p       = torch::tensor({0.0f, 0.0f, 0.001f, 0.99f, 0.9f}, torch::kFloat32).pin_memory();
-    auto temperature = torch::tensor({0.1f, 0.001f, 0.2f, 1.0f, 100.0f}, torch::kFloat32).pin_memory();
+    auto top_k       = maybePinMemory(torch::tensor({1, 4, 0, 0, 8}, torch::kInt32));
+    auto top_p       = maybePinMemory(torch::tensor({0.0f, 0.0f, 0.001f, 0.99f, 0.9f}, torch::kFloat32));
+    auto temperature = maybePinMemory(torch::tensor({0.1f, 0.001f, 0.2f, 1.0f, 100.0f}, torch::kFloat32));
 
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
 

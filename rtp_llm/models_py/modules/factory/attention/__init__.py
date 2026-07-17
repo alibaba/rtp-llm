@@ -28,7 +28,37 @@ from rtp_llm.models_py.modules.factory.attention.attn_factory import (
 )
 
 device_type = get_device_type()
-if device_type == DeviceType.ROCm:
+if device_type == DeviceType.Xpu:
+    # XPU hard-requires the accelerated vllm-xpu-kernels attention path,
+    # matching the CUDA and ROCm backends (no pure-PyTorch attention fallback).
+    from rtp_llm.models_py.modules.factory.attention.xpu_impl.vllm_flash_attn import (
+        XpuVllmFlashAttnPrefillImpl,
+        XpuVllmFlashAttnDecodeImpl,
+    )
+    PREFILL_MHA_IMPS.append(XpuVllmFlashAttnPrefillImpl)
+    DECODE_MHA_IMPS.append(XpuVllmFlashAttnDecodeImpl)
+
+    # FA2 preflight: XPU decode hard-requires the FA2 kernel from
+    # vllm-xpu-kernels, which is installed out-of-band (see deps/requirements_xpu.txt)
+    # and cannot be expressed as a pip dependency. Fail fast at startup with an
+    # actionable message instead of letting the service boot and only fail at the
+    # first decode step.
+    try:
+        from rtp_llm.models_py.modules.base.xpu.vllm_xpu_ops import check_fa2_requirements
+        _fa2_error = check_fa2_requirements()
+    except Exception as _fa2_exc:  # noqa: BLE001 - normalize probe failure to a hard error
+        _fa2_error = f"could not probe vllm-xpu-kernels: {_fa2_exc}"
+        logging.getLogger(__name__).error(
+            "XPU FA2 preflight could not probe vllm-xpu-kernels: %s", _fa2_exc)
+    if _fa2_error:
+        raise RuntimeError(
+            "XPU decode attention requires the FA2 kernel from vllm-xpu-kernels "
+            ">= 0.1.10. " + _fa2_error + ". Install a compatible FA2-enabled build "
+            "via the enforced installer (does not silently drift like a hand-run "
+            "pip install would): "
+            "`VLLM_XPU_KERNELS_INDEX_URL=<url> deps/install_xpu_fa2.sh` "
+            "(see deps/requirements_xpu.txt and deps/install_xpu_fa2.sh).")
+elif device_type == DeviceType.ROCm:
     # Import to register ROCm FMHA implementations
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
         AiterDecodeImplAsm,

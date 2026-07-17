@@ -75,6 +75,8 @@ def apply_write_cache_store(
         attn_inputs: Attention calculation input parameters
         kv_cache: KV Cache to write to
     """
+    if kv_cache is None:
+        return
     if (
         attn_inputs.is_prefill
         and attn_inputs.cache_store_inputs

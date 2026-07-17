@@ -10,6 +10,9 @@ def device_test_envs():
         "@//:using_rocm": {
             "TEST_USING_DEVICE": "ROCM",
         },
+        "@//:using_xpu": {
+            "TEST_USING_DEVICE": "XPU",
+        },
         "//conditions:default": {
             "TEST_USING_DEVICE": "CUDA",
             "LD_PRELOAD": "libtorch_cpu.so",

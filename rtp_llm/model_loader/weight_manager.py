@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 import torch
 
+from rtp_llm.device.device_impl import _is_xpu_device
 from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 
@@ -112,9 +113,17 @@ class WeightManager:
         self._weights: ModelWeights = weight
         self._weights_loader: ModelLoader = model_weights_loader
         self._weight_module = self._weights_loader._model_weights_info
-        self._working_stream: torch.cuda.Stream = torch.cuda.Stream(
-            device=self._device,
-        )
+        # Respect RTP_LLM_DEVICE_TYPE: only skip the CUDA stream when the
+        # resolved device is actually XPU, not merely when XPU hardware exists.
+        if _is_xpu_device():
+            # XPU currently operates on a single default stream; creating a
+            # separate stream is not needed. torch.xpu.synchronize() in the
+            # update path is acceptable since weight updates are infrequent.
+            self._working_stream = None
+        else:
+            self._working_stream: torch.cuda.Stream = torch.cuda.Stream(
+                device=self._device,
+            )
         # TODO: Consider the actual need for this lock. If updates are always
         # serialized via the server's request handling, a per-update lock might
         # be redundant or require finer-grained locking within _weights.update_...
@@ -193,6 +202,8 @@ class WeightManager:
         tensor: torch.Tensor | None = None
 
         if method == "cuda_ipc":
+            if _is_xpu_device():
+                raise ValueError("cuda_ipc is not supported on XPU; use method='shm'")
             helper = CudaIpcHelper()
             tensor = helper.build_from_meta(bytes.fromhex(desc))
         else:  # method == "shm"
@@ -211,7 +222,12 @@ class WeightManager:
         logging.info(
             f"update weight request: {name}, shape: {tensor.shape}, device: {tensor.device}, dtype: {tensor.dtype}"
         )
-        with torch.cuda.stream(self._working_stream):
+        if self._working_stream is not None:
+            stream_ctx = torch.cuda.stream(self._working_stream)
+        else:
+            import contextlib
+            stream_ctx = contextlib.nullcontext()
+        with stream_ctx:
             config = self._weights_loader.get_load_config()
             if "layers" in name:
                 # This is a layer-specific weight
@@ -273,4 +289,7 @@ class WeightManager:
                         f"{stored_name} not found. wanted name list is {[w.name for w in self._weight_module.weights]}"
                     )
 
-            self._working_stream.synchronize()
+            if self._working_stream is not None:
+                self._working_stream.synchronize()
+            elif _is_xpu_device():
+                torch.xpu.synchronize()
