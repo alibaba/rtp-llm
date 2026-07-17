@@ -101,3 +101,15 @@ def get_model_class(model_type: str) -> Type[nn.Module]:
 
 def list_models():
     return sorted(set(MODEL_REGISTRY) | set(_LAZY_MODEL_REGISTRY))
+
+
+register_lazy_model(
+    "qwen_3",
+    "rtp_llm.models_py.new_models.qwen3",
+    "Qwen3ForCausalLM",
+)
+register_lazy_model(
+    "qwen_3_tool",
+    "rtp_llm.models_py.new_models.qwen3",
+    "Qwen3ForCausalLM",
+)
