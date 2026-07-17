@@ -33,6 +33,8 @@ class _Block(RtpModule):
 
 
 class _FoundationModel(RtpModule):
+    supports_rank_local_checkpoint = True
+
     def __init__(self, model_config, load_config):
         super().__init__()
         self.layers = nn.ModuleList([_Block()])
