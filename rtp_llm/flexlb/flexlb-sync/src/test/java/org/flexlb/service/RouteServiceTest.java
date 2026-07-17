@@ -1,5 +1,6 @@
 package org.flexlb.service;
 
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.config.ConfigService;
@@ -41,6 +42,9 @@ class RouteServiceTest {
     private RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
 
     @Mock
+    private EndpointRegistry endpointRegistry;
+
+    @Mock
     private BalanceContext balanceContext;
 
     private RouteService routeService;
@@ -49,7 +53,8 @@ class RouteServiceTest {
     void setUp() {
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
         routeService = new RouteService(configService, defaultRouter, queueManager,
-                flexlbBatchScheduler, recentCacheKeyTraceReporter);
+                flexlbBatchScheduler, recentCacheKeyTraceReporter,
+                endpointRegistry);
     }
 
     @Test

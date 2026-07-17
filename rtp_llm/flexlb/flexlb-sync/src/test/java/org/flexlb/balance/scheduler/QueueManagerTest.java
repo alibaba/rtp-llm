@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -30,6 +31,8 @@ class QueueManagerTest {
     private RoutingQueueReporter metrics;
     @Mock
     private ConfigService configService;
+    @Mock
+    private EndpointRegistry endpointRegistry;
 
     private QueueManager queueManager;
 
@@ -38,7 +41,7 @@ class QueueManagerTest {
         FlexlbConfig config = new FlexlbConfig();
         config.setMaxQueueSize(10);
         when(configService.loadBalanceConfig()).thenReturn(config);
-        queueManager = new QueueManager(metrics, configService);
+        queueManager = new QueueManager(metrics, configService, endpointRegistry);
     }
 
     @Test

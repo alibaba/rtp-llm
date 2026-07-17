@@ -113,7 +113,7 @@ absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
     {
         std::lock_guard<std::mutex> lock(lock_);
         ScheduleUnit                unit;
-        unit.group_id = -1;
+        unit.group_id = stream->isGroup() ? stream->groupId() : -1;
         unit.streams.push_back(stream);
         waiting_.push_back(std::move(unit));
         schedule_trigger_ = true;
@@ -204,6 +204,58 @@ bool FIFOScheduler::canAdmitUnit(size_t              admitted_count,
     return admitted_total_tokens + unit_tokens < max_batch_tokens_size_;
 }
 
+bool FIFOScheduler::isGroupTimeoutExpired(const ScheduleUnit& unit) const {
+    if (!unit.isGroup() || unit.streams.empty()) {
+        return false;
+    }
+    const auto& s          = unit.streams[0];
+    int64_t     elapsed_us = autil::TimeUtility::currentTimeInMicroSeconds() - s->enqueueTime();
+    return elapsed_us > static_cast<int64_t>(s->groupTimeout()) * 1000;
+}
+
+void FIFOScheduler::processGroupUnits() {
+    // Group waiting units by group_id
+    std::unordered_map<int64_t, std::vector<std::list<ScheduleUnit>::iterator>> group_units;
+    for (auto it = waiting_.begin(); it != waiting_.end(); ++it) {
+        if (it->isGroup()) {
+            group_units[it->group_id].push_back(it);
+        }
+    }
+
+    for (auto& kv : group_units) {
+        auto& units = kv.second;
+        if (units.empty() || units[0]->streams.empty()) {
+            continue;
+        }
+
+        int    group_size    = units[0]->streams[0]->groupSize();
+        size_t total_streams = 0;
+        for (const auto& it : units) {
+            total_streams += it->size();
+        }
+
+        if (total_streams >= static_cast<size_t>(group_size)) {
+            // Complete group: merge all streams into the first unit
+            auto& first_unit = *units[0];
+            for (size_t i = 1; i < units.size(); ++i) {
+                for (auto& s : units[i]->streams) {
+                    first_unit.streams.push_back(std::move(s));
+                }
+            }
+            // Erase the extra units (reverse order; list iterators are stable)
+            for (size_t i = units.size() - 1; i >= 1; --i) {
+                waiting_.erase(units[i]);
+            }
+        } else if (isGroupTimeoutExpired(*units[0])) {
+            // Incomplete group, timeout expired: dissolve so streams are admitted individually
+            for (auto& it : units) {
+                it->group_id = -1;
+            }
+        }
+        // Incomplete group, timeout not expired: leave as-is (skipped in admitWaitingUnits)
+    }
+}
+
 void FIFOScheduler::admitWaitingUnits() {
     size_t  admitted_count        = 0;
     size_t  admitted_total_tokens = 0;
@@ -219,6 +271,9 @@ void FIFOScheduler::admitWaitingUnits() {
         }
     }
 
+    // Aggregate group streams: merge complete groups, dissolve timed-out incomplete groups
+    processGroupUnits();
+
     for (auto it = waiting_.begin(); it != waiting_.end();) {
         auto& unit = *it;
         if (admitted_count > 0) {
@@ -226,6 +281,14 @@ void FIFOScheduler::admitWaitingUnits() {
                 break;
             }
             if (unit.isGroup()) {
+                ++it;
+                continue;
+            }
+        }
+        // Skip incomplete groups that haven't timed out (dissolved groups have group_id = -1)
+        if (unit.isGroup() && !unit.streams.empty()) {
+            int group_size = unit.streams[0]->groupSize();
+            if (unit.size() < static_cast<size_t>(group_size)) {
                 ++it;
                 continue;
             }

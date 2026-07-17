@@ -3,9 +3,12 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
 import java.util.Comparator;
 import java.util.ArrayList;
@@ -20,11 +23,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Tests for {@link FixedWindowBatcherAlgorithm#headWaitMs(BatcherContext)}.
+ * Tests for {@link FixedWindowBatcherAlgorithm}.
  *
- * <p>Verifies that the algorithm computes head wait time using the
- * fixed-window semantics ({@code fixedWaitMs - elapsedMs}) rather
- * than leaking sortKey-as-deadline assumptions.
+ * <p>Verifies head wait time computation, queue deadline drop, and token-cap
+ * filtering behavior.
  */
 class FixedWindowBatcherAlgorithmTest {
 
@@ -192,6 +194,64 @@ class FixedWindowBatcherAlgorithmTest {
         assertEquals("batch_full", meta.getValue().reason());
     }
 
+    @Test
+    void processQueue_dropsExpiredHeadRequest() throws InterruptedException {
+        FixedWindowBatcherAlgorithm algo = new FixedWindowBatcherAlgorithm();
+
+        FlexlbConfig config = new FlexlbConfig();
+        config.setFlexlbBatchFixedMaxInflightBatches(0); // disable backpressure
+        config.setFlexlbBatchEnqueueDeadlineMs(100);     // 100ms queue deadline
+        config.setFlexlbBatchFixedWaitMs(10000);         // long window — don't trigger window timeout
+
+        long now = System.currentTimeMillis();
+        // Enqueued 200ms ago — exceeds the 100ms deadline
+        BatchItem head = enqueuedItem(1L, now - 200);
+        PriorityBlockingQueue<BatchItem> queue = queueWith(head);
+
+        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        BatcherContext ctx = new BatcherContext("test", null, config, handler, queue, mock(BatchSchedulerReporter.class));
+
+        algo.processQueue(ctx);
+
+        // The head should have been dropped via onExpired
+        Mockito.verify(handler).onExpired(head);
+        assertTrue(queue.isEmpty(), "Queue should be empty after dropping expired head");
+    }
+
+    @Test
+    void processQueue_tokenCapFiltersOversizedRequests() throws InterruptedException {
+        FixedWindowBatcherAlgorithm algo = new FixedWindowBatcherAlgorithm();
+
+        FlexlbConfig config = new FlexlbConfig();
+        config.setFlexlbBatchFixedMaxInflightBatches(0); // disable backpressure
+        config.setFlexlbBatchEnqueueDeadlineMs(100000);  // long deadline — don't trigger
+        config.setFlexlbBatchFixedWaitMs(0);             // immediate window timeout
+        config.setFlexlbBatchMaxCapacity(1000);          // 1000 token cap
+        config.setFlexlbBatchSizeMax(10);                // large batch size
+
+        long now = System.currentTimeMillis();
+        BatchItem item1 = itemWithSeqLen(1L, 600, now - 10);
+        BatchItem item2 = itemWithSeqLen(2L, 600, now - 5);
+        PriorityBlockingQueue<BatchItem> queue = queueWith(item1, item2);
+
+        PrefillEndpoint prefillEp = mock(PrefillEndpoint.class);
+        Mockito.when(prefillEp.getIp()).thenReturn("test");
+        Mockito.when(prefillEp.ipPort()).thenReturn("test:8080");
+
+        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        BatcherContext ctx = new BatcherContext("test", prefillEp, config, handler, queue, mock(BatchSchedulerReporter.class));
+
+        algo.processQueue(ctx);
+
+        // Only item1 should be dispatched (600 <= 1000).
+        // item2 would exceed the cap (600 + 600 = 1200 > 1000) and is skipped.
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<BatchItem>> captor = ArgumentCaptor.forClass(List.class);
+        Mockito.verify(handler).onBatchReady(captor.capture(), Mockito.any());
+        assertEquals(1, captor.getValue().size(), "Only one item should fit within token cap");
+        assertEquals(1L, captor.getValue().get(0).requestId());
+    }
+
     // ---- helpers ----
 
     private static FlexlbConfig sloCaseConfig() {
@@ -208,6 +268,17 @@ class FixedWindowBatcherAlgorithmTest {
     private static BatchItem enqueuedItem(long requestId, long enqueuedAtMs) {
         BatchItem item = new BatchItem(null, null, null, null, null, null, null, 0, enqueuedAtMs);
         item.setSortKey(enqueuedAtMs);  // FixedWindow: sortKey = enqueuedAtMs
+        return item;
+    }
+
+    private static BatchItem itemWithSeqLen(long requestId, long seqLen, long enqueuedAtMs) {
+        Request request = new Request();
+        request.setRequestId(requestId);
+        request.setSeqLen(seqLen);
+        BalanceContext ctx = new BalanceContext();
+        ctx.setRequest(request);
+        BatchItem item = new BatchItem(ctx, null, null, null, null, null, null, 0, enqueuedAtMs);
+        item.setSortKey(enqueuedAtMs);
         return item;
     }
 
