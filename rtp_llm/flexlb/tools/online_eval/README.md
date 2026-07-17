@@ -27,7 +27,7 @@ After completion, the important outputs are:
 Common overrides:
 
 ```bash
-PROCESS_CONFIG_FILE=rtp_llm/flexlb/tools/online_eval/data/config/master_fixed_window_220ms.json \
+PROCESS_CONFIG_FILE=rtp_llm/flexlb/tools/online_eval/data/config/master_fixed_window.json \
 DURATION_S=300 \
 LIMIT=5000 \
 REPLAY_SPEED=20 \
@@ -56,7 +56,7 @@ It also defaults to `MAVEN_PROFILES=opensource,!internal` so an adjacent `intern
 - `data/online_logs/pod1_arrivals.tsv`: arrival analysis source.
 - `data/online_logs/sample_access.json`: sample raw access log row.
 - `data/performance/dsv4_flash_performance.sample.json`: mock latency model.
-- `data/config/master_fixed_window_220ms.json`: master process env config for the fixed-window baseline.
+- `data/config/master_fixed_window.json`: master process env config for the fixed-window baseline.
 
 ## Manual flow
 
@@ -86,8 +86,8 @@ Start the full SpringBoot `flexlb-api` with the environment variables generated
 by the mock cluster. FlexLB's own gRPC port is `server.port + 2`.
 
 Backend mock engines use the rtp-llm convention `http_port + 1 == grpc_port`.
-The generated service route uses `"protocol": "grpc"`, so FlexLB treats the
-service discovery port as the engine gRPC port and derives HTTP as `grpc - 1`.
+The generated service route uses `"protocol": "http"`, so FlexLB treats the
+service discovery port as the engine HTTP port and derives gRPC as `http + 1`.
 
 ### 3. Run load client
 

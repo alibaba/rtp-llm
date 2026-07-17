@@ -9,6 +9,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.util.concurrent.CompletableFuture;
+
 /**
  * Engine gRPC Service for worker status queries
  */
@@ -123,6 +125,108 @@ public class EngineGrpcService {
             return engineGrpcClient.getMultimodalCacheStatus(ip, grpcPort, request, requestTimeoutMs);
         } else {
             return engineGrpcClient.getCacheStatus(ip, grpcPort, request, requestTimeoutMs);
+        }
+    }
+
+    /**
+     * Get worker status via gRPC (async)
+     *
+     * @param ip                  worker IP
+     * @param grpcPort            worker gRPC port
+     * @param finishedTaskVersion finished task version
+     * @return CompletableFuture of WorkerStatusPB
+     */
+    public CompletableFuture<EngineRpcService.WorkerStatusPB> getWorkerStatusAsync(String ip, int grpcPort, long finishedTaskVersion, long requestTimeoutMs) {
+        if (engineGrpcClient == null) {
+            throw new RuntimeException("EngineGrpcService not initialized");
+        }
+
+        EngineRpcService.StatusVersionPB request = EngineRpcService.StatusVersionPB.newBuilder()
+                .setLatestFinishedVersion(finishedTaskVersion)
+                .build();
+
+        return engineGrpcClient.getWorkerStatusAsync(ip, grpcPort, request, requestTimeoutMs);
+    }
+
+    /**
+     * Get worker status via gRPC with RoleType routing (async)
+     *
+     * @param ip                  worker IP
+     * @param grpcPort            worker gRPC port
+     * @param finishedTaskVersion finished task version
+     * @param roleType            role type to determine which service to use
+     * @return CompletableFuture of WorkerStatusPB
+     */
+    public CompletableFuture<EngineRpcService.WorkerStatusPB> getWorkerStatusAsync(String ip, int grpcPort, long finishedTaskVersion, long requestTimeoutMs, RoleType roleType) {
+        if (engineGrpcClient == null) {
+            throw new RuntimeException("EngineGrpcService not initialized");
+        }
+
+        EngineRpcService.StatusVersionPB request = EngineRpcService.StatusVersionPB.newBuilder()
+                .setLatestFinishedVersion(finishedTaskVersion)
+                .build();
+
+        // Use MultimodalRpcService for VIT role, RpcService for others
+        if (RoleType.VIT.equals(roleType)) {
+            return engineGrpcClient.getMultimodalWorkerStatusAsync(ip, grpcPort, request, requestTimeoutMs);
+        } else {
+            return engineGrpcClient.getWorkerStatusAsync(ip, grpcPort, request, requestTimeoutMs);
+        }
+    }
+
+    /**
+     * Get cache status via gRPC (async)
+     *
+     * @param ip           worker IP
+     * @param grpcPort     worker gRPC port
+     * @param workerStatus worker status
+     * @param cacheVersion cache version for status check
+     * @return CompletableFuture of CacheStatusPB
+     */
+    public CompletableFuture<EngineRpcService.CacheStatusPB> getCacheStatusAsync(
+            String ip, int grpcPort, WorkerStatus workerStatus, long cacheVersion, long requestTimeoutMs) {
+
+        if (engineGrpcClient == null) {
+            throw new RuntimeException("EngineGrpcService not initialized");
+        }
+        // Only need cacheKeys for Prefill nodes in PD-separated mode and non PD-separated mode
+        boolean needCacheKeys = workerStatus.getRole() == RoleType.PREFILL || workerStatus.getRole() == RoleType.PDFUSION;
+        EngineRpcService.CacheVersionPB request = EngineRpcService.CacheVersionPB.newBuilder()
+                .setLatestCacheVersion((int) cacheVersion)
+                .setNeedCacheKeys(needCacheKeys)
+                .build();
+        logger.info("Get cache status Request: {}, cacheVersion: {}, needCacheKeys: {}", ip, cacheVersion, needCacheKeys);
+        return engineGrpcClient.getCacheStatusAsync(ip, grpcPort, request, requestTimeoutMs);
+    }
+
+    /**
+     * Get cache status via gRPC with RoleType routing (async)
+     *
+     * @param ip           worker IP
+     * @param grpcPort     worker gRPC port
+     * @param workerStatus worker status
+     * @param cacheVersion cache version for status check
+     * @param roleType     role type to determine which service to use
+     * @return CompletableFuture of CacheStatusPB
+     */
+    public CompletableFuture<EngineRpcService.CacheStatusPB> getCacheStatusAsync(
+        String ip, int grpcPort, WorkerStatus workerStatus, long cacheVersion, long requestTimeoutMs, RoleType roleType) {
+
+        if (engineGrpcClient == null) {
+            throw new RuntimeException("EngineGrpcService not initialized");
+        }
+        boolean needCacheKeys = workerStatus.getRole() == RoleType.PREFILL || workerStatus.getRole() == RoleType.PDFUSION;
+        EngineRpcService.CacheVersionPB request = EngineRpcService.CacheVersionPB.newBuilder()
+                .setLatestCacheVersion((int) cacheVersion)
+                .setNeedCacheKeys(needCacheKeys)
+                .build();
+        logger.info("Get cache status Request: {}, cacheVersion: {}, needCacheKeys: {}", ip, cacheVersion, needCacheKeys);
+
+        // Use MultimodalRpcService for VIT role, RpcService for others
+        if (RoleType.VIT.equals(roleType)) {
+            return engineGrpcClient.getMultimodalCacheStatusAsync(ip, grpcPort, request, requestTimeoutMs);
+        } else {
+            return engineGrpcClient.getCacheStatusAsync(ip, grpcPort, request, requestTimeoutMs);
         }
     }
 }

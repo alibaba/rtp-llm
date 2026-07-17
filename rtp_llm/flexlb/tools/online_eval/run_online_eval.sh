@@ -7,16 +7,23 @@ REPO_ROOT="$(cd "${FLEXLB_DIR}/../.." && pwd)"
 
 TRACE_FILE="${TRACE_FILE:-${SCRIPT_DIR}/data/online_logs/trace_30min.jsonl}"
 PERFORMANCE_FILE="${PERFORMANCE_FILE:-${SCRIPT_DIR}/data/performance/dsv4_flash_performance.sample.json}"
-PROCESS_CONFIG_FILE="${PROCESS_CONFIG_FILE:-${SCRIPT_DIR}/data/config/master_fixed_window_220ms.json}"
+PROCESS_CONFIG_FILE="${PROCESS_CONFIG_FILE:-${SCRIPT_DIR}/data/config/master_fixed_window.json}"
 RUN_ROOT="${RUN_ROOT:-${SCRIPT_DIR}/run}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 RUN_DIR="${RUN_DIR:-${RUN_ROOT}/${RUN_ID}}"
 
 N_PREFILL="${N_PREFILL:-2}"
 N_DECODE="${N_DECODE:-4}"
-MOCK_BASE_GRPC_PORT="${MOCK_BASE_GRPC_PORT:-55151}"
+MOCK_BASE_GRPC_PORT="${MOCK_BASE_GRPC_PORT:-61000}"
+MOCK_ENGINE_IMPL="${MOCK_ENGINE_IMPL:-java}"
+JAVA_MOCK_ENGINE_JAR="${JAVA_MOCK_ENGINE_JAR:-${FLEXLB_DIR}/flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar}"
+JAVA_MOCK_EVENT_LOOP_THREADS="${JAVA_MOCK_EVENT_LOOP_THREADS:-32}"
 PREFILL_CACHE_BLOCKS="${PREFILL_CACHE_BLOCKS:-6000}"
 DECODE_CACHE_BLOCKS="${DECODE_CACHE_BLOCKS:-3000}"
+N_SHARDS="${N_SHARDS:-64}"  # mock engine 分片数，默认 64（多进程模式）
+# HTTP proxy port for the shard launcher.
+# Placed above the gRPC engine range to avoid ephemeral port collisions.
+MOCK_PROXY_PORT=$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE + 100 + N_SHARDS))
 
 FLEXLB_HTTP_ADDR="${FLEXLB_HTTP_ADDR:-127.0.0.1:7001}"
 FLEXLB_HTTP_PORT="${FLEXLB_HTTP_ADDR##*:}"
@@ -29,14 +36,27 @@ MAVEN_PROFILES="${MAVEN_PROFILES:-opensource,!internal}"
 LIMIT="${LIMIT:-1000}"
 DURATION_S="${DURATION_S:-0}"
 REPLAY_SPEED="${REPLAY_SPEED:-10}"
-MAX_CONCURRENCY="${MAX_CONCURRENCY:-1024}"
+MAX_CONCURRENCY="${MAX_CONCURRENCY:-999999999}"
 SCHEDULE_MODE="${SCHEDULE_MODE:-batch}"
 TIMEOUT_MS="${TIMEOUT_MS:-3600000}"
 SLA_TTFT_MS="${SLA_TTFT_MS:-500}"
 ZERO_OUTPUT_POLICY="${ZERO_OUTPUT_POLICY:-skip}"
+MAX_INPUT_LEN="${MAX_INPUT_LEN:-0}"
+MAX_OUTPUT_LEN="${MAX_OUTPUT_LEN:-0}"
+GRADIENT="${GRADIENT:-0}"
+GRADIENT_MAX_SPEED="${GRADIENT_MAX_SPEED:-1000}"
+GRADIENT_START_SPEED="${GRADIENT_START_SPEED:-10}"
 SCHEDULE_ONLY="${SCHEDULE_ONLY:-0}"
+LOOP="${LOOP:-0}"
+PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-}"
+LOAD_CLIENT_WORKERS="${LOAD_CLIENT_WORKERS:-8}"
+JFR_FILE="${JFR_FILE:-${RUN_DIR}/flexlb_profile.jfr}"
+JFR_DURATION="${JFR_DURATION:-300s}"
+FLEXLB_MONITOR_ENABLED="${FLEXLB_MONITOR_ENABLED:-true}"
+FLEXLB_MONITOR_MODE="${FLEXLB_MONITOR_MODE:-critical-only}"
+HIPPO_ROLE="${HIPPO_ROLE:-test}"
 
-DEFAULT_FLEXLB_CONFIG='{"loadBalanceStrategy":"COST_BASED_PREFILL","decodeLoadBalanceStrategy":"COST_BASED_DECODE","cacheHitMaxCacheKeys":80000000,"cacheHitMetricReportEnabled":true,"cacheHitTimeWindowMs":1800000,"cacheHitTraceLogEnabled":false,"cacheHitWindowWriteEnabled":true,"decodeConcurrencyLimit":132,"flexlbBatchAlgorithm":"fixed_window","flexlbBatchFixedWaitMs":220,"flexlbBatchPredictThresholdMs":550,"flexlbBatchSizeMax":32,"hysteresisBiasPercent":30,"maxQueueSize":5000,"prefillQueueSizeThreshold":100000,"defaultScheduleMode":"BATCH","flexlbBatchFixedMaxInflightBatches":2,"costSloMs":1000,"flexlbBatchMinSize":8,"prefillLbTimeoutMs":5000}'
+DEFAULT_FLEXLB_CONFIG='{"loadBalanceStrategy":"COST_BASED_PREFILL","decodeLoadBalanceStrategy":"COST_BASED_DECODE","cacheHitMaxCacheKeys":10000000,"cacheHitMetricReportEnabled":true,"cacheHitTimeWindowMs":1800000,"cacheHitTraceLogEnabled":false,"cacheHitWindowWriteEnabled":true,"decodeConcurrencyLimit":132,"flexlbBatchAlgorithm":"fixed_window","flexlbBatchFixedWaitMs":10,"flexlbBatchPredictThresholdMs":550,"flexlbBatchSizeMax":32,"hysteresisBiasPercent":30,"maxQueueSize":1000000,"flexlbBatchMaxInflight":1000000,"flexlbBatchDispatchPoolSize":500,"flexlbBatchDispatchQueueSize":10000,"prefillQueueSizeThreshold":100000,"defaultScheduleMode":"BATCH","flexlbBatchFixedMaxInflightBatches":-1,"costSloMs":1000,"flexlbBatchMinSize":8,"prefillLbTimeoutMs":5000}'
 DEFAULT_STRATEGY_CONFIGS='{"shortestTtft":{"candidatePool":{"mode":"FIXED","size":2}}}'
 FLEXLB_CONFIG="${FLEXLB_CONFIG:-${DEFAULT_FLEXLB_CONFIG}}"
 STRATEGY_CONFIGS="${STRATEGY_CONFIGS:-${DEFAULT_STRATEGY_CONFIGS}}"
@@ -44,8 +64,35 @@ OTEL_TRACE_SKIP_PATTERN="${OTEL_TRACE_SKIP_PATTERN:-.*}"
 OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-none}"
 HIPPO_ROLE="${HIPPO_ROLE:-flexlb_eval_master}"
 
+# ========== Thread Pool Size Configuration ==========
+# These defaults keep total threads <1000 on high-core machines.
+export GRPC_CLIENT_EXECUTOR_CORE_SIZE="${GRPC_CLIENT_EXECUTOR_CORE_SIZE:-32}"
+export GRPC_CLIENT_EXECUTOR_MAX_SIZE="${GRPC_CLIENT_EXECUTOR_MAX_SIZE:-32}"
+export GRPC_CLIENT_EXECUTOR_QUEUE_SIZE="${GRPC_CLIENT_EXECUTOR_QUEUE_SIZE:-10000}"
+export GRPC_CLIENT_EVENT_LOOP_THREADS="${GRPC_CLIENT_EVENT_LOOP_THREADS:-8}"
+export GRPC_SERVER_WORKER_EVENT_LOOP_THREADS="${GRPC_SERVER_WORKER_EVENT_LOOP_THREADS:-4}"
+export FLEXLB_N_CHANNELS="${FLEXLB_N_CHANNELS:-16}"
+export HTTP_NETTY_EVENT_LOOP_THREADS="${HTTP_NETTY_EVENT_LOOP_THREADS:-4}"
+export HTTP_NETTY_EVENT_EXECUTOR_THREADS="${HTTP_NETTY_EVENT_EXECUTOR_THREADS:-16}"
+export HTTP_NETTY_EVENT_EXECUTOR_QUEUE_SIZE="${HTTP_NETTY_EVENT_EXECUTOR_QUEUE_SIZE:-1000}"
+export HTTP_REQUEST_EXECUTOR_CORE_SIZE="${HTTP_REQUEST_EXECUTOR_CORE_SIZE:-32}"
+export HTTP_REQUEST_EXECUTOR_MAX_SIZE="${HTTP_REQUEST_EXECUTOR_MAX_SIZE:-32}"
+export HTTP_REQUEST_EXECUTOR_QUEUE_SIZE="${HTTP_REQUEST_EXECUTOR_QUEUE_SIZE:-10000}"
+export ENGINE_SYNC_EXECUTOR_CORE_SIZE="${ENGINE_SYNC_EXECUTOR_CORE_SIZE:-32}"
+export ENGINE_SYNC_EXECUTOR_MAX_SIZE="${ENGINE_SYNC_EXECUTOR_MAX_SIZE:-64}"
+export STATUS_CHECK_EXECUTOR_CORE_SIZE="${STATUS_CHECK_EXECUTOR_CORE_SIZE:-32}"
+export STATUS_CHECK_EXECUTOR_MAX_SIZE="${STATUS_CHECK_EXECUTOR_MAX_SIZE:-64}"
+export SERVICE_DISCOVERY_MAX_SIZE="${SERVICE_DISCOVERY_MAX_SIZE:-32}"
+export NETTY_SELECT_THREAD_MULTIPLIER="${NETTY_SELECT_THREAD_MULTIPLIER:-1}"
+export NETTY_WORKER_THREAD_MULTIPLIER="${NETTY_WORKER_THREAD_MULTIPLIER:-1}"
+export FLEXLB_GRPC_EXECUTOR_CORE_SIZE="${FLEXLB_GRPC_EXECUTOR_CORE_SIZE:-128}"
+export FLEXLB_GRPC_EXECUTOR_MAX_SIZE="${FLEXLB_GRPC_EXECUTOR_MAX_SIZE:-128}"
+export FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE="${FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE:-50000}"
+export SCHEDULE_WORKER_SIZE="${SCHEDULE_WORKER_SIZE:-16}"
+
 MOCK_PID=""
 FLEXLB_PID=""
+CLIENT_PIDS=()
 JAVA_MODULE_OPTS=(
   --add-modules ALL-SYSTEM
   --add-opens java.base/java.lang=ALL-UNNAMED
@@ -57,6 +104,9 @@ JAVA_MODULE_OPTS=(
   --add-opens java.base/sun.nio.ch=ALL-UNNAMED
   --add-opens java.instrument/sun.instrument=ALL-UNNAMED
 )
+
+# Limit Reactor boundedElastic scheduler threads to prevent thread explosion
+JVM_SYSTEM_PROPS=(-Dreactor.schedulers.defaultBoundedElasticSize=64)
 
 java_major() {
   local java_bin="${1:-java}"
@@ -96,12 +146,21 @@ if [[ -n "${JAVA21_HOME_DETECTED}" ]]; then
 fi
 
 cleanup() {
+  for pid in "${CLIENT_PIDS[@]}"; do
+    kill "${pid}" >/dev/null 2>&1 || true
+  done
   if [[ -n "${FLEXLB_PID}" ]]; then
     kill "${FLEXLB_PID}" >/dev/null 2>&1 || true
   fi
   if [[ -n "${MOCK_PID}" ]]; then
     kill "${MOCK_PID}" >/dev/null 2>&1 || true
   fi
+  sleep 1
+  for pid in "${CLIENT_PIDS[@]}" "${FLEXLB_PID}" "${MOCK_PID}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" >/dev/null 2>&1; then
+      kill -9 "${pid}" >/dev/null 2>&1 || true
+    fi
+  done
 }
 trap cleanup EXIT
 
@@ -129,6 +188,60 @@ sys.exit(1)
 PY
 }
 
+wait_for_endpoints_ready() {
+  local master_port=$1
+  local expected_prefill=$2
+  local expected_decode=$3
+  local max_wait=120
+  local elapsed=0
+
+  echo "[wait_for_endpoints_ready] Waiting for ${expected_prefill} prefill + ${expected_decode} decode endpoints to be discovered and alive..."
+
+  while [ "${elapsed}" -lt "${max_wait}" ]; do
+    local response
+    response=$(curl -s -X POST "http://127.0.0.1:${master_port}/rtp_llm/master/info" \
+        -H "Content-Type: application/json" \
+        -H "Accept: application/json" \
+        -d '{}' 2>/dev/null) || true
+
+    if [ -n "${response}" ]; then
+      local result
+      result=$(echo "${response}" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    ready = data.get('ready', False)
+    ws = data.get('worker_summary', {})
+    prefill = ws.get('PREFILL', {})
+    decode = ws.get('DECODE', {})
+    p_disc = prefill.get('discovered', 0)
+    p_alive = prefill.get('alive', 0)
+    d_disc = decode.get('discovered', 0)
+    d_alive = decode.get('alive', 0)
+    print(f'{ready}|{p_disc}|{p_alive}|{d_disc}|{d_alive}')
+except Exception:
+    print('False|0|0|0|0')
+" 2>/dev/null) || result="False|0|0|0|0"
+
+      local ready p_disc p_alive d_disc d_alive
+      IFS='|' read -r ready p_disc p_alive d_disc d_alive <<< "${result}"
+
+      if [ "${ready}" = "True" ] && [ "${p_disc}" -ge "${expected_prefill}" ] && [ "${p_alive}" -ge "${expected_prefill}" ] && [ "${d_disc}" -ge "${expected_decode}" ] && [ "${d_alive}" -ge "${expected_decode}" ]; then
+        echo "[wait_for_endpoints_ready] All endpoints ready: prefill=${p_alive}/${expected_prefill}, decode=${d_alive}/${expected_decode} (${elapsed}s)"
+        return 0
+      fi
+
+      echo "[wait_for_endpoints_ready] Not ready yet: ready=${ready}, prefill discovered=${p_disc}/${expected_prefill} alive=${p_alive}/${expected_prefill}, decode discovered=${d_disc}/${expected_decode} alive=${d_alive}/${expected_decode} (${elapsed}s)"
+    fi
+
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+
+  echo "[wait_for_endpoints_ready] WARNING: Timeout after ${max_wait}s waiting for endpoints. Proceeding anyway."
+  return 0
+}
+
 mkdir -p "${RUN_DIR}"
 echo "run_dir=${RUN_DIR}"
 
@@ -136,18 +249,71 @@ ENDPOINT_FILE="${RUN_DIR}/endpoints.json"
 FLEXLB_ENV_FILE="${RUN_DIR}/flexlb_env.txt"
 
 if [[ "${START_MOCK}" == "1" ]]; then
-  PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/mock_engine_cluster.py" \
-    --n-prefill "${N_PREFILL}" \
-    --n-decode "${N_DECODE}" \
-    --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
-    --performance "${PERFORMANCE_FILE}" \
-    --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
-    --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
-    --endpoint-file "${ENDPOINT_FILE}" \
-    --env-file "${FLEXLB_ENV_FILE}" \
-    >"${RUN_DIR}/mock_engine.log" 2>&1 &
-  MOCK_PID="$!"
-  wait_for_port "127.0.0.1" "${MOCK_BASE_GRPC_PORT}" 20
+  if [[ "${MOCK_ENGINE_IMPL}" == "java" ]]; then
+    if [[ ! -f "${JAVA_MOCK_ENGINE_JAR}" ]]; then
+      echo "Java mock engine jar not found: ${JAVA_MOCK_ENGINE_JAR}" >&2
+      echo "Build it with: ./mvnw package -DskipTests -P '!internal'" >&2
+      exit 1
+    fi
+    java -Xms1g -Xmx1g -jar "${JAVA_MOCK_ENGINE_JAR}" \
+      --n-prefill "${N_PREFILL}" \
+      --n-decode "${N_DECODE}" \
+      --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
+      --event-loop-threads "${JAVA_MOCK_EVENT_LOOP_THREADS}" \
+      --performance "${PERFORMANCE_FILE}" \
+      --master-config "${PROCESS_CONFIG_FILE}" \
+      --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
+      --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
+      --endpoint-file "${ENDPOINT_FILE}" \
+      --env-file "${FLEXLB_ENV_FILE}" \
+      >"${RUN_DIR}/mock_engine.log" 2>&1 &
+    MOCK_PID="$!"
+    # The Java process writes discovery files only after every gRPC port is bound.
+    wait_for_port "127.0.0.1" "$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE - 1))" 60
+    if ! kill -0 "${MOCK_PID}" >/dev/null 2>&1; then
+      echo "Java mock engine exited during startup" >&2
+      tail -50 "${RUN_DIR}/mock_engine.log" >&2 || true
+      exit 1
+    fi
+    for _ in $(seq 1 100); do
+      if [[ -s "${ENDPOINT_FILE}" ]]; then
+        break
+      fi
+      sleep 0.1
+    done
+    if [[ ! -s "${ENDPOINT_FILE}" ]]; then
+      echo "Java mock engine did not write endpoint file: ${ENDPOINT_FILE}" >&2
+      exit 1
+    fi
+  elif [[ "${MOCK_ENGINE_IMPL}" == "python" ]]; then
+    MOCK_ENGINE_SCRIPT="${SCRIPT_DIR}/mock_engine_cluster.py"
+    MOCK_ENGINE_EXTRA_ARGS=()
+    if [[ "${N_SHARDS}" -gt 1 ]]; then
+      MOCK_ENGINE_SCRIPT="${SCRIPT_DIR}/mock_engine_shard_launcher.py"
+      MOCK_ENGINE_EXTRA_ARGS=(--n-shards "${N_SHARDS}")
+    fi
+    PYTHONDONTWRITEBYTECODE=1 python3 "${MOCK_ENGINE_SCRIPT}" \
+      --n-prefill "${N_PREFILL}" \
+      --n-decode "${N_DECODE}" \
+      --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
+      --performance "${PERFORMANCE_FILE}" \
+      --master-config "${PROCESS_CONFIG_FILE}" \
+      --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
+      --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
+      --endpoint-file "${ENDPOINT_FILE}" \
+      --env-file "${FLEXLB_ENV_FILE}" \
+      "${MOCK_ENGINE_EXTRA_ARGS[@]}" \
+      >"${RUN_DIR}/mock_engine.log" 2>&1 &
+    MOCK_PID="$!"
+    if [[ "${N_SHARDS}" -gt 1 ]]; then
+      wait_for_port "127.0.0.1" "${MOCK_PROXY_PORT}" 180
+    else
+      wait_for_port "127.0.0.1" "${MOCK_BASE_GRPC_PORT}" 20
+    fi
+  else
+    echo "Unsupported MOCK_ENGINE_IMPL=${MOCK_ENGINE_IMPL}; expected java or python" >&2
+    exit 1
+  fi
 else
   if [[ ! -f "${ENDPOINT_FILE}" ]]; then
     echo "START_MOCK=0 requires ENDPOINT_FILE at ${ENDPOINT_FILE}" >&2
@@ -198,21 +364,50 @@ OVERRIDE_ENV_KEYS=(
   DECODE_CONCURRENCY_LIMIT
   DECODE_LOAD_BALANCE_STRATEGY
   DEFAULT_SCHEDULE_MODE
+  ENGINE_SYNC_EXECUTOR_CORE_SIZE
+  ENGINE_SYNC_EXECUTOR_MAX_SIZE
   FLEXLB_BATCH_ALGORITHM
+  FLEXLB_BATCH_DISPATCH_POOL_SIZE
+  FLEXLB_BATCH_DISPATCH_QUEUE_SIZE
   FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES
   FLEXLB_BATCH_FIXED_WAIT_MS
+  FLEXLB_BATCH_MAX_INFLIGHT
   FLEXLB_BATCH_MIN_SIZE
   FLEXLB_BATCH_PREDICT_THRESHOLD_MS
   FLEXLB_BATCH_SIZE_MAX
   FLEXLB_GRPC_EXECUTOR_CORE_SIZE
   FLEXLB_GRPC_EXECUTOR_MAX_SIZE
+  FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE
   FLEXLB_JVM_HEAP_SIZE
+  FLEXLB_MONITOR_ENABLED
+  FLEXLB_MONITOR_MODE
+  GRADIENT
+  GRADIENT_MAX_SPEED
+  GRADIENT_START_SPEED
+  GRPC_CLIENT_EVENT_LOOP_THREADS
+  GRPC_CLIENT_EXECUTOR_CORE_SIZE
+  GRPC_CLIENT_EXECUTOR_MAX_SIZE
+  GRPC_CLIENT_EXECUTOR_QUEUE_SIZE
+  GRPC_SERVER_WORKER_EVENT_LOOP_THREADS
+  HTTP_NETTY_EVENT_EXECUTOR_QUEUE_SIZE
+  HTTP_NETTY_EVENT_EXECUTOR_THREADS
+  HTTP_NETTY_EVENT_LOOP_THREADS
+  HTTP_REQUEST_EXECUTOR_CORE_SIZE
+  HTTP_REQUEST_EXECUTOR_MAX_SIZE
+  HTTP_REQUEST_EXECUTOR_QUEUE_SIZE
   HYSTERESIS_BIAS_PERCENT
   LOAD_BALANCE_STRATEGY
   MAX_QUEUE_SIZE
+  NETTY_SELECT_THREAD_MULTIPLIER
+  NETTY_WORKER_THREAD_MULTIPLIER
   PREFILL_QUEUE_SIZE_THRESHOLD
   PREFILL_TIME_FORMULA
+  SCHEDULE_WORKER_SIZE
+  SERVICE_DISCOVERY_MAX_SIZE
+  STATUS_CHECK_EXECUTOR_CORE_SIZE
+  STATUS_CHECK_EXECUTOR_MAX_SIZE
   SYNC_REQUEST_TIMEOUT_MS
+  SYNC_STATUS_INTERVAL
 )
 for key in "${OVERRIDE_ENV_KEYS[@]}"; do
   if [[ -v "${key}" ]]; then
@@ -221,6 +416,7 @@ for key in "${OVERRIDE_ENV_KEYS[@]}"; do
 done
 
 JAVA_HEAP_OPTS=()
+JVM_HEAP_SIZE=""
 if [[ -f "${PROCESS_CONFIG_FILE}" ]]; then
   JVM_HEAP_SIZE="$(python3 - "${PROCESS_CONFIG_FILE}" <<'PY'
 import json
@@ -233,9 +429,14 @@ for item in payload.get("zone_process_setting", {}).get("process_info", {}).get(
         break
 PY
 )"
-  if [[ -n "${JVM_HEAP_SIZE}" ]]; then
-    JAVA_HEAP_OPTS=(-Xms"${JVM_HEAP_SIZE}" -Xmx"${JVM_HEAP_SIZE}")
-  fi
+fi
+JVM_XMS="${FLEXLB_JVM_XMS:-${JVM_HEAP_SIZE}}"
+JVM_XMX="${FLEXLB_JVM_XMX:-${JVM_HEAP_SIZE}}"
+if [[ -n "${JVM_XMS}" ]]; then
+  JAVA_HEAP_OPTS+=(-Xms"${JVM_XMS}")
+fi
+if [[ -n "${JVM_XMX}" ]]; then
+  JAVA_HEAP_OPTS+=(-Xmx"${JVM_XMX}")
 fi
 
 if [[ "${START_FLEXLB}" == "1" ]]; then
@@ -261,14 +462,27 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
       "OTEL_TRACE_SKIP_PATTERN=${OTEL_TRACE_SKIP_PATTERN}" \
       "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
       "HIPPO_ROLE=${HIPPO_ROLE}" \
-      java "${JAVA_HEAP_OPTS[@]}" "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
+      java -XX:StartFlightRecording=filename=${JFR_FILE},settings=profile,duration=${JFR_DURATION},disk=true,maxsize=256m,dumponexit=true "${JAVA_HEAP_OPTS[@]}" "${JAVA_MODULE_OPTS[@]}" "${JVM_SYSTEM_PROPS[@]}" -jar "${FLEXLB_JAR}" \
       --server.port="${FLEXLB_HTTP_PORT}" \
       --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
       --spring.profiles.active="${SPRING_PROFILE:-default}" \
       >"${RUN_DIR}/flexlb.log" 2>&1 &
   fi
   FLEXLB_PID="$!"
-  wait_for_port "127.0.0.1" "${FLEXLB_HTTP_PORT}" 60
+  echo "FlexLB heap: Xms=${JVM_XMS:-JVM-default}, Xmx=${JVM_XMX:-JVM-default}"
+  if ! wait_for_port "127.0.0.1" "${FLEXLB_HTTP_PORT}" 60; then
+    if ! kill -0 "${FLEXLB_PID}" >/dev/null 2>&1; then
+      flexlb_exit_code=0
+      wait "${FLEXLB_PID}" || flexlb_exit_code=$?
+      echo "FlexLB exited before opening port ${FLEXLB_HTTP_PORT} (exit_code=${flexlb_exit_code})" >&2
+    fi
+    exit 1
+  fi
+  wait_for_endpoints_ready "${FLEXLB_HTTP_PORT}" "${N_PREFILL}" "${N_DECODE}"
+  if [[ "${FLEXLB_WARMUP_SECONDS:-0}" -gt 0 ]]; then
+    echo "Warming up FlexLB for ${FLEXLB_WARMUP_SECONDS}s before starting load..."
+    sleep "${FLEXLB_WARMUP_SECONDS}"
+  fi
 fi
 
 CLIENT_ARGS=(
@@ -287,9 +501,107 @@ CLIENT_ARGS=(
 if [[ "${SCHEDULE_ONLY}" == "1" ]]; then
   CLIENT_ARGS+=(--schedule-only)
 fi
+if [[ "${LOOP}" == "1" ]]; then
+  CLIENT_ARGS+=(--loop)
+fi
+if [[ -n "${RESPONSE_TIMEOUT:-}" ]]; then
+  CLIENT_ARGS+=(--response-timeout "${RESPONSE_TIMEOUT}")
+fi
+if [[ -n "${PUSHGATEWAY_URL}" ]]; then
+  CLIENT_ARGS+=(--pushgateway-url "${PUSHGATEWAY_URL}")
+fi
+if [[ -n "${MAX_INPUT_LEN}" && "${MAX_INPUT_LEN}" != "0" ]]; then
+  CLIENT_ARGS+=(--max-input-len "${MAX_INPUT_LEN}")
+fi
+if [[ -n "${MAX_OUTPUT_LEN}" && "${MAX_OUTPUT_LEN}" != "0" ]]; then
+  CLIENT_ARGS+=(--max-output-len "${MAX_OUTPUT_LEN}")
+fi
+if [[ "${GRADIENT}" == "1" ]]; then
+  CLIENT_ARGS+=(--gradient --gradient-max-speed "${GRADIENT_MAX_SPEED}" --gradient-start-speed "${GRADIENT_START_SPEED}")
+fi
 
-PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/flexlb_load_client.py" "${CLIENT_ARGS[@]}" | tee "${RUN_DIR}/client.stdout"
+if [[ "${LOAD_CLIENT_WORKERS}" -le 1 ]]; then
+  PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/flexlb_load_client.py" "${CLIENT_ARGS[@]}" | tee "${RUN_DIR}/client.stdout"
+else
+  mkdir -p "${RUN_DIR}/load_client"
+  curl -fsS -X POST "http://${FLEXLB_HTTP_ADDR}/rtp_llm/server_latency/reset" >/dev/null
+  SHARD_MAX_CONCURRENCY=$(( (MAX_CONCURRENCY + LOAD_CLIENT_WORKERS - 1) / LOAD_CLIENT_WORKERS ))
+  for ((shard = 0; shard < LOAD_CLIENT_WORKERS; shard++)); do
+    shard_dir="${RUN_DIR}/load_client/shard_${shard}"
+    PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/flexlb_load_client.py" \
+      "${CLIENT_ARGS[@]}" \
+      --output-dir "${shard_dir}" \
+      --num-shards "${LOAD_CLIENT_WORKERS}" \
+      --shard-index "${shard}" \
+      --max-concurrency "${SHARD_MAX_CONCURRENCY}" \
+      --skip-server-latency \
+      >"${RUN_DIR}/client_shard_${shard}.stdout" 2>&1 &
+    CLIENT_PIDS+=("$!")
+  done
+
+  CLIENT_EXIT=0
+  for pid in "${CLIENT_PIDS[@]}"; do
+    wait "${pid}" || CLIENT_EXIT=$?
+  done
+
+  curl -fsS "http://${FLEXLB_HTTP_ADDR}/rtp_llm/server_latency" \
+    >"${RUN_DIR}/load_client/server_latency.json"
+  python3 - "${RUN_DIR}/load_client" "${LOAD_CLIENT_WORKERS}" <<'PY'
+import json
+import pathlib
+import sys
+
+output_dir = pathlib.Path(sys.argv[1])
+worker_count = int(sys.argv[2])
+shards = [
+    json.loads((output_dir / f"shard_{index}" / "summary.json").read_text())
+    for index in range(worker_count)
+]
+server = json.loads((output_dir / "server_latency.json").read_text())
+summary = {
+    "load_client_workers": worker_count,
+    "total_requests": sum(item.get("total_requests", 0) for item in shards),
+    "success_count": sum(item.get("success_count", 0) for item in shards),
+    "error_count": sum(item.get("error_count", 0) for item in shards),
+    "actual_send_qps": round(sum(item.get("actual_send_qps", 0.0) for item in shards), 3),
+    "server_arrival_qps": server.get("arrival_qps", 0.0),
+    "server_completion_qps": server.get("completion_qps", 0.0),
+    "schedule_latency_source": "server",
+    "schedule_latency_ms": server.get("server_total_ms", {}),
+    "server_stage_latency_ms": {
+        key: server.get(key, {})
+        for key in ("grpc_queue_ms", "route_submit_ms", "batch_wait_ms", "dispatch_ack_ms", "ack_response_ms")
+    },
+    "shard_summaries": [f"shard_{index}/summary.json" for index in range(worker_count)],
+}
+summary["error_rate"] = round(
+    summary["error_count"] / summary["total_requests"], 6
+) if summary["total_requests"] else 0.0
+(output_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+(output_dir / "report.md").write_text(
+    "# FlexLB multi-client performance\n\n"
+    f"- Load client workers: {worker_count}\n"
+    f"- Actual send QPS: {summary['actual_send_qps']}\n"
+    f"- Server arrival QPS: {summary['server_arrival_qps']}\n"
+    f"- Server completion QPS: {summary['server_completion_qps']}\n"
+    f"- Total requests: {summary['total_requests']}\n"
+    f"- Error count: {summary['error_count']}\n"
+    f"- Error rate: {summary['error_rate']}\n"
+    f"- Server latency: {json.dumps(summary['schedule_latency_ms'])}\n"
+)
+print(json.dumps(summary, indent=2))
+PY
+  if [[ "${CLIENT_EXIT}" -ne 0 ]]; then
+    exit "${CLIENT_EXIT}"
+  fi
+fi
 
 echo "summary=${RUN_DIR}/load_client/summary.json"
-echo "per_request=${RUN_DIR}/load_client/per_request.jsonl"
+if [[ "${LOAD_CLIENT_WORKERS}" -le 1 ]]; then
+  echo "per_request=${RUN_DIR}/load_client/per_request.jsonl"
+else
+  echo "per_request_shards=${RUN_DIR}/load_client/shard_*/per_request.jsonl"
+fi
 echo "report=${RUN_DIR}/load_client/report.md"
+echo "server_latency=${RUN_DIR}/load_client/server_latency.json"
+echo "jfr=${JFR_FILE}"

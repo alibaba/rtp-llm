@@ -8,6 +8,8 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.concurrent.CompletableFuture;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -59,18 +61,18 @@ class GrpcWorkerStatusCheckRunnerTest {
                 .setAlive(true)
                 .build();
 
-        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(),
-                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(workerStatusPB);
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(CompletableFuture.completedFuture(workerStatusPB));
 
         // Act — pass null for FlexlbBatchScheduler and EndpointRegistry (not needed in unit test)
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 modelName, ipPort, site,
                 RoleType.PREFILL,
-                group, workerStatus, engineHealthReporter, engineGrpcService, 20L, null, null);
+                group, workerStatus, engineHealthReporter, engineGrpcService, 20L, null, null, Runnable::run);
         runner.run();
 
         // Assert — gRPC port is derived from HTTP port 8080 → 8081
-        verify(engineGrpcService).getWorkerStatus("127.0.0.1", 8081, -1L, 20L, RoleType.PREFILL);
+        verify(engineGrpcService).getWorkerStatusAsync("127.0.0.1", 8081, -1L, 20L, RoleType.PREFILL);
     }
 
     @Test
@@ -102,13 +104,13 @@ class GrpcWorkerStatusCheckRunnerTest {
                 .addRunningTaskInfo(taskInfo)
                 .build();
 
-        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(),
-                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(workerStatusPB);
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(CompletableFuture.completedFuture(workerStatusPB));
 
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 modelName, ipPort, site,
                 RoleType.PREFILL,
-                group, workerStatus, engineHealthReporter, engineGrpcService, 20L, null, null);
+                group, workerStatus, engineHealthReporter, engineGrpcService, 20L, null, null, Runnable::run);
         runner.run();
 
         // Version not advanced → runningTaskList should NOT be populated from response

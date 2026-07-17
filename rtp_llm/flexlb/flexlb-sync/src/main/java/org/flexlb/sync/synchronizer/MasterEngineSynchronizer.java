@@ -6,6 +6,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
@@ -52,9 +53,10 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                     CacheAwareService localKvCacheAwareManager,
                                     @org.springframework.beans.factory.annotation.Autowired(required = false)
                                     FlexlbBatchScheduler batchScheduler,
-                                    EndpointRegistry endpointRegistry) {
+                                    EndpointRegistry endpointRegistry,
+                                    ConfigService configService) {
 
-        super(workerAddressService, engineHealthReporter, engineWorkerStatus, modelMetaConfig);
+        super(workerAddressService, engineHealthReporter, engineWorkerStatus, modelMetaConfig, configService);
 
         this.engineGrpcService = engineGrpcService;
         this.localKvCacheAwareManager = localKvCacheAwareManager;

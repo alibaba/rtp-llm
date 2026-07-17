@@ -24,7 +24,6 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
@@ -83,42 +82,47 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
 
         FilterResult hardFilterResult = applyHardFilters(eligible, seqLen, config, cacheMatchResults);
-        List<PrefillEndpoint> survivors = hardFilterResult.endpoints();
+        List<CandidateSnapshot> survivors = hardFilterResult.candidates();
 
         PrefillEndpoint best = null;
         long bestScore = Long.MAX_VALUE;
         long bestCacheHit = 0;
 
-        // First pass: find minScore
+        // First pass: compute scores and cache results, find minScore
+        int survivorsSize = survivors.size();
+        long[] scores = new long[survivorsSize];
+        long[] cacheHits = new long[survivorsSize];
         long minScore = Long.MAX_VALUE;
-        for (PrefillEndpoint ep : survivors) {
-            long cacheHit = calculateCacheHit(ep, cacheMatchResults, seqLen);
-            long score = computeScore(ep, cacheHit, seqLen);
+        for (int i = 0; i < survivorsSize; i++) {
+            CandidateSnapshot candidate = survivors.get(i);
+            long score = candidate.score();
+            cacheHits[i] = candidate.cacheHit();
+            scores[i] = score;
             if (score < minScore) {
                 minScore = score;
             }
         }
 
-        // Second pass: collect all endpoints within threshold of minScore
-        long tieThreshold = 0;
+        // Second pass: collect tied endpoints using cached scores (no re-computation)
         if (minScore != Long.MAX_VALUE) {
+            long tieThreshold = 0;
             if (config.isScoreTieRandomEnabled()) {
                 tieThreshold = Math.max((long) (minScore * config.getScoreTieThresholdPct()), config.getScoreTieThresholdMs());
             }
             long scoreCutoff = minScore + tieThreshold;
-            List<PrefillEndpoint> tied = new ArrayList<>();
-            for (PrefillEndpoint ep : survivors) {
-                long cacheHit = calculateCacheHit(ep, cacheMatchResults, seqLen);
-                long score = computeScore(ep, cacheHit, seqLen);
-                if (score <= scoreCutoff) {
-                    tied.add(ep);
+            int[] tiedIndices = new int[survivorsSize];
+            int tiedCount = 0;
+            for (int i = 0; i < survivorsSize; i++) {
+                if (scores[i] <= scoreCutoff) {
+                    tiedIndices[tiedCount++] = i;
                 }
             }
 
             // Random selection among threshold-eligible endpoints to avoid deterministic bias
-            best = tied.get(ThreadLocalRandom.current().nextInt(tied.size()));
+            int selectedIdx = tiedIndices[ThreadLocalRandom.current().nextInt(tiedCount)];
+            best = survivors.get(selectedIdx).endpoint();
             bestScore = minScore;
-            bestCacheHit = calculateCacheHit(best, cacheMatchResults, seqLen);
+            bestCacheHit = cacheHits[selectedIdx];
         }
 
         if (best == null) {
@@ -135,7 +139,14 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     }
 
     private record EndpointFilterResult(List<PrefillEndpoint> endpoints, Map<String, Integer> rejections) {}
-    private record FilterResult(List<PrefillEndpoint> endpoints, Map<String, Integer> rejections) {}
+    private record CandidateSnapshot(PrefillEndpoint endpoint, long cacheHit,
+                                     long prefillMs, long endpointWaitMs,
+                                     long pendingCount, long batcherWaitMs) {
+        long score() {
+            return prefillMs + batcherWaitMs + endpointWaitMs;
+        }
+    }
+    private record FilterResult(List<CandidateSnapshot> candidates, Map<String, Integer> rejections) {}
 
     private FilterResult applyHardFilters(List<PrefillEndpoint> eligible, long seqLen,
                                                 FlexlbConfig config, Map<String, Integer> cacheMatchResults) {
@@ -145,8 +156,15 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         double hotspotMultiplier = config.getCostHotspotMultiplier();
         double imbalanceMultiplier = config.getCostImbalanceMultiplier();
 
-        List<PrefillEndpoint> feasible = new ArrayList<>(eligible.size());
+        int eligibleSize = eligible.size();
+        List<CandidateSnapshot> feasible = new ArrayList<>(eligibleSize);
+        long[] feasibleWaitMs = new long[eligibleSize];
+        long[] feasiblePendingCount = new long[eligibleSize];
         Map<String, Integer> rejections = new java.util.HashMap<>();
+        long sumWaitMs = 0;
+        long sumPendingCount = 0;
+
+        // Round 1: SLO filter + cache wait time / pending count for feasible endpoints
         for (PrefillEndpoint ep : eligible) {
             PrefillTimePredictor predictor = ep.getPredictor();
             if (predictor == null) {
@@ -164,26 +182,29 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 continue;
             }
 
-            feasible.add(ep);
+            long pendingCount = ep.realPendingCount();
+            long batcherWaitMs = ep.batcherWaitMs();
+            int idx = feasible.size();
+            feasible.add(new CandidateSnapshot(
+                    ep, cacheHit, singlePrefillMs, endpointWaitMs, pendingCount, batcherWaitMs));
+            feasibleWaitMs[idx] = endpointWaitMs;
+            feasiblePendingCount[idx] = pendingCount;
+            sumWaitMs += endpointWaitMs;
+            sumPendingCount += pendingCount;
         }
 
         if (feasible.isEmpty()) {
             return new FilterResult(feasible, rejections);
         }
 
-        long sumWaitMs = 0;
-        long sumPendingCount = 0;
-        for (PrefillEndpoint ep : feasible) {
-            sumWaitMs += ep.realWaitTimeMs();
-            sumPendingCount += ep.realPendingCount();
-        }
         long avgWaitMs = sumWaitMs / feasible.size();
         long avgPendingCount = sumPendingCount / feasible.size();
 
-        List<PrefillEndpoint> survivors = new ArrayList<>(feasible.size());
-        for (PrefillEndpoint ep : feasible) {
-            long endpointWaitMs = ep.realWaitTimeMs();
-            long pendingCount = ep.realPendingCount();
+        // Round 2: hotspot / imbalance filter using cached values (no re-computation)
+        List<CandidateSnapshot> survivors = new ArrayList<>(feasible.size());
+        for (int i = 0; i < feasible.size(); i++) {
+            long endpointWaitMs = feasibleWaitMs[i];
+            long pendingCount = feasiblePendingCount[i];
 
             if (hotspotMultiplier > 0 && avgPendingCount > 0 && pendingCount > avgPendingCount * hotspotMultiplier) {
                 rejections.merge("HOTSPOT_FILTERED", 1, Integer::sum);
@@ -194,25 +215,24 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 continue;
             }
 
-            survivors.add(ep);
+            survivors.add(feasible.get(i));
         }
 
         if (survivors.isEmpty()) {
-            PrefillEndpoint leastLoaded = feasible.stream()
-                    .min(Comparator.comparingLong(PrefillEndpoint::realWaitTimeMs))
-                    .orElse(null);
-            if (leastLoaded != null) {
-                survivors.add(leastLoaded);
+            int minIdx = -1;
+            long minWait = Long.MAX_VALUE;
+            for (int i = 0; i < feasible.size(); i++) {
+                if (feasibleWaitMs[i] < minWait) {
+                    minWait = feasibleWaitMs[i];
+                    minIdx = i;
+                }
+            }
+            if (minIdx >= 0) {
+                survivors.add(feasible.get(minIdx));
             }
         }
 
         return new FilterResult(survivors, rejections);
-    }
-
-    private long computeScore(PrefillEndpoint ep, long cacheHit, long seqLen) {
-        PrefillTimePredictor predictor = ep.getPredictor();
-        long prefillMs = predictor.estimateMs(seqLen, cacheHit);
-        return prefillMs + ep.batcherWaitMs() + ep.realWaitTimeMs();
     }
 
     private EndpointFilterResult getAvailableEndpoints(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator) {

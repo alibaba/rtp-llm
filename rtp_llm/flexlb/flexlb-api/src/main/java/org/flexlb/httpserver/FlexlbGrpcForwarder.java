@@ -16,6 +16,7 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
@@ -26,16 +27,19 @@ public class FlexlbGrpcForwarder {
     private final ConfigService configService;
     private final EngineHealthReporter engineHealthReporter;
     private final EventLoopGroup eventLoopGroup;
+    private final Executor executor;
     private final ConcurrentHashMap<String, ManagedChannel> channels = new ConcurrentHashMap<>();
 
     public FlexlbGrpcForwarder(LBStatusConsistencyService lbStatusConsistencyService,
                                ConfigService configService,
                                EngineHealthReporter engineHealthReporter,
-                               @Qualifier("managedChannelEventLoopGroup") EventLoopGroup eventLoopGroup) {
+                               @Qualifier("managedChannelEventLoopGroup") EventLoopGroup eventLoopGroup,
+                               @Qualifier("forwarderChannelExecutor") Executor executor) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.configService = configService;
         this.engineHealthReporter = engineHealthReporter;
         this.eventLoopGroup = eventLoopGroup;
+        this.executor = executor;
     }
 
     public FlexlbScheduleProtocol.FlexlbScheduleResponsePB forwardToMaster(
@@ -124,6 +128,7 @@ public class FlexlbGrpcForwarder {
         return NettyChannelBuilder.forAddress(ip, port)
                 .channelType(NioSocketChannel.class)
                 .eventLoopGroup(eventLoopGroup)
+                .executor(executor)
                 .usePlaintext()
                 .keepAliveTime(30, TimeUnit.SECONDS)
                 .keepAliveTimeout(10, TimeUnit.SECONDS)

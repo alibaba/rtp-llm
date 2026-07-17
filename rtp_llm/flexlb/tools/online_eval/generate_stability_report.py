@@ -313,6 +313,14 @@ def _get(summary: Optional[Mapping], *keys: str) -> Optional[object]:
     return val
 
 
+def _get_max_concurrency(runs: list[RunData]) -> str:
+    """Get max_concurrency from first available summary.json, or env var, or default."""
+    for run in runs:
+        if run.summary and isinstance(run.summary.get("max_concurrency"), (int, float)):
+            return str(run.summary["max_concurrency"])
+    return os.environ.get("MAX_CONCURRENCY", "16384")
+
+
 def generate_report(
     runs: list[RunData], sla_ms: float, mock_baseline_ms: float = 0.0
 ) -> str:
@@ -328,7 +336,9 @@ def generate_report(
     # --- Section 1: Test config ---
     L.append("## 1. 测试配置")
     L.append("- N_PREFILL=2, N_DECODE=4, SCHEDULE_MODE=batch")
-    L.append(f"- MAX_CONCURRENCY=1024, SLA_TTFT_MS={int(sla_ms)}ms")
+    L.append(
+        f"- MAX_CONCURRENCY={_get_max_concurrency(runs)}, SLA_TTFT_MS={int(sla_ms)}ms"
+    )
     L.append(f"- 递增压力: REPLAY_SPEED = {' → '.join(labels)}")
     L.append("")
 

@@ -10,6 +10,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.util.Comparator;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.PriorityBlockingQueue;
 
@@ -151,6 +152,30 @@ class FixedWindowBatcherAlgorithmTest {
         Mockito.verify(handler).onBatchReady(captor.capture(), Mockito.any());
         assertEquals(1, captor.getValue().size(), "Only one item should fit within token cap");
         assertEquals(1L, captor.getValue().get(0).requestId());
+    }
+
+    @Test
+    void contextQueueDepthTracksMutationsWithoutQueueSizeReads() {
+        BatchItem first = enqueuedItem(1L, 1L);
+        BatchItem second = enqueuedItem(2L, 2L);
+        PriorityBlockingQueue<BatchItem> queue = queueWith(first, second);
+        BatcherContext ctx = new BatcherContext(
+                "test", null, new FlexlbConfig(), null, queue,
+                mock(BatchSchedulerReporter.class));
+
+        assertEquals(2, ctx.size());
+        assertEquals(first, ctx.poll());
+        assertEquals(1, ctx.size());
+        assertTrue(ctx.remove(second));
+        assertEquals(0, ctx.size());
+        assertTrue(ctx.isEmpty());
+
+        queue.add(first);
+        BatcherContext drainCtx = new BatcherContext(
+                "test", null, new FlexlbConfig(), null, queue,
+                mock(BatchSchedulerReporter.class));
+        drainCtx.drainTo(new ArrayList<>());
+        assertEquals(0, drainCtx.size());
     }
 
     // ---- helpers ----

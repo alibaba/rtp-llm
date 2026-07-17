@@ -10,7 +10,9 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -77,18 +79,18 @@ class FlexlbBatchSchedulerTest {
             BalanceContext ctx = inv.getArgument(0);
             return successRoute(ctx.getRequestId());
         });
-        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenAnswer(inv -> {
                     sentEndpoints.add(inv.getArgument(0) + ":" + inv.getArgument(1));
                     EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
                     sentBatches.add(request);
-                    return ackFor(request);
+                    return CompletableFuture.completedFuture(ackFor(request));
                 });
         when(grpcClient.cancel(anyString(), anyInt(), anyLong(), anyLong()))
                 .thenReturn(EngineRpcService.EmptyPB.getDefaultInstance());
 
         EndpointRegistry endpointRegistry = new EndpointRegistry(configService, null, reporter);
-        BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService);
+        BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
         scheduler = new FlexlbBatchScheduler(configService, router, grpcClient, engineWorkerStatus,
                 endpointRegistry, dispatcher, reporter, null);
 
@@ -170,7 +172,7 @@ class FlexlbBatchSchedulerTest {
     @Test
     void batch_enqueue_error_list_fails_only_rejected_request() throws Exception {
         // Use request IDs to match, not input positions
-        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenAnswer(inv -> {
                     sentEndpoints.add(inv.getArgument(0) + ":" + inv.getArgument(1));
                     EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
@@ -194,7 +196,7 @@ class FlexlbBatchSchedulerTest {
                                     .build());
                         }
                     }
-                    return response.build();
+                    return CompletableFuture.completedFuture(response.build());
                 });
 
         CompletableFuture<Response> first = scheduler.submit(context(81));
@@ -207,7 +209,7 @@ class FlexlbBatchSchedulerTest {
     @Test
     void batch_enqueue_missing_success_fails_missing_request() throws Exception {
         // Only return success for request 83, missing ack for 84
-        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenAnswer(inv -> {
                     sentEndpoints.add(inv.getArgument(0) + ":" + inv.getArgument(1));
                     EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
@@ -222,7 +224,7 @@ class FlexlbBatchSchedulerTest {
                                     .setRequestId(83).build());
                         }
                     }
-                    return response.build();
+                    return CompletableFuture.completedFuture(response.build());
                 });
 
         CompletableFuture<Response> first = scheduler.submit(context(83));
@@ -232,6 +234,43 @@ class FlexlbBatchSchedulerTest {
         Response secondResp = second.get(2, TimeUnit.SECONDS);
         assertFalse(secondResp.isSuccess());
         assertTrue(secondResp.getErrorMessage().contains("EnqueueBatch missing ack for request 84"));
+    }
+
+    @Test
+    void worker_completion_before_enqueue_ack_still_completes_schedule_future() throws Exception {
+        config.setFlexlbBatchSizeMax(1);
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> ackFuture = new CompletableFuture<>();
+        CountDownLatch enqueueStarted = new CountDownLatch(1);
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
+                any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                .thenAnswer(inv -> {
+                    EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
+                    sentBatches.add(request);
+                    enqueueStarted.countDown();
+                    return ackFuture;
+                });
+
+        CompletableFuture<Response> scheduleFuture = scheduler.submit(context(85));
+        assertTrue(enqueueStarted.await(2, TimeUnit.SECONDS));
+        FlexlbBatchScheduler.InflightEntry entry = scheduler.inflight.get(85L);
+        long batchId = entry.lifecycle.snapshot().batchId();
+
+        TaskInfo finished = new TaskInfo();
+        finished.setRequestId(85L);
+        finished.setBatchId(batchId);
+        WorkerStatusResponse status = new WorkerStatusResponse();
+        status.setRole(RoleType.DECODE);
+        status.setFinishedTaskInfo(Map.of("85", finished));
+        scheduler.onWorkerStatusUpdate(new WorkerStatus(), status);
+
+        assertFalse(scheduleFuture.isDone());
+        ackFuture.complete(ackFor(sentBatches.getFirst()));
+
+        Response response = scheduleFuture.get(2, TimeUnit.SECONDS);
+        assertTrue(response.isSuccess());
+        assertTrue(response.isEnqueuedByMaster());
+        assertEquals(RequestLifecycleState.COMPLETED,
+                scheduler.getRequestState(85L, batchId).state());
     }
 
     @Test
@@ -265,7 +304,7 @@ class FlexlbBatchSchedulerTest {
         Response response = future.get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), response.getCode());
-        verify(grpcClient, never()).batchEnqueue(anyString(), anyInt(), any(), anyLong());
+        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
     }
 
     @Test
@@ -275,13 +314,13 @@ class FlexlbBatchSchedulerTest {
         CountDownLatch releaseAck = new CountDownLatch(1);
         CountDownLatch cancelSeen = new CountDownLatch(1);
 
-        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenAnswer(inv -> {
                     EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
                     sentBatches.add(request);
                     batchStarted.countDown();
                     assertTrue(releaseAck.await(2, TimeUnit.SECONDS));
-                    return ackFor(request);
+                    return CompletableFuture.completedFuture(ackFor(request));
                 });
         when(grpcClient.cancel(anyString(), anyInt(), anyLong(), anyLong()))
                 .thenAnswer(inv -> {
@@ -317,7 +356,7 @@ class FlexlbBatchSchedulerTest {
 
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode());
-        verify(grpcClient, never()).batchEnqueue(anyString(), anyInt(), any(), anyLong());
+        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
     }
 
     @Test
@@ -327,12 +366,12 @@ class FlexlbBatchSchedulerTest {
 
         CountDownLatch batchBlocked = new CountDownLatch(1);
         CountDownLatch releaseBlock = new CountDownLatch(1);
-        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenAnswer(inv -> {
                     batchBlocked.countDown();
                     assertTrue(releaseBlock.await(5, TimeUnit.SECONDS));
                     EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
-                    return ackFor(request);
+                    return CompletableFuture.completedFuture(ackFor(request));
                 });
 
         scheduler.submit(context(41));
@@ -484,7 +523,7 @@ class FlexlbBatchSchedulerTest {
 
         Response response = future.get(2, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
-        verify(grpcClient, never()).batchEnqueue(anyString(), anyInt(), any(), anyLong());
+        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
     }
 
     // ==================== cancel / onRequestsFinished → Decode endpoint release ====================

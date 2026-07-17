@@ -11,10 +11,13 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 
+import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
 import static org.flexlb.constant.MetricConstant.BATCH_ACTUAL_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICTED_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICT_GAP_MS;
 import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
+import static org.flexlb.constant.MetricConstant.ACK_TO_RESPONSE_TIME_MS;
+import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
@@ -53,7 +56,7 @@ public class BatchSchedulerReporter {
     public void init() {
         // Queue — same type as RoutingQueueReporter
         monitor.register(ROUTING_QUEUE_LENGTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(ROUTING_QUEUE_WAIT_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(ROUTING_QUEUE_WAIT_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
         // Dispatch reason — independent metric for batch path
         monitor.register(ENGINE_BALANCING_MASTER_DISPATCH_REASON, FlexMetricType.QPS, FlexPriorityType.PRECISE);
@@ -71,19 +74,28 @@ public class BatchSchedulerReporter {
         // Note: the former per-engine app.engine.health.check.local.inflight.size has been removed.
         monitor.register(SCHEDULER_INFLIGHT_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
+        // Batcher queue size — per-engine pending batch request count (FlexLB batcher queue depth)
+        monitor.register(BATCHER_QUEUE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+
         // Decode total load and inflight KV reserved — per decode worker (FlexLB scheduler view)
         monitor.register(DECODE_TOTAL_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(DECODE_INFLIGHT_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
-        // Prediction accuracy — predicted vs actual engine execution time
-        monitor.register(BATCH_PREDICTED_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(BATCH_ACTUAL_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(BATCH_PREDICT_GAP_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        // Prediction accuracy — predicted vs actual engine execution time (timer for distribution)
+        monitor.register(BATCH_PREDICTED_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        monitor.register(BATCH_ACTUAL_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        monitor.register(BATCH_PREDICT_GAP_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
-        // Dispatch-to-ACK time — latency from gRPC dispatch to engine EnqueueBatch acknowledgment
-        monitor.register(DISPATCH_ACK_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        // Dispatch-to-ACK time — latency from gRPC dispatch to engine EnqueueBatch acknowledgment (timer for distribution)
+        monitor.register(DISPATCH_ACK_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (14 metrics)");
+        // Route+submit time — from schedule() entry to batcher offer completion (timer for distribution)
+        monitor.register(ROUTE_SUBMIT_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+
+        // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
+        monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+
+        log.info("BatchSchedulerReporter initialized (17 metrics)");
     }
 
     // ==================== Queue metrics ====================
@@ -96,6 +108,18 @@ public class BatchSchedulerReporter {
                 "type", "batchQueue",
                 "role", role);
         monitor.report(ROUTING_QUEUE_LENGTH, tags, depth);
+    }
+
+    /**
+     * Report per-worker batcher queue size via {@code app.flexlb.batcher.queue.size}.
+     * <p>Independent metric name to avoid tag schema conflict with {@code routing.queue.length}
+     * (which uses type=batchQueue tag). Uses the same role + engineIp tag pattern as other
+     * per-worker metrics.
+     */
+    public void reportBatcherQueueSize(String role, String engineIp, String engineIpPort, int depth) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+                "role", role);
+        monitor.report(BATCHER_QUEUE_SIZE, tags, depth);
     }
 
     /**
@@ -269,5 +293,37 @@ public class BatchSchedulerReporter {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
                 "role", role);
         monitor.report(DISPATCH_ACK_TIME_MS, tags, ackTimeMs);
+    }
+
+    // ==================== Route+submit latency metrics ====================
+
+    /**
+     * Report route+submit latency (from schedule() entry to batcher offer completion)
+     * via {@code app.flexlb.route.submit.time.ms}.
+     *
+     * @param role      prefill / decode
+     * @param engineIp  the prefill endpoint IP
+     * @param submitMs  milliseconds from schedule entry to batcher offer completion
+     */
+    public void reportRouteSubmitTimeMs(String role, String engineIp, String engineIpPort, long submitMs) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+                "role", role);
+        monitor.report(ROUTE_SUBMIT_TIME_MS, tags, submitMs);
+    }
+
+    // ==================== ACK-to-response latency metrics ====================
+
+    /**
+     * Report ACK-to-response latency (from engine EnqueueBatch acknowledgment to schedule
+     * response sent to the client) via {@code app.flexlb.ack.to.response.time.ms}.
+     *
+     * @param role             prefill / decode
+     * @param engineIp         the prefill endpoint IP
+     * @param ackToResponseMs  milliseconds from engine ACK to response sent
+     */
+    public void reportAckToResponseTimeMs(String role, String engineIp, String engineIpPort, long ackToResponseMs) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+                "role", role);
+        monitor.report(ACK_TO_RESPONSE_TIME_MS, tags, ackToResponseMs);
     }
 }

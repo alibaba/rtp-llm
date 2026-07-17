@@ -17,6 +17,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.LongAdder;
 
 import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
@@ -41,6 +44,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private final long requestTimeoutMs;
     private final LongAdder syncCount;
     private final Long syncEngineStatusInterval;
+    private final Executor callbackExecutor;
 
     public GrpcCacheStatusCheckRunner(String modelName, String ipPort, String site, RoleType roleType,
                                       WorkerStatus workerStatus,
@@ -49,7 +53,8 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                                       CacheAwareService cacheAwareService,
                                       long requestTimeoutMs,
                                       LongAdder syncCount,
-                                      Long syncEngineStatusInterval) {
+                                      Long syncEngineStatusInterval,
+                                      Executor callbackExecutor) {
 
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
@@ -68,10 +73,12 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         this.requestTimeoutMs = requestTimeoutMs;
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
+        this.callbackExecutor = callbackExecutor;
     }
 
     @Override
     public void run() {
+        boolean asyncInitiated = false;
         try {
             logger.debug("GrpcCacheStatusCheckRunner run for {}", ipPort);
             long prefillCacheStatusCheckInterval = DynamicCacheIntervalService.getCurrentIntervalMs();
@@ -82,17 +89,47 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             if ((RoleType.PREFILL.equals(roleType) || RoleType.PDFUSION.equals(roleType))
                         && syncCount.longValue() % roundInterval != 0) {
                 logger.debug("Skip prefill cache status check for {} because not in {}ms interval", ipPort, prefillCacheStatusCheckInterval);
-                return;
+                return; // finally will reset the flag
             }
 
             long startTime = System.nanoTime() / 1000;
             long currentCacheVersion = getCurrentCacheVersion();
 
-            // Launch gRPC cache status check
-            CacheStatus cacheStatus = launchGrpcCacheStatusCheck(ip, grpcPort, currentCacheVersion);
-            handleCacheStatusResponse(cacheStatus, startTime);
+            engineGrpcService.getCacheStatusAsync(ip, grpcPort, workerStatus, currentCacheVersion,
+                            requestTimeoutMs, roleType)
+                    .thenApply(cacheStatusPB -> {
+                        logger.info("gRPC Cache Status Response - handled for {}, role:{}, cache_key_size:{}, cache_version:{}, "
+                                        + "available_kv_cache:{}, total_kv_cache:{}, block_size:{}",
+                                ipPort, roleType.name(), cacheStatusPB.getCacheKeysMap().size(), cacheStatusPB.getVersion(),
+                                cacheStatusPB.getAvailableKvCache(), cacheStatusPB.getTotalKvCache(), cacheStatusPB.getBlockSize());
+                        return EngineStatusConverter.convertToCacheStatus(cacheStatusPB);
+                    })
+                    .whenCompleteAsync((cacheStatus, ex) -> {
+                        try {
+                            if (ex != null) {
+                                Throwable throwable = ex instanceof CompletionException ? ex.getCause() : ex;
+                                handleException(throwable);
+                                // Return a default CacheStatus with error information
+                                CacheStatus errorStatus = CacheStatus.builder()
+                                        .version(-1)
+                                        .availableKvCache(0)
+                                        .totalKvCache(0)
+                                        .blockSize(0)
+                                        .message("Cache Status gRPC call failed: " + throwable.getMessage())
+                                        .build();
+                                handleCacheStatusResponse(errorStatus, startTime);
+                            } else {
+                                handleCacheStatusResponse(cacheStatus, startTime);
+                            }
+                        } finally {
+                            workerStatus.getCacheCheckInProgress().set(false);
+                        }
+                    }, callbackExecutor);
+            asyncInitiated = true;
         } finally {
-            workerStatus.getCacheCheckInProgress().set(false);
+            if (!asyncInitiated) {
+                workerStatus.getCacheCheckInProgress().set(false);
+            }
         }
     }
 

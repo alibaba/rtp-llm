@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import signal
 import struct
 import time
@@ -28,6 +29,21 @@ logger = logging.getLogger("mock_engine")
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _avg(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return sum(values) / len(values)
+
+
+def _p99(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    sorted_vals = sorted(values)
+    n = len(sorted_vals)
+    idx = max(0, min(n - 1, math.ceil(0.99 * n) - 1))
+    return sorted_vals[idx]
 
 
 class LruBlockCache:
@@ -89,6 +105,10 @@ class TaskRuntime:
     dp_rank: int = 0
 
 
+# ATOMICITY INVARIANT: This class uses no locks. All critical sections contain only
+# synchronous code (no await). In asyncio's single-threaded model, code between await
+# points is atomic. If you add an await inside any method that modifies state, you MUST
+# restore asyncio.Lock protection.
 class MockEngineState:
     def __init__(
         self,
@@ -119,7 +139,6 @@ class MockEngineState:
         self.cluster = cluster
         self.inject_config: dict = {}
 
-        self._lock = asyncio.Lock()
         self._running: Dict[int, TaskRuntime] = {}
         self._finished: List[Tuple[int, object]] = []
         self._response_queues: Dict[int, asyncio.Queue] = {}
@@ -142,6 +161,8 @@ class MockEngineState:
         self._cancelled_count = 0
         self._request_lifecycle: Dict[int, dict] = {}
         self._injected_queue_depth = 0
+        self._recent_prefill_times: list[float] = []
+        self._recent_decode_times: list[float] = []
 
     def set_injection(self, config: dict) -> None:
         """Set error-injection / timeout-simulation config.
@@ -159,7 +180,7 @@ class MockEngineState:
 
     @property
     def ip_port(self) -> str:
-        return f"{self.host}:{self.grpc_port}"
+        return f"{self.host}:{self.http_port}"
 
     @property
     def http_ip_port(self) -> str:
@@ -249,91 +270,92 @@ class MockEngineState:
             int(request_id),
             was_running,
         )
-        async with self._lock:
-            self._cancelled.add(int(request_id))
-            self._running.pop(int(request_id), None)
-            self._status_version += 1
+        self._cancelled.add(int(request_id))
+        self._running.pop(int(request_id), None)
+        self._status_version += 1
         queue = self._response_queues.get(int(request_id))
         if queue is not None:
             await queue.put(SENTINEL)
 
     async def worker_status(self, request) -> object:
         latest = int(getattr(request, "latest_finished_version", -1))
-        async with self._lock:
-            status = self.pb2.WorkerStatusPB(
-                role=self.role.upper(),
-                role_type=self._role_pb(),
-                available_concurrency=max(
-                    0, self._max_prefill_concurrency - len(self._running)
-                ),
-                waiting_query_len=max(
-                    self._injected_queue_depth if self._injected_queue_depth > 0 else 0,
-                    self._prefill_waiting,
-                ),
-                running_query_len=len(self._running),
-                step_latency_ms=0.0,
-                iterate_count=self._completed,
-                dp_size=1,
-                tp_size=1,
-                status_version=self._status_version,
-                alive=True,
-                precision="mock",
-                latest_finished_version=self._finished_version,
-                dp_rank=0,
-                available_kv_cache=max(
-                    0, self.total_kv_tokens - self._active_kv_tokens
-                ),
-                total_kv_cache=self.total_kv_tokens,
-            )
-            for task in self._running.values():
-                status.running_task_info.append(self._task_pb(task))
-            for version, task_pb in self._finished:
-                if version > latest:
-                    status.finished_task_list.append(task_pb)
-            return status
+        status = self.pb2.WorkerStatusPB(
+            role=self.role.upper(),
+            role_type=self._role_pb(),
+            available_concurrency=max(
+                0, self._max_prefill_concurrency - len(self._running)
+            ),
+            waiting_query_len=max(
+                self._injected_queue_depth if self._injected_queue_depth > 0 else 0,
+                self._prefill_waiting,
+            ),
+            running_query_len=len(self._running),
+            step_latency_ms=0.0,
+            iterate_count=self._completed,
+            dp_size=1,
+            tp_size=1,
+            status_version=self._status_version,
+            alive=True,
+            precision="mock",
+            latest_finished_version=self._finished_version,
+            dp_rank=0,
+            available_kv_cache=max(0, self.total_kv_tokens - self._active_kv_tokens),
+            total_kv_cache=self.total_kv_tokens,
+        )
+        for task in self._running.values():
+            status.running_task_info.append(self._task_pb(task))
+        filtered_count = 0
+        for version, task_pb in self._finished:
+            if version > latest:
+                status.finished_task_list.append(task_pb)
+                filtered_count += 1
+        return status
 
     async def cache_status(self, request) -> object:
         need_keys = bool(getattr(request, "need_cache_keys", True))
-        async with self._lock:
-            response = self.pb2.CacheStatusPB(
-                available_kv_cache=max(
-                    0, self.total_kv_tokens - self._active_kv_tokens
-                ),
-                total_kv_cache=self.total_kv_tokens,
-                block_size=self.block_size,
-                version=self._cache_version,
-            )
-            if need_keys:
-                for key in self.cache.keys:
-                    response.cache_keys[int(key)] = True
-            return response
+        response = self.pb2.CacheStatusPB(
+            available_kv_cache=max(0, self.total_kv_tokens - self._active_kv_tokens),
+            total_kv_cache=self.total_kv_tokens,
+            block_size=self.block_size,
+            version=self._cache_version,
+        )
+        if need_keys:
+            for key in self.cache.keys:
+                response.cache_keys[int(key)] = True
+        return response
 
     async def snapshot(self) -> dict:
-        async with self._lock:
-            return {
-                "name": self.name,
-                "role": self.role,
-                "grpc_addr": self.ip_port,
-                "http_addr": self.http_ip_port,
-                "running": len(self._running),
-                "accepted": self._accepted,
-                "completed": self._completed,
-                "cache_keys": len(self.cache.keys),
-                "cache_evictions": self.cache.evictions,
-                "active_kv_tokens": self._active_kv_tokens,
-                "available_kv_tokens": max(
-                    0, self.total_kv_tokens - self._active_kv_tokens
-                ),
-                "status_version": self._status_version,
-                "cache_version": self._cache_version,
-                "inject_config": dict(self.inject_config),
-                "rpc_counts": dict(self._rpc_counts),
-                "cancelled_count": self._cancelled_count,
-                "cancelled_rids": sorted(self._cancelled),
-                "request_lifecycle": {
-                    str(k): v for k, v in self._request_lifecycle.items()
-                },
-            }
+        return {
+            "name": self.name,
+            "role": self.role,
+            "grpc_addr": f"{self.host}:{self.grpc_port}",
+            "http_addr": self.http_ip_port,
+            "running": len(self._running),
+            "waiting": max(self._injected_queue_depth, self._prefill_waiting),
+            "accepted": self._accepted,
+            "completed": self._completed,
+            "cache_keys": len(self.cache.keys),
+            "cache_evictions": self.cache.evictions,
+            "active_kv_tokens": self._active_kv_tokens,
+            "available_kv_tokens": max(
+                0, self.total_kv_tokens - self._active_kv_tokens
+            ),
+            "status_version": self._status_version,
+            "cache_version": self._cache_version,
+            "inject_config": dict(self.inject_config),
+            "rpc_counts": dict(self._rpc_counts),
+            "cancelled_count": self._cancelled_count,
+            "cancelled_rids": sorted(self._cancelled),
+            "request_lifecycle": {
+                str(k): v for k, v in self._request_lifecycle.items()
+            },
+            "prefill_ms_avg": _avg(self._recent_prefill_times),
+            "prefill_ms_p99": _p99(self._recent_prefill_times),
+            "prefill_ms_count": len(self._recent_prefill_times),
+            "decode_ms_avg": _avg(self._recent_decode_times),
+            "decode_ms_p99": _p99(self._recent_decode_times),
+            "decode_ms_count": len(self._recent_decode_times),
+        }
 
     def _prune_lifecycle(self) -> None:
         """Keep _request_lifecycle bounded; evict oldest 20% when over 10000 entries."""
@@ -353,34 +375,33 @@ class MockEngineState:
             return
         shapes = [self._shape_from_input(input_pb) for input_pb in inputs]
         start = now_ms()
-        async with self._lock:
-            self._accepted += len(inputs)
-            for shape in shapes:
-                task = TaskRuntime(
-                    request_id=shape.request_id,
-                    batch_id=batch_id,
-                    input_len=shape.input_len,
-                    output_len=shape.output_len,
-                    block_keys=shape.block_keys,
-                    prefix_len=shape.hit_tokens,
-                    phase=self.pb2.TASK_PHASE_RUNNING,
-                    start_ms=start,
-                    dp_rank=0,
-                )
-                self._running[shape.request_id] = task
-            arrived_ms = int(time.time() * 1000)
-            for shape in shapes:
-                self._request_lifecycle[shape.request_id] = {
-                    "rid": shape.request_id,
-                    "method": "enqueue_batch" if batch_id >= 0 else "generate_stream",
-                    "batch_id": batch_id,
-                    "arrived_ms": arrived_ms,
-                    "running_ms": arrived_ms,
-                    "end_ms": 0,
-                    "end_state": "running",
-                }
-            self._prune_lifecycle()
-            self._status_version += 1
+        self._accepted += len(inputs)
+        for shape in shapes:
+            task = TaskRuntime(
+                request_id=shape.request_id,
+                batch_id=batch_id,
+                input_len=shape.input_len,
+                output_len=shape.output_len,
+                block_keys=shape.block_keys,
+                prefix_len=shape.hit_tokens,
+                phase=self.pb2.TASK_PHASE_RUNNING,
+                start_ms=start,
+                dp_rank=0,
+            )
+            self._running[shape.request_id] = task
+        arrived_ms = int(time.time() * 1000)
+        for shape in shapes:
+            self._request_lifecycle[shape.request_id] = {
+                "rid": shape.request_id,
+                "method": "enqueue_batch" if batch_id >= 0 else "generate_stream",
+                "batch_id": batch_id,
+                "arrived_ms": arrived_ms,
+                "running_ms": arrived_ms,
+                "end_ms": 0,
+                "end_state": "running",
+            }
+        self._prune_lifecycle()
+        self._status_version += 1
 
         prefill_ms = self.performance.prefill_ms(shapes)
         self._prefill_waiting += 1
@@ -389,24 +410,21 @@ class MockEngineState:
             await asyncio.sleep(self.performance.sleep_seconds(prefill_ms))
         end = now_ms()
 
-        async with self._lock:
-            for shape in shapes:
-                task = self._running.pop(shape.request_id, None)
-                if task is None:
-                    continue
-                task.execution_time_ms = max(1, end - task.start_ms)
-                self._finish_task(task)
-                if self.cache.admit(shape.block_keys):
-                    self._cache_version += 1
-            end_ms_lc = int(time.time() * 1000)
-            for rid in [s.request_id for s in shapes]:
-                lc = self._request_lifecycle.get(rid)
-                if lc:
-                    lc["end_ms"] = end_ms_lc
-                    lc["end_state"] = (
-                        "cancelled" if rid in self._cancelled else "completed"
-                    )
-            self._status_version += 1
+        for shape in shapes:
+            task = self._running.pop(shape.request_id, None)
+            if task is None:
+                continue
+            task.execution_time_ms = max(1, end - task.start_ms)
+            self._finish_task(task)
+            if self.cache.admit(shape.block_keys):
+                self._cache_version += 1
+        end_ms_lc = int(time.time() * 1000)
+        for rid in [s.request_id for s in shapes]:
+            lc = self._request_lifecycle.get(rid)
+            if lc:
+                lc["end_ms"] = end_ms_lc
+                lc["end_state"] = "cancelled" if rid in self._cancelled else "completed"
+        self._status_version += 1
 
         if self.inject_config.get("no_respond"):
             return
@@ -418,47 +436,65 @@ class MockEngineState:
                 await queue.put(SENTINEL)
                 continue
             decode_state = self.cluster.resolve_decode(input_pb)
-            if decode_state is None or decode_state is self:
-                decode_tasks.append(
-                    asyncio.create_task(self._emit_without_decode(shape, queue))
+            if decode_state is not None and decode_state is not self:
+                logger.debug(
+                    f"[DIAG] _run_prefill_batch: rid={shape.request_id} "
+                    f"decode_target={decode_state.name}"
                 )
-            else:
                 decode_tasks.append(
                     asyncio.create_task(
                         decode_state._run_decode(input_pb, batch_id, queue)
                     )
                 )
+            else:
+                remote_addr = self._get_remote_decode_addr(input_pb)
+                if remote_addr is not None:
+                    logger.debug(
+                        f"[DIAG] _run_prefill_batch: rid={shape.request_id} "
+                        f"decode_target=remote:{remote_addr}"
+                    )
+                    decode_tasks.append(
+                        asyncio.create_task(self._run_remote_decode(input_pb, queue))
+                    )
+                else:
+                    target_desc = "None" if decode_state is None else "self"
+                    logger.debug(
+                        f"[DIAG] _run_prefill_batch: rid={shape.request_id} "
+                        f"decode_target={target_desc} (emit_without_decode, not tracked)"
+                    )
+                    decode_tasks.append(
+                        asyncio.create_task(self._emit_without_decode(shape, queue))
+                    )
         if batch_id < 0 and decode_tasks:
             await asyncio.gather(*decode_tasks, return_exceptions=True)
 
     async def _run_decode(self, input_pb, batch_id: int, queue: asyncio.Queue) -> None:
         shape = self._shape_from_input(input_pb)
         start = now_ms()
-        async with self._lock:
-            self._accepted += 1
-            active_batch = len(self._running) + 1
-            self._active_kv_tokens += shape.input_len
-            self._running[shape.request_id] = TaskRuntime(
-                request_id=shape.request_id,
-                batch_id=batch_id,
-                input_len=shape.input_len,
-                output_len=shape.output_len,
-                block_keys=shape.block_keys,
-                phase=self.pb2.TASK_PHASE_RUNNING,
-                start_ms=start,
-            )
-            arrived_ms = int(time.time() * 1000)
-            self._request_lifecycle[shape.request_id] = {
-                "rid": shape.request_id,
-                "method": "enqueue_batch" if batch_id >= 0 else "generate_stream",
-                "batch_id": batch_id,
-                "arrived_ms": arrived_ms,
-                "running_ms": arrived_ms,
-                "end_ms": 0,
-                "end_state": "running",
-            }
-            self._prune_lifecycle()
-            self._status_version += 1
+        self._accepted += 1
+        active_batch = len(self._running) + 1
+        self._active_kv_tokens += shape.input_len
+        self._running[shape.request_id] = TaskRuntime(
+            request_id=shape.request_id,
+            batch_id=batch_id,
+            input_len=shape.input_len,
+            output_len=shape.output_len,
+            block_keys=shape.block_keys,
+            phase=self.pb2.TASK_PHASE_RUNNING,
+            start_ms=start,
+        )
+        arrived_ms = int(time.time() * 1000)
+        self._request_lifecycle[shape.request_id] = {
+            "rid": shape.request_id,
+            "method": "enqueue_batch" if batch_id >= 0 else "generate_stream",
+            "batch_id": batch_id,
+            "arrived_ms": arrived_ms,
+            "running_ms": arrived_ms,
+            "end_ms": 0,
+            "end_state": "running",
+        }
+        self._prune_lifecycle()
+        self._status_version += 1
 
         first_step_ms = self.performance.first_decode_step_ms(active_batch)
         await asyncio.sleep(self.performance.sleep_seconds(first_step_ms))
@@ -477,22 +513,21 @@ class MockEngineState:
         await asyncio.sleep(self.performance.sleep_seconds(remaining_ms))
         end = now_ms()
 
-        async with self._lock:
-            task = self._running.pop(shape.request_id, None)
-            self._active_kv_tokens = max(0, self._active_kv_tokens - shape.input_len)
-            if task is not None:
-                task.execution_time_ms = max(1, end - task.start_ms)
-                self._finish_task(task)
-            if self.cache.admit(shape.block_keys):
-                self._cache_version += 1
-            end_ms_lc = int(time.time() * 1000)
-            lc = self._request_lifecycle.get(shape.request_id)
-            if lc:
-                lc["end_ms"] = end_ms_lc
-                lc["end_state"] = (
-                    "cancelled" if shape.request_id in self._cancelled else "completed"
-                )
-            self._status_version += 1
+        task = self._running.pop(shape.request_id, None)
+        self._active_kv_tokens = max(0, self._active_kv_tokens - shape.input_len)
+        if task is not None:
+            task.execution_time_ms = max(1, end - task.start_ms)
+            self._finish_task(task)
+        if self.cache.admit(shape.block_keys):
+            self._cache_version += 1
+        end_ms_lc = int(time.time() * 1000)
+        lc = self._request_lifecycle.get(shape.request_id)
+        if lc:
+            lc["end_ms"] = end_ms_lc
+            lc["end_state"] = (
+                "cancelled" if shape.request_id in self._cancelled else "completed"
+            )
+        self._status_version += 1
 
         if self.inject_config.get("no_respond"):
             return
@@ -527,6 +562,72 @@ class MockEngineState:
             )
         await queue.put(SENTINEL)
 
+    def _get_remote_decode_addr(self, input_pb) -> Optional[str]:
+        """Return the decode engine gRPC address from role_addrs, or None."""
+        for role_addr in input_pb.generate_config.role_addrs:
+            if role_addr.role_type == self.pb2.ROLE_TYPE_DECODE:
+                return f"{role_addr.ip}:{role_addr.grpc_port}"
+        return None
+
+    async def _run_remote_decode(self, input_pb, queue: asyncio.Queue) -> None:
+        """Forward a decode request to a remote engine via gRPC.
+
+        Used when ``resolve_decode`` cannot find the decode engine locally
+        (multi-shard mode).  The remote engine runs its own ``_run_decode``
+        and streams responses back, which we relay into the local *queue*.
+        """
+        request_id = int(input_pb.request_id)
+        decode_addr = self._get_remote_decode_addr(input_pb)
+        if decode_addr is None:
+            logger.warning(
+                f"[DIAG] _run_remote_decode: rid={request_id} "
+                f"no decode role_addr found, falling back to emit_without_decode"
+            )
+            shape = self._shape_from_input(input_pb)
+            await self._emit_without_decode(shape, queue)
+            return
+        logger.debug(
+            f"[DIAG] _run_remote_decode: rid={request_id} "
+            f"forwarding to remote decode engine at {decode_addr}"
+        )
+        MAX_RETRIES = 1  # at most 1 retry (2 attempts total)
+        retry_count = 0
+        try:
+            while True:
+                try:
+                    channel = await self.cluster._get_grpc_channel(decode_addr)
+                    stub = self.cluster.pb2_grpc.RpcServiceStub(channel)
+                    stream = stub.GenerateStreamCall(input_pb, timeout=120.0)
+                    async for output in stream:
+                        if request_id in self._cancelled:
+                            # Forward the cancel to the remote engine so it
+                            # stops decoding instead of running to completion.
+                            self.cluster._grpc_cancel_forward_count += 1
+                            try:
+                                await stub.Cancel(
+                                    self.pb2.CancelRequestPB(request_id=request_id),
+                                    timeout=5.0,
+                                )
+                            except Exception:
+                                pass  # best-effort, never block the cancel path
+                            break
+                        await queue.put(output)
+                    break  # stream completed successfully, exit retry loop
+                except Exception as exc:
+                    retry_count += 1
+                    self.cluster._grpc_error_count += 1
+                    logger.error(
+                        f"[DIAG] _run_remote_decode: rid={request_id} "
+                        f"attempt={retry_count} error forwarding to "
+                        f"{decode_addr}: {exc}"
+                    )
+                    if retry_count > MAX_RETRIES:
+                        break  # exceeded retries, give up
+                    self.cluster._grpc_retry_count += 1
+                    await asyncio.sleep(0.5)
+        finally:
+            await queue.put(SENTINEL)
+
     async def _read_response_queue(self, request_id: int):
         queue = self._response_queues.setdefault(request_id, asyncio.Queue())
         while True:
@@ -559,6 +660,18 @@ class MockEngineState:
         self._finished_version += 1
         self._completed += 1
         self._finished.append((self._finished_version, self._task_pb(task)))
+        if task.execution_time_ms > 0:
+            if self.role == "prefill":
+                self._recent_prefill_times.append(float(task.execution_time_ms))
+                if len(self._recent_prefill_times) > 100:
+                    self._recent_prefill_times.pop(0)
+            elif self.role == "decode":
+                self._recent_decode_times.append(float(task.execution_time_ms))
+                if len(self._recent_decode_times) > 100:
+                    self._recent_decode_times.pop(0)
+        logger.info(
+            f"[DIAG] _finish_task: requestId={task.request_id}, new_finished_version={self._finished_version}, finished_list_len={len(self._finished)}"
+        )
         # Keep bounded history; FlexLB sync polls frequently and only needs recent
         # versions newer than latest_finished_version.
         if len(self._finished) > 10000:
@@ -697,6 +810,174 @@ class MockRpcServicer:
         return self.pb2.GetPeerInfoResponsePB()
 
 
+def generate_aggregated_prometheus_metrics(
+    engines: list[dict],
+    cluster_counters: dict | None = None,
+) -> str:
+    """Generate role-aggregated Prometheus exposition format metrics.
+
+    Groups engines by role (prefill/decode) and aggregates:
+    - Counters/state/KV: sum across engines
+    - RPC: sum by method name
+    - Latency avg: weighted average (sum(avg*count)/sum(count))
+    - Latency p99: max across engines
+    - Latency count: sum across engines
+    """
+    lines: list[str] = []
+    metrics_meta = [
+        ("mock_engine_up", "1 if engine is running, 0 if stopped", "gauge"),
+        ("mock_engine_running", "current running requests", "gauge"),
+        (
+            "mock_engine_waiting",
+            "current waiting requests (queued but not yet processing)",
+            "gauge",
+        ),
+        ("mock_engine_accepted_total", "total accepted requests", "counter"),
+        ("mock_engine_completed_total", "total completed requests", "counter"),
+        ("mock_engine_cancelled_total", "total cancelled requests", "counter"),
+        ("mock_engine_cache_keys", "number of cache keys", "gauge"),
+        ("mock_engine_cache_evictions_total", "total cache evictions", "counter"),
+        ("mock_engine_active_kv_tokens", "active KV cache tokens", "gauge"),
+        ("mock_engine_available_kv_tokens", "available KV cache tokens", "gauge"),
+        ("mock_engine_rpc_total", "total RPC calls by method", "counter"),
+        (
+            "mock_engine_prefill_ms_avg",
+            "average prefill execution time in ms",
+            "gauge",
+        ),
+        ("mock_engine_prefill_ms_p99", "p99 prefill execution time in ms", "gauge"),
+        (
+            "mock_engine_prefill_ms_count",
+            "count of recent prefill completions",
+            "gauge",
+        ),
+        (
+            "mock_engine_decode_ms_avg",
+            "average decode execution time in ms",
+            "gauge",
+        ),
+        ("mock_engine_decode_ms_p99", "p99 decode execution time in ms", "gauge"),
+        (
+            "mock_engine_decode_ms_count",
+            "count of recent decode completions",
+            "gauge",
+        ),
+        (
+            "flexlb_mock_grpc_error_count",
+            "Total gRPC errors in remote decode",
+            "counter",
+        ),
+        (
+            "flexlb_mock_grpc_retry_count",
+            "Total gRPC retries in remote decode",
+            "counter",
+        ),
+        (
+            "flexlb_mock_grpc_cancel_forward_count",
+            "Total cancel forwarded to remote engines",
+            "counter",
+        ),
+    ]
+    for name, help_text, mtype in metrics_meta:
+        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# TYPE {name} {mtype}")
+
+    # Group engines by role
+    buckets: dict[str, list[dict]] = {"prefill": [], "decode": []}
+    for e in engines:
+        role = e.get("role", "")
+        if role in buckets:
+            buckets[role].append(e)
+
+    for role in ("prefill", "decode"):
+        group = buckets[role]
+        if not group:
+            continue
+        label = f'role="{role}"'
+
+        up = sum(0 if e.get("stopped", False) else 1 for e in group)
+        lines.append(f"mock_engine_up{{{label}}} {up}")
+
+        running = sum(e.get("running", 0) for e in group)
+        lines.append(f"mock_engine_running{{{label}}} {running}")
+
+        waiting = sum(e.get("waiting", 0) for e in group)
+        lines.append(f"mock_engine_waiting{{{label}}} {waiting}")
+
+        accepted = sum(e.get("accepted", 0) for e in group)
+        lines.append(f"mock_engine_accepted_total{{{label}}} {accepted}")
+
+        completed = sum(e.get("completed", 0) for e in group)
+        lines.append(f"mock_engine_completed_total{{{label}}} {completed}")
+
+        cancelled = sum(e.get("cancelled_count", 0) for e in group)
+        lines.append(f"mock_engine_cancelled_total{{{label}}} {cancelled}")
+
+        cache_keys = sum(e.get("cache_keys", 0) for e in group)
+        lines.append(f"mock_engine_cache_keys{{{label}}} {cache_keys}")
+
+        cache_evictions = sum(e.get("cache_evictions", 0) for e in group)
+        lines.append(f"mock_engine_cache_evictions_total{{{label}}} {cache_evictions}")
+
+        active_kv = sum(e.get("active_kv_tokens", 0) for e in group)
+        lines.append(f"mock_engine_active_kv_tokens{{{label}}} {active_kv}")
+
+        available_kv = sum(e.get("available_kv_tokens", 0) for e in group)
+        lines.append(f"mock_engine_available_kv_tokens{{{label}}} {available_kv}")
+
+        rpc_totals: dict[str, int] = {}
+        for e in group:
+            for method, count in e.get("rpc_counts", {}).items():
+                rpc_totals[method] = rpc_totals.get(method, 0) + count
+        for method in sorted(rpc_totals.keys()):
+            rpc_label = f'role="{role}",rpc_method="{method}"'
+            lines.append(f"mock_engine_rpc_total{{{rpc_label}}} {rpc_totals[method]}")
+
+        prefill_total_count = sum(e.get("prefill_ms_count", 0) for e in group)
+        if prefill_total_count > 0:
+            prefill_weighted = sum(
+                e.get("prefill_ms_avg", 0.0) * e.get("prefill_ms_count", 0)
+                for e in group
+            )
+            prefill_avg = prefill_weighted / prefill_total_count
+        else:
+            prefill_avg = 0.0
+        prefill_p99 = max((e.get("prefill_ms_p99", 0.0) for e in group), default=0.0)
+        lines.append(f"mock_engine_prefill_ms_avg{{{label}}} {prefill_avg:.1f}")
+        lines.append(f"mock_engine_prefill_ms_p99{{{label}}} {prefill_p99:.1f}")
+        lines.append(f"mock_engine_prefill_ms_count{{{label}}} {prefill_total_count}")
+
+        decode_total_count = sum(e.get("decode_ms_count", 0) for e in group)
+        if decode_total_count > 0:
+            decode_weighted = sum(
+                e.get("decode_ms_avg", 0.0) * e.get("decode_ms_count", 0) for e in group
+            )
+            decode_avg = decode_weighted / decode_total_count
+        else:
+            decode_avg = 0.0
+        decode_p99 = max((e.get("decode_ms_p99", 0.0) for e in group), default=0.0)
+        lines.append(f"mock_engine_decode_ms_avg{{{label}}} {decode_avg:.1f}")
+        lines.append(f"mock_engine_decode_ms_p99{{{label}}} {decode_p99:.1f}")
+        lines.append(f"mock_engine_decode_ms_count{{{label}}} {decode_total_count}")
+
+    # Cluster-level metrics (no labels)
+    if cluster_counters is not None:
+        lines.append(
+            f"flexlb_mock_grpc_error_count "
+            f"{cluster_counters.get('grpc_error_count', 0)}"
+        )
+        lines.append(
+            f"flexlb_mock_grpc_retry_count "
+            f"{cluster_counters.get('grpc_retry_count', 0)}"
+        )
+        lines.append(
+            f"flexlb_mock_grpc_cancel_forward_count "
+            f"{cluster_counters.get('grpc_cancel_forward_count', 0)}"
+        )
+
+    return "\n".join(lines) + "\n"
+
+
 class MockEngineCluster:
     def __init__(
         self,
@@ -715,6 +996,11 @@ class MockEngineCluster:
         self._base_http_port = base_http_port
         self._http_runner = None
         self._stopped: set[str] = set()
+        self._grpc_channels: Dict[str, object] = {}
+        # Cluster-level counters for remote decode diagnostics.
+        self._grpc_error_count = 0
+        self._grpc_retry_count = 0
+        self._grpc_cancel_forward_count = 0
 
     async def add_engine(
         self,
@@ -761,19 +1047,55 @@ class MockEngineCluster:
         await server.start()
         self._servers.append(server)
         self.states.append(state)
-        self._by_grpc_addr[state.ip_port] = state
+        self._by_grpc_addr[f"{state.host}:{state.grpc_port}"] = state
         self._by_grpc_addr[f"localhost:{state.grpc_port}"] = state
         self._by_grpc_addr[f"127.0.0.1:{state.grpc_port}"] = state
         return state
 
     def resolve_decode(self, input_pb) -> Optional[MockEngineState]:
+        request_id = int(input_pb.request_id)
         for role_addr in input_pb.generate_config.role_addrs:
             if role_addr.role_type == self.pb2.ROLE_TYPE_DECODE:
-                return self._by_grpc_addr.get(f"{role_addr.ip}:{role_addr.grpc_port}")
+                addr = f"{role_addr.ip}:{role_addr.grpc_port}"
+                state = self._by_grpc_addr.get(addr)
+                if state is not None:
+                    logger.debug(
+                        f"[DIAG] resolve_decode: rid={request_id} decode_addr={addr} "
+                        f"found_in_process=True engine={state.name}"
+                    )
+                    return state
+                logger.debug(
+                    f"[DIAG] resolve_decode: rid={request_id} decode_addr={addr} "
+                    f"found_in_process=False, returning None for remote routing"
+                )
+                return None
         decodes = [s for s in self.states if s.role == "decode"]
         if not decodes:
+            logger.debug(
+                f"[DIAG] resolve_decode: rid={request_id} no decode engines available, returning None"
+            )
             return None
-        return decodes[int(input_pb.request_id) % len(decodes)]
+        selected = decodes[int(input_pb.request_id) % len(decodes)]
+        logger.debug(
+            f"[DIAG] resolve_decode: rid={request_id} "
+            f"no_role_addrs_decode, round_robin_selected={selected.name}"
+        )
+        return selected
+
+    async def _get_grpc_channel(self, target: str):
+        """Return a cached gRPC channel for *target*, creating one if needed."""
+        import grpc
+
+        if target not in self._grpc_channels:
+            self._grpc_channels[target] = grpc.aio.insecure_channel(
+                target,
+                options=[
+                    ("grpc.max_send_message_length", 64 * 1024 * 1024),
+                    ("grpc.max_receive_message_length", 64 * 1024 * 1024),
+                ],
+            )
+            logger.debug(f"[DIAG] _get_grpc_channel: created new channel for {target}")
+        return self._grpc_channels[target]
 
     async def stop_engine(self, name: str) -> bool:
         """Stop a single engine's gRPC server with grace=0 (simulates process kill).
@@ -850,10 +1172,31 @@ class MockEngineCluster:
         app.router.add_post("/set_queue_depth", self._http_set_queue_depth)
         app.router.add_post("/stop_engine", self._http_stop_engine)
         app.router.add_post("/start_engine", self._http_start_engine)
+        app.router.add_get("/metrics", self._http_metrics)
         self._http_runner = web.AppRunner(app)
         await self._http_runner.setup()
         site = web.TCPSite(self._http_runner, "0.0.0.0", port)
-        await site.start()
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                await site.start()
+                break
+            except OSError as exc:
+                if attempt < max_retries:
+                    logger.warning(
+                        "failed to bind HTTP port %d (attempt %d/%d): %s; "
+                        "retrying in 0.5s",
+                        port,
+                        attempt,
+                        max_retries,
+                        exc,
+                    )
+                    await asyncio.sleep(0.5)
+                else:
+                    raise RuntimeError(
+                        f"failed to bind HTTP port {port} after "
+                        f"{max_retries} attempts: {exc}"
+                    ) from exc
 
     async def _http_snapshot(self, request) -> object:
         from aiohttp import web
@@ -992,6 +1335,145 @@ class MockEngineCluster:
             {"status": "ok", "engine": engine_name, "action": "started"}
         )
 
+    @staticmethod
+    def _escape_label_value(value: str) -> str:
+        """Escape a label value for Prometheus exposition format."""
+        return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+    async def generate_prometheus_metrics(self) -> str:
+        """Generate Prometheus exposition format metrics for all engines."""
+        lines: list[str] = []
+        metrics_meta = [
+            ("mock_engine_up", "1 if engine is running, 0 if stopped", "gauge"),
+            ("mock_engine_running", "current running requests", "gauge"),
+            (
+                "mock_engine_waiting",
+                "current waiting requests (queued but not yet processing)",
+                "gauge",
+            ),
+            ("mock_engine_accepted_total", "total accepted requests", "counter"),
+            ("mock_engine_completed_total", "total completed requests", "counter"),
+            ("mock_engine_cancelled_total", "total cancelled requests", "counter"),
+            ("mock_engine_cache_keys", "number of cache keys", "gauge"),
+            ("mock_engine_cache_evictions_total", "total cache evictions", "counter"),
+            ("mock_engine_active_kv_tokens", "active KV cache tokens", "gauge"),
+            ("mock_engine_available_kv_tokens", "available KV cache tokens", "gauge"),
+            ("mock_engine_rpc_total", "total RPC calls by method", "counter"),
+            (
+                "mock_engine_prefill_ms_avg",
+                "average prefill execution time in ms",
+                "gauge",
+            ),
+            ("mock_engine_prefill_ms_p99", "p99 prefill execution time in ms", "gauge"),
+            (
+                "mock_engine_prefill_ms_count",
+                "count of recent prefill completions",
+                "gauge",
+            ),
+            (
+                "mock_engine_decode_ms_avg",
+                "average decode execution time in ms",
+                "gauge",
+            ),
+            ("mock_engine_decode_ms_p99", "p99 decode execution time in ms", "gauge"),
+            (
+                "mock_engine_decode_ms_count",
+                "count of recent decode completions",
+                "gauge",
+            ),
+            (
+                "flexlb_mock_grpc_error_count",
+                "Total gRPC errors in remote decode",
+                "counter",
+            ),
+            (
+                "flexlb_mock_grpc_retry_count",
+                "Total gRPC retries in remote decode",
+                "counter",
+            ),
+            (
+                "flexlb_mock_grpc_cancel_forward_count",
+                "Total cancel forwarded to remote engines",
+                "counter",
+            ),
+        ]
+        for name, help_text, mtype in metrics_meta:
+            lines.append(f"# HELP {name} {help_text}")
+            lines.append(f"# TYPE {name} {mtype}")
+        for state in self.states:
+            snap = await state.snapshot()
+            esc = self._escape_label_value
+            labels = (
+                f'engine_name="{esc(state.name)}",'
+                f'role="{esc(state.role)}",'
+                f'grpc_port="{state.grpc_port}",'
+                f'engine_ip="{esc(state.host)}"'
+            )
+            is_up = 0 if state.name in self._stopped else 1
+            lines.append(f"mock_engine_up{{{labels}}} {is_up}")
+            lines.append(f'mock_engine_running{{{labels}}} {snap["running"]}')
+            lines.append(f'mock_engine_waiting{{{labels}}} {snap["waiting"]}')
+            lines.append(f'mock_engine_accepted_total{{{labels}}} {snap["accepted"]}')
+            lines.append(f'mock_engine_completed_total{{{labels}}} {snap["completed"]}')
+            lines.append(
+                f'mock_engine_cancelled_total{{{labels}}} {snap["cancelled_count"]}'
+            )
+            lines.append(f'mock_engine_cache_keys{{{labels}}} {snap["cache_keys"]}')
+            lines.append(
+                f'mock_engine_cache_evictions_total{{{labels}}} {snap["cache_evictions"]}'
+            )
+            lines.append(
+                f'mock_engine_active_kv_tokens{{{labels}}} {snap["active_kv_tokens"]}'
+            )
+            lines.append(
+                f'mock_engine_available_kv_tokens{{{labels}}} {snap["available_kv_tokens"]}'
+            )
+            for rpc_method, count in snap.get("rpc_counts", {}).items():
+                rpc_labels = f'{labels},rpc_method="{esc(rpc_method)}"'
+                lines.append(f"mock_engine_rpc_total{{{rpc_labels}}} {count}")
+            lines.append(
+                f'mock_engine_prefill_ms_avg{{{labels}}} {snap["prefill_ms_avg"]:.1f}'
+            )
+            lines.append(
+                f'mock_engine_prefill_ms_p99{{{labels}}} {snap["prefill_ms_p99"]:.1f}'
+            )
+            lines.append(
+                f'mock_engine_prefill_ms_count{{{labels}}} {snap["prefill_ms_count"]}'
+            )
+            lines.append(
+                f'mock_engine_decode_ms_avg{{{labels}}} {snap["decode_ms_avg"]:.1f}'
+            )
+            lines.append(
+                f'mock_engine_decode_ms_p99{{{labels}}} {snap["decode_ms_p99"]:.1f}'
+            )
+            lines.append(
+                f'mock_engine_decode_ms_count{{{labels}}} {snap["decode_ms_count"]}'
+            )
+        # Cluster-level metrics (not per-engine)
+        lines.append(f"flexlb_mock_grpc_error_count {self._grpc_error_count}")
+        lines.append(f"flexlb_mock_grpc_retry_count {self._grpc_retry_count}")
+        lines.append(
+            f"flexlb_mock_grpc_cancel_forward_count "
+            f"{self._grpc_cancel_forward_count}"
+        )
+        return "\n".join(lines) + "\n"
+
+    async def _http_metrics(self, request) -> object:
+        """GET /metrics — Prometheus exposition format for all engines."""
+        from aiohttp import web
+
+        per_engine = request.query.get("per_engine", "").lower() == "true"
+        if per_engine:
+            metrics_text = await self.generate_prometheus_metrics()
+        else:
+            snap = await self.snapshot()
+            metrics_text = generate_aggregated_prometheus_metrics(
+                snap["engines"], snap.get("cluster_counters")
+            )
+        resp = web.Response(text=metrics_text)
+        resp.headers["Content-Type"] = "text/plain; version=0.0.4; charset=utf-8"
+        return resp
+
     def _find_engine(self, name: str) -> Optional[MockEngineState]:
         for state in self.states:
             if state.name == name:
@@ -1005,6 +1487,9 @@ class MockEngineCluster:
         for server in self._servers:
             await server.stop(grace=1)
         self._servers.clear()
+        for channel in self._grpc_channels.values():
+            await channel.close()
+        self._grpc_channels.clear()
 
     async def snapshot(self) -> dict:
         engines = []
@@ -1012,7 +1497,14 @@ class MockEngineCluster:
             snap = await state.snapshot()
             snap["stopped"] = state.name in self._stopped
             engines.append(snap)
-        return {"engines": engines}
+        return {
+            "engines": engines,
+            "cluster_counters": {
+                "grpc_error_count": self._grpc_error_count,
+                "grpc_retry_count": self._grpc_retry_count,
+                "grpc_cancel_forward_count": self._grpc_cancel_forward_count,
+            },
+        }
 
     def service_discovery_env(self, prefill_domain: str, decode_domain: str) -> dict:
         prefill = ",".join(s.ip_port for s in self.states if s.role == "prefill")
@@ -1025,12 +1517,12 @@ class MockEngineCluster:
                     "group": "mock",
                     "prefill_endpoint": {
                         "address": prefill_domain,
-                        "protocol": "grpc",
+                        "protocol": "http",
                         "path": "/",
                     },
                     "decode_endpoint": {
                         "address": decode_domain,
-                        "protocol": "grpc",
+                        "protocol": "http",
                         "path": "/",
                     },
                 }

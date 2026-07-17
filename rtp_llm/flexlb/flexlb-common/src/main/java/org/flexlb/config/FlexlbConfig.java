@@ -176,6 +176,110 @@ public class FlexlbConfig {
      */
     private int nettyWorkerThreadMultiplier = 2;
 
+    // ========== Thread Pool Size Configuration ==========
+
+    /**
+     * gRPC Client Executor core pool size.
+     * Environment variable: GRPC_CLIENT_EXECUTOR_CORE_SIZE
+     */
+    private int grpcClientExecutorCoreSize = 32;
+
+    /**
+     * gRPC Client Executor max pool size.
+     * Set equal to core size because LinkedBlockingQueue prevents thread pool
+     * expansion until the queue is full. With a large queue (10000), maxPoolSize
+     * would be effectively unreachable, so we keep the pool fixed at core size.
+     * Environment variable: GRPC_CLIENT_EXECUTOR_MAX_SIZE
+     */
+    private int grpcClientExecutorMaxSize = 32;
+
+    /**
+     * gRPC Client Executor bounded queue size.
+     * Environment variable: GRPC_CLIENT_EXECUTOR_QUEUE_SIZE
+     */
+    private int grpcClientExecutorQueueSize = 10000;
+
+    /**
+     * gRPC Client EventLoopGroup thread count.
+     * Environment variable: GRPC_CLIENT_EVENT_LOOP_THREADS
+     */
+    private int grpcClientEventLoopThreads = 8;
+
+    /**
+     * gRPC Server Worker EventLoopGroup thread count.
+     * Environment variable: GRPC_SERVER_WORKER_EVENT_LOOP_THREADS
+     */
+    private int grpcServerWorkerEventLoopThreads = 4;
+
+    /**
+     * HTTP Netty NioEventLoopGroup thread count.
+     * Environment variable: HTTP_NETTY_EVENT_LOOP_THREADS
+     */
+    private int httpNettyEventLoopThreads = 4;
+
+    /**
+     * HTTP Netty EventExecutorGroup thread count.
+     * Environment variable: HTTP_NETTY_EVENT_EXECUTOR_THREADS
+     */
+    private int httpNettyEventExecutorThreads = 16;
+
+    /**
+     * HTTP Netty EventExecutorGroup bounded queue size.
+     * Environment variable: HTTP_NETTY_EVENT_EXECUTOR_QUEUE_SIZE
+     */
+    private int httpNettyEventExecutorQueueSize = 1000;
+
+    /**
+     * HTTP Request Executor core pool size.
+     * Environment variable: HTTP_REQUEST_EXECUTOR_CORE_SIZE
+     */
+    private int httpRequestExecutorCoreSize = 32;
+
+    /**
+     * HTTP Request Executor max pool size.
+     * Set equal to core size because LinkedBlockingQueue prevents thread pool
+     * expansion until the queue is full. With a large queue (10000), maxPoolSize
+     * would be effectively unreachable, so we keep the pool fixed at core size.
+     * Environment variable: HTTP_REQUEST_EXECUTOR_MAX_SIZE
+     */
+    private int httpRequestExecutorMaxSize = 32;
+
+    /**
+     * HTTP Request Executor bounded queue size.
+     * Environment variable: HTTP_REQUEST_EXECUTOR_QUEUE_SIZE
+     */
+    private int httpRequestExecutorQueueSize = 10000;
+
+    /**
+     * Engine Sync Executor core pool size.
+     * Environment variable: ENGINE_SYNC_EXECUTOR_CORE_SIZE
+     */
+    private int engineSyncExecutorCoreSize = 32;
+
+    /**
+     * Engine Sync Executor max pool size.
+     * Environment variable: ENGINE_SYNC_EXECUTOR_MAX_SIZE
+     */
+    private int engineSyncExecutorMaxSize = 64;
+
+    /**
+     * Status Check Executor core pool size.
+     * Environment variable: STATUS_CHECK_EXECUTOR_CORE_SIZE
+     */
+    private int statusCheckExecutorCoreSize = 32;
+
+    /**
+     * Status Check Executor max pool size.
+     * Environment variable: STATUS_CHECK_EXECUTOR_MAX_SIZE
+     */
+    private int statusCheckExecutorMaxSize = 64;
+
+    /**
+     * Service Discovery Executor max pool size.
+     * Environment variable: SERVICE_DISCOVERY_MAX_SIZE
+     */
+    private int serviceDiscoveryMaxSize = 32;
+
     /**
      * Ordered traffic policy rules. A matched rule forces the whole request to a worker group.
      */

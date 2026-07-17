@@ -1,6 +1,7 @@
 package org.flexlb.service;
 
 import org.flexlb.cache.core.RecentCacheKeyWindow;
+import org.flexlb.cache.core.ShardedRecentCacheKeyWindow;
 import org.flexlb.cache.monitor.CacheHitTheoryStats;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.config.FlexlbConfig;
@@ -34,7 +35,7 @@ public class RecentCacheKeyTraceReporter {
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSXXX").withZone(ZoneId.systemDefault());
 
     @Autowired(required = false)
-    private RecentCacheKeyWindow recentCacheKeyWindow;
+    private ShardedRecentCacheKeyWindow shardedRecentCacheKeyWindow;
 
     @Autowired(required = false)
     private CacheMetricsReporter cacheMetricsReporter;
@@ -57,12 +58,13 @@ public class RecentCacheKeyTraceReporter {
         }
 
         Request request = balanceContext.getRequest();
-        if (request == null || recentCacheKeyWindow == null) {
+        if (request == null || shardedRecentCacheKeyWindow == null) {
             return;
         }
 
         List<Long> cacheKeys = request.getBlockCacheKeys();
-        RecentCacheKeyWindow.Snapshot snapshot = recentCacheKeyWindow.record(cacheKeys);
+        RecentCacheKeyWindow.Snapshot snapshot =
+                shardedRecentCacheKeyWindow.record(balanceContext.getRequestId(), cacheKeys);
         long inputTokens = Math.max(0L, request.getSeqLen());
         long hitTokens = theoryHitTokens(
                 snapshot.getRequestHitOccurrences(),

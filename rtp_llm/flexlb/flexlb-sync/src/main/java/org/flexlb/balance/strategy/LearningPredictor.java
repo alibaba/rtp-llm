@@ -98,6 +98,12 @@ public class LearningPredictor implements PrefillTimePredictor {
         return calcOutput(weights, linearExp);
     }
 
+    @Override
+    public double predictBatchMsUncached(List<BatchItem> items) {
+        // LearningPredictor has no cache — delegate directly.
+        return predictBatchMs(items);
+    }
+
     private double calcLinearExp(double[] inputs, double[] weights) {
         double sum = 0.0;
         for (int i = 0; i < inputs.length; i++) {

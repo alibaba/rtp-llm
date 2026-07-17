@@ -3,8 +3,13 @@ package org.flexlb.balance.scheduler;
 import com.google.protobuf.Int64Value;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.grpc.Status;
+import io.micrometer.core.instrument.FunctionCounter;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
+import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
@@ -12,6 +17,7 @@ import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.util.Logger;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
@@ -21,7 +27,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -37,20 +44,71 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class DefaultBatchDispatcher implements BatchDispatcher {
 
+    private static final String METRIC_PREFIX = "flexlb.";
+
     private final EngineGrpcClient grpcClient;
     private final ConfigService configService;
-    private final ExecutorService dispatchExecutor;
+    private final ThreadPoolExecutor dispatchExecutor;
+    private final MeterRegistry meterRegistry;
 
-    public DefaultBatchDispatcher(EngineGrpcClient grpcClient, ConfigService configService) {
+    public DefaultBatchDispatcher(EngineGrpcClient grpcClient, ConfigService configService,
+                                  @Autowired(required = false) MeterRegistry meterRegistry) {
         this.grpcClient = grpcClient;
         this.configService = configService;
+        this.meterRegistry = meterRegistry;
         int poolSize = configService.loadBalanceConfig().getFlexlbBatchDispatchPoolSize();
         int queueSize = configService.loadBalanceConfig().getFlexlbBatchDispatchQueueSize();
+        Logger.info("FlexLB dispatch executor config: poolSize={}, queueSize={}, threadFactory=flexlb-dispatch-executor, rejectionPolicy=AbortPolicy",
+                poolSize, queueSize);
         this.dispatchExecutor = new ThreadPoolExecutor(
                 poolSize, poolSize,
                 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(queueSize),
+                new NamedThreadFactory("flexlb-dispatch-executor"),
                 new ThreadPoolExecutor.AbortPolicy());
+        registerMetrics();
+    }
+
+    /**
+     * Register Micrometer gauges and function counters for the dispatch executor.
+     *
+     * <p>Metrics exposed:
+     * <ul>
+     *   <li>{@code flexlb_dispatch_executor_active_threads} — gauge: active thread count</li>
+     *   <li>{@code flexlb_dispatch_executor_queue_size} — gauge: pending task queue length</li>
+     *   <li>{@code flexlb_dispatch_executor_pool_size} — gauge: current thread pool size</li>
+     *   <li>{@code flexlb_dispatch_executor_completed_tasks_total} — counter: completed task count</li>
+     * </ul>
+     *
+     * <p>When {@link MeterRegistry} is not available, metric registration is silently skipped.
+     */
+    private void registerMetrics() {
+        if (meterRegistry == null) {
+            Logger.info("MeterRegistry not available, skipping dispatch executor metrics");
+            return;
+        }
+
+        Gauge.builder(METRIC_PREFIX + MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS,
+                        dispatchExecutor, ThreadPoolExecutor::getActiveCount)
+                .description("Dispatch executor active thread count")
+                .register(meterRegistry);
+
+        Gauge.builder(METRIC_PREFIX + MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE,
+                        dispatchExecutor, exec -> exec.getQueue().size())
+                .description("Dispatch executor pending task queue size")
+                .register(meterRegistry);
+
+        Gauge.builder(METRIC_PREFIX + MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE,
+                        dispatchExecutor, ThreadPoolExecutor::getPoolSize)
+                .description("Dispatch executor current pool size")
+                .register(meterRegistry);
+
+        FunctionCounter.builder(METRIC_PREFIX + MetricConstant.DISPATCH_EXECUTOR_COMPLETED_TASKS,
+                        dispatchExecutor, ThreadPoolExecutor::getCompletedTaskCount)
+                .description("Dispatch executor total completed tasks")
+                .register(meterRegistry);
+
+        Logger.info("FlexLB dispatch executor metrics registered with MeterRegistry");
     }
 
     @Override
@@ -106,29 +164,36 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         // 2. Log dispatch
         logDispatch(batchId, items, prefillEp, predMs, reason);
 
-        // 3. Send gRPC
-        try {
-            long deadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
-            EngineRpcService.EnqueueBatchResponsePB response =
-                    grpcClient.batchEnqueue(prefillEp.getIp(), prefillEp.getGrpcPort(),
-                            request, deadlineMs);
-            if (response == null) {
-                failItems(items, prefillEp, batchId, "EnqueueBatch returned null response", callback);
-                return;
-            }
-            handleResponse(batchId, items, response, callback);
-        } catch (Throwable t) {
-            Logger.warn("EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
-                    batchId, prefillEp.getIp(), prefillEp.getGrpcPort(), t.getMessage());
-            if (Status.fromThrowable(t).getCode() == Status.Code.DEADLINE_EXCEEDED) {
-                prefillEp.releaseBatch(batchId);
-                for (BatchItem item : items) {
-                    callback.onTimeout(item, t);
-                }
-            } else {
-                failItems(items, prefillEp, batchId, "gRPC dispatch failed: " + t.getMessage(), callback);
-            }
-        }
+        // 3. Send gRPC (async)
+        long deadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
+        grpcClient.batchEnqueueAsync(prefillEp.getIp(), prefillEp.getGrpcPort(), request, deadlineMs)
+                .whenCompleteAsync((response, ex) -> {
+                    try {
+                        if (ex != null) {
+                            Throwable cause = ex instanceof CompletionException ? ex.getCause() : ex;
+                            Logger.warn("EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
+                                    batchId, prefillEp.getIp(), prefillEp.getGrpcPort(), cause.getMessage());
+                            if (Status.fromThrowable(cause).getCode() == Status.Code.DEADLINE_EXCEEDED) {
+                                prefillEp.releaseBatch(batchId);
+                                for (BatchItem item : items) {
+                                    callback.onTimeout(item, cause);
+                                }
+                            } else {
+                                failItems(items, prefillEp, batchId,
+                                        "gRPC dispatch failed: " + cause.getMessage(), callback);
+                            }
+                        } else if (response == null) {
+                            failItems(items, prefillEp, batchId, "EnqueueBatch returned null response", callback);
+                        } else {
+                            handleResponse(batchId, items, response, callback);
+                        }
+                    } catch (Throwable t) {
+                        // Safety net: ensure callbacks are always invoked even for unexpected errors
+                        Logger.error("Unexpected error in EnqueueBatch callback batchId={}", batchId, t);
+                        failItems(items, prefillEp, batchId,
+                                "Unexpected callback error: " + t.getMessage(), callback);
+                    }
+                }, dispatchExecutor);
     }
 
     private void failItems(List<BatchItem> items, PrefillEndpoint prefillEp,

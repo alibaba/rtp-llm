@@ -47,6 +47,7 @@ public class HttpLoadBalanceServer {
     private final FlexlbBatchScheduler batchScheduler;
     private final EndpointRegistry endpointRegistry;
     private final MasterEngineSynchronizer masterEngineSynchronizer;
+    private final ServerScheduleLatencyRecorder serverLatencyRecorder;
 
     public HttpLoadBalanceServer(LBStatusConsistencyService lbStatusConsistencyService,
                                  QueueManager queueManager,
@@ -54,13 +55,15 @@ public class HttpLoadBalanceServer {
                                  FlexlbBatchScheduler batchScheduler,
                                  EndpointRegistry endpointRegistry,
                                  @org.springframework.beans.factory.annotation.Autowired(required = false)
-                                 MasterEngineSynchronizer masterEngineSynchronizer) {
+                                 MasterEngineSynchronizer masterEngineSynchronizer,
+                                 ServerScheduleLatencyRecorder serverLatencyRecorder) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.queueManager = queueManager;
         this.configService = configService;
         this.batchScheduler = batchScheduler;
         this.endpointRegistry = endpointRegistry;
         this.masterEngineSynchronizer = masterEngineSynchronizer;
+        this.serverLatencyRecorder = serverLatencyRecorder;
     }
 
     @Bean
@@ -80,6 +83,8 @@ public class HttpLoadBalanceServer {
                         this::queueSnapshot)
                 .GET("/rtp_llm/inflight_status", accept(MediaType.APPLICATION_JSON),
                         this::inflightStatus)
+                .GET("/rtp_llm/server_latency", this::serverLatency)
+                .POST("/rtp_llm/server_latency/reset", this::resetServerLatency)
                 .build();
     }
 
@@ -234,5 +239,18 @@ public class HttpLoadBalanceServer {
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(Mono.just(e.getMessage()), String.class);
         }
+    }
+
+    private Mono<ServerResponse> serverLatency(ServerRequest request) {
+        return ServerResponse.ok()
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(serverLatencyRecorder.snapshot());
+    }
+
+    private Mono<ServerResponse> resetServerLatency(ServerRequest request) {
+        serverLatencyRecorder.reset();
+        return ServerResponse.ok()
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of("reset", true));
     }
 }

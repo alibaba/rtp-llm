@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -612,6 +613,14 @@ def _fmt_val(val: Any, suffix: str = "") -> str:
     return str(val)
 
 
+def _get_max_concurrency(runs: List[SpeedRunData]) -> str:
+    """Get max_concurrency from first available summary.json, or env var, or default."""
+    for run in runs:
+        if run.summary and isinstance(run.summary.get("max_concurrency"), (int, float)):
+            return str(run.summary["max_concurrency"])
+    return os.environ.get("MAX_CONCURRENCY", "16384")
+
+
 def _get_summary_field(summary: Optional[Dict[str, Any]], *keys: str) -> Optional[Any]:
     if summary is None:
         return None
@@ -653,12 +662,12 @@ def generate_report(runs: List[SpeedRunData], sla_ms: float, speeds: List[int]) 
     L.append("  - SCHEDULE_MODE=batch")
     L.append("  - LOAD_BALANCE_STRATEGY=COST_BASED_PREFILL")
     L.append("  - DECODE_LOAD_BALANCE_STRATEGY=COST_BASED_DECODE")
-    L.append("  - MAX_CONCURRENCY=1024")
+    L.append(f"  - MAX_CONCURRENCY={_get_max_concurrency(runs)}")
     L.append(f"  - SLA_TTFT_MS={int(sla_ms)}")
     L.append("  - ZERO_OUTPUT_POLICY=one (trace ol=0, set to 1)")
     L.append("  - LIMIT=0 (unlimited, full 8332 requests)")
     L.append("  - DURATION_S=0 (complete trace)")
-    L.append("  - MAX_INFLIGHT_BATCHES=2, WAIT_MS=220ms, PREDICT_THRESHOLD_MS=550ms")
+    L.append("  - MAX_INFLIGHT_BATCHES=2, WAIT_MS=10ms, PREDICT_THRESHOLD_MS=550ms")
     L.append("  - MONITOR_INTERVAL=2s")
     L.append("")
 
@@ -1031,7 +1040,7 @@ def generate_report(runs: List[SpeedRunData], sla_ms: float, speeds: List[int]) 
     if not suggestions:
         suggestions.append("- 所有 speed 下系统表现稳定，未检测到明显瓶颈")
         suggestions.append(
-            "- 当前配置 (MAX_INFLIGHT_BATCHES=2, WAIT_MS=220ms) "
+            "- 当前配置 (MAX_INFLIGHT_BATCHES=2, WAIT_MS=10ms) "
             "在测试流量范围内表现良好"
         )
 

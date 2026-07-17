@@ -65,7 +65,8 @@ import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_RUNNING_QUER
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_STEP_LATENCY_VAR;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.FORWARD_TO_MASTER_RESULT;
-import static org.flexlb.constant.MetricConstant.REQUEST_ARRIVAL_DELAY_MS;
+import static org.flexlb.constant.MetricConstant.REQUEST_NETWORK_DELAY_MS;
+import static org.flexlb.constant.MetricConstant.GRPC_SERVER_PROCESS_MS;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_EVENT;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_NODE;
 
@@ -121,7 +122,7 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         this.monitor.register(ENGINE_BALANCING_MASTER_ALL_QPS, FlexMetricType.QPS);
-        this.monitor.register(ENGINE_BALANCING_MASTER_ALL_RT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_BALANCING_MASTER_ALL_RT, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_BALANCING_MASTER_SELECT_DETAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
         this.monitor.register(ENGINE_RUNNING_QUEUE_TIME, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -140,7 +141,8 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_AVAILABLE_KV_CACHE_TOKENS, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_TOTAL_KV_CACHE_TOKENS, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_USED_KV_CACHE_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(REQUEST_ARRIVAL_DELAY_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(REQUEST_NETWORK_DELAY_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(GRPC_SERVER_PROCESS_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(FORWARD_TO_MASTER_RESULT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
     }
 
@@ -162,7 +164,9 @@ public class EngineHealthReporter {
             monitor.report(ENGINE_DECODE_WORKER_NUMBER, tags, modelWorkerStatus.getDecodeStatusMap().size());
         }
 
-        if (AbstractEngineStatusSynchronizer.engineSyncExecutor != null && AbstractEngineStatusSynchronizer.statusCheckExecutor != null) {
+        if (AbstractEngineStatusSynchronizer.engineSyncExecutor != null
+                && AbstractEngineStatusSynchronizer.statusCheckExecutor != null
+                && WorkerAddressService.serviceDiscoveryExecutor != null) {
             reportThreadPoolInfo(ENGINE_BALANCING_THREAD_POOL_INFO, "engineSyncExecutor",
                     (ThreadPoolExecutor) AbstractEngineStatusSynchronizer.engineSyncExecutor);
             reportThreadPoolInfo(ENGINE_BALANCING_THREAD_POOL_INFO, "statusCheckExecutor",
@@ -422,8 +426,17 @@ public class EngineHealthReporter {
         if (ctx.getRequest().getRequestTimeMs() == 0) {
             return;
         }
-        long arrivalDelayMs = ctx.getStartTime() - ctx.getRequest().getRequestTimeMs();
-        monitor.report(REQUEST_ARRIVAL_DELAY_MS, FlexMetricTags.of(), arrivalDelayMs);
+        long grpcEntryTime = ctx.getGrpcEntryTime();
+        if (grpcEntryTime > 0) {
+            long networkDelayMs = grpcEntryTime - ctx.getRequest().getRequestTimeMs();
+            long grpcProcessMs = ctx.getStartTime() - grpcEntryTime;
+            monitor.report(REQUEST_NETWORK_DELAY_MS, FlexMetricTags.of(), networkDelayMs);
+            monitor.report(GRPC_SERVER_PROCESS_MS, FlexMetricTags.of(), grpcProcessMs);
+        } else {
+            // Fallback: if grpcEntryTime not set, report total delay as network delay
+            long arrivalDelayMs = ctx.getStartTime() - ctx.getRequest().getRequestTimeMs();
+            monitor.report(REQUEST_NETWORK_DELAY_MS, FlexMetricTags.of(), arrivalDelayMs);
+        }
     }
 
     public void reportForwardToMasterResult(String type, String code) {

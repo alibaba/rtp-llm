@@ -3,89 +3,109 @@ package org.flexlb.balance.strategy;
 import org.flexlb.balance.scheduler.BatchItem;
 
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
+import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
-import java.util.function.ToDoubleFunction;
+import java.util.Set;
 
+/**
+ * Builds variable bindings for {@link PrefillTimeFormula} evaluation.
+ *
+ * <p>Uses a {@link ThreadLocal} pool of {@code double[]} arrays and a reusable
+ * {@code ArrayList} to eliminate per-call allocations on the hot evaluation path.
+ * The returned {@link EvaluationVariables} references arrays owned by the ThreadLocal;
+ * callers must consume them before the next call on the same thread.
+ */
 final class PrefillTimeVariableBindings {
 
     private static final String BATCH_SIZE = "batchSize";
-    private static final Map<String, ToDoubleFunction<RequestStats>> REQUEST_BINDINGS = requestBindings();
+    private static final Set<String> REQUEST_VAR_NAMES = Set.of(
+            "inputTokens", "hitCacheTokens", "computeTokens", "hasHitCache");
+
+    private static final ThreadLocal<BindingContext> BINDING_CTX = ThreadLocal.withInitial(BindingContext::new);
 
     private PrefillTimeVariableBindings() {
     }
 
     static boolean supports(String name) {
-        return BATCH_SIZE.equals(name) || REQUEST_BINDINGS.containsKey(name);
+        return BATCH_SIZE.equals(name) || REQUEST_VAR_NAMES.contains(name);
     }
 
     static EvaluationVariables singleRequestVariables(long totalTokens, long hitCacheTokens) {
-        RequestStats request = requestStats(totalTokens, hitCacheTokens);
-        Map<String, Double> topLevelVars = requestVars(request);
-        topLevelVars.put(BATCH_SIZE, 1.0);
-        Map<String, Double> requestVars = new HashMap<>(topLevelVars);
-        requestVars.remove(BATCH_SIZE);
-        return new EvaluationVariables(topLevelVars, List.of(requestVars));
+        BindingContext ctx = BINDING_CTX.get();
+        ctx.reset();
+        fillRequestVars(ctx.topLevelVars, totalTokens, hitCacheTokens);
+        ctx.topLevelVars[PrefillTimeFormula.IDX_BATCH_SIZE] = 1.0;
+
+        double[] item = ctx.acquireArray();
+        fillRequestVars(item, totalTokens, hitCacheTokens);
+        ctx.itemVars.add(item);
+
+        return new EvaluationVariables(ctx.topLevelVars, ctx.itemVars);
     }
 
     static EvaluationVariables batchVariables(List<BatchItem> items) {
-        List<Map<String, Double>> itemVars = new ArrayList<>(items.size());
+        BindingContext ctx = BINDING_CTX.get();
+        ctx.reset();
         for (BatchItem item : items) {
-            RequestStats request = requestStats(item.seqLen(), item.hitCache());
-            itemVars.add(requestVars(request));
+            double[] itemArray = ctx.acquireArray();
+            fillRequestVars(itemArray, item.seqLen(), item.hitCache());
+            ctx.itemVars.add(itemArray);
         }
-        Map<String, Double> topLevelVars = new HashMap<>();
-        topLevelVars.put(BATCH_SIZE, (double) items.size());
-        return new EvaluationVariables(topLevelVars, itemVars);
+        ctx.topLevelVars[PrefillTimeFormula.IDX_BATCH_SIZE] = items.size();
+        return new EvaluationVariables(ctx.topLevelVars, ctx.itemVars);
     }
 
-    private static RequestStats requestStats(long totalTokens, long hitCacheTokens) {
+    /**
+     * Fill the given array with the four per-request variables.
+     * The array is expected to be already zeroed by {@link BindingContext#acquireArray}.
+     */
+    private static void fillRequestVars(double[] vars, long totalTokens, long hitCacheTokens) {
         long inputTokens = Math.max(0L, totalTokens);
         long boundedHitCacheTokens = Math.max(0L, Math.min(hitCacheTokens, inputTokens));
-        return new RequestStats(inputTokens, boundedHitCacheTokens);
+        long computeTokens = inputTokens - boundedHitCacheTokens;
+        double hasHitCache = boundedHitCacheTokens > 0 ? 1.0 : 0.0;
+        vars[PrefillTimeFormula.IDX_INPUT_TOKENS] = inputTokens;
+        vars[PrefillTimeFormula.IDX_HIT_CACHE_TOKENS] = boundedHitCacheTokens;
+        vars[PrefillTimeFormula.IDX_COMPUTE_TOKENS] = computeTokens;
+        vars[PrefillTimeFormula.IDX_HAS_HIT_CACHE] = hasHitCache;
     }
 
-    private static Map<String, Double> requestVars(RequestStats request) {
-        return bind(REQUEST_BINDINGS, request);
-    }
+    /**
+     * Thread-local container for reusable {@code double[]} arrays.
+     * <ul>
+     *   <li>{@code topLevelVars} — dedicated array for top-level variables (batchSize etc.)</li>
+     *   <li>{@code itemVars} — reusable ArrayList of per-request variable arrays</li>
+     *   <li>{@code arrayPool} — backing pool of {@code double[]} instances, grown on demand</li>
+     * </ul>
+     * After {@link #reset()}, all arrays are zeroed and ready for reuse.
+     * The pool grows to the maximum batch size seen and never shrinks.
+     */
+    private static final class BindingContext {
+        final double[] topLevelVars = new double[PrefillTimeFormula.VAR_COUNT];
+        final List<double[]> itemVars = new ArrayList<>();
+        final List<double[]> arrayPool = new ArrayList<>();
+        int poolIndex = 0;
 
-    private static <T> Map<String, Double> bind(Map<String, ToDoubleFunction<T>> bindings, T source) {
-        Map<String, Double> vars = new HashMap<>(bindings.size());
-        bindings.forEach((name, value) -> vars.put(name, value.applyAsDouble(source)));
-        return vars;
-    }
-
-    private static Map<String, ToDoubleFunction<RequestStats>> requestBindings() {
-        Map<String, ToDoubleFunction<RequestStats>> bindings = new LinkedHashMap<>();
-        bindings.put("inputTokens", request -> request.inputTokens);
-        bindings.put("hitCacheTokens", request -> request.hitCacheTokens);
-        bindings.put("computeTokens", RequestStats::computeTokens);
-        bindings.put("hasHitCache", RequestStats::hasHitCache);
-        return Collections.unmodifiableMap(bindings);
-    }
-
-    private static final class RequestStats {
-        private final long inputTokens;
-        private final long hitCacheTokens;
-
-        private RequestStats(long inputTokens, long hitCacheTokens) {
-            this.inputTokens = inputTokens;
-            this.hitCacheTokens = hitCacheTokens;
+        void reset() {
+            Arrays.fill(topLevelVars, 0.0);
+            itemVars.clear();
+            poolIndex = 0;
         }
 
-        private double computeTokens() {
-            return inputTokens - hitCacheTokens;
-        }
-
-        private double hasHitCache() {
-            return hitCacheTokens > 0 ? 1.0 : 0.0;
+        double[] acquireArray() {
+            if (poolIndex < arrayPool.size()) {
+                double[] a = arrayPool.get(poolIndex++);
+                Arrays.fill(a, 0.0);
+                return a;
+            }
+            double[] a = new double[PrefillTimeFormula.VAR_COUNT];
+            arrayPool.add(a);
+            poolIndex++;
+            return a;
         }
     }
 
-    record EvaluationVariables(Map<String, Double> topLevelVars,
-                               List<Map<String, Double>> itemVars) {
+    record EvaluationVariables(double[] topLevelVars,
+                               List<double[]> itemVars) {
     }
 }

@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import java.util.Iterator;
 import java.util.Map;
 import java.util.function.Consumer;
 
@@ -44,13 +43,18 @@ public class InflightEvictor<K, V extends InflightEvictor.TtlTracked> {
     public int evictExpired(long ttlMs) {
         long now = System.currentTimeMillis();
         int count = 0;
-        for (Iterator<Map.Entry<K, V>> it = map.entrySet().iterator(); it.hasNext(); ) {
-            Map.Entry<K, V> entry = it.next();
+        for (Map.Entry<K, V> entry : map.entrySet()) {
             if (now - entry.getValue().createdAtMs() > ttlMs) {
-                it.remove();
-                count++;
-                if (onEvict != null) {
-                    onEvict.accept(entry.getValue());
+                // Use map.remove() instead of iterator.remove() to avoid race with
+                // concurrent release()/calibrate() map.remove(key). If another thread
+                // already removed the entry, map.remove() returns null and we skip
+                // the onEvict callback — preventing double-deduction of counters.
+                V removed = map.remove(entry.getKey());
+                if (removed != null) {
+                    count++;
+                    if (onEvict != null) {
+                        onEvict.accept(removed);
+                    }
                 }
             }
         }

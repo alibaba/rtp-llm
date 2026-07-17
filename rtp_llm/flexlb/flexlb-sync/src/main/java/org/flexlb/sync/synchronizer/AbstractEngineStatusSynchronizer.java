@@ -1,12 +1,12 @@
 package org.flexlb.sync.synchronizer;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
+import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.util.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,31 +50,25 @@ public abstract class AbstractEngineStatusSynchronizer {
     public AbstractEngineStatusSynchronizer(WorkerAddressService workerAddressService,
                                             EngineHealthReporter engineHealthReporter,
                                             EngineWorkerStatus engineWorkerStatus,
-                                            ModelMetaConfig modelMetaConfig) {
+                                            ModelMetaConfig modelMetaConfig,
+                                            ConfigService configService) {
         this.workerAddressService = workerAddressService;
         this.engineHealthReporter = engineHealthReporter;
         this.engineWorkerStatus = engineWorkerStatus;
         this.modelMetaConfig = modelMetaConfig;
-        int corePoolSize = 500;
-        int maximumPoolSize = 1000;
+        this.flexlbConfig = configService.loadBalanceConfig();
 
-        engineSyncExecutor = new ThreadPoolExecutor(corePoolSize, maximumPoolSize, 60L, TimeUnit.SECONDS,
+        engineSyncExecutor = new ThreadPoolExecutor(
+                flexlbConfig.getEngineSyncExecutorCoreSize(),
+                flexlbConfig.getEngineSyncExecutorMaxSize(), 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(15000), new NamedThreadFactory("engine-sync-executor"),
                 new ThreadPoolExecutor.CallerRunsPolicy());
 
-        statusCheckExecutor = new ThreadPoolExecutor(corePoolSize, maximumPoolSize, 60L, TimeUnit.SECONDS,
+        statusCheckExecutor = new ThreadPoolExecutor(
+                flexlbConfig.getStatusCheckExecutorCoreSize(),
+                flexlbConfig.getStatusCheckExecutorMaxSize(), 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(15000), new NamedThreadFactory("status-checker-executor"),
                 new ThreadPoolExecutor.CallerRunsPolicy());
-
-        String masterConfigStr = System.getenv("FLEXLB_CONFIG");
-        logger.warn("FLEXLB_CONFIG = {}", masterConfigStr);
-        FlexlbConfig masterConfig;
-        if (masterConfigStr != null) {
-            masterConfig = JsonUtils.toObject(masterConfigStr, FlexlbConfig.class);
-        } else {
-            masterConfig = new FlexlbConfig();
-        }
-        this.flexlbConfig = masterConfig;
     }
 
     protected abstract void syncEngineStatus();

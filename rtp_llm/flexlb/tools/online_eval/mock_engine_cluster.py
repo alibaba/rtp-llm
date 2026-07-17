@@ -13,7 +13,11 @@ from pathlib import Path
 
 from online_eval.mock_engine import MockEngineCluster
 from online_eval.proto_utils import ensure_proto_modules
-from online_eval.rt_model import PerformanceModel, load_performance_config
+from online_eval.rt_model import (
+    PerformanceModel,
+    extract_prefill_formula_from_master_config,
+    load_performance_config,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -23,6 +27,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-prefill", type=int, default=2)
     parser.add_argument("--n-decode", type=int, default=4)
     parser.add_argument("--performance", help="performance model JSON")
+    parser.add_argument(
+        "--master-config",
+        default=None,
+        help="Master config JSON (read PREFILL_TIME_FORMULA from here "
+        "so the mock engine uses the same formula as the Master, "
+        "eliminating coefficient duplication)",
+    )
     parser.add_argument("--prefill-cache-blocks", type=int, default=6000)
     parser.add_argument("--decode-cache-blocks", type=int, default=3000)
     parser.add_argument("--prefill-total-kv-tokens", type=int, default=6_291_456)
@@ -42,6 +53,31 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="JSON list of per-engine performance overrides, e.g. "
         '[{"name":"prefill-0","prefill_ms":200}]',
+    )
+    parser.add_argument(
+        "--shard-id",
+        type=int,
+        default=0,
+        help="Current shard ID (default 0)",
+    )
+    parser.add_argument(
+        "--total-shards",
+        type=int,
+        default=1,
+        help="Total number of shards (default 1)",
+    )
+    parser.add_argument(
+        "--partial-endpoint-file",
+        default=None,
+        help="Path to write partial endpoint file for this shard "
+        "(for multi-process sharding; default: not written)",
+    )
+    parser.add_argument(
+        "--http-port",
+        type=int,
+        default=None,
+        help="Override HTTP control port (default: auto-computed from "
+        "base_grpc_port and shard_id)",
     )
     return parser.parse_args()
 
@@ -111,15 +147,41 @@ async def main() -> None:
     pb2, pb2_grpc = ensure_proto_modules()
     perf_cfg = load_performance_config(args.performance)
     perf_cfg.setdefault("block_size", args.block_size)
+    # Read PREFILL_TIME_FORMULA from the master config so the mock engine
+    # evaluates the same formula as the Java Master — single source of truth.
+    formula_str = extract_prefill_formula_from_master_config(args.master_config)
+    if formula_str:
+        perf_cfg.setdefault("prefill", {})["formula_str"] = formula_str
     performance = PerformanceModel(perf_cfg)
     per_engine_perf = build_per_engine_perf(perf_cfg, args.per_engine_perf)
-    cluster = MockEngineCluster(
-        pb2, pb2_grpc, performance, base_http_port=args.base_grpc_port - 1
-    )
+    # HTTP control port: unique per shard when sharding.
+    # In multi-shard mode, placed well above the gRPC engine port range to
+    # avoid collisions with the Linux kernel ephemeral port range (32768-60999).
+    # In single-process mode, ``base - 1`` is kept for backward compatibility
+    # with standalone test scripts that compute ``MOCK_BASE_GRPC_PORT - 1``.
+    if args.http_port is not None:
+        http_port = args.http_port
+    elif args.total_shards > 1:
+        http_port = (
+            args.base_grpc_port + args.n_prefill + args.n_decode + 100 + args.shard_id
+        )
+    else:
+        http_port = args.base_grpc_port - 1
 
-    port = args.base_grpc_port
-    for i in range(args.n_prefill):
+    cluster = MockEngineCluster(pb2, pb2_grpc, performance, base_http_port=http_port)
+
+    # Calculate this shard's engine index ranges.
+    # Engine names and ports are global (based on the global engine index)
+    # so that merging endpoints from all shards produces globally unique
+    # names and ports.
+    pf_start = args.shard_id * args.n_prefill // args.total_shards
+    pf_end = (args.shard_id + 1) * args.n_prefill // args.total_shards
+    dc_start = args.shard_id * args.n_decode // args.total_shards
+    dc_end = (args.shard_id + 1) * args.n_decode // args.total_shards
+
+    for i in range(pf_start, pf_end):
         name = f"prefill-{i}"
+        port = args.base_grpc_port + i
         await cluster.add_engine(
             name=name,
             role="prefill",
@@ -130,9 +192,9 @@ async def main() -> None:
             block_size=args.block_size,
             performance_override=per_engine_perf.get(name),
         )
-        port += 1
-    for i in range(args.n_decode):
+    for i in range(dc_start, dc_end):
         name = f"decode-{i}"
+        port = args.base_grpc_port + args.n_prefill + i
         await cluster.add_engine(
             name=name,
             role="decode",
@@ -143,18 +205,35 @@ async def main() -> None:
             block_size=args.block_size,
             performance_override=per_engine_perf.get(name),
         )
-        port += 1
 
-    http_port = args.base_grpc_port - 1
-    await cluster.start_http_server(http_port)
-    await write_outputs(cluster, args)
-    print(
-        f"mock engine cluster started: {args.n_prefill} prefill, "
-        f"{args.n_decode} decode"
-    )
+    # Write partial endpoint file BEFORE starting the HTTP server so that
+    # if the HTTP server crashes, the launcher still knows which engines
+    # this shard intended to host.
+    if args.partial_endpoint_file:
+        write_partial_endpoints(cluster, args, http_port)
+    try:
+        await cluster.start_http_server(http_port)
+    except OSError as exc:
+        logging.error(
+            "shard %d: failed to start HTTP server on port %d: %s",
+            args.shard_id,
+            http_port,
+            exc,
+        )
+        raise
+    if args.total_shards <= 1:
+        await write_outputs(cluster, args)
+
+    n_pf = pf_end - pf_start
+    n_dc = dc_end - dc_start
+    print(f"mock engine cluster started: {n_pf} prefill, " f"{n_dc} decode")
     print(f"endpoint file: {args.endpoint_file}")
     print(f"flexlb env file: {args.env_file}")
     print(f"http control API on port {http_port}")
+    if args.total_shards > 1:
+        print(f"shard {args.shard_id}/{args.total_shards}")
+    if args.partial_endpoint_file:
+        print(f"partial endpoint file: {args.partial_endpoint_file}")
     print("press Ctrl-C to stop")
 
     stop_event = asyncio.Event()
@@ -199,6 +278,35 @@ async def write_outputs(cluster: MockEngineCluster, args: argparse.Namespace) ->
         env_lines.append(f"  '{key}={value}' \\")
     env_lines.append("  <your-flexlb-api-start-command>")
     env_path.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
+
+
+def write_partial_endpoints(
+    cluster: MockEngineCluster, args: argparse.Namespace, http_port: int
+) -> None:
+    """Write a partial endpoint file for this shard.
+
+    The file contains this shard's engine info in a format suitable for
+    merging by mock_engine_shard_launcher.py.
+    """
+    engines = []
+    for state in cluster.states:
+        engines.append(
+            {
+                "name": state.name,
+                "ip": state.host,
+                "grpc_port": state.grpc_port,
+                "http_port": state.http_port,
+                "role": state.role,
+            }
+        )
+    payload = {
+        "engines": engines,
+        "shard_id": args.shard_id,
+        "http_port": http_port,
+    }
+    path = Path(args.partial_endpoint_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 async def snapshot_loop(cluster: MockEngineCluster, interval_s: float) -> None:

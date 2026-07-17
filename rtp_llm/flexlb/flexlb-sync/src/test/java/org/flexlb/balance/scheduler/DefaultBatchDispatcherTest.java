@@ -55,7 +55,7 @@ class DefaultBatchDispatcherTest {
         config.setFlexlbBatchEnqueueDeadlineMs(5000);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService);
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
         callback = new TestCallback();
     }
 
@@ -65,8 +65,8 @@ class DefaultBatchDispatcherTest {
         BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
 
         EngineRpcService.EnqueueBatchResponsePB response = ackResponse(1L, List.of(1L));
-        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
-                .thenReturn(response);
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                .thenReturn(CompletableFuture.completedFuture(response));
 
         dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test_reason", callback);
 
@@ -80,8 +80,8 @@ class DefaultBatchDispatcherTest {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
 
-        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
-                .thenThrow(new RuntimeException("gRPC connection refused"));
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                .thenReturn(CompletableFuture.failedFuture(new RuntimeException("gRPC connection refused")));
 
         dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test_reason", callback);
 
@@ -95,8 +95,8 @@ class DefaultBatchDispatcherTest {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
 
-        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
-                .thenReturn(null);
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                .thenReturn(CompletableFuture.completedFuture(null));
 
         dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test_reason", callback);
 
@@ -108,11 +108,11 @@ class DefaultBatchDispatcherTest {
     void dispatchRejectsAckWithDifferentBatchId() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         BatchItem item = createBatchItem(8L, 500, 200, prefillEp);
-        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(), anyLong())).thenReturn(
-                EngineRpcService.EnqueueBatchResponsePB.newBuilder()
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong())).thenReturn(
+                CompletableFuture.completedFuture(EngineRpcService.EnqueueBatchResponsePB.newBuilder()
                         .setBatchId(87L)
                         .addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder().setRequestId(8L))
-                        .build());
+                        .build()));
 
         dispatcher.dispatch(List.of(item), prefillEp, 88L,
                 100, "batch_id_mismatch", callback);
@@ -130,10 +130,10 @@ class DefaultBatchDispatcherTest {
         cancelled.ctx().cancel(); // mark as cancelled
 
         AtomicReference<EngineRpcService.EnqueueBatchRequestPB> captured = new AtomicReference<>();
-        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenAnswer(inv -> {
                     captured.set(inv.getArgument(2));
-                    return ackResponse(1L, List.of(1L, 2L));
+                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L, 2L)));
                 });
 
         dispatcher.dispatch(List.of(active, cancelled), prefillEp, 1L, 100, "test", callback);
@@ -178,8 +178,8 @@ class DefaultBatchDispatcherTest {
                                         .build())
                                 .build())
                         .build();
-        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
-                .thenReturn(response);
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                .thenReturn(CompletableFuture.completedFuture(response));
 
         dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback);
 
@@ -196,8 +196,8 @@ class DefaultBatchDispatcherTest {
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
                         .setBatchId(1L)
                         .build(); // no success, no error
-        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
-                .thenReturn(response);
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                .thenReturn(CompletableFuture.completedFuture(response));
 
         dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback);
 
@@ -211,10 +211,10 @@ class DefaultBatchDispatcherTest {
 
         // Submit tasks so executor has work in flight
         CountDownLatch started = new CountDownLatch(1);
-        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenAnswer(inv -> {
                     started.countDown();
-                    return ackResponse(1L, List.of(1L));
+                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
                 });
 
         BatchItem item = createBatchItem(1L, 500, 200, prefillEp);

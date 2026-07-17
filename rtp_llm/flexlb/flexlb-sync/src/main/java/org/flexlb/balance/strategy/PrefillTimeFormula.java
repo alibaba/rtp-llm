@@ -60,6 +60,21 @@ public final class PrefillTimeFormula {
 
     private static final Set<String> AGGREGATE_FUNCTIONS = Set.of("sum");
 
+    static final int IDX_BATCH_SIZE = 0;
+    static final int IDX_INPUT_TOKENS = 1;
+    static final int IDX_HIT_CACHE_TOKENS = 2;
+    static final int IDX_COMPUTE_TOKENS = 3;
+    static final int IDX_HAS_HIT_CACHE = 4;
+    static final int VAR_COUNT = 5;
+
+    private static final Map<String, Integer> VAR_INDEX_MAP = Map.of(
+            "batchSize", IDX_BATCH_SIZE,
+            "inputTokens", IDX_INPUT_TOKENS,
+            "hitCacheTokens", IDX_HIT_CACHE_TOKENS,
+            "computeTokens", IDX_COMPUTE_TOKENS,
+            "hasHitCache", IDX_HAS_HIT_CACHE
+    );
+
     private final String source;
     private final Node root;
     private final Map<String, ParameterNode> parameters;
@@ -89,17 +104,17 @@ public final class PrefillTimeFormula {
 
     /**
      * Evaluate the formula with the given variable bindings.
-     * Missing keys default to 0.
+     * Array slots not set default to 0.0.
      */
-    public long evaluate(Map<String, Double> vars) {
+    public long evaluate(double[] vars) {
         return evaluate(vars, null);
     }
 
     /**
      * Evaluate the formula with aggregate-aware per-request bindings.
-     * {@code sum(expr)} evaluates {@code expr} for each map in {@code itemVars}.
+     * {@code sum(expr)} evaluates {@code expr} for each array in {@code itemVars}.
      */
-    public long evaluate(Map<String, Double> vars, List<Map<String, Double>> itemVars) {
+    public long evaluate(double[] vars, List<double[]> itemVars) {
         return (long) root.evaluate(new EvalContext(vars, itemVars));
     }
 
@@ -146,9 +161,13 @@ public final class PrefillTimeFormula {
         double evaluate(EvalContext ctx);
     }
 
-    private record EvalContext(Map<String, Double> vars, List<Map<String, Double>> itemVars) {
-        EvalContext withVars(Map<String, Double> nextVars) {
-            return new EvalContext(nextVars, null);
+    private static final class EvalContext {
+        double[] vars;
+        List<double[]> itemVars;
+
+        EvalContext(double[] vars, List<double[]> itemVars) {
+            this.vars = vars;
+            this.itemVars = itemVars;
         }
     }
 
@@ -159,11 +178,10 @@ public final class PrefillTimeFormula {
         }
     }
 
-    private record VariableNode(String name) implements Node {
+    private record VariableNode(int varIndex) implements Node {
         @Override
         public double evaluate(EvalContext ctx) {
-            Double v = ctx.vars().get(name);
-            return v != null ? v : 0.0;
+            return ctx.vars[varIndex];
         }
     }
 
@@ -211,13 +229,26 @@ public final class PrefillTimeFormula {
     private record AggregateFuncNode(Node arg) implements Node {
         @Override
         public double evaluate(EvalContext ctx) {
-            List<Map<String, Double>> itemVars = ctx.itemVars();
+            List<double[]> itemVars = ctx.itemVars;
             if (itemVars == null || itemVars.isEmpty()) {
-                return arg.evaluate(ctx.withVars(ctx.vars()));
+                ctx.itemVars = null;
+                try {
+                    return arg.evaluate(ctx);
+                } finally {
+                    ctx.itemVars = itemVars;
+                }
             }
             double total = 0.0;
-            for (Map<String, Double> item : itemVars) {
-                total += arg.evaluate(ctx.withVars(item));
+            double[] savedVars = ctx.vars;
+            ctx.itemVars = null;
+            try {
+                for (double[] item : itemVars) {
+                    ctx.vars = item;
+                    total += arg.evaluate(ctx);
+                }
+            } finally {
+                ctx.vars = savedVars;
+                ctx.itemVars = itemVars;
             }
             return total;
         }
@@ -351,7 +382,11 @@ public final class PrefillTimeFormula {
                 if (!supportedVariable.test(name)) {
                     throw error("Unknown variable: " + name);
                 }
-                return new VariableNode(name);
+                Integer idx = VAR_INDEX_MAP.get(name);
+                if (idx == null) {
+                    throw error("Variable not in index map: " + name);
+                }
+                return new VariableNode(idx);
             }
             if (hasNext() && (Character.isDigit(peek()) || peek() == '.')) {
                 return parseNumber();
@@ -372,7 +407,7 @@ public final class PrefillTimeFormula {
             }
             skipWs();
             Node initialValueNode = parseExpression();
-            double initialValue = initialValueNode.evaluate(new EvalContext(Map.of(), null));
+            double initialValue = initialValueNode.evaluate(new EvalContext(new double[VAR_COUNT], null));
             skipWs();
             if (!match(')')) {
                 throw error("Expected ')' after param() arguments");

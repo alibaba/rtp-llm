@@ -13,11 +13,14 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.enums.ScheduleModeEnum;
+import org.flexlb.interceptor.GrpcServerTimingInterceptor;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -36,23 +39,32 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private final ActiveRequestCounter activeRequestCounter;
     private final FlexlbGrpcForwarder grpcForwarder;
     private final ConfigService configService;
+    private final BatchSchedulerReporter batchSchedulerReporter;
+    private final ServerScheduleLatencyRecorder serverLatencyRecorder;
     public FlexlbServiceImpl(RouteService routeService,
                              LBStatusConsistencyService lbStatusConsistencyService,
                              EngineHealthReporter engineHealthReporter,
                              ActiveRequestCounter activeRequestCounter,
                              FlexlbGrpcForwarder grpcForwarder,
-                             ConfigService configService) {
+                             ConfigService configService,
+                             BatchSchedulerReporter batchSchedulerReporter,
+                             ServerScheduleLatencyRecorder serverLatencyRecorder) {
         this.routeService = routeService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.engineHealthReporter = engineHealthReporter;
         this.activeRequestCounter = activeRequestCounter;
         this.grpcForwarder = grpcForwarder;
         this.configService = configService;
+        this.batchSchedulerReporter = batchSchedulerReporter;
+        this.serverLatencyRecorder = serverLatencyRecorder;
     }
 
     @Override
     public void schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
                          StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver) {
+        Long interceptedEntryNanos = GrpcServerTimingInterceptor.getNanos();
+        serverLatencyRecorder.recordArrival(
+                interceptedEntryNanos != null ? interceptedEntryNanos : System.nanoTime());
         ActiveRequestCounter.RequestToken token = activeRequestCounter.acquire();
         AtomicBoolean responded = new AtomicBoolean(false);
         BalanceContext ctx = null;
@@ -190,8 +202,30 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private void completeSchedule(BalanceContext ctx,
                                   FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
                                   StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) {
-        observer.onNext(response);
-        observer.onCompleted();
+        // Report ACK-to-response time for BATCH path (only when engine ACK was received)
+        if (ctx != null && ctx.getAckAtMs() > 0) {
+            long ackToResponseMs = System.currentTimeMillis() - ctx.getAckAtMs();
+            String prefillIp = "";
+            String prefillIpPort = "";
+            if (ctx.getResponse() != null && ctx.getResponse().getServerStatus() != null) {
+                for (ServerStatus ss : ctx.getResponse().getServerStatus()) {
+                    if (ss.getRole() == RoleType.PREFILL) {
+                        prefillIp = ss.getServerIp() != null ? ss.getServerIp() : "";
+                        prefillIpPort = ss.getServerIp() != null
+                                ? ss.getServerIp() + ":" + ss.getHttpPort() : "";
+                        break;
+                    }
+                }
+            }
+            batchSchedulerReporter.reportAckToResponseTimeMs(
+                    RoleType.PREFILL.name(), prefillIp, prefillIpPort, ackToResponseMs);
+        }
+        try {
+            observer.onNext(response);
+            observer.onCompleted();
+        } finally {
+            serverLatencyRecorder.recordCompletion(ctx, System.nanoTime());
+        }
         if (ctx != null) {
             ctx.setSuccess(response.getSuccess());
             if (!response.getSuccess()) {
@@ -236,6 +270,17 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
 
         ctx.setScheduleMode(resolveScheduleMode(pb.getScheduleMode(), configService.loadBalanceConfig()));
+
+        // Capture gRPC server entry time from interceptor context for delay metric splitting
+        Long grpcEntryTime = GrpcServerTimingInterceptor.get();
+        if (grpcEntryTime != null) {
+            ctx.setGrpcEntryTime(grpcEntryTime);
+        }
+        Long grpcEntryNanos = GrpcServerTimingInterceptor.getNanos();
+        if (grpcEntryNanos != null) {
+            ctx.setGrpcEntryNanos(grpcEntryNanos);
+        }
+
         return ctx;
     }
 

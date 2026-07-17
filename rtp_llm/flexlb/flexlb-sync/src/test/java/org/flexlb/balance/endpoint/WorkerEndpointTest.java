@@ -203,7 +203,9 @@ class WorkerEndpointTest {
         assertEquals(1L, status.getDpRank());
         assertEquals(10000L, status.getAvailableKvCacheTokens().get());
         assertEquals(5L, status.getStatusVersion().get());
-        assertEquals(3L, status.getLatestFinishedTaskVersion().get());
+        // latestFinishedTaskVersion is intentionally NOT set by updateFromResponse();
+        // it is advanced only after calibrate processes finished tasks
+        assertEquals(-1L, status.getLatestFinishedTaskVersion().get());
     }
 
     @Test
