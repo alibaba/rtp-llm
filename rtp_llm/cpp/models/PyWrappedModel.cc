@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include <algorithm>
 #include <cstdint>
 #include <stdexcept>
 #include <mutex>
@@ -452,6 +453,22 @@ torch_ext::PyMultimodalInputs PyWrappedModel::buildPyMultimodalInputs(const GptM
     return multimodal_input;
 }
 
+bool PyWrappedModel::shouldUseContextParallel(const GptModelInputs& inputs, bool enable_prefill_cp) {
+    if (!enable_prefill_cp || inputs.prefix_lengths.numel() == 0 || inputs.is_target_verify) {
+        return false;
+    }
+    const bool has_multimodal_input =
+        (inputs.multimodal_features.has_value() && !inputs.multimodal_features->empty())
+        || (inputs.mm_extra_input.has_value() && !inputs.mm_extra_input->empty())
+        || (inputs.mm_features_locs.defined() && inputs.mm_features_locs.numel() > 0)
+        || (inputs.text_tokens_mask.defined() && inputs.text_tokens_mask.numel() > 0);
+    const bool has_mtp_hidden_states =
+        inputs.last_hidden_states.defined() && inputs.last_hidden_states.numel() > 0;
+    const bool has_explicit_position_ids =
+        inputs.combo_position_ids.defined() && inputs.combo_position_ids.numel() > 0;
+    return !has_multimodal_input && !has_mtp_hidden_states && !has_explicit_position_ids;
+}
+
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
     d2d_copies_.clear();
@@ -467,33 +484,38 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             return forwardMicroBatched(inputs);
         }
         PyContextParallelParams cp_params;
-        if (device_props_.enable_prefill_cp) {
-            context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
+        GptModelInputs          cp_inputs;
+        const bool enable_context_parallel = shouldUseContextParallel(inputs, device_props_.enable_prefill_cp);
+        if (enable_context_parallel) {
+            cp_inputs               = inputs;
+            cp_inputs.input_lengths = inputs.input_lengths.clone().pin_memory();
+            context_parallel_processor_->handleInputs(cp_inputs, cp_params);
         }
+        const GptModelInputs& forward_inputs = enable_context_parallel ? cp_inputs : inputs;
 
         torch::Tensor token_ids;
-        token_ids = tensorHoldHostAndToCuda(inputs.combo_tokens);
+        token_ids = tensorHoldHostAndToCuda(forward_inputs.combo_tokens);
 
         torch::Tensor input_hiddens =
-            inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
+            forward_inputs.last_hidden_states.defined() ? forward_inputs.last_hidden_states : torch::empty({0});
 
-        torch::Tensor combo_position_ids = inputs.combo_position_ids.defined() ?
-                                               tensorHoldHostAndToCuda(inputs.combo_position_ids) :
+        torch::Tensor combo_position_ids = forward_inputs.combo_position_ids.defined() ?
+                                               tensorHoldHostAndToCuda(forward_inputs.combo_position_ids) :
                                                torch::empty({0});
 
-        auto embedding_inputs      = buildPyEmbeddingInputs(inputs);
-        auto multimodal_inputs     = buildPyMultimodalInputs(inputs);
-        auto attention_inputs      = buildPyAttentionInputs(inputs);
-        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
-        if (device_props_.enable_prefill_cp) {
+        auto embedding_inputs      = buildPyEmbeddingInputs(forward_inputs);
+        auto multimodal_inputs     = buildPyMultimodalInputs(forward_inputs);
+        auto attention_inputs      = buildPyAttentionInputs(forward_inputs);
+        auto bert_embedding_inputs = buildBertEmbeddingInputs(forward_inputs);
+        if (enable_context_parallel) {
             attention_inputs.context_parallel_info = cp_params;
         }
 
-        if (!inputs.warmup && inputs.pd_separation) {
-            attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
+        if (!forward_inputs.warmup && forward_inputs.pd_separation) {
+            attention_inputs.cache_store_inputs = prepareWriteCacheParams(forward_inputs);
             cache_store_async_writer_->init();
         }
-        setupKVCacheForAttentionInputs(attention_inputs, inputs);
+        setupKVCacheForAttentionInputs(attention_inputs, forward_inputs);
 
         calculatePaddingOffset(attention_inputs);
         attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
@@ -540,16 +562,16 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             hidden_states         = py_model_outputs.hidden_states.clone();
         }
 
-        if (!inputs.warmup && inputs.pd_separation) {
+        if (!forward_inputs.warmup && forward_inputs.pd_separation) {
             cache_store_async_writer_->waitAllDone();
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-        if (device_props_.enable_prefill_cp) {
-            size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
+        if (enable_context_parallel) {
+            size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, forward_inputs, cp_params);
+            return callForwardPostLayers(hidden_states, forward_inputs, true, num_valid_tokens);
         }
-        return callForwardPostLayers(hidden_states, inputs, true);
+        return callForwardPostLayers(hidden_states, forward_inputs, true);
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());

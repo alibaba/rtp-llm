@@ -270,6 +270,13 @@ def h20_oss_suites():
                 gpu_type=["H20"],
             ),
             smoke_test(
+                name="next_mtp_cp2_multimodal",
+                task_info="data/model/qwen35/q_r_35b_moe_vl_fp8.json",
+                smoke_args="--use_local 1 --act_type BF16 --seq_size_per_block 2048 --tp_size 2 --ep_size 2 --world_size 2 --local_world_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 30000 --enable_cuda_graph 0 --warm_up 0 --cp_rotate_method ALL_GATHER --use_all_gather=0 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16",
+                gpu_type=["H20"],
+                data=native.glob(['data/model/qwen_vl/*.jpeg']),
+            ),
+            smoke_test(
                 name="next_mtp_reuse",
                 task_info="data/model/qwen3_next/q_r_next_fp8_tp2_mtp_reuse_cache.json",
                 smoke_args="--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --reuse_cache 1",

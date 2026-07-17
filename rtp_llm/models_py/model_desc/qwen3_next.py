@@ -1,4 +1,3 @@
-import logging
 import sys
 from typing import Any, Dict, Optional
 
@@ -516,6 +515,7 @@ class Qwen3NextAttention(CausalAttention):
         layernorm_eps: float,
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        layer_idx: int = 0,
     ):
         super().__init__(
             attn_config,
@@ -524,6 +524,7 @@ class Qwen3NextAttention(CausalAttention):
             layernorm_eps,
             quant_config,
             hw_kernel_config=hw_kernel_config,
+            layer_idx=layer_idx,
         )
         # maybe fuse gate in qkv_proj later
         self.gate = LinearFactory.create_linear_from_weights(
@@ -951,6 +952,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 config.quant_config,
                 hw_kernel_config=hw_kernel_config,
+                layer_idx=layer_idx,
             )
 
         if config.moe_style == 2:
@@ -1122,7 +1124,7 @@ class Qwen3NextModel(GptModelBase):
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         prefill_conv1d_meta = None
         is_target_verify = attention_inputs.is_target_verify
-        is_cp = self.parallelism_config.prefill_cp_config.is_enabled()
+        is_cp = attention_inputs.context_parallel_info is not None
 
         full_prefill_conv1d_meta = None
         full_prefill_cu_seqlens = None

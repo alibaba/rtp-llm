@@ -39,6 +39,41 @@ class FusedRopeKVCachePrefillOpBase:
     def __init__(self, attn_configs: AttentionConfigs) -> None:
         self.attn_configs = attn_configs
 
+    @staticmethod
+    def _get_cp_position_ids(attn_inputs: PyAttentionInputs) -> torch.Tensor:
+        cp_info = attn_inputs.context_parallel_info
+        shuffle_indices = cp_info.prefill_shuffle_indices
+        if not attn_inputs.prefix_lengths.any().item():
+            return shuffle_indices
+
+        # Explicit position_ids override the kernel's prefix offset. Convert each
+        # request-local CP index to an absolute position and keep padding at zero.
+        chunk_lengths = cp_info.prefill_cp_chunk_lengths
+        output_size = shuffle_indices.numel()
+        prefix_lengths = torch.repeat_interleave(
+            attn_inputs.prefix_lengths_device,
+            chunk_lengths,
+            output_size=output_size,
+        )
+        actual_input_lengths = cp_info.prefill_actual_input_lengths_cpu.to(
+            device=shuffle_indices.device,
+            dtype=shuffle_indices.dtype,
+            non_blocking=True,
+        )
+        actual_input_lengths = torch.repeat_interleave(
+            actual_input_lengths,
+            chunk_lengths,
+            output_size=output_size,
+        )
+        valid_tokens = shuffle_indices.ge(0) & shuffle_indices.lt(
+            actual_input_lengths
+        )
+        return torch.where(
+            valid_tokens,
+            shuffle_indices + prefix_lengths,
+            torch.zeros_like(shuffle_indices),
+        )
+
     def prepare(self, attn_inputs: PyAttentionInputs) -> FusedRopeAttnParams:
         if (
             attn_inputs.kv_cache_kernel_block_id is not None
@@ -52,8 +87,14 @@ class FusedRopeKVCachePrefillOpBase:
         kv_cache_offset_h = None # not used
 
         position_ids = attn_inputs.combo_position_ids
-        if attn_inputs.context_parallel_info is not None:
-            position_ids = attn_inputs.context_parallel_info.prefill_shuffle_indices
+        has_explicit_position_ids = (
+            position_ids is not None and position_ids.numel() > 0
+        )
+        if (
+            attn_inputs.context_parallel_info is not None
+            and not has_explicit_position_ids
+        ):
+            position_ids = self._get_cp_position_ids(attn_inputs)
 
         return FusedRopeAttnParams(
             kv_cache_offset,
