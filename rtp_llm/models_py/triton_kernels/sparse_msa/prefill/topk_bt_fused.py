@@ -48,6 +48,28 @@ def _patch_fmha_sm100_cxx_standard():
         pass
 
 
+def _patch_cutlass_cute_thrmma():
+    """Compat shim for nvidia-cutlass-dsl 4.6.0.dev0.
+
+    fmha_sm100's kernel modules annotate params as ``cute.core.ThrMma``, but this
+    cutlass-dsl daily relocated ``ThrMma`` from ``cutlass.cute.core`` to
+    ``cutlass.cute.atom`` (still re-exported as ``cutlass.cute.ThrMma``). The
+    annotations are evaluated at import, so the stale ``core.ThrMma`` reference
+    raises ``AttributeError`` and aborts the engine on the first sparse forward.
+    FA4 (flash_attn_4==4.6.0.dev0) and flashinfer/trtllm (>=4.5.0) both require
+    this exact dsl, so re-aliasing the one relocated symbol is the least-invasive
+    fix (no version change, no lock-file churn)."""
+    try:
+        import cutlass.cute.atom as _atom
+        import cutlass.cute.core as _core
+
+        if not hasattr(_core, "ThrMma") and hasattr(_atom, "ThrMma"):
+            _core.ThrMma = _atom.ThrMma
+    except Exception:
+        pass
+
+
+_patch_cutlass_cute_thrmma()
 _patch_fmha_sm100_cxx_standard()
 
 

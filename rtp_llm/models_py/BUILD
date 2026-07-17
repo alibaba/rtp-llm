@@ -13,11 +13,14 @@ deep = ["deep_gemm", "deep_ep"]
 flashmla = ["fast-hadamard-transform", "flash-mla", "tilelang"]
 rtp_kernel = ["rtp-kernel"]
 flashattn = ["flash_attn","flash-attn-3"]
+# FA4 (Blackwell paged fp8) — cuda13 x86 only, see arch_select _CUDA13_X86_ONLY.
+flashattn4 = ["flash-attn-4"]
 requirement(flashinfer)
 requirement(deep)
 requirement(flashmla)
 requirement(rtp_kernel)
 requirement(flashattn)
+requirement(flashattn4)
 
 
 filegroup(
