@@ -5,6 +5,7 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 
 import java.util.Comparator;
+import java.util.ArrayList;
 import java.util.concurrent.PriorityBlockingQueue;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -88,6 +89,30 @@ class FixedWindowBatcherAlgorithmTest {
         long fixedWaitMs = algo.headWaitMs(ctx);
         assertTrue(fixedWaitMs >= 95 && fixedWaitMs <= 100,
                 "FixedWindow should return ~100ms remaining, got " + fixedWaitMs);
+    }
+
+    @Test
+    void contextQueueDepthTracksMutationsWithoutQueueSizeReads() {
+        BatchItem first = enqueuedItem(1L, 1L);
+        BatchItem second = enqueuedItem(2L, 2L);
+        PriorityBlockingQueue<BatchItem> queue = queueWith(first, second);
+        BatcherContext ctx = new BatcherContext(
+                "test", null, new FlexlbConfig(), null, queue,
+                mock(BatchSchedulerReporter.class));
+
+        assertEquals(2, ctx.size());
+        assertEquals(first, ctx.poll());
+        assertEquals(1, ctx.size());
+        assertTrue(ctx.remove(second));
+        assertEquals(0, ctx.size());
+        assertTrue(ctx.isEmpty());
+
+        queue.add(first);
+        BatcherContext drainCtx = new BatcherContext(
+                "test", null, new FlexlbConfig(), null, queue,
+                mock(BatchSchedulerReporter.class));
+        drainCtx.drainTo(new ArrayList<>());
+        assertEquals(0, drainCtx.size());
     }
 
     // ---- helpers ----

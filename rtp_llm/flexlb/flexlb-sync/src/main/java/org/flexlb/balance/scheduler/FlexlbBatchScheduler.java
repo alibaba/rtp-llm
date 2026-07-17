@@ -175,6 +175,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 return future;
             }
             WorkerBatcher batcher = prefillEp.getBatcher();
+            ctx.setRouteSubmittedNanos(System.nanoTime());
             batcher.offer(item);
 
             // Report route+submit time: from schedule() entry (ctx.startTime) to batcher offer completion
@@ -445,6 +446,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             InflightEntry entry = entryFor(item);
             if (entry != null) {
                 entry.lifecycle.markDispatched();
+                item.ctx().setBatchDispatchedNanos(System.nanoTime());
             }
         }
 
@@ -457,7 +459,17 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     public void onSuccess(BatchItem item, long batchId) {
         InflightEntry entry = entryFor(item);
         if (entry == null) {
-            // The request already reached a terminal state and was removed.
+            // A fast worker can report decode completion before the EnqueueBatch
+            // ACK callback runs. The lifecycle is tombstoned, but the Schedule
+            // future still needs the successful ACK response.
+            RequestLifecycleSnapshot terminal = terminalStates.get(item.requestId());
+            if (terminal != null
+                    && terminal.state() == RequestLifecycleState.COMPLETED
+                    && !item.future().isDone()) {
+                item.ctx().setAckAtMs(System.currentTimeMillis());
+                item.ctx().setAckAtNanos(System.nanoTime());
+                completeSuccess(item);
+            }
             return;
         }
 
@@ -473,6 +485,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             if (snapshot.state() == RequestLifecycleState.ACKNOWLEDGED) {
                 // Record ACK timestamp for ack_to_response_time_ms metric (reported in FlexlbServiceImpl.completeSchedule)
                 item.ctx().setAckAtMs(System.currentTimeMillis());
+                item.ctx().setAckAtNanos(System.nanoTime());
 
                 long dispatchedAtMs = entry.lifecycle.getDispatchedAtMs();
                 if (dispatchedAtMs > 0) {
@@ -492,12 +505,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             cancelAfterAck = snapshot.state() == RequestLifecycleState.CANCEL_REQUESTED
                     || snapshot.state() == RequestLifecycleState.TIMED_OUT;
             if (!cancelAfterAck && !snapshot.state().isTerminal() && !item.future().isDone()) {
-                Response success = copyResponse(item.routeResponse());
-                success.setSuccess(true);
-                success.setCode(200);
-                success.setEnqueuedByMaster(true);
-                success.setQueueLength(inflight.size());
-                item.future().complete(success);
+                completeSuccess(item);
                 Logger.debug("FlexLB batch enqueued request {} in batch_id={}",
                         item.requestId(), batchId);
             }
@@ -516,6 +524,15 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 }
             }
         }
+    }
+
+    private void completeSuccess(BatchItem item) {
+        Response success = copyResponse(item.routeResponse());
+        success.setSuccess(true);
+        success.setCode(200);
+        success.setEnqueuedByMaster(true);
+        success.setQueueLength(inflight.size());
+        item.future().complete(success);
     }
 
     @Override

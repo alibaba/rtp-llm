@@ -10,6 +10,8 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.PriorityBlockingQueue;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Per-worker request batcher that owns the queue and lifecycle, delegating
@@ -26,6 +28,8 @@ public class WorkerBatcher {
     private final BatchDecisionHandler handler;
     private final PriorityBlockingQueue<BatchItem> queue =
             new PriorityBlockingQueue<>(11, Comparator.comparingLong(BatchItem::sortKey));
+    private final AtomicInteger queueDepth = new AtomicInteger();
+    private final AtomicLong headSortKey = new AtomicLong();
     private final Thread workerThread;
     private volatile boolean stopped;
     private final BatcherAlgorithm algorithm;
@@ -39,7 +43,8 @@ public class WorkerBatcher {
         this.cfg = cfg;
         this.handler = handler;
         this.algorithm = createAlgorithm(cfg);
-        this.ctx = new BatcherContext(key, prefillEp, cfg, handler, queue, reporter);
+        this.ctx = new BatcherContext(
+                key, prefillEp, cfg, handler, queue, queueDepth, headSortKey, reporter);
         this.workerThread = new Thread(this::runLoop, "flexlb-batcher-" + key);
         this.workerThread.setDaemon(true);
         this.workerThread.setUncaughtExceptionHandler((t, e) ->
@@ -65,24 +70,30 @@ public class WorkerBatcher {
             return;
         }
         int maxSize = cfg.getFlexlbBatchQueueMaxSize();
-        if (maxSize > 0 && queue.size() >= maxSize) {
+        if (!reserveQueueSlot(maxSize)) {
             handler.onOfferFailure(item,
                     new IllegalStateException("FlexLB batcher queue full, maxSize=" + maxSize));
             return;
         }
-        long sortKey = algorithm.computeSortKey(ctx, item);
-        item.setSortKey(sortKey);
-        algorithm.onOffer(ctx, item, System.currentTimeMillis());
-        queue.add(item);
+        try {
+            long sortKey = algorithm.computeSortKey(ctx, item);
+            item.setSortKey(sortKey);
+            algorithm.onOffer(ctx, item, System.currentTimeMillis());
+            queue.add(item);
+            ctx.refreshHeadSortKey();
+        } catch (RuntimeException | Error e) {
+            queueDepth.decrementAndGet();
+            ctx.refreshHeadSortKey();
+            throw e;
+        }
     }
 
     public int queueSize() {
-        return queue.size();
+        return queueDepth.get();
     }
 
     public long headSortKey() {
-        BatchItem head = queue.peek();
-        return head != null ? head.sortKey() : 0;
+        return headSortKey.get();
     }
 
     /**
@@ -90,7 +101,16 @@ public class WorkerBatcher {
      * Delegates to the algorithm-specific {@link BatcherAlgorithm#headWaitMs}.
      */
     public long headWaitMs() {
-        return algorithm.headWaitMs(ctx);
+        long currentHeadSortKey = headSortKey.get();
+        if (queueDepth.get() == 0 || currentHeadSortKey == 0) {
+            return 0;
+        }
+        long now = System.currentTimeMillis();
+        if (algorithm instanceof FixedWindowBatcherAlgorithm) {
+            long elapsedMs = now - currentHeadSortKey;
+            return Math.max(0, cfg.getFlexlbBatchFixedWaitMs() - elapsedMs);
+        }
+        return Math.max(0, currentHeadSortKey - now);
     }
 
     /**
@@ -98,7 +118,10 @@ public class WorkerBatcher {
      * Delegates to the algorithm-specific {@link BatcherAlgorithm#queueWaitMs}.
      */
     public long queueWaitMs() {
-        return algorithm.queueWaitMs(ctx);
+        if (queueDepth.get() == 0 && algorithm instanceof FixedWindowBatcherAlgorithm) {
+            return cfg.getFlexlbBatchFixedWaitMs();
+        }
+        return headWaitMs();
     }
 
     public void shutdown() {
@@ -106,7 +129,7 @@ public class WorkerBatcher {
         workerThread.interrupt();
         algorithm.onShutdown(ctx);
         List<BatchItem> remaining = new ArrayList<>();
-        queue.drainTo(remaining);
+        ctx.drainTo(remaining);
         for (BatchItem item : remaining) {
             handler.onOfferFailure(item,
                     new CancellationException("FlexLB batcher stopped: " + key));
@@ -132,5 +155,21 @@ public class WorkerBatcher {
     private void waitForNonEmpty() throws InterruptedException {
         BatchItem item = queue.take();
         queue.put(item);
+    }
+
+    private boolean reserveQueueSlot(int maxSize) {
+        if (maxSize <= 0) {
+            queueDepth.incrementAndGet();
+            return true;
+        }
+        while (true) {
+            int current = queueDepth.get();
+            if (current >= maxSize) {
+                return false;
+            }
+            if (queueDepth.compareAndSet(current, current + 1)) {
+                return true;
+            }
+        }
     }
 }

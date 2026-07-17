@@ -27,6 +27,7 @@ public class GrpcServerTimingInterceptor implements ServerInterceptor {
      * Accessed by {@code FlexlbServiceImpl} via {@link #get()}.
      */
     public static final Context.Key<Long> GRPC_ENTRY_TIME_KEY = Context.key("grpcEntryTime");
+    public static final Context.Key<Long> GRPC_ENTRY_NANOS_KEY = Context.key("grpcEntryNanos");
 
     /**
      * Convenience method to retrieve the current gRPC entry time from the
@@ -37,12 +38,19 @@ public class GrpcServerTimingInterceptor implements ServerInterceptor {
         return GRPC_ENTRY_TIME_KEY.get();
     }
 
+    public static Long getNanos() {
+        return GRPC_ENTRY_NANOS_KEY.get();
+    }
+
     @Override
     public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
             ServerCall<ReqT, RespT> call, Metadata headers,
             ServerCallHandler<ReqT, RespT> next) {
         long grpcEntryTime = System.currentTimeMillis();
-        Context ctx = Context.current().withValue(GRPC_ENTRY_TIME_KEY, grpcEntryTime);
+        long grpcEntryNanos = System.nanoTime();
+        Context ctx = Context.current()
+                .withValue(GRPC_ENTRY_TIME_KEY, grpcEntryTime)
+                .withValue(GRPC_ENTRY_NANOS_KEY, grpcEntryNanos);
         return Contexts.interceptCall(ctx, call, headers, next);
     }
 }

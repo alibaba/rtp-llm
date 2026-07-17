@@ -33,6 +33,7 @@ class FlexlbServiceImplTest {
     private FlexlbGrpcForwarder grpcForwarder;
     private ConfigService configService;
     private BatchSchedulerReporter batchSchedulerReporter;
+    private ServerScheduleLatencyRecorder serverLatencyRecorder;
     private FlexlbServiceImpl service;
 
     @BeforeEach
@@ -43,6 +44,7 @@ class FlexlbServiceImplTest {
         activeRequestCounter = mock(ActiveRequestCounter.class);
         grpcForwarder = mock(FlexlbGrpcForwarder.class);
         batchSchedulerReporter = mock(BatchSchedulerReporter.class);
+        serverLatencyRecorder = mock(ServerScheduleLatencyRecorder.class);
 
         configService = mock(ConfigService.class);
         FlexlbConfig flexlbConfig = new FlexlbConfig();
@@ -58,7 +60,8 @@ class FlexlbServiceImplTest {
                 activeRequestCounter,
                 grpcForwarder,
                 configService,
-                batchSchedulerReporter
+                batchSchedulerReporter,
+                serverLatencyRecorder
         );
     }
 
@@ -93,6 +96,8 @@ class FlexlbServiceImplTest {
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB resp = captor.getValue();
         assertTrue(resp.getSuccess());
         assertEquals(200, resp.getCode());
+        verify(serverLatencyRecorder).recordArrival(anyLong());
+        verify(serverLatencyRecorder).recordCompletion(any(BalanceContext.class), anyLong());
     }
 
     @Test

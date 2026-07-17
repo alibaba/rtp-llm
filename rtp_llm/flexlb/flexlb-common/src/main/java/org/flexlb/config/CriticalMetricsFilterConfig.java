@@ -2,6 +2,7 @@ package org.flexlb.config;
 
 import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.config.MeterFilter;
+import io.micrometer.core.instrument.config.MeterFilterReply;
 import org.flexlb.metric.MicrometerFlexMonitor;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -65,13 +66,14 @@ public class CriticalMetricsFilterConfig {
     public MeterFilter criticalMetricsOnlyFilter() {
         return new MeterFilter() {
             @Override
-            public Meter.Id map(Meter.Id id) {
+            public MeterFilterReply accept(Meter.Id id) {
                 String name = id.getName();
                 if (!name.startsWith(METRIC_PREFIX)) {
-                    return id;
+                    return MeterFilterReply.NEUTRAL;
                 }
                 String unprefixed = name.substring(METRIC_PREFIX.length());
-                return CRITICAL_METRICS.contains(unprefixed) ? id : null;
+                return CRITICAL_METRICS.contains(unprefixed)
+                        ? MeterFilterReply.NEUTRAL : MeterFilterReply.DENY;
             }
         };
     }

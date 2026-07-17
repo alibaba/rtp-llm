@@ -40,13 +40,15 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private final FlexlbGrpcForwarder grpcForwarder;
     private final ConfigService configService;
     private final BatchSchedulerReporter batchSchedulerReporter;
+    private final ServerScheduleLatencyRecorder serverLatencyRecorder;
     public FlexlbServiceImpl(RouteService routeService,
                              LBStatusConsistencyService lbStatusConsistencyService,
                              EngineHealthReporter engineHealthReporter,
                              ActiveRequestCounter activeRequestCounter,
                              FlexlbGrpcForwarder grpcForwarder,
                              ConfigService configService,
-                             BatchSchedulerReporter batchSchedulerReporter) {
+                             BatchSchedulerReporter batchSchedulerReporter,
+                             ServerScheduleLatencyRecorder serverLatencyRecorder) {
         this.routeService = routeService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.engineHealthReporter = engineHealthReporter;
@@ -54,11 +56,15 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         this.grpcForwarder = grpcForwarder;
         this.configService = configService;
         this.batchSchedulerReporter = batchSchedulerReporter;
+        this.serverLatencyRecorder = serverLatencyRecorder;
     }
 
     @Override
     public void schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
                          StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver) {
+        Long interceptedEntryNanos = GrpcServerTimingInterceptor.getNanos();
+        serverLatencyRecorder.recordArrival(
+                interceptedEntryNanos != null ? interceptedEntryNanos : System.nanoTime());
         ActiveRequestCounter.RequestToken token = activeRequestCounter.acquire();
         AtomicBoolean responded = new AtomicBoolean(false);
         BalanceContext ctx = null;
@@ -214,8 +220,12 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             batchSchedulerReporter.reportAckToResponseTimeMs(
                     RoleType.PREFILL.name(), prefillIp, prefillIpPort, ackToResponseMs);
         }
-        observer.onNext(response);
-        observer.onCompleted();
+        try {
+            observer.onNext(response);
+            observer.onCompleted();
+        } finally {
+            serverLatencyRecorder.recordCompletion(ctx, System.nanoTime());
+        }
         if (ctx != null) {
             ctx.setSuccess(response.getSuccess());
             if (!response.getSuccess()) {
@@ -265,6 +275,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         Long grpcEntryTime = GrpcServerTimingInterceptor.get();
         if (grpcEntryTime != null) {
             ctx.setGrpcEntryTime(grpcEntryTime);
+        }
+        Long grpcEntryNanos = GrpcServerTimingInterceptor.getNanos();
+        if (grpcEntryNanos != null) {
+            ctx.setGrpcEntryNanos(grpcEntryNanos);
         }
 
         return ctx;

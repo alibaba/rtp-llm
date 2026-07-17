@@ -48,6 +48,7 @@
         <module>flexlb-common</module>
         <module>flexlb-grpc</module>
         <module>flexlb-cache</module>
+        <module>flexlb-mock-engine</module>
     </modules>
 
     <!-- 此处定义所有模块都依赖的 -->

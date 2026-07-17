@@ -10,7 +10,9 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -232,6 +234,43 @@ class FlexlbBatchSchedulerTest {
         Response secondResp = second.get(2, TimeUnit.SECONDS);
         assertFalse(secondResp.isSuccess());
         assertTrue(secondResp.getErrorMessage().contains("EnqueueBatch missing ack for request 84"));
+    }
+
+    @Test
+    void worker_completion_before_enqueue_ack_still_completes_schedule_future() throws Exception {
+        config.setFlexlbBatchSizeMax(1);
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> ackFuture = new CompletableFuture<>();
+        CountDownLatch enqueueStarted = new CountDownLatch(1);
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
+                any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                .thenAnswer(inv -> {
+                    EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
+                    sentBatches.add(request);
+                    enqueueStarted.countDown();
+                    return ackFuture;
+                });
+
+        CompletableFuture<Response> scheduleFuture = scheduler.submit(context(85));
+        assertTrue(enqueueStarted.await(2, TimeUnit.SECONDS));
+        FlexlbBatchScheduler.InflightEntry entry = scheduler.inflight.get(85L);
+        long batchId = entry.lifecycle.snapshot().batchId();
+
+        TaskInfo finished = new TaskInfo();
+        finished.setRequestId(85L);
+        finished.setBatchId(batchId);
+        WorkerStatusResponse status = new WorkerStatusResponse();
+        status.setRole(RoleType.DECODE);
+        status.setFinishedTaskInfo(Map.of("85", finished));
+        scheduler.onWorkerStatusUpdate(new WorkerStatus(), status);
+
+        assertFalse(scheduleFuture.isDone());
+        ackFuture.complete(ackFor(sentBatches.getFirst()));
+
+        Response response = scheduleFuture.get(2, TimeUnit.SECONDS);
+        assertTrue(response.isSuccess());
+        assertTrue(response.isEnqueuedByMaster());
+        assertEquals(RequestLifecycleState.COMPLETED,
+                scheduler.getRequestState(85L, batchId).state());
     }
 
     @Test

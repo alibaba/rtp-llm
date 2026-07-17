@@ -9,6 +9,8 @@ import json
 import os
 import socket
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -54,6 +56,9 @@ def parse_args() -> argparse.Namespace:
         help="number of gRPC channels per target for channel pooling (default 8, "
         "env FLEXLB_N_CHANNELS)",
     )
+    parser.add_argument("--num-shards", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
+    parser.add_argument("--skip-server-latency", action="store_true")
     parser.add_argument(
         "--schedule-mode", choices=["auto", "batch", "direct", "queue"], default="batch"
     )
@@ -137,10 +142,12 @@ class LoadClient:
         self.per_request_path = self.output_dir / "per_request.jsonl"
         self.summary_path = self.output_dir / "summary.json"
         self.report_path = self.output_dir / "report.md"
-        self._write_lock = asyncio.Lock()
+        self.server_latency_path = self.output_dir / "server_latency.json"
         self._results: List[dict] = []
         self._channels: Dict[str, List[object]] = {}
         self._channel_rr: Dict[str, int] = {}
+        self._schedule_stubs: Dict[str, List[object]] = {}
+        self._schedule_stub_rr: Dict[str, int] = {}
         self._n_channels: int = getattr(args, "n_channels", 8) or 8
         self._fallback_prefill_addrs: List[str] = []
         self._fallback_decode_addrs: List[str] = []
@@ -165,6 +172,8 @@ class LoadClient:
                 await channel.close()
         self._channels.clear()
         self._channel_rr.clear()
+        self._schedule_stubs.clear()
+        self._schedule_stub_rr.clear()
 
     async def run(self) -> None:
         # When loop is enabled, load all trace records (no duration/limit filter).
@@ -180,6 +189,19 @@ class LoadClient:
         )
         if not requests:
             raise RuntimeError("no replayable requests loaded")
+
+        trace_first_ts = requests[0].ts_ms
+        trace_last_ts = requests[-1].ts_ms
+        if self.args.num_shards > 1:
+            if not 0 <= self.args.shard_index < self.args.num_shards:
+                raise ValueError("shard-index must be in [0, num-shards)")
+            requests = [
+                request
+                for index, request in enumerate(requests)
+                if index % self.args.num_shards == self.args.shard_index
+            ]
+            if not requests:
+                raise RuntimeError("trace shard has no replayable requests")
 
         # Apply length truncation if requested
         if self.args.max_input_len > 0 or self.args.max_output_len > 0:
@@ -206,7 +228,11 @@ class LoadClient:
                 flush=True,
             )
 
-        print(f"loaded {len(requests)} requests from {self.args.trace}", flush=True)
+        print(
+            f"loaded {len(requests)} requests from {self.args.trace} "
+            f"(shard={self.args.shard_index}/{self.args.num_shards})",
+            flush=True,
+        )
         if self.args.loop:
             print(
                 f"loop mode: will replay trace repeatedly until "
@@ -228,6 +254,7 @@ class LoadClient:
             )
 
         self.per_request_path.write_text("", encoding="utf-8")
+        await self._reset_server_latency()
         _mc = (
             self.args.max_concurrency if self.args.max_concurrency > 0 else 999_999_999
         )
@@ -240,8 +267,8 @@ class LoadClient:
             print(
                 f"pushgateway metrics push enabled: {self._pushgateway_url}", flush=True
             )
-        first_ts = requests[0].ts_ms
-        last_ts = requests[-1].ts_ms
+        first_ts = trace_first_ts
+        last_ts = trace_last_ts
         trace_span_ms = max(last_ts - first_ts, 1)
         tasks: List[asyncio.Task] = []
         sent_count = 0
@@ -366,6 +393,7 @@ class LoadClient:
             await asyncio.sleep(1)
         progress_task.cancel()
         elapsed = time.monotonic() - started_at
+        await asyncio.to_thread(self._write_per_request_results)
         await self._write_summary(elapsed)
         # Stop pushgateway loop and do final push
         if self._pushgateway_task:
@@ -469,14 +497,13 @@ class LoadClient:
         # Clean up internal fields before writing
         result.pop("_schedule_exc", None)
 
-        async with self._write_lock:
-            self._results.append(result)
-            if result.get("status") in ("ok", "scheduled"):
-                self._success_count += 1
-            else:
-                self._error_count += 1
-            with self.per_request_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(result, separators=(",", ":")) + "\n")
+        # All request coroutines run on this event loop and there is no await in
+        # this block, so list/counter updates are serialized without a lock.
+        self._results.append(result)
+        if result.get("status") in ("ok", "scheduled"):
+            self._success_count += 1
+        else:
+            self._error_count += 1
 
     def _fetch_response_enabled(self) -> bool:
         """Check whether fetch-response (engine stream reading) is enabled.
@@ -538,9 +565,7 @@ class LoadClient:
 
         try:
             schedule_start = time.monotonic()
-            flexlb_stub = self.schedule_pb2_grpc.FlexlbServiceStub(
-                await self._channel(self._flexlb_target())
-            )
+            flexlb_stub = await self._schedule_stub(self._flexlb_target())
             response = await flexlb_stub.Schedule(
                 schedule_req, timeout=self.args.timeout_ms / 1000.0
             )
@@ -806,6 +831,26 @@ class LoadClient:
         self._channel_rr[target] = (rr + 1) % self._n_channels
         return self._channels[target][rr]
 
+    async def _schedule_stub(self, target: str):
+        if target not in self._schedule_stubs:
+            await self._channel(target)
+            self._channel_rr[target] = 0
+            self._schedule_stubs[target] = [
+                self.schedule_pb2_grpc.FlexlbServiceStub(channel)
+                for channel in self._channels[target]
+            ]
+            self._schedule_stub_rr[target] = 0
+        rr = self._schedule_stub_rr[target]
+        self._schedule_stub_rr[target] = (rr + 1) % self._n_channels
+        return self._schedule_stubs[target][rr]
+
+    def _write_per_request_results(self) -> None:
+        with self.per_request_path.open(
+            "w", encoding="utf-8", buffering=1024 * 1024
+        ) as output:
+            for result in self._results:
+                output.write(json.dumps(result, separators=(",", ":")) + "\n")
+
     def _flexlb_target(self) -> str:
         if self.args.flexlb_grpc_target:
             return self.args.flexlb_grpc_target
@@ -826,6 +871,24 @@ class LoadClient:
         ttft = [r["ttft_ms"] for r in ok if r["ttft_ms"] > 0]
         total = [r["total_ms"] for r in ok if r["total_ms"] > 0]
         schedule = [r["schedule_ms"] for r in self._results if r["schedule_ms"] > 0]
+        client_schedule_summary = summarize_latencies(schedule)
+        server_latency = await self._fetch_server_latency()
+        server_schedule_summary = server_latency.get("server_total_ms", {})
+        has_server_latency = bool(server_schedule_summary.get("count", 0))
+        if server_latency:
+            self.server_latency_path.write_text(
+                json.dumps(server_latency, indent=2), encoding="utf-8"
+            )
+        server_stage_latency = {
+            name: server_latency.get(name, {})
+            for name in (
+                "grpc_queue_ms",
+                "route_submit_ms",
+                "batch_wait_ms",
+                "dispatch_ack_ms",
+                "ack_response_ms",
+            )
+        }
         violations = [r for r in ok if r["ttft_ms"] > self.args.sla_ttft_ms]
 
         send_duration_s = (
@@ -866,11 +929,21 @@ class LoadClient:
                 if send_duration_s > 0
                 else 0.0
             ),
+            "server_arrival_qps": server_latency.get("arrival_qps", 0.0),
+            "server_completion_qps": server_latency.get("completion_qps", 0.0),
             "n_channels": self._n_channels,
             "sla_ttft_ms": self.args.sla_ttft_ms,
             "sla_violations": len(violations),
             "sla_violation_rate": round(len(violations) / len(ok), 6) if ok else 0.0,
-            "schedule_latency_ms": summarize_latencies(schedule),
+            "schedule_latency_source": "server" if has_server_latency else "client",
+            "schedule_latency_ms": (
+                server_schedule_summary
+                if has_server_latency
+                else client_schedule_summary
+            ),
+            "server_schedule_latency_ms": server_schedule_summary,
+            "server_stage_latency_ms": server_stage_latency,
+            "client_schedule_latency_ms": client_schedule_summary,
             "ttft_ms": summarize_latencies(ttft),
             "total_ms": summarize_latencies(total),
             "prefill_balance": load_balance_summary(r["prefill"] for r in ok),
@@ -884,6 +957,41 @@ class LoadClient:
         )
         print(json.dumps(summary, indent=2), flush=True)
         print(f"report: {self.report_path}", flush=True)
+
+    def _server_latency_url(self, suffix: str = "") -> str:
+        return f"http://{self.args.flexlb_http_addr}/rtp_llm/server_latency{suffix}"
+
+    def _server_latency_request(self, method: str, suffix: str = "") -> dict:
+        request = urllib.request.Request(
+            self._server_latency_url(suffix),
+            data=b"" if method == "POST" else None,
+            headers={"Accept": "application/json"},
+            method=method,
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    async def _reset_server_latency(self) -> None:
+        if self.args.skip_server_latency:
+            return
+        try:
+            await asyncio.to_thread(
+                self._server_latency_request, "POST", "/reset"
+            )
+        except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+            print(f"server latency reset unavailable: {exc}", flush=True)
+
+    async def _fetch_server_latency(self) -> dict:
+        if self.args.skip_server_latency:
+            return {}
+        try:
+            return await asyncio.to_thread(self._server_latency_request, "GET")
+        except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+            print(
+                f"server latency snapshot unavailable, using client RTT: {exc}",
+                flush=True,
+            )
+            return {}
 
     def _percentile(self, values: list, p: float) -> float:
         if not values:

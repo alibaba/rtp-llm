@@ -27,18 +27,15 @@ def write_markdown_report(
         f"- Errors: {summary.get('errors', 0)}",
         f"- Offered QPS: {summary.get('offered_qps', 0)}",
         f"- Completed QPS: {summary.get('completed_qps', 0)}",
+        f"- Server arrival QPS: {summary.get('server_arrival_qps', 0)}",
+        f"- Server completion QPS: {summary.get('server_completion_qps', 0)}",
+        f"- Schedule latency source: {summary.get('schedule_latency_source', 'client')}",
         f"- SLA TTFT: {summary.get('sla_ttft_ms', 0)} ms",
         f"- SLA violations: {summary.get('sla_violations', 0)} ({summary.get('sla_violation_rate', 0)})",
         "",
         "## Latency",
         "",
-        _latency_table(
-            [
-                ("Schedule", _mapping(summary.get("schedule_latency_ms"))),
-                ("TTFT", _mapping(summary.get("ttft_ms"))),
-                ("Total", _mapping(summary.get("total_ms"))),
-            ]
-        ),
+        _latency_table(_latency_rows(summary)),
         "",
         "## Load Balance",
         "",
@@ -65,6 +62,30 @@ def write_markdown_report(
 
 def _mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _latency_rows(summary: Mapping[str, object]) -> list[tuple[str, Mapping[str, object]]]:
+    source = str(summary.get("schedule_latency_source", "client"))
+    schedule_label = "Schedule (server)" if source == "server" else "Schedule (client RTT)"
+    rows = [(schedule_label, _mapping(summary.get("schedule_latency_ms")))]
+    if source == "server":
+        rows.append(("Schedule (client RTT)", _mapping(summary.get("client_schedule_latency_ms"))))
+        stages = _mapping(summary.get("server_stage_latency_ms"))
+        for label, key in (
+            ("Server gRPC queue", "grpc_queue_ms"),
+            ("Server route + submit", "route_submit_ms"),
+            ("Server batch wait", "batch_wait_ms"),
+            ("Server dispatch ACK", "dispatch_ack_ms"),
+            ("Server ACK to response", "ack_response_ms"),
+        ):
+            stage = _mapping(stages.get(key))
+            if stage.get("count", 0):
+                rows.append((label, stage))
+    rows.extend([
+        ("TTFT", _mapping(summary.get("ttft_ms"))),
+        ("Total", _mapping(summary.get("total_ms"))),
+    ])
+    return rows
 
 
 def _latency_table(rows: Iterable[tuple[str, Mapping[str, object]]]) -> str:

@@ -6,6 +6,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -165,19 +166,16 @@ public class GlobalCacheIndex {
             Long blockCacheKey = blockCacheKeys.get(i);
             Set<String> blockOwners = getEnginesForBlock(blockCacheKey);
 
-            // Set of engines with confirmed match length
-            Set<String> confirmedEngines = Sets.newHashSet();
             // Filter candidate engines: only keep engines that exist in current block
-            for (String candidateEngine : candidateEngines) {
+            Iterator<String> candidates = candidateEngines.iterator();
+            while (candidates.hasNext()) {
+                String candidateEngine = candidates.next();
                 if (blockOwners.isEmpty() || !blockOwners.contains(candidateEngine)) {
                     // This engine does not exist in current block, prefix match interrupted
                     result.put(candidateEngine, i);
-                    confirmedEngines.add(candidateEngine);
+                    candidates.remove();
                 }
             }
-
-            // Remove engines with confirmed prefix length from candidate set
-            candidateEngines.removeAll(confirmedEngines);
 
             // Exit early if no candidate engines remain
             if (candidateEngines.isEmpty()) {
