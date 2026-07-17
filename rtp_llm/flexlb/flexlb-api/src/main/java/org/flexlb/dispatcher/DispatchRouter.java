@@ -52,8 +52,26 @@ public class DispatchRouter {
         for (BatchEndpointSpec spec : specs) {
             b.POST("/dispatcher" + spec.getPath(), req -> tracked(() -> batchHandler.handle(req, spec)));
         }
-        // Inspection endpoints are read-only diagnostics, not serving traffic — left out of the
-        // graceful-drain count.
+        // Diagnostics, not serving traffic — left out of the graceful-drain count.
+        //
+        // They sit unauthenticated on the 7001 listener because *nothing* here is authenticated:
+        // there is no security dependency and no auth filter in the module, and the sibling
+        // endpoints on this same listener already expose the equivalent surface — /rtp_llm/
+        // schedule_snapshot dumps the whole LB view (worker addresses + load), and
+        // /rtp_llm/update_log_level and /rtp_llm/notify_master additionally mutate state.
+        // 7001 is a trusted internal port by platform design; gating only these two would leave
+        // the same information a request away, so it buys nothing.
+        //
+        // Note the management listener (7002) is not a safer home: it runs Actuator with
+        // `base-path: /` and `exposure.include: "*"`, also unauthenticated, so /env and
+        // /configprops there expose strictly more than this does. If the trusted-port assumption
+        // ever stops holding, it stops holding for the whole listener and has to be fixed there,
+        // not per-endpoint.
+        //
+        // What is genuinely this handler's business — a diagnostic must not perturb production —
+        // is enforced in DispatcherInspectionHandler: dry-run resolves no BE targets (and so
+        // never advances master's round-robin cursor) unless explicitly asked with
+        // ?pre_assign=true.
         b.GET("/dispatcher/_snapshot", inspectionHandler::snapshot);
         b.POST("/dispatcher/_dryrun/**", inspectionHandler::dryRun);
         return b.route(RequestPredicates.path("/dispatcher/**"), req -> tracked(() -> passthroughClient.forward(req)))
