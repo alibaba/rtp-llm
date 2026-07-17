@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ModelMetaConfigTest {
@@ -48,5 +49,35 @@ class ModelMetaConfigTest {
 
         assertTrue(roles.contains(RoleType.PREFILL), "configured PREFILL must be reported: " + roles);
         assertTrue(roles.contains(RoleType.DECODE), "configured DECODE must be reported: " + roles);
+    }
+
+    @Test
+    void getConfiguredRoleTypes_sees_a_route_replacement_after_a_cached_read() {
+        ModelMetaConfig config = new ModelMetaConfig();
+        ModelMetaConfig.putServiceRoute(TEST_SERVICE_ID,
+                routeWithRoles(TEST_SERVICE_ID, true, false, false));
+        assertTrue(config.getConfiguredRoleTypes().contains(RoleType.PREFILL));
+
+        // The first read populated the cache; replacing the route must invalidate it.
+        ModelMetaConfig.putServiceRoute(TEST_SERVICE_ID,
+                routeWithRoles(TEST_SERVICE_ID, false, true, false));
+        List<RoleType> roles = config.getConfiguredRoleTypes();
+
+        assertTrue(roles.contains(RoleType.DECODE), "the replacement's roles must be visible: " + roles);
+        assertFalse(roles.contains(RoleType.PREFILL),
+                "the replaced route's roles must not survive in the cached union: " + roles);
+    }
+
+    @Test
+    void getConfiguredRoleTypes_sees_a_removal_after_a_cached_read() {
+        ModelMetaConfig config = new ModelMetaConfig();
+        ModelMetaConfig.putServiceRoute(TEST_SERVICE_ID,
+                routeWithRoles(TEST_SERVICE_ID, false, false, true));
+        assertTrue(config.getConfiguredRoleTypes().contains(RoleType.PDFUSION));
+
+        ModelMetaConfig.removeServiceRoute(TEST_SERVICE_ID);
+
+        assertFalse(config.getConfiguredRoleTypes().contains(RoleType.PDFUSION),
+                "a removed route's roles must not survive in the cached union");
     }
 }

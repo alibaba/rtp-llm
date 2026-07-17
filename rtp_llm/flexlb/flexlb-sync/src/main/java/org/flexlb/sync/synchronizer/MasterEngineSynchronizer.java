@@ -6,8 +6,8 @@ import org.apache.commons.lang3.StringUtils;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.service.address.WorkerAddressService;
@@ -20,6 +20,7 @@ import org.flexlb.util.IdUtils;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.flexlb.util.RateLimitedWarn;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -30,6 +31,7 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Consumer;
 
 /**
  * Master engine status synchronizer
@@ -42,14 +44,24 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
     private final Map<String, Long> lastDiscoverySuccessUs = new ConcurrentHashMap<>();
     /** One in-flight sync round per {@code model/role} — see {@link #submitRound}. */
     private final SingleFlightGate syncGate = new SingleFlightGate();
-    /** Ticks are 20ms apart; a slow-discovery deployment would otherwise flood the log. */
-    private final RateLimitedWarn slowRoundWarn = new RateLimitedWarn(1, TimeUnit.SECONDS);
+    /**
+     * Ticks are 20ms apart; a slow-discovery deployment would otherwise flood the log. Keyed per
+     * {@code model/role} so one key's suppression window cannot swallow another key's signal in a
+     * multi-role deployment.
+     */
+    private final Map<String, RateLimitedWarn> slowRoundWarns = new ConcurrentHashMap<>();
+    /**
+     * Discovery-gap warn per {@code model/role}, handed to the per-round runners — runners are
+     * recreated every round, so a runner-owned instance would never suppress anything.
+     */
+    private final Map<String, RateLimitedWarn> discoveryGapWarns = new ConcurrentHashMap<>();
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService localKvCacheAwareManager;
     private final long syncRequestTimeoutMs;
     private final LongAdder syncCount = new LongAdder();
     private final Long syncEngineStatusInterval;
 
+    @Autowired
     public MasterEngineSynchronizer(WorkerAddressService workerAddressService,
                                     EngineHealthReporter engineHealthReporter,
                                     EngineWorkerStatus engineWorkerStatus,
@@ -57,6 +69,26 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                     ModelMetaConfig modelMetaConfig,
                                     CacheAwareService localKvCacheAwareManager,
                                     ConfigService configService) {
+
+        this(workerAddressService, engineHealthReporter, engineWorkerStatus, engineGrpcService,
+                modelMetaConfig, localKvCacheAwareManager, configService,
+                System.getenv("MODEL_SERVICE_CONFIG"), MasterEngineSynchronizer::startPeriodicSync);
+    }
+
+    /**
+     * Wiring seam: production reads {@code MODEL_SERVICE_CONFIG} from the environment and starts
+     * the real scheduler; tests inject the config string and the start hook, making "a failed
+     * validation must not start the scheduler" observable without a live scheduler thread.
+     */
+    MasterEngineSynchronizer(WorkerAddressService workerAddressService,
+                             EngineHealthReporter engineHealthReporter,
+                             EngineWorkerStatus engineWorkerStatus,
+                             EngineGrpcService engineGrpcService,
+                             ModelMetaConfig modelMetaConfig,
+                             CacheAwareService localKvCacheAwareManager,
+                             ConfigService configService,
+                             String modelConfig,
+                             Consumer<MasterEngineSynchronizer> schedulerStarter) {
 
         super(workerAddressService, engineHealthReporter, engineWorkerStatus, modelMetaConfig, configService);
 
@@ -70,8 +102,6 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                 ? Long.parseLong(System.getenv("SYNC_REQUEST_TIMEOUT_MS"))
                 : syncEngineStatusInterval;
 
-        // Get environment variable
-        String modelConfig = System.getenv("MODEL_SERVICE_CONFIG");
         if (StringUtils.isEmpty(modelConfig)) {
             Logger.warn("prefill load balancer env:MODEL_CONFIG is empty");
             throw new RuntimeException("master load balancer env:MODEL_CONFIG is empty");
@@ -86,6 +116,10 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
 
         // Start the periodic sync only after config parse + validation succeed, so a failed
         // construction never leaves a live scheduler thread running against partial state.
+        schedulerStarter.accept(this);
+    }
+
+    private void startPeriodicSync() {
         this.scheduler = new ScheduledThreadPoolExecutor(5, new NamedThreadFactory("sync-status-scheduler"),
                 new ThreadPoolExecutor.AbortPolicy());
         this.scheduler.scheduleAtFixedRate(this::syncEngineStatus, 0, syncEngineStatusInterval, TimeUnit.MILLISECONDS);
@@ -115,7 +149,13 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                         logger.error("roleEndpoints is null, by roleType : {}", roleType);
                         continue;
                     }
-                    submitRound(modelName, roleType, modelWorkerStatus.getRoleStatusMap(roleType));
+                    try {
+                        submitRound(modelName, roleType, modelWorkerStatus.getRoleStatusMap(roleType));
+                    } catch (Throwable e) {
+                        // Per-role rounds are independent: a rejected submit (saturated executor)
+                        // for one role must not starve the remaining roles of this tick.
+                        logger.error("submit sync round failed, model={}, role={}", modelName, roleType, e);
+                    }
                 }
             }
         } catch (Throwable e) {
@@ -138,7 +178,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
      * flight per key, which is what {@code scheduleWithFixedDelay} would give us if the work were
      * done inline.
      */
-    private void submitRound(String modelName, RoleType roleType, Map<String, WorkerStatus> roleStatusMap) {
+    void submitRound(String modelName, RoleType roleType, Map<String, WorkerStatus> roleStatusMap) {
         String key = modelName + "/" + roleType;
         boolean submitted = syncGate.submit(key, engineSyncExecutor, () -> new EngineSyncRunner(
                 modelName, roleStatusMap,
@@ -146,12 +186,14 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                 engineGrpcService, roleType, localKvCacheAwareManager,
                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
                 flexlbConfig.getEngineType(), flexlbConfig.getDiscoveryFailureGraceMs(),
-                lastDiscoverySuccessUs
+                lastDiscoverySuccessUs,
+                discoveryGapWarns.computeIfAbsent(key, k -> new RateLimitedWarn(1, TimeUnit.SECONDS))
         ).run());
         if (!submitted) {
             // Discovery is slower than the tick — worth surfacing, but at 20ms ticks it must not
             // flood the log.
-            slowRoundWarn.warn("sync round still in flight, skipping tick: key={}", key);
+            slowRoundWarns.computeIfAbsent(key, k -> new RateLimitedWarn(1, TimeUnit.SECONDS))
+                    .warn("sync round still in flight, skipping tick: key={}", key);
         }
     }
 }

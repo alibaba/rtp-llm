@@ -84,6 +84,13 @@ public final class NoOpServiceDiscovery implements ServiceDiscovery {
      */
     @Override
     public void listen(String address, ServiceHostListener listener) {
+        listen(address, listener, System.getenv());
+    }
+
+    /**
+     * Test-seam variant taking an explicit env map, symmetric with {@link #getHosts(String, Map)}.
+     */
+    void listen(String address, ServiceHostListener listener, Map<String, String> env) {
         log.info("NoOpServiceDiscovery does not support dynamic listening for address: {}", address);
         // Default empty implementation does not support dynamic listening, could consider periodic polling implementation
         // Simply trigger initialization once here
@@ -91,7 +98,7 @@ public final class NoOpServiceDiscovery implements ServiceDiscovery {
             return;
         }
         try {
-            listener.onHostsChanged(getHosts(address));
+            listener.onHostsChanged(getHosts(address, env));
         } catch (Exception e) {
             log.error("NoOpServiceDiscovery initial host push failed for address: {}", address, e);
         }

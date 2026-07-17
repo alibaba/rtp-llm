@@ -75,6 +75,7 @@ public class GeneralHttpNettyService {
                         .readCallback((resultHttpNettyChannelContext, httpObject)
                                 -> handleNettyMessage(resultHttpNettyChannelContext, httpObject, responseClz))
                         .errorCallback(this::handlerNettyError)
+                        .channelInactiveCallback(this::handleChannelInactive)
                         .byteDataList(new ArrayList<>(1 << 4))
                         .byteDataSize(new LongAdder())
                         .build())
@@ -114,9 +115,34 @@ public class GeneralHttpNettyService {
     private <Result> Mono<Result> executeHttpRequest(HttpNettyChannelContext<Result> nettyCtx, URI uri, String path, HttpHeaders headers) {
         return Flux.<Result>create(sink -> {
             nettyCtx.setSink(sink);
+            if (nettyCtx.isFinish()) {
+                // The channel went inactive before the sink existed; error here because the
+                // inactive callback had no sink to terminate.
+                sink.error(StatusEnum.ENGINE_ABNORMAL_DISCONNECT_EXCEPTION
+                        .toException("channel closed before request could be written"));
+                return;
+            }
             DefaultFullHttpRequest request = buildRequest(nettyCtx, uri, path, headers);
             nettyCtx.getChannel().writeAndFlush(request);
         }).last();
+    }
+
+    /**
+     * The peer disconnected mid-exchange. Both aggregation paths (200 and non-200) terminate the
+     * sink only on {@link LastHttpContent}, which a disconnected peer will never send, and the
+     * read-timeout handler stops firing once the channel is inactive — so without failing the sink
+     * here the caller would wait forever.
+     */
+    private <Result> void handleChannelInactive(HttpNettyChannelContext<Result> nettyCtx) {
+        if (nettyCtx.isFinish()) {
+            return;
+        }
+        nettyCtx.setFinish(true);
+        if (nettyCtx.getSink() == null || nettyCtx.getSink().isCancelled()) {
+            return;
+        }
+        nettyCtx.getSink().error(StatusEnum.ENGINE_ABNORMAL_DISCONNECT_EXCEPTION
+                .toException("channel closed before the response completed"));
     }
 
     private <Result> DefaultFullHttpRequest buildRequest(HttpNettyChannelContext<Result> nettyCtx, URI uri, String path, HttpHeaders headers) {
@@ -137,6 +163,7 @@ public class GeneralHttpNettyService {
     }
 
     private <Result> void handlerNettyError(HttpNettyChannelContext<Result> nettyCtx, Throwable e) {
+        nettyCtx.setFinish(true);
         if (e instanceof ReadTimeoutException) {
             nettyCtx.getSink().error(StatusEnum.READ_TIME_OUT.toException());
         } else {
