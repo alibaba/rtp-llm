@@ -193,7 +193,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         int finishedSize = finishedTaskInfo != null ? finishedTaskInfo.size() : 0;
         int runningSize = runningTaskInfo != null ? runningTaskInfo.size() : 0;
         if (finishedSize > 0 || !inflightBatches.isEmpty()) {
-            logger.info("Prefill calibrate: finishedTasks={}, runningTasks={}, inflightBatches={}",
+            logger.debug("Prefill calibrate: finishedTasks={}, runningTasks={}, inflightBatches={}",
                     finishedSize, runningSize, inflightBatches.size());
         }
 

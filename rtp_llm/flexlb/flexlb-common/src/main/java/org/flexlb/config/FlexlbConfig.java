@@ -356,7 +356,7 @@ public class FlexlbConfig {
      * When the engine already has this many batches inflight, the batcher parks
      * instead of dispatching new batches.  Default 2 prevents engine overload.
      *
-     * <p>Set to 0 to disable backpressure and keep the original always-dispatch behavior.
+     * <p>0 = disable backpressure, use only in test environments.
      */
     private int flexlbBatchFixedMaxInflightBatches = 2;
 
@@ -621,7 +621,7 @@ public class FlexlbConfig {
         return buckets.get(buckets.size() - 1)[1];
     }
 
-    private List<long[]> getParsedSloBuckets() {
+    List<long[]> getParsedSloBuckets() {
         if (parsedSloBuckets != null) {
             return parsedSloBuckets;
         }
@@ -630,12 +630,22 @@ public class FlexlbConfig {
         }
         List<long[]> result = new ArrayList<>();
         for (String entry : costSloBuckets.split(",")) {
-            String[] kv = entry.trim().split(":");
-            if (kv.length == 2) {
-                try {
-                    result.add(new long[]{Long.parseLong(kv[0].trim()), Long.parseLong(kv[1].trim())});
-                } catch (NumberFormatException ignored) {
-                }
+            String trimmed = entry.trim();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            String[] kv = trimmed.split(":");
+            if (kv.length != 2) {
+                throw new ConfigValidationException("costSloBuckets",
+                    "Invalid SLO bucket entry '" + trimmed
+                        + "'. Expected format: seqLen:sloMs (e.g. 4096:2000)");
+            }
+            try {
+                result.add(new long[]{Long.parseLong(kv[0].trim()), Long.parseLong(kv[1].trim())});
+            } catch (NumberFormatException e) {
+                throw new ConfigValidationException("costSloBuckets",
+                    "Invalid number in SLO bucket entry '" + trimmed
+                        + "'. Expected format: seqLen:sloMs (e.g. 4096:2000)", e);
             }
         }
         result.sort(Comparator.comparingLong(a -> a[0]));
@@ -645,12 +655,21 @@ public class FlexlbConfig {
 
     /**
      * Returns the configured default schedule mode as an enum.
+     *
+     * @throws ConfigValidationException if the configured value is not a valid ScheduleModeEnum.
      */
     public ScheduleModeEnum getDefaultScheduleModeEnum() {
+        if (defaultScheduleMode == null) {
+            throw new ConfigValidationException("defaultScheduleMode",
+                "Schedule mode is null. Valid values: "
+                    + java.util.Arrays.toString(ScheduleModeEnum.values()));
+        }
         try {
             return ScheduleModeEnum.valueOf(defaultScheduleMode.toUpperCase());
         } catch (IllegalArgumentException e) {
-            return ScheduleModeEnum.AUTO;
+            throw new ConfigValidationException("defaultScheduleMode",
+                "Invalid schedule mode '" + defaultScheduleMode
+                    + "'. Valid values: " + java.util.Arrays.toString(ScheduleModeEnum.values()), e);
         }
     }
 }

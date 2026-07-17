@@ -1303,7 +1303,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.specify_gpu_arch);
             },
             [](py::tuple t) {
-                if (t.size() < 14)
+                if (t.size() < 13)
                     throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
@@ -1320,7 +1320,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.worker_grpc_addrs             = t[10].cast<std::vector<std::string>>();
                     c.worker_addrs                  = t[11].cast<std::vector<std::string>>();
                     c.all_worker_grpc_addrs         = t[12].cast<std::vector<std::string>>();
-                    c.specify_gpu_arch              = t[13].cast<std::string>();
+                    if (t.size() >= 14) {
+                        c.specify_gpu_arch = t[13].cast<std::string>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());
                 }
@@ -1723,6 +1725,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("prefill_enqueue_pool_size", &PDSepConfig::prefill_enqueue_pool_size)
         .def_readwrite("prefill_worker_lambda_pool_size", &PDSepConfig::prefill_worker_lambda_pool_size)
         .def_readwrite("prefill_slot_pool_size", &PDSepConfig::prefill_slot_pool_size)
+        .def_readwrite("prefill_stop_stream_wait_timeout_ms", &PDSepConfig::prefill_stop_stream_wait_timeout_ms)
         .def("to_string", &PDSepConfig::to_string)
         .def(py::pickle(
             [](const PDSepConfig& self) {
@@ -1751,13 +1754,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.batch_load_timeout_ms,
                                       self.prefill_enqueue_pool_size,
                                       self.prefill_worker_lambda_pool_size,
-                                      self.prefill_slot_pool_size);
+                                      self.prefill_slot_pool_size,
+                                      self.prefill_stop_stream_wait_timeout_ms);
             },
             [](py::tuple t) {
-                if (t.size() < 26)
+                if (t.size() < 20)
                     throw std::runtime_error("Invalid state!");
                 PDSepConfig c;
                 try {
+                    // Fields 0-19: basic fields (old 20-item baseline, always present)
                     c.role_type                       = t[0].cast<RoleType>();
                     c.cache_store_rdma_mode           = t[1].cast<bool>();
                     c.cache_store_listen_port         = t[2].cast<int64_t>();
@@ -1778,12 +1783,22 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.max_rpc_timeout_ms              = t[17].cast<int64_t>();
                     c.worker_port_offset              = t[18].cast<int64_t>();
                     c.decode_entrance                 = t[19].cast<bool>();
-                    c.batch_dispatch_timeout_ms       = t[20].cast<int64_t>();
-                    c.batch_prepare_timeout_ms        = t[21].cast<int64_t>();
-                    c.batch_load_timeout_ms           = t[22].cast<int64_t>();
-                    c.prefill_enqueue_pool_size       = t[23].cast<int64_t>();
-                    c.prefill_worker_lambda_pool_size = t[24].cast<int64_t>();
-                    c.prefill_slot_pool_size          = t[25].cast<int64_t>();
+                    // Fields 20-22: batch timeout fields (added after initial 20)
+                    if (t.size() >= 23) {
+                        c.batch_dispatch_timeout_ms = t[20].cast<int64_t>();
+                        c.batch_prepare_timeout_ms  = t[21].cast<int64_t>();
+                        c.batch_load_timeout_ms     = t[22].cast<int64_t>();
+                    }
+                    // Fields 23-25: prefill pool configuration
+                    if (t.size() >= 26) {
+                        c.prefill_enqueue_pool_size       = t[23].cast<int64_t>();
+                        c.prefill_worker_lambda_pool_size = t[24].cast<int64_t>();
+                        c.prefill_slot_pool_size          = t[25].cast<int64_t>();
+                    }
+                    // Field 26: prefill stop stream wait timeout
+                    if (t.size() >= 27) {
+                        c.prefill_stop_stream_wait_timeout_ms = t[26].cast<int64_t>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PDSepConfig unpickle error: ") + e.what());
                 }
