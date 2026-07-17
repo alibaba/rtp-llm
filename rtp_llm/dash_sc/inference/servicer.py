@@ -107,9 +107,9 @@ def _build_mm_inputs_from_request(request: Any) -> list:
             MMPreprocessConfig(
                 -1,  # width (no upstream control today)
                 -1,  # height
-                part.fps,
                 part.min_pixels,
                 part.max_pixels,
+                part.fps,
                 part.min_frames,
                 part.max_frames,
                 [],  # crop_positions (no upstream control today)
