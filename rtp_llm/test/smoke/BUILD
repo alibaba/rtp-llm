@@ -53,6 +53,7 @@ test_suite(
     tests = [
         ":smoke_h20_mla",
         ":smoke_h20_moe",
+        ":smoke_h20_newloader",
         ":smoke_h20_next",
         ":smoke_h20_kimi_linear",
         ":smoke_cuda_remote_cache",

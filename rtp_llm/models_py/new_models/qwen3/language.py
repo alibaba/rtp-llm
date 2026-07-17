@@ -1,4 +1,6 @@
 import logging
+import math
+from numbers import Real
 from typing import Any, Optional
 
 import torch
@@ -454,6 +456,19 @@ class Qwen3ForCausalLM(NewLoaderModelBase):
             )
             self.lm_head._copy_local_tied_weight(self.embed_tokens.weight.data)
 
+    def process_weights_after_loading(self) -> None:
+        if self._lm_head_postprocessed:
+            return
+        processed = self.lm_head.weight
+        if self.normalize_lm_head_weight:
+            processed = torch.nn.functional.normalize(processed, dim=1)
+        if self.logit_scale != 1.0:
+            processed = processed * self.logit_scale
+        if processed is not self.lm_head.weight:
+            with torch.no_grad():
+                self.lm_head.weight.copy_(processed)
+        self._lm_head_postprocessed = True
+
     def __init__(self, model_config: Any, load_config: Any):
         parallelism_config = getattr(load_config, "parallelism_config", None)
         if parallelism_config is None:
@@ -475,6 +490,26 @@ class Qwen3ForCausalLM(NewLoaderModelBase):
             if isinstance(model_config, dict)
             else bool(getattr(model_config, "tie_word_embeddings", False))
         )
+        normalize_lm_head_weight = (
+            model_config.get("normalize_lm_head_weight", False)
+            if isinstance(model_config, dict)
+            else getattr(model_config, "normalize_lm_head_weight", False)
+        )
+        if not isinstance(normalize_lm_head_weight, bool):
+            raise TypeError("normalize_lm_head_weight must be a bool")
+        raw_logit_scale = (
+            model_config.get("logit_scale", 1.0)
+            if isinstance(model_config, dict)
+            else getattr(model_config, "logit_scale", 1.0)
+        )
+        if isinstance(raw_logit_scale, bool) or not isinstance(raw_logit_scale, Real):
+            raise TypeError("logit_scale must be a finite real number")
+        logit_scale = float(raw_logit_scale)
+        if not math.isfinite(logit_scale):
+            raise ValueError("logit_scale must be finite")
+        self.normalize_lm_head_weight = normalize_lm_head_weight
+        self.logit_scale = logit_scale
+        self._lm_head_postprocessed = False
 
         self.embed_tokens = VocabParallelEmbedding(
             vocab_size=cfg["vocab_size"],

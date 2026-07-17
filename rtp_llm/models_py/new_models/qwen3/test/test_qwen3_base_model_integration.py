@@ -1,3 +1,4 @@
+import os
 import tempfile
 import types
 import unittest
@@ -82,14 +83,19 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         base_model.fmha_config = None
         base_model.device_resource_config = None
         base_model.tokenizer = None
+        base_model.hw_kernel_config = types.SimpleNamespace(enable_cuda_graph=False)
 
         with tempfile.TemporaryDirectory() as model_path:
             config.ckpt_path = model_path
             save_file(_weights(), f"{model_path}/model.safetensors")
             with patch.object(
                 BaseModel, "_get_device_str", return_value="cpu"
-            ), patch.object(BaseModel, "_init_custom_module", return_value=None):
-                base_model._load_with_new_loader()
+            ), patch.object(
+                BaseModel, "_init_custom_module", return_value=None
+            ), patch.dict(
+                os.environ, {"USE_NEW_LOADER": "1"}, clear=False
+            ):
+                base_model.load()
 
         self.assertIsInstance(base_model.py_model, Qwen3ForCausalLM)
         self.assertFalse(base_model.py_model.training)

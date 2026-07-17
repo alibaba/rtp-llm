@@ -300,6 +300,37 @@ class Qwen3LoadTest(unittest.TestCase):
 
         torch.testing.assert_close(model.lm_head.weight, weights["lm_head.weight"])
 
+    def test_lm_head_postprocess_matches_legacy_logits_for_tp(self):
+        hidden_states = torch.tensor([[1.0, -2.0, 0.5, 3.0], [-1.0, 0.25, 2.0, 0.75]])
+        explicit_lm_head = torch.arange(32, 64, dtype=torch.float32).reshape(8, 4)
+
+        for tied in (True, False):
+            config = self._config()
+            config.tie_word_embeddings = tied
+            config.normalize_lm_head_weight = True
+            config.logit_scale = 0.25
+            weights = self._weights()
+            source = weights["model.embed_tokens.weight"]
+            if not tied:
+                weights["lm_head.weight"] = explicit_lm_head
+                source = explicit_lm_head
+
+            with self.subTest(tied=tied), tempfile.TemporaryDirectory() as model_path:
+                save_file(weights, f"{model_path}/model.safetensors")
+                for rank in range(2):
+                    model = NewModelLoader(
+                        model_config=config,
+                        load_config=self._load_config(tp_size=2, tp_rank=rank),
+                        model_path=model_path,
+                    ).load()
+                    local_source = source[rank * 4 : (rank + 1) * 4]
+                    expected_weight = F.normalize(local_source, dim=1) * 0.25
+                    torch.testing.assert_close(model.lm_head.weight, expected_weight)
+                    torch.testing.assert_close(
+                        F.linear(hidden_states, model.runtime_weight_view()["lm_head"]),
+                        F.linear(hidden_states, expected_weight),
+                    )
+
     def test_checkpoint_lm_head_must_use_global_vocab_shape(self):
         config = self._config()
         config.tie_word_embeddings = False
