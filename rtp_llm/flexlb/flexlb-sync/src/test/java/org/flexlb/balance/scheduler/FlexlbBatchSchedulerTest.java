@@ -348,6 +348,17 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
+    void duplicate_active_request_id_is_rejected_before_rerouting() {
+        scheduler.submit(context(14));
+
+        Response duplicate = scheduler.submit(context(14)).getNow(null);
+
+        assertFalse(duplicate.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), duplicate.getCode());
+        verify(router).route(any(BalanceContext.class));
+    }
+
+    @Test
     void route_failure_completes_without_batch_enqueue() throws Exception {
         Response failure = Response.error(StrategyErrorType.NO_PREFILL_WORKER);
         when(router.route(any(BalanceContext.class))).thenReturn(failure);

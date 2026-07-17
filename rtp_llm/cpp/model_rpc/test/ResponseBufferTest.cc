@@ -417,6 +417,37 @@ TEST(AsyncSubmitChainTest, ErrorStatusPropagatesToConsumer) {
     EXPECT_NE(terminal_status.error_message().find("simulated finishStream failure"), std::string::npos);
 }
 
+TEST(ResponseBufferEntryTest, WriteRejectsOnByteLimit) {
+    auto entry = std::make_shared<ResponseBufferEntry>();
+    // Temporarily lower the byte limit for testing
+    auto saved_limit                    = ResponseBufferEntry::kMaxQueueBytes;
+    ResponseBufferEntry::kMaxQueueBytes = 64 * 1024;  // 64KB for test
+
+    GenerateOutputsPB large_output;
+    large_output.set_request_id(1);
+    large_output.mutable_error_info()->set_error_message(std::string(64 * 1024, 'x'));
+
+    EXPECT_FALSE(entry->write(large_output));
+    EXPECT_TRUE(entry->isCancelled());
+    EXPECT_EQ(entry->droppedCount(), 1u);
+
+    ResponseBufferEntry::kMaxQueueBytes = saved_limit;  // restore
+}
+
+TEST(ResponseBufferEntryTest, WriteOverflowIncrementsDroppedCount) {
+    auto entry = std::make_shared<ResponseBufferEntry>();
+
+    GenerateOutputsPB output;
+    output.set_request_id(1);
+    for (size_t i = 0; i < ResponseBufferEntry::kMaxQueueSize; ++i) {
+        ASSERT_TRUE(entry->write(output));
+    }
+
+    EXPECT_FALSE(entry->write(output));
+    EXPECT_TRUE(entry->isCancelled());
+    EXPECT_EQ(entry->droppedCount(), 1u);
+}
+
 }  // namespace rtp_llm::test
 
 int main(int argc, char** argv) {
