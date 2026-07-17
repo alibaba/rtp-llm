@@ -79,5 +79,9 @@ thrift
 #     rtp_llm/models_py/modules/factory/attention/__init__.py); the
 #     service will not boot.
 #
-# Install manually (pin the version matching your torch-xpu build):
-#   pip install 'vllm-xpu-kernels==<version>' --find-links <index-url>
+# Validated floor: vllm-xpu-kernels >= 0.1.10 (first release providing the
+# non-contiguous paged K/V stride capability that XPU decode depends on).
+# The startup preflight in attention/__init__.py enforces this floor and
+# fails fast on older/incompatible builds. Pin the exact build matching your
+# torch-xpu wheel; install manually since it is off-index:
+#   pip install 'vllm-xpu-kernels>=0.1.10' --find-links <index-url>

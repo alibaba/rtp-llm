@@ -55,6 +55,58 @@ def is_moe_available():
     return _MOE_AVAILABLE
 
 
+# Minimum vllm-xpu-kernels version whose FA2 kernel provides the non-contiguous
+# paged K/V stride capability that XPU decode relies on. Older builds import
+# fine but violate the stride contract at decode time, so the startup preflight
+# rejects them.
+_FA2_MIN_VERSION = "0.1.10"
+
+
+def _get_vllm_xpu_version():
+    """Best-effort resolution of the installed vllm-xpu-kernels version."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+        try:
+            return version("vllm-xpu-kernels")
+        except PackageNotFoundError:
+            pass
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import vllm_xpu_kernels
+        return getattr(vllm_xpu_kernels, "__version__", None)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def check_fa2_requirements():
+    """Validate the FA2 kernel against the XPU decode contract.
+
+    Returns None when the requirement is satisfied, otherwise an actionable
+    error string describing why (missing module or version below the floor that
+    introduced the non-contiguous paged K/V stride capability).
+    """
+    if not _FA2_AVAILABLE:
+        return "vllm-xpu-kernels FA2 module (_vllm_fa2_C) is not importable"
+    ver = _get_vllm_xpu_version()
+    if ver is None:
+        logger.warning(
+            "vllm-xpu-kernels version could not be determined; skipping the "
+            "FA2 >= %s version gate", _FA2_MIN_VERSION)
+        return None
+    try:
+        from packaging.version import Version
+        if Version(ver) < Version(_FA2_MIN_VERSION):
+            return (
+                f"vllm-xpu-kernels {ver} is older than the required "
+                f"{_FA2_MIN_VERSION}; it lacks the non-contiguous paged K/V "
+                "stride capability that XPU decode requires")
+    except Exception as exc:  # noqa: BLE001 - packaging missing or unparsable version
+        logger.warning(
+            "vllm-xpu-kernels version gate skipped (detected=%s, error=%s)", ver, exc)
+    return None
+
+
 def rms_norm(result, input, weight, epsilon):
     if _VLLM_XPU_AVAILABLE:
         torch.ops._C.rms_norm(result, input, weight, epsilon)
