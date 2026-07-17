@@ -84,6 +84,55 @@ void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t siz
     }
 }
 
+namespace {
+
+// The captured graph owns fixed-size block tables. Replay inputs can be views into
+// larger scheduler-owned tables, so only the live batch rows may be copied. Reject
+// any layout that cannot fit into the captured table before launching the fused copy.
+bool validateBlockTableForCudaGraph(
+    const torch::Tensor& src, const torch::Tensor& dst, int live_batch_size, bool expect_cuda, const char* table_name) {
+    if (!src.defined() || src.numel() <= 0) {
+        return true;
+    }
+
+    const bool compatible =
+        dst.defined() && dst.numel() > 0 && src.dim() == 2 && dst.dim() == 2 && src.is_cuda() == expect_cuda
+        && dst.is_cuda() == expect_cuda && src.scalar_type() == dst.scalar_type() && live_batch_size > 0
+        && src.size(0) >= live_batch_size && dst.size(0) >= live_batch_size && src.size(1) <= dst.size(1)
+        && src.stride(0) >= src.size(1) && dst.stride(0) >= src.size(1);
+    if (compatible) {
+        return true;
+    }
+
+    const auto tensor_dim = [](const torch::Tensor& tensor) -> long long {
+        return tensor.defined() ? tensor.dim() : -1;
+    };
+    const auto tensor_size = [](const torch::Tensor& tensor, int dim) -> long long {
+        return tensor.defined() && tensor.dim() > dim ? tensor.size(dim) : -1;
+    };
+    const auto tensor_stride = [](const torch::Tensor& tensor) -> long long {
+        return tensor.defined() && tensor.dim() > 0 ? tensor.stride(0) : -1;
+    };
+    RTP_LLM_LOG_WARNING(
+        "CUDA graph %s block table is incompatible: live_batch=%d, src={cuda=%d, dim=%lld, rows=%lld, cols=%lld, "
+        "row_stride=%lld}, dst={cuda=%d, dim=%lld, rows=%lld, cols=%lld, row_stride=%lld}; fallback to normal run",
+        table_name,
+        live_batch_size,
+        src.defined() && src.is_cuda(),
+        tensor_dim(src),
+        tensor_size(src, 0),
+        tensor_size(src, 1),
+        tensor_stride(src),
+        dst.defined() && dst.is_cuda(),
+        tensor_dim(dst),
+        tensor_size(dst, 0),
+        tensor_size(dst, 1),
+        tensor_stride(dst));
+    return false;
+}
+
+}  // namespace
+
 void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareInputs");
     // 1. non spec cuda graph:
@@ -119,35 +168,29 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         }
     };
 
-    // Collect a strided 2D D2D copy: copies src[0..rows, 0..cols] into dst[0..rows, 0..cols]
+    // Collect a strided 2D D2D copy: copies live rows from src into dst.
     // where src and dst may have different column strides (copySmallerIntoLarger semantics).
-    // For 1D tensors, falls back to a contiguous D2D copy to avoid silent data loss.
-    auto tryAddStridedD2DCopy = [&strided_d2d_copies, &d2d_copies](const torch::Tensor& src, torch::Tensor& dst) {
+    auto tryAddStridedD2DCopy = [&strided_d2d_copies, &state](const torch::Tensor& src, torch::Tensor& dst) {
         if (!src.defined() || src.numel() <= 0)
             return;
-        if (src.dim() < 2) {
-            d2d_copies.add(src.data_ptr(), dst.data_ptr(), src.numel() * src.element_size());
-            return;
-        }
+        RTP_LLM_CHECK_WITH_INFO(validateBlockTableForCudaGraph(src, dst, state.current_batch_size, true, "device"),
+                                "invalid device block table reached CUDA graph replay");
         strided_d2d_copies.add(src.data_ptr(),
                                dst.data_ptr(),
-                               src.size(0),
+                               state.current_batch_size,
                                src.size(1) * src.element_size(),
                                src.stride(0) * src.element_size(),
                                dst.stride(0) * dst.element_size());
     };
 
     // H2H strided 2D copy via row-by-row memcpy (cannot use GPU kernel for host memory).
-    // For 1D tensors, falls back to a contiguous memcpy.
-    auto stridedCopyHost = [](const torch::Tensor& src, torch::Tensor& dst) {
+    auto stridedCopyHost = [&state](const torch::Tensor& src, torch::Tensor& dst) {
         if (!src.defined() || src.numel() <= 0)
             return;
         RTP_LLM_PROFILE_SCOPE("stridedCopyHost");
-        if (src.dim() < 2) {
-            memcpy(dst.data_ptr(), src.data_ptr(), src.numel() * src.element_size());
-            return;
-        }
-        const size_t nrows      = src.size(0);
+        RTP_LLM_CHECK_WITH_INFO(validateBlockTableForCudaGraph(src, dst, state.current_batch_size, false, "host"),
+                                "invalid host block table reached CUDA graph replay");
+        const size_t nrows      = state.current_batch_size;
         const size_t row_bytes  = src.size(1) * src.element_size();
         const size_t src_stride = src.stride(0) * src.element_size();
         const size_t dst_stride = dst.stride(0) * dst.element_size();
@@ -477,6 +520,51 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs& inputs, const 
                 static_cast<unsigned long long>(fallback_count));
         }
         return false;
+    }
+
+    const auto& captured_inputs = graph_it->second.mem_hold_.py_model_inputs_;
+    if (inputs.attention_inputs_by_tag.empty()) {
+        if (!validateBlockTableForCudaGraph(inputs.attention_inputs.kv_cache_kernel_block_id_device,
+                                            captured_inputs.attention_inputs.kv_cache_kernel_block_id_device,
+                                            state.current_batch_size,
+                                            true,
+                                            "device")
+            || !validateBlockTableForCudaGraph(inputs.attention_inputs.kv_cache_kernel_block_id,
+                                               captured_inputs.attention_inputs.kv_cache_kernel_block_id,
+                                               state.current_batch_size,
+                                               false,
+                                               "host")) {
+            return false;
+        }
+    } else {
+        if (inputs.attention_inputs_by_tag.size() != captured_inputs.attention_inputs_by_tag.size()) {
+            RTP_LLM_LOG_WARNING("CUDA graph tagged block table size mismatch: source=%zu, captured=%zu; "
+                                "fallback to normal run",
+                                inputs.attention_inputs_by_tag.size(),
+                                captured_inputs.attention_inputs_by_tag.size());
+            return false;
+        }
+        for (const auto& [tag, source] : inputs.attention_inputs_by_tag) {
+            const auto captured_it = captured_inputs.attention_inputs_by_tag.find(tag);
+            if (captured_it == captured_inputs.attention_inputs_by_tag.end()) {
+                RTP_LLM_LOG_WARNING("CUDA graph tagged block table is missing tag=%s; fallback to normal run",
+                                    tag.c_str());
+                return false;
+            }
+            const auto& captured = captured_it->second;
+            if (!validateBlockTableForCudaGraph(source.kv_cache_kernel_block_id_device,
+                                                captured.kv_cache_kernel_block_id_device,
+                                                state.current_batch_size,
+                                                true,
+                                                "tagged device")
+                || !validateBlockTableForCudaGraph(source.kv_cache_kernel_block_id,
+                                                   captured.kv_cache_kernel_block_id,
+                                                   state.current_batch_size,
+                                                   false,
+                                                   "tagged host")) {
+                return false;
+            }
+        }
     }
     return true;
 }
