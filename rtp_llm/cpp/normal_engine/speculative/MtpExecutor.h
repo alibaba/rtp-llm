@@ -182,9 +182,13 @@ private:
     size_t                                   vocab_size_;
 
     // for mtp
-    DataType                                         data_type_;
-    size_t                                           hidden_size_;
-    size_t                                           propose_step_;
+    DataType data_type_;
+    size_t   hidden_size_;
+    size_t   propose_step_;
+    // DSpark/DFlash block-diffusion draft: one non-causal block forward
+    // proposes propose_step_ tokens (no MTP multi-step decode chain, sampling
+    // lives in the draft model).  Set from propose_params->sp_type.
+    bool                                             is_dspark_ = false;
     size_t                                           draft_vocab_size_;
     std::shared_ptr<ModelBase>                       draft_model_;
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;

@@ -116,6 +116,21 @@ torch::Tensor pickOneStepTargetLastToken(const GenerateStreamPtr& stream) {
     return columnAsFlat(sp_output_buffer->tokens, 0);
 }
 
+// DSpark: the per-stream propose state is a full [1, k] row (MTP readers only
+// ever take the last column).  Undefined when the stream has no propose state
+// yet — the caller decides whether that is an error.
+torch::Tensor pickDSparkProposeRow(const GenerateStreamPtr& stream) {
+    const auto& state_propose = stream->getProposeTokensGpu();
+    if (state_propose.defined()) {
+        return state_propose.reshape({-1});
+    }
+    auto sp_output_buffer = stream->getSPOutputBuffer();
+    if (sp_output_buffer && sp_output_buffer->propose_tokens_gpu.defined()) {
+        return sp_output_buffer->propose_tokens_gpu.reshape({-1});
+    }
+    return torch::Tensor();
+}
+
 torch::Tensor pickOneStepDraftToken(const GenerateStreamPtr& stream) {
     const auto& state_propose = stream->getProposeTokensGpu();
     if (state_propose.defined()) {
@@ -297,7 +312,8 @@ absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(c
 
     RTP_LLM_CHECK(model_input.ok());
 
-    if (propose_step_ == 1) {
+    // One-step MTP and dspark verify inputs carry no cross-step hidden chain.
+    if (propose_step_ == 1 || is_dspark_) {
         return model_input;
     }
 
@@ -630,6 +646,184 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&  
     model_input.combo_tokens  = toCudaInt32(combo_tokens_cpu, host_holder);
 }
 
+void MtpBatchStreamProcessor::updatePrefillPostDSparkDraftModelInput(GptModelInputs&        model_input,
+                                                                     const GptModelOutputs& model_output,
+                                                                     const SamplerOutput&   sampler_output,
+                                                                     TensorHolder&          host_holder) {
+    // Prefill seeding: the draft input is one [anchor + k*mask] block per
+    // stream, plus the target aux features of the computed prompt suffix for
+    // the feature-KV injection pass (a reused prefix keeps the feature KV
+    // injected when its blocks were first filled).
+    const int64_t width      = propose_step_ + 1;
+    const int64_t batch_size = sampler_output.token_ids.size(0);
+
+    RTP_LLM_CHECK_WITH_INFO(model_output.aux_hidden_states.defined(),
+                            "dspark prefill: target model did not export aux_hidden_states — "
+                            "check capture_aux_hidden_layer_ids wiring");
+
+    // anchor = the token the target just sampled for each stream
+    auto anchors  = toCudaInt32(lastColumnAsFlat(sampler_output.token_ids), host_holder);
+    auto combo_2d = fullInt32OnCuda({batch_size, width}, dspark_mask_token_id_);
+    combo_2d.select(1, 0).copy_(anchors);
+
+    auto suffix_lengths = toCudaInt32(model_input.input_lengths, host_holder).clone();  // computed suffix
+    auto reuse_lengths  = toCudaInt32(model_input.prefix_lengths, host_holder);         // prefix-cache reuse
+
+    // Aux export is [tokens, n_capture_layers, hidden]; the draft fc consumes
+    // the layer-concatenated [tokens, n*hidden] view.
+    const auto& aux                = model_output.aux_hidden_states;
+    model_input.last_hidden_states = aux.reshape({aux.size(0), -1});
+    model_input.dspark_ctx_lengths = suffix_lengths;
+
+    model_input.combo_tokens     = combo_2d.reshape({-1});
+    model_input.prefix_lengths   = reuse_lengths + suffix_lengths;  // = full prompt length
+    model_input.input_lengths    = fullInt32OnCuda({batch_size}, width);
+    model_input.sequence_lengths = emptyInt32OnCuda({0});
+    // Draft logits are unused (the proposal comes back as draft_tokens/
+    // draft_probs), so point lm_head at the anchor rows only.
+    model_input.lm_output_indexes = torch::arange(0, batch_size * width, width, cudaInt32Options());
+}
+
+void MtpBatchStreamProcessor::prepareDSparkVerifyModelInput(const StreamGroups& stream_groups,
+                                                            GptModelInputs&     model_input,
+                                                            TensorHolder&       host_holder) {
+    const size_t batch_size = stream_groups.size();
+    if (batch_size == 0) {
+        return;
+    }
+
+    std::vector<torch::Tensor> anchor_slices;  // each [1]
+    std::vector<torch::Tensor> propose_rows;   // each [k]
+    std::vector<torch::Tensor> next_seq_lens;  // each [1], device-state fast path
+    anchor_slices.reserve(batch_size);
+    propose_rows.reserve(batch_size);
+    next_seq_lens.reserve(batch_size);
+    bool all_next_seq_len = true;
+
+    for (const auto& stream : stream_groups.allStreams()) {
+        auto anchor = pickOneStepTargetLastToken(stream);
+        auto row    = pickDSparkProposeRow(stream);
+        RTP_LLM_CHECK_WITH_INFO(
+            anchor.defined(), "dspark verify: target anchor token missing for stream %ld", stream->streamId());
+        RTP_LLM_CHECK_WITH_INFO(row.defined() && row.numel() == propose_step_,
+                                "dspark verify: propose row missing or wrong width (%ld vs k=%d) for stream %ld",
+                                row.defined() ? (long)row.numel() : -1L,
+                                propose_step_,
+                                stream->streamId());
+        anchor_slices.push_back(toCudaInt32(anchor, host_holder));
+        propose_rows.push_back(toCudaInt32(row, host_holder));
+
+        const auto& next_seq_len = stream->getNextSeqLenGpu();
+        if (next_seq_len.defined() && next_seq_len.is_cuda()) {
+            next_seq_lens.push_back(next_seq_len);
+        } else {
+            all_next_seq_len = false;
+        }
+    }
+
+    auto anchors_2d  = torch::cat(anchor_slices, 0).reshape({(int64_t)batch_size, 1});
+    auto proposes_2d = torch::stack(propose_rows, 0);  // [B, k]
+    auto combo       = torch::cat({anchors_2d, proposes_2d}, 1).reshape({-1});
+
+    if (all_next_seq_len && next_seq_lens.size() == batch_size) {
+        model_input.prefix_lengths = (torch::cat(next_seq_lens, 0) - 1).to(torch::kInt32);
+    } else {
+        // First decode after prefill: no device state yet; the normal gather's
+        // sequence_lengths (= cached token count) is the committed prefix.
+        model_input.prefix_lengths = toCudaInt32(model_input.sequence_lengths, host_holder).clone();
+    }
+    setVerifyPairInputs(model_input, std::move(combo), batch_size, propose_step_ + 1, host_holder);
+}
+
+void MtpBatchStreamProcessor::updateDSparkDraftSamplerOutput(const StreamGroups& stream_groups,
+                                                             SamplerOutput&      draft_sampler_output,
+                                                             torch::Tensor&      draft_token_probs_d_t,
+                                                             TensorHolder&       host_holder) {
+    const size_t batch_size = stream_groups.size();
+
+    std::vector<torch::Tensor> token_rows;    // each [k] int32
+    std::vector<torch::Tensor> probs_slices;  // each [1, k, vocab]
+    token_rows.reserve(batch_size);
+    probs_slices.reserve(batch_size);
+
+    for (const auto& stream : stream_groups.allStreams()) {
+        auto row = pickDSparkProposeRow(stream);
+        RTP_LLM_CHECK_WITH_INFO(row.defined() && row.numel() == propose_step_,
+                                "dspark draft sampler: propose row missing for stream %ld",
+                                stream->streamId());
+        token_rows.push_back(toCudaInt32(row, host_holder));
+
+        auto          sp_output_buffer = stream->getSPOutputBuffer();
+        const auto&   dev_probs        = stream->getDraftAllProbsGpu();
+        torch::Tensor probs =
+            dev_probs.defined() ? dev_probs : (sp_output_buffer ? sp_output_buffer->all_probs : torch::Tensor());
+        RTP_LLM_CHECK_WITH_INFO(probs.defined() && probs.dim() == 3 && probs.size(1) == propose_step_,
+                                "dspark draft sampler: [1, k, vocab] draft probs missing for stream %ld",
+                                stream->streamId());
+        probs_slices.push_back(probs);
+    }
+
+    draft_sampler_output.token_ids = torch::stack(token_rows, 0);               // [B, k]
+    draft_token_probs_d_t          = torch::cat(probs_slices, 0).contiguous();  // [B, k, vocab]
+    draft_sampler_output.all_probs = draft_token_probs_d_t;
+}
+
+void MtpBatchStreamProcessor::updateDecodePostDSparkDraftModelInput(
+    GptModelInputs&                              model_input,
+    const GptModelOutputs&                       model_output,
+    const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
+    const size_t                                 batch_size,
+    torch::Tensor&                               hidden_states_d_t,
+    TensorHolder&                                host_holder) {
+    // Decode-tail seeding: anchor = last accepted (bonus/corrected) token,
+    // feature window = the accept_len committed rows of the verify aux export.
+    // Phase-1a runs sync-eager, so waiting for the rejection D2H here is fine.
+    const int64_t width = propose_step_ + 1;
+
+    speculative_sampler_output.transfer_done_event->synchronize();
+    const auto& accept_len_cpu    = speculative_sampler_output.accept_len_cpu;
+    const auto& accept_tokens_cpu = speculative_sampler_output.accept_tokens_cpu;
+    RTP_LLM_CHECK_WITH_INFO(accept_len_cpu.defined() && accept_tokens_cpu.defined(),
+                            "dspark decode tail: accept_len/accept_tokens host copies missing");
+    RTP_LLM_CHECK_WITH_INFO(model_output.aux_hidden_states.defined(),
+                            "dspark decode tail: target verify did not export aux_hidden_states");
+
+    const auto pin_i32   = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+    auto       combo_cpu = torch::full({(int64_t)batch_size, width}, dspark_mask_token_id_, pin_i32);
+
+    const int64_t        token_stride = accept_tokens_cpu.size(1);
+    const int32_t*       accept_len   = accept_len_cpu.data_ptr<int32_t>();
+    const int32_t*       accept_toks  = accept_tokens_cpu.data_ptr<int32_t>();
+    int32_t*             combo        = combo_cpu.data_ptr<int32_t>();
+    std::vector<int64_t> aux_row_ids;
+    aux_row_ids.reserve(batch_size * width);
+    for (int64_t i = 0; i < (int64_t)batch_size; ++i) {
+        const int len = accept_len[i];
+        RTP_LLM_CHECK_WITH_INFO(
+            len >= 1 && len <= width, "dspark decode tail: accept_len %d out of [1, %ld]", len, (long)width);
+        combo[i * width] = accept_toks[i * token_stride + len - 1];
+        for (int j = 0; j < len; ++j) {
+            aux_row_ids.push_back(i * width + j);
+        }
+    }
+    model_input.combo_tokens = toCudaInt32(combo_cpu.reshape({-1}), host_holder);
+
+    // Gather the accepted rows of the verify aux features, request-major.
+    const auto& aux   = model_output.aux_hidden_states;
+    auto        aux2d = aux.reshape({aux.size(0), -1});
+    auto        rows  = torch::tensor(aux_row_ids, torch::TensorOptions().dtype(torch::kLong)).to(torch::kCUDA);
+    model_input.last_hidden_states = aux2d.index_select(0, rows);
+    hidden_states_d_t              = model_input.last_hidden_states;
+
+    auto accept_len_d              = toCudaInt32(speculative_sampler_output.accept_len, host_holder);
+    model_input.dspark_ctx_lengths = accept_len_d;
+    // new committed prefix = verify prefix + accept_len
+    model_input.prefix_lengths = toCudaInt32(model_input.prefix_lengths, host_holder) + accept_len_d;
+    // input_lengths ([B] of k+1) and empty sequence_lengths carry over from
+    // setVerifyPairInputs; draft logits are unused, keep them to anchor rows.
+    model_input.lm_output_indexes = torch::arange(0, (int64_t)batch_size * width, width, cudaInt32Options());
+}
+
 void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     GptModelInputs&                              model_input,
     const GptModelOutputs&                       model_output,
@@ -774,7 +968,9 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
             draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
 
         torch::Tensor last_hidden_states;
-        if (propose_step_ > 1) {
+        // dspark draft rows are [B*(k+1)], not token-aligned; it keeps no
+        // cross-step hidden chain, so only multi-step MTP slices here.
+        if (propose_step_ > 1 && !is_dspark_) {
             last_hidden_states = draft_model_output.all_hidden_states.narrow(0, token_offset + token_size - 1, 1);
         }
 
@@ -817,7 +1013,7 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         int cur_accept_len = accept_len[batch_idx_out].item<int>();
 
         torch::Tensor last_hidden_states;
-        if (propose_step_ > 1) {
+        if (propose_step_ > 1 && !is_dspark_) {
             auto slice_t       = draft_model_output.all_hidden_states.narrow(0, token_offset + cur_accept_len - 1, 1);
             last_hidden_states = slice_t;
         }

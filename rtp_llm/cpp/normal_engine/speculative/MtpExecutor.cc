@@ -353,8 +353,35 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     propose_step_     = propose_params->gen_num_per_circle;
     vocab_size_       = params.model_config_.vocab_size;
     draft_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
+    is_dspark_        = propose_params->sp_type == SP_TYPE_DSPARK;
 
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
+
+    if (is_dspark_) {
+        // Phase-1a scope: sync eager PDFUSION only. Every unsupported axis
+        // fails at init instead of corrupting streams at runtime.
+        RTP_LLM_CHECK_WITH_INFO(!useStreamAsync() && !useDropBroadSync() && !useAsyncPrepare() && !useDeviceInput(),
+                                "dspark phase-1a does not support the async decode switches "
+                                "(RTP_LLM_STREAM_ASYNC/RTP_LLM_DROP_BROAD_SYNC/RTP_LLM_MTP_ASYNC_PREPARE/"
+                                "RTP_LLM_DEVICE_INPUT)");
+        RTP_LLM_CHECK_WITH_INFO(role_type_ == RoleType::PDFUSION,
+                                "dspark phase-1a only supports PDFUSION role, got role_type=%d",
+                                static_cast<int>(role_type_));
+        RTP_LLM_CHECK_WITH_INFO(!params.parallelism_config.prefill_cp_config.is_enabled()
+                                    && !params.parallelism_config.prefill_cp_config.is_prefill_enabled(),
+                                "dspark phase-1a does not support context parallel");
+        RTP_LLM_CHECK_WITH_INFO(!params.hw_kernel_config.enable_cuda_graph,
+                                "dspark phase-1a does not support ENABLE_CUDA_GRAPH");
+        // tpSyncModelInputs does not broadcast dspark_ctx_lengths yet, and the
+        // fake-stream path (dp_size > 1) has no k-wide propose state.
+        RTP_LLM_CHECK_WITH_INFO(params.parallelism_config.tp_size <= 1 && params.parallelism_config.dp_size <= 1,
+                                "dspark phase-1a only supports tp_size=1/dp_size=1, got tp=%zu dp=%zu",
+                                (size_t)params.parallelism_config.tp_size,
+                                (size_t)params.parallelism_config.dp_size);
+        RTP_LLM_CHECK_WITH_INFO(params.sp_config.sp_dspark_mask_token_id >= 0,
+                                "dspark requires sp_dspark_mask_token_id from the draft ckpt config, got %ld",
+                                (long)params.sp_config.sp_dspark_mask_token_id);
+    }
 
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
@@ -517,7 +544,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     const auto& draft_weights = propose_params->getEngineInitParams().gpt_weights;
     d2t_map_                  = draft_model_ ? draft_model_->weights_.d2t_map : draft_weights.d2t_map;
     speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
-    fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_));
+    if (!is_dspark_) {
+        // dspark drafts sample in the model (draft_tokens/draft_probs on the
+        // model outputs); the executor-side top-k sampler stays unbuilt.
+        fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_));
+    }
 
     RTP_LLM_LOG_INFO("[speculative decoding] d2t_map size: %ld", d2t_map_.defined() ? d2t_map_.numel() : 0);
 }
@@ -751,8 +782,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 model_input.combo_tokens  = saved_combo_tokens;
                 model_input.input_lengths = saved_input_lengths;
             }
-            batch_stream_processor_->updatePrefillPostDraftModelInput(
-                model_input, model_output, sampler_output, buffer_holder_);
+            if (is_dspark_) {
+                batch_stream_processor_->updatePrefillPostDSparkDraftModelInput(
+                    model_input, model_output, sampler_output, buffer_holder_);
+            } else {
+                batch_stream_processor_->updatePrefillPostDraftModelInput(
+                    model_input, model_output, sampler_output, buffer_holder_);
+            }
         }
     }
 
@@ -776,9 +812,19 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // draft model sample
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_sample)");
-        fast_topk_sampler_output       = fast_topk_sampler_->forward(draft_model_output.logits);
-        draft_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
-        draft_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
+        if (is_dspark_) {
+            // Sampling lives in the dspark draft: the block forward already
+            // returned the proposal, no executor-side top-k pass.
+            RTP_LLM_CHECK_WITH_INFO(draft_model_output.draft_tokens.defined()
+                                        && draft_model_output.draft_probs.defined(),
+                                    "dspark draft forward did not emit draft_tokens/draft_probs");
+            draft_sampler_output.token_ids = draft_model_output.draft_tokens;
+            draft_sampler_output.all_probs = draft_model_output.draft_probs;
+        } else {
+            fast_topk_sampler_output       = fast_topk_sampler_->forward(draft_model_output.logits);
+            draft_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
+            draft_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
+        }
     }
 
     // collect metrics
@@ -927,7 +973,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_decode_input_and_tp_sync)");
         if (isTpRank0()) {
-            if (propose_step_ == 1) {
+            if (is_dspark_) {
+                batch_stream_processor_->prepareDSparkVerifyModelInput(stream_groups, model_input, buffer_holder_);
+            } else if (propose_step_ == 1) {
                 batch_stream_processor_->prepareOneStepSpecDecodeModelInput(stream_groups, model_input, buffer_holder_);
             } else {
                 batch_stream_processor_->prepareDecodeDraftModelInput(stream_groups, model_input, buffer_holder_);
@@ -947,7 +995,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     launchTargetVerifyPrepareAsync(model_input, batch_size);
 
-    if (propose_step_ > 1) {
+    // dspark proposed this round's k tokens in the PREVIOUS round's tail
+    // block forward — there is no per-round draft decode chain to run here.
+    if (propose_step_ > 1 && !is_dspark_) {
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
         draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t);
@@ -969,7 +1019,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(update_draft_sampler_output)");
         if (!model_input.is_fake_stream) {
-            if (propose_step_ == 1) {
+            if (is_dspark_) {
+                batch_stream_processor_->updateDSparkDraftSamplerOutput(
+                    stream_groups, draft_sampler_output, draft_token_probs_d_t, buffer_holder_);
+            } else if (propose_step_ == 1) {
                 batch_stream_processor_->updateOneStepDraftSamplerOutput(
                     stream_groups, draft_sampler_output, draft_token_probs_d_t, buffer_holder_);
             } else {
@@ -1026,8 +1079,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
         }
 
-        batch_stream_processor_->updateDecodePostDraftModelInput(
-            model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
+        if (is_dspark_) {
+            RTP_LLM_CHECK_WITH_INFO(!model_input.is_fake_stream,
+                                    "dspark decode does not support fake streams (dp>1 / perf-test paths)");
+            batch_stream_processor_->updateDecodePostDSparkDraftModelInput(
+                model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
+        } else {
+            batch_stream_processor_->updateDecodePostDraftModelInput(
+                model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
+        }
         if (metrics_reporter_) {
             accept_len_ready_event.record(cuda_graph::graphGetCurrentStream());
         }
@@ -1063,9 +1123,18 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     SamplerOutput draft_prefill_sampler_output;
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_sample)");
-        auto fast_topk_sampler_output          = fast_topk_sampler_->forward(draft_prefill_model_output.logits);
-        draft_prefill_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
-        draft_prefill_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
+        if (is_dspark_) {
+            // The tail block forward already returned next round's proposal.
+            RTP_LLM_CHECK_WITH_INFO(draft_prefill_model_output.draft_tokens.defined()
+                                        && draft_prefill_model_output.draft_probs.defined(),
+                                    "dspark tail draft forward did not emit draft_tokens/draft_probs");
+            draft_prefill_sampler_output.token_ids = draft_prefill_model_output.draft_tokens;
+            draft_prefill_sampler_output.all_probs = draft_prefill_model_output.draft_probs;
+        } else {
+            auto fast_topk_sampler_output          = fast_topk_sampler_->forward(draft_prefill_model_output.logits);
+            draft_prefill_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
+            draft_prefill_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
+        }
     }
 
     // Record after draft_model_sample so worker all_probs/token_ids reads wait
@@ -1785,10 +1854,10 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
     auto next_seq_len_owned = torch::empty({batch_size}, cuda_i32);
     next_seq_len_owned.copy_(next_seq_len_cpu, /*non_blocking=*/true);
 
-    // Batch gather hidden states
+    // Batch gather hidden states (dspark keeps no cross-step hidden chain)
     torch::Tensor last_hidden_all;
     const auto    stream_hidden_len = static_cast<int64_t>(propose_step_ + 1);
-    if (propose_step_ > 1 && draft_all_hidden_full.defined()) {
+    if (propose_step_ > 1 && !is_dspark_ && draft_all_hidden_full.defined()) {
         const auto hidden_size = draft_all_hidden_full.size(1);
         auto       hidden_3d   = draft_all_hidden_full.reshape({batch_size, stream_hidden_len, hidden_size});
         auto       accept_i32  = accept_len_all.to(torch::kInt32);
