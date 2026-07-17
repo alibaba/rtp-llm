@@ -9,6 +9,7 @@ import torch
 
 _SAFETENSORS_INDEX = "model.safetensors.index.json"
 _PYTORCH_INDEX = "pytorch_model.bin.index.json"
+_CONSOLIDATED_RANK_RE = re.compile(r"^consolidated[._-](\d+)(?:[._-]|$)", re.IGNORECASE)
 _EXCLUDED_WEIGHT_FILES = {
     "adapter_model.bin",
     "adapter_model.safetensors",
@@ -194,6 +195,13 @@ def _is_consolidated_weight_file(path: str) -> bool:
     return os.path.basename(path).lower().startswith("consolidated")
 
 
+def is_rank_local_checkpoint(files: List[str]) -> bool:
+    return any(
+        _CONSOLIDATED_RANK_RE.match(os.path.basename(path)) is not None
+        for path in files
+    )
+
+
 def _is_model_weight_file(path: str, allow_consolidated: bool = False) -> bool:
     name = os.path.basename(path).lower()
     if name in _EXCLUDED_WEIGHT_FILES:
@@ -227,10 +235,7 @@ def _select_consolidated_files(
     ranked_files = {}
     unranked_files = []
     for path in files:
-        match = re.match(
-            r"^consolidated[._-](\d+)(?:[._-]|$)",
-            os.path.basename(path).lower(),
-        )
+        match = _CONSOLIDATED_RANK_RE.match(os.path.basename(path))
         if match is None:
             unranked_files.append(path)
             continue
