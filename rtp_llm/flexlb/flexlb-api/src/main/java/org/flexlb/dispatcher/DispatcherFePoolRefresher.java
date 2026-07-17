@@ -4,6 +4,7 @@ import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.util.Logger;
 import org.flexlb.util.RateLimitedWarn;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -16,6 +17,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -54,10 +56,28 @@ public class DispatcherFePoolRefresher {
      */
     private static final long DISCOVERY_TIMEOUT_MS = 3_000;
 
+    /**
+     * How long a run of empty discovery results may keep displacing the last non-empty pool.
+     * Within the window an empty snapshot is treated as suspect (a discovery hiccup, a client
+     * that swallows failures into an empty list) and the known FEs are kept; past it the empty
+     * result is accepted as the truth — the fleet scaled to zero or was torn down — and
+     * {@link FePool#next()} fails fast instead of timing out against removed hosts forever.
+     * Mirrors the sync side's {@code DISCOVERY_FAILURE_GRACE_MS} default (5 minutes).
+     */
+    private static final long EMPTY_DISCOVERY_GRACE_NANOS = TimeUnit.MINUTES.toNanos(5);
+
     private final ServiceDiscovery serviceDiscovery;
     private final String serviceId;
+    private final LongSupplier nanoClock;
     private final AtomicReference<List<String>> fePoolUrls = new AtomicReference<>(List.of());
     private final RateLimitedWarn emptyDiscoveryWarn = new RateLimitedWarn(1, TimeUnit.SECONDS);
+
+    /**
+     * Monotonic instant of the last snapshot that proved the fleet non-empty. The grace clock
+     * for accepting an empty snapshot counts from here, so intermittent non-empty results keep
+     * resetting it and only a sustained run of emptiness drains the pool.
+     */
+    private volatile long lastNonEmptyNanos;
 
     /**
      * Dedicated single-thread executor for the bounded discovery lookup. A wedged discovery client
@@ -70,9 +90,17 @@ public class DispatcherFePoolRefresher {
         return t;
     });
 
+    @Autowired
     public DispatcherFePoolRefresher(ServiceDiscovery serviceDiscovery, DispatchConfig cfg) {
+        this(serviceDiscovery, cfg, System::nanoTime);
+    }
+
+    /** Visible for tests: {@code nanoClock} lets grace-window expiry be simulated without sleeping. */
+    DispatcherFePoolRefresher(ServiceDiscovery serviceDiscovery, DispatchConfig cfg, LongSupplier nanoClock) {
         this.serviceDiscovery = serviceDiscovery;
         this.serviceId = cfg.getFePoolServiceId();
+        this.nanoClock = nanoClock;
+        this.lastNonEmptyNanos = nanoClock.getAsLong();
         // Boot seed first — guarantees source() returns the freshest available view by the
         // time downstream beans (FePool, FeHealthChecker) read it during their own init.
         // A discovery hiccup here degrades to an empty snapshot that the listener and poll
@@ -137,24 +165,43 @@ public class DispatcherFePoolRefresher {
      * "changed?" check stays in one place. Steady state — same list arriving twice — emits
      * nothing, so the log does not get flooded by no-op refreshes.
      *
-     * <p>An empty snapshot never displaces a non-empty one. A discovery client that swallows a
-     * failed lookup reports it as an empty list, indistinguishable from a fleet that scaled to
-     * zero, and accepting it would drop every FE at once and fail 100% of batch traffic. Liveness
-     * is not discovery's job here — {@link FeHealthChecker} probes the known FEs directly, so a
-     * fleet that genuinely went away is taken out of rotation by the probe rather than by an
-     * empty snapshot.
+     * <p>An empty snapshot displaces a non-empty pool only after it has persisted for
+     * {@link #EMPTY_DISCOVERY_GRACE_NANOS}. Within the window it is treated as suspect — a
+     * discovery hiccup, or a client that swallows a failed lookup into an empty list — and the
+     * known FEs are kept ({@link FeHealthChecker} probes them directly, so hosts that are
+     * genuinely gone leave rotation via the probe). Past the window the empty result is the
+     * truth: the fleet scaled to zero, and holding the old list forever would keep
+     * {@link FePool#next()}'s all-dead fallback shoveling traffic at removed hosts. Accepting
+     * it empties the pool so {@code next()} fails fast until discovery reports hosts again.
+     * (Outright lookup failures never reach here as an empty list — {@code boundedGetHosts}
+     * throws and the callers keep the pool untouched.)
      */
     private void applyUrls(List<String> urls, String source) {
-        List<String> prev = fePoolUrls.getAndUpdate(current ->
-                urls.isEmpty() && !current.isEmpty() ? current : urls);
-        if (urls.isEmpty() && !prev.isEmpty()) {
-            emptyDiscoveryWarn.warn("dispatcher FE pool: ignoring empty discovery result ({}), "
-                    + "keeping {} known FE(s): serviceId={}", source, prev.size(), serviceId);
+        if (!urls.isEmpty()) {
+            lastNonEmptyNanos = nanoClock.getAsLong();
+            List<String> prev = fePoolUrls.getAndSet(urls);
+            if (!prev.equals(urls)) {
+                Logger.warn("dispatcher FE pool updated ({}): serviceId={}, hosts={} (was {})",
+                        source, serviceId, urls.size(), prev.size());
+            }
             return;
         }
-        if (!prev.equals(urls)) {
-            Logger.warn("dispatcher FE pool updated ({}): serviceId={}, hosts={} (was {})",
-                    source, serviceId, urls.size(), prev.size());
+        List<String> prev = fePoolUrls.get();
+        if (prev.isEmpty()) {
+            return;
+        }
+        long emptyForNanos = nanoClock.getAsLong() - lastNonEmptyNanos;
+        if (emptyForNanos <= EMPTY_DISCOVERY_GRACE_NANOS) {
+            emptyDiscoveryWarn.warn("dispatcher FE pool: ignoring empty discovery result ({}) within "
+                    + "grace, keeping {} known FE(s): serviceId={}", source, prev.size(), serviceId);
+            return;
+        }
+        // CAS so a concurrent non-empty update wins over this (by definition stale) drain.
+        if (fePoolUrls.compareAndSet(prev, List.of())) {
+            Logger.warn("dispatcher FE pool: empty discovery persisted beyond grace ({}s), accepting "
+                            + "it — dropping {} FE(s) and failing fast until discovery reports hosts again: "
+                            + "serviceId={}, source={}",
+                    TimeUnit.NANOSECONDS.toSeconds(EMPTY_DISCOVERY_GRACE_NANOS), prev.size(), serviceId, source);
         }
     }
 
