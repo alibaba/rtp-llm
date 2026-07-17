@@ -53,9 +53,11 @@ if device_type == DeviceType.Xpu:
     if _fa2_error:
         raise RuntimeError(
             "XPU decode attention requires the FA2 kernel from vllm-xpu-kernels "
-            ">= 0.1.10. " + _fa2_error + ". Install a compatible FA2-enabled build, e.g. "
-            "`pip install 'vllm-xpu-kernels>=0.1.10' --find-links <url>` "
-            "(see deps/requirements_xpu.txt).")
+            ">= 0.1.10. " + _fa2_error + ". Install a compatible FA2-enabled build "
+            "via the enforced installer (does not silently drift like a hand-run "
+            "pip install would): "
+            "`VLLM_XPU_KERNELS_INDEX_URL=<url> deps/install_xpu_fa2.sh` "
+            "(see deps/requirements_xpu.txt and deps/install_xpu_fa2.sh).")
 elif device_type == DeviceType.ROCm:
     # Import to register ROCm FMHA implementations
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (

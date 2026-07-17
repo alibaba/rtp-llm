@@ -82,6 +82,11 @@ thrift
 # Validated floor: vllm-xpu-kernels >= 0.1.10 (first release providing the
 # non-contiguous paged K/V stride capability that XPU decode depends on).
 # The startup preflight in attention/__init__.py enforces this floor and
-# fails fast on older/incompatible builds. Pin the exact build matching your
-# torch-xpu wheel; install manually since it is off-index:
-#   pip install 'vllm-xpu-kernels>=0.1.10' --find-links <index-url>
+# fails fast on older/incompatible builds.
+#
+# Do NOT install by hand from this comment. Build/CI/image pipelines MUST
+# call the enforced, fail-closed installer instead, which pins the build and
+# re-verifies the preflight immediately after install (deps/install_xpu_fa2.sh):
+#   VLLM_XPU_KERNELS_INDEX_URL=<index-url> deps/install_xpu_fa2.sh
+#   # or: deps/install_xpu_fa2.sh --wheel /path/to/vllm_xpu_kernels-*.whl
+
