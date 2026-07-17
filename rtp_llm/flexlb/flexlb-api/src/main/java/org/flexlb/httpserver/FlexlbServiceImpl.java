@@ -102,9 +102,11 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     routeLocally(requestContext);
 
             Context grpcContext = Context.current();
-            Context.CancellationListener cancellationListener = context ->
+            Context.CancellationListener cancellationListener = context -> {
+                    requestContext.cancel();
                     routeFuture.completeExceptionally(
                             Status.CANCELLED.withDescription("gRPC context cancelled").asRuntimeException());
+            };
             grpcContext.addListener(cancellationListener, Runnable::run);
 
             routeFuture.whenComplete((response, ex) -> {
