@@ -15,14 +15,17 @@ import org.springframework.stereotype.Component;
 
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Cache-affinity-first routing with bounded queue spillover.
  *
  * <p>Cold requests have no cache lead and therefore follow the shortest TTFT. Each local
  * assignment immediately increases that worker's estimated queue, so subsequent cold requests
- * naturally spread to other workers. Once cache locality appears, the cache leader is preferred
- * until its additional queue work exceeds the configured multiple of the saved prefill work.
+ * naturally spread to other workers. A cache-poor worker that remains idle receives a bounded
+ * probe request so it can build the shared prefix instead of starving indefinitely. Once cache
+ * locality appears, the cache leader is preferred until its additional queue work exceeds the
+ * configured multiple of the saved prefill work.
  */
 @Component("cacheAffinityFirstStrategy")
 public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
@@ -61,6 +64,19 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
                         .thenComparingLong(ScoredWorker::lastSelectedTime))
                 .orElse(shortestTtftWorker);
 
+        ScoredWorker coldWorker = findColdWorkerForProbe(
+                sortedWorkers, cacheLeader, seqLen, config);
+        if (coldWorker != null) {
+            Logger.debug(
+                    "Cache affinity first cold worker probe - cacheLeader: {}, cacheLeaderHitTokens: {}, coldWorker: {}, coldWorkerHitTokens: {}, idleTimeUs: {}",
+                    cacheLeader.worker().getIpPort(),
+                    cacheLeader.hitCacheTokens(),
+                    coldWorker.worker().getIpPort(),
+                    coldWorker.hitCacheTokens(),
+                    idleTimeUs(coldWorker));
+            return claimPreferredWorker(coldWorker, sortedWorkers, shortestTtftWorker);
+        }
+
         long blockSize = cacheLeader.worker().getCacheStatus() == null
                 ? 0
                 : cacheLeader.worker().getCacheStatus().getBlockSize();
@@ -97,6 +113,49 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
                 preferredWorker.worker().getIpPort());
 
         return claimPreferredWorker(preferredWorker, sortedWorkers, shortestTtftWorker);
+    }
+
+    private ScoredWorker findColdWorkerForProbe(
+            List<ScoredWorker> workers,
+            ScoredWorker cacheLeader,
+            long seqLen,
+            FlexlbConfig config) {
+        long probeIntervalMs = config.getCacheAffinityFirstColdWorkerProbeIntervalMs();
+        if (probeIntervalMs <= 0 || workers.size() < 2) {
+            return null;
+        }
+
+        long blockSize = cacheLeader.worker().getCacheStatus() == null
+                ? 0
+                : cacheLeader.worker().getCacheStatus().getBlockSize();
+        if (blockSize <= 0) {
+            return null;
+        }
+
+        long minimumCacheGap = blockSize
+                * Math.max(0, config.getPrefillCachePreferenceMinBlockGap());
+        long probeIntervalUs = TimeUnit.MILLISECONDS.toMicros(probeIntervalMs);
+        long nowUs = System.nanoTime() / 1000;
+        return workers.stream()
+                .filter(worker -> !worker.equals(cacheLeader))
+                .filter(worker -> {
+                    long cacheGap = cacheLeader.hitCacheTokens() - worker.hitCacheTokens();
+                    return cacheGap > 0 && cacheGap >= minimumCacheGap;
+                })
+                .filter(worker -> estimateQueueWork(
+                        worker, seqLen, config.getPrefillCacheHitDiscount()) == 0)
+                .filter(worker -> worker.lastSelectedTime() < 0
+                        || nowUs - worker.lastSelectedTime() >= probeIntervalUs)
+                .min(Comparator.comparingLong(ScoredWorker::lastSelectedTime)
+                        .thenComparingLong(ScoredWorker::ttft))
+                .orElse(null);
+    }
+
+    private long idleTimeUs(ScoredWorker worker) {
+        if (worker.lastSelectedTime() < 0) {
+            return -1;
+        }
+        return Math.max(0, System.nanoTime() / 1000 - worker.lastSelectedTime());
     }
 
     private long estimateQueueWork(

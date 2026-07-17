@@ -114,6 +114,44 @@ class CacheAffinityFirstStrategyTest {
         Assertions.assertEquals(shortestQueueWorker.getIp(), selected.getServerIp());
     }
 
+    @Test
+    void sendsOneWarmupRequestToAnIdleColdWorker() {
+        WorkerStatus cacheLeader = createWorker("127.0.0.1", 5000);
+        WorkerStatus warmWorker = createWorker("127.0.0.2", 0);
+        WorkerStatus coldWorker = createWorker("127.0.0.3", 0);
+        coldWorker.getLastSelectedTime().set(-1);
+        CacheAffinityFirstStrategy strategy = createStrategy(
+                List.of(cacheLeader, warmWorker, coldWorker),
+                Map.of(
+                        cacheLeader.getIpPort(), 17,
+                        warmWorker.getIpPort(), 16,
+                        coldWorker.getIpPort(), 0));
+
+        ServerStatus first = select(strategy, cacheAffinityConfig(), "cold-warmup");
+        ServerStatus second = select(strategy, cacheAffinityConfig(), "after-warmup");
+
+        Assertions.assertEquals(coldWorker.getIp(), first.getServerIp());
+        Assertions.assertNotEquals(coldWorker.getIp(), second.getServerIp());
+        Assertions.assertTrue(coldWorker.getRunningQueueTime().get() > 0);
+    }
+
+    @Test
+    void doesNotExploreARecentlySelectedColdWorker() {
+        WorkerStatus cacheLeader = createWorker("127.0.0.1", 5000);
+        WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
+        WorkerStatus coldWorker = createWorker("127.0.0.3", 0);
+        CacheAffinityFirstStrategy strategy = createStrategy(
+                List.of(cacheLeader, shortestTtftWorker, coldWorker),
+                Map.of(
+                        cacheLeader.getIpPort(), 17,
+                        shortestTtftWorker.getIpPort(), 16,
+                        coldWorker.getIpPort(), 0));
+
+        ServerStatus selected = select(strategy, cacheAffinityConfig(), "recent-cold-worker");
+
+        Assertions.assertEquals(shortestTtftWorker.getIp(), selected.getServerIp());
+    }
+
     private CacheAffinityFirstStrategy createStrategy(
             List<WorkerStatus> workers, Map<String, Integer> cacheMatches) {
         Map<String, WorkerStatus> prefillWorkers =
@@ -157,6 +195,7 @@ class CacheAffinityFirstStrategyTest {
         config.setPrefillCacheHitDiscount(1.0);
         config.setPrefillCachePreferenceMinBlockGap(2);
         config.setCacheAffinityFirstQueueToleranceFactor(2.0);
+        config.setCacheAffinityFirstColdWorkerProbeIntervalMs(5000);
         return config;
     }
 
@@ -168,6 +207,7 @@ class CacheAffinityFirstStrategyTest {
         worker.setGroup("default");
         worker.setAlive(true);
         worker.getRunningQueueTime().set(queueWork);
+        worker.getLastSelectedTime().set(System.nanoTime() / 1000);
 
         CacheStatus cacheStatus = new CacheStatus();
         cacheStatus.setBlockSize(BLOCK_SIZE);

@@ -93,6 +93,12 @@ public class FlexlbConfig {
     private double cacheAffinityFirstQueueToleranceFactor = 2.0;
 
     /**
+     * Maximum time a cache-poor, idle worker may remain unselected before
+     * CACHE_AFFINITY_FIRST sends it one warm-up request. Set to 0 to disable.
+     */
+    private long cacheAffinityFirstColdWorkerProbeIntervalMs = 5000;
+
+    /**
      * KV cache available threshold for DECODE role (percentage)
      * When Worker's KV cache usage is below this threshold, the Worker is considered available
      * Range: 1-100, default 90 means Worker is unavailable when usage exceeds 90%
