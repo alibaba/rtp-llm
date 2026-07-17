@@ -1729,6 +1729,35 @@ class AiterPrefillImplPaged(FMHAImplBase):
                 cu_q_host[1:] = torch.cumsum(q_lens_host, dim=0)
                 cu_k_host[1:] = torch.cumsum(kv_lens_host, dim=0)
 
+        if bool((q_lens_host < 0).any()) or bool((kv_lens_host < 0).any()):
+            raise ValueError(
+                "Aiter prefill CUDA graph received non-monotonic cumulative lengths: "
+                f"q_lens={q_lens_host.tolist()}, kv_lens={kv_lens_host.tolist()}"
+            )
+        if bool((kv_lens_host < q_lens_host).any()):
+            raise ValueError(
+                "Aiter prefill CUDA graph received KV lengths shorter than query lengths: "
+                f"q_lens={q_lens_host.tolist()}, kv_lens={kv_lens_host.tolist()}"
+            )
+
+        exp_sums = getattr(fmha_params, "exp_sums", None)
+        if exp_sums is not None and expected_batch > 0:
+            context_partition_size = self.triton_prefill_impl.context_partition_size
+            max_context_len = int(kv_lens_host.max().item())
+            required_partitions = (
+                max_context_len + context_partition_size - 1
+            ) // context_partition_size
+            workspace_partitions = int(exp_sums.shape[2])
+            if required_partitions > workspace_partitions:
+                raise RuntimeError(
+                    "Aiter prefill CUDA graph workspace is too small for replay metadata: "
+                    f"max_context_len={max_context_len}, "
+                    f"required_partitions={required_partitions}, "
+                    f"workspace_partitions={workspace_partitions}, "
+                    f"workspace_shape={tuple(exp_sums.shape)}, "
+                    f"kv_lens={kv_lens_host.tolist()}"
+                )
+
         self._copy_padded_int32(fmha_params.cu_seqlens_q, cu_q_host)
         self._copy_padded_int32(fmha_params.cu_seqlens_k, cu_k_host)
 
