@@ -9,6 +9,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -28,6 +29,12 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Tests for {@link FixedWindowBatcherAlgorithm}.
+ *
+ * <p>Verifies head wait time computation, queue deadline drop, and token-cap
+ * filtering behavior.
+ */
 class FixedWindowBatcherAlgorithmTest {
 
     @Test
@@ -251,6 +258,31 @@ class FixedWindowBatcherAlgorithmTest {
         verify(handler).onOfferFailure(eq(item), any(IllegalArgumentException.class));
         verify(handler, never()).onBatchReady(anyList(), any(DispatchMeta.class));
         assertEquals(0, context.size());
+    }
+
+    @Test
+    void processQueue_dropsExpiredHeadRequest() throws InterruptedException {
+        FixedWindowBatcherAlgorithm algo = new FixedWindowBatcherAlgorithm();
+
+        FlexlbConfig config = new FlexlbConfig();
+        config.setFlexlbBatchFixedMaxInflightBatches(0); // disable backpressure
+        config.setFlexlbBatchEnqueueDeadlineMs(100);     // 100ms queue deadline
+        config.setFlexlbBatchFixedWaitMs(10000);         // long window — don't trigger window timeout
+
+        long now = System.currentTimeMillis();
+        // Enqueued 200ms ago — exceeds the 100ms deadline
+        BatchItem head = enqueuedItem(1L, now - 200);
+        PriorityBlockingQueue<BatchItem> queue = queueWith(head);
+
+        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        BatcherContext ctx = new BatcherContext("test", null, config, handler, queue, mock(BatchSchedulerReporter.class));
+
+        algo.processQueue(ctx);
+
+        // The head should have been dropped via onExpired
+        Mockito.verify(handler).onExpired(head);
+        assertTrue(queue.isEmpty(), "Queue should be empty after dropping expired head");
+    }
     }
 
     // ---- helpers ----

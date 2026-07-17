@@ -86,6 +86,20 @@ public class BalanceContext {
 
     private String errorMessage;
 
+    //===================== Decode Release ===================//
+
+    /**
+     * Callback to release the decode KV reservation for DIRECT/QUEUE paths.
+     * Set by CostBasedDecodeStrategy.select() after a successful DECODE reserve.
+     * Executed by RouteService.cancel() so each path releases its own reservation
+     * directly, without going through FlexlbBatchScheduler.
+     *
+     * <p>Uses Runnable (not DecodeEndpoint) because BalanceContext lives in
+     * flexlb-common which cannot depend on flexlb-sync classes.
+     */
+    @ToString.Exclude
+    private volatile Runnable decodeReleaseCallback;
+
     //===================== Method ===================//
 
     public long getRequestId() {

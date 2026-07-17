@@ -19,34 +19,21 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final ConcurrentHashMap<Long, RequestInflight> inflightRequests = new ConcurrentHashMap<>();
-    private final AtomicLong inflightKvReservedTotal = new AtomicLong(0);
     private final AtomicLong reportedKvAvailable = new AtomicLong();
     private volatile int confirmedRunningCount;
     private final InflightEvictor<Long, RequestInflight> requestEvictor;
 
     public DecodeEndpoint(WorkerStatus status) {
         super(status);
-        this.requestEvictor = new InflightEvictor<>(inflightRequests,
-                req -> inflightKvReservedTotal.addAndGet(-req.kvTokens()));
+        this.requestEvictor = new InflightEvictor<>(inflightRequests, req -> {});
     }
 
-    public void reserve(long requestId, long kvTokens) {
-        RequestInflight newRi = new RequestInflight(kvTokens);
-        RequestInflight prev = inflightRequests.putIfAbsent(requestId, newRi);
-        if (prev != null) {
-            // requestId already exists — subtract the old kvTokens before overwriting,
-            // otherwise the old value is silently lost and the counter stays inflated.
-            inflightKvReservedTotal.addAndGet(-prev.kvTokens());
-            inflightRequests.put(requestId, newRi);
-        }
-        inflightKvReservedTotal.addAndGet(kvTokens);
+    public void reserve(long requestId, long kvTokens, long expectedKvTokens) {
+        inflightRequests.put(requestId, new RequestInflight(kvTokens, expectedKvTokens));
     }
 
     public void release(long requestId) {
-        RequestInflight removed = inflightRequests.remove(requestId);
-        if (removed != null) {
-            inflightKvReservedTotal.addAndGet(-removed.kvTokens());
-        }
+        inflightRequests.remove(requestId);
     }
 
     @Override
@@ -85,10 +72,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             for (TaskInfo task : runningTaskInfo.values()) {
                 TaskPhase phase = task.getPhase();
                 if (phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING) {
-                    RequestInflight removed = inflightRequests.remove(task.getRequestId());
-                    if (removed != null) {
-                        inflightKvReservedTotal.addAndGet(-removed.kvTokens());
-                    }
+                    inflightRequests.remove(task.getRequestId());
                 }
             }
         }
@@ -98,9 +82,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             for (TaskInfo task : finishedTaskInfo.values()) {
                 if (task.getErrorCode() != 0) {
                     RequestInflight removed = inflightRequests.remove(task.getRequestId());
-                    if (removed != null) {
-                        inflightKvReservedTotal.addAndGet(-removed.kvTokens());
-                    } else if (!isCancelError(task)) {
+                    if (removed == null && !isCancelError(task)) {
                         logger.warn("Decode calibrate: finished failed request reqId={} not in inflight, error={}",
                                 task.getRequestId(), task.getErrorMessage());
                     }
@@ -110,10 +92,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // Phase 3: process finished success requests
             for (TaskInfo task : finishedTaskInfo.values()) {
                 if (task.getErrorCode() == 0) {
-                    RequestInflight removed = inflightRequests.remove(task.getRequestId());
-                    if (removed != null) {
-                        inflightKvReservedTotal.addAndGet(-removed.kvTokens());
-                    }
+                    inflightRequests.remove(task.getRequestId());
                 }
             }
         }
@@ -122,12 +101,30 @@ public class DecodeEndpoint extends WorkerEndpoint {
     // ==================== KV Cache 三视图 ====================
 
     /**
-     * Local inflight KV reservation not yet confirmed by the engine.
-     * Maintained as an {@link AtomicLong} counter, updated incrementally on
-     * {@link #reserve}, {@link #release}, {@link #calibrate}, and TTL eviction.
+     * Local inflight KV reservation (conservative estimate) not yet confirmed by the engine.
+     * Sums {@code expectedKvTokens} (seqLen + maxNewTokens) to account for generation-phase
+     * KV growth. Used for scoring / load balancing.
+     * Computed on demand from the inflight map — no separate counter needed.
      */
-    private long inflightKvReserved() {
-        return inflightKvReservedTotal.get();
+    public long inflightKvReserved() {
+        long sum = 0;
+        for (RequestInflight ri : inflightRequests.values()) {
+            sum += ri.expectedKvTokens();
+        }
+        return sum;
+    }
+
+    /**
+     * Local inflight KV reservation (hard demand) not yet confirmed by the engine.
+     * Sums {@code kvTokens} (seqLen only) — the minimum KV needed for the prompt itself.
+     * Used for hard-capacity filtering to ensure the prompt fits.
+     */
+    public long inflightHardKvReserved() {
+        long sum = 0;
+        for (RequestInflight ri : inflightRequests.values()) {
+            sum += ri.kvTokens();
+        }
+        return sum;
     }
 
     /**
@@ -141,14 +138,19 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Real KV available: engine-reported available - local inflight reservations.
+     * Real KV available: engine-reported available - local inflight hard reservations.
+     *
+     * <p>Uses {@link #inflightHardKvReserved()} (prompt-only KV) rather than
+     * {@link #inflightKvReserved()} (expected KV with generation) so that the
+     * hard-capacity filter only checks whether the prompt itself fits, without
+     * being overly aggressive due to other inflight requests' expected growth.
      *
      * <p><b>Approximate:</b> reads {@code reportedKvAvailable} and
-     * computes {@code inflightKvReserved()} non-atomically — the returned value may reflect a
+     * computes {@code inflightHardKvReserved()} non-atomically — the returned value may reflect a
      * slightly inconsistent snapshot. This is acceptable for scheduling decisions.
      */
     public long realKvAvailable() {
-        return Math.max(0, reportedKvAvailable.get() - inflightKvReserved());
+        return Math.max(0, reportedKvAvailable.get() - inflightHardKvReserved());
     }
 
     // ==================== Metrics ====================

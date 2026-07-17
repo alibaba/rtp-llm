@@ -49,6 +49,8 @@ private:
     bool                         waitPredicate();
     bool                         checkInputLength(const GenerateStreamPtr& stream);
     void                         admitWaitingUnits();
+    void                         processGroupUnits();
+    bool                         isGroupTimeoutExpired(const ScheduleUnit& unit) const;
     bool                         canAdmitUnit(size_t              admitted_count,
                                               size_t              admitted_total_tokens,
                                               size_t              running_count,

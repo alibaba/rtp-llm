@@ -507,7 +507,7 @@ class FlexlbBatchSchedulerTest {
         // Simulate strategy having reserved resources on the decode endpoint
         decodeStatus.getAvailableKvCacheTokens().set(10000);
         decodeEp.onWorkerStatusUpdate(decodeStatus, new WorkerStatusResponse());
-        decodeEp.reserve(17L, 500);
+        decodeEp.reserve(17L, 500, 500);
         assertEquals(1, decodeEp.getInflightCount());
 
         // Submit a request — router returns decode at 10.0.0.2:8081
