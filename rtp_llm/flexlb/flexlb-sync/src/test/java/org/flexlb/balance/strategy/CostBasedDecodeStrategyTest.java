@@ -13,6 +13,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
@@ -336,5 +337,106 @@ class CostBasedDecodeStrategyTest {
 
         Assertions.assertFalse(status.isSuccess());
         Assertions.assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), status.getCode());
+    }
+
+    @Test
+    void direct_mode_also_reserves_decode_kv() {
+        Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+
+        WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
+        worker1.getTotalKvCacheTokens().set(10000);
+        worker1.getAvailableKvCacheTokens().set(9000);
+
+        decodeMap.put("127.0.0.1:8080", worker1);
+
+        EndpointRegistry registry = createDecodeRegistry(decodeMap);
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), registry);
+
+        Request req = new Request();
+        req.setSeqLen(1000);
+        req.setMaxNewTokens(500);
+        req.setRequestId(1000L);
+
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
+        Mockito.when(decodeResourceMeasure.isResourceAvailable(any())).thenReturn(true);
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory);
+
+        BalanceContext balanceContext = new BalanceContext();
+        balanceContext.setRequest(req);
+        balanceContext.setConfig(configService.loadBalanceConfig());
+        balanceContext.setScheduleMode(ScheduleModeEnum.DIRECT);
+
+        ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
+
+        Assertions.assertTrue(status.isSuccess());
+        // DIRECT mode should now reserve decode KV (previously skipped)
+        DecodeEndpoint selectedEp = registry.getDecode("127.0.0.1:8080");
+        Assertions.assertEquals(1, selectedEp.getInflightCount(),
+                "DIRECT mode should reserve decode KV to prevent oversubscription");
+    }
+
+    @Test
+    void expected_kv_tokens_affects_scoring() {
+        Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+
+        WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
+        worker1.getTotalKvCacheTokens().set(10000);
+        worker1.getAvailableKvCacheTokens().set(9000);
+
+        WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
+        worker2.getTotalKvCacheTokens().set(10000);
+        worker2.getAvailableKvCacheTokens().set(9000);
+
+        decodeMap.put("127.0.0.1:8080", worker1);
+        decodeMap.put("127.0.0.2:8080", worker2);
+
+        EndpointRegistry registry = createDecodeRegistry(decodeMap);
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), registry);
+
+        // Add inflight reservation to worker2 with high expectedKvTokens
+        // kvTokens=100 (hard), expectedKvTokens=5000 (conservative)
+        DecodeEndpoint ep2 = registry.getDecode("127.0.0.2:8080");
+        ep2.reserve(999L, 100, 5000);
+
+        Request req = new Request();
+        req.setSeqLen(1000);
+        req.setMaxNewTokens(100);
+        req.setRequestId(1000L);
+
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
+        Mockito.when(decodeResourceMeasure.isResourceAvailable(any())).thenReturn(true);
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory);
+
+        BalanceContext balanceContext = new BalanceContext();
+        balanceContext.setRequest(req);
+        balanceContext.setConfig(configService.loadBalanceConfig());
+
+        // Worker1: realKvUsed = (10000-9000) + 0 = 1000
+        // Worker2: realKvUsed = (10000-9000) + 5000 = 6000 (higher due to expectedKvTokens)
+        // Worker1 should be selected more often due to lower realKvUsed
+        int worker1Count = 0;
+        int worker2Count = 0;
+        for (int i = 0; i < 1000; i++) {
+            balanceContext.getRequest().setRequestId(2000L + i);
+            ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
+            if (status.isSuccess()) {
+                if ("127.0.0.1".equals(status.getServerIp())) {
+                    worker1Count++;
+                } else {
+                    worker2Count++;
+                }
+                // Rollback to avoid accumulating inflight on the selected worker
+                costBasedDecodeStrategy.rollBack(registry.getDecode(status.getServerIp() + ":8080"), 2000L + i);
+            }
+        }
+
+        log.info("Expected KV scoring: worker1={} (no inflight), worker2={} (inflight expectedKv=5000)",
+                worker1Count, worker2Count);
+        Assertions.assertTrue(worker1Count > worker2Count,
+                "Worker without inflight expected KV should be selected more often");
     }
 }

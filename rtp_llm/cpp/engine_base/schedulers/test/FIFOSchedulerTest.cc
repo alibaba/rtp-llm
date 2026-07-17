@@ -1258,7 +1258,7 @@ TEST_F(FIFOSchedulerTest, testForceBatchGroupComplete) {
     ASSERT_EQ(scheduler.runningStreamsSize(), 3);
 }
 
-TEST_F(FIFOSchedulerTest, testForceBatchCompleteGroupSkipsTokenCapAfterTimeout) {
+TEST_F(FIFOSchedulerTest, testForceBatchCompleteGroupRespectsTokenCapAfterTimeout) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
@@ -1281,6 +1281,9 @@ TEST_F(FIFOSchedulerTest, testForceBatchCompleteGroupSkipsTokenCapAfterTimeout) 
     int     timeout_ms = 10;
     int64_t past_time  = autil::TimeUtility::currentTimeInMicroSeconds() - (timeout_ms + 100) * 1000;
 
+    // Complete group (3 of 3), timeout expired, but total tokens (3) > max_batch_tokens_size (2).
+    // The group should NOT bypass token cap — proactive cleanup errors and removes all streams.
+    vector<shared_ptr<GenerateStream>> streams;
     for (int i = 0; i < group_size; ++i) {
         std::shared_ptr<GenerateInput> query  = make_shared<GenerateInput>();
         query->input_ids                      = torch::tensor({1}, torch::kInt32);
@@ -1292,13 +1295,67 @@ TEST_F(FIFOSchedulerTest, testForceBatchCompleteGroupSkipsTokenCapAfterTimeout) 
         shared_ptr<GenerateStream> stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
+        streams.push_back(stream);
     }
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 3);
+    ASSERT_EQ(result.value().size(), 0);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
-    ASSERT_EQ(scheduler.runningStreamsSize(), 3);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+    for (const auto& s : streams) {
+        ASSERT_TRUE(s->hasError());
+        ASSERT_EQ(s->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testCompleteGroupEnqueuedIndividuallyRespectsTokenCap) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 2;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    int64_t group_id   = 102;
+    int     group_size = 3;
+
+    // Complete group (3 of 3), no timeout, total tokens (3) > max_batch_tokens_size (2).
+    // Streams enqueued individually via enqueue() — group aggregation should still apply token cap.
+    vector<shared_ptr<GenerateStream>> streams;
+    for (int i = 0; i < group_size; ++i) {
+        std::shared_ptr<GenerateInput> query  = make_shared<GenerateInput>();
+        query->input_ids                      = torch::tensor({1}, torch::kInt32);
+        query->generate_config                = make_shared<GenerateConfig>();
+        query->generate_config->group_timeout = 10;
+        query->group_id                       = group_id;
+        query->group_size                     = group_size;
+        query->begin_time_us                  = autil::TimeUtility::currentTimeInMicroSeconds();
+        shared_ptr<GenerateStream> stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+        streams.push_back(stream);
+    }
+
+    auto result = scheduler.schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.value().size(), 0);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+    for (const auto& s : streams) {
+        ASSERT_TRUE(s->hasError());
+        ASSERT_EQ(s->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    }
 }
 
 TEST_F(FIFOSchedulerTest, testForceBatchTimeout) {

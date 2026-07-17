@@ -1,8 +1,9 @@
 package org.flexlb.service;
 
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.scheduler.CancelReason;
@@ -18,7 +19,6 @@ import org.flexlb.enums.ScheduleModeEnum;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
-import reactor.core.publisher.Mono;
 
 @Component
 public class RouteService {
@@ -28,17 +28,20 @@ public class RouteService {
     private final QueueManager queueManager;
     private final FlexlbBatchScheduler flexlbBatchScheduler;
     private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
+    private final EndpointRegistry endpointRegistry;
 
     public RouteService(ConfigService configService,
                         DefaultRouter defaultScheduler,
                         QueueManager queueManager,
                         @Lazy @Autowired(required = false) FlexlbBatchScheduler flexlbBatchScheduler,
-                        RecentCacheKeyTraceReporter recentCacheKeyTraceReporter) {
+                        RecentCacheKeyTraceReporter recentCacheKeyTraceReporter,
+                        EndpointRegistry endpointRegistry) {
         this.configService = configService;
         this.router = defaultScheduler;
         this.queueManager = queueManager;
         this.flexlbBatchScheduler = flexlbBatchScheduler;
         this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
+        this.endpointRegistry = endpointRegistry;
     }
 
     /**
@@ -51,8 +54,7 @@ public class RouteService {
         balanceContext.setConfig(flexlbConfig);
 
         // Resolve AUTO to actual schedule mode so downstream components
-        // (e.g., CostBasedDecodeStrategy) can make mode-aware decisions
-        // such as skipping KV reserve for DIRECT/QUEUE paths.
+        // (e.g., CostBasedDecodeStrategy) can make mode-aware decisions.
         ScheduleModeEnum mode = balanceContext.getScheduleMode();
         if (mode == ScheduleModeEnum.AUTO) {
             if (shouldUseFlexlbBatch(balanceContext, flexlbConfig)) {
@@ -100,21 +102,29 @@ public class RouteService {
     }
 
     public void cancel(BalanceContext balanceContext, CancelReason reason) {
-        FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
         balanceContext.cancel();
-        if (flexlbConfig.isEnableQueueing() || balanceContext.getScheduleMode() == ScheduleModeEnum.QUEUE) {
-            CompletableFuture<Response> future = balanceContext.getFuture();
-            if (future != null) {
-                future.completeExceptionally(new CancellationException("Request cancelled by client"));
+        ScheduleModeEnum mode = balanceContext.getScheduleMode();
+        switch (mode) {
+            case BATCH -> {
+                if (flexlbBatchScheduler != null && balanceContext.getRequest() != null) {
+                    flexlbBatchScheduler.cancel(balanceContext.getRequest().getRequestId(), reason, 0);
+                }
             }
+            case QUEUE -> queueManager.cancel(balanceContext);
+            case DIRECT -> {
+                // DIRECT path has no dedicated manager class; inline the release logic.
+                Runnable releaseCallback = balanceContext.getDecodeReleaseCallback();
+                if (releaseCallback != null) {
+                    releaseCallback.run();
+                } else {
+                    long rid = balanceContext.getRequestId();
+                    for (DecodeEndpoint ep : endpointRegistry.getDecodeEndpoints().values()) {
+                        ep.release(rid);
+                    }
+                }
+            }
+            default -> { /* AUTO should already be resolved by route() */ }
         }
-        if (flexlbBatchScheduler != null && balanceContext.getRequest() != null) {
-            flexlbBatchScheduler.cancel(balanceContext.getRequest().getRequestId(), reason, 0);
-        }
-        // Note: DIRECT and QUEUE paths skip de.reserve() in CostBasedDecodeStrategy,
-        // so there is no decode KV reservation to release on cancel.
-        // BATCH path's reservation is cleaned by flexlbBatchScheduler.cancel() above,
-        // which calls rollbackOnce() → de.release() for the decode endpoint.
         balanceContext.setSuccess(false);
         balanceContext.setErrorMessage("request cancelled");
     }
@@ -122,12 +132,17 @@ public class RouteService {
     public RequestLifecycleSnapshot cancelByRequestId(long requestId,
                                                       CancelReason reason,
                                                       long expectedBatchId) {
-        // Only BATCH path has decode KV reservations tracked by flexlbBatchScheduler.
-        // DIRECT and QUEUE paths skip reserve, so cancel is a no-op for them.
+        RequestLifecycleSnapshot snapshot = null;
         if (flexlbBatchScheduler != null) {
-            return flexlbBatchScheduler.cancel(requestId, reason, expectedBatchId);
+            snapshot = flexlbBatchScheduler.cancel(requestId, reason, expectedBatchId);
         }
-        return null;
+        if (snapshot == null) {
+            // Not in BATCH inflight — likely a DIRECT/QUEUE request whose decode
+            // KV reservation is not tracked by the batch scheduler. Release it
+            // via QueueManager, which brute-force iterates all decode endpoints.
+            queueManager.cancelByRequestId(requestId);
+        }
+        return snapshot;
     }
 
     public RequestLifecycleSnapshot getRequestState(long requestId,

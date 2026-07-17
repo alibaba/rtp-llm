@@ -28,8 +28,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         this.requestEvictor = new InflightEvictor<>(inflightRequests, req -> {});
     }
 
-    public void reserve(long requestId, long kvTokens) {
-        inflightRequests.put(requestId, new RequestInflight(requestId, kvTokens));
+    public void reserve(long requestId, long kvTokens, long expectedKvTokens) {
+        inflightRequests.put(requestId, new RequestInflight(requestId, kvTokens, expectedKvTokens));
     }
 
     public void release(long requestId) {
@@ -103,10 +103,25 @@ public class DecodeEndpoint extends WorkerEndpoint {
     // ==================== KV Cache 三视图 ====================
 
     /**
-     * Local inflight KV reservation not yet confirmed by the engine.
+     * Local inflight KV reservation (conservative estimate) not yet confirmed by the engine.
+     * Sums {@code expectedKvTokens} (seqLen + maxNewTokens) to account for generation-phase
+     * KV growth. Used for scoring / load balancing.
      * Computed on demand from the inflight map — no separate counter needed.
      */
     public long inflightKvReserved() {
+        long sum = 0;
+        for (RequestInflight ri : inflightRequests.values()) {
+            sum += ri.expectedKvTokens();
+        }
+        return sum;
+    }
+
+    /**
+     * Local inflight KV reservation (hard demand) not yet confirmed by the engine.
+     * Sums {@code kvTokens} (seqLen only) — the minimum KV needed for the prompt itself.
+     * Used for hard-capacity filtering to ensure the prompt fits.
+     */
+    public long inflightHardKvReserved() {
         long sum = 0;
         for (RequestInflight ri : inflightRequests.values()) {
             sum += ri.kvTokens();
@@ -125,14 +140,19 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Real KV available: engine-reported available - local inflight reservations.
+     * Real KV available: engine-reported available - local inflight hard reservations.
+     *
+     * <p>Uses {@link #inflightHardKvReserved()} (prompt-only KV) rather than
+     * {@link #inflightKvReserved()} (expected KV with generation) so that the
+     * hard-capacity filter only checks whether the prompt itself fits, without
+     * being overly aggressive due to other inflight requests' expected growth.
      *
      * <p><b>Approximate:</b> reads {@code reportedKvAvailable} and
-     * computes {@code inflightKvReserved()} non-atomically — the returned value may reflect a
+     * computes {@code inflightHardKvReserved()} non-atomically — the returned value may reflect a
      * slightly inconsistent snapshot. This is acceptable for scheduling decisions.
      */
     public long realKvAvailable() {
-        return Math.max(0, reportedKvAvailable.get() - inflightKvReserved());
+        return Math.max(0, reportedKvAvailable.get() - inflightHardKvReserved());
     }
 
     // ==================== Metrics ====================

@@ -250,13 +250,11 @@ public class FlexlbConfig {
     /**
      * Maximum in-flight prefill batches per worker for the fixed_window batcher.
      * When the engine already has this many batches inflight, the batcher parks
-     * instead of dispatching new batches.  Default 0 disables backpressure —
-     * the fixed_window batcher dispatches regardless of engine load.
+     * instead of dispatching new batches.  Default 2 prevents engine overload.
      *
-     * <p>Set to a small value (e.g. 2–3) to prevent engine overload when
-     * using fixed_window; set to 0 to keep the original always-dispatch behavior.
+     * <p>Set to 0 to disable backpressure and keep the original always-dispatch behavior.
      */
-    private int flexlbBatchFixedMaxInflightBatches = 0;
+    private int flexlbBatchFixedMaxInflightBatches = 2;
 
     /**
      * Deadline in milliseconds for EnqueueBatch.
@@ -421,8 +419,8 @@ public class FlexlbConfig {
      * Batcher algorithm name. Supported values:
      * <ul>
      *   <li>{@code fixed_window} — Fixed time window batching with optional
-     *       predictor-based early dispatch. No SLO deadline tracking, no EMA,
-     *       no request dropping (default).</li>
+     *       predictor-based early dispatch, queue deadline drop, and token-cap
+     *       filtering (default).</li>
      *   <li>{@code slo_budget} — SLO-deadline-aware batching with EMA arrival
      *       rate estimation, budget-based greedy fill, and deadline-gated dispatch.</li>
      * </ul>
