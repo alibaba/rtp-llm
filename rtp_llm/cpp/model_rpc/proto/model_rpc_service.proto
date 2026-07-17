@@ -697,10 +697,6 @@ message FetchRequestPB {
     int64 request_id = 1;
 }
 
-message CancelRequestPB {
-    int64 request_id = 1;
-}
-
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
@@ -779,5 +775,4 @@ message FlexlbScheduleResponsePB {
 
 service FlexlbService {
     rpc Schedule(FlexlbScheduleRequestPB) returns (FlexlbScheduleResponsePB);
-    rpc Cancel(CancelRequestPB) returns (EmptyPB);
 }

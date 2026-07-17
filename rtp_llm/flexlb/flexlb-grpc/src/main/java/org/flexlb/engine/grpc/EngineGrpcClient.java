@@ -187,16 +187,6 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
         return executeGrpcCall(ip, port, stub -> stub.getRpcServiceStub().enqueueBatch(request), requestTimeoutMs, ServiceType.BATCH_ENQUEUE);
     }
 
-    /**
-     * Cancel a request previously submitted through EnqueueBatch.
-     */
-    public EngineRpcService.EmptyPB cancel(String ip, int port, long requestId, long requestTimeoutMs) {
-        EngineRpcService.CancelRequestPB request = EngineRpcService.CancelRequestPB.newBuilder()
-                .setRequestId(requestId)
-                .build();
-        return executeGrpcCall(ip, port, stub -> stub.getRpcServiceStub().cancel(request), requestTimeoutMs, ServiceType.CANCEL);
-    }
-
     @Override
     protected ManagedChannel createChannel(String channelKey) {
         String[] parts = parseServiceKey(channelKey);

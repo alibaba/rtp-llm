@@ -60,7 +60,7 @@ Key concepts:
 - **Graceful lifecycle**: Hook-based online/shutdown management
 
 Queue scheduling components:
-- `QueueManager`: Manages request queue with configurable capacity, timeout handling, and request cancellation
+- `QueueManager`: Manages request queue with configurable capacity and timeout handling
 - `RequestScheduler`: Worker thread pool that consumes queue and routes requests (configurable pool size)
 - `RouteService`: High-level routing service supporting queue/direct routing modes
 
@@ -188,7 +188,7 @@ FlexLB supports two routing modes controlled by `FLEXLB_CONFIG.enableQueueing`:
   - `offerToHead()`: Priority insertion for retries (e.g., DECODE retry after PREFILL success)
   - `takeRequest()`: Worker thread consumption
   - `snapshotQueue()`: Debugging snapshot of queue state
-  - Handles request cancellation and timeout
+  - Handles request timeout
 
 - `RequestScheduler`:
   - Fixed worker thread pool (size: `FLEXLB_CONFIG.scheduleWorkerSize`)
@@ -199,7 +199,6 @@ FlexLB supports two routing modes controlled by `FLEXLB_CONFIG.enableQueueing`:
 - `RouteService`:
   - `routeRequest()`: Main routing entry point
   - Supports queue mode (async) and direct mode (sync)
-  - `cancelRequest()`: Request cancellation via sequence ID
 
 **Request Lifecycle in Queue Mode**:
 1. Client submits request → `QueueManager.tryRouteAsync()`
@@ -351,15 +350,12 @@ The request queue is a `BlockingDeque<BalanceContext>` accessed by both HTTP req
 ### BalanceContext Extensions
 `BalanceContext` (request state) includes queue-related fields:
 - `future`: `CompletableFuture<BalanceContext>` for async response
-- `cancelled`: AtomicBoolean for request cancellation
 - `retryCount`: Number of retry attempts
 - `enqueueTime`: Timestamp when request entered queue
 - `dequeueTime`: Timestamp when request left queue
-- `sequenceId`: Unique request identifier for cancellation
+- `sequenceId`: Unique queue entry identifier
 
 Methods:
-- `cancel()`: Mark request as cancelled
-- `isCancelled()`: Check if request is cancelled
 - `incrementRetryCount()`: Increment retry counter
 
 ### Reactive Programming
@@ -392,7 +388,6 @@ Monitoring enhancements:
 ### Queue Errors
 - `QUEUE_FULL`: Request rejected because queue is at capacity (maxQueueSize)
 - `QUEUE_TIMEOUT`: Request waited in queue longer than configured timeout
-- `REQUEST_CANCELLED`: Request cancelled by client or system during queue wait
 
 ### Worker Errors
 - `NO_PREFILL_WORKER`: No available Prefill workers

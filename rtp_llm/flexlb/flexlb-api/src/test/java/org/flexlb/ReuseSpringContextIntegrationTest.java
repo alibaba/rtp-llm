@@ -15,7 +15,7 @@ import uk.org.webcompere.systemstubs.jupiter.SystemStubsExtension;
 
 /**
  * Integration test with reusable Spring context.
- * Schedule/cancel tests moved to gRPC layer (FlexlbServiceImpl).
+ * Schedule tests moved to gRPC layer (FlexlbServiceImpl).
  */
 @Slf4j
 @ActiveProfiles("test")

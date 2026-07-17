@@ -81,21 +81,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
     }
 
-    @Override
-    public void cancel(EngineRpcService.CancelRequestPB request,
-                       StreamObserver<EngineRpcService.EmptyPB> responseObserver) {
-        try {
-            routeService.cancelByRequestId(request.getRequestId());
-            responseObserver.onNext(EngineRpcService.EmptyPB.getDefaultInstance());
-            responseObserver.onCompleted();
-        } catch (Exception e) {
-            Logger.error("FlexlbService.cancel error, request_id={}", request.getRequestId(), e);
-            responseObserver.onError(io.grpc.Status.INTERNAL
-                    .withDescription(e.getMessage())
-                    .asRuntimeException());
-        }
-    }
-
     private EngineRpcService.FlexlbScheduleResponsePB routeLocally(BalanceContext ctx) {
         Response response = routeService.route(ctx).block();
         return toProtoResponse(response);

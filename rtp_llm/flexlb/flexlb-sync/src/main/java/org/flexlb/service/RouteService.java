@@ -1,6 +1,5 @@
 package org.flexlb.service;
 
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 
 import org.flexlb.balance.scheduler.DefaultRouter;
@@ -65,32 +64,6 @@ public class RouteService {
                 recentCacheKeyTraceReporter.report(balanceContext);
             }
         });
-    }
-
-    /**
-     * Cancel a specified request
-     * @param balanceContext Load balancing context
-     */
-    public void cancel(BalanceContext balanceContext) {
-        FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
-        balanceContext.cancel();
-        if (flexlbConfig.isEnableQueueing()) {
-            CompletableFuture<Response> future = balanceContext.getFuture();
-            if (future != null) {
-                future.completeExceptionally(new CancellationException("Request cancelled by client"));
-            }
-        }
-        if (flexlbBatchScheduler != null && balanceContext.getRequest() != null) {
-            flexlbBatchScheduler.cancel(balanceContext.getRequest().getRequestId());
-        }
-        balanceContext.setSuccess(false);
-        balanceContext.setErrorMessage("request cancelled");
-    }
-
-    public void cancelByRequestId(long requestId) {
-        if (flexlbBatchScheduler != null) {
-            flexlbBatchScheduler.cancel(requestId);
-        }
     }
 
     boolean shouldUseFlexlbBatch(BalanceContext ctx, FlexlbConfig config) {

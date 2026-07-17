@@ -182,48 +182,6 @@ class FlexlbServiceImplTest {
     }
 
     @Test
-    void testCancel_success() {
-        // Given
-        doNothing().when(routeService).cancelByRequestId(12345L);
-
-        EngineRpcService.CancelRequestPB request = EngineRpcService.CancelRequestPB.newBuilder()
-                .setRequestId(12345L)
-                .build();
-
-        StreamObserver<EngineRpcService.EmptyPB> observer = mock(StreamObserver.class);
-
-        // When
-        service.cancel(request, observer);
-
-        // Then
-        verify(routeService).cancelByRequestId(12345L);
-        verify(observer).onNext(any(EngineRpcService.EmptyPB.class));
-        verify(observer).onCompleted();
-        verify(observer, never()).onError(any());
-    }
-
-    @Test
-    void testCancel_exceptionHandling() {
-        // Given
-        doThrow(new RuntimeException("cancel error")).when(routeService).cancelByRequestId(12345L);
-
-        EngineRpcService.CancelRequestPB request = EngineRpcService.CancelRequestPB.newBuilder()
-                .setRequestId(12345L)
-                .build();
-
-        StreamObserver<EngineRpcService.EmptyPB> observer = mock(StreamObserver.class);
-
-        // When
-        service.cancel(request, observer);
-
-        // Then
-        verify(routeService).cancelByRequestId(12345L);
-        verify(observer).onError(any());
-        verify(observer, never()).onNext(any());
-        verify(observer, never()).onCompleted();
-    }
-
-    @Test
     void testSchedule_buildContextPreservesCacheKeyBlockSize() {
         // Given: not master, no consistency needed
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);

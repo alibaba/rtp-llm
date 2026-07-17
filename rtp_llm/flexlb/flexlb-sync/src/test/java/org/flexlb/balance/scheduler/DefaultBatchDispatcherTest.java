@@ -105,11 +105,11 @@ class DefaultBatchDispatcherTest {
     }
 
     @Test
-    void dispatchFiltersCancelledItemsBeforeSend() throws Exception {
+    void dispatchFiltersCompletedItemsBeforeSend() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         BatchItem active = createBatchItem(1L, 500, 200, prefillEp);
-        BatchItem cancelled = createBatchItem(2L, 300, 100, prefillEp);
-        cancelled.ctx().cancel(); // mark as cancelled
+        BatchItem completed = createBatchItem(2L, 300, 100, prefillEp);
+        completed.future().complete(Response.error(StrategyErrorType.BATCH_SLO_EXPIRED));
 
         AtomicReference<EngineRpcService.EnqueueBatchRequestPB> captured = new AtomicReference<>();
         when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
@@ -118,12 +118,14 @@ class DefaultBatchDispatcherTest {
                     return ackResponse(List.of(1L));
                 });
 
-        dispatcher.dispatch(List.of(active, cancelled), prefillEp, 1L, 100, "test", callback);
+        dispatcher.dispatch(List.of(active, completed), prefillEp, 1L, 100, "test", callback);
 
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
+        assertEquals(1, callback.failureCount.get());
         EngineRpcService.EnqueueBatchRequestPB sent = captured.get();
         assertNotNull(sent);
-        // Only 1 request should be in the batch (the cancelled one filtered out)
+        // Only 1 request should be in the batch (the completed one is filtered out)
         long sentCount = sent.getDpSlotsList().stream()
                 .mapToLong(slot -> slot.getRequestsCount())
                 .sum();

@@ -1,4 +1,4 @@
-"""FlexLB schedule client: request role addrs from master/slave via gRPC."""
+"""FlexLB schedule client: request role addrs from the master via gRPC."""
 
 import logging
 import time
@@ -38,7 +38,7 @@ class FlexlbResponse:
 
     Success: role_addrs is set. Failure: connection_failed and/or
     error_code/error_message from scheduler. request_id is always from frontend;
-    only connection_failed triggers slave retry and domain fallback.
+    only connection_failed permits domain fallback.
     """
 
     role_addrs: Optional[List[RoleAddr]] = None
@@ -84,7 +84,7 @@ class FlexlbResponse:
         error_code: int,
         error_message: Optional[str] = None,
     ) -> "FlexlbResponse":
-        """Scheduler returned error (e.g. non-200 body). No slave retry / no domain fallback."""
+        """Scheduler returned an error. Domain fallback is not allowed."""
         return cls(
             role_addrs=None,
             connection_failed=False,
@@ -96,7 +96,7 @@ class FlexlbResponse:
 
     @classmethod
     def connection_failed_response(cls) -> "FlexlbResponse":
-        """No response (connection/timeout). Triggers slave retry and domain fallback."""
+        """No response (connection/timeout). Permits domain fallback."""
         return cls(
             role_addrs=None,
             connection_failed=True,
@@ -108,7 +108,7 @@ class FlexlbResponse:
 
 
 class MasterClient:
-    """Client for FlexLB schedule gRPC API (master and optional slave)."""
+    """Client for the FlexLB master Schedule gRPC API."""
 
     def __init__(self, host_service=None, server_config=None, master_config=None):
         self.master_config = (
@@ -203,18 +203,15 @@ class MasterClient:
         input_pb: Optional["GenerateInputPB"] = None,
     ) -> FlexlbResponse:
         """
-        Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
+        Resolve backend role addrs from the FlexLB master.
 
         request_id is frontend-generated and only used for logging.
-        Only connection_failed triggers slave retry and domain fallback.
+        A transport failure is returned to the caller for domain fallback; this
+        method never retries because Schedule may already have taken effect.
         """
         master_addr = self.host_service.get_master_addr() if self.host_service else None
         if not master_addr:
             return FlexlbResponse.connection_failed_response()
-
-        slave_addr = None
-        if self.host_service:
-            slave_addr = getattr(self.host_service, "get_slave_addr", lambda: None)()
 
         ttft_timeout_ms = getattr(
             input.generate_config, "ttft_timeout_ms", None
@@ -244,16 +241,6 @@ class MasterClient:
         response = await self._send_schedule_request(
             master_addr, request_pb, timeout_s, request_id
         )
-
-        if response is None and slave_addr:
-            route_logger.info(
-                "Master connection failed, retrying slave, slave=%s, request_id=%s",
-                slave_addr,
-                request_id,
-            )
-            response = await self._send_schedule_request(
-                slave_addr, request_pb, timeout_s, request_id
-            )
 
         if response is None:
             return FlexlbResponse.connection_failed_response()
