@@ -51,11 +51,11 @@ public class WorkerBatcher {
 
     private static BatcherAlgorithm createAlgorithm(FlexlbConfig config) {
         String algoName = config.getFlexlbBatchAlgorithm();
-        if ("fixed_window".equalsIgnoreCase(algoName)) {
-            return new FixedWindowBatcherAlgorithm();
+        if ("slo_budget".equalsIgnoreCase(algoName)) {
+            return new SloBudgetBatcherAlgorithm();
         }
-        // Fallback: slo_budget for any unrecognized value
-        return new SloBudgetBatcherAlgorithm();
+        // Fallback: fixed_window for any unrecognized value (safer default)
+        return new FixedWindowBatcherAlgorithm();
     }
 
     public void start() {
