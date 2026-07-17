@@ -287,6 +287,10 @@ struct SpeculativeExecutionConfig {
     // DSpark/DFlash static commit length k; 0 = derive from the draft ckpt's
     // speculative_tokens.  Must satisfy k + 1 <= ckpt block_size.
     int64_t sp_dspark_propose_num = 0;
+    // DSpark/DFlash mask token id from the draft ckpt config; the executor
+    // builds each [anchor + k*mask] query block with it.  -1 = unset (filled
+    // by model_factory from the draft ckpt when sp_type is dspark).
+    int64_t sp_dspark_mask_token_id = -1;
     std::string     to_string() const;
 
     // Helper functions for enum conversion

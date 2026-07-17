@@ -447,6 +447,29 @@ class ModelFactory:
         dspark_params.speculative_tokens = k
         # propose_step / verify width / lookahead reservation all key off this.
         sp_config.gen_num_per_cycle = k
+        # The executor builds each [anchor + k*mask] query block in C++.
+        sp_config.sp_dspark_mask_token_id = dspark_params.mask_token_id
+
+        # Phase-2 knobs (confidence / STS / SPS, dspark-phase2-design §API) are
+        # not implemented in phase 1 — reject them loudly instead of silently
+        # ignoring a scheduling/temperature policy the user asked for.
+        phase2_envs = [
+            "SP_DSPARK_CONFIDENCE_SHADOW",
+            "SP_DSPARK_CONFIDENCE_THRESHOLD",
+            "SP_DSPARK_STS_CONFIG",
+            "SP_DSPARK_STS_VALUES",
+            "SP_DSPARK_STS_FILE",
+            "SP_DSPARK_SPS_CONFIG",
+            "SP_DSPARK_SPS_FILE",
+            "SP_DSPARK_SPS_WRITE_STEPS",
+        ]
+        set_phase2 = [name for name in phase2_envs if os.environ.get(name)]
+        if set_phase2:
+            raise NotImplementedError(
+                f"dspark phase-2 flags not implemented yet: {set_phase2} "
+                "(confidence/STS/SPS land with phase 2, see "
+                "docs/dspark-phase2-design-2026-07-14.md)"
+            )
 
         # Target-side multi-layer feature capture: the ckpt's
         # aux_hidden_state_layer_ids are 1-based "output of layer j"; the

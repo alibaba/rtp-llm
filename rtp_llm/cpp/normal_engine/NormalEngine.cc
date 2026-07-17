@@ -102,6 +102,13 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     initExecutor(params, propose_params_);
     if (propose_params_) {
         reserve_step_ = propose_params_->gen_num_per_circle + 1;
+        if (propose_params_->sp_type == SP_TYPE_DSPARK) {
+            // The dspark tail block-forward proposes round t+1 within round t,
+            // writing draft KV at [prefix + accept_len, prefix + accept_len + k + 1)
+            // — up to seq_len + 2k tokens with accept_len = k + 1 — so the
+            // per-step block reservation must cover 2(k+1), not MTP's k+1.
+            reserve_step_ = 2 * (propose_params_->gen_num_per_circle + 1);
+        }
     } else {
         reserve_step_ = 0;
     }
