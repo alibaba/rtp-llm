@@ -33,11 +33,13 @@ py_binary(
 py_test(
     name = "models_test",
     srcs = ["test_models.py"],
+    main = "test_models.py",
     deps = [":kv_cache_subscriber"],
 )
 
 py_test(
     name = "service_test",
     srcs = ["test_service.py"],
+    main = "test_service.py",
     deps = [":kv_cache_subscriber"],
 )
