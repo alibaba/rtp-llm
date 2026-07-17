@@ -121,7 +121,7 @@ public class DispatcherInspectionHandler {
      */
     private boolean resolvePreAssign(ServerRequest request) {
         return request.queryParam("pre_assign")
-                .map(v -> "true".equals(v.trim().toLowerCase()))
+                .map(v -> Boolean.parseBoolean(v.trim()))
                 .orElse(false);
     }
 

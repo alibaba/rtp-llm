@@ -72,6 +72,21 @@ class BatchScheduleClientTest {
     }
 
     @Test
+    void hungCoordinatorTimesOutAndCollapsesToEmptyList() {
+        // A hung transport (slave forwarding to a wedged master) must not pin the /dispatcher
+        // request: the whole-call timeout fires and degrades to the same empty-list path as any
+        // other failure. Virtual time keeps the 3s bound from slowing the suite.
+        BatchScheduleCoordinator coordinator = mock(BatchScheduleCoordinator.class);
+        when(coordinator.schedule(any())).thenReturn(Mono.never());
+
+        StepVerifier.withVirtualTime(() -> new BatchScheduleClient(coordinator).requestTargets(4))
+                .thenAwait(BatchScheduleClient.REQUEST_TIMEOUT.plusSeconds(1))
+                .assertNext(returned -> assertEquals(0, returned.size(),
+                        "a timed-out pre-assign call must degrade silently to empty list"))
+                .verifyComplete();
+    }
+
+    @Test
     void nullServerStatusTreatedAsEmpty() {
         BatchScheduleCoordinator coordinator = mock(BatchScheduleCoordinator.class);
         BatchScheduleResponse resp = new BatchScheduleResponse();

@@ -1,5 +1,6 @@
 package org.flexlb.dispatcher;
 
+import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.util.Logger;
@@ -57,14 +58,23 @@ public class DispatcherFePoolRefresher {
     private static final long DISCOVERY_TIMEOUT_MS = 3_000;
 
     /**
+     * Fallback for the empty-discovery grace window when the configured value is absent or
+     * non-positive. Matches {@code FlexlbConfig#discoveryFailureGraceMs}'s own default so an
+     * unconfigured deployment behaves identically on both sides.
+     */
+    private static final long DEFAULT_EMPTY_DISCOVERY_GRACE_NANOS = TimeUnit.MINUTES.toNanos(5);
+
+    /**
      * How long a run of empty discovery results may keep displacing the last non-empty pool.
      * Within the window an empty snapshot is treated as suspect (a discovery hiccup, a client
      * that swallows failures into an empty list) and the known FEs are kept; past it the empty
      * result is accepted as the truth — the fleet scaled to zero or was torn down — and
      * {@link FePool#next()} fails fast instead of timing out against removed hosts forever.
-     * Mirrors the sync side's {@code DISCOVERY_FAILURE_GRACE_MS} default (5 minutes).
+     * Sourced from the same {@code FlexlbConfig#discoveryFailureGraceMs} the sync side reads
+     * (env override {@code DISCOVERY_FAILURE_GRACE_MS}), so one knob governs both discovery
+     * consumers; {@link #DEFAULT_EMPTY_DISCOVERY_GRACE_NANOS} when unset or non-positive.
      */
-    private static final long EMPTY_DISCOVERY_GRACE_NANOS = TimeUnit.MINUTES.toNanos(5);
+    private final long emptyDiscoveryGraceNanos;
 
     private final ServiceDiscovery serviceDiscovery;
     private final String serviceId;
@@ -91,14 +101,21 @@ public class DispatcherFePoolRefresher {
     });
 
     @Autowired
-    public DispatcherFePoolRefresher(ServiceDiscovery serviceDiscovery, DispatchConfig cfg) {
-        this(serviceDiscovery, cfg, System::nanoTime);
+    public DispatcherFePoolRefresher(ServiceDiscovery serviceDiscovery, DispatchConfig cfg,
+                                     ConfigService configService) {
+        this(serviceDiscovery, cfg,
+                configService.loadBalanceConfig().getDiscoveryFailureGraceMs(), System::nanoTime);
     }
 
-    /** Visible for tests: {@code nanoClock} lets grace-window expiry be simulated without sleeping. */
-    DispatcherFePoolRefresher(ServiceDiscovery serviceDiscovery, DispatchConfig cfg, LongSupplier nanoClock) {
+    /**
+     * Visible for tests: {@code emptyDiscoveryGraceMs} lets a small grace be configured directly
+     * and {@code nanoClock} lets grace-window expiry be simulated without sleeping.
+     */
+    DispatcherFePoolRefresher(ServiceDiscovery serviceDiscovery, DispatchConfig cfg,
+                              long emptyDiscoveryGraceMs, LongSupplier nanoClock) {
         this.serviceDiscovery = serviceDiscovery;
         this.serviceId = cfg.getFePoolServiceId();
+        this.emptyDiscoveryGraceNanos = resolveGraceNanos(emptyDiscoveryGraceMs);
         this.nanoClock = nanoClock;
         this.lastNonEmptyNanos = nanoClock.getAsLong();
         // Boot seed first — guarantees source() returns the freshest available view by the
@@ -127,6 +144,15 @@ public class DispatcherFePoolRefresher {
             Logger.warn("dispatcher FE pool listen() registration failed (poll will repair): "
                     + "serviceId={}, err={}", serviceId, DispatcherResponses.briefReason(e));
         }
+    }
+
+    /**
+     * A non-positive configured grace is a misconfiguration, not a request to drain instantly —
+     * that would turn every discovery hiccup into a full FE-pool drop. Fall back to the 5-minute
+     * default the sync side also documents.
+     */
+    static long resolveGraceNanos(long graceMs) {
+        return graceMs > 0 ? TimeUnit.MILLISECONDS.toNanos(graceMs) : DEFAULT_EMPTY_DISCOVERY_GRACE_NANOS;
     }
 
     /**
@@ -166,7 +192,7 @@ public class DispatcherFePoolRefresher {
      * nothing, so the log does not get flooded by no-op refreshes.
      *
      * <p>An empty snapshot displaces a non-empty pool only after it has persisted for
-     * {@link #EMPTY_DISCOVERY_GRACE_NANOS}. Within the window it is treated as suspect — a
+     * {@link #emptyDiscoveryGraceNanos}. Within the window it is treated as suspect — a
      * discovery hiccup, or a client that swallows a failed lookup into an empty list — and the
      * known FEs are kept ({@link FeHealthChecker} probes them directly, so hosts that are
      * genuinely gone leave rotation via the probe). Past the window the empty result is the
@@ -191,7 +217,7 @@ public class DispatcherFePoolRefresher {
             return;
         }
         long emptyForNanos = nanoClock.getAsLong() - lastNonEmptyNanos;
-        if (emptyForNanos <= EMPTY_DISCOVERY_GRACE_NANOS) {
+        if (emptyForNanos <= emptyDiscoveryGraceNanos) {
             emptyDiscoveryWarn.warn("dispatcher FE pool: ignoring empty discovery result ({}) within "
                     + "grace, keeping {} known FE(s): serviceId={}", source, prev.size(), serviceId);
             return;
@@ -201,7 +227,7 @@ public class DispatcherFePoolRefresher {
             Logger.warn("dispatcher FE pool: empty discovery persisted beyond grace ({}s), accepting "
                             + "it — dropping {} FE(s) and failing fast until discovery reports hosts again: "
                             + "serviceId={}, source={}",
-                    TimeUnit.NANOSECONDS.toSeconds(EMPTY_DISCOVERY_GRACE_NANOS), prev.size(), serviceId, source);
+                    TimeUnit.NANOSECONDS.toSeconds(emptyDiscoveryGraceNanos), prev.size(), serviceId, source);
         }
     }
 

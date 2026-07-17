@@ -177,10 +177,17 @@ class PassthroughClientTest {
         StepVerifier.create(client.forward(request))
                 .assertNext(r -> {
                     Assertions.assertEquals(502, r.statusCode().value());
-                    byte[] body = (byte[]) ((EntityResponse<?>) r).entity();
-                    Assertions.assertTrue(
-                            new String(body, StandardCharsets.UTF_8).contains("passthrough_failed"),
+                    String body = new String((byte[]) ((EntityResponse<?>) r).entity(), StandardCharsets.UTF_8);
+                    Assertions.assertTrue(body.contains("passthrough_failed"),
                             "headers timeout must surface the shared passthrough error envelope");
+                    // Anti-leak: the constant message must never regress to e.getMessage(), which
+                    // embeds the FE address and the exception class.
+                    Assertions.assertFalse(body.contains(server.getHostName()),
+                            "502 body must not leak the FE host: " + body);
+                    Assertions.assertFalse(body.contains(String.valueOf(server.getPort())),
+                            "502 body must not leak the FE port: " + body);
+                    Assertions.assertFalse(body.contains("Exception"),
+                            "502 body must not leak exception class text: " + body);
                 })
                 .expectComplete()
                 .verify(Duration.ofSeconds(5));
@@ -202,6 +209,13 @@ class PassthroughClientTest {
                     Assertions.assertEquals(502, r.statusCode().value());
                     Assertions.assertEquals(org.springframework.http.MediaType.APPLICATION_JSON,
                             r.headers().getContentType());
+                    String body = new String((byte[]) ((EntityResponse<?>) r).entity(), StandardCharsets.UTF_8);
+                    Assertions.assertTrue(body.contains("upstream request failed"),
+                            "502 body must be the constant message: " + body);
+                    // Anti-leak: a regression back to e.getMessage() would embed the pick
+                    // failure's exception class text.
+                    Assertions.assertFalse(body.contains("Exception"),
+                            "502 body must not leak exception class text: " + body);
                 })
                 .verifyComplete();
     }
