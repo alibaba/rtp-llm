@@ -127,6 +127,7 @@ class ModelFactory:
             or sp_type == SpeculativeType.MTP
             or sp_type == SpeculativeType.EAGLE3
             or sp_type == SpeculativeType.EAGLE
+            or sp_type == SpeculativeType.DSPARK
         ):
             model_type = propose_model_config.model_type
             if model_type == "deepseek-v3-mtp" or model_type == "mixtbstars-mtp":
@@ -364,14 +365,18 @@ class ModelFactory:
         if not sp_config.checkpoint_path:
             return None
 
-        # Current SP engine only supports MTP and EAGLE
-        if sp_config.type not in [SpeculativeType.MTP, SpeculativeType.EAGLE]:
+        # Current SP engine only supports MTP, EAGLE and DSPARK
+        if sp_config.type not in [
+            SpeculativeType.MTP,
+            SpeculativeType.EAGLE,
+            SpeculativeType.DSPARK,
+        ]:
             logging.error(
-                "Speculative engine only supports MTP and EAGLE, but got %s",
+                "Speculative engine only supports MTP/EAGLE/DSPARK, but got %s",
                 sp_config.type.name,
             )
             raise ValueError(
-                "Speculative engine only supports MTP and EAGLE, but got %s"
+                "Speculative engine only supports MTP/EAGLE/DSPARK, but got %s"
                 % sp_config.type.name
             )
 
@@ -407,4 +412,55 @@ class ModelFactory:
             embedding_config=None,  # Propose model doesn't need embedding_config
         )
 
+        if sp_config.type == SpeculativeType.DSPARK:
+            ModelFactory._setup_dspark_configs(
+                sp_config, model_config, propose_model_config
+            )
+
         return propose_model_config
+
+    @staticmethod
+    def _setup_dspark_configs(
+        sp_config, model_config: ModelConfig, propose_model_config: ModelConfig
+    ) -> None:
+        """DSpark/DFlash wiring between the draft ckpt and both configs.
+
+        Runs before the target model is built (create_propose_model_config
+        precedes from_model_configs), so target-side capture takes effect at
+        model construction time.
+        """
+        dspark_params = propose_model_config.dspark_config
+        if dspark_params is None:
+            raise ValueError(
+                "sp_type dspark requires a dspark/dflash draft checkpoint "
+                "(sp_model_type qwen_3_dspark / qwen_3_dflash), got "
+                f"model_type '{propose_model_config.model_type}'"
+            )
+        # Static commit length k: flag overrides the ckpt's speculative_tokens.
+        # The query block is 1 + k wide and must fit the training block width.
+        k = int(sp_config.sp_dspark_propose_num) or dspark_params.speculative_tokens
+        if k <= 0 or k + 1 > dspark_params.block_size:
+            raise ValueError(
+                f"invalid dspark propose num {k}: need 0 < k and k + 1 <= "
+                f"ckpt block_size ({dspark_params.block_size})"
+            )
+        dspark_params.speculative_tokens = k
+        # propose_step / verify width / lookahead reservation all key off this.
+        sp_config.gen_num_per_cycle = k
+
+        # Target-side multi-layer feature capture: the ckpt's
+        # aux_hidden_state_layer_ids are 1-based "output of layer j"; the
+        # capture loop consumes 0-based decoder-layer-output indices.
+        capture_ids = [j - 1 for j in dspark_params.aux_hidden_state_layer_ids]
+        invalid = [j for j in capture_ids if j < 0 or j >= model_config.num_layers]
+        if invalid:
+            raise ValueError(
+                f"dspark aux_hidden_state_layer_ids {dspark_params.aux_hidden_state_layer_ids} "
+                f"out of range for target with {model_config.num_layers} layers "
+                f"(0-based capture ids {capture_ids})"
+            )
+        model_config.capture_aux_hidden_layer_ids = capture_ids
+        logging.info(
+            f"dspark wiring: k={k} (block width {k + 1}), "
+            f"target capture layer ids (0-based) = {capture_ids}"
+        )

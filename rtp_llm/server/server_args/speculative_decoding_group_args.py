@@ -75,6 +75,16 @@ def init_speculative_decoding_group_args(parser, sp_config):
     )
 
     speculative_decoding_group.add_argument(
+        "--sp_dspark_propose_num",
+        env_name="SP_DSPARK_PROPOSE_NUM",
+        bind_to=(sp_config, "sp_dspark_propose_num"),
+        type=int,
+        default=0,
+        help="DSpark/DFlash 静态提交长度 k;0 = 取 draft ckpt 的 speculative_tokens"
+        "(块宽 = k+1,须满足 k+1 <= ckpt block_size,越界启动报错)。",
+    )
+
+    speculative_decoding_group.add_argument(
         "--gen_num_per_cycle",
         env_name="GEN_NUM_PER_CIRCLE",
         bind_to=(sp_config, "gen_num_per_cycle"),

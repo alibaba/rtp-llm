@@ -3,6 +3,7 @@
 #include <map>
 #include <sstream>
 #include <algorithm>
+#include <stdexcept>
 #include <string>
 #include <cctype>
 #include <regex>
@@ -244,8 +245,12 @@ SpeculativeType SpeculativeExecutionConfig::from_string(const std::string& str) 
         return SP_TYPE_EAGLE;
     } else if (str == "deterministic") {
         return SP_TYPE_DETERMINISTIC;
+    } else if (str == "dspark") {
+        return SP_TYPE_DSPARK;
     } else {
-        return SP_TYPE_NONE;  // Default to NONE for unknown values
+        // A typo'd --sp_type silently disabling speculation is a footgun;
+        // fail loudly instead of falling back to NONE.
+        throw std::invalid_argument("unknown sp_type: '" + str + "'");
     }
 }
 
@@ -263,6 +268,8 @@ std::string SpeculativeExecutionConfig::to_string(SpeculativeType type) {
             return "eagle";
         case SP_TYPE_DETERMINISTIC:
             return "deterministic";
+        case SP_TYPE_DSPARK:
+            return "dspark";
         default:
             return "none";
     }
@@ -279,7 +286,8 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "force_stream_sample: " << force_stream_sample << "\n"
         << "force_score_context_attention: " << force_score_context_attention << "\n"
         << "quantization: " << quantization << "\n"
-        << "checkpoint_path: " << checkpoint_path;
+        << "checkpoint_path: " << checkpoint_path << "\n"
+        << "sp_dspark_propose_num: " << sp_dspark_propose_num;
     return oss.str();
 }
 

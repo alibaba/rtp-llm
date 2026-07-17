@@ -736,7 +736,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("MTP", SP_TYPE_MTP)
         .value("EAGLE3", SP_TYPE_EAGLE3)
         .value("EAGLE", SP_TYPE_EAGLE)
-        .value("DETERMINISTIC", SP_TYPE_DETERMINISTIC);
+        .value("DETERMINISTIC", SP_TYPE_DETERMINISTIC)
+        .value("DSPARK", SP_TYPE_DSPARK);
 
     // Register SpeculativeExecutionConfig
     py::class_<SpeculativeExecutionConfig>(m, "SpeculativeExecutionConfig")
@@ -762,6 +763,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("force_score_context_attention", &SpeculativeExecutionConfig::force_score_context_attention)
         .def_readwrite("quantization", &SpeculativeExecutionConfig::quantization)
         .def_readwrite("checkpoint_path", &SpeculativeExecutionConfig::checkpoint_path)
+        .def_readwrite("sp_dspark_propose_num", &SpeculativeExecutionConfig::sp_dspark_propose_num)
         .def("to_string", [](const SpeculativeExecutionConfig& self) { return self.to_string(); })
         .def(py::pickle(
             [](const SpeculativeExecutionConfig& self) {
@@ -774,10 +776,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.force_stream_sample,
                                       self.force_score_context_attention,
                                       self.quantization,
-                                      self.checkpoint_path);
+                                      self.checkpoint_path,
+                                      self.sp_dspark_propose_num);
             },
             [](py::tuple t) {
-                if (t.size() != 10)
+                if (t.size() != 11)
                     throw std::runtime_error("Invalid state!");
                 SpeculativeExecutionConfig c;
                 try {
@@ -791,6 +794,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.force_score_context_attention = t[7].cast<bool>();
                     c.quantization                  = t[8].cast<std::string>();
                     c.checkpoint_path               = t[9].cast<std::string>();
+                    c.sp_dspark_propose_num         = t[10].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("SpeculativeExecutionConfig unpickle error: ") + e.what());
                 }

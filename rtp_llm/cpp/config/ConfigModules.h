@@ -269,7 +269,8 @@ enum SpeculativeType {
     SP_TYPE_MTP           = 2,  // Multi-token prediction (DeepSeek-V3)
     SP_TYPE_EAGLE3        = 3,  // EAGLE-3
     SP_TYPE_EAGLE         = 4,  // EAGLE
-    SP_TYPE_DETERMINISTIC = 5   // Deterministic (Prompt-Lookup)
+    SP_TYPE_DETERMINISTIC = 5,  // Deterministic (Prompt-Lookup)
+    SP_TYPE_DSPARK        = 6   // DFlash/DSpark block-diffusion draft
 };
 
 struct SpeculativeExecutionConfig {
@@ -283,6 +284,9 @@ struct SpeculativeExecutionConfig {
     bool            force_score_context_attention = true;
     std::string     quantization                  = "";
     std::string     checkpoint_path               = "";
+    // DSpark/DFlash static commit length k; 0 = derive from the draft ckpt's
+    // speculative_tokens.  Must satisfy k + 1 <= ckpt block_size.
+    int64_t sp_dspark_propose_num = 0;
     std::string     to_string() const;
 
     // Helper functions for enum conversion
