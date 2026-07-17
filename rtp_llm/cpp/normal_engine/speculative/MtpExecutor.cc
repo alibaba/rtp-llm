@@ -1000,7 +1000,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     if (propose_step_ > 1 && !is_dspark_) {
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t);
+        metrics_collector.sp_engine_collector.propose_step_latency_us +=
+            autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
     }
 
@@ -1012,7 +1015,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_output          = runTargetVerifyForward(model_input, stream_groups);
-        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        int64_t span_us       = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        model_forward_us += span_us;
+        metrics_collector.sp_engine_collector.score_step_latency_us += span_us;
     }
 
     // trick: update draft sampler output after spec decode to avoid kernel launch overhead
@@ -1076,7 +1081,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 {(int64_t)batch_size, (int64_t)(propose_step_ + 1), (int64_t)vocab_size_});
 
             // rejection sampling
+            int64_t sampler_start_us   = autil::TimeUtility::currentTimeInMicroSeconds();
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
+            metrics_collector.sp_engine_collector.speculative_sampler_latency_us +=
+                autil::TimeUtility::currentTimeInMicroSeconds() - sampler_start_us;
         }
 
         if (is_dspark_) {
@@ -1111,7 +1119,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     {
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         draft_prefill_model_output = runDraftPrefillForward(model_input);
-        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        int64_t span_us            = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        model_forward_us += span_us;
+        metrics_collector.sp_engine_collector.propose_step_latency_us += span_us;
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {

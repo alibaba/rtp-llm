@@ -112,3 +112,36 @@ aux 特征,注入窗口 = [prefix - accept_len_i, prefix)。模型侧
   与本分支无关,PR 描述里说明。
 - bazel py 测试:--test_env LD_PRELOAD=/usr/lib64/libnvidia-ml.so.1 +
   PYTHONNOUSERSITE=1;deps 要 //rtp_llm:models + //rtp_llm:async_model。
+
+## 执行结果(2026-07-17)
+
+全部完成,三个 commit:init 链(SP_TYPE_DSPARK 路由 + mask_token_id 通道 +
+单模块多层 draft + reserve_step=2(k+1) + fail-fast)、executor 缝合
+(4 个 dspark 变体 + 5 处 guard)、E2E 修复 + 分阶段延迟观测。
+
+计划外发现:
+- dspark 尾部播种把下一轮 propose 提前到本轮,KV 写至 seq+2k →
+  reserve_step 必须 2(k+1),MTP 的 k+1 不够(§2c 未预见)。
+- 引擎侧 kv_cache_block_id_host 是 [group,batch,blocks] 3-D(golden UT
+  造的是 2-D),注入 pass 需归一;engine 加载 lm_head 为 fp32
+  (enable_fp32_lm_head),compute_base_logits 需按权重 dtype 对齐。
+- 内源 HEAD(VisionBert ARPC timeline)引用 main 的 EmbeddingProfileConfig
+  而 pr-1107 基线没有 → cherry-pick 665cf28aa 解锁本地全量编译。
+
+E2E gate(真实 32B target + 训练版 draft,单 H20,greedy 64-80 tok × 9
+prompts):管线全通;确定性 prompt(代码/数列)sp on/off 逐字一致;开放
+文本 5/9 在歧义点分叉——探针实锤为 target 自身 prefill vs decode kernel
+的 near-tie 路径差(baseline 以 " Paris." 结尾续写 = dspark 的选择),
+且分叉后可重收敛(李白用例),排除 KV/位置损坏。结论:sp on/off 逐位
+一致这一 gate 判据对本引擎不可达(MTP smoke 也是按配置各存 golden),
+dspark 精度回归应走独立 golden(1b 建 smoke case)。
+
+MTP 回归:eagle_mtp_tp2 首轮即过;其余 5 个首轮挂全为远程执行器 GPU
+挤占(加载期 OOM / device reserved memory 不足,死在 MtpExecutor 之前),
+带 gpu_lock 重跑后 cudagraph×3 + reuse 全过。`eagle_remote_cache_tp2`
+两轮均挂,真实死因 = backend forward 抛 "can not find mha type"
+(attn_factory 对 seq_size_per_block=8 + FP16 + remote-cache 配置选不到
+fmha 实现;同为 reuse 的 eagle_mtp_reuse 过 ⇒ 差异轴是 page=8 支持矩阵);
+本次全部改动文件与 fmha 选择路径零交集,判定为分支基线缺口,rebase 到
+main 后由 CI 复核。C++ UT:processor test 过;mtp_executor_test 的
+testSingleBatchDecode 为基线既有失败(stash 复测证实)。

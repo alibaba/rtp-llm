@@ -239,6 +239,11 @@ class Qwen3DSparkModel(GptModelBase):
         prefix = attn_inputs.prefix_lengths.tolist()
         ctx = ctx_lengths.tolist()
         block_table = attn_inputs.kv_cache_block_id_host
+        if block_table.dim() == 3:
+            # Engine layout is [group, batch, blocks]; the dspark draft is a
+            # single FULL cache group (hybrid/linear targets are out of
+            # phase-1 scope), so its rows live in group 0.
+            block_table = block_table[0]
 
         batch_indices: List[int] = []
         positions: List[int] = []
@@ -343,7 +348,9 @@ class Qwen3DSparkModel(GptModelBase):
         """
         width = self.dspark_params.block_width
         hidden = head_hidden.view(-1, width, head_hidden.shape[-1])[:, 1:, :]
-        return F.linear(hidden, self.lm_head_weight)
+        # The engine loader may keep lm_head in fp32 (enable_fp32_lm_head);
+        # follow the weight dtype — logits go through .float() downstream.
+        return F.linear(hidden.to(self.lm_head_weight.dtype), self.lm_head_weight)
 
     # ---- Stage D ------------------------------------------------------
 
