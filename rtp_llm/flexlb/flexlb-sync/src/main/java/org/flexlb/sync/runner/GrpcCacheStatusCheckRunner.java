@@ -73,7 +73,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     @Override
     public void run() {
         try {
-            logger.info("GrpcCacheStatusCheckRunner run for {}", ipPort);
+            logger.debug("GrpcCacheStatusCheckRunner run for {}", ipPort);
             long prefillCacheStatusCheckInterval = DynamicCacheIntervalService.getCurrentIntervalMs();
             long roundInterval = prefillCacheStatusCheckInterval / syncEngineStatusInterval;
             roundInterval = Math.max(roundInterval, 1);
@@ -81,7 +81,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             // Skip prefill cache status check if not in 100ms interval
             if ((RoleType.PREFILL.equals(roleType) || RoleType.PDFUSION.equals(roleType))
                         && syncCount.longValue() % roundInterval != 0) {
-                logger.info("Skip prefill cache status check for {} because not in {}ms interval", ipPort, prefillCacheStatusCheckInterval);
+                logger.debug("Skip prefill cache status check for {} because not in {}ms interval", ipPort, prefillCacheStatusCheckInterval);
                 return;
             }
 
@@ -100,7 +100,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         try {
             EngineRpcService.CacheStatusPB cacheStatus = engineGrpcService.getCacheStatus(
                 ip, grpcPort, workerStatus, cacheVersion, requestTimeoutMs, roleType);
-            logger.info("gRPC Cache Status Response - handled for {}, role:{}, cache_key_size:{}, cache_version:{}, "
+            logger.debug("gRPC Cache Status Response - handled for {}, role:{}, cache_key_size:{}, cache_version:{}, "
                             + "available_kv_cache:{}, total_kv_cache:{}, block_size:{}",
                     ipPort, roleType.name(), cacheStatus.getCacheKeysMap().size(), cacheStatus.getVersion(),
                     cacheStatus.getAvailableKvCache(), cacheStatus.getTotalKvCache(), cacheStatus.getBlockSize());
@@ -122,7 +122,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private void handleCacheStatusResponse(CacheStatus newCacheStatus, long startTime) {
 
         try {
-            logger.info("gRPC Cache Status - handled for {}, role:{}", ipPort, roleType.name());
+            logger.debug("gRPC Cache Status - handled for {}, role:{}", ipPort, roleType.name());
 
             if (newCacheStatus.getMessage() != null) {
                 logger.error("gRPC Cache Status - {}, role:{}, message:{}", ipPort, roleType.name(), newCacheStatus.getMessage());
@@ -153,7 +153,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         }
         CacheStatus currentCacheStatus = workerStatus.getCacheStatus();
         if (currentCacheStatus != null && newCacheStatus.getVersion() <= currentCacheStatus.getVersion()) {
-            logger.info("gRPC Cache Status - {}, role:{}, version not updated, current: {}, response: {}",
+            logger.debug("gRPC Cache Status - {}, role:{}, version not updated, current: {}, response: {}",
                     ipPort, roleType.name(), currentCacheStatus.getVersion(), newCacheStatus.getVersion());
             return false;
         }
@@ -162,7 +162,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
 
     private void logCacheStatusUpdate(CacheStatus cacheStatus, long startTime) {
 
-        logger.info("gRPC Cache Status - {}, role:{}, block_size:{}, version:{}, cacheKeySize:{},"
+        logger.debug("gRPC Cache Status - {}, role:{}, block_size:{}, version:{}, cacheKeySize:{},"
                         + " available_kv_cache:{}, total_kv_cache:{}, cost:{}, syncIntervalMs:{}",
                 ipPort,
                 roleType.name(),

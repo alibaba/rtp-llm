@@ -85,8 +85,8 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
 
     public void syncEngineStatus() {
         syncCount.increment();
-        logger.info("====================sync engine prefill status start, times:{} =========================", syncCount.longValue());
-        logger.info("modelNames:{}", modelNames);
+        logger.debug("====================sync engine prefill status start, times:{} =========================", syncCount.longValue());
+        logger.debug("modelNames:{}", modelNames);
         try {
             for (String modelName : modelNames) {
                 ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;

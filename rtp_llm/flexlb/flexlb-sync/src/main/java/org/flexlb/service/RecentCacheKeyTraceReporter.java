@@ -105,7 +105,12 @@ public class RecentCacheKeyTraceReporter {
             return;
         }
         List<Long> cacheKeys = request.getBlockCacheKeys();
-        Logger.info("Master cache-key trace: masterRequestId={}, requestId={}, retryCount={}, "
+        String digest = cacheKeyDigest(cacheKeys);
+        Logger.info("Master cache-key summary: masterRequestId={}, cacheKeyDigest={}, keyCount={}",
+                balanceContext.getRequestId(),
+                digest,
+                cacheKeys != null ? cacheKeys.size() : 0);
+        Logger.debug("Master cache-key trace: masterRequestId={}, requestId={}, retryCount={}, "
                         + "seqLen={}, requestTimeMs={}, requestCacheKeys={}, hitCacheKeys={}, hitRatio={}, "
                         + "hitTokens={}, inputTokens={}, tokenHitRatio={}, cacheKeyDigest={}, selectedServers={}, cacheKeys={}",
                 balanceContext.getRequestId(),
@@ -119,7 +124,7 @@ public class RecentCacheKeyTraceReporter {
                 hitTokens,
                 inputTokens,
                 hitRatio(hitTokens, inputTokens),
-                cacheKeyDigest(cacheKeys),
+                digest,
                 formatServerStatusList(balanceContext.getResponse()),
                 formatCacheKeys(cacheKeys));
     }

@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -1308,29 +1309,51 @@ void PrefillRpcServer::reportPrefillRecentCacheKeyMetricsOnce(PrefillGenerateCon
                                                                                                        &collector);
     }
 
+    auto key_digest = cacheKeyDigest(cache_keys);
+
     if (prefillCacheDebugLogEnabled()) {
-        auto key_digest = cacheKeyDigest(cache_keys);
-        auto key_text   = cacheKeysToString(cache_keys);
-        RTP_LLM_LOG_INFO("Prefill cache-key trace: request_id=%ld request_key=%s token_num=%ld seq_size_per_block=%d "
-                         "key_count=%zu hit_count=%ld total_count=%ld hit_ratio=%.6f cache_key_digest=%s "
-                         "retained_occurrences=%ld retained_unique_cache_keys=%zu window_ms=%ld cache_keys=%s",
-                         prefill_context.request_id,
-                         prefill_context.request_key.c_str(),
-                         prefill_context.generate_input->input_ids.numel(),
-                         seq_size_per_block,
-                         cache_keys.size(),
-                         snapshot.request_hit_occurrences,
-                         snapshot.request_occurrences,
-                         snapshot.request_hit_ratio,
-                         key_digest.c_str(),
-                         snapshot.retained_occurrences,
-                         snapshot.retained_unique_cache_keys,
-                         snapshot.time_window_ms,
-                         key_text.c_str());
-        RTP_LLM_LOG_INFO("Prefill cache-key preview trace: request_id=%ld cache_key_digest=%s keys_preview=%s",
-                         prefill_context.request_id,
-                         key_digest.c_str(),
-                         cacheKeyPreview(cache_keys).c_str());
+        auto key_text = cacheKeysToString(cache_keys);
+        RTP_LLM_LOG_DEBUG("Prefill cache-key trace: request_id=%ld request_key=%s token_num=%ld seq_size_per_block=%d "
+                          "key_count=%zu hit_count=%ld total_count=%ld hit_ratio=%.6f cache_key_digest=%s "
+                          "retained_occurrences=%ld retained_unique_cache_keys=%zu window_ms=%ld cache_keys=%s",
+                          prefill_context.request_id,
+                          prefill_context.request_key.c_str(),
+                          prefill_context.generate_input->input_ids.numel(),
+                          seq_size_per_block,
+                          cache_keys.size(),
+                          snapshot.request_hit_occurrences,
+                          snapshot.request_occurrences,
+                          snapshot.request_hit_ratio,
+                          key_digest.c_str(),
+                          snapshot.retained_occurrences,
+                          snapshot.retained_unique_cache_keys,
+                          snapshot.time_window_ms,
+                          key_text.c_str());
+        RTP_LLM_LOG_DEBUG("Prefill cache-key preview trace: request_id=%ld cache_key_digest=%s keys_preview=%s",
+                          prefill_context.request_id,
+                          key_digest.c_str(),
+                          cacheKeyPreview(cache_keys).c_str());
+    }
+
+    // INFO-level summary with sampling: PREFILL_CACHE_LOG_SAMPLE_RATE=N outputs every Nth request
+    static const int64_t cache_log_sample_rate = []() {
+        const char* value = std::getenv("PREFILL_CACHE_LOG_SAMPLE_RATE");
+        if (value == nullptr || value[0] == 0) {
+            return static_cast<int64_t>(0);
+        }
+        return static_cast<int64_t>(atoll(value));
+    }();
+    if (cache_log_sample_rate > 0) {
+        static std::atomic<int64_t> cache_log_counter{0};
+        int64_t                     count = cache_log_counter.fetch_add(1);
+        if (count % cache_log_sample_rate == 0) {
+            RTP_LLM_LOG_INFO(
+                "Prefill cache-key summary: request_id=%ld key_count=%zu hit_ratio=%.6f cache_key_digest=%s",
+                prefill_context.request_id,
+                cache_keys.size(),
+                snapshot.request_hit_ratio,
+                key_digest.c_str());
+        }
     }
 }
 

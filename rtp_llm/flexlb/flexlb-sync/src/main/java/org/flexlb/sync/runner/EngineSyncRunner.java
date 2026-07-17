@@ -28,6 +28,8 @@ public class EngineSyncRunner implements Runnable {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
+    private final SyncSummaryLogger summaryLogger = new SyncSummaryLogger();
+
     private final String modelName;
 
     private final Map<String /*ipPort*/, WorkerStatus> workerStatusMap;
@@ -85,11 +87,11 @@ public class EngineSyncRunner implements Runnable {
 
     @Override
     public void run() {
-        logger.info("EngineSyncRunner start for model: {}, role: {}", modelName, roleType.toString());
+        logger.debug("EngineSyncRunner start for model: {}, role: {}", modelName, roleType.toString());
         try {
             long startTimeInUs = System.nanoTime() / 1000;
             List<WorkerHost> latestEngineWorkerList = workerAddressService.getEngineWorkerList(modelName, roleType);
-            logger.info("workerAddressService getEngineWorkerList, model: {}, role: {}, size: {}", modelName, roleType, latestEngineWorkerList.size());
+            logger.debug("workerAddressService getEngineWorkerList, model: {}, role: {}, size: {}", modelName, roleType, latestEngineWorkerList.size());
             engineHealthReporter.reportServiceDiscoveryResult(modelName, latestEngineWorkerList.size(), roleType.toString());
             if (CollectionUtils.isEmpty(latestEngineWorkerList)) {
                 logger.error("get engine worker list is empty, cost={}μs, model={}", System.nanoTime() / 1000 - startTimeInUs, modelName);
@@ -106,7 +108,7 @@ public class EngineSyncRunner implements Runnable {
             Set<String> latestValidIpPorts = latestEngineWorkerList.stream()
                     .map(WorkerHost::getIpPort)
                     .collect(Collectors.toSet());
-            logger.info("Current cached worker size: {}, latest worker list size: {}", cachedWorkerStatuses.size(), latestEngineWorkerList.size());
+            logger.debug("Current cached worker size: {}, latest worker list size: {}", cachedWorkerStatuses.size(), latestEngineWorkerList.size());
             for (Map.Entry<String, WorkerStatus> entry: cachedWorkerStatuses.entrySet()) {
                 WorkerStatus workerStatus = entry.getValue();
                 String ipPort = entry.getKey();
@@ -125,10 +127,10 @@ public class EngineSyncRunner implements Runnable {
                 logger.warn("latestEngineWorkerList is empty, role: {}", roleType);
                 return;
             } else {
-                logger.info("latestEngineWorkerList for role: {}, workers:{}", roleType, latestEngineWorkerList.size());
+                logger.debug("latestEngineWorkerList for role: {}, workers:{}", roleType, latestEngineWorkerList.size());
             }
 
-            logger.info("Submitting status check tasks for {} workers", latestEngineWorkerList.size());
+            logger.debug("Submitting status check tasks for {} workers", latestEngineWorkerList.size());
             for (WorkerHost host : latestEngineWorkerList) {
                 String workerIpPort = host.getIpPort();
                 String site = host.getSite();
@@ -148,7 +150,7 @@ public class EngineSyncRunner implements Runnable {
                         logger.warn("Status check rejected for worker: {}, reset flag for retry", workerIpPort);
                     }
                 } else {
-                    logger.info("Skip status check for worker: {}, previous request in progress", workerIpPort);
+                    logger.debug("Skip status check for worker: {}, previous request in progress", workerIpPort);
                 }
 
                 if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
@@ -164,10 +166,10 @@ public class EngineSyncRunner implements Runnable {
                         logger.warn("Cache check rejected for worker: {}, reset flag for retry", workerIpPort);
                     }
                 } else {
-                    logger.info("Skip cache check for worker: {}, previous request in progress", workerIpPort);
+                    logger.debug("Skip cache check for worker: {}, previous request in progress", workerIpPort);
                 }
             }
-            logger.info("Finished submitting status check tasks for model: {}, role: {}, worker count: {}", modelName,
+            logger.debug("Finished submitting status check tasks for model: {}, role: {}, worker count: {}", modelName,
                     roleType, latestEngineWorkerList.size());
 
         } catch (Exception e) {
@@ -205,10 +207,18 @@ public class EngineSyncRunner implements Runnable {
                 double variance2 = sumRunningLoadOfSquaredDiffs / (size - 1);
 
                 engineHealthReporter.reportLatencyMetric(modelName, this.roleType.toString(), variance, variance2);
-                logger.info("EngineSyncRunner finished for model: {}, role: {}", modelName, roleType);
+                logger.debug("EngineSyncRunner finished for model: {}, role: {}", modelName, roleType);
             } else {
                 logger.debug("Less than 2 workers, skipping variance calculation for model: {}", modelName);
             }
+
+            int aliveCount = 0;
+            for (WorkerStatus ws : workerStatusMap.values()) {
+                if (ws.isAlive()) {
+                    aliveCount++;
+                }
+            }
+            summaryLogger.recordSyncRound(size, aliveCount, size - aliveCount);
         }
     }
 

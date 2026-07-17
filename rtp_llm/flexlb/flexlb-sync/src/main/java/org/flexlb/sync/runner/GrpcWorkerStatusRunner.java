@@ -68,7 +68,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     @Override
     public void run() {
         try {
-            logger.info("GrpcWorkerStatusRunner run for {}", ipPort);
+            logger.debug("GrpcWorkerStatusRunner run for {}", ipPort);
             long startTime = System.nanoTime() / 1000;
 
             long latestFinishedTaskVersion = workerStatus.getLatestFinishedTaskVersion().get();
@@ -161,7 +161,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void logWorkerStatusUpdate(long startTime, WorkerStatus workerStatus) {
-        logger.info("gRPC Worker Status - {}, role:{}, alive:{}, concurrency:{}, "
+        logger.debug("gRPC Worker Status - {}, role:{}, alive:{}, concurrency:{}, "
                         + "step_latency_ms:{}, iterate_count:{}, "
                         + "dp_rank:{}, dp_size:{}, tp_size:{}, "
                         + "avail_kv_tokens:{}, used_kv_tokens:{}, "
@@ -196,7 +196,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void log(String msg) {
-        logger.info("[gRPC][{}][{}][{}][{}][{}μs]: {}",
+        logger.debug("[gRPC][{}][{}][{}][{}][{}μs]: {}",
                 id,
                 site,
                 ipPort,
