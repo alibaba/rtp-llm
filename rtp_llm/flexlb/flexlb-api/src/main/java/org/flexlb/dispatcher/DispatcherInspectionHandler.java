@@ -11,7 +11,6 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
-import java.util.Optional;
 
 /**
  * Read-only diagnostic endpoints exposing dispatcher-local state and what dispatcher would emit
