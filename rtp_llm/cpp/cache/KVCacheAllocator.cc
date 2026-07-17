@@ -345,4 +345,10 @@ void KVCacheAllocator::regUserMr(size_t model_id, std::shared_ptr<CacheStore> ca
     }
 }
 
+void KVCacheAllocator::deregUserMr() {
+    if (block_pool_) {
+        block_pool_->deregUserMr();
+    }
+}
+
 }  // namespace rtp_llm

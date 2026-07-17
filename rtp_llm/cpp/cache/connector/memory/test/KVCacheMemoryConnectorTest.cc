@@ -1,5 +1,6 @@
 // Copyright (c) RTP-LLM
 
+#include <atomic>
 #include <csignal>
 #include <chrono>
 #include <execinfo.h>
@@ -1970,6 +1971,47 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
         verifyBlockBytesEq(mem_buffer, byte_off, bytes, static_cast<char>('k' + static_cast<int>(layer)));
         byte_off += layer_stride;
     }
+}
+
+// Sleep flips the memory-cache backing on/off via release/restore while a
+// GetCacheStatus caller can concurrently read the cache keys (cacheKeys() is
+// lock-free w.r.t. malloc_mutex_). The backing object address stays stable and
+// clear() takes MemoryBlockCache's internal write lock, so concurrent readers
+// must never crash or read a torn pointer. This test hammers that overlap.
+TEST_F(KVCacheMemoryConnectorTest, cacheKeys_ConcurrentWithReleaseRestore_NoCrash) {
+    const size_t mem_block_size = memoryCacheBlockBytes();
+    putItemsToCache({1001, 1002, 1003, 1004}, mem_block_size);
+    ASSERT_FALSE(connector_->cacheKeys().empty());
+
+    std::atomic<bool> stop{false};
+    std::atomic<int>  reads{0};
+
+    // Reader mirrors GetCacheStatus: spin on the lock-free cacheKeys() path.
+    std::thread reader([&]() {
+        while (!stop.load(std::memory_order_relaxed)) {
+            auto keys = connector_->cacheKeys();
+            // Size may be 0 (released) or non-empty (running); either is valid.
+            (void)keys;
+            reads.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+
+    // Writer flips the sleep backing many times.
+    for (int i = 0; i < 200; ++i) {
+        ASSERT_TRUE(connector_->releaseMemoryCacheBacking());
+        // After release the cache is empty in place.
+        EXPECT_TRUE(connector_->cacheKeys().empty());
+        ASSERT_TRUE(connector_->restoreMemoryCacheBacking());
+    }
+
+    stop.store(true, std::memory_order_relaxed);
+    reader.join();
+
+    EXPECT_GT(reads.load(), 0);
+    // Ends in the restored (running) state with an empty, usable cache.
+    EXPECT_TRUE(connector_->cacheKeys().empty());
+    putItemsToCache({2001, 2002}, mem_block_size);
+    EXPECT_EQ(connector_->cacheKeys().size(), 2u);
 }
 
 }  // namespace rtp_llm::test

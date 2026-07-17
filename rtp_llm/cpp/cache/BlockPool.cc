@@ -1,4 +1,8 @@
+#include <ATen/cuda/CachingHostAllocator.h>
+
 #include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -184,8 +188,33 @@ void BlockPool::initializeCacheBuffer() {
     } else if (use_cuda_malloc_backing_) {
         initializeCudaMallocBuffer();
     } else {
+        // Sleep/wake_up: tag the KV big-buffer allocation so the torch_memory_saver
+        // preload shim (when present) tracks it under "kv_cache" and can later
+        // pause/resume its physical pages. Without the shim this is a no-op.
+        VmmBackend vmm_backend;
+        const bool tagged = vmm_backend.isAvailable()
+                            && vmm_backend.beginAllocationRegion(KVCachePhysicalMemoryController::kDefaultTag);
+        // RAII: the shim's "interesting region" flag is process-global and thread-local.
+        // If torch::empty(kCUDA) throws (e.g. OOM), we MUST still leave the region, or every
+        // subsequent cudaMalloc process-wide gets mis-tagged as "kv_cache" and a later pause
+        // would release unrelated memory. endAllocationRegion() is idempotent enough to run
+        // on the normal path too (guarded by `tagged`).
+        struct AllocationRegionGuard {
+            VmmBackend* backend;
+            bool        active;
+            ~AllocationRegionGuard() {
+                if (active) {
+                    backend->endAllocationRegion();
+                }
+            }
+        } region_guard{&vmm_backend, tagged};
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        if (tagged) {
+            RTP_LLM_LOG_INFO("KV cache buffer (%zu bytes) allocated under VMM tag '%s'",
+                             config_.total_size_bytes,
+                             KVCachePhysicalMemoryController::kDefaultTag);
+        }
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
@@ -428,6 +457,81 @@ void BlockPool::initFreeBlocks() {
     block_cache_ref_counter_.init(config_.block_num);
     req_cache_ref_counter_.init(config_.block_num);
     block_cache_ = std::make_shared<BlockCache>();
+}
+
+void BlockPool::resetMetadata() {
+    std::scoped_lock lock(ref_mu_, free_mu_);
+    free_block_ids_.clear();
+    // block 0 is reserved, same as initFreeBlocks()
+    for (BlockIdxType i = 1; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
+        free_block_ids_.insert(i);
+    }
+    request_ref_counter_.init(config_.block_num);
+    connector_ref_counter_.init(config_.block_num);
+    req_con_ref_counter_.init(config_.block_num);
+    block_cache_ref_counter_.init(config_.block_num);
+    req_cache_ref_counter_.init(config_.block_num);
+    RTP_LLM_LOG_INFO("BlockPool metadata reset to fresh state: free_blocks=%zu, total_blocks=%u",
+                     free_block_ids_.size(),
+                     config_.block_num);
+}
+
+void BlockPool::releaseHostBuffer() {
+    RTP_LLM_CHECK_WITH_INFO(allocation_type_ == AllocationType::HOST,
+                            "releaseHostBuffer is only valid for HOST block pool");
+    if (host_released_) {
+        return;
+    }
+    {
+        // Prevent malloc() from handing out blocks that point into the freed buffer.
+        std::scoped_lock lock(ref_mu_, free_mu_);
+        free_block_ids_.clear();
+    }
+    // Drop everything that views into cache_aligned_buffer_ so the tensor's refcount
+    // reaches zero and the pinned host memory is actually returned to the OS.
+    layout_strategies_.clear();
+    global_layer_kv_tensors_.clear();
+    global_layer_kv_scale_tensors_.clear();
+    global_layer_to_local_.clear();
+    block_cache_          = std::make_shared<BlockCache>();
+    cache_base_ptr_       = nullptr;
+    cache_aligned_buffer_ = torch::Tensor();
+    // The buffer was allocated via torch's CachingHostAllocator (pin_memory()); dropping
+    // the tensor only returns the block to torch's pinned-memory *cache*, NOT to the OS.
+    // Flush that cache so the pinned pages are actually cudaHostFree'd and RAM is reclaimed
+    // (the whole point of discarding the memory cache on sleep). Only frees unused blocks.
+    at::getHostAllocator(at::kCUDA)->empty_cache();
+    host_released_ = true;
+    RTP_LLM_LOG_INFO("BlockPool host buffer released for sleep (%zu bytes freed)", config_.total_size_bytes);
+}
+
+void BlockPool::reallocateHostBuffer() {
+    RTP_LLM_CHECK_WITH_INFO(allocation_type_ == AllocationType::HOST,
+                            "reallocateHostBuffer is only valid for HOST block pool");
+    if (!host_released_) {
+        return;
+    }
+    // Mirror init(): re-create the pinned buffer and every derived layer view/layout.
+    initializeCacheBuffer();
+    initializeLayerMappings();
+    initializeLayoutStrategies();
+    {
+        // Locked reset of block metadata to a fresh pool (same as initFreeBlocks()),
+        // safe against the connector's metrics-reporter thread reading counts.
+        std::scoped_lock lock(ref_mu_, free_mu_);
+        free_block_ids_.clear();
+        for (BlockIdxType i = 1; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
+            free_block_ids_.insert(i);
+        }
+        request_ref_counter_.init(config_.block_num);
+        connector_ref_counter_.init(config_.block_num);
+        req_con_ref_counter_.init(config_.block_num);
+        block_cache_ref_counter_.init(config_.block_num);
+        req_cache_ref_counter_.init(config_.block_num);
+        block_cache_ = std::make_shared<BlockCache>();
+    }
+    host_released_ = false;
+    RTP_LLM_LOG_INFO("BlockPool host buffer reallocated on wake (%zu bytes)", config_.total_size_bytes);
 }
 
 std::vector<torch::Tensor> BlockPool::allLayerCacheBase() const {
