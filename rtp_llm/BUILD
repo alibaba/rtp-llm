@@ -497,6 +497,7 @@ py_library(
         "//rtp_llm/aios/kmonitor:kmonitor_py",
         "//rtp_llm/metrics:metrics",
         "//rtp_llm/access_logger:access_logger",
+        "//rtp_llm/kv_cache_subscriber:kv_cache_subscriber",
     ],
     data = [
         "//rtp_llm/libs:frontend_libs"
