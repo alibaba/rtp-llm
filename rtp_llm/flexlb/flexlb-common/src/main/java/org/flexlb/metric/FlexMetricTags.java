@@ -118,4 +118,35 @@ public interface FlexMetricTags {
     static FlexMetricTags of(String... keyValues) {
         return new ImmutableFlexMetricTags(keyValues);
     }
+
+    /**
+     * Factory method - create immutable tags with engineIp and engineIpPort pre-populated
+     *
+     * @param engineIp       Engine IP (pure IP, e.g. "10.0.0.1")
+     * @param engineIpPort   Engine IP:Port (e.g. "10.0.0.1:8080")
+     * @param extraKeyValues Additional key-value pairs, format: key1, value1, key2, value2, ...
+     * @return Immutable tags instance
+     */
+    static FlexMetricTags ofEngine(String engineIp, String engineIpPort, String... extraKeyValues) {
+        java.util.Map<String, String> map = new java.util.HashMap<>();
+        if (engineIp != null) {
+            map.put("engineIp", engineIp);
+        }
+        if (engineIpPort != null) {
+            map.put("engineIpPort", engineIpPort);
+        }
+        if (extraKeyValues != null && extraKeyValues.length % 2 != 0) {
+            throw new IllegalArgumentException("extraKeyValues must have even number of elements");
+        }
+        if (extraKeyValues != null) {
+            for (int i = 0; i + 1 < extraKeyValues.length; i += 2) {
+                String key = extraKeyValues[i];
+                String value = extraKeyValues[i + 1];
+                if (key != null && value != null) {
+                    map.put(key, value);
+                }
+            }
+        }
+        return new ImmutableFlexMetricTags(map);
+    }
 }

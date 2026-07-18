@@ -74,11 +74,12 @@ if [ -z $SETENV_SETTED ]; then
         fi
         export CPU_COUNT
 
-        mkdir -p "$APP_HOME"/.default
         export SERVICE_PID=$APP_HOME/.default/${APP_NAME}.pid
         export SERVICE_OUT=$APP_HOME/logs/service_stdout.log
         export MIDDLEWARE_LOGS="${HOME}/logs"
         export MIDDLEWARE_SNAPSHOTS="${HOME}/snapshots"
+        mkdir -p "$APP_HOME"/.default "$APP_HOME"/logs \
+          "$MIDDLEWARE_LOGS" "$MIDDLEWARE_SNAPSHOTS" || exit 1
 
         if [ -z "$SERVICE_TMPDIR" ] ; then
             # Define the java.io.tmpdir to use for Service(pandora boot)

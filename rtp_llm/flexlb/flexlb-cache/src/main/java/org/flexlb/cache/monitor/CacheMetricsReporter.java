@@ -110,11 +110,12 @@ public class CacheMetricsReporter {
     /**
      * Report local cache metrics for a single engine
      *
-     * @param engineIp   Engine IP
-     * @param role       Engine role
-     * @param cacheCount Cache count
+     * @param engineIp     Engine IP
+     * @param engineIpPort Engine IP:Port
+     * @param role         Engine role
+     * @param cacheCount   Cache count
      */
-    public void reportEngineLocalMetrics(String engineIp, String role, int cacheCount) {
+    public void reportEngineLocalMetrics(String engineIp, String engineIpPort, String role, int cacheCount) {
         if (engineIp == null) {
             return;
         }
@@ -122,10 +123,7 @@ public class CacheMetricsReporter {
         // Calculate cache count and bytes
         long cacheBytes = calculateEngineCacheBytes(cacheCount);
 
-        FlexMetricTags tags = FlexMetricTags.of(
-                "engineIp", engineIp,
-                "role", role
-        );
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort, "role", role);
 
         monitor.report(CACHE_ENGINE_LOCAL_COUNT, tags, cacheCount);
         monitor.report(CACHE_ENGINE_LOCAL_BYTES, tags, cacheBytes);
