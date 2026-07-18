@@ -60,53 +60,6 @@ public class ExpirationCleaner {
                 workerStatusMap.remove(item.getKey(), workerStatus);
                 endpointRegistry.remove(role, item.getKey(), workerStatus);
             }
-
-            // 2. Check if tasks within worker need cleanup: lost tasks and long-timeout tasks
-            ConcurrentHashMap<Long, TaskInfo> localTaskMap = workerStatus.getLocalTaskMap();
-            Iterator<Map.Entry<Long, TaskInfo>> taskIterator = localTaskMap.entrySet().iterator();
-            while (taskIterator.hasNext()) {
-                Map.Entry<Long, TaskInfo> entry = taskIterator.next();
-                Long requestId = entry.getKey();
-                TaskInfo task = entry.getValue();
-
-                boolean shouldRemove = false;
-
-                // Check if task is lost
-                if (task.isLost()) {
-                    Logger.warn("Cleaning lost task: {}, state: {}, role: {}, worker: {}", requestId, task.getTaskState(), role, workerStatus.getIp());
-                    reportTaskRemoved(workerStatus.getRole(), "lost");
-                    task.updateTaskState(TaskStateEnum.CLEANED);
-                    shouldRemove = true;
-                }
-                // Check if task is timed out
-                else if (task.isTimeout(currentTime, taskTimeoutUs)) {
-                    Logger.warn("Removing timeout task: {}, state: {}, age: {}ms, role: {}, worker: {}", requestId, task.getTaskState(),
-                            (currentTime - task.getLastActiveTimeUs()) / 1000, role, workerStatus.getIp());
-                    reportTaskRemoved(workerStatus.getRole(), "timeout");
-                    task.updateTaskState(TaskStateEnum.CLEANED);
-                    shouldRemove = true;
-                }
-
-                if (shouldRemove) {
-                    decrementQueueTime(workerStatus.getRunningQueueTime(), task, workerStatus.getRole());
-                    taskIterator.remove();
-                }
-            }
-        }
-    }
-
-    private void reportTaskRemoved(String role, String type) {
-        FlexMetricTags tags = FlexMetricTags.of(
-            "role", role,
-            "type", type
-        );
-        monitor.report(TASK_REMOVED, tags, 1);
-    }
-
-    private static void decrementQueueTime(AtomicLong runningQueueTime, TaskInfo task, String role) {
-        if (RoleType.PREFILL.matches(role) || RoleType.PDFUSION.matches(role)) {
-            long delta = task.estimatePrefillTime();
-            WorkerStatus.safeDecrementQueueTime(runningQueueTime, delta);
         }
     }
 }

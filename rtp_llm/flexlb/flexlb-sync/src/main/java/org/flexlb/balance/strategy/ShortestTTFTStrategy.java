@@ -10,6 +10,7 @@ import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
@@ -111,7 +112,8 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
         long candidateMaxHitTokens = scoredEndpoints.stream()
-                .mapToLong(ScoredEndpoint::hitCache)
+                .mapToLong(scored -> calculateRoutingCacheMatchTokens(
+                        scored.ep(), cacheMatchResults, balanceContext.getRequest()))
                 .max()
                 .orElse(0L);
 
@@ -136,7 +138,11 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
 
         reportCacheHitMetrics(roleType, selected.hitCache(), seqLen);
         reportRoutingCacheMatchMetrics(
-                roleType, selected.hitCache(), candidateMaxHitTokens, seqLen);
+                roleType,
+                calculateRoutingCacheMatchTokens(
+                        selected.ep(), cacheMatchResults, balanceContext.getRequest()),
+                candidateMaxHitTokens,
+                seqLen);
 
         return buildServerStatus(selected, roleType, requestId, config, balanceContext);
     }
@@ -262,6 +268,33 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
             return Math.max(0L, seqLen - blockSize);
         }
         return Math.max(0L, rawHit);
+    }
+
+    private long calculateRoutingCacheMatchTokens(PrefillEndpoint ep,
+                                                  Map<String, Integer> cacheMatchResults,
+                                                  Request request) {
+        if (ep == null || cacheMatchResults == null || request == null || request.getSeqLen() <= 0L) {
+            return 0L;
+        }
+
+        Integer prefixMatchLength = cacheMatchResults.get(ep.ipPort());
+        if (prefixMatchLength == null || prefixMatchLength <= 0) {
+            return 0L;
+        }
+
+        long blockSize = request.getCacheKeyBlockSize();
+        if (blockSize <= 0L && ep.getStatus().getCacheStatus() != null) {
+            blockSize = ep.getStatus().getCacheStatus().getBlockSize();
+        }
+        if (blockSize <= 0L) {
+            return 0L;
+        }
+
+        long hitTokens = blockSize * prefixMatchLength;
+        if (hitTokens < 0L) {
+            return request.getSeqLen();
+        }
+        return Math.min(request.getSeqLen(), hitTokens);
     }
 
     // ==================== Metrics & ServerStatus (mirrors CostBasedPrefillStrategy) ====================

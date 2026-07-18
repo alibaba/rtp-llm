@@ -131,7 +131,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
             // Only report success worker status check info
             engineHealthReporter.reportStatusCheckRemoteInfo(
-                    modelName, newWorkerStatus.getRole(), startTime);
+                    modelName, newWorkerStatus.getRole().name(), startTime);
 
             Long responseVersion = newWorkerStatus.getStatusVersion();
             if (responseVersion == 0L) {

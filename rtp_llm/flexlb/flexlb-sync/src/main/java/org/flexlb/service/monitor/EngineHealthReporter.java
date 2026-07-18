@@ -223,10 +223,10 @@ public class EngineHealthReporter {
                                            int runningTaskInfoSize,
                                            int finishedTaskListSize) {
 
-        FlexMetricTags metricTags = FlexMetricTags.ofEngine(workerStatus.getIp(), workerStatus.getIpPort(),
+        FlexMetricTags metricTags = FlexMetricTags.of(
                 "model", modelName,
                 "engineIp", workerStatus.getIp(),
-                "role", workerStatus.getRole());
+                "role", workerStatus.getRole().name());
 
         Long availableConcurrency = workerStatus.getAvailableConcurrency();
         if (availableConcurrency != null) {
@@ -245,10 +245,10 @@ public class EngineHealthReporter {
     public void reportCacheStatusCheckerSuccess(String modelName, WorkerStatus workerStatus) {
         long cacheLastUpdateTime = workerStatus.getCacheLastUpdateTime().get();
         if (cacheLastUpdateTime > 0) {
-            FlexMetricTags metricTags = FlexMetricTags.ofEngine(workerStatus.getIp(), workerStatus.getIpPort(),
+            FlexMetricTags metricTags = FlexMetricTags.of(
                     "model", modelName,
                     "engineIp", workerStatus.getIp(),
-                    "role", workerStatus.getRole());
+                    "role", workerStatus.getRole().name());
             monitor.report(CACHE_STATUS_CHECK_SUCCESS_PERIOD, metricTags, (double) System.nanoTime() / 1000 - cacheLastUpdateTime);
         }
         if (workerStatus.getCacheStatus() != null) {
@@ -256,11 +256,11 @@ public class EngineHealthReporter {
             long cacheKeySize = workerStatus.getCacheStatus().getCacheKeySize();
             FlexMetricTags roleMetricTags = FlexMetricTags.of(
                     "model", modelName,
-                    "role", workerStatus.getRole());
+                    "role", workerStatus.getRole().name());
             FlexMetricTags engineMetricTags = FlexMetricTags.of(
                     "model", modelName,
                     "engineIp", workerStatus.getIp(),
-                    "role", workerStatus.getRole());
+                    "role", workerStatus.getRole().name());
             monitor.report(CACHE_BLOCK_SIZE, roleMetricTags, blockSize);
             monitor.report(CACHE_KEY_SIZE, engineMetricTags, cacheKeySize);
         }
@@ -269,14 +269,15 @@ public class EngineHealthReporter {
         long availableKvCacheTokens = workerStatus.getAvailableKvCacheTokens().get();
         long usedKvCacheTokens = totalKvCacheTokens - availableKvCacheTokens;
 
-        FlexMetricTags kvCacheMetricTags = FlexMetricTags.ofEngine(workerStatus.getIp(), workerStatus.getIpPort(),
+        FlexMetricTags kvCacheMetricTags = FlexMetricTags.of(
                 "model", modelName,
+                "engineIp", workerStatus.getIp(),
                 "role", workerStatus.getRole().name());
 
         monitor.report(CACHE_USED_KV_CACHE_TOKENS, kvCacheMetricTags, usedKvCacheTokens);
         monitor.report(CACHE_AVAILABLE_KV_CACHE_TOKENS, kvCacheMetricTags, availableKvCacheTokens);
         monitor.report(CACHE_TOTAL_KV_CACHE_TOKENS,
-                FlexMetricTags.of("model", modelName, "role", workerStatus.getRole()),
+                FlexMetricTags.of("model", modelName, "role", workerStatus.getRole().name()),
                 totalKvCacheTokens);
         if (totalKvCacheTokens > 0) {
             double usedRatio = (usedKvCacheTokens * 1.0 / totalKvCacheTokens) * 100;

@@ -68,7 +68,6 @@ public class RequestCancelTest {
 
             WorkerStatus workerStatus = new WorkerStatus();
             workerStatus.setAlive(true);
-            workerStatus.setUsedKvCacheTokens(new AtomicLong(990L)); // High usage, simulating resource constraints
             workerStatus.setAvailableKvCacheTokens(new AtomicLong(10L)); // Set very small remaining memory, simulating decode resource shortage
 
             EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.100:8080", workerStatus);
