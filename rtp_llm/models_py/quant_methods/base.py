@@ -77,6 +77,7 @@ class QuantizationConfig:
         quant_type: str = "none",
         source_config: Any = None,
         ignored_layers: Optional[Iterable[str]] = None,
+        hw_kernel_config: Any = None,
     ):
         if not isinstance(quant_type, str):
             raise TypeError("quant_type must be a string")
@@ -85,6 +86,10 @@ class QuantizationConfig:
             normalized = "none"
         self.quant_type = normalized
         self.source_config = source_config
+        use_swizzle_a = getattr(hw_kernel_config, "use_swizzleA", False)
+        if not isinstance(use_swizzle_a, bool):
+            raise TypeError("hw_kernel_config.use_swizzleA must be a bool")
+        self.hw_kernel_config = hw_kernel_config
         self.ignored_layers = self._normalize_ignored(
             self._source_ignored_layers(source_config)
             if ignored_layers is None

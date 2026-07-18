@@ -93,8 +93,9 @@ class RocmFp8PTPCLinearBase(LinearBase):
             return weight_scales.contiguous()
         return weight_scales.reshape(1, output_size).contiguous()
 
+    @staticmethod
     def _quantize_input(
-        self, input: torch.Tensor
+        input: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.dtype]:
         original_dtype = input.dtype
         input_bf16 = (
@@ -106,6 +107,41 @@ class RocmFp8PTPCLinearBase(LinearBase):
     @staticmethod
     def _restore_dtype(output: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         return output if output.dtype == dtype else output.to(dtype)
+
+
+def run_rocm_fp8_ptpc_no_swizzle(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scales: torch.Tensor,
+    output_size: int,
+    bias: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Run the shared CKTile/AITer policy on a prepared [N, K] weight."""
+    input_fp8, input_scales, input_bf16, original_dtype = (
+        RocmFp8PTPCLinearBase._quantize_input(input)
+    )
+    m = input_bf16.shape[0]
+    k = input_fp8.shape[-1]
+    use_cktile = k < 192 or m >= 1536 or (m >= 512 and output_size > 1536)
+    if use_cktile:
+        output = torch.empty(
+            (m, output_size), dtype=input_bf16.dtype, device=input_bf16.device
+        )
+        gemm_a8w8_bpreshuffle_cktile(
+            input_fp8, weight, input_scales, weight_scales, output
+        )
+    else:
+        output = aiter.gemm_a8w8_bpreshuffle(
+            input_fp8,
+            weight,
+            input_scales,
+            weight_scales,
+            None,
+            input_bf16.dtype,
+        )
+    if bias is not None:
+        output = output + bias.to(output.dtype)
+    return RocmFp8PTPCLinearBase._restore_dtype(output, original_dtype)
 
 
 class RocmFp8PTPCLinearNoSwizzle(RocmFp8PTPCLinearBase):
@@ -143,39 +179,13 @@ class RocmFp8PTPCLinearNoSwizzle(RocmFp8PTPCLinearBase):
         )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        input_fp8, input_scales, input_bf16, original_dtype = self._quantize_input(
-            input
+        return run_rocm_fp8_ptpc_no_swizzle(
+            input,
+            self.weight,
+            self.weight_scales,
+            self.output_size,
+            self.bias,
         )
-
-        M = input_bf16.shape[0]
-        N = self.output_size
-        K = input_fp8.shape[-1]
-
-        # Dispatch rules from origin/main, validated on MI308X with sweep
-        # M=[1..16384], N={1024,2816}, K=1024. Keep this NoSwizzle policy
-        # unchanged so shapes without the swizzleA layout continue using the
-        # tuned CK/default split instead of being forced onto hipBLASLt.
-        use_cktile = K < 192 or M >= 1536 or (M >= 512 and N > 1536)
-        if use_cktile:
-            output = torch.empty(
-                (M, N), dtype=input_bf16.dtype, device=input_bf16.device
-            )
-            gemm_a8w8_bpreshuffle_cktile(
-                input_fp8, self.weight, input_scales, self.weight_scales, output
-            )
-        else:
-            output = aiter.gemm_a8w8_bpreshuffle(
-                input_fp8,
-                self.weight,
-                input_scales,
-                self.weight_scales,
-                None,
-                input_bf16.dtype,
-            )
-
-        if self.bias is not None:
-            output = output + self.bias.to(output.dtype)
-        return self._restore_dtype(output, original_dtype)
 
 
 class RocmFp8PTPCLinearWithSwizzle(RocmFp8PTPCLinearBase):

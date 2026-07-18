@@ -285,9 +285,11 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
                 base_model.fmha_config = None
                 base_model.device_resource_config = None
                 base_model.tokenizer = None
-                base_model.hw_kernel_config = types.SimpleNamespace(
-                    enable_cuda_graph=False
+                hw_kernel_config = types.SimpleNamespace(
+                    enable_cuda_graph=False,
+                    use_swizzleA=True,
                 )
+                base_model.hw_kernel_config = hw_kernel_config
 
                 with patch.object(
                     BaseModel, "_get_device_str", return_value="cpu"
@@ -296,6 +298,9 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
                 ), patch(
                     "rtp_llm.models_py.quant_methods.fp8._select_fp8_runtime_backend",
                     return_value="cuda_scaled_mm",
+                ), patch(
+                    "rtp_llm.models_py.quant_methods.fp8._is_hip_runtime",
+                    return_value=False,
                 ), patch.dict(
                     os.environ, {"USE_NEW_LOADER": "1"}, clear=False
                 ):
@@ -305,6 +310,10 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
                 self.assertEqual(
                     o_proj.quant_config.activation_dynamic,
                     activation_dynamic,
+                )
+                self.assertIs(
+                    o_proj.quant_config.hw_kernel_config,
+                    hw_kernel_config,
                 )
                 self.assertEqual(
                     "input_scale" in o_proj._loaded_parameter_names,

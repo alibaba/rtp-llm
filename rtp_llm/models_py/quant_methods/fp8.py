@@ -87,6 +87,7 @@ def _is_hip_runtime() -> bool:
 _CUDA_SCALED_MM = "cuda_scaled_mm"
 _ROCM_SCALED_MM = "rocm_scaled_mm"
 _ROCM_AITER_PTPC = "rocm_aiter_ptpc"
+_ROCM_HIPBLASLT_PTPC = "rocm_hipblaslt_ptpc"
 _ROCM_AITER_BLOCK = "rocm_aiter_block"
 _CUDA_DEEP_GEMM = "cuda_deep_gemm"
 
@@ -113,7 +114,26 @@ def _aiter_has_symbol(symbol: str) -> bool:
     return callable(getattr(aiter, symbol, None))
 
 
-def _select_fp8_runtime_backend(device: torch.device, quant_kind: str) -> str:
+def _use_rocm_swizzle_a(hw_kernel_config: object) -> bool:
+    value = getattr(hw_kernel_config, "use_swizzleA", False)
+    if not isinstance(value, bool):
+        raise TypeError("hw_kernel_config.use_swizzleA must be a bool")
+    return value
+
+
+def _rocm_cktile_ptpc_available() -> bool:
+    try:
+        from aiter.ops.gemm_op_a8w8 import gemm_a8w8_bpreshuffle_cktile
+    except ImportError:
+        return False
+    return callable(gemm_a8w8_bpreshuffle_cktile)
+
+
+def _select_fp8_runtime_backend(
+    device: torch.device,
+    quant_kind: str,
+    hw_kernel_config: object = None,
+) -> str:
     """Resolve an executable FP8 backend before retaining runtime weights."""
     device = torch.device(device)
     if quant_kind not in ("per_tensor", "per_channel", "block"):
@@ -133,8 +153,24 @@ def _select_fp8_runtime_backend(device: torch.device, quant_kind: str) -> str:
             )
         if quant_kind == "per_tensor" and hasattr(torch, "_scaled_mm"):
             return _ROCM_SCALED_MM
-        if quant_kind == "per_channel" and _aiter_has_symbol("gemm_a8w8_bpreshuffle"):
-            return _ROCM_AITER_PTPC
+        if quant_kind == "per_channel":
+            if _use_rocm_swizzle_a(hw_kernel_config):
+                if _aiter_has_symbol("hipb_create_extension") and _aiter_has_symbol(
+                    "hipb_mm"
+                ):
+                    return _ROCM_HIPBLASLT_PTPC
+                raise RuntimeError(
+                    "ROCm FP8 per-channel use_swizzleA requires AITer hipBLASLt"
+                )
+            if (
+                _aiter_has_symbol("gemm_a8w8_bpreshuffle")
+                and _rocm_cktile_ptpc_available()
+            ):
+                return _ROCM_AITER_PTPC
+            raise RuntimeError(
+                "ROCm FP8 per-channel without use_swizzleA requires both "
+                "AITer and CKTile PTPC kernels"
+            )
         if quant_kind == "block" and _aiter_has_symbol(
             "gemm_a8w8_blockscale_bpreshuffle"
         ):
@@ -164,30 +200,71 @@ def _shuffle_rocm_fp8_weight(weight: torch.Tensor) -> torch.Tensor:
     return shuffle_weight(weight, layout=(16, 16))
 
 
-def _apply_rocm_fp8_per_channel(
+def _prepare_rocm_fp8_ptpc_executor(
+    layer,
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    runtime_backend: str,
+):
+    """Materialize the exact layout consumed by the legacy ROCm strategies."""
+    if runtime_backend == _ROCM_HIPBLASLT_PTPC:
+        from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
+            RocmFp8PTPCLinearWithSwizzle,
+        )
+        from rtp_llm.utils.swizzle_utils import swizzle_tensor
+
+        runtime_weight = swizzle_tensor(weight.contiguous(), False).T
+        runtime_scale = scale.float().reshape(-1, 1).T.contiguous()
+        executor_type = RocmFp8PTPCLinearWithSwizzle
+    elif runtime_backend == _ROCM_AITER_PTPC:
+        from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
+            run_rocm_fp8_ptpc_no_swizzle,
+        )
+
+        runtime_weight = _shuffle_rocm_fp8_weight(weight).contiguous()
+        runtime_scale = scale.float().reshape(-1, 1).contiguous()
+        executor_type = run_rocm_fp8_ptpc_no_swizzle
+    else:
+        raise RuntimeError(f"Unsupported ROCm FP8 PTPC backend {runtime_backend!r}")
+
+    del layer.weight
+    layer.register_parameter(
+        "weight", nn.Parameter(runtime_weight, requires_grad=False)
+    )
+    del layer.weight_scale
+    layer.register_parameter(
+        "weight_scale", nn.Parameter(runtime_scale, requires_grad=False)
+    )
+    if runtime_backend == _ROCM_AITER_PTPC:
+        return executor_type
+    return executor_type(
+        weight=layer.weight, weight_scales=layer.weight_scale, bias=None
+    )
+
+
+def _rocm_fp8_ptpc_executor_name(runtime_backend: str, executor) -> str:
+    if runtime_backend not in (_ROCM_AITER_PTPC, _ROCM_HIPBLASLT_PTPC):
+        return "torch._scaled_mm"
+    if executor is None:
+        return runtime_backend
+    return getattr(executor, "__name__", type(executor).__name__)
+
+
+def _run_rocm_fp8_ptpc_executor(
+    executor,
+    runtime_backend: str,
     input_2d: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
-    out_dtype: torch.dtype,
+    output_size: int,
 ) -> torch.Tensor:
-    import aiter
-
-    from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
-
-    original_dtype = input_2d.dtype
-    input_bf16 = (
-        input_2d if original_dtype == torch.bfloat16 else input_2d.to(torch.bfloat16)
-    )
-    qinput, x_scale = rocm_per_token_quant_fp8(input_bf16, eps=1e-10)
-    output = aiter.gemm_a8w8_bpreshuffle(
-        qinput,
-        weight,
-        x_scale.to(torch.float32),
-        weight_scale,
-        None,
-        torch.bfloat16,
-    )
-    return output if original_dtype == torch.bfloat16 else output.to(out_dtype)
+    if executor is None:
+        raise RuntimeError("ROCm FP8 PTPC executor was not initialized")
+    if runtime_backend == _ROCM_AITER_PTPC:
+        return executor(input_2d, weight, weight_scale, output_size)
+    if runtime_backend == _ROCM_HIPBLASLT_PTPC:
+        return executor(input_2d)
+    raise RuntimeError(f"Unsupported ROCm FP8 PTPC backend {runtime_backend!r}")
 
 
 def _apply_rocm_fp8_block(
@@ -746,19 +823,28 @@ class Fp8PerChannelOnlineLinearMethod(QuantizeMethodBase):
         )
 
     def validate_runtime_device(self, device: torch.device) -> None:
-        _select_fp8_runtime_backend(device, "per_channel")
+        _select_fp8_runtime_backend(
+            device,
+            "per_channel",
+            self.quant_config.hw_kernel_config,
+        )
 
     def process_weights_after_loading(self, layer):
         weight = layer.weight.data
         if weight.ndim != 2:
             raise ValueError(f"expected 2D weight, got {weight.shape}")
         self._runtime_backend = _select_fp8_runtime_backend(
-            weight.device, "per_channel"
+            weight.device,
+            "per_channel",
+            self.quant_config.hw_kernel_config,
         )
 
         # Treat weight rows as "tokens" -> per-output-channel quant.
         # fp8_weight: [N, K] float8_e4m3fn, scale: [N, 1] float32.
-        is_hip = _is_hip_runtime()
+        is_hip = self._runtime_backend in (
+            _ROCM_AITER_PTPC,
+            _ROCM_HIPBLASLT_PTPC,
+        )
         quant_input = (
             weight.to(torch.bfloat16)
             if is_hip and weight.dtype != torch.bfloat16
@@ -766,22 +852,26 @@ class Fp8PerChannelOnlineLinearMethod(QuantizeMethodBase):
         )
         fp8_weight, scale = _resolve_per_token_quant()(quant_input)
         if is_hip:
-            fp8_weight = _shuffle_rocm_fp8_weight(fp8_weight)
-            scale = scale.view(-1, 1).to(torch.float32).contiguous()
+            self._rocm_executor = _prepare_rocm_fp8_ptpc_executor(
+                layer,
+                fp8_weight,
+                scale,
+                self._runtime_backend,
+            )
         else:
             # torch._scaled_mm consumes scale_b as [1, N]. Materialize that
             # layout once after loading instead of transposing every forward.
             scale = scale.view(1, -1).contiguous()
 
-        del layer.weight
-        layer.register_parameter(
-            "weight", nn.Parameter(fp8_weight.contiguous(), requires_grad=False)
-        )
-        del layer.weight_scale
-        layer.register_parameter(
-            "weight_scale",
-            nn.Parameter(scale, requires_grad=False),
-        )
+            del layer.weight
+            layer.register_parameter(
+                "weight", nn.Parameter(fp8_weight.contiguous(), requires_grad=False)
+            )
+            del layer.weight_scale
+            layer.register_parameter(
+                "weight_scale",
+                nn.Parameter(scale, requires_grad=False),
+            )
 
         Fp8PerChannelOnlineLinearMethod._quant_count += 1
         if not Fp8PerChannelOnlineLinearMethod._quant_logged:
@@ -804,13 +894,14 @@ class Fp8PerChannelOnlineLinearMethod(QuantizeMethodBase):
         if getattr(self, "_runtime_backend", None) not in (
             _CUDA_SCALED_MM,
             _ROCM_AITER_PTPC,
+            _ROCM_HIPBLASLT_PTPC,
         ):
             raise RuntimeError("FP8 per-channel backend was not initialized")
         out_dtype = x.dtype
         input_2d = x.reshape(-1, x.shape[-1])
         if not input_2d.is_contiguous():
             input_2d = input_2d.contiguous()
-        N = layer.weight.shape[0]
+        N = layer.output_size
         output_shape = list(x.shape[:-1]) + [N]
 
         if not Fp8PerChannelOnlineLinearMethod._apply_logged:
@@ -818,10 +909,9 @@ class Fp8PerChannelOnlineLinearMethod(QuantizeMethodBase):
                 "[Fp8PerChannelOnlineLinearMethod] FIRST forward via %s: "
                 "prefix=%r, x.dtype=%s, x.shape=%s, weight.dtype=%s, "
                 "weight.shape=%s, weight_scale.shape=%s, total_quanted_weights=%d",
-                (
-                    "AITer gemm_a8w8_bpreshuffle"
-                    if self._runtime_backend == _ROCM_AITER_PTPC
-                    else "torch._scaled_mm"
+                _rocm_fp8_ptpc_executor_name(
+                    self._runtime_backend,
+                    getattr(self, "_rocm_executor", None),
                 ),
                 getattr(layer, "prefix", "?"),
                 x.dtype,
@@ -833,12 +923,17 @@ class Fp8PerChannelOnlineLinearMethod(QuantizeMethodBase):
             )
             Fp8PerChannelOnlineLinearMethod._apply_logged = True
 
-        if self._runtime_backend == _ROCM_AITER_PTPC:
-            output = _apply_rocm_fp8_per_channel(
+        if self._runtime_backend in (
+            _ROCM_AITER_PTPC,
+            _ROCM_HIPBLASLT_PTPC,
+        ):
+            output = _run_rocm_fp8_ptpc_executor(
+                getattr(self, "_rocm_executor", None),
+                self._runtime_backend,
                 input_2d,
                 layer.weight,
                 layer.weight_scale,
-                out_dtype,
+                layer.output_size,
             )
             if bias is not None:
                 output = output + bias.to(output.dtype)
@@ -905,34 +1000,48 @@ class Fp8PerChannelLinearMethod(QuantizeMethodBase):
         )
 
     def validate_runtime_device(self, device: torch.device) -> None:
-        _select_fp8_runtime_backend(device, "per_channel")
+        _select_fp8_runtime_backend(
+            device,
+            "per_channel",
+            self.quant_config.hw_kernel_config,
+        )
 
     def process_weights_after_loading(self, layer):
         # ckpt scale may arrive as [N] or [N, 1]. ROCm fp8 kernels expect the
         # platform runtime dtype (e4m3fnuz on MI308X), so convert already-FP8
         # checkpoint weights once after loading and store scale as [N, 1].
         self._runtime_backend = _select_fp8_runtime_backend(
-            layer.weight.device, "per_channel"
+            layer.weight.device,
+            "per_channel",
+            self.quant_config.hw_kernel_config,
         )
         fp8_weight, scale = _requant_per_channel_to_runtime_fp8(
             layer.weight.data, layer.weight_scale.data
         )
-        is_hip = _is_hip_runtime()
+        is_hip = self._runtime_backend in (
+            _ROCM_AITER_PTPC,
+            _ROCM_HIPBLASLT_PTPC,
+        )
         if is_hip:
-            fp8_weight = _shuffle_rocm_fp8_weight(fp8_weight)
+            self._rocm_executor = _prepare_rocm_fp8_ptpc_executor(
+                layer,
+                fp8_weight,
+                scale,
+                self._runtime_backend,
+            )
         else:
             # torch._scaled_mm consumes scale_b as [1, N]. Materialize that
             # layout once after loading instead of transposing every forward.
             scale = scale.t().contiguous()
-        del layer.weight
-        layer.register_parameter(
-            "weight", nn.Parameter(fp8_weight, requires_grad=False)
-        )
-        del layer.weight_scale
-        layer.register_parameter(
-            "weight_scale",
-            nn.Parameter(scale, requires_grad=False),
-        )
+            del layer.weight
+            layer.register_parameter(
+                "weight", nn.Parameter(fp8_weight, requires_grad=False)
+            )
+            del layer.weight_scale
+            layer.register_parameter(
+                "weight_scale",
+                nn.Parameter(scale, requires_grad=False),
+            )
 
     def apply(
         self, layer, x: torch.Tensor, bias: Optional[torch.Tensor] = None
@@ -940,23 +1049,23 @@ class Fp8PerChannelLinearMethod(QuantizeMethodBase):
         if getattr(self, "_runtime_backend", None) not in (
             _CUDA_SCALED_MM,
             _ROCM_AITER_PTPC,
+            _ROCM_HIPBLASLT_PTPC,
         ):
             raise RuntimeError("FP8 per-channel backend was not initialized")
         out_dtype = x.dtype
         input_2d = x.reshape(-1, x.shape[-1])
         if not input_2d.is_contiguous():
             input_2d = input_2d.contiguous()
-        N = layer.weight.shape[0]
+        N = layer.output_size
         output_shape = list(x.shape[:-1]) + [N]
 
         if not Fp8PerChannelLinearMethod._apply_logged:
             logger.info(
                 "[Fp8PerChannelLinearMethod] FIRST forward via %s: "
                 "prefix=%r, x.shape=%s, weight.shape=%s, weight_scale.shape=%s",
-                (
-                    "AITer gemm_a8w8_bpreshuffle"
-                    if self._runtime_backend == _ROCM_AITER_PTPC
-                    else "torch._scaled_mm"
+                _rocm_fp8_ptpc_executor_name(
+                    self._runtime_backend,
+                    getattr(self, "_rocm_executor", None),
                 ),
                 getattr(layer, "prefix", "?"),
                 tuple(x.shape),
@@ -965,12 +1074,17 @@ class Fp8PerChannelLinearMethod(QuantizeMethodBase):
             )
             Fp8PerChannelLinearMethod._apply_logged = True
 
-        if self._runtime_backend == _ROCM_AITER_PTPC:
-            output = _apply_rocm_fp8_per_channel(
+        if self._runtime_backend in (
+            _ROCM_AITER_PTPC,
+            _ROCM_HIPBLASLT_PTPC,
+        ):
+            output = _run_rocm_fp8_ptpc_executor(
+                getattr(self, "_rocm_executor", None),
+                self._runtime_backend,
                 input_2d,
                 layer.weight,
                 layer.weight_scale,
-                out_dtype,
+                layer.output_size,
             )
             if bias is not None:
                 output = output + bias.to(output.dtype)

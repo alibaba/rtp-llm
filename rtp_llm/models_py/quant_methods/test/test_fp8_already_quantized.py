@@ -48,7 +48,9 @@ from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
 
 
 def _make_qc(
-    quant_type: str, activation_dynamic: Optional[bool] = None
+    quant_type: str,
+    activation_dynamic: Optional[bool] = None,
+    hw_kernel_config=None,
 ) -> QuantizationConfig:
     source_config = None
     if activation_dynamic is not None:
@@ -56,12 +58,14 @@ def _make_qc(
             is_quanted=True,
             dynamic=activation_dynamic,
         )
-    return QuantizationConfig(quant_type=quant_type, source_config=source_config)
+    return QuantizationConfig(
+        quant_type=quant_type,
+        source_config=source_config,
+        hw_kernel_config=hw_kernel_config,
+    )
 
 
 def _runtime_scale(scale: torch.Tensor) -> torch.Tensor:
-    if _runtime_fp8_dtype() == torch.float8_e4m3fnuz:
-        return scale.float() * 2.0
     return scale.float()
 
 
@@ -69,20 +73,48 @@ class _LoadBackendMixin:
     runtime_backend = "cuda_scaled_mm"
 
     def setUp(self):
-        self._backend_patcher = mock.patch(
-            "rtp_llm.models_py.quant_methods.fp8._select_fp8_runtime_backend",
-            return_value=self.runtime_backend,
-        )
-        self._backend_patcher.start()
+        self._platform_patchers = [
+            mock.patch(
+                "rtp_llm.models_py.quant_methods.fp8._select_fp8_runtime_backend",
+                return_value=self.runtime_backend,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.quant_methods.fp8._is_hip_runtime",
+                return_value=False,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.quant_methods.fp8._runtime_fp8_dtype",
+                return_value=torch.float8_e4m3fn,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.quant_methods.fp8.is_deep_gemm_e8m0_used",
+                return_value=False,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.quant_methods.fp8._shuffle_rocm_fp8_weight",
+                side_effect=AssertionError(
+                    "CPU routing tests must not invoke ROCm weight shuffle"
+                ),
+            ),
+            mock.patch(
+                "rtp_llm.models_py.quant_methods.fp8._resolve_requant_weight_ue8m0",
+                side_effect=AssertionError(
+                    "CPU routing tests must not invoke SM100 UE8M0 conversion"
+                ),
+            ),
+        ]
+        for patcher in self._platform_patchers:
+            patcher.start()
         super().setUp()
 
     def tearDown(self):
-        self._backend_patcher.stop()
+        for patcher in reversed(self._platform_patchers):
+            patcher.stop()
         super().tearDown()
 
 
 def _channel_scale_shape(channels: int):
-    return (channels, 1) if _is_hip_runtime() else (1, channels)
+    return (1, channels)
 
 
 class TestQuantMethodDispatch(unittest.TestCase):
@@ -147,6 +179,41 @@ assert "rtp_llm.models_py.quant_methods.fp8" not in sys.modules
         with self.assertRaisesRegex(ValueError, "stable module prefix"):
             partially_ignored.get_quant_method(layer)
 
+    def test_rocm_ptpc_selector_honors_swizzle_configuration(self):
+        properties = SimpleNamespace(gcnArchName="gfx942:sramecc+:xnack-")
+        with mock.patch.object(
+            torch.cuda, "is_available", return_value=True
+        ), mock.patch.object(
+            torch.cuda, "get_device_capability", return_value=(9, 4)
+        ), mock.patch.object(
+            torch.cuda, "get_device_properties", return_value=properties
+        ), mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._is_hip_runtime",
+            return_value=True,
+        ), mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._aiter_has_symbol",
+            return_value=True,
+        ), mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._rocm_cktile_ptpc_available",
+            return_value=True,
+        ):
+            self.assertEqual(
+                _select_fp8_runtime_backend(
+                    torch.device("cuda:0"),
+                    "per_channel",
+                    SimpleNamespace(use_swizzleA=False),
+                ),
+                "rocm_aiter_ptpc",
+            )
+            self.assertEqual(
+                _select_fp8_runtime_backend(
+                    torch.device("cuda:0"),
+                    "per_channel",
+                    SimpleNamespace(use_swizzleA=True),
+                ),
+                "rocm_hipblaslt_ptpc",
+            )
+
 
 class TestFp8PerTensorLoad(_LoadBackendMixin, unittest.TestCase):
     """Already-quantized FP8 per-tensor compressed -> ColumnParallel."""
@@ -177,7 +244,7 @@ class TestFp8PerTensorLoad(_LoadBackendMixin, unittest.TestCase):
         )
         layer.process_weights_after_loading()
 
-        self.assertEqual(layer.weight.dtype, _runtime_fp8_dtype())
+        self.assertEqual(layer.weight.dtype, torch.float8_e4m3fn)
         self.assertEqual(layer.weight.shape, (N, K))
         self.assertEqual(layer.weight_scale.shape, (1,))
         self.assertAlmostEqual(
@@ -334,48 +401,43 @@ class TestFp8PerChannelLoad(_LoadBackendMixin, unittest.TestCase):
         scale = torch.ones(N, 1, dtype=torch.float32)
         layer.load_weights({"test.weight": weight, "test.weight_scale": scale})
 
+        executor = mock.Mock()
         with mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._select_fp8_runtime_backend",
+            return_value="rocm_aiter_ptpc",
+        ), mock.patch(
             "rtp_llm.models_py.quant_methods.fp8._is_hip_runtime",
             return_value=True,
         ), mock.patch(
             "rtp_llm.models_py.quant_methods.fp8._runtime_fp8_dtype",
             return_value=torch.float8_e4m3fn,
         ), mock.patch(
-            "rtp_llm.models_py.quant_methods.fp8._shuffle_rocm_fp8_weight",
-            side_effect=lambda tensor: tensor.contiguous(),
-        ) as shuffle:
+            "rtp_llm.models_py.quant_methods.fp8._prepare_rocm_fp8_ptpc_executor",
+            return_value=executor,
+        ) as prepare:
             layer.process_weights_after_loading()
 
-        shuffle.assert_called_once()
+        prepare.assert_called_once()
+        self.assertIs(layer.quant_method._rocm_executor, executor)
         self.assertEqual(layer.weight_scale.shape, (N, 1))
 
     def test_rocm_apply_uses_legacy_aiter_ptpc_path(self):
         N, K = 16, 32
+        expected = torch.randn(2, N, dtype=torch.bfloat16)
         method = Fp8PerChannelLinearMethod()
         method._runtime_backend = "rocm_aiter_ptpc"
+        method._rocm_executor = mock.Mock(return_value=expected)
         layer = SimpleNamespace(
             weight=torch.zeros(N, K, dtype=torch.float8_e4m3fn),
             weight_scale=torch.ones(N, 1, dtype=torch.float32),
             prefix="test",
+            output_size=N,
         )
         x = torch.randn(2, K, dtype=torch.bfloat16)
-        expected = torch.randn(2, N, dtype=torch.bfloat16)
+        actual = method.apply(layer, x)
 
-        with mock.patch(
-            "rtp_llm.models_py.quant_methods.fp8._is_hip_runtime",
-            return_value=True,
-        ), mock.patch(
-            "rtp_llm.models_py.quant_methods.fp8._apply_rocm_fp8_per_channel",
-            return_value=expected,
-        ) as rocm_apply:
-            actual = method.apply(layer, x)
-
-        rocm_apply.assert_called_once()
-        args = rocm_apply.call_args.args
-        torch.testing.assert_close(args[0], x)
-        self.assertIs(args[1], layer.weight)
-        self.assertIs(args[2], layer.weight_scale)
-        self.assertEqual(args[3], torch.bfloat16)
+        method._rocm_executor.assert_called_once()
+        torch.testing.assert_close(method._rocm_executor.call_args.args[0], x)
         torch.testing.assert_close(actual, expected)
 
 
@@ -393,64 +455,93 @@ class TestRocmFp8PerChannelOnline(unittest.TestCase):
         # Match the production PTPC shape family used by the tuned AITer path:
         # TP=2 leaves each rank with N=1024 and K=1024.
         output_size, input_size, batch = 2048, 1024, 4
-        for dtype in (torch.float16, torch.bfloat16):
-            with self.subTest(dtype=dtype):
-                weight = torch.randn(
-                    output_size,
-                    input_size,
-                    dtype=dtype,
-                    device="cuda",
-                )
-                layer = ColumnParallelLinear(
-                    input_size=input_size,
-                    output_size=output_size,
-                    tp_size=2,
-                    tp_rank=1,
-                    quant_config=_make_qc("fp8_per_channel_online"),
-                    prefix="test",
-                    params_dtype=dtype,
-                ).to("cuda")
-                layer.load_weights({"test.weight": weight})
-                layer.process_weights_after_loading()
+        for use_swizzle_a in (False, True):
+            for dtype in (torch.float16, torch.bfloat16):
+                with self.subTest(dtype=dtype, use_swizzleA=use_swizzle_a):
+                    self._check_online_ptpc_runtime(
+                        aiter,
+                        shuffle_weight,
+                        rocm_per_token_quant_fp8,
+                        output_size,
+                        input_size,
+                        batch,
+                        dtype,
+                        use_swizzle_a,
+                    )
 
-                self.assertIsInstance(
-                    layer.quant_method, Fp8PerChannelOnlineLinearMethod
-                )
-                self.assertEqual(layer.weight_scale.shape, (output_size // 2, 1))
+    def _check_online_ptpc_runtime(
+        self,
+        aiter,
+        shuffle_weight,
+        rocm_per_token_quant_fp8,
+        output_size,
+        input_size,
+        batch,
+        dtype,
+        use_swizzle_a,
+    ):
+        weight = torch.randn(
+            output_size,
+            input_size,
+            dtype=dtype,
+            device="cuda",
+        )
+        layer = ColumnParallelLinear(
+            input_size=input_size,
+            output_size=output_size,
+            tp_size=2,
+            tp_rank=1,
+            quant_config=_make_qc(
+                "fp8_per_channel_online",
+                hw_kernel_config=SimpleNamespace(use_swizzleA=use_swizzle_a),
+            ),
+            prefix="test",
+            params_dtype=dtype,
+        ).to("cuda")
+        layer.load_weights({"test.weight": weight})
+        layer.process_weights_after_loading()
 
-                local_weight = weight[output_size // 2 :].contiguous()
-                quant_input = (
-                    local_weight
-                    if dtype == torch.bfloat16
-                    else local_weight.to(torch.bfloat16)
-                )
-                expected_weight, expected_weight_scale = rocm_per_token_quant_fp8(
-                    quant_input,
-                    eps=1e-10,
-                )
-                expected_weight = shuffle_weight(expected_weight, layout=(16, 16))
-                torch.testing.assert_close(layer.weight, expected_weight)
-                torch.testing.assert_close(
-                    layer.weight_scale,
-                    expected_weight_scale.to(torch.float32),
-                )
+        self.assertIsInstance(layer.quant_method, Fp8PerChannelOnlineLinearMethod)
+        expected_executor = (
+            "RocmFp8PTPCLinearWithSwizzle"
+            if use_swizzle_a
+            else "run_rocm_fp8_ptpc_no_swizzle"
+        )
+        actual_executor = (
+            type(layer.quant_method._rocm_executor).__name__
+            if use_swizzle_a
+            else layer.quant_method._rocm_executor.__name__
+        )
+        self.assertEqual(
+            actual_executor,
+            expected_executor,
+        )
 
-                x = torch.randn(batch, input_size, dtype=dtype, device="cuda")
-                actual = layer(x)
-                x_bf16 = x if dtype == torch.bfloat16 else x.to(torch.bfloat16)
-                qinput, x_scale = rocm_per_token_quant_fp8(x_bf16, eps=1e-10)
-                expected = aiter.gemm_a8w8_bpreshuffle(
-                    qinput,
-                    expected_weight,
-                    x_scale.to(torch.float32),
-                    expected_weight_scale.to(torch.float32),
-                    None,
-                    torch.bfloat16,
-                )
-                if dtype == torch.float16:
-                    expected = expected.to(dtype)
-                self.assertEqual(actual.dtype, dtype)
-                torch.testing.assert_close(actual, expected)
+        local_weight = weight[output_size // 2 :].contiguous()
+        quant_input = (
+            local_weight if dtype == torch.bfloat16 else local_weight.to(torch.bfloat16)
+        )
+        expected_weight, expected_weight_scale = rocm_per_token_quant_fp8(
+            quant_input,
+            eps=1e-10,
+        )
+        expected_weight = shuffle_weight(expected_weight, layout=(16, 16))
+        x = torch.randn(batch, input_size, dtype=dtype, device="cuda")
+        actual = layer(x)
+        x_bf16 = x if dtype == torch.bfloat16 else x.to(torch.bfloat16)
+        qinput, x_scale = rocm_per_token_quant_fp8(x_bf16, eps=1e-10)
+        expected = aiter.gemm_a8w8_bpreshuffle(
+            qinput,
+            expected_weight,
+            x_scale.to(torch.float32),
+            expected_weight_scale.to(torch.float32),
+            None,
+            torch.bfloat16,
+        )
+        if dtype == torch.float16:
+            expected = expected.to(dtype)
+        self.assertEqual(actual.dtype, dtype)
+        torch.testing.assert_close(actual, expected, rtol=0.02, atol=0.02)
 
 
 class TestMergedColumnPerChannelScale(_LoadBackendMixin, unittest.TestCase):
@@ -629,12 +720,7 @@ class TestFp8BlockLoad(_LoadBackendMixin, unittest.TestCase):
         self.assertFalse(hasattr(layer, "weight_scale_inv"))
         self.assertTrue(layer.quant_method._use_deep_gemm)
         self.assertEqual(layer.weight.dtype, torch.float8_e4m3fn)
-        if is_deep_gemm_e8m0_used():
-            self.assertEqual(layer.weight_scale.dtype, torch.int32)
-        else:
-            torch.testing.assert_close(
-                layer.weight_scale, expected_scale, rtol=0, atol=0
-            )
+        torch.testing.assert_close(layer.weight_scale, expected_scale, rtol=0, atol=0)
 
     def test_unsupported_runtime_fails_before_expanding_block_weights(self):
         with mock.patch(

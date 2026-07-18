@@ -425,6 +425,7 @@ class BaseModel(object):
             quant_config=QuantizationConfig(
                 self._new_loader_quant_type(),
                 source_config=getattr(self.model_config, "quant_config", None),
+                hw_kernel_config=self.hw_kernel_config,
             ),
             parallelism_config=self.parallelism_config,
             fmha_config=self.fmha_config,
