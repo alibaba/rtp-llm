@@ -1,28 +1,21 @@
 package org.flexlb;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.balance.scheduler.QueueManager;
-import org.flexlb.cases.QueueStressTest;
-import org.flexlb.cases.RequestCancelTest;
 import org.flexlb.config.ConfigService;
-import org.flexlb.service.RouteService;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.reactive.AutoConfigureWebTestClient;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.SpyBean;
 import org.springframework.test.context.ActiveProfiles;
-import org.springframework.test.web.reactive.server.WebTestClient;
 import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 import uk.org.webcompere.systemstubs.jupiter.SystemStub;
 import uk.org.webcompere.systemstubs.jupiter.SystemStubsExtension;
 
 /**
- * Integration test with reusable Spring context
+ * Integration test with reusable Spring context.
+ * Schedule/cancel tests moved to gRPC layer (FlexlbServiceImpl).
  */
 @Slf4j
 @ActiveProfiles("test")
@@ -38,14 +31,6 @@ public class ReuseSpringContextIntegrationTest {
 
     @SpyBean
     private ConfigService configService;
-    @SpyBean
-    private RouteService routeService;
-    @Autowired
-    private QueueManager queueManager;
-    @Autowired
-    private WebTestClient webTestClient;
-
-    //========================= Integration Test Class ======================//
 
     @BeforeAll
     public static void setUp() {
@@ -73,33 +58,5 @@ public class ReuseSpringContextIntegrationTest {
         );
         environmentVariables.set("HIPPO_ROLE", "TEST_HIPPO_ROLE");
         environmentVariables.set("OTEL_EXPORTER_OTLP_ENDPOINT", "http://search-uniagent-trace-na61.vip.tbsite.net:4317");
-    }
-
-    private WebTestClient createWebClient() {
-        return webTestClient.mutate()
-                .baseUrl("http://localhost:7001")
-                .build();
-    }
-
-    @Test
-    @DisplayName("Request cancellation test")
-    public void requestCancelTest() {
-        RequestCancelTest.init(environmentVariables, configService, routeService).run();
-    }
-
-    @Test
-    @DisplayName("Queue full rejection test")
-    public void queueFullRejectionTest() {
-        QueueStressTest.init(createWebClient(), environmentVariables, configService)
-                .resetQueue(queueManager, 10)
-                .testQueueFullRejection();
-    }
-
-    @Test
-    @DisplayName("Concurrent enqueue thread safety test")
-    public void concurrentEnqueueTest() {
-        QueueStressTest.init(createWebClient(), environmentVariables, configService)
-                .resetQueue(queueManager, 500)
-                .testConcurrentEnqueue();
     }
 }

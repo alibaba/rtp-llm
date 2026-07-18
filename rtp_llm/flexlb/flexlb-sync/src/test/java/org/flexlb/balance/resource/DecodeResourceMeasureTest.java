@@ -1,5 +1,6 @@
 package org.flexlb.balance.resource;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.TaskInfo;
@@ -37,45 +38,40 @@ class DecodeResourceMeasureTest {
     void concurrency_limit_disabled_should_not_affect_decode_availability() {
         config.setDecodeConcurrencyLimit(0);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
-        WorkerStatus worker = createAliveDecodeWorker();
-        worker.setWaitingTaskList(taskMap(1L, 2L));
-        worker.setRunningTaskList(taskMap(3L, 4L));
-        worker.getLocalTaskMap().put(5L, taskInfo(5L));
+        DecodeEndpoint endpoint = createAliveDecodeEndpoint();
+        endpoint.getStatus().setRunningTaskList(taskMap(1L, 2L, 3L, 4L));
 
-        assertTrue(measure.isResourceAvailable(worker));
-        assertEquals(0.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
+        assertTrue(measure.isResourceAvailable(endpoint));
+        assertEquals(0.0, measure.calculateAverageWaterLevel(Map.of("worker", endpoint.getStatus())));
     }
 
     @Test
     void worker_should_be_unavailable_when_decode_concurrency_limit_reached() {
         config.setDecodeConcurrencyLimit(2);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
-        WorkerStatus worker = createAliveDecodeWorker();
-        worker.setRunningTaskList(taskMap(1L));
-        worker.getLocalTaskMap().put(2L, taskInfo(2L));
-
-        assertFalse(measure.isResourceAvailable(worker));
+        DecodeEndpoint endpoint = createAliveDecodeEndpoint();
+        endpoint.reserve(1L, 0);
+        endpoint.reserve(2L, 0);
+        // getTotalLoad() = confirmedRunningCount(0) + inflightRequests.size(2) = 2, limit = 2, 2 >= 2 → unavailable
+        assertFalse(measure.isResourceAvailable(endpoint));
     }
 
     @Test
-    void concurrency_count_should_deduplicate_reported_and_local_request_ids() {
-        config.setDecodeConcurrencyLimit(2);
+    void worker_should_be_available_when_inflight_below_concurrency_limit() {
+        config.setDecodeConcurrencyLimit(3);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
-        WorkerStatus worker = createAliveDecodeWorker();
-        worker.setRunningTaskList(taskMap(1L));
-        worker.getLocalTaskMap().put(1L, taskInfo(1L));
-
-        assertTrue(measure.isResourceAvailable(worker));
+        DecodeEndpoint endpoint = createAliveDecodeEndpoint();
+        endpoint.reserve(1L, 0);
+        // getTotalLoad() = confirmedRunningCount(0) + inflightRequests.size(1) = 1, limit = 3, 1 < 3 → available
+        assertTrue(measure.isResourceAvailable(endpoint));
     }
 
     @Test
     void concurrency_water_level_should_contribute_to_serviceability() {
         config.setDecodeConcurrencyLimit(4);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
-        WorkerStatus worker = createAliveDecodeWorker();
-        worker.setWaitingTaskList(taskMap(1L));
-        worker.setRunningTaskList(taskMap(2L));
-        worker.getLocalTaskMap().put(3L, taskInfo(3L));
+        WorkerStatus worker = createAliveWorkerStatus();
+        worker.setRunningTaskList(taskMap(1L, 2L, 3L));
 
         assertEquals(75.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
     }
@@ -84,18 +80,23 @@ class DecodeResourceMeasureTest {
     void water_level_should_use_higher_value_between_kv_cache_and_concurrency() {
         config.setDecodeConcurrencyLimit(4);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
-        WorkerStatus worker = createAliveDecodeWorker();
-        worker.getUsedKvCacheTokens().set(70);
+        WorkerStatus worker = createAliveWorkerStatus();
+        worker.getTotalKvCacheTokens().set(100);
         worker.getAvailableKvCacheTokens().set(30);
         worker.setRunningTaskList(taskMap(1L));
 
         assertEquals(75.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
     }
 
-    private WorkerStatus createAliveDecodeWorker() {
+    private DecodeEndpoint createAliveDecodeEndpoint() {
+        WorkerStatus status = createAliveWorkerStatus();
+        return new DecodeEndpoint(status);
+    }
+
+    private WorkerStatus createAliveWorkerStatus() {
         WorkerStatus worker = new WorkerStatus();
         worker.setAlive(true);
-        worker.getUsedKvCacheTokens().set(0);
+        worker.getTotalKvCacheTokens().set(100);
         worker.getAvailableKvCacheTokens().set(100);
         return worker;
     }
