@@ -35,6 +35,9 @@ class RouteServiceTest {
     private QueueManager queueManager;
 
     @Mock
+    private org.flexlb.balance.scheduler.FlexlbBatchScheduler flexlbBatchScheduler;
+
+    @Mock
     private RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
 
     @Mock
@@ -45,7 +48,8 @@ class RouteServiceTest {
     @BeforeEach
     void setUp() {
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
-        routeService = new RouteService(configService, defaultRouter, queueManager, recentCacheKeyTraceReporter);
+        routeService = new RouteService(configService, defaultRouter, queueManager,
+                flexlbBatchScheduler, recentCacheKeyTraceReporter);
     }
 
     @Test
@@ -54,7 +58,7 @@ class RouteServiceTest {
         when(flexlbConfig.isEnableQueueing()).thenReturn(true);
         when(queueManager.tryRouteAsync(balanceContext)).thenReturn(Mono.just(response));
 
-        Response actual = routeService.route(balanceContext).block();
+        Response actual = routeService.route(balanceContext).join();
 
         assertSame(response, actual);
         verify(balanceContext).setConfig(flexlbConfig);
@@ -70,7 +74,7 @@ class RouteServiceTest {
         when(flexlbConfig.isEnableQueueing()).thenReturn(false);
         when(defaultRouter.route(balanceContext)).thenReturn(response);
 
-        Response actual = routeService.route(balanceContext).block();
+        Response actual = routeService.route(balanceContext).join();
 
         assertSame(response, actual);
         verify(balanceContext).setConfig(flexlbConfig);
@@ -87,7 +91,7 @@ class RouteServiceTest {
         when(flexlbConfig.isEnableQueueing()).thenReturn(false);
         when(defaultRouter.route(balanceContext)).thenReturn(response);
 
-        Response actual = routeService.route(balanceContext).block();
+        Response actual = routeService.route(balanceContext).join();
 
         assertSame(response, actual);
         verify(balanceContext).setConfig(flexlbConfig);
