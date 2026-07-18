@@ -2,13 +2,16 @@ package org.flexlb.sync.status;
 
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Component;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.stream.Collectors;
+import java.util.function.BiConsumer;
 
 @Slf4j
 @Data
@@ -18,30 +21,53 @@ public class EngineWorkerStatus {
     public static final ModelWorkerStatus MODEL_ROLE_WORKER_STATUS = new ModelWorkerStatus();
 
     public final ModelMetaConfig modelMetaConfig;
+    private final EndpointRegistry endpointRegistry;
 
-    public EngineWorkerStatus(ModelMetaConfig modelMetaConfig) {
+    public EngineWorkerStatus(ModelMetaConfig modelMetaConfig, EndpointRegistry endpointRegistry) {
         this.modelMetaConfig = modelMetaConfig;
+        this.endpointRegistry = endpointRegistry;
     }
 
-    public Map<String/*ipPort*/, WorkerStatus> selectModelWorkerStatus(RoleType roleType, String group) {
+    /**
+     * Select workers for a given role and group, returning
+     * {@link WorkerEndpoint} instances so callers can access both
+     * engine status and endpoint-local methods (reserve / release / …).
+     */
+    public Map<String/*ipPort*/, WorkerEndpoint> selectModelWorkerStatus(RoleType roleType, String group) {
 
-        Map<String/*ip:port*/, WorkerStatus> roleStatusMap = MODEL_ROLE_WORKER_STATUS.getRoleStatusMap(roleType);
+        Map<String, WorkerEndpoint> result = new LinkedHashMap<>();
+        forEachModelWorkerEndpoint(roleType, group, result::put);
+        return result;
+    }
 
-        if (roleStatusMap == null) {
-            return Map.of();
+    /**
+     * Visit registered endpoints without materializing a temporary map.
+     *
+     * @return number of endpoints passed to {@code action}
+     */
+    public int forEachModelWorkerEndpoint(RoleType roleType, String group,
+                                          BiConsumer<String, WorkerEndpoint> action) {
+        int visited = 0;
+        for (Map.Entry<String, ? extends WorkerEndpoint> entry
+                : endpointRegistry.getEndpoints(roleType).entrySet()) {
+            WorkerEndpoint endpoint = entry.getValue();
+            WorkerStatus ws = endpoint.getStatus();
+            if (ws == null) {
+                continue;
+            }
+            if (group != null && !group.equals(ws.getGroup())) {
+                continue;
+            }
+            action.accept(entry.getKey(), endpoint);
+            visited++;
         }
+        return visited;
+    }
 
-        if (group == null) {
-            return roleStatusMap;
-        }
-
-        return roleStatusMap.entrySet()
-                .stream()
-                .filter(entry -> {
-                    WorkerStatus workerStatus = entry.getValue();
-                    return workerStatus != null && workerStatus.getGroup() != null && workerStatus.getGroup().equals(group);
-                })
-                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+    public int getModelWorkerCapacity(RoleType roleType) {
+        Map<String, WorkerStatus> roleStatusMap = MODEL_ROLE_WORKER_STATUS.getRoleStatusMap(roleType);
+        int statusCount = roleStatusMap == null ? 0 : roleStatusMap.size();
+        return Math.max(statusCount, endpointRegistry.getEndpointCount(roleType));
     }
 
 }

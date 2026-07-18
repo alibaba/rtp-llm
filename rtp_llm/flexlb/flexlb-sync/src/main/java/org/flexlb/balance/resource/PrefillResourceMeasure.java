@@ -1,12 +1,16 @@
 package org.flexlb.balance.resource;
 
 import org.apache.commons.collections4.MapUtils;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.enums.TaskPhase;
 import org.springframework.stereotype.Component;
+
+import org.flexlb.util.Logger;
 
 import java.util.Map;
 
@@ -31,13 +35,24 @@ public class PrefillResourceMeasure implements ResourceMeasure {
     }
 
     @Override
-    public boolean isResourceAvailable(WorkerStatus workerStatus) {
-        if (workerStatus == null || !workerStatus.isAlive()) {
+    public boolean isResourceAvailable(WorkerEndpoint endpoint) {
+        if (endpoint instanceof PrefillEndpoint) {
+            return isResourceAvailable((PrefillEndpoint) endpoint);
+        }
+        return ResourceMeasure.super.isResourceAvailable(endpoint);
+    }
+
+    public boolean isResourceAvailable(PrefillEndpoint endpoint) {
+        if (endpoint == null || !endpoint.getStatus().isAlive()) {
             return false;
         }
-
-        long queueSize = effectiveQueueSize(workerStatus);
-        return workerStatus.updateResourceAvailabilityWithHysteresis(queueSize, queueSizeThreshold, hysteresisBiasPercent);
+        long queueSize = endpoint.realPendingCount();
+        boolean available = endpoint.getStatus().updateResourceAvailabilityWithHysteresis(queueSize, queueSizeThreshold, hysteresisBiasPercent);
+        if (!available) {
+            Logger.warn("Prefill worker {} resource unavailable: queueSize={}, threshold={}, alive={}",
+                    endpoint.getIp(), queueSize, queueSizeThreshold, endpoint.getStatus().isAlive());
+        }
+        return available;
     }
 
     @Override
@@ -68,7 +83,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return 0.0;
         }
 
-        long queueSize = effectiveQueueSize(workerStatus);
+        long queueSize = countWaitingTasks(workerStatus);
 
         if (queueSize <= 0) {
             return 0.0;
@@ -79,8 +94,12 @@ public class PrefillResourceMeasure implements ResourceMeasure {
         }
     }
 
-    private long effectiveQueueSize(WorkerStatus workerStatus) {
-        long waitingTaskCount = workerStatus.getWaitingTaskList() == null ? 0 : workerStatus.getWaitingTaskList().size();
-        return Math.max(waitingTaskCount, workerStatus.getLocalPendingTaskCount());
+    private static long countWaitingTasks(WorkerStatus workerStatus) {
+        if (MapUtils.isEmpty(workerStatus.getRunningTaskList())) {
+            return 0;
+        }
+        return workerStatus.getRunningTaskList().values().stream()
+                .filter(t -> t.getPhase() != TaskPhase.RUNNING).count();
     }
+
 }

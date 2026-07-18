@@ -20,6 +20,9 @@ public class ServerStatus {
     @JsonProperty("grpc_port")
     private int grpcPort;
 
+    @JsonProperty("dp_rank")
+    private long dpRank;
+
     @JsonProperty("prefill_time")
     private long prefillTime;
 

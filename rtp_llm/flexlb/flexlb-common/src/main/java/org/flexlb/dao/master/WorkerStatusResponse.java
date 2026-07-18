@@ -1,10 +1,9 @@
-package org.flexlb.domain.worker;
+package org.flexlb.dao.master;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
-import org.flexlb.dao.master.CacheStatus;
-import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.dao.route.RoleType;
 
 import java.util.Map;
 
@@ -18,7 +17,7 @@ import java.util.Map;
 public class WorkerStatusResponse {
 
     @JsonProperty("role")
-    private String role;
+    private RoleType role;
 
     @JsonProperty("available_concurrency")
     private long availableConcurrency;
@@ -31,9 +30,6 @@ public class WorkerStatusResponse {
 
     @JsonProperty("running_task_info")
     private Map<String, TaskInfo> runningTaskInfo;
-
-    @JsonProperty("waiting_task_info")
-    private Map<String, TaskInfo> waitingTaskInfo;
 
     @JsonProperty("finished_task_info")
     private Map<String, TaskInfo> finishedTaskInfo;
@@ -59,8 +55,17 @@ public class WorkerStatusResponse {
     @JsonProperty("tpSize")
     private long tpSize;
 
+    @JsonProperty("dpRank")
+    private long dpRank;
+
     @JsonProperty("alive")
     private boolean alive;
+
+    @JsonProperty("available_kv_cache")
+    private long availableKvCacheTokens;
+
+    @JsonProperty("total_kv_cache")
+    private long totalKvCacheTokens;
 
     @JsonProperty("version")
     private long version;

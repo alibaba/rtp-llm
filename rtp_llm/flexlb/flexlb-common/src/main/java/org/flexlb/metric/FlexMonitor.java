@@ -8,7 +8,7 @@ import org.flexlb.enums.FlexPriorityType;
  *
  * @author saichen.sm
  */
-public interface FlexMonitor {
+public interface FlexMonitor extends AutoCloseable {
 
     /**
      * Register monitoring metric
@@ -52,4 +52,34 @@ public interface FlexMonitor {
      * @param value       Metric value
      */
     void report(String metricName, FlexMetricTags metricsTags, double value);
+
+    /**
+     * Prepare a tagged metric before it enters a hot reporting path.
+     * Implementations that do not require registration may keep the default no-op.
+     *
+     * @param metricName Metric name
+     * @param metricsTags Tags object
+     */
+    default void prepare(String metricName, FlexMetricTags metricsTags) {
+        // No-op by default.
+    }
+
+    /**
+     * Acquire ownership of all metrics carrying the supplied endpoint identity tags.
+     * The last closed lease allows the implementation to retire those metrics after
+     * {@code retirementGraceMs}. Implementations without dynamic metric storage may
+     * keep the default no-op lease.
+     *
+     * @param endpointTags endpoint identity tags (role, engineIp, engineIpPort)
+     * @param retirementGraceMs time allowed for in-flight callbacks to finish
+     * @return an idempotent ownership lease
+     */
+    default MetricLease acquireEndpointScope(FlexMetricTags endpointTags, long retirementGraceMs) {
+        return MetricLease.noop();
+    }
+
+    @Override
+    default void close() {
+        // No-op by default.
+    }
 }

@@ -1,8 +1,10 @@
 package org.flexlb.service;
 
 import org.flexlb.cache.core.RecentCacheKeyWindow;
+import org.flexlb.cache.core.ShardedRecentCacheKeyWindow;
 import org.flexlb.cache.monitor.CacheHitTheoryStats;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -10,8 +12,11 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -34,15 +39,18 @@ public class RecentCacheKeyTraceReporter {
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSXXX").withZone(ZoneId.systemDefault());
 
     @Autowired(required = false)
-    private RecentCacheKeyWindow recentCacheKeyWindow;
+    private ShardedRecentCacheKeyWindow shardedRecentCacheKeyWindow;
 
     @Autowired(required = false)
     private CacheMetricsReporter cacheMetricsReporter;
 
+    @Autowired(required = false)
+    private ConfigService configService;
+
     private final CacheHitTheoryStats theoryStats = new CacheHitTheoryStats();
 
-    private static BufferedWriter theoryLogWriter;
-    private static boolean theoryLogOpenFailed;
+    private static volatile BufferedWriter theoryLogWriter;
+    private static volatile boolean theoryLogOpenFailed;
 
     private static final long FNV_OFFSET_BASIS = 0xcbf29ce484222325L;
     private static final long FNV_PRIME = 0x100000001b3L;
@@ -57,12 +65,13 @@ public class RecentCacheKeyTraceReporter {
         }
 
         Request request = balanceContext.getRequest();
-        if (request == null || recentCacheKeyWindow == null) {
+        if (request == null || shardedRecentCacheKeyWindow == null) {
             return;
         }
 
         List<Long> cacheKeys = request.getBlockCacheKeys();
-        RecentCacheKeyWindow.Snapshot snapshot = recentCacheKeyWindow.record(cacheKeys);
+        RecentCacheKeyWindow.Snapshot snapshot =
+                shardedRecentCacheKeyWindow.record(balanceContext.getRequestId(), cacheKeys);
         long inputTokens = Math.max(0L, request.getSeqLen());
         long hitTokens = theoryHitTokens(
                 snapshot.getRequestHitOccurrences(),
@@ -93,6 +102,17 @@ public class RecentCacheKeyTraceReporter {
             return inputTokens;
         }
         return Math.min(inputTokens, hitTokens);
+    }
+
+    @PostConstruct
+    public void initializeTheoryLog() {
+        FlexlbConfig config = configService == null ? null : configService.loadBalanceConfig();
+        if (config == null || !config.isCacheHitTheoryLogEnabled()) {
+            return;
+        }
+        synchronized (THEORY_LOG_LOCK) {
+            getTheoryLogWriterLocked();
+        }
     }
 
     private void logTraceIfEnabled(BalanceContext balanceContext,
@@ -170,6 +190,9 @@ public class RecentCacheKeyTraceReporter {
     }
 
     private static void writeTheoryLogLine(String line) {
+        if (theoryLogOpenFailed) {
+            return;
+        }
         synchronized (THEORY_LOG_LOCK) {
             BufferedWriter writer = getTheoryLogWriterLocked();
             if (writer == null) {
@@ -178,7 +201,6 @@ public class RecentCacheKeyTraceReporter {
             try {
                 writer.write(line);
                 writer.newLine();
-                writer.flush();
             } catch (IOException e) {
                 Logger.warn("Failed to write master theory hit log: {}", e.getMessage());
             }
@@ -207,6 +229,40 @@ public class RecentCacheKeyTraceReporter {
             Logger.warn("Failed to open master theory hit log path {}: {}", logPath, e.getMessage());
         }
         return theoryLogWriter;
+    }
+
+    @Scheduled(fixedDelay = 1000L)
+    public void flushTheoryLog() {
+        if (theoryLogWriter == null) {
+            return;
+        }
+        synchronized (THEORY_LOG_LOCK) {
+            BufferedWriter writer = theoryLogWriter;
+            if (writer == null) {
+                return;
+            }
+            try {
+                writer.flush();
+            } catch (IOException e) {
+                Logger.warn("Failed to flush master theory hit log: {}", e.getMessage());
+            }
+        }
+    }
+
+    @PreDestroy
+    public void closeTheoryLog() {
+        synchronized (THEORY_LOG_LOCK) {
+            if (theoryLogWriter == null) {
+                return;
+            }
+            try {
+                theoryLogWriter.close();
+            } catch (IOException e) {
+                Logger.warn("Failed to close master theory hit log: {}", e.getMessage());
+            } finally {
+                theoryLogWriter = null;
+            }
+        }
     }
 
     private static String cacheKeyDigest(List<Long> cacheKeys) {
