@@ -77,6 +77,7 @@ class HttpKvcmReporter:
     def _register_instance_request(self, block_size: int) -> dict[str, object]:
         config = self._engine_config
         dtype = config.get("dtype")
+        model_name = config.get("model_name")
         return {
             "trace_id": self._trace_id("register_instance"),
             "instance_group": self._config.instance_group,
@@ -86,13 +87,27 @@ class HttpKvcmReporter:
                 {"name": self._spec_name(block_size), "size": block_size}
             ],
             "model_deployment": {
-                "model_name": str(config.get("model_name", "default")),
-                "dtype": dtype if isinstance(dtype, str) else "",
-                "use_mla": bool(config.get("use_mla", False)),
-                "tp_size": _positive_int(config.get("tensor_parallel_size")),
-                "dp_size": _positive_int(config.get("data_parallel_size")),
+                "model_name": (
+                    model_name
+                    if isinstance(model_name, str) and model_name
+                    else self._config.model_name
+                ),
+                "dtype": (
+                    dtype
+                    if isinstance(dtype, str) and dtype
+                    else self._config.model_dtype
+                ),
+                "use_mla": bool(config.get("use_mla", self._config.use_mla)),
+                "tp_size": _positive_int(
+                    config.get("tensor_parallel_size"), self._config.tp_size
+                ),
+                "dp_size": _positive_int(
+                    config.get("data_parallel_size"), self._config.dp_size
+                ),
                 "lora_name": "",
-                "pp_size": _positive_int(config.get("pipeline_parallel_size")),
+                "pp_size": _positive_int(
+                    config.get("pipeline_parallel_size"), self._config.pp_size
+                ),
                 "extra": "",
                 "user_data": "",
             },

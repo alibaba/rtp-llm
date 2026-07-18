@@ -33,7 +33,10 @@ available, then run:
 python -m rtp_llm.kv_cache_subscriber \
   --rtp-endpoints 127.0.0.1:8089 \
   --kvcm-url http://127.0.0.1:6382 \
-  --instance-id my-deployment
+  --instance-id my-deployment \
+  --model-name Qwen2-0.5B \
+  --model-dtype bfloat16 \
+  --tp-size 2
 ```
 
 The Bazel entry point is:
@@ -89,6 +92,9 @@ event-reporting enum value.
 | `--kvcm-report-batch-size` | `1000` | Maximum events per `ReportEvent` request |
 | `--host-ip-port` | local IP plus `8088` | Stable KVCM location identity |
 | `--medium` | `hbm` | KVCM location medium |
+| `--model-name` | checkpoint directory or `default` | KVCM model deployment name |
+| `--model-dtype` | `KVCM_MODEL_DTYPE`, `ACT_TYPE`, or `bfloat16` | KVCM model dtype (`bf16`/`fp16` aliases are normalized) |
+| `--tp-size`, `--dp-size`, `--pp-size` | matching RTP environment or `1` | KVCM model parallel shape |
 
 ## Tests
 
