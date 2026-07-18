@@ -269,7 +269,6 @@ public class QueueStressTest {
 
         WorkerStatus workerStatus = new WorkerStatus();
         workerStatus.setAlive(true);
-        workerStatus.setUsedKvCacheTokens(new AtomicLong(990L)); // High usage, simulating resource constraints
         workerStatus.setAvailableKvCacheTokens(new AtomicLong(10L)); // Very small resources, force queuing
 
         // Configure multiple Prefill Workers

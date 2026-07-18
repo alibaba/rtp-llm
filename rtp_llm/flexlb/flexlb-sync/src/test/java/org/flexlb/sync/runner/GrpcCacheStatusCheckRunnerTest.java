@@ -9,6 +9,7 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.LongAdder;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -44,12 +45,12 @@ class GrpcCacheStatusCheckRunnerTest {
                 .setTotalKvCache(2000)
                 .setBlockSize(128)
                 .build();
-        when(engineGrpcService.getCacheStatus(anyString(), anyInt(), any(WorkerStatus.class), anyLong(), anyLong(), eq(RoleType.PREFILL))).thenReturn(cacheStatusPB);
+        when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), any(WorkerStatus.class), anyLong(), anyLong(), eq(RoleType.PREFILL))).thenReturn(CompletableFuture.completedFuture(cacheStatusPB));
 
         // Act
         GrpcCacheStatusCheckRunner runner = new GrpcCacheStatusCheckRunner(
                 modelName, ipPort, site, RoleType.PREFILL, workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
-                20, new LongAdder(), 50L);
+                20, new LongAdder(), 50L, Runnable::run);
         runner.run();
 
         // Give some time for async execution
@@ -60,6 +61,6 @@ class GrpcCacheStatusCheckRunnerTest {
         }
 
         // Assert
-        verify(engineGrpcService).getCacheStatus(eq("127.0.0.1"), eq(8081), any(WorkerStatus.class), eq(-1L), eq(20L), eq(RoleType.PREFILL));
+        verify(engineGrpcService).getCacheStatusAsync(eq("127.0.0.1"), eq(8081), any(WorkerStatus.class), eq(-1L), eq(20L), eq(RoleType.PREFILL));
     }
 }
