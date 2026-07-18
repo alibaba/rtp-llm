@@ -518,6 +518,7 @@ py_library(
             ":embedding",
             "//rtp_llm/tools/convert:convert",
             ":aiter",
+            ":triton-kernels",
         ],
         "//conditions:default": [
             ":models",

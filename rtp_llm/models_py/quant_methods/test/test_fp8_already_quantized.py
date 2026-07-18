@@ -17,10 +17,12 @@ import subprocess
 import sys
 import unittest
 from types import SimpleNamespace
+from typing import Optional
 from unittest import mock
 
 import torch
 
+from rtp_llm.config.quant_config import Fp8PerTensorCompressedQuantConfig
 from rtp_llm.models_py.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -44,8 +46,16 @@ from rtp_llm.models_py.quant_methods.fp8 import (
 from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
 
 
-def _make_qc(quant_type: str) -> QuantizationConfig:
-    return QuantizationConfig(quant_type=quant_type)
+def _make_qc(
+    quant_type: str, activation_dynamic: Optional[bool] = None
+) -> QuantizationConfig:
+    source_config = None
+    if activation_dynamic is not None:
+        source_config = Fp8PerTensorCompressedQuantConfig(
+            is_quanted=True,
+            dynamic=activation_dynamic,
+        )
+    return QuantizationConfig(quant_type=quant_type, source_config=source_config)
 
 
 def _runtime_scale(scale: torch.Tensor) -> torch.Tensor:
@@ -156,6 +166,58 @@ class TestFp8PerTensorLoad(unittest.TestCase):
         self.assertAlmostEqual(
             layer.weight_scale.item(), _runtime_scale(scale).item(), places=4
         )
+
+    def test_static_input_scale_is_required_but_dynamic_scale_is_not(self):
+        weight = torch.ones(4, 4, dtype=torch.float8_e4m3fn)
+        weight_scale = torch.tensor([0.25], dtype=torch.float32)
+
+        for activation_dynamic in (True, False):
+            with self.subTest(activation_dynamic=activation_dynamic):
+                layer = ColumnParallelLinear(
+                    input_size=4,
+                    output_size=4,
+                    quant_config=_make_qc("fp8", activation_dynamic),
+                    prefix="test",
+                    params_dtype=torch.bfloat16,
+                )
+                layer.load_weights(
+                    {
+                        "test.weight": weight,
+                        "test.weight_scale": weight_scale,
+                    }
+                )
+                if activation_dynamic:
+                    layer.validate_weights_loaded()
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "input_scale"):
+                        layer.validate_weights_loaded()
+                    layer.load_weights(
+                        {"test.input_scale": torch.tensor([0.5], dtype=torch.float32)}
+                    )
+                    layer.validate_weights_loaded()
+
+    def test_static_input_scale_must_be_finite_and_positive(self):
+        for input_scale in (0.0, -0.5, float("nan"), float("inf")):
+            with self.subTest(input_scale=input_scale):
+                layer = ColumnParallelLinear(
+                    input_size=4,
+                    output_size=4,
+                    quant_config=_make_qc("fp8", activation_dynamic=False),
+                    prefix="test",
+                    params_dtype=torch.bfloat16,
+                )
+                layer.load_weights(
+                    {
+                        "test.weight": torch.ones(4, 4, dtype=torch.float8_e4m3fn),
+                        "test.weight_scale": torch.tensor([0.25], dtype=torch.float32),
+                        "test.input_scale": torch.tensor(
+                            [input_scale], dtype=torch.float32
+                        ),
+                    }
+                )
+                layer.validate_weights_loaded()
+                with self.assertRaisesRegex(ValueError, "finite and positive"):
+                    layer.process_weights_after_loading()
 
 
 class TestFp8PerChannelLoad(unittest.TestCase):
@@ -308,9 +370,7 @@ class TestRocmFp8PerChannelOnline(unittest.TestCase):
         import aiter
         from aiter.ops.shuffle import shuffle_weight
 
-        from rtp_llm.models_py.kernels.rocm.fp8_kernel import (
-            rocm_per_token_quant_fp8,
-        )
+        from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
 
         # Match the production PTPC shape family used by the tuned AITer path:
         # TP=2 leaves each rank with N=1024 and K=1024.
@@ -873,46 +933,50 @@ class TestFp8BlockForward(unittest.TestCase):
 class TestFp8AlreadyQuantizedForward(unittest.TestCase):
     """End-to-end: load already-quantized ckpt -> forward via _scaled_mm."""
 
-    def test_fp8_per_tensor_forward_matches_dequant_reference(self):
+    def test_fp8_per_tensor_static_and_dynamic_forward_match_reference(self):
         N, K, M = 32, 64, 8
         device = "cuda"
         weight_bf16 = torch.randn(N, K, dtype=torch.bfloat16, device=device)
         scale = (weight_bf16.abs().max() / 448.0).float()
         fp8_weight = (weight_bf16 / scale).to(torch.float8_e4m3fn)
-
-        qc = _make_qc("fp8")
-        layer = ColumnParallelLinear(
-            input_size=K,
-            output_size=N,
-            tp_size=1,
-            tp_rank=0,
-            quant_config=qc,
-            prefix="test",
-            params_dtype=torch.bfloat16,
-        ).to(device)
-        layer.load_weights(
-            {
-                "test.weight": fp8_weight.to(device),
-                "test.weight_scale": scale.reshape(1).to(device),
-                "test.input_scale": torch.tensor(
-                    [1.0], dtype=torch.float32, device=device
-                ),
-            }
-        )
-        layer.process_weights_after_loading()
-
         x = torch.randn(M, K, dtype=torch.bfloat16, device=device)
-        out = layer(x)
+        dynamic_scale = (x.abs().max() / 448.0).float().reshape(1)
+        static_scale = dynamic_scale * 2.0
 
-        # Reference both quantized operands. The production path dynamically
-        # quantizes activations as well as consuming the FP8 checkpoint weight.
-        qinput, x_scale = _resolve_per_tensor_quant()(x)
-        input_dequant = qinput.float() * x_scale.float()
-        weight_dequant = fp8_weight.float().to(device) * scale.float().to(device)
-        ref = torch.nn.functional.linear(input_dequant, weight_dequant).to(out.dtype)
+        for activation_dynamic in (True, False):
+            with self.subTest(activation_dynamic=activation_dynamic):
+                layer = ColumnParallelLinear(
+                    input_size=K,
+                    output_size=N,
+                    tp_size=1,
+                    tp_rank=0,
+                    quant_config=_make_qc("fp8", activation_dynamic),
+                    prefix="test",
+                    params_dtype=torch.bfloat16,
+                ).to(device)
+                checkpoint = {
+                    "test.weight": fp8_weight.to(device),
+                    "test.weight_scale": scale.reshape(1).to(device),
+                }
+                if not activation_dynamic:
+                    checkpoint["test.input_scale"] = static_scale
+                layer.load_weights(checkpoint)
+                layer.validate_weights_loaded()
+                layer.process_weights_after_loading()
 
-        # _scaled_mm and the BF16 reference differ only in accumulation.
-        torch.testing.assert_close(out, ref, rtol=0.05, atol=0.05)
+                out = layer(x)
+                expected_input_scale = None if activation_dynamic else static_scale
+                qinput, x_scale = _resolve_per_tensor_quant()(x, expected_input_scale)
+                if not activation_dynamic:
+                    torch.testing.assert_close(x_scale, static_scale)
+                input_dequant = qinput.float() * x_scale.float()
+                weight_dequant = layer.weight.float() * layer.weight_scale.float()
+                ref = torch.nn.functional.linear(input_dequant, weight_dequant).to(
+                    out.dtype
+                )
+
+                # _scaled_mm and the BF16 reference differ only in accumulation.
+                torch.testing.assert_close(out, ref, rtol=0.05, atol=0.05)
 
 
 if __name__ == "__main__":

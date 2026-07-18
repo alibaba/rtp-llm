@@ -323,16 +323,21 @@ class Fp8LinearMethod(QuantizeMethodBase):
       - weight_scale: fp32 scalar (per-tensor)
       - input_scale: fp32 scalar (optional; static activation scale)
 
-    Forward: torch._scaled_mm with online dynamic per-tensor activation quant.
-    The ckpt's static input_scale is intentionally unused — using runtime-
-    computed activation scale gives equivalent numerical accuracy without
-    needing to plumb static-vs-dynamic through the LinearMethod construction.
+    Forward: torch._scaled_mm with either the checkpoint's static activation
+    scale or a dynamically computed per-tensor scale, as declared by the
+    source quantization config.
     """
 
     # Class-level flag: the diagnostic log fires at most once across ALL
     # instances in a process. See Fp8OnlineLinearMethod for the assumption.
     _apply_logged: bool = False
-    required_checkpoint_parameters = ("weight", "weight_scale")
+
+    @property
+    def required_checkpoint_parameters(self) -> Tuple[str, ...]:
+        required = ["weight", "weight_scale"]
+        if not self.quant_config.activation_dynamic:
+            required.append("input_scale")
+        return tuple(required)
 
     def create_weights(
         self,
@@ -370,7 +375,10 @@ class Fp8LinearMethod(QuantizeMethodBase):
         out_features = layer.weight.shape[0]
         output_shape = list(x.shape[:-1]) + [out_features]
 
-        qinput, x_scale = _resolve_per_tensor_quant()(input_2d)
+        input_scale = (
+            None if self.quant_config.activation_dynamic else layer.input_scale
+        )
+        qinput, x_scale = _resolve_per_tensor_quant()(input_2d, input_scale)
 
         if not Fp8LinearMethod._apply_logged:
             logger.info(
@@ -413,6 +421,18 @@ class Fp8LinearMethod(QuantizeMethodBase):
             layer.input_scale = nn.Parameter(
                 layer.input_scale.reshape(1), requires_grad=False
             )
+        if not self.quant_config.activation_dynamic:
+            input_scale = layer.input_scale.detach().float().reshape(-1)
+            if input_scale.numel() != 1:
+                raise ValueError(
+                    "Static FP8 per-tensor input_scale must contain one value"
+                )
+            if not bool(torch.isfinite(input_scale).all()) or bool(
+                (input_scale <= 0).any()
+            ):
+                raise ValueError(
+                    "Static FP8 per-tensor input_scale must be finite and positive"
+                )
 
 
 @register_quant_method("fp8_online", "FP8_DYNAMIC_PER_TENSOR")

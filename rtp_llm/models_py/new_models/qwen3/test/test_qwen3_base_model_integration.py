@@ -223,6 +223,91 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         )
         self.assertIsInstance(layer.mlp.down_proj.quant_method, UnquantizedLinearMethod)
 
+    def test_static_and_dynamic_activation_scale_reach_real_newloader(self):
+        ignored = [
+            "model.layers.0.self_attn.q_proj",
+            "model.layers.0.self_attn.k_proj",
+            "model.layers.0.self_attn.v_proj",
+            "model.layers.0.mlp.gate_proj",
+            "model.layers.0.mlp.up_proj",
+            "model.layers.0.mlp.down_proj",
+            "lm_head",
+        ]
+
+        for activation_dynamic in (True, False):
+            with self.subTest(
+                activation_dynamic=activation_dynamic
+            ), tempfile.TemporaryDirectory() as model_path:
+                quantization_config = {
+                    "quant_method": "compressed-tensors",
+                    "config_groups": {
+                        "group_0": {
+                            "weights": {
+                                "type": "float",
+                                "num_bits": 8,
+                                "strategy": "tensor",
+                            },
+                            "input_activations": {
+                                "dynamic": activation_dynamic,
+                            },
+                        }
+                    },
+                    "ignore": ignored,
+                }
+                with open(f"{model_path}/config.json", "w") as output:
+                    json.dump({"quantization_config": quantization_config}, output)
+
+                source_config = SourceQuantizationConfig.load_from_ckpt(model_path)
+                self.assertEqual(source_config.is_dynamic(), activation_dynamic)
+
+                checkpoint = _weights()
+                weight_name = "model.layers.0.self_attn.o_proj.weight"
+                source_weight = checkpoint[weight_name]
+                weight_scale = (source_weight.abs().max() / 448.0).float().reshape(1)
+                checkpoint[weight_name] = (source_weight / weight_scale).to(
+                    torch.float8_e4m3fn
+                )
+                checkpoint[f"{weight_name}_scale"] = weight_scale
+                if not activation_dynamic:
+                    checkpoint["model.layers.0.self_attn.o_proj.input_scale"] = (
+                        torch.tensor([0.125], dtype=torch.float32)
+                    )
+                save_file(checkpoint, f"{model_path}/model.safetensors")
+
+                config = _model_config()
+                config.quant_config = source_config
+                config.ckpt_path = model_path
+                base_model = object.__new__(BaseModel)
+                base_model.model_config = config
+                base_model.parallelism_config = _parallelism_config()
+                base_model.force_cpu_load_weights = False
+                base_model.load_method = LoadMethod.SCRATCH
+                base_model.fmha_config = None
+                base_model.device_resource_config = None
+                base_model.tokenizer = None
+                base_model.hw_kernel_config = types.SimpleNamespace(
+                    enable_cuda_graph=False
+                )
+
+                with patch.object(
+                    BaseModel, "_get_device_str", return_value="cpu"
+                ), patch.object(
+                    BaseModel, "_init_custom_module", return_value=None
+                ), patch.dict(
+                    os.environ, {"USE_NEW_LOADER": "1"}, clear=False
+                ):
+                    base_model.load()
+
+                o_proj = base_model.py_model.layers[0].self_attn.o_proj
+                self.assertEqual(
+                    o_proj.quant_config.activation_dynamic,
+                    activation_dynamic,
+                )
+                self.assertEqual(
+                    "input_scale" in o_proj._loaded_parameter_names,
+                    not activation_dynamic,
+                )
+
     def test_quant_config_without_runtime_method_is_rejected(self):
         base_model = object.__new__(BaseModel)
         base_model.model_config = _model_config()

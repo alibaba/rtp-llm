@@ -87,6 +87,7 @@ class QuantizationConfig:
             if ignored_layers is None
             else ignored_layers
         )
+        self.activation_dynamic = self._activation_dynamic(source_config)
         self.weight_block_size = self._weight_block_size(self.quant_type, source_config)
 
     @staticmethod
@@ -123,6 +124,22 @@ class QuantizationConfig:
             if value:
                 result.extend(cls._normalize_ignored(value))
         return result
+
+    @staticmethod
+    def _activation_dynamic(source_config: Any) -> bool:
+        """Return whether per-tensor activation scales are computed at runtime."""
+        if source_config is None:
+            return True
+        value = getattr(source_config, "is_dynamic", None)
+        if callable(value):
+            value = value()
+        elif value is None:
+            value = getattr(source_config, "activation_dynamic", None)
+        if value is None:
+            return True
+        if not isinstance(value, bool):
+            raise TypeError("activation dynamic flag must be a bool")
+        return value
 
     @staticmethod
     def _weight_block_size(quant_type: str, source_config: Any) -> List[int]:
