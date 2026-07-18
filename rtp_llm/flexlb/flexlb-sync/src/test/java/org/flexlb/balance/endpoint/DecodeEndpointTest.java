@@ -161,6 +161,192 @@ class DecodeEndpointTest {
         assertEquals("10.0.0.1:8080", endpoint.ipPort());
     }
 
+    // ==================== KV Counter Incremental Maintenance Tests ====================
+
+    @Test
+    void reserveIncrementsKvCounters() {
+        endpoint.reserve(1001L, 500, 800);
+        assertEquals(500, endpoint.inflightHardKvReserved());
+        assertEquals(800, endpoint.inflightKvReserved());
+    }
+
+    @Test
+    void reserveDuplicateKeySwapsKvCounters() {
+        endpoint.reserve(1001L, 500, 800);
+        endpoint.reserve(1001L, 300, 600);
+        // Old values subtracted, new values added
+        assertEquals(300, endpoint.inflightHardKvReserved());
+        assertEquals(600, endpoint.inflightKvReserved());
+    }
+
+    @Test
+    void releaseDecrementsKvCounters() {
+        endpoint.reserve(1001L, 500, 800);
+        endpoint.release(1001L);
+        assertEquals(0, endpoint.inflightHardKvReserved());
+        assertEquals(0, endpoint.inflightKvReserved());
+    }
+
+    @Test
+    void calibratePhase1DecrementsKvCounters() {
+        endpoint.reserve(1001L, 500, 800);
+        TaskInfo running = task(1001L);
+        running.setPhase(TaskPhase.KV_ALLOCATED);
+        endpoint.calibrate(Map.of("1001", running), null, 10000);
+        assertEquals(0, endpoint.inflightHardKvReserved());
+        assertEquals(0, endpoint.inflightKvReserved());
+    }
+
+    @Test
+    void calibratePhase2DecrementsKvCounters() {
+        endpoint.reserve(1001L, 500, 800);
+        TaskInfo failed = task(1001L);
+        failed.setErrorCode(1);
+        failed.setErrorMessage("timeout");
+        endpoint.calibrate(null, Map.of("1001", failed), 10000);
+        assertEquals(0, endpoint.inflightHardKvReserved());
+        assertEquals(0, endpoint.inflightKvReserved());
+    }
+
+    @Test
+    void calibratePhase3DecrementsKvCounters() {
+        endpoint.reserve(1001L, 500, 800);
+        TaskInfo success = task(1001L);
+        success.setErrorCode(0);
+        endpoint.calibrate(null, Map.of("1001", success), 10000);
+        assertEquals(0, endpoint.inflightHardKvReserved());
+        assertEquals(0, endpoint.inflightKvReserved());
+    }
+
+    @Test
+    void evictExpiredDecrementsKvCounters() throws InterruptedException {
+        endpoint.reserve(1001L, 500, 800);
+        Thread.sleep(10);
+        endpoint.evictExpiredRequests(1);
+        assertEquals(0, endpoint.inflightHardKvReserved());
+        assertEquals(0, endpoint.inflightKvReserved());
+    }
+
+    @Test
+    void calibratePhase1ThenPhase2And3NoDoubleDeduction() {
+        endpoint.reserve(1001L, 500, 800);
+        // Phase 1: KV_ALLOCATED removes from inflight
+        TaskInfo running = task(1001L);
+        running.setPhase(TaskPhase.KV_ALLOCATED);
+        // Phase 2: finished error tries to remove same requestId
+        TaskInfo failed = task(1001L);
+        failed.setErrorCode(1);
+        failed.setErrorMessage("timeout");
+        // Phase 3: finished success tries to remove same requestId
+        TaskInfo success = task(1001L);
+        success.setErrorCode(0);
+        endpoint.calibrate(Map.of("running-1001", running),
+                Map.of("err-1001", failed, "succ-1001", success), 10000);
+        // Counters should be 0, not negative (no double deduction)
+        assertEquals(0, endpoint.inflightHardKvReserved());
+        assertEquals(0, endpoint.inflightKvReserved());
+    }
+
+    @Test
+    void releaseThenCalibrateNoDoubleDeduction() {
+        endpoint.reserve(1001L, 500, 800);
+        endpoint.release(1001L);
+        // Calibrate tries to remove same requestId — already gone
+        TaskInfo success = task(1001L);
+        success.setErrorCode(0);
+        endpoint.calibrate(null, Map.of("1001", success), 10000);
+        // Counters should still be 0, not negative
+        assertEquals(0, endpoint.inflightHardKvReserved());
+        assertEquals(0, endpoint.inflightKvReserved());
+    }
+
+    @Test
+    void multipleRequestsProgressiveDecrease() {
+        endpoint.reserve(1001L, 100, 200);
+        endpoint.reserve(1002L, 200, 400);
+        endpoint.reserve(1003L, 300, 600);
+        // Total: hard=600, expected=1200
+        assertEquals(600, endpoint.inflightHardKvReserved());
+        assertEquals(1200, endpoint.inflightKvReserved());
+
+        // Release first
+        endpoint.release(1001L);
+        assertEquals(500, endpoint.inflightHardKvReserved());
+        assertEquals(1000, endpoint.inflightKvReserved());
+
+        // Calibrate second (KV_ALLOCATED)
+        TaskInfo running = task(1002L);
+        running.setPhase(TaskPhase.KV_ALLOCATED);
+        endpoint.calibrate(Map.of("1002", running), null, 10000);
+        assertEquals(300, endpoint.inflightHardKvReserved());
+        assertEquals(600, endpoint.inflightKvReserved());
+
+        // Release third
+        endpoint.release(1003L);
+        assertEquals(0, endpoint.inflightHardKvReserved());
+        assertEquals(0, endpoint.inflightKvReserved());
+    }
+
+    @Test
+    void emptyMapCountersAreZero() {
+        assertEquals(0, endpoint.inflightHardKvReserved());
+        assertEquals(0, endpoint.inflightKvReserved());
+    }
+
+    @Test
+    void hardAndExpectedKvTrackIndependently() {
+        // kvTokens=1000 (prompt only), expectedKvTokens=5000 (prompt + generation)
+        endpoint.reserve(1001L, 1000, 5000);
+        endpoint.reserve(1002L, 2000, 3000);
+        // Hard KV: 1000 + 2000 = 3000
+        assertEquals(3000, endpoint.inflightHardKvReserved());
+        // Expected KV: 5000 + 3000 = 8000
+        assertEquals(8000, endpoint.inflightKvReserved());
+        // Verify they differ — proving independent tracking
+        assertNotEquals(endpoint.inflightHardKvReserved(), endpoint.inflightKvReserved());
+    }
+
+    @Test
+    void countersEquivalentToTraversal() {
+        // Mix of operations
+        endpoint.reserve(1001L, 100, 200);
+        endpoint.reserve(1002L, 300, 600);
+        endpoint.reserve(1003L, 500, 1000);
+
+        // Remove one via release
+        endpoint.release(1002L);
+
+        // Remove one via calibrate Phase 1
+        TaskInfo running = task(1003L);
+        running.setPhase(TaskPhase.RUNNING);
+        endpoint.calibrate(Map.of("1003", running), null, 10000);
+
+        // Only 1001 remains: hard=100, expected=200
+        // Verify counter values equal manual traversal sums
+        assertEquals(manualHardKvSum(), endpoint.inflightHardKvReserved());
+        assertEquals(manualExpectedKvSum(), endpoint.inflightKvReserved());
+        assertEquals(100, endpoint.inflightHardKvReserved());
+        assertEquals(200, endpoint.inflightKvReserved());
+    }
+
+    // ---- counter test helpers ----
+
+    private long manualHardKvSum() {
+        long sum = 0;
+        for (RequestInflight ri : endpoint.getInflightRequests().values()) {
+            sum += ri.kvTokens();
+        }
+        return sum;
+    }
+
+    private long manualExpectedKvSum() {
+        long sum = 0;
+        for (RequestInflight ri : endpoint.getInflightRequests().values()) {
+            sum += ri.expectedKvTokens();
+        }
+        return sum;
+    }
+
     private TaskInfo task(long requestId) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);

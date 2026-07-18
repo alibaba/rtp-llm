@@ -55,7 +55,7 @@ public class CriticalMetricsFilterConfig {
             "app.request.network.delay.ms",             // client to gRPC server entry (network transfer)
             "app.grpc.server.process.ms",              // gRPC server entry to BalanceContext start
             "app.flexlb.route.submit.time.ms",          // master decision start to batcher queue
-            "app.routing.queue.wait.time.ms",           // batcher queue wait to dispatch
+            "app.flexlb.batcher.queue.wait.time.ms",    // batcher queue wait to dispatch (batch path, TIMER)
             "app.flexlb.dispatch.ack.time.ms",          // dispatch gRPC to engine ACK
             "app.engine.balancing.master.dispatch.reason" // exact batch trigger counters
     );

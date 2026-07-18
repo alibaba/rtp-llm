@@ -80,6 +80,53 @@ final class PrefillTimeVariableBindings {
         return new EvaluationVariables(ctx.topLevelVars, ctx.itemVars);
     }
 
+    /**
+     * Build variable bindings for a batch consisting of existing queue items
+     * plus a new request that hasn't been enqueued yet.
+     *
+     * <p>Equivalent to {@link #batchVariables(List)} applied to {@code items}
+     * with a synthetic item appended for {@code extraSeqLen}/{@code extraCacheHit},
+     * but avoids allocating a {@link BatchItem} wrapper. The synthetic item
+     * participates in all aggregations, and {@code batchSize = items.size() + 1}.
+     */
+    static EvaluationVariables batchVariables(List<BatchItem> items, long extraSeqLen, long extraCacheHit) {
+        BindingContext ctx = BINDING_CTX.get();
+        ctx.reset();
+        long totalInputTokens = 0L;
+        long totalHitCacheTokens = 0L;
+        long maxInputTokens = 0L;
+        long maxComputeTokens = 0L;
+        for (BatchItem item : items) {
+            double[] itemArray = ctx.acquireArray();
+            fillRequestVars(itemArray, item.seqLen(), item.hitCache());
+            ctx.itemVars.add(itemArray);
+
+            long inputTokens = (long) itemArray[PrefillTimeFormula.IDX_INPUT_TOKENS];
+            long hitCacheTokens = (long) itemArray[PrefillTimeFormula.IDX_HIT_CACHE_TOKENS];
+            long computeTokens = inputTokens - hitCacheTokens;
+            totalInputTokens += inputTokens;
+            totalHitCacheTokens += hitCacheTokens;
+            maxInputTokens = Math.max(maxInputTokens, inputTokens);
+            maxComputeTokens = Math.max(maxComputeTokens, computeTokens);
+        }
+        // Append the virtual item for the new request
+        double[] extraArray = ctx.acquireArray();
+        fillRequestVars(extraArray, extraSeqLen, extraCacheHit);
+        ctx.itemVars.add(extraArray);
+        long extraInputTokens = (long) extraArray[PrefillTimeFormula.IDX_INPUT_TOKENS];
+        long extraHitCacheTokens = (long) extraArray[PrefillTimeFormula.IDX_HIT_CACHE_TOKENS];
+        long extraComputeTokens = extraInputTokens - extraHitCacheTokens;
+        totalInputTokens += extraInputTokens;
+        totalHitCacheTokens += extraHitCacheTokens;
+        maxInputTokens = Math.max(maxInputTokens, extraInputTokens);
+        maxComputeTokens = Math.max(maxComputeTokens, extraComputeTokens);
+
+        ctx.topLevelVars[PrefillTimeFormula.IDX_BATCH_SIZE] = items.size() + 1;
+        fillBatchVars(ctx.topLevelVars, totalInputTokens, totalHitCacheTokens,
+                maxInputTokens, maxComputeTokens);
+        return new EvaluationVariables(ctx.topLevelVars, ctx.itemVars);
+    }
+
     private static void fillBatchVars(double[] vars,
                                       long totalInputTokens,
                                       long totalHitCacheTokens,

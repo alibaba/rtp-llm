@@ -119,7 +119,21 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     public long batcherWaitMs() {
-        return batcher.headWaitMs();
+        return batcher.queueWaitMs();
+    }
+
+    /**
+     * Estimate prefill time for the batch that a new request would join.
+     * Uses batch-level prediction when queue has items in the same batch,
+     * falls back to single-request estimateMs when the new request would
+     * start a fresh batch (empty queue or remaining == 0).
+     */
+    public long estimateBatchPrefillMs(long seqLen, long cacheHit) {
+        if (predictor == null) {
+            return 0;
+        }
+        List<BatchItem> batchItems = batcher.peekBatchItems();
+        return (long) predictor.predictBatchMs(batchItems, seqLen, cacheHit);
     }
 
     private static PrefillTimePredictor createPredictor(FlexlbConfig cfg) {

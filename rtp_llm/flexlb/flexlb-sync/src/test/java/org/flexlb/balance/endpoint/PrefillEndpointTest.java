@@ -346,6 +346,201 @@ class PrefillEndpointTest {
         // Should not throw — batcher handles stopped state
     }
 
+    // ==================== inflightRequestCount Counter Tests ====================
+
+    @Test
+    void commitBatchIncrementsRequestCount() {
+        BatchItem item1 = createBatchItem(1001L, 500, 200);
+        BatchItem item2 = createBatchItem(1002L, 300, 100);
+        endpoint.commitBatch(1L, 100, List.of(item1, item2));
+        assertEquals(2, endpoint.getInflightRequestCount());
+    }
+
+    @Test
+    void commitBatchDuplicateKeySwapsRequestCount() {
+        BatchItem item1 = createBatchItem(1001L, 500, 200);
+        BatchItem item2 = createBatchItem(1002L, 300, 100);
+        endpoint.commitBatch(1L, 100, List.of(item1, item2));
+        assertEquals(2, endpoint.getInflightRequestCount());
+
+        // Commit same batchId with different requests
+        BatchItem item3 = createBatchItem(1003L, 400, 0);
+        endpoint.commitBatch(1L, 50, List.of(item3));
+        // Old (2) subtracted, new (1) added → 1
+        assertEquals(1, endpoint.getInflightRequestCount());
+    }
+
+    @Test
+    void releaseBatchDecrementsRequestCount() {
+        BatchItem item1 = createBatchItem(1001L, 500, 200);
+        BatchItem item2 = createBatchItem(1002L, 300, 100);
+        endpoint.commitBatch(1L, 100, List.of(item1, item2));
+        endpoint.releaseBatch(1L);
+        assertEquals(0, endpoint.getInflightRequestCount());
+    }
+
+    @Test
+    void repackBatchAllFailedDecrementsRequestCount() {
+        BatchItem item1 = createBatchItem(1001L, 500, 200);
+        BatchItem item2 = createBatchItem(1002L, 300, 100);
+        endpoint.commitBatch(1L, 100, List.of(item1, item2));
+        assertEquals(2, endpoint.getInflightRequestCount());
+
+        endpoint.repackBatch(1L, Set.of(1001L, 1002L));
+        assertEquals(0, endpoint.getInflightRequestCount());
+    }
+
+    @Test
+    void repackBatchPartialFailureDecrementsRequestCount() {
+        BatchItem item1 = createBatchItem(1001L, 500, 200);
+        BatchItem item2 = createBatchItem(1002L, 300, 100);
+        BatchItem item3 = createBatchItem(1003L, 400, 0);
+        endpoint.commitBatch(1L, 100, List.of(item1, item2, item3));
+        assertEquals(3, endpoint.getInflightRequestCount());
+
+        // Fail item2 → 3 - 1 = 2
+        endpoint.repackBatch(1L, Set.of(1002L));
+        assertEquals(2, endpoint.getInflightRequestCount());
+    }
+
+    @Test
+    void calibratePhase1NonBatchDecrementsRequestCount() {
+        // Non-batch request: committed with batchId = requestId
+        BatchItem item = createBatchItem(1001L, 500, 200);
+        endpoint.commitBatch(1001L, 100, List.of(item));
+        assertEquals(1, endpoint.getInflightRequestCount());
+
+        // Calibrate with finished non-batch task (batchId = -1)
+        Map<String, TaskInfo> finished = new HashMap<>();
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(1001L);
+        task.setBatchId(-1);
+        task.setErrorCode(0);
+        finished.put("1001", task);
+        endpoint.calibrate(finished, Map.of());
+        assertEquals(0, endpoint.getInflightRequestCount());
+    }
+
+    @Test
+    void calibratePhase2BatchSuccessDecrementsRequestCount() {
+        BatchItem item1 = createBatchItem(1001L, 500, 200);
+        BatchItem item2 = createBatchItem(1002L, 300, 100);
+        endpoint.commitBatch(1L, 100, List.of(item1, item2));
+        assertEquals(2, endpoint.getInflightRequestCount());
+
+        Map<String, TaskInfo> finished = new HashMap<>();
+        TaskInfo successTask = new TaskInfo();
+        successTask.setRequestId(1001L);
+        successTask.setBatchId(1L);
+        successTask.setErrorCode(0);
+        finished.put("1001", successTask);
+        endpoint.calibrate(finished, Map.of());
+        assertEquals(0, endpoint.getInflightRequestCount());
+    }
+
+    @Test
+    void evictExpiredBatchesDecrementsRequestCount() throws InterruptedException {
+        BatchItem item1 = createBatchItem(1001L, 500, 200);
+        BatchItem item2 = createBatchItem(1002L, 300, 100);
+        endpoint.commitBatch(1L, 100, List.of(item1, item2));
+        assertEquals(2, endpoint.getInflightRequestCount());
+
+        Thread.sleep(10);
+        endpoint.evictExpiredBatches(1);
+        assertEquals(0, endpoint.getInflightRequestCount());
+    }
+
+    @Test
+    void calibratePhase2ThenPhase3NoDoubleDeduction() {
+        BatchItem item1 = createBatchItem(1001L, 500, 200);
+        BatchItem item2 = createBatchItem(1002L, 300, 100);
+        endpoint.commitBatch(1L, 100, List.of(item1, item2));
+        assertEquals(2, endpoint.getInflightRequestCount());
+
+        // One success, one failure for same batchId
+        Map<String, TaskInfo> finished = new HashMap<>();
+        TaskInfo successTask = new TaskInfo();
+        successTask.setRequestId(1001L);
+        successTask.setBatchId(1L);
+        successTask.setErrorCode(0);
+        finished.put("1001", successTask);
+
+        TaskInfo failedTask = new TaskInfo();
+        failedTask.setRequestId(1002L);
+        failedTask.setBatchId(1L);
+        failedTask.setErrorCode(500);
+        failedTask.setErrorMessage("engine error");
+        finished.put("1002", failedTask);
+
+        endpoint.calibrate(finished, Map.of());
+        // Phase 2 removes entire batch (counter -= 2)
+        // Phase 3 skips because batchId is in batchesWithSuccess
+        assertEquals(0, endpoint.getInflightRequestCount());
+    }
+
+    @Test
+    void multipleBatchesProgressiveDecrease() {
+        BatchItem item1 = createBatchItem(1001L, 500, 200);
+        BatchItem item2 = createBatchItem(1002L, 300, 100);
+        BatchItem item3 = createBatchItem(1003L, 400, 0);
+        BatchItem item4 = createBatchItem(1004L, 600, 50);
+
+        endpoint.commitBatch(1L, 100, List.of(item1, item2));
+        endpoint.commitBatch(2L, 50, List.of(item3));
+        endpoint.commitBatch(3L, 200, List.of(item4));
+        assertEquals(4, endpoint.getInflightRequestCount());
+
+        // Release batch 1
+        endpoint.releaseBatch(1L);
+        assertEquals(2, endpoint.getInflightRequestCount());
+
+        // Calibrate batch 2 (success)
+        Map<String, TaskInfo> finished = new HashMap<>();
+        TaskInfo successTask = new TaskInfo();
+        successTask.setRequestId(1003L);
+        successTask.setBatchId(2L);
+        successTask.setErrorCode(0);
+        finished.put("1003", successTask);
+        endpoint.calibrate(finished, Map.of());
+        assertEquals(1, endpoint.getInflightRequestCount());
+
+        // Release batch 3
+        endpoint.releaseBatch(3L);
+        assertEquals(0, endpoint.getInflightRequestCount());
+    }
+
+    @Test
+    void emptyMapRequestCountIsZero() {
+        assertEquals(0, endpoint.getInflightRequestCount());
+    }
+
+    @Test
+    void requestCountEquivalentToTraversal() {
+        BatchItem item1 = createBatchItem(1001L, 500, 200);
+        BatchItem item2 = createBatchItem(1002L, 300, 100);
+        BatchItem item3 = createBatchItem(1003L, 400, 0);
+
+        endpoint.commitBatch(1L, 100, List.of(item1, item2));
+        endpoint.commitBatch(2L, 50, List.of(item3));
+
+        // Remove batch 1 via release
+        endpoint.releaseBatch(1L);
+
+        // Only batch 2 with 1 request remains
+        assertEquals(manualRequestCountSum(), endpoint.getInflightRequestCount());
+        assertEquals(1, endpoint.getInflightRequestCount());
+    }
+
+    // ---- counter test helper ----
+
+    private int manualRequestCountSum() {
+        int sum = 0;
+        for (BatchInflight batch : endpoint.getInflightBatches().values()) {
+            sum += batch.requests().size();
+        }
+        return sum;
+    }
+
     // ---- helpers ----
 
     private BatchItem createBatchItem(long requestId, long seqLen, long hitCacheLen) {

@@ -502,6 +502,54 @@ class FormulaPredictorTest {
         assertEquals(300, (long) first);
     }
 
+    // ---- batch-level prediction with extra request (not yet enqueued) ----
+
+    @Test
+    @DisplayName("predictBatchMs(emptyList, seqLen, cacheHit) matches estimateMs(seqLen, cacheHit)")
+    void predictBatchMsEmptyItemsWithExtraMatchesEstimateMs() {
+        FormulaPredictor p = new FormulaPredictor(
+                "10 + 0.1*sum(computeTokens) + 0.01*sum(computeTokens^2) + 5*batchSize");
+        long seqLen = 500;
+        long cacheHit = 200;
+
+        assertEquals(p.estimateMs(seqLen, cacheHit),
+                (long) p.predictBatchMs(List.of(), seqLen, cacheHit));
+    }
+
+    @Test
+    @DisplayName("predictBatchMs(items, seqLen, cacheHit) exceeds estimateMs(seqLen, cacheHit)")
+    void predictBatchMsWithExtraItemsExceedsSingleEstimate() {
+        // Formula where a larger batch strictly increases the result.
+        // estimateMs(300, 0): batchSize=1, compute=300 → 10*1 + 300 = 310
+        // predictBatchMs([item(500,200)], 300, 0): batchSize=2,
+        //   sum(compute) = 300 + 300 = 600 → 10*2 + 600 = 620 > 310
+        FormulaPredictor p = new FormulaPredictor("10*batchSize + sum(computeTokens)");
+        BatchItem existing = batchItem(500, 200);
+
+        long singleEstimate = p.estimateMs(300, 0);
+        long batchEstimate = (long) p.predictBatchMs(List.of(existing), 300, 0);
+
+        assertTrue(batchEstimate > singleEstimate,
+                "batch estimate " + batchEstimate + " should exceed single " + singleEstimate);
+    }
+
+    @Test
+    @DisplayName("predictBatchMs(items, seqLen, cacheHit) matches batchVariables of merged list")
+    void predictBatchMsWithExtraMatchesMergedBatch() {
+        FormulaPredictor p = new FormulaPredictor(
+                "10 + 0.1*sum(computeTokens) + 0.5*sum(hitCacheTokens) + 5*batchSize");
+        BatchItem existing = batchItem(500, 200);
+        long newSeqLen = 300;
+        long newCacheHit = 100;
+
+        // Merged batch: existing + new request as a real BatchItem
+        long merged = (long) p.predictBatchMs(List.of(existing, batchItem(newSeqLen, newCacheHit)));
+        // Overload: existing items + extra request
+        long withExtra = (long) p.predictBatchMs(List.of(existing), newSeqLen, newCacheHit);
+
+        assertEquals(merged, withExtra);
+    }
+
     // ---- helpers ----
 
     private static BatchItem batchItem(long seqLen, long hitCacheLen) {
