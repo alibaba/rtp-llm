@@ -1,44 +1,37 @@
 package org.flexlb.sync.schedule;
 
 import org.apache.commons.collections4.MapUtils;
-import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.FlexMetricType;
-import org.flexlb.enums.FlexPriorityType;
-import org.flexlb.enums.TaskStateEnum;
-import org.flexlb.metric.FlexMetricTags;
-import org.flexlb.metric.FlexMonitor;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
-import org.flexlb.util.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PostConstruct;
 import java.util.Iterator;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 public class ExpirationCleaner {
 
-    private static final String TASK_REMOVED = "task.removed";
+    private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
-    private final long taskTimeoutUs;
     private final long workerTimeoutUs;
-    private final FlexMonitor monitor;
+    private final EndpointRegistry endpointRegistry;
 
-    public ExpirationCleaner(FlexMonitor monitor) {
-        this.monitor = monitor;
-        this.taskTimeoutUs = Long.parseLong(System.getenv().getOrDefault("TASK_TIMEOUT_US", "3000000"));  // Default 3s
-        this.workerTimeoutUs = Long.parseLong(System.getenv().getOrDefault("WORKER_TIMEOUT_US", "3000000")); // Default 3s
+    @Autowired
+    public ExpirationCleaner(EndpointRegistry endpointRegistry) {
+        this(endpointRegistry,
+                Long.parseLong(System.getenv().getOrDefault("WORKER_TIMEOUT_US", "3000000")));
     }
 
-    @PostConstruct
-    public void init() {
-        this.monitor.register(TASK_REMOVED, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+    ExpirationCleaner(EndpointRegistry endpointRegistry, long workerTimeoutUs) {
+        this.endpointRegistry = endpointRegistry;
+        this.workerTimeoutUs = workerTimeoutUs;
     }
 
     @Scheduled(fixedRate = 3000)
@@ -59,12 +52,13 @@ public class ExpirationCleaner {
             Map.Entry<String, WorkerStatus> item = it.next();
             WorkerStatus workerStatus = item.getValue();
 
-            // 1. Check if worker needs cleanup
             long expirationTime = workerStatus.getStatusLastUpdateTime().get() + workerTimeoutUs;
             long currentTime = System.nanoTime() / 1000;
             if (currentTime > expirationTime) {
-                it.remove();
-                continue;
+                logger.info("Removing expired worker: {}, role: {}", item.getKey(), role);
+                workerStatus.setAlive(false);
+                workerStatusMap.remove(item.getKey(), workerStatus);
+                endpointRegistry.remove(role, item.getKey(), workerStatus);
             }
 
             // 2. Check if tasks within worker need cleanup: lost tasks and long-timeout tasks

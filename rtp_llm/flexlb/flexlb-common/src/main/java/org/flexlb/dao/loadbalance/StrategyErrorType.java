@@ -17,12 +17,18 @@ public enum StrategyErrorType {
     NO_DECODE_WORKER(8403, true),
     NO_PDFUSION_WORKER(8404, true),
     NO_VIT_WORKER(8405, true),
+    NO_FRONTEND_WORKER(8407, true),
     INVALID_REQUEST(8406, false),
 
     // queue error
     QUEUE_FULL(8502, false),
     QUEUE_TIMEOUT(8503, false),
-    REQUEST_CANCELLED(8504, false);
+    REQUEST_CANCELLED(8504, false),
+
+    // batch dispatch error
+    BATCH_DISPATCH_FAILED(8510, true),
+    BATCH_SLO_EXPIRED(8511, false),
+    BATCH_BUILD_FAILED(8512, false);
 
     private final int errorCode;
     private final String errorMsg;
