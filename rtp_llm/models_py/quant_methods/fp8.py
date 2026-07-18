@@ -100,15 +100,20 @@ def _apply_rocm_fp8_per_channel(
 
     from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
 
-    qinput, x_scale = rocm_per_token_quant_fp8(input_2d, eps=1e-10)
-    return aiter.gemm_a8w8_bpreshuffle(
+    original_dtype = input_2d.dtype
+    input_bf16 = (
+        input_2d if original_dtype == torch.bfloat16 else input_2d.to(torch.bfloat16)
+    )
+    qinput, x_scale = rocm_per_token_quant_fp8(input_bf16, eps=1e-10)
+    output = aiter.gemm_a8w8_bpreshuffle(
         qinput,
         weight,
         x_scale.to(torch.float32),
         weight_scale,
         None,
-        out_dtype,
+        torch.bfloat16,
     )
+    return output if original_dtype == torch.bfloat16 else output.to(out_dtype)
 
 
 # Hoist kernel imports to module scope. apply() is on the per-token decode hot
@@ -117,12 +122,8 @@ def _apply_rocm_fp8_per_channel(
 # module load amortizes that cost across the lifetime of the process.
 #
 # Each method that uses a kernel still falls back to a lazy `_resolve_*()` helper
-# below when the module-level symbol is None, since `fp8.py` is loaded eagerly
-# from `quant_methods/__init__.py` and may resolve before the kernel package
-# finishes initialization (the kernel package's __init__ calls load_all_configs()
-# which can take long enough for an interleaving import to observe a partially
-# initialized module — that is reported with a logger.warning here so the
-# fallback isn't silent).
+# below when the module-level symbol is None. The FP8 provider itself is imported
+# only after runtime dispatch selects an FP8 key.
 try:
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
         per_block_cast_to_fp8,
@@ -147,6 +148,7 @@ try:
     from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
         fp8_gemm_nt,
         has_deep_gemm,
+        is_deep_gemm_e8m0_used,
     )
 except ImportError as e:  # pragma: no cover
     logger.warning(
@@ -155,6 +157,9 @@ except ImportError as e:  # pragma: no cover
     fp8_gemm_nt = None
 
     def has_deep_gemm() -> bool:  # type: ignore[no-redef]
+        return False
+
+    def is_deep_gemm_e8m0_used() -> bool:  # type: ignore[no-redef]
         return False
 
 
@@ -590,21 +595,31 @@ class Fp8PerChannelOnlineLinearMethod(QuantizeMethodBase):
         if weight.ndim != 2:
             raise ValueError(f"expected 2D weight, got {weight.shape}")
 
-        # Treat weight rows as "tokens" → per-output-channel quant.
+        # Treat weight rows as "tokens" -> per-output-channel quant.
         # fp8_weight: [N, K] float8_e4m3fn, scale: [N, 1] float32.
-        fp8_weight, scale = _resolve_per_token_quant()(weight)
+        is_hip = _is_hip_runtime()
+        quant_input = (
+            weight.to(torch.bfloat16)
+            if is_hip and weight.dtype != torch.bfloat16
+            else weight
+        )
+        fp8_weight, scale = _resolve_per_token_quant()(quant_input)
+        if is_hip:
+            fp8_weight = _shuffle_rocm_fp8_weight(fp8_weight)
+            scale = scale.view(-1, 1).to(torch.float32).contiguous()
+        else:
+            # torch._scaled_mm consumes scale_b as [1, N]. Materialize that
+            # layout once after loading instead of transposing every forward.
+            scale = scale.view(1, -1).contiguous()
 
         del layer.weight
         layer.register_parameter(
             "weight", nn.Parameter(fp8_weight.contiguous(), requires_grad=False)
         )
-        # Store scale already shaped [1, N] contiguous so apply() can pass
-        # layer.weight_scale directly to torch._scaled_mm as scale_b without
-        # per-call reshape+contiguous (was a measurable per-token decode cost).
         del layer.weight_scale
         layer.register_parameter(
             "weight_scale",
-            nn.Parameter(scale.view(1, -1).contiguous(), requires_grad=False),
+            nn.Parameter(scale, requires_grad=False),
         )
 
         Fp8PerChannelOnlineLinearMethod._quant_count += 1
@@ -632,43 +647,48 @@ class Fp8PerChannelOnlineLinearMethod(QuantizeMethodBase):
         N = layer.weight.shape[0]
         output_shape = list(x.shape[:-1]) + [N]
 
-        # Per-token activation quant: [M, K] bf16 -> [M, K] fp8 + [M, 1] fp32.
-        qinput, x_scale = _resolve_per_token_quant()(input_2d)
-
-        # Weight scale was already shaped [1, N] contiguous in
-        # process_weights_after_loading — use it directly.
-        weight_scale_b = layer.weight_scale
-
         if not Fp8PerChannelOnlineLinearMethod._apply_logged:
             logger.info(
-                "[Fp8PerChannelOnlineLinearMethod] FIRST forward via torch._scaled_mm: "
-                "prefix=%r, x.dtype=%s, x.shape=%s, qinput.dtype=%s, qinput.shape=%s, "
-                "x_scale.shape=%s, weight.dtype=%s, weight.shape=%s, "
-                "weight_scale.shape=%s, scale_b.shape=%s, total_quanted_weights=%d",
+                "[Fp8PerChannelOnlineLinearMethod] FIRST forward via %s: "
+                "prefix=%r, x.dtype=%s, x.shape=%s, weight.dtype=%s, "
+                "weight.shape=%s, weight_scale.shape=%s, total_quanted_weights=%d",
+                (
+                    "AITer gemm_a8w8_bpreshuffle"
+                    if _is_hip_runtime()
+                    else "torch._scaled_mm"
+                ),
                 getattr(layer, "prefix", "?"),
                 x.dtype,
                 tuple(x.shape),
-                qinput.dtype,
-                tuple(qinput.shape),
-                tuple(x_scale.shape),
                 layer.weight.dtype,
                 tuple(layer.weight.shape),
                 tuple(layer.weight_scale.shape),
-                tuple(weight_scale_b.shape),
                 Fp8PerChannelOnlineLinearMethod._quant_count,
             )
             Fp8PerChannelOnlineLinearMethod._apply_logged = True
 
-        output = torch._scaled_mm(
-            qinput,
-            layer.weight.t(),
-            scale_a=x_scale,
-            scale_b=weight_scale_b,
-            bias=bias,
-            out_dtype=out_dtype,
-        )
-        if isinstance(output, tuple):
-            output = output[0]
+        if _is_hip_runtime():
+            output = _apply_rocm_fp8_per_channel(
+                input_2d,
+                layer.weight,
+                layer.weight_scale,
+                out_dtype,
+            )
+            if bias is not None:
+                output = output + bias.to(output.dtype)
+        else:
+            # Per-token activation quant: [M, K] -> fp8 + [M, 1] fp32.
+            qinput, x_scale = _resolve_per_token_quant()(input_2d)
+            output = torch._scaled_mm(
+                qinput,
+                layer.weight.t(),
+                scale_a=x_scale,
+                scale_b=layer.weight_scale,
+                bias=bias,
+                out_dtype=out_dtype,
+            )
+            if isinstance(output, tuple):
+                output = output[0]
 
         return output.view(*output_shape)
 
@@ -939,6 +959,9 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
                 f"FP8 scale shape {tuple(scale.shape)} != {expected_scale_shape}"
             )
 
+        if is_deep_gemm_e8m0_used():
+            fp8_weight, scale = _resolve_requant_weight_ue8m0()(fp8_weight, scale)
+
         del layer.weight
         layer.register_parameter(
             "weight", nn.Parameter(fp8_weight.contiguous(), requires_grad=False)
@@ -963,7 +986,7 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
                 fp8_weight.dtype,
                 tuple(scale.shape),
                 scale.dtype,
-                float(scale.mean().item()),
+                float(scale.float().mean().item()),
                 fp8_weight.device,
             )
             Fp8BlockOnlineLinearMethod._quant_logged = True
@@ -1145,20 +1168,23 @@ class Fp8BlockLinearMethod(Fp8BlockOnlineLinearMethod):
             )
             return
 
+        weight = layer.weight.data
         if list(block_size) != [self.BLOCK, self.BLOCK]:
             weight_dequant = _dequant_rectangular_blocks_to_bf16(
-                layer.weight.data,
+                weight,
                 layer.weight_scale_inv.data,
                 block_size[0],
                 block_size[1],
             )
             weight, scale = _resolve_per_block_cast()(weight_dequant, use_ue8m0=False)
-            del layer.weight
-            layer.register_parameter(
-                "weight", nn.Parameter(weight.contiguous(), requires_grad=False)
-            )
         else:
             scale = layer.weight_scale_inv.data
+        if is_deep_gemm_e8m0_used():
+            weight, scale = _resolve_requant_weight_ue8m0()(weight, scale)
+        del layer.weight
+        layer.register_parameter(
+            "weight", nn.Parameter(weight.contiguous(), requires_grad=False)
+        )
         del layer.weight_scale_inv
         layer.register_parameter(
             "weight_scale",

@@ -13,6 +13,8 @@ The forward (`apply`) path uses `torch._scaled_mm` and requires CUDA; those
 tests are gated by `torch.cuda.is_available()`. Layer-level load_weights
 routing tests run on CPU.
 """
+import subprocess
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -31,11 +33,13 @@ from rtp_llm.models_py.quant_methods.fp8 import (
     Fp8LinearMethod,
     Fp8OnlineLinearMethod,
     Fp8PerChannelLinearMethod,
+    Fp8PerChannelOnlineLinearMethod,
     _convert_e4m3fn_to_fnuz,
     _is_hip_runtime,
     _resolve_per_tensor_quant,
     _runtime_fp8_dtype,
     has_deep_gemm,
+    is_deep_gemm_e8m0_used,
 )
 from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
 
@@ -55,6 +59,27 @@ def _channel_scale_shape(channels: int):
 
 
 class TestQuantMethodDispatch(unittest.TestCase):
+    def test_unquantized_dispatch_does_not_import_fp8_provider(self):
+        script = """
+import sys
+from types import SimpleNamespace
+
+from rtp_llm.models_py.quant_methods.base import QuantizationConfig
+
+method = QuantizationConfig("none").get_quant_method(
+    SimpleNamespace(shard_names=[]), "proj"
+)
+assert type(method).__name__ == "UnquantizedLinearMethod"
+assert "rtp_llm.models_py.quant_methods.fp8" not in sys.modules
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_canonical_fp8_aliases_dispatch_to_expected_methods(self):
         layer = SimpleNamespace(shard_names=[])
         expected = {
@@ -274,6 +299,82 @@ class TestFp8PerChannelLoad(unittest.TestCase):
         torch.testing.assert_close(actual, expected)
 
 
+@unittest.skipUnless(
+    torch.cuda.is_available() and _is_hip_runtime(),
+    "requires a ROCm GPU and AITer",
+)
+class TestRocmFp8PerChannelOnline(unittest.TestCase):
+    def test_fp16_bf16_tp_weights_use_ptpc_runtime(self):
+        import aiter
+        from aiter.ops.shuffle import shuffle_weight
+
+        from rtp_llm.models_py.kernels.rocm.fp8_kernel import (
+            rocm_per_token_quant_fp8,
+        )
+
+        # Match the production PTPC shape family used by the tuned AITer path:
+        # TP=2 leaves each rank with N=1024 and K=1024.
+        output_size, input_size, batch = 2048, 1024, 4
+        for dtype in (torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                weight = torch.randn(
+                    output_size,
+                    input_size,
+                    dtype=dtype,
+                    device="cuda",
+                )
+                layer = ColumnParallelLinear(
+                    input_size=input_size,
+                    output_size=output_size,
+                    tp_size=2,
+                    tp_rank=1,
+                    quant_config=_make_qc("fp8_per_channel_online"),
+                    prefix="test",
+                    params_dtype=dtype,
+                ).to("cuda")
+                layer.load_weights({"test.weight": weight})
+                layer.process_weights_after_loading()
+
+                self.assertIsInstance(
+                    layer.quant_method, Fp8PerChannelOnlineLinearMethod
+                )
+                self.assertEqual(layer.weight_scale.shape, (output_size // 2, 1))
+
+                local_weight = weight[output_size // 2 :].contiguous()
+                quant_input = (
+                    local_weight
+                    if dtype == torch.bfloat16
+                    else local_weight.to(torch.bfloat16)
+                )
+                expected_weight, expected_weight_scale = rocm_per_token_quant_fp8(
+                    quant_input,
+                    eps=1e-10,
+                )
+                expected_weight = shuffle_weight(expected_weight, layout=(16, 16))
+                torch.testing.assert_close(layer.weight, expected_weight)
+                torch.testing.assert_close(
+                    layer.weight_scale,
+                    expected_weight_scale.to(torch.float32),
+                )
+
+                x = torch.randn(batch, input_size, dtype=dtype, device="cuda")
+                actual = layer(x)
+                x_bf16 = x if dtype == torch.bfloat16 else x.to(torch.bfloat16)
+                qinput, x_scale = rocm_per_token_quant_fp8(x_bf16, eps=1e-10)
+                expected = aiter.gemm_a8w8_bpreshuffle(
+                    qinput,
+                    expected_weight,
+                    x_scale.to(torch.float32),
+                    expected_weight_scale.to(torch.float32),
+                    None,
+                    torch.bfloat16,
+                )
+                if dtype == torch.float16:
+                    expected = expected.to(dtype)
+                self.assertEqual(actual.dtype, dtype)
+                torch.testing.assert_close(actual, expected)
+
+
 class TestMergedColumnPerChannelScale(unittest.TestCase):
     """gate_up_proj per-channel weight_scale should cat across shards."""
 
@@ -435,9 +536,12 @@ class TestFp8BlockLoad(unittest.TestCase):
         self.assertFalse(hasattr(layer, "weight_scale_inv"))
         if has_deep_gemm():
             self.assertEqual(layer.weight.dtype, torch.float8_e4m3fn)
-            torch.testing.assert_close(
-                layer.weight_scale, expected_scale, rtol=0, atol=0
-            )
+            if is_deep_gemm_e8m0_used():
+                self.assertEqual(layer.weight_scale.dtype, torch.int32)
+            else:
+                torch.testing.assert_close(
+                    layer.weight_scale, expected_scale, rtol=0, atol=0
+                )
         else:
             self.assertEqual(layer.weight.dtype, torch.bfloat16)
             self.assertFalse(hasattr(layer, "weight_scale"))
@@ -748,6 +852,13 @@ class TestFp8BlockForward(unittest.TestCase):
         ).to(device)
         online.load_weights({"on.weight": weight_bf16})
         online.process_weights_after_loading()
+
+        if is_deep_gemm_e8m0_used():
+            self.assertEqual(offline.weight_scale.dtype, torch.int32)
+            self.assertEqual(online.weight_scale.dtype, torch.int32)
+        else:
+            self.assertEqual(offline.weight_scale.dtype, torch.float32)
+            self.assertEqual(online.weight_scale.dtype, torch.float32)
 
         x = torch.randn(M, K, dtype=torch.bfloat16, device=device) * 0.1
         out_offline = offline(x)

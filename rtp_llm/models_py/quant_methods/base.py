@@ -34,6 +34,22 @@ class QuantizeMethodBase(ABC):
 
 _LINEAR_METHOD_REGISTRY: Dict[str, Type[QuantizeMethodBase]] = {}
 
+_FP8_METHOD_KEYS = frozenset(
+    {
+        "fp8",
+        "fp8_online",
+        "fp8_per_channel",
+        "fp8_per_channel_online",
+        "fp8_block",
+        "fp8_block_online",
+        "FP8_PER_TENSOR_COMPRESSED",
+        "FP8_DYNAMIC_PER_TENSOR",
+        "FP8_PER_CHANNEL_COMPRESSED",
+        "FP8_PER_CHANNEL_QUARK",
+        "FP8_PER_BLOCK",
+    }
+)
+
 
 def register_quant_method(*keys: str):
     def decorator(cls: Type[QuantizeMethodBase]) -> Type[QuantizeMethodBase]:
@@ -177,10 +193,6 @@ class QuantizationConfig:
         return False
 
     def get_quant_method(self, layer, prefix: str = "") -> QuantizeMethodBase:
-        from rtp_llm.models_py.quant_methods import fp8  # noqa: F401
-        from rtp_llm.models_py.quant_methods import unquantized  # noqa: F401
-        from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
-
         if self.ignored_layers and not prefix:
             raise ValueError(
                 "A stable module prefix is required when quantization exclusions "
@@ -196,12 +208,22 @@ class QuantizationConfig:
             )
         ignored = [self.is_layer_ignored(candidate) for candidate in ignore_prefixes]
         if ignored[0] or (len(ignored) > 1 and all(ignored[1:])):
+            from rtp_llm.models_py.quant_methods.unquantized import (
+                UnquantizedLinearMethod,
+            )
+
             return UnquantizedLinearMethod(self)
         if len(ignored) > 1 and any(ignored[1:]):
             raise ValueError(
                 f"Quantization exclusions partially match fused layer {prefix!r}; "
                 "all fused projections must use the same quantization layout"
             )
+
+        if self.quant_type not in _LINEAR_METHOD_REGISTRY:
+            if self.quant_type == "none":
+                from rtp_llm.models_py.quant_methods import unquantized  # noqa: F401
+            elif self.quant_type in _FP8_METHOD_KEYS:
+                from rtp_llm.models_py.quant_methods import fp8  # noqa: F401
 
         method_cls = _LINEAR_METHOD_REGISTRY.get(self.quant_type)
         if method_cls is None:

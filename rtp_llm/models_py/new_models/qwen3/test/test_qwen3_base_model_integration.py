@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import types
@@ -7,11 +8,13 @@ from unittest.mock import patch
 import torch
 from safetensors.torch import save_file
 
+from rtp_llm.config.quant_config import QuantizationConfig as SourceQuantizationConfig
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.qwen3.language import Qwen3ForCausalLM
+from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
 
 
 def _model_config():
@@ -75,6 +78,151 @@ def _weights():
 
 
 class Qwen3BaseModelIntegrationTest(unittest.TestCase):
+    def test_source_configs_preserve_ignore_and_exclude(self):
+        ignored = ["model.layers.0.self_attn.o_proj"]
+        excluded = "model.layers.0.mlp.down_proj"
+        cases = (
+            (
+                "fp8",
+                {
+                    "quant_method": "fp8",
+                    "ignore": ignored,
+                    "exclude": excluded,
+                },
+            ),
+            (
+                "fp8_block",
+                {
+                    "quant_method": "fp8",
+                    "weight_block_size": [128, 128],
+                    "ignore": ignored,
+                    "exclude": excluded,
+                },
+            ),
+            (
+                "fp8_per_channel",
+                {
+                    "quant_method": "compressed-tensors",
+                    "config_groups": {
+                        "group_0": {
+                            "weights": {
+                                "type": "float",
+                                "num_bits": 8,
+                                "strategy": "channel",
+                            },
+                            "input_activations": {"dynamic": True},
+                        }
+                    },
+                    "ignore": ignored,
+                    "exclude": excluded,
+                },
+            ),
+            (
+                "fp8_per_channel",
+                {
+                    "quant_method": "quark",
+                    "global_quant_config": {
+                        "weight": {
+                            "dtype": "fp8_e4m3",
+                            "qscheme": "per_channel",
+                        }
+                    },
+                    "ignore": ignored,
+                    "exclude": excluded,
+                },
+            ),
+            (
+                "",
+                {
+                    "quant_method": "awq",
+                    "bits": 4,
+                    "group_size": 128,
+                    "ignore": ignored,
+                    "exclude": excluded,
+                },
+            ),
+        )
+
+        for expected_method, quantization_config in cases:
+            with self.subTest(
+                method=expected_method
+            ), tempfile.TemporaryDirectory() as path:
+                with open(f"{path}/config.json", "w") as output:
+                    json.dump({"quantization_config": quantization_config}, output)
+                source_config = SourceQuantizationConfig.load_from_ckpt(path)
+
+                self.assertEqual(
+                    source_config.get_runtime_method_key(), expected_method
+                )
+                self.assertEqual(source_config.ignored_layers, ignored)
+                self.assertEqual(source_config.exclude_modules, {excluded})
+
+    def test_checkpoint_ignore_reaches_real_newloader_projection(self):
+        ignored = [
+            "model.layers.0.self_attn.q_proj",
+            "model.layers.0.self_attn.k_proj",
+            "model.layers.0.self_attn.v_proj",
+            "model.layers.0.self_attn.o_proj",
+            "model.layers.0.mlp.gate_proj",
+            "model.layers.0.mlp.up_proj",
+            "lm_head",
+        ]
+        excluded = "model.layers.0.mlp.down_proj"
+        config = _model_config()
+        base_model = object.__new__(BaseModel)
+        base_model.model_config = config
+        base_model.parallelism_config = _parallelism_config()
+        base_model.force_cpu_load_weights = False
+        base_model.load_method = LoadMethod.SCRATCH
+        base_model.fmha_config = None
+        base_model.device_resource_config = None
+        base_model.tokenizer = None
+        base_model.hw_kernel_config = types.SimpleNamespace(enable_cuda_graph=False)
+
+        with tempfile.TemporaryDirectory() as model_path:
+            with open(f"{model_path}/config.json", "w") as output:
+                json.dump(
+                    {
+                        "quantization_config": {
+                            "quant_method": "compressed-tensors",
+                            "config_groups": {
+                                "group_0": {
+                                    "weights": {
+                                        "type": "float",
+                                        "num_bits": 8,
+                                        "strategy": "tensor",
+                                    },
+                                    "input_activations": {"dynamic": True},
+                                }
+                            },
+                            "ignore": ignored,
+                            "exclude": excluded,
+                        }
+                    },
+                    output,
+                )
+            source_config = SourceQuantizationConfig.load_from_ckpt(model_path)
+            self.assertEqual(source_config.ignored_layers, ignored)
+            self.assertEqual(source_config.exclude_modules, {excluded})
+            config.quant_config = source_config
+            config.ckpt_path = model_path
+            save_file(_weights(), f"{model_path}/model.safetensors")
+
+            with patch.object(
+                BaseModel, "_get_device_str", return_value="cpu"
+            ), patch.object(
+                BaseModel, "_init_custom_module", return_value=None
+            ), patch.dict(
+                os.environ, {"USE_NEW_LOADER": "1"}, clear=False
+            ):
+                base_model.load()
+
+        layer = base_model.py_model.layers[0]
+        self.assertIsInstance(
+            layer.self_attn.o_proj.quant_method, UnquantizedLinearMethod
+        )
+        self.assertIsInstance(layer.mlp.down_proj.quant_method, UnquantizedLinearMethod)
+
     def test_quant_config_without_runtime_method_is_rejected(self):
         base_model = object.__new__(BaseModel)
         base_model.model_config = _model_config()
