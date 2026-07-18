@@ -87,6 +87,10 @@ DecodeRpcServer::~DecodeRpcServer() {
     }
 }
 
+size_t DecodeRpcServer::activeCacheTransferCount() {
+    return RemoteRpcServer::activeCacheTransferCount() + onflight_load_cache_requests_.load(std::memory_order_relaxed);
+}
+
 void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     decode_context.time_info.updateRequestBegineTime();
@@ -288,8 +292,9 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", decode_context.request_key.c_str());
 }
 
-BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
-    const LoadKVCacheContext& load_context, int index, const std::vector<std::string>& peer_addrs) const {
+BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
+                                                                   int                             index,
+                                                                   const std::vector<std::string>& peer_addrs) const {
     BroadcastLoadRequestPB request;
     request.set_request_id(load_context.request_id);
     request.set_request_key(load_context.request_key);
@@ -312,9 +317,11 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
         int group_num = peer_addrs.size() / resource_.workers.size();
         request.add_peer_addrs(peer_addrs[index * group_num]);
     }
+
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
     }
+    // Prefer per-group block ids if available (hybrid KV cache).
     if (!load_context.block_ids_by_group.empty()) {
         for (const auto& group_block : load_context.block_ids_by_group) {
             auto* row = request.add_group_block_ids();
@@ -328,9 +335,8 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     return request;
 }
 
-BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
-                                                                   int                             index,
-                                                                   const std::vector<std::string>& peer_addrs) const {
+BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
+    const LoadKVCacheContext& load_context, int index, const std::vector<std::string>& peer_addrs) const {
     BroadcastLoadRequestPB request;
     request.set_request_id(load_context.request_id);
     request.set_request_key(load_context.request_key);
@@ -366,11 +372,9 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
             }
         }
     }
-
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
     }
-    // Prefer per-group block ids if available (hybrid KV cache).
     if (!load_context.block_ids_by_group.empty()) {
         for (const auto& group_block : load_context.block_ids_by_group) {
             auto* row = request.add_group_block_ids();
@@ -787,7 +791,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         return group_tokens > 0
                && group_tokens == cfg.seq_size_per_block * static_cast<size_t>(load_context.prefill_cp_size);
     };
-    auto blockPositionsForLoad = [&](size_t            block_num,
+    auto blockPositionsForLoad = [&](size_t             block_num,
                                      const CacheConfig& cfg,
                                      bool               cfg_use_hybrid,
                                      CacheGroupType     group_type,
@@ -815,8 +819,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         const size_t cp_size        = static_cast<size_t>(load_context.prefill_cp_size);
         const size_t compact_blocks = (block_num + cp_size - 1) / cp_size;
         const size_t reuse_blocks   = static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0));
-        const size_t start          = cfg_use_hybrid ? (compact_blocks > 2 ? compact_blocks - 2 : 0) :
-                                                       std::min(reuse_blocks, compact_blocks);
+        const size_t start =
+            cfg_use_hybrid ? (compact_blocks > 2 ? compact_blocks - 2 : 0) : std::min(reuse_blocks, compact_blocks);
         block_pos_list.reserve(compact_blocks - start);
         for (size_t compact_pos = start; compact_pos < compact_blocks; ++compact_pos) {
             block_pos_list.push_back(std::min((compact_pos + 1) * cp_size - 1, block_num - 1));
@@ -824,11 +828,11 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         return block_pos_list;
     };
     auto cacheKeyIndexForBlock = [&](const CacheConfig& cfg,
-                                     KVCacheRegionName region_name,
-                                     size_t            gid,
-                                     size_t            block_pos,
-                                     size_t            cache_key_count,
-                                     size_t&           cache_key_index) {
+                                     KVCacheRegionName  region_name,
+                                     size_t             gid,
+                                     size_t             block_pos,
+                                     size_t             cache_key_count,
+                                     size_t&            cache_key_index) {
         if (cache_key_count == 0) {
             return false;
         }
@@ -888,8 +892,12 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         continue;
                     }
                     size_t cache_key_index = 0;
-                    if (!cacheKeyIndexForBlock(
-                            cache_config, region_name, gid, block_pos, load_context.cache_keys.size(), cache_key_index)) {
+                    if (!cacheKeyIndexForBlock(cache_config,
+                                               region_name,
+                                               gid,
+                                               block_pos,
+                                               load_context.cache_keys.size(),
+                                               cache_key_index)) {
                         continue;
                     }
                     auto cache_key = makeCacheKey(
@@ -1012,9 +1020,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 region_name = mtp_cache_cfg.group_region_names[gid];
                             }
                             CacheGroupType group_type     = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
-                            auto block_pos_list =
-                                blockPositionsForLoad(
-                                    block_num, mtp_cache_cfg, mtp_use_hybrid, group_type, region_name, gid);
+                            auto           block_pos_list = blockPositionsForLoad(
+                                block_num, mtp_cache_cfg, mtp_use_hybrid, group_type, region_name, gid);
 
                             if (!shouldLoadGroupFromPeer(group_type, region_name, i)) {
                                 continue;
@@ -1135,6 +1142,11 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                          const BroadcastLoadRequestPB* request,
                                          BroadcastLoadResponsePB*      response) {
     RTP_LLM_PROFILE_FUNCTION();
+    auto admission = acquireAdmission();
+    if (!admission.detail.admitted) {
+        return AdmissionGate::toGrpcStatus(admission.detail);
+    }
+    auto admission_lease = std::move(admission.lease);
     if (request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
         RTP_LLM_LOG_WARNING("only load when in dp group, skip load for dp rank %d", request->dp_rank());
         return grpc::Status::OK;
@@ -1178,8 +1190,14 @@ grpc::Status DecodeRpcServer::allocateResourceFunc(DecodeGenerateContext& decode
 
 grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context, ServerStream* grpc_stream) {
     RTP_LLM_PROFILE_FUNCTION();
-    AtomicGuard      request_guard(onflight_requests_);
-    DecodeRpcContext rpc_context{grpc_stream};
+    auto admission = acquireAdmission();
+    if (!admission.detail.admitted) {
+        return AdmissionGate::toGrpcStatus(admission.detail);
+    }
+    auto               admission_lease = std::move(admission.lease);
+    c10::InferenceMode inference_guard(true);
+    AtomicGuard        request_guard(onflight_requests_);
+    DecodeRpcContext   rpc_context{grpc_stream};
     // TODO(xinfei.sxf) request id is 0 here
     auto decode_context              = DecodeGenerateContext(rpc_context, 0, server_context, metrics_reporter_, meta_);
     decode_context.onflight_requests = onflight_requests_;

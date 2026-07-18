@@ -34,6 +34,17 @@ py_test(
     ],
 )
 
+py_test(
+    name = "database_fastsafetensors_region_test",
+    srcs = [
+        "database_fastsafetensors_region_test.py",
+    ],
+    deps = [
+        "//rtp_llm:lora",
+        "//rtp_llm:utils",
+    ],
+)
+
 
 py_test(
     name = "util_test",

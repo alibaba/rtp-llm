@@ -17,7 +17,10 @@ from rtp_llm.config.server_config_setup import (
     maybe_write_jit_cache_to_remote,
     setup_and_configure_server,
 )
-from rtp_llm.ops import RoleType, SpeculativeType
+from rtp_llm.model_loader.weight_memory_saver import (
+    start_configured_process as start_memory_saver_configured_process,
+)
+from rtp_llm.ops import RoleType, SpeculativeType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import (
@@ -122,7 +125,9 @@ def start_backend_server_impl(
             args=(global_controller, py_env_configs, pipe_writer),
             name="backend_manager",
         )
-        backend_process.start()
+        # Start under the weight-memory-saver preload context (sleep level-2)
+        # when configured; otherwise this is a plain process.start().
+        start_memory_saver_configured_process(backend_process)
     finally:
         if old_defer is None:
             os.environ.pop(DEFER_FIRST_SIGTERM_ENV, None)

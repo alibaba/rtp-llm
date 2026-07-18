@@ -26,19 +26,19 @@ struct PrefillStatInfo {
         finish                 = 10
     };
 
-    int64_t      begin_time                     = 0;
-    int64_t      get_rpc_connection_rt_us       = 0;
-    int64_t      multimodal_process_rt_us       = 0;
-    int64_t      remote_allocate_resource_rt_us = 0;
-    int64_t      enqueue_request_rt_us          = 0;
-    int64_t      remote_load_cache_start_rt_us  = 0;
-    int64_t      remote_load_cache_wait_stream_rt_us = 0;
+    int64_t      begin_time                            = 0;
+    int64_t      get_rpc_connection_rt_us              = 0;
+    int64_t      multimodal_process_rt_us              = 0;
+    int64_t      remote_allocate_resource_rt_us        = 0;
+    int64_t      enqueue_request_rt_us                 = 0;
+    int64_t      remote_load_cache_start_rt_us         = 0;
+    int64_t      remote_load_cache_wait_stream_rt_us   = 0;
     int64_t      remote_load_cache_write_request_rt_us = 0;
-    int64_t      poll_local_output_rt_us        = 0;
-    int64_t      remote_load_cache_end_rt_us    = 0;
-    int64_t      remote_generate_rt_us          = 0;
-    int64_t      poll_remote_output_rt_us       = 0;
-    ExecuteStage stage                          = start;
+    int64_t      poll_local_output_rt_us               = 0;
+    int64_t      remote_load_cache_end_rt_us           = 0;
+    int64_t      remote_generate_rt_us                 = 0;
+    int64_t      poll_remote_output_rt_us              = 0;
+    ExecuteStage stage                                 = start;
 
     ExecuteStage saveStage() const;
     void         restoreStage(ExecuteStage stage);
@@ -74,9 +74,12 @@ public:
     void         closeGrpcConnection();
 
 private:
-    void markRequestEnd();
-    void reportTime();
-    void stopStream();
+    int64_t requestIdForCacheStore() const;
+    void    markLocalRequestEnd(int64_t request_id);
+    void    markRemoteWorkersRequestEnd(int64_t request_id);
+    void    markRequestEnd();
+    void    reportTime();
+    void    stopStream();
 
 public:
     typedef grpc::ClientReaderWriter<GenerateRequestPB, GenerateOutputsPB> ClientStream;

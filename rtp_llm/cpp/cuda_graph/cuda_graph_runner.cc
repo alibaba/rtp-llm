@@ -5,6 +5,7 @@
 #include <cstring>
 #include <string>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -40,6 +41,44 @@ private:
     bool        had_old_value_ = false;
     std::string old_value_;
 };
+
+constexpr const char* kCudaGraphVmmTag = "cuda_graph";
+
+class CudaGraphVmmRegionGuard {
+public:
+    CudaGraphVmmRegionGuard() {
+        if (!vmm_backend_.isAvailable()) {
+            return;
+        }
+        // Only allocations made while CUDA stream capture is active may carry
+        // this tag. Tagging warmup/default-pool allocations makes empty_cache()
+        // try to release ranges that VMM pause has already unmapped.
+        active_ = vmm_backend_.beginAllocationRegion(kCudaGraphVmmTag, true);
+        if (active_) {
+            RTP_LLM_LOG_INFO("CUDA graph allocations are tagged under VMM tag '%s'", kCudaGraphVmmTag);
+        }
+    }
+
+    ~CudaGraphVmmRegionGuard() {
+        if (active_) {
+            vmm_backend_.endAllocationRegion();
+        }
+    }
+
+    CudaGraphVmmRegionGuard(const CudaGraphVmmRegionGuard&)            = delete;
+    CudaGraphVmmRegionGuard& operator=(const CudaGraphVmmRegionGuard&) = delete;
+
+private:
+    VmmBackend vmm_backend_;
+    bool       active_{false};
+};
+
+void prepareCudaGraphVmmCapture() {
+    VmmBackend vmm_backend;
+    if (vmm_backend.isAvailable()) {
+        cuda_graph::graphEmptyCache();
+    }
+}
 
 }  // namespace
 
@@ -519,7 +558,8 @@ bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, 
     state.current_batch_size = inputs.attention_inputs.input_lengths.size(0);
     state.current_seq_len    = inferTotalTokensNoSync(inputs);
     if (state.current_seq_len <= 0) {
-        RTP_LLM_CHECK_WITH_INFO(false, "prefill cuda graph: cannot infer total tokens without CPU sync, fallback to normal run");
+        RTP_LLM_CHECK_WITH_INFO(
+            false, "prefill cuda graph: cannot infer total tokens without CPU sync, fallback to normal run");
         return false;
     }
     if (capture_range_.empty()) {
@@ -619,9 +659,9 @@ void CudaGraphRunner::initKernelInternalMemory() {
         torch::zeros({int(max_bs_ + 1)}, torch::TensorOptions(torch::kInt32).device(torch::kCPU)).pin_memory();
     torch::Tensor cu_kv_seqlens =
         torch::zeros({int(max_bs_ + 1)}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
-    auto input_lengths  = capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths;
-    input_lengths       = input_lengths.is_cuda() ? input_lengths.cpu() : input_lengths;
-    auto prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
+    auto input_lengths            = capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths;
+    input_lengths                 = input_lengths.is_cuda() ? input_lengths.cpu() : input_lengths;
+    auto       prefix_lengths     = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
     const bool has_prefix_lengths = prefix_lengths.defined() && prefix_lengths.numel() > 0;
     prefix_lengths = has_prefix_lengths && prefix_lengths.is_cuda() ? prefix_lengths.cpu() : prefix_lengths;
 
@@ -772,6 +812,7 @@ void CudaGraphRunner::logCudaGraphPoolMemory(const char* phase) {
 
 void CudaGraphRunner::initCapture() {
     if (enable_cuda_graph_) {
+        prepareCudaGraphVmmCapture();
         RTP_LLM_LOG_INFO("CUDA graph capture is enabled");
         shared_graph_pool_ = cuda_graph::graphPoolHandle();
         if (is_prefill_cuda_graph_mode_) {
@@ -786,13 +827,12 @@ void CudaGraphRunner::initCapture() {
 
         PyModelInputs inputs;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
-        inputs.input_ids     = torch::zeros({max_num_token_}, options_cuda_int32_);
+        inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
         // DSv4 MTP draft consumes the target's pre-hc residual ([T, hc*dim])
         // as input_hiddens; for everyone else hc_mult_ == 1 so this matches
         // the post-reduce hidden size. The output tensor below stays at
         // hidden_size_ (post-reduce) regardless.
-        inputs.input_hiddens =
-            torch::zeros({max_num_token_, hidden_size_ * hc_mult_}, options_cuda_float_);
+        inputs.input_hiddens = torch::zeros({max_num_token_, hidden_size_ * hc_mult_}, options_cuda_float_);
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
 
@@ -904,15 +944,19 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         PyModelOutputs outputs;
         {
             cuda_graph::graphCaptureBegin(graph, shared_graph_pool_);
-            CudaGraphCaptureGuard capture_guard;
-            try {
-                auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
-                outputs             = py_outputs_obj.cast<PyModelOutputs>();
-            } catch (const py::error_already_set& e) {
-                RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
-                throw;
+            cuda_graph::GraphNcclCaptureContext capture_ctx;
+            CudaGraphCaptureGuard               capture_guard(&capture_ctx);
+            {
+                CudaGraphVmmRegionGuard vmm_region_guard;
+                try {
+                    auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
+                    outputs             = py_outputs_obj.cast<PyModelOutputs>();
+                } catch (const py::error_already_set& e) {
+                    RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
+                    throw;
+                }
+                graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
             }
-            graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
             graph.capture_end();
         }
 
@@ -953,12 +997,10 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     // the ``view(T, hc, dim)`` reshape.  Embedding prefill (num_tokens_per_bs_
     // == max_seq_len_) still slices to seq_len because it goes through
     // ``forward_prefill`` which expects flat ``T = input_ids.numel()``.
-    const bool draft_prefill_graph_mode =
-        is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
-    const int token_slice_len =
-        draft_prefill_graph_mode ? max_bs_ * num_tokens_per_bs_ : seq_len_or_tokens;
-    inputs.input_ids     = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
-    inputs.input_hiddens = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
+    const bool draft_prefill_graph_mode = is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
+    const int  token_slice_len          = draft_prefill_graph_mode ? max_bs_ * num_tokens_per_bs_ : seq_len_or_tokens;
+    inputs.input_ids                    = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
+    inputs.input_hiddens                = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
     inputs.attention_inputs.padding_offset =

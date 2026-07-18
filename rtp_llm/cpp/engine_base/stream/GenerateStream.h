@@ -249,14 +249,14 @@ public:
                                 ErrorCode               error_code = ErrorCode::NONE_ERROR,
                                 const std::string&      error_msg  = "");
 
-    void         reportError(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
+    virtual void reportError(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
     bool         hasEvent(StreamEvents::EventType event) const;
     virtual bool hasError() const;
     ErrorInfo    statusInfo();
     std::string  stopReason();
 
-    void        setReserveStep(size_t reserve_step);
-    size_t      reserveStep() const {
+    void   setReserveStep(size_t reserve_step);
+    size_t reserveStep() const {
         return reserve_step_;
     }
     StreamState moveToNext();
@@ -704,15 +704,15 @@ protected:
     int64_t                               vocab_size_;
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
     int64_t                               begin_time_us_;
-    int64_t                               wait_time_us_ = 0;
-    bool                                  metrics_reported_ = false;
-    int64_t                               scheduler_enqueue_time_us_ = 0;
-    int64_t                               can_run_time_us_ = 0;
+    int64_t                               wait_time_us_                = 0;
+    bool                                  metrics_reported_            = false;
+    int64_t                               scheduler_enqueue_time_us_   = 0;
+    int64_t                               can_run_time_us_             = 0;
     int64_t                               loading_cache_start_time_us_ = 0;
-    int64_t                               loading_cache_done_time_us_ = 0;
-    int64_t                               first_running_time_us_ = 0;
-    int64_t                               loading_cache_latency_us_ = 0;
-    int64_t                               load_done_to_running_us_ = 0;
+    int64_t                               loading_cache_done_time_us_  = 0;
+    int64_t                               first_running_time_us_       = 0;
+    int64_t                               loading_cache_latency_us_    = 0;
+    int64_t                               load_done_to_running_us_     = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;
     size_t                                iter_count_           = 0;
@@ -795,10 +795,10 @@ protected:
     // Stream-async device-resident state for the next decode step's prepare.
     // These structs stay default-constructed (epoch=0, undefined tensors) until
     // their corresponding async/sync publisher installs a usable state.
-    MtpAsyncDeviceState    mtp_async_state_;
-    uint64_t               mtp_async_epoch_counter_ = 0;
-    NormalAsyncDeviceState normal_async_state_;
-    uint64_t               normal_async_epoch_counter_ = 0;
+    MtpAsyncDeviceState                mtp_async_state_;
+    uint64_t                           mtp_async_epoch_counter_ = 0;
+    NormalAsyncDeviceState             normal_async_state_;
+    uint64_t                           normal_async_epoch_counter_       = 0;
     std::shared_ptr<std::atomic<bool>> grpc_normal_device_state_pending_ = std::make_shared<std::atomic<bool>>(false);
 
     bool return_all_hidden_states_ = false;

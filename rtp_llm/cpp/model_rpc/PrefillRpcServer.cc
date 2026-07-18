@@ -335,7 +335,7 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
 void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
-    auto start_time_us = currentTimeUs();
+    auto start_time_us         = currentTimeUs();
     prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
     prefill_context.stat_info.remote_load_cache_wait_stream_rt_us += currentTimeUs() - start_time_us;
     if (prefill_context.error_info.hasError()) {
@@ -554,9 +554,15 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         return LocalRpcServer::GenerateStreamCall(server_context, request, writer);
     }
 
-    AtomicGuardPtr request_guard = make_shared<AtomicGuard>(onflight_requests_);
-    RPCContext     rpc_context{request, writer};
-    auto           prefill_context         = PrefillGenerateContext(&this->resource(),
+    auto admission = acquireAdmission();
+    if (!admission.detail.admitted) {
+        return AdmissionGate::toGrpcStatus(admission.detail);
+    }
+    auto               admission_lease = std::move(admission.lease);
+    c10::InferenceMode inference_guard(true);
+    AtomicGuardPtr     request_guard = make_shared<AtomicGuard>(onflight_requests_);
+    RPCContext         rpc_context{request, writer};
+    auto               prefill_context     = PrefillGenerateContext(&this->resource(),
                                                   rpc_context,
                                                   request->generate_config().timeout_ms(),
                                                   server_context,

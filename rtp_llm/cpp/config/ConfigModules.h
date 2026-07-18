@@ -175,17 +175,17 @@ struct KVCacheConfig {
     bool        enable_device_cache       = true;
     bool        enable_memory_cache       = false;
     // When true, memory-cache H2D/D2H may use split-KV SM scatter/gather (CUDA) when layout is eligible.
-    bool    enable_memory_cache_sm_copy  = false;
-    bool    enable_remote_cache          = false;
-    bool    write_cache_sync             = false;
-    bool    enable_tiered_memory_cache   = false;
-    bool    enable_gpu_prefix_tree       = true;
-    bool    enable_prefix_tree_memory_cache = true;
-    bool    enable_legacy_memory_connector_fallback = true;
-    int64_t prefix_tree_memory_state_swa_pool_ratio = 0;
+    bool    enable_memory_cache_sm_copy                  = false;
+    bool    enable_remote_cache                          = false;
+    bool    write_cache_sync                             = false;
+    bool    enable_tiered_memory_cache                   = false;
+    bool    enable_gpu_prefix_tree                       = true;
+    bool    enable_prefix_tree_memory_cache              = true;
+    bool    enable_legacy_memory_connector_fallback      = true;
+    int64_t prefix_tree_memory_state_swa_pool_ratio      = 0;
     bool    enable_dsv4_state_block_independent_eviction = false;
-    int64_t device_cache_min_free_blocks = 0;
-    int     load_cache_retry_times       = 1;  // Maximum retry attempts for load cache transfer failures
+    int64_t device_cache_min_free_blocks                 = 0;
+    int     load_cache_retry_times = 1;  // Maximum retry attempts for load cache transfer failures
 
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
     // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
@@ -371,9 +371,9 @@ struct BatchDecodeSchedulerConfig {
 };
 
 struct FIFOSchedulerConfig {
-    int64_t     max_context_batch_size       = 1;
-    int64_t     max_batch_tokens_size        = 0;
-    bool        cp_force_single_prefill      = true;
+    int64_t     max_context_batch_size      = 1;
+    int64_t     max_batch_tokens_size       = 0;
+    bool        cp_force_single_prefill     = true;
     int64_t     max_inited_kv_cache_streams = 0;
     std::string to_string() const;
 };
@@ -395,6 +395,13 @@ struct RuntimeConfig {
     int64_t reserve_runtime_mem_mb = 0;
     bool    warm_up                = false;
     bool    warm_up_with_loss      = false;
+    bool    enable_sleep_mode      = false;
+    // Startup-selected sleep level for this process (torch_memory_saver binds the
+    // weights region's cpu_backup at allocation time, so the level cannot change per
+    // request). 1 = weights backed to pinned host on sleep (fast wake, holds host
+    // RAM). 2 = weights discarded entirely (frees GPU + host); wake reloads them from
+    // a local-disk raw backup. A /sleep request's level must match this value.
+    int64_t sleep_mode_level = 1;
 
     // Scheduler configuration
     bool                       use_batch_decode_scheduler = false;

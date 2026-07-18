@@ -69,6 +69,19 @@ std::optional<BlockCache::CacheItem> BlockCache::remove(CacheKeyType cache_key, 
     return removed_item;
 }
 
+void BlockCache::clear() {
+    std::lock_guard<std::mutex> lock(mu_);
+    const size_t                dropped = lru_cache_.size();
+    lru_cache_.clear();
+    generation_++;
+    RTP_LLM_LOG_INFO("BlockCache cleared: dropped_items=%zu, generation=%lu", dropped, generation_);
+}
+
+uint64_t BlockCache::generation() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return generation_;
+}
+
 bool BlockCache::empty() const {
     std::lock_guard<std::mutex> lock(mu_);
     return lru_cache_.empty();

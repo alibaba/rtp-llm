@@ -82,7 +82,10 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_types",
+        ":kv_cache_physical_memory_controller",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:lru_cache",
         "//rtp_llm/cpp/utils:profiling_scope",
@@ -137,6 +140,22 @@ cc_library(
         ":cp_slot_mapper",
         ":recent_cache_key_window",
         "//rtp_llm/cpp/metrics",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+)
+
+cc_library(
+    name = "kv_cache_physical_memory_controller",
+    srcs = [
+        "KVCachePhysicalMemoryController.cc",
+    ],
+    hdrs = [
+        "KVCachePhysicalMemoryController.h",
+    ],
+    copts = copts(),
+    linkopts = ["-ldl"],
+    visibility = ["//visibility:public"],
+    deps = [
         "//rtp_llm/cpp/utils:core_utils",
     ],
 )
@@ -297,6 +316,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_core",
+        ":kv_cache_physical_memory_controller",
         "//rtp_llm/cpp/cache/connector",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",

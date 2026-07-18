@@ -93,6 +93,7 @@ public:
     }
 
     virtual void                    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
+    virtual void                    deregUserMr();
     virtual int64_t                 getMrCostTimeMs() const;
     virtual size_t                  freeBlocksNum() const;
     virtual size_t                  availableBlocksNum() const;

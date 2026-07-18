@@ -396,6 +396,8 @@ std::string RuntimeConfig::to_string() const {
         << "reserve_runtime_mem_mb: " << reserve_runtime_mem_mb << "\n"
         << "warm_up: " << warm_up << "\n"
         << "warm_up_with_loss: " << warm_up_with_loss << "\n"
+        << "enable_sleep_mode: " << enable_sleep_mode << "\n"
+        << "sleep_mode_level: " << sleep_mode_level << "\n"
         << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
         << "use_gather_batch_scheduler: " << use_gather_batch_scheduler << "\n"
         << "batch_decode_scheduler_config: {\n"

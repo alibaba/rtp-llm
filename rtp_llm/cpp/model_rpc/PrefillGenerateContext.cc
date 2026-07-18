@@ -121,24 +121,32 @@ void PrefillGenerateContext::nextStage() {
     stat_info.nextStage();
 }
 
-void PrefillGenerateContext::markRequestEnd() {
-    int64_t real_id = request_id;
+int64_t PrefillGenerateContext::requestIdForCacheStore() const {
     if (stream_) {
-        real_id = stream_->streamId();
+        return stream_->streamId();
     }
-    if (!resource->isTensorParallel()) {
-        resource->cache_store->markRequestEnd(std::to_string(real_id));
+    return request_id;
+}
+
+void PrefillGenerateContext::markLocalRequestEnd(int64_t request_id) {
+    if (resource && resource->cache_store) {
+        resource->cache_store->markRequestEnd(std::to_string(request_id));
+    }
+}
+
+void PrefillGenerateContext::markRemoteWorkersRequestEnd(int64_t request_id) {
+    if (!resource || !resource->isTensorParallel()) {
         return;
     }
     const auto&           prefill_workers = resource->grpc_workers;
     RemoteFinishRequestPB finish_request;
-    finish_request.set_request_id(real_id);
+    finish_request.set_request_id(request_id);
     for (int i = 0; i < prefill_workers.size(); i++) {
         auto& prefill_worker = prefill_workers[i];
         auto  connect_status = resource->rpc_pool.getConnection(prefill_worker);
         if (!connect_status.ok()) {
             RTP_LLM_LOG_WARNING("request [%d], get grpc connection for ip %s failed, ignore markRequestEnd for it",
-                                real_id,
+                                request_id,
                                 prefill_worker.c_str());
             continue;
         }
@@ -148,11 +156,17 @@ void PrefillGenerateContext::markRequestEnd() {
         auto          grpc_status = stub->RemoteFinish(&client_context, finish_request, &response);
         if (!grpc_status.ok()) {
             RTP_LLM_LOG_WARNING("request [%d], remote finish for ip %s failed, ignore markRequestEnd for it",
-                                real_id,
+                                request_id,
                                 prefill_worker.c_str());
             continue;
         }
     }
+}
+
+void PrefillGenerateContext::markRequestEnd() {
+    const auto cache_store_request_id = requestIdForCacheStore();
+    markLocalRequestEnd(cache_store_request_id);
+    markRemoteWorkersRequestEnd(cache_store_request_id);
 }
 
 void PrefillGenerateContext::reportTime() {
@@ -160,18 +174,18 @@ void PrefillGenerateContext::reportTime() {
 
     collectBasicMetrics(collector);
 
-    collector.loading_cache_request          = loading_cache_requests;
-    collector.get_rpc_connection_rt_us       = stat_info.get_rpc_connection_rt_us;
-    collector.remote_allocate_resource_rt_us = stat_info.remote_allocate_resource_rt_us;
-    collector.multimodal_process_rt_us       = stat_info.multimodal_process_rt_us;
-    collector.enqueue_request_rt_us          = stat_info.enqueue_request_rt_us;
-    collector.remote_load_cache_start_rt_us  = stat_info.remote_load_cache_start_rt_us;
-    collector.remote_load_cache_wait_stream_rt_us = stat_info.remote_load_cache_wait_stream_rt_us;
+    collector.loading_cache_request                 = loading_cache_requests;
+    collector.get_rpc_connection_rt_us              = stat_info.get_rpc_connection_rt_us;
+    collector.remote_allocate_resource_rt_us        = stat_info.remote_allocate_resource_rt_us;
+    collector.multimodal_process_rt_us              = stat_info.multimodal_process_rt_us;
+    collector.enqueue_request_rt_us                 = stat_info.enqueue_request_rt_us;
+    collector.remote_load_cache_start_rt_us         = stat_info.remote_load_cache_start_rt_us;
+    collector.remote_load_cache_wait_stream_rt_us   = stat_info.remote_load_cache_wait_stream_rt_us;
     collector.remote_load_cache_write_request_rt_us = stat_info.remote_load_cache_write_request_rt_us;
-    collector.poll_local_output_rt_us        = stat_info.poll_local_output_rt_us;
-    collector.remote_load_cache_end_rt_us    = stat_info.remote_load_cache_end_rt_us;
-    collector.remote_generate_rt_us          = stat_info.remote_generate_rt_us;
-    collector.poll_remote_output_rt_us       = stat_info.poll_remote_output_rt_us;
+    collector.poll_local_output_rt_us               = stat_info.poll_local_output_rt_us;
+    collector.remote_load_cache_end_rt_us           = stat_info.remote_load_cache_end_rt_us;
+    collector.remote_generate_rt_us                 = stat_info.remote_generate_rt_us;
+    collector.poll_remote_output_rt_us              = stat_info.poll_remote_output_rt_us;
 
     reportMetrics(collector);
     metrics_reporter.reset();  // avoid to report metrics in base class

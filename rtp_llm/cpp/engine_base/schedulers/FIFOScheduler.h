@@ -37,6 +37,7 @@ public:
     std::vector<std::shared_ptr<GenerateStream>> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override;
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
     absl::Status                                 stop() override;
+    void                                         wake() override;
     bool                                         empty() override;
 
     void reportMetrics();
@@ -51,14 +52,14 @@ public:
 
 private:
     int64_t lastScheduleTime() override;
-    bool evaluateRunningBatch(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
+    bool   evaluateRunningBatch(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
     size_t countInitedKVCacheStreams() const;
-    void accountBatchMetrics(const GenerateStreamPtr& new_stream);
-    bool waitPredicate();
-    void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
-    void evaluateWaitingStreams(std::list<GenerateStreamPtr>& streams);
-    void cancelStreams(std::list<GenerateStreamPtr>& streams);
-    bool checkInputLength(const GenerateStreamPtr& stream);
+    void   accountBatchMetrics(const GenerateStreamPtr& new_stream);
+    bool   waitPredicate();
+    void   addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
+    void   evaluateWaitingStreams(std::list<GenerateStreamPtr>& streams);
+    void   cancelStreams(std::list<GenerateStreamPtr>& streams);
+    bool   checkInputLength(const GenerateStreamPtr& stream);
 
 protected:
     void evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
@@ -71,24 +72,24 @@ protected:
     std::list<GenerateStreamPtr>    running_streams_;
     std::list<GenerateStreamPtr>    new_streams_;
     std::shared_ptr<KVCacheManager> cache_manager_;
-    std::atomic<int64_t>            last_schedule_time_      = autil::TimeUtility::currentTimeInMilliSeconds();
-    size_t                          max_seq_len_                  = 0;
-    size_t                          max_batch_tokens_size_        = 0;
-    size_t                          max_generate_batch_size_      = 1;
-    size_t                          max_inited_kv_cache_streams_  = 0;
-    const bool                      need_fill_fake_stream_        = false;
+    std::atomic<int64_t>            last_schedule_time_          = autil::TimeUtility::currentTimeInMilliSeconds();
+    size_t                          max_seq_len_                 = 0;
+    size_t                          max_batch_tokens_size_       = 0;
+    size_t                          max_generate_batch_size_     = 1;
+    size_t                          max_inited_kv_cache_streams_ = 0;
+    const bool                      need_fill_fake_stream_       = false;
     // Optional guard for Context-Parallel prefill: when enabled, force prefill
     // to one stream per round. This remains the conservative default while
     // newer dsv4 CP paths can opt in to batched prefill through runtime config.
-    const bool                      cp_force_single_prefill_ = false;
-    std::atomic<bool>               stop_                    = false;
-    bool                            schedule_trigger_        = false;
-    std::mutex                      lock_;
-    std::condition_variable         cond_;
-    kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;
-    int64_t                         last_admitted_context_batch_size_ = 0;
-    int64_t                         last_admitted_context_token_size_ = 0;
-    int64_t                         last_waiting_oldest_age_us_       = 0;
+    const bool                   cp_force_single_prefill_ = false;
+    std::atomic<bool>            stop_                    = false;
+    bool                         schedule_trigger_        = false;
+    std::mutex                   lock_;
+    std::condition_variable      cond_;
+    kmonitor::MetricsReporterPtr metrics_reporter_                 = nullptr;
+    int64_t                      last_admitted_context_batch_size_ = 0;
+    int64_t                      last_admitted_context_token_size_ = 0;
+    int64_t                      last_waiting_oldest_age_us_       = 0;
 
     std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo> running_task_list_;

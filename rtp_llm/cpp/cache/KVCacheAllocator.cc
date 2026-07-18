@@ -51,8 +51,7 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
             if (malloc_info.batch_kv_cache_resource) {
                 const auto& cache_keys      = malloc_info.batch_kv_cache_resource->cacheKeys(0);
                 size_t      match_keys_size = cache_keys.size();
-                device_input_length =
-                    static_cast<int64_t>(match_keys_size) * deviceCacheMetricTokensPerBlock();
+                device_input_length         = static_cast<int64_t>(match_keys_size) * deviceCacheMetricTokensPerBlock();
             }
 
             if (device_input_length > 0) {
@@ -264,8 +263,8 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
         batch_resource->mutableBlockIds(0, gid).resize(evict_result.evicted_keys.size(), NULL_BLOCK_IDX);
     }
 
-    CacheKeysType          evicted_keys;
-    BlockDependenciesType  evicted_dependencies;
+    CacheKeysType         evicted_keys;
+    BlockDependenciesType evicted_dependencies;
     evicted_keys.reserve(evict_result.evicted_keys.size());
     evicted_dependencies.reserve(evict_result.evicted_keys.size());
     for (size_t evicted_idx = 0; evicted_idx < evict_result.evicted_keys.size(); ++evicted_idx) {
@@ -386,6 +385,12 @@ int KVCacheAllocator::deviceCacheMetricTokensPerBlock() const {
 void KVCacheAllocator::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
     if (block_pool_) {
         block_pool_->regUserMr(model_id, std::move(cache_store));
+    }
+}
+
+void KVCacheAllocator::deregUserMr() {
+    if (block_pool_) {
+        block_pool_->deregUserMr();
     }
 }
 

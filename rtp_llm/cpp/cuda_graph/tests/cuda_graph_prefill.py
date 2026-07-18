@@ -9,10 +9,21 @@ import rtp_llm.models
 from rtp_llm.cpp.cuda_graph.tests.cuda_graph_test_utils import (
     CudaGraphTestModelBuilder,
     ModelBuildConfig,
+    use_synthetic_cuda_graph_model,
 )
 from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import CudaGraphRunner
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs, get_typemeta
+
+
+def _resolve_model_path() -> str:
+    return os.environ.get(
+        "RTP_LLM_CUDA_GRAPH_PREFILL_MODEL_PATH",
+        os.environ.get(
+            "RTP_LLM_CUDA_GRAPH_TEST_MODEL_PATH",
+            "/mnt/nas1/hf/gte-Qwen2-7B-instruct/",
+        ),
+    )
 
 
 class TestCudaGraphPrefill(unittest.TestCase):
@@ -32,10 +43,21 @@ class TestCudaGraphPrefill(unittest.TestCase):
         # Generate prefill_capture_seq_lens
         self.prefill_capture_seq_lens = self._generate_prefill_capture_seq_lens()
 
-        # Build model using shared model builder (only load 1 layer for test)
+        # Build model using shared model builder (only load 1 layer for test).
+        # The default path is an integration-test convention; local/Bazel runs
+        # can override it.
+        model_path = _resolve_model_path()
+        if not use_synthetic_cuda_graph_model() and not os.path.isdir(model_path):
+            raise unittest.SkipTest(
+                f"CUDA graph prefill test model path does not exist: {model_path}; "
+                "set RTP_LLM_CUDA_GRAPH_PREFILL_MODEL_PATH or "
+                "RTP_LLM_CUDA_GRAPH_TEST_MODEL_PATH, or set "
+                "RTP_LLM_CUDA_GRAPH_USE_SYNTHETIC_MODEL=1 for local "
+                "CudaGraphRunner coverage"
+            )
         self.model_builder = CudaGraphTestModelBuilder(
             ModelBuildConfig(
-                model_path="/mnt/nas1/hf/gte-Qwen2-7B-instruct/",
+                model_path=model_path,
                 tokens_per_block=self.tokens_per_block,
                 device=self.device,
                 act_type="BF16",

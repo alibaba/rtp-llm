@@ -27,7 +27,8 @@ public:
     virtual absl::StatusOr<std::list<GenerateStreamPtr>> scheduleConservative(int /*propose_step*/) {
         return schedule();
     }
-    virtual absl::Status stop()             = 0;
+    virtual absl::Status stop() = 0;
+    virtual void         wake() {}
     virtual bool         empty()            = 0;
     virtual int64_t      lastScheduleTime() = 0;
     virtual int64_t      onflightStreams()  = 0;
