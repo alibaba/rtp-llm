@@ -1,3 +1,4 @@
+import logging
 from typing import Dict, List, Union
 
 from smoke.case_runner import CaseRunner

@@ -191,6 +191,7 @@ class BaseAttentionTest(unittest.TestCase):
         sequence_lengths: List[int],
         seq_size_per_block: int,
         dtype: torch.dtype = torch.float16,
+        with_kv_cache_block_ids: bool = True,
     ) -> PyAttentionInputs:
         """Helper to create PyAttentionInputs for prefill mode
 
@@ -199,6 +200,7 @@ class BaseAttentionTest(unittest.TestCase):
             sequence_lengths: List of sequence lengths for each batch item
             seq_size_per_block: Number of tokens per block (page size)
             dtype: Data type for attention computation (default: torch.float16)
+            with_kv_cache_block_ids: Whether to populate paged KV cache block IDs
 
         Returns:
             PyAttentionInputs configured for prefill mode
@@ -223,14 +225,16 @@ class BaseAttentionTest(unittest.TestCase):
             batch_size, dtype=torch.int32, device="cpu"
         )
 
-        # Create KV cache block IDs using the extracted helper
-        kv_cache_block_id = self._create_kv_cache_block_ids(
-            batch_size, sequence_lengths, seq_size_per_block
-        )
-        attn_inputs.kv_cache_block_id = kv_cache_block_id
-        attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
-        attn_inputs.kv_cache_kernel_block_id = kv_cache_block_id
-        attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
+        if with_kv_cache_block_ids:
+            kv_cache_block_id = self._create_kv_cache_block_ids(
+                batch_size, sequence_lengths, seq_size_per_block
+            )
+            attn_inputs.kv_cache_block_id = kv_cache_block_id
+            attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
+            attn_inputs.kv_cache_kernel_block_id = kv_cache_block_id
+            attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(
+                self.device
+            )
 
         # Create cu_seqlens (cumulative sequence lengths) for ragged tensor
         cu_seqlens = [0]

@@ -31,6 +31,9 @@ class AccMetrics(Enum):
     VIT_QPS_METRIC = "py_rtp_vit_qps"
     VIT_ERROR_QPS_METRIC = "py_rtp_vit_error_qps"
     VIT_SUCCESS_QPS_METRIC = "py_rtp_vit_success_qps"
+    # Incremented when a submission is rejected because the scheduler's waiting
+    # queue is full (overload / stalled forward backpressure).
+    VIT_EMBEDDING_OVERLOAD_QPS_METRIC = "py_rtp_vit_embedding_overload_qps"
     VIT_PROCESS_POOL_RESTART_QPS_METRIC = "py_rtp_vit_process_pool_restart_qps"
     VIT_RPC_CLIENT_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_client_error_qps"
     VIT_RPC_SERVER_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_server_error_qps"
@@ -77,6 +80,10 @@ class GaugeMetrics(Enum):
 
     # vit preprocess
     VIT_PREPROCESS_RT_METRIC = "py_rtp_vit_preprocess_rt"
+    # Per-request embedding latency = wait + forward, sampled once per request in
+    # submit_and_wait. Preserves the historical meaning (pre-scheduler this timed
+    # the forward under the embedding lock, i.e. lock-wait + forward per request)
+    # so existing dashboards/alerts are unchanged.
     VIT_EMBEDDING_RT_METRIC = "py_rtp_vit_embedding_rt"
     VIT_RPC_SERVER_HANDLER_RT_US_METRIC = "rtp_llm_vit_rpc_server_handler_rt_us"
     VIT_RPC_SERVER_LIFECYCLE_RT_US_METRIC = "rtp_llm_vit_rpc_server_lifecycle_rt_us"
@@ -94,6 +101,13 @@ class GaugeMetrics(Enum):
     VIT_IMAGE_RESIZE_RT_US_METRIC = "rtp_llm_vit_image_resize_rt_us"
     VIT_IMAGE_PROCESSOR_RT_US_METRIC = "rtp_llm_vit_image_processor_rt_us"
     VIT_RESIZED_PIXEL_COUNT_METRIC = "rtp_llm_vit_resized_pixel_count"
+    # Forward-only latency of one GPU embedding forward (no wait), sampled once
+    # per merged batch in _run_embedding. A NEW name so it doesn't redefine the
+    # historical per-request VIT_EMBEDDING_RT.
+    VIT_EMBEDDING_FORWARD_RT_METRIC = "py_rtp_vit_embedding_forward_rt"
+    # Number of requests merged into one GPU forward by the MMScheduler. 1 on the
+    # serial path (gpu_max_batch_size == 1); > 1 means cross-request batching kicked in.
+    VIT_EMBEDDING_BATCH_SIZE_METRIC = "py_rtp_vit_embedding_batch_size"
 
     # topology KV policy
     TOPOLOGY_KV_POLICY_SCHEDULE_MS_METRIC = "py_rtp_topology_kv_policy_schedule_ms"

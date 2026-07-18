@@ -84,7 +84,7 @@ class MMProfiler:
             self._armed = True
 
             logging.info(
-                f"MMProfiler: armed for {count} requests, output={self._output_path}"
+                f"MMProfiler: armed for {count} forwards, output={self._output_path}"
             )
             return {
                 "status": "started",
@@ -166,11 +166,14 @@ class MMProfiler:
     # ------------------------------------------------------------------ #
 
     @contextmanager
-    def profile_request(self):
-        """Wrap request computation.  If profiling is armed, the request
-        waits for its turn (only one profiled at a time to avoid CUPTI
-        conflicts), then runs with full CPU + GPU tracing on the same
-        worker thread.  Non-profiled requests pass through immediately.
+    def profile_forward(self):
+        """Wrap ONE embedding forward (a batch) on the scheduler thread. If
+        profiling is armed, the forward waits for its turn (only one profiled at a
+        time to avoid CUPTI conflicts), then runs with full CPU + GPU tracing on
+        that thread. Non-profiled forwards pass through immediately.
+
+        NOTE: the unit is per-forward/per-batch (a forward may merge several
+        requests), NOT per-request — start_profile(count) counts forwards.
         """
         with self._lock:
             want_profile = self._armed and self._profiled_count < self._target_count
@@ -194,7 +197,7 @@ class MMProfiler:
         if request_idx is None:
             # Bail out: release the slot BEFORE yielding so that neither lock is
             # held during request execution; otherwise start/end/get_status and
-            # subsequent profile_request callers would all block on this request.
+            # subsequent profile_forward callers would all block on this forward.
             self._profile_slot.release()
             yield
             return
@@ -239,7 +242,7 @@ class MMProfiler:
                     if self._profiled_count >= self._target_count:
                         self._armed = False
                         self._finished = True
-                        logging.info("MMProfiler: all requests profiled")
+                        logging.info("MMProfiler: all forwards profiled")
         finally:
             self._profile_slot.release()
 

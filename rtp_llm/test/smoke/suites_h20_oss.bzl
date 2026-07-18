@@ -493,6 +493,17 @@ def h20_oss_suites():
                 data=native.glob(['data/model/llava/*.jpg']),
             ),
             smoke_test(
+                name="qwen3_vl_gpu_batch",
+                task_info="data/model/qwen_vl/q_r_3_gpu_batch.json",
+                smoke_args = {
+                    "llm": "--act_type BF16 --use_local 1 --tp_size 2 --reuse_cache 0",
+                    "vit": "--act_type BF16 --use_local 1 --use_local_preprocess 1 --gpu_batch_wait_ms 500 --gpu_max_batch_size 8 --mm_cache_item_num 0"
+                },
+                concurrency_test=True,
+                gpu_type=["H20"],
+                data=native.glob(['data/model/llava/*.jpg']),
+            ),
+            smoke_test(
                 name="qwen3_vl_moe",
                 task_info="data/model/qwen_vl/q_r_3_moe.json",
                 smoke_args = "--act_type BF16 --use_local 1 --enable_xqa off",
