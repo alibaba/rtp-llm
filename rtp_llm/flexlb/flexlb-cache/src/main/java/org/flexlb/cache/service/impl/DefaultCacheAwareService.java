@@ -25,13 +25,13 @@ import java.util.Set;
 @Slf4j
 @Service
 public class DefaultCacheAwareService implements CacheAwareService {
-    
+
     @Autowired
     private KvCacheManager kvCacheManager;
-    
+
     @Autowired
     private CacheMetricsReporter cacheMetricsReporter;
-    
+
     @Override
     public Map<String, Integer> findMatchingEngines(List<Long> blockCacheKeys,
         RoleType roleType, String group) {
@@ -55,12 +55,13 @@ public class DefaultCacheAwareService implements CacheAwareService {
             return Collections.emptyMap();
         }
     }
-    
+
     @Override
     public WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus) {
         long startTime = System.nanoTime() / 1000;
         String engineIpPort = workerStatus.getIpPort();
-        String role = workerStatus.getRole();
+        String engineIp = workerStatus.getIp();
+        String role = workerStatus.getRole().getCode();
 
         try {
             if (workerStatus.getCacheStatus() == null) {
@@ -78,19 +79,19 @@ public class DefaultCacheAwareService implements CacheAwareService {
             }
 
             Set<Long> cachedKeys = cacheStatus.getCachedKeys();
-            
+
             // Update cache
             kvCacheManager.updateEngineCache(ipPort, role, cachedKeys);
-            
+
             WorkerCacheUpdateResult result = buildSuccessResult(workerStatus, cacheStatus);
 
             cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "1");
             
             return result;
-                
+
         } catch (Throwable e) {
             log.error("Error updating worker cache for: {}", engineIpPort, e);
-            
+
             WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, e.getMessage());
 
             cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "0");
@@ -112,7 +113,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
             .cacheVersion(cacheStatus.getVersion())
             .build();
     }
-    
+
     /**
      * Build failure result
      */

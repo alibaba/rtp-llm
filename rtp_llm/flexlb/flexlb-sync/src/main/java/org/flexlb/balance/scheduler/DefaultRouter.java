@@ -2,10 +2,12 @@ package org.flexlb.balance.scheduler;
 
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
 import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
-import org.flexlb.balance.strategy.LoadBalancer;
+import org.flexlb.balance.strategy.LoadBalanceStrategy;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -29,20 +31,25 @@ import java.util.Map;
 import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 
 @Component
-@DependsOn({"randomStrategy", "weightedCacheStrategy", "shortestTTFTStrategy"})
+@DependsOn({"randomStrategy", "costBasedDecodeStrategy", "costBasedPrefillStrategy", "shortestTtftStrategy"})
 public class DefaultRouter implements Router {
 
-    private final Map<RoleType, LoadBalancer> loadBalancerMap;
+    private final Map<RoleType, LoadBalanceStrategy> loadBalanceStrategyMap;
     private final GroupRoutingPolicy groupRoutingPolicy;
+    private final EndpointRegistry endpointRegistry;
 
-    public DefaultRouter(ConfigService configService, GroupRoutingPolicy groupRoutingPolicy) {
+    public DefaultRouter(ConfigService configService, GroupRoutingPolicy groupRoutingPolicy,
+                         EndpointRegistry endpointRegistry) {
         this.groupRoutingPolicy = groupRoutingPolicy;
+        this.endpointRegistry = endpointRegistry;
         FlexlbConfig config = configService.loadBalanceConfig();
-        this.loadBalancerMap = new EnumMap<>(RoleType.class);
+        this.loadBalanceStrategyMap = new EnumMap<>(RoleType.class);
 
         for (RoleType roleType : RoleType.values()) {
             LoadBalanceStrategyEnum strategy = config.getStrategyForRoleType(roleType);
-            loadBalancerMap.put(roleType, LoadBalanceStrategyFactory.getLoadBalancer(strategy));
+            if (strategy != null) {
+                loadBalanceStrategyMap.put(roleType, LoadBalanceStrategyFactory.getLoadBalanceStrategy(strategy));
+            }
         }
     }
 
@@ -57,7 +64,6 @@ public class DefaultRouter implements Router {
      */
     @Override
     public Response route(BalanceContext balanceContext) {
-        long startTimeInMicros = System.nanoTime() / 1000;
         // 1. Validate request
         Response validationResponse = validateRequest(balanceContext);
         if (validationResponse != null) {
@@ -69,6 +75,7 @@ public class DefaultRouter implements Router {
         ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
         List<RoleType> roleTypeList = workerStatus.getRoleTypeList();
         if (CollectionUtils.isEmpty(roleTypeList)) {
+            Logger.warn("No worker roles registered yet (total workers: {})", workerStatus.getWorkerTotalCount());
             return Response.error(NO_AVAILABLE_WORKER);
         }
 
@@ -125,8 +132,8 @@ public class DefaultRouter implements Router {
         }
 
         for (RoleType roleType : roleTypeList) {
-            LoadBalancer loadBalancer = getLoadBalancer(roleType);
-            ServerStatus serverStatus = loadBalancer.select(balanceContext, roleType, group);
+            LoadBalanceStrategy loadBalanceStrategy = getLoadBalanceStrategy(roleType);
+            ServerStatus serverStatus = loadBalanceStrategy.select(balanceContext, roleType, group);
 
             if (!serverStatus.isSuccess()) {
                 // Selection failed, return failure result
@@ -147,10 +154,10 @@ public class DefaultRouter implements Router {
     }
 
     /**
-     * Get LoadBalancer based on role type
+     * Get LoadBalanceStrategy based on role type
      */
-    private LoadBalancer getLoadBalancer(RoleType roleType) {
-        return loadBalancerMap.get(roleType);
+    private LoadBalanceStrategy getLoadBalanceStrategy(RoleType roleType) {
+        return loadBalanceStrategyMap.get(roleType);
     }
 
     /**
@@ -166,10 +173,16 @@ public class DefaultRouter implements Router {
         for (ServerStatus serverStatus : partialResults) {
             String serverIpPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
             long requestId = balanceContext.getRequestId();
-
             RoleType role = serverStatus.getRole();
-            LoadBalancer loadBalancer = getLoadBalancer(role);
-            loadBalancer.rollBack(serverIpPort, requestId);
+
+            WorkerEndpoint ep = endpointRegistry.get(role, serverIpPort);
+            if (ep == null) {
+                Logger.warn("DefaultRouter.rollBack: endpoint not found for ipPort={}", serverIpPort);
+                continue;
+            }
+
+            LoadBalanceStrategy loadBalanceStrategy = getLoadBalanceStrategy(role);
+            loadBalanceStrategy.rollBack(ep, requestId);
         }
     }
 

@@ -7,17 +7,17 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class LoadBalanceStrategyFactory {
 
-    private static final Map<LoadBalanceStrategyEnum, LoadBalancer> loadBalancerFactory = new ConcurrentHashMap<>();
+    private static final Map<LoadBalanceStrategyEnum, LoadBalanceStrategy> loadBalanceStrategyMap = new ConcurrentHashMap<>();
 
-    public static void register(LoadBalanceStrategyEnum strategy, LoadBalancer loadBalancer) {
-        loadBalancerFactory.put(strategy, loadBalancer);
+    public static void register(LoadBalanceStrategyEnum strategy, LoadBalanceStrategy loadBalanceStrategy) {
+        loadBalanceStrategyMap.put(strategy, loadBalanceStrategy);
     }
 
-    public static LoadBalancer getLoadBalancer(LoadBalanceStrategyEnum strategy) {
-        LoadBalancer loadBalancer = loadBalancerFactory.get(strategy);
-        if (loadBalancer == null) {
+    public static LoadBalanceStrategy getLoadBalanceStrategy(LoadBalanceStrategyEnum strategy) {
+        LoadBalanceStrategy loadBalanceStrategy = loadBalanceStrategyMap.get(strategy);
+        if (loadBalanceStrategy == null) {
             throw new RuntimeException("loadBalanceStrategy not found: " + strategy);
         }
-        return loadBalancer;
+        return loadBalanceStrategy;
     }
 }
