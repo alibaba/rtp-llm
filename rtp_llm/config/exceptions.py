@@ -99,9 +99,17 @@ class ExceptionType(IntEnum):
 
     # master error
     MASTER_NO_AVAILABLE_WORKER = 8400, ExceptionCategory.CAPACITY
+    MASTER_NO_PREFILL_WORKER = 8402, ExceptionCategory.CAPACITY
+    MASTER_NO_DECODE_WORKER = 8403, ExceptionCategory.CAPACITY
+    MASTER_NO_PDFUSION_WORKER = 8404, ExceptionCategory.CAPACITY
+    MASTER_NO_VIT_WORKER = 8405, ExceptionCategory.CAPACITY
+    MASTER_INVALID_REQUEST = 8406, ExceptionCategory.BAD_REQUEST
 
     # route error
     ROUTE_ERROR = 8500, ExceptionCategory.CAPACITY
+    ROUTER_QUEUE_FULL = 8502, ExceptionCategory.CAPACITY
+    ROUTER_QUEUE_TIMEOUT = 8503, ExceptionCategory.TIMEOUT
+    ROUTER_REQUEST_CANCELLED = 8504, ExceptionCategory.CANCELLED
 
     # multimodal error
     MM_LONG_PROMPT_ERROR = 901, ExceptionCategory.TOO_LONG

@@ -232,6 +232,18 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                     loss,
                     src_batch_indices,
                     all_hidden_states});
+
+    if (stream->isFinished() || stream->needFinish()) {
+        auto    ti     = stream->getTimeInfo();
+        int64_t now_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        RTP_LLM_ACCESS_LOG_INFO("decode_finished: %s output_len=%ld first_token_latency_us=%ld "
+                                "total_latency_us=%ld iter_count=%ld",
+                                stream->streamLogTag().c_str(),
+                                stream->outputTokenLen(),
+                                ti.first_token_time_us,
+                                ti.begin_time_us > 0 ? (now_us - ti.begin_time_us) : 0,
+                                stream->iterCount());
+    }
 }
 
 }  // namespace rtp_llm

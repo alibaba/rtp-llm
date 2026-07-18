@@ -1,15 +1,15 @@
+import asyncio
 import logging
 import os
 import time
-import asyncio
-from typing import TYPE_CHECKING, AsyncGenerator, List, Optional
+from typing import TYPE_CHECKING, AsyncGenerator, List, Optional, Set
 
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
-from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
+from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
@@ -33,6 +33,12 @@ if TYPE_CHECKING:
     from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 route_logger = logging.getLogger("route_logger")
+
+
+def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
+    """Return the set of human-readable role names from a list of RoleAddr."""
+    return {role_addr.role.name for role_addr in role_addrs}
+
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
 DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
@@ -216,6 +222,7 @@ class BackendRPCServerVisitor:
         full_block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
+        input_pb = trans_input(input)
 
         try:
             route_result = await self.master_client.get_backend_role_addrs(
@@ -223,6 +230,7 @@ class BackendRPCServerVisitor:
                 cache_key_block_size=self._cache_key_block_size(),
                 input=input,
                 request_id=input.request_id,
+                input_pb=input_pb,
             )
         except BaseException as e:
             exception_json = format_exception(e)
@@ -235,6 +243,7 @@ class BackendRPCServerVisitor:
 
         if route_result.is_ok:
             input.generate_config.role_addrs = route_result.role_addrs
+            input.enqueued_by_master = route_result.enqueued_by_master
             route_logger.debug(
                 "master route success, request_id=%s, addrs=%s",
                 input.request_id,
@@ -360,6 +369,12 @@ class BackendRPCServerVisitor:
             allow_domain_fallback = master_route_result is None or (
                 master_route_result.connection_failed
             )
+            if self.master_config and self.master_config.disable_domain_fallback:
+                allow_domain_fallback = False
+                route_logger.warning(
+                    "master_config.disable_domain_fallback is enabled, "
+                    "skipping domain fallback routing"
+                )
             if (
                 not input.generate_config.role_addrs or need_domain_routing
             ) and allow_domain_fallback:
@@ -463,10 +478,7 @@ class BackendRPCServerVisitor:
                 aux_info["role_addrs"] = [
                     role_addr.model_dump(mode="json") for role_addr in role_addrs
                 ]
-                roles = {
-                    str(getattr(role_addr.role, "name", role_addr.role))
-                    for role_addr in role_addrs
-                }
+                roles = get_role_names(role_addrs)
                 aux_info["pd_sep"] = {"PREFILL", "DECODE"}.issubset(roles)
             e.aux_info = aux_info
 
@@ -544,15 +556,18 @@ class BackendRPCServerVisitor:
         return stream_with_aux_info()
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:
-        roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(
-            self.backend_role_list, refresh
-        )
-        if not roles:
-            return False
-        for role in self.backend_role_list:
-            if role not in [r.role for r in roles]:
-                logging.warning(f"role {role} not in available roles {roles}")
-                return False
+        # COMMENTED OUT: Direct connection to prefill/decode bypasses FlexLB
+        # roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(
+        #     self.backend_role_list, refresh
+        # )
+        # if not roles:
+        #     return False
+        # for role in self.backend_role_list:
+        #     if role not in [r.role for r in roles]:
+        #         logging.warning(f"role {role} not in available roles {roles}")
+        #         return False
+        # return True
+        # Always return True to force routing through FlexLB
         return True
 
 

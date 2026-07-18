@@ -16,7 +16,10 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.metrics import GaugeMetrics, kmonitor
 from rtp_llm.ops import SpecialTokens, SpeculativeExecutionConfig, VitSeparation
-from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.backend_rpc_server_visitor import (
+    BackendRPCServerVisitor,
+    get_role_names,
+)
 from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
@@ -473,8 +476,8 @@ class Pipeline(object):
             generate_config=generate_config,
             tokenizer=self.tokenizer,
             token_type_ids=token_type_ids,
-            batch_group_size=kwargs.get("batch_group_size", 1),
-            batch_group_id=kwargs.get("batch_group_id", -1),
+            group_size=kwargs.get("group_size", 1),
+            group_id=kwargs.get("group_id", -1),
             headers=request_headers,
         )
 
@@ -509,10 +512,7 @@ class Pipeline(object):
                     aux_info_dict["role_addrs"] = [
                         role_addr.model_dump(mode="json") for role_addr in role_addrs
                     ]
-                    roles = {
-                        str(getattr(role_addr.role, "name", role_addr.role))
-                        for role_addr in role_addrs
-                    }
+                    roles = get_role_names(role_addrs)
                     aux_info_dict.setdefault(
                         "pd_sep", {"PREFILL", "DECODE"}.issubset(roles)
                     )

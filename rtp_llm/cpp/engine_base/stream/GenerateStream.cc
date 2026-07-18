@@ -120,14 +120,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
 void GenerateStream::resetBeginTime(int64_t begin_time_us) {
     begin_time_us_ = begin_time_us;
-    wait_time_us_ = 0;
-    scheduler_enqueue_time_us_ = 0;
-    can_run_time_us_ = 0;
-    loading_cache_start_time_us_ = 0;
-    loading_cache_done_time_us_ = 0;
-    first_running_time_us_ = 0;
-    loading_cache_latency_us_ = 0;
-    load_done_to_running_us_ = 0;
 }
 
 bool GenerateStream::hasCacheKeys() const {
@@ -142,7 +134,7 @@ absl::Status GenerateStream::initKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     if (generate_status_->status == StreamState::WAITING) {
-        recordWaitLatency();
+        wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
     }
     auto ret = stream_cache_resource_->initKVBlock(reserve_step_);
     if (!ret.ok()) {
@@ -233,24 +225,6 @@ bool GenerateStream::isStreaming() const {
 
 int64_t GenerateStream::streamId() const {
     return generate_input_->request_id;
-}
-
-std::string GenerateStream::streamLogTag() const {
-    const auto& request_info = generate_input_->request_info;
-    std::string tag          = std::string("request_id=") + std::to_string(streamId()) + " trace_id=" + traceId();
-    if (!request_info.request_id.empty()) {
-        tag += " source_request_id=" + request_info.request_id;
-    }
-    if (!request_info.frontend_ip.empty()) {
-        tag += " frontend_ip=" + request_info.frontend_ip;
-    }
-    if (!request_info.dash_ip.empty()) {
-        tag += " dash_ip=" + request_info.dash_ip;
-    }
-    if (!request_info.source_role.empty()) {
-        tag += " source_role=" + request_info.source_role;
-    }
-    return tag;
 }
 
 std::string GenerateStream::adapterName() const {
@@ -590,44 +564,14 @@ void GenerateStream::checkTimeout() {
     }
 }
 
-void GenerateStream::recordWaitLatency() {
-    wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
-}
-
-void GenerateStream::recordSchedulerEnqueueTime(int64_t time_us) {
-    if (scheduler_enqueue_time_us_ == 0) {
-        scheduler_enqueue_time_us_ = time_us;
-    }
-}
-
-void GenerateStream::recordCanRunTime() {
-    if (can_run_time_us_ == 0) {
-        can_run_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
-    }
-}
-
-void GenerateStream::recordLoadingCacheStartTime() {
-    if (loading_cache_start_time_us_ == 0) {
-        loading_cache_start_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
-    }
-}
-
-void GenerateStream::recordLoadingCacheDoneTime() {
-    if (loading_cache_done_time_us_ == 0) {
-        loading_cache_done_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
-        if (loading_cache_start_time_us_ > 0) {
-            loading_cache_latency_us_ = loading_cache_done_time_us_ - loading_cache_start_time_us_;
-        }
-    }
-}
-
-void GenerateStream::recordRunningTime() {
-    if (first_running_time_us_ != 0) {
-        return;
-    }
-    first_running_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
-    if (loading_cache_done_time_us_ > 0) {
-        load_done_to_running_us_ = first_running_time_us_ - loading_cache_done_time_us_;
+void GenerateStream::checkTimeoutWithoutLock() {
+    auto running_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
+    auto timeout_ms      = getTimeoutMs();
+    if (timeout_ms > 0 && timeout_ms < running_time_ms) {
+        generate_status_->reportEvent(StreamEvents::Error,
+                                      ErrorCode::GENERATE_TIMEOUT,
+                                      "query has been running " + std::to_string(running_time_ms) + " ms, "
+                                          + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout");
     }
 }
 
@@ -635,19 +579,13 @@ void GenerateStream::recordRunningTime() {
 // 外部线程调用时自动加锁保护 error_info 和 events_ 的一致性。
 void GenerateStream::reportEvent(StreamEvents::EventType event, ErrorCode error_code, const std::string& error_msg) {
     std::lock_guard<std::mutex> lock(*mutex_);
-    if (event == StreamEvents::CanRun) {
-        recordCanRunTime();
-    }
     generate_status_->reportEvent(event, error_code, error_msg);
 }
 
-// 无锁版本，供已持有 mutex_ 的内部调用路径使用（如 update/specUpdate/moveToNext 链路）。
+// 无锁版本，供已持有 mutex_ 的内部调用路径使用（如 update/specUpdate 链路）。
 void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
                                             ErrorCode               error_code,
                                             const std::string&      error_msg) {
-    if (event == StreamEvents::CanRun) {
-        recordCanRunTime();
-    }
     generate_status_->reportEvent(event, error_code, error_msg);
 }
 
@@ -678,25 +616,115 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
     generate_status_->setReserveStep(reserve_step);
 }
 
-StreamState GenerateStream::moveToNext() {
-    checkTimeout();
-    StreamState state;
-    bool        should_report_metric = false;
-    {
-        std::lock_guard<std::mutex> lock(*mutex_);
-        auto                        old_state = generate_status_->getStatus();
-        state                                 = generate_status_->moveToNext();
-        should_report_metric                  = old_state != StreamState::FINISHED && state == StreamState::FINISHED;
+bool GenerateStream::prepare() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+    generate_status_->reportEvent(StreamEvents::CanRun);
+    auto result = streamCacheResource().initKVBlock(reserveStep());
+    if (!result.ok()) {
+        generate_status_->reportEvent(StreamEvents::Error,
+                                      ErrorCode::MALLOC_FAILED,
+                                      std::string("initKVBlock failed: ")
+                                          + std::string(result.message().data(), result.message().size()));
+        finish_internal();
+        return false;
     }
+    needs_cache_loading_ = streamCacheResource().asyncLoadCache();
+    generate_status_->reportEvent(StreamEvents::LoadInitiated);
+    return needs_cache_loading_;
+}
 
-    // notify one thread waiting for stream completion
-    if (state == StreamState::FINISHED) {
-        if (should_report_metric) {
-            reportMetricOnce();
-        }
-        cv_->notify_one();
+bool GenerateStream::isReady() {
+    if (!needs_cache_loading_)
+        return true;
+    return streamCacheResource().loadCacheDone();
+}
+
+void GenerateStream::activate() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (generate_status_->hasEvent(StreamEvents::Error)) {
+        finish_internal();
+        return;
     }
-    return state;
+    if (streamCacheResource().resourceContext().role_type == RoleType::PREFILL && isContextStream()) {
+        generate_status_->status.store(StreamState::RUNNING, std::memory_order_release);
+        return;
+    }
+    auto result = streamCacheResource().incrKVBlock(reserveStep());
+    if (!result.ok()) {
+        generate_status_->reportEvent(StreamEvents::Error,
+                                      ErrorCode::MALLOC_FAILED,
+                                      std::string("incrKVBlock(activate) failed: ")
+                                          + std::string(result.message().data(), result.message().size()));
+        finish_internal();
+        return;
+    }
+    generate_status_->status.store(StreamState::RUNNING, std::memory_order_release);
+}
+
+void GenerateStream::advance() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    checkTimeoutWithoutLock();
+    if (generate_status_->hasEvent(StreamEvents::Error)) {
+        finish_internal();
+        return;
+    }
+    if (generate_status_->hasEvent(StreamEvents::GenerateDone)) {
+        finish_internal();
+        return;
+    }
+    if (streamCacheResource().resourceContext().role_type == RoleType::PREFILL && isContextStream()) {
+        return;
+    }
+    // Use the publish-time seqLength so incrKVBlock doesn't race the async
+    // worker's update() — a stale read skips the block-boundary allocation.
+    // Prefer Normal state; fall back to MTP state if the stream is MTP.
+    int       seq_len_override = -1;
+    const int normal_override  = getNormalAsyncDeviceState().next_real_seq_len;
+    if (normal_override > 0) {
+        seq_len_override = normal_override;
+    } else {
+        const auto& mtp_state    = getMtpAsyncDeviceState();
+        const int   mtp_override = mtp_state.next_real_seq_len;
+        if (mtp_override > 0) {
+            seq_len_override = mtp_override;
+        }
+    }
+    auto result = streamCacheResource().incrKVBlock(reserveStep(), seq_len_override);
+    if (!result.ok()) {
+        generate_status_->reportEvent(StreamEvents::Error,
+                                      ErrorCode::MALLOC_FAILED,
+                                      std::string("incrKVBlock(advance) failed: ")
+                                          + std::string(result.message().data(), result.message().size()));
+        finish_internal();
+        return;
+    }
+}
+
+bool GenerateStream::alive() {
+    return generate_status_->getStatus() != StreamState::FINISHED;
+}
+
+void GenerateStream::finish() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    finish_internal();
+}
+
+void GenerateStream::finish_internal() {
+    if (generate_status_->getStatus() == StreamState::FINISHED)
+        return;
+    // Set FINISHED before releaseResource so that tryReleaseKVBlock's
+    // status == FINISHED guard allows insertIntoCache to persist kv items.
+    generate_status_->status.store(StreamState::FINISHED, std::memory_order_release);
+    // releaseResource runs under mutex_; do not wait here.
+    // If a worker still owns KV blocks, mark deferred and let its dec path
+    // perform the release after the pending count drains.
+    if (hasPendingAsyncBookkeeping()) {
+        markDeferredRelease();
+    } else if (!streamCacheResource().isResourceReleased()) {
+        streamCacheResource().releaseResource();
+    }
+    cv_->notify_one();
 }
 
 bool GenerateStream::hasError() const {
@@ -1161,14 +1189,6 @@ void GenerateStream::setMetricsReporter(kmonitor::MetricsReporterPtr metrics_rep
     metrics_reporter_ = metrics_reporter;
 }
 
-void GenerateStream::reportMetricOnce() {
-    if (metrics_reported_) {
-        return;
-    }
-    metrics_reported_ = true;
-    reportMetric();
-}
-
 void GenerateStream::reportMetric() {
     reportStreamMetrics();
     reportCacheReuseMetrics();
@@ -1188,7 +1208,6 @@ void GenerateStream::reportStreamMetrics() {
         if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
             collector.reuse_length           = initial_reuse_length_;
             collector.input_token_length     = inputLength();
-            collector.effective_context_length = std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
             collector.output_token_length    = outputTokenLen();
             collector.iterate_count          = iter_count_;
             collector.query_batch_size       = maxBatchSize();
@@ -1197,14 +1216,6 @@ void GenerateStream::reportStreamMetrics() {
             RTP_LLM_LOG_DEBUG(
                 "stream [%s] report first latency us = %ld", streamLogTag().c_str(), collector.first_token_latency_us);
             collector.wait_latency_us          = wait_time_us_;
-            if (scheduler_enqueue_time_us_ > 0 && can_run_time_us_ > scheduler_enqueue_time_us_) {
-                collector.enqueue_to_canrun_us = can_run_time_us_ - scheduler_enqueue_time_us_;
-            }
-            if (can_run_time_us_ > 0 && first_running_time_us_ > can_run_time_us_) {
-                collector.canrun_to_running_us = first_running_time_us_ - can_run_time_us_;
-            }
-            collector.loading_cache_latency_us = loading_cache_latency_us_;
-            collector.load_done_to_running_us  = load_done_to_running_us_;
             collector.batch_with_prefill_times = batch_with_prefill_times_;
             collector.batch_with_prefill_len   = batch_with_prefill_len_;
             collector.malloc_failed_times      = stream_cache_resource_->mallocFailedTimes();

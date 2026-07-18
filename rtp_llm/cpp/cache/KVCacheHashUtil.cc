@@ -59,10 +59,24 @@ void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
             hash          = rtp_llm::hashInt64Array(hash, token_ids + pos, token_ids + pos + (int)seq_size_per_block);
             batch_kv_cache_resource->pushBackCacheKey(i, hash);
         }
+
+        // Re-compute partial block key if there's a remaining partial block.
+        // The previous partial block key was popped above (if lastBlockAligned was false),
+        // so we need to re-add it because the partial block may have grown or still exists.
+        // Without this, sequences shorter than one block would have zero cache keys,
+        // causing insertIntoCache to skip device cache insertion entirely.
+        const int remaining = seq_len - total_blocks * seq_size_per_block;
+        if (remaining > 0) {
+            const int pos       = total_blocks * seq_size_per_block;
+            const int block_len = std::min(seq_size_per_block, seq_len - pos);
+            hash                = rtp_llm::hashInt64Array(hash, token_ids + pos, token_ids + pos + block_len);
+            batch_kv_cache_resource->pushBackCacheKey(i, hash);
+        }
     }
 
-    // After incremental update we guarantee all existing keys are for full blocks.
-    batch_kv_cache_resource->setLastBlockAligned(true);
+    // Set lastBlockAligned based on whether there's a partial block,
+    // consistent with initCacheKeys behavior.
+    batch_kv_cache_resource->setLastBlockAligned(seq_len % seq_size_per_block == 0);
     for (int i = 0; i < batch_size; ++i) {
         batch_kv_cache_resource->cacheResource(i).ensureLinearBlockDependencies();
     }
