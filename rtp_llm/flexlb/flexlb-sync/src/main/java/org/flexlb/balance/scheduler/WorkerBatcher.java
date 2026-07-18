@@ -118,10 +118,7 @@ public class WorkerBatcher {
      * Delegates to the algorithm-specific {@link BatcherAlgorithm#queueWaitMs}.
      */
     public long queueWaitMs() {
-        if (queueDepth.get() == 0 && algorithm instanceof FixedWindowBatcherAlgorithm) {
-            return cfg.getFlexlbBatchFixedWaitMs();
-        }
-        return headWaitMs();
+        return algorithm.queueWaitMs(ctx);
     }
 
     public void shutdown() {
