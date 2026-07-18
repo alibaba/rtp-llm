@@ -75,6 +75,16 @@ def _weights():
 
 
 class Qwen3BaseModelIntegrationTest(unittest.TestCase):
+    def test_quant_config_without_runtime_method_is_rejected(self):
+        base_model = object.__new__(BaseModel)
+        base_model.model_config = _model_config()
+        base_model.model_config.quant_config = types.SimpleNamespace(
+            get_runtime_method_key=lambda: ""
+        )
+
+        with self.assertRaisesRegex(ValueError, "is not supported"):
+            base_model._new_loader_quant_type()
+
     def test_gpt_runtime_base_rejects_invalid_graph_capture_state(self):
         runtime = GptModelBase(
             config=_model_config(),

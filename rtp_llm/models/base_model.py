@@ -335,7 +335,13 @@ class BaseModel(object):
                 "model_config.quant_config must define get_method() or "
                 "get_runtime_method_key()"
             )
-        return method() or "none"
+        runtime_method = method()
+        if not isinstance(runtime_method, str) or not runtime_method.strip():
+            raise ValueError(
+                f"Quantization config {type(quant_config).__name__} is not "
+                "supported by the Qwen dense newloader path"
+            )
+        return runtime_method.strip()
 
     def _load_with_new_loader(self) -> None:
         from rtp_llm.models_py.model_loader import (
@@ -416,7 +422,10 @@ class BaseModel(object):
             compute_dtype=self.model_config.compute_dtype,
             device=device,
             load_method=load_method,
-            quant_config=QuantizationConfig(self._new_loader_quant_type()),
+            quant_config=QuantizationConfig(
+                self._new_loader_quant_type(),
+                source_config=getattr(self.model_config, "quant_config", None),
+            ),
             parallelism_config=self.parallelism_config,
             fmha_config=self.fmha_config,
             device_resource_config=self.device_resource_config,

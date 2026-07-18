@@ -95,6 +95,10 @@ class QuantizationConfig(ABC):
     def group_size(self) -> int:
         return self._group_size
 
+    def get_runtime_method_key(self) -> str:
+        """Return the newloader quant-method key, or empty when unsupported."""
+        return ""
+
     @classmethod
     def load_from_ckpt(cls, ckpt_path: str) -> Optional["QuantizationConfig"]:
         """
@@ -333,6 +337,9 @@ class Fp8PerTensorQuantConfig(QuantizationConfig):
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float8_e4m3fn]
 
+    def get_runtime_method_key(self) -> str:
+        return "fp8" if self.is_quanted() else "fp8_online"
+
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerTensorQuantConfig(**config)
@@ -367,6 +374,9 @@ class Fp8DynamicPerTensorQuantConfig(QuantizationConfig):
 
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float8_e4m3fn, torch.float16, torch.bfloat16]
+
+    def get_runtime_method_key(self) -> str:
+        return "fp8" if self.is_quanted() else "fp8_online"
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -403,6 +413,9 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
 
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
+
+    def get_runtime_method_key(self) -> str:
+        return "fp8_block" if self.is_quanted() else "fp8_block_online"
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -456,6 +469,9 @@ class Fp8PerTensorCompressedQuantConfig(CompressedTensorsQuantConfig):
     def is_dynamic(self) -> bool:
         return self._dynamic
 
+    def get_runtime_method_key(self) -> str:
+        return "fp8" if self.is_quanted() else "fp8_online"
+
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerTensorCompressedQuantConfig(**config)
@@ -481,6 +497,9 @@ class Fp8PerChannelCompressedQuantConfig(CompressedTensorsQuantConfig):
 
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
+
+    def get_runtime_method_key(self) -> str:
+        return "fp8_per_channel" if self.is_quanted() else "fp8_per_channel_online"
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -529,6 +548,9 @@ class Fp8PerChannelQuarkQuantConfig(QuarkQuantConfig):
 
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
+
+    def get_runtime_method_key(self) -> str:
+        return "fp8_per_channel" if self.is_quanted() else "fp8_per_channel_online"
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":

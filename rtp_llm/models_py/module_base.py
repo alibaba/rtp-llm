@@ -21,6 +21,32 @@ def _is_allowed_dropped_weight(name: str) -> bool:
     )
 
 
+def _is_float8_dtype(dtype: torch.dtype) -> bool:
+    return str(dtype).startswith("torch.float8_")
+
+
+def copy_weight_(target: torch.Tensor, source: torch.Tensor, label: str) -> None:
+    """Copy a checkpoint tensor without hiding quantized layout mistakes."""
+    if tuple(target.shape) != tuple(source.shape):
+        raise ValueError(
+            f"Shape mismatch for {label}: expected {tuple(target.shape)}, "
+            f"got {tuple(source.shape)}"
+        )
+    if target.dtype != source.dtype:
+        compatible_floats = target.is_floating_point() and source.is_floating_point()
+        if (
+            not compatible_floats
+            or _is_float8_dtype(target.dtype)
+            or _is_float8_dtype(source.dtype)
+        ):
+            raise TypeError(
+                f"Dtype mismatch for {label}: expected {target.dtype}, "
+                f"got {source.dtype}"
+            )
+    with torch.no_grad():
+        target.copy_(source)
+
+
 def _mark_loaded(module: nn.Module, name: str) -> None:
     loaded = getattr(module, "_rtp_loaded_weight_names", None)
     if loaded is None:
