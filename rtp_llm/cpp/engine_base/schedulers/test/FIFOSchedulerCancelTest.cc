@@ -68,20 +68,20 @@ protected:
         return cache_manager_->freeBlocksNum();
     }
 
-    // Helper function to schedule a stream through WAITING->LOADING_CACHE->WAITING->RUNNING
-    // Returns the result of the final schedule() call when stream is RUNNING
+    // Helper function to schedule a stream through to RUNNING state
+    // Returns the result of the schedule() call that transitions stream(s) to RUNNING
     absl::StatusOr<std::list<GenerateStreamPtr>> scheduleToRunning(std::shared_ptr<FIFOScheduler>& scheduler) {
-        // First schedule: WAITING -> LOADING_CACHE
+        // First schedule: stream should transition to RUNNING
         auto result1 = scheduler->schedule();
         if (!result1.ok() || result1.value().size() > 0) {
-            return result1;  // Unexpected: already RUNNING or error
+            return result1;
         }
-        // Second schedule: LOADING_CACHE -> WAITING (with CanRun event set)
+        // If not yet RUNNING, try again (e.g., loading cache)
         auto result2 = scheduler->schedule();
         if (!result2.ok() || result2.value().size() > 0) {
-            return result2;  // Unexpected: error or already done
+            return result2;
         }
-        // Third schedule: WAITING -> RUNNING
+        // Third attempt
         return scheduler->schedule();
     }
 
@@ -153,7 +153,7 @@ TEST_F(FIFOSchedulerCancelTest, CancelWhileRunning) {
 
 // ============================================================================
 // 3. Cancel during resource allocation (stream transitions through WAITING
-//    where initKVBlock happens inside moveToNext)
+//    where initKVBlock happens inside prepare())
 // ============================================================================
 TEST_F(FIFOSchedulerCancelTest, CancelDuringResourceAllocation) {
     auto scheduler   = createScheduler();
@@ -163,7 +163,7 @@ TEST_F(FIFOSchedulerCancelTest, CancelDuringResourceAllocation) {
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
 
     // Report error before the first schedule() — the stream is WAITING
-    // and moveToNext() will see the Error event before attempting initKVBlock
+    // and prepare() will see the Error event via alive() check
     stream->reportError(ErrorCode::CANCELLED, "cancelled during init");
 
     auto result = scheduler->schedule();
@@ -244,9 +244,9 @@ TEST_F(FIFOSchedulerCancelTest, VerifyStateAndErrorAfterCancel) {
     ASSERT_FALSE(stream->getStatus() == StreamState::RUNNING);
     ASSERT_FALSE(stream->getStatus() == StreamState::WAITING);
     ASSERT_EQ(stream->stopReason(), "user requested cancel");
-    // moveToNext on FINISHED stream should not crash (idempotent)
-    auto state = stream->moveToNext();
-    ASSERT_EQ(state, StreamState::FINISHED);
+    // finish() on FINISHED stream should not crash (idempotent)
+    stream->finish();
+    ASSERT_TRUE(stream->isFinished());
 }
 
 // ============================================================================
@@ -315,8 +315,8 @@ TEST_F(FIFOSchedulerCancelTest, ConcurrentCancelDuringSchedule) {
     // Run schedule() while cancel thread is active.
     // Only call schedule() when there are running streams to avoid blocking
     // on an empty scheduler (waitPredicate would return false and cv blocks forever).
-    // reportEvent() only sets event flags; the streams remain in running_streams_
-    // until schedule() -> evaluateAndUpdateStreams() calls moveToNext().
+    // reportEvent() only sets event flags; the streams remain in running_
+    // until schedule() -> advance() detects the error and calls finish().
     while (scheduler->runningStreamsSize() > 0) {
         auto result = scheduler->schedule();
         ASSERT_TRUE(result.ok());

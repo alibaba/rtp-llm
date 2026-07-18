@@ -65,6 +65,7 @@ typedef std::function<void(bool, CacheStoreErrorCode, const std::map<std::string
                   CacheStoreRemoteStoreDoneCallback;
 const std::string kEnvRdmaMode             = "CACHE_STORE_RDMA_MODE";
 const std::string kEnvRdmaWriteBlockConcat = "CACHE_STORE_RDMA_WRITE_BLOCK_CONCAT";
+const std::string kEnvMockMode             = "CACHE_STORE_MOCK_MODE";
 const uint32_t    kTcpRdmaPortDiff         = 100;
 
 struct RemoteStoreRequest {
