@@ -93,18 +93,18 @@ class CacheMetricsReporterTest {
 
     @Test
     void should_report_routing_cache_match_token_metrics() {
-        reporter.reportRoutingCandidateCacheMatchMetrics(RoleType.PREFILL, "127.0.0.1", 256L, 1024L);
-        reporter.reportRoutingSelectedCacheMatchMetrics(RoleType.PREFILL, "127.0.0.2", 128L, 1024L);
+        reporter.reportRoutingCandidateCacheMatchMetrics(RoleType.PREFILL, "127.0.0.1", "127.0.0.1:8080", 256L, 1024L);
+        reporter.reportRoutingSelectedCacheMatchMetrics(RoleType.PREFILL, "127.0.0.2", "127.0.0.2:8080", 128L, 1024L);
 
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", RoleType.PREFILL.name(),
-                "engineIp", "127.0.0.1");
+        FlexMetricTags tags = FlexMetricTags.ofEngine(
+                "127.0.0.1", "127.0.0.1:8080",
+                "role", RoleType.PREFILL.name());
         verify(monitor).report(CACHE_ROUTING_CANDIDATE_MATCH_HIT_TOKENS, tags, 256L);
         verify(monitor).report(CACHE_ROUTING_CANDIDATE_MATCH_TOTAL_TOKENS, tags, 1024L);
 
-        FlexMetricTags selectedTags = FlexMetricTags.of(
-                "role", RoleType.PREFILL.name(),
-                "engineIp", "127.0.0.2");
+        FlexMetricTags selectedTags = FlexMetricTags.ofEngine(
+                "127.0.0.2", "127.0.0.2:8080",
+                "role", RoleType.PREFILL.name());
         verify(monitor).report(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, selectedTags, 128L);
         verify(monitor).report(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, selectedTags, 1024L);
     }
