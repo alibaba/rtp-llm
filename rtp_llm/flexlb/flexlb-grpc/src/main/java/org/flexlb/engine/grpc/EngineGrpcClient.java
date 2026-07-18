@@ -1,5 +1,8 @@
 package org.flexlb.engine.grpc;
 
+import com.google.common.util.concurrent.FutureCallback;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
 import com.google.protobuf.MessageLite;
 import io.grpc.ManagedChannel;
 import io.grpc.StatusRuntimeException;
@@ -15,10 +18,12 @@ import org.flexlb.cache.core.EngineLocalView;
 import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
+import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -76,9 +81,9 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
             GrpcStubWrapper stubWrapper = invoker.getRpcServiceStub()
                     .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
 
-            long startTime = System.nanoTime() / 1000;
+            long startTime = System.nanoTime();
             R response = grpcCall.apply(stubWrapper);
-            long endTime = System.nanoTime() / 1000;
+            long endTime = System.nanoTime();
 
             // Calculate response body size in bytes
             int responseSize = 0;
@@ -87,15 +92,15 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
             }
 
             // Record statistics
-            long duration = endTime - startTime;
-            grpcReporter.reportCallMetrics(ip, serviceType.getOperationName(), duration, responseSize, false);
+            long duration = TimeUnit.NANOSECONDS.toMillis(endTime - startTime);
+            grpcReporter.reportCallMetrics(ip, ip + ":" + CommonUtils.toHttpPort(port), serviceType.getOperationName(), duration, responseSize, false);
 
             return response;
         } catch (StatusRuntimeException e) {
             if (isConnectionBrokenError(e)) {
                 invoker.markExpired();
                 long connectionDuration = invoker.getConnectionDuration();
-                grpcReporter.reportConnectionDuration(ip, serviceType.getOperationName(), connectionDuration);
+                grpcReporter.reportConnectionDuration(ip, ip + ":" + CommonUtils.toHttpPort(port), serviceType.getOperationName(), connectionDuration);
                 Logger.warn("Connection broken for {}:{} {}, duration: {}μs, recreating channel and retrying once, msh:{}",
                         ip, port, serviceType, connectionDuration, e.getMessage());
                 return retryWithNewChannel(channelKey, invoker, grpcCall, requestTimeoutMs, ip, port, serviceType);
@@ -105,6 +110,124 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
         } catch (Exception e) {
             Logger.error("Exception during {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, e);
             throw e;
+        }
+    }
+
+    private <R> CompletableFuture<R> executeGrpcCallAsync(String ip, int port,
+                                                           Function<GrpcFutureStubWrapper, ListenableFuture<R>> grpcCall,
+                                                           long requestTimeoutMs,
+                                                           ServiceType serviceType) {
+        CompletableFuture<R> resultFuture = new CompletableFuture<>();
+        long startTime = System.nanoTime();
+
+        try {
+            String channelKey = createKey(ip, port, serviceType);
+            Invoker invoker = getInvoker(channelKey);
+
+            if (invoker == null) {
+                Logger.warn("ip:{} {} grpc channel not found, creating and adding to pool", ip, serviceType);
+                ManagedChannel newChannel = createChannel(channelKey);
+                invoker = putInvokerIfAbsent(channelKey, newChannel);
+            } else if (invoker.getChannel().isShutdown() || invoker.getChannel().isTerminated()) {
+                Logger.warn("ip:{} {} grpc channel is shutdown or terminated, recreating and updating pool", ip, serviceType);
+                ManagedChannel newChannel = createChannel(channelKey);
+                invoker = replaceInvoker(channelKey, invoker, newChannel);
+            }
+
+            invoker.updateLastUsedTime();
+            final Invoker finalInvoker = invoker;
+            GrpcFutureStubWrapper stubWrapper = new GrpcFutureStubWrapper(
+                    RpcServiceGrpc.newFutureStub(finalInvoker.getChannel()),
+                    MultimodalRpcServiceGrpc.newFutureStub(finalInvoker.getChannel())
+            ).withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
+
+            ListenableFuture<R> listenableFuture = grpcCall.apply(stubWrapper);
+
+            Futures.addCallback(listenableFuture, new FutureCallback<R>() {
+                @Override
+                public void onSuccess(R response) {
+                    long endTime = System.nanoTime();
+                    int responseSize = 0;
+                    if (response instanceof MessageLite messageLite) {
+                        responseSize = messageLite.getSerializedSize();
+                    }
+                    long duration = TimeUnit.NANOSECONDS.toMillis(endTime - startTime);
+                    grpcReporter.reportCallMetrics(ip, ip + ":" + CommonUtils.toHttpPort(port),
+                            serviceType.getOperationName(), duration, responseSize, false);
+                    resultFuture.complete(response);
+                }
+
+                @Override
+                public void onFailure(Throwable t) {
+                    if (t instanceof StatusRuntimeException e && isConnectionBrokenError(e)) {
+                        finalInvoker.markExpired();
+                        long connectionDuration = finalInvoker.getConnectionDuration();
+                        grpcReporter.reportConnectionDuration(ip, ip + ":" + CommonUtils.toHttpPort(port),
+                                serviceType.getOperationName(), connectionDuration);
+                        Logger.warn("Connection broken for {}:{} {}, duration: {}μs, recreating channel and retrying once async, msh:{}",
+                                ip, port, serviceType, connectionDuration, e.getMessage());
+                        retryWithNewChannelAsync(channelKey, finalInvoker, grpcCall, requestTimeoutMs,
+                                ip, port, serviceType, resultFuture, startTime);
+                    } else {
+                        Logger.error("Exception during async {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, t);
+                        resultFuture.completeExceptionally(t);
+                    }
+                }
+            }, Runnable::run);
+
+        } catch (Exception e) {
+            Logger.error("Exception initiating async {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, e);
+            resultFuture.completeExceptionally(e);
+        }
+
+        return resultFuture;
+    }
+
+    private <R> void retryWithNewChannelAsync(String channelKey,
+                                               Invoker staleInvoker,
+                                               Function<GrpcFutureStubWrapper, ListenableFuture<R>> grpcCall,
+                                               long requestTimeoutMs,
+                                               String ip, int port,
+                                               ServiceType serviceType,
+                                               CompletableFuture<R> resultFuture,
+                                               long originalStartTime) {
+        try {
+            ManagedChannel newChannel = createChannel(channelKey);
+            Invoker newInvoker = replaceInvoker(channelKey, staleInvoker, newChannel);
+
+            Logger.info("Retrying async gRPC call with new channel for {}:{} {}", ip, port, serviceType);
+
+            GrpcFutureStubWrapper stubWrapper = new GrpcFutureStubWrapper(
+                    RpcServiceGrpc.newFutureStub(newInvoker.getChannel()),
+                    MultimodalRpcServiceGrpc.newFutureStub(newInvoker.getChannel())
+            ).withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
+
+            ListenableFuture<R> listenableFuture = grpcCall.apply(stubWrapper);
+
+            Futures.addCallback(listenableFuture, new FutureCallback<R>() {
+                @Override
+                public void onSuccess(R response) {
+                    long endTime = System.nanoTime();
+                    int responseSize = 0;
+                    if (response instanceof MessageLite messageLite) {
+                        responseSize = messageLite.getSerializedSize();
+                    }
+                    long duration = TimeUnit.NANOSECONDS.toMillis(endTime - originalStartTime);
+                    grpcReporter.reportCallMetrics(ip, ip + ":" + CommonUtils.toHttpPort(port),
+                            serviceType.getOperationName(), duration, responseSize, true);
+                    resultFuture.complete(response);
+                }
+
+                @Override
+                public void onFailure(Throwable t) {
+                    Logger.error("Async retry failed for {}:{} {}", ip, port, serviceType, t);
+                    resultFuture.completeExceptionally(t);
+                }
+            }, Runnable::run);
+
+        } catch (Exception e) {
+            Logger.error("Exception during async retry for {}:{} {}", ip, port, serviceType, e);
+            resultFuture.completeExceptionally(e);
         }
     }
 
@@ -132,9 +255,9 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
         GrpcStubWrapper stubWrapper = newInvoker.getRpcServiceStub()
                 .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
 
-        long startTime = System.nanoTime() / 1000;
+        long startTime = System.nanoTime();
         R response = grpcCall.apply(stubWrapper);
-        long endTime = System.nanoTime() / 1000;
+        long endTime = System.nanoTime();
 
         // Calculate response body size in bytes
         int responseSize = 0;
@@ -143,8 +266,8 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
         }
 
         // Record retry statistics
-        long duration = endTime - startTime;
-        grpcReporter.reportCallMetrics(ip, serviceType.getOperationName(), duration, responseSize, true);
+        long duration = TimeUnit.NANOSECONDS.toMillis(endTime - startTime);
+        grpcReporter.reportCallMetrics(ip, ip + ":" + CommonUtils.toHttpPort(port), serviceType.getOperationName(), duration, responseSize, true);
 
         return response;
     }
@@ -175,6 +298,61 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
      */
     public EngineRpcService.CacheStatusPB getMultimodalCacheStatus(String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
         return executeGrpcCall(ip, port, stub -> stub.getMultimodalRpcServiceStub().getCacheStatus(request), requestTimeoutMs, ServiceType.MULTIMODAL_CACHE_STATUS);
+    }
+
+    /**
+     * Submit a batch of already-routed requests to a Prefill worker.
+     */
+    public EngineRpcService.EnqueueBatchResponsePB batchEnqueue(String ip,
+                                                                int port,
+                                                                EngineRpcService.EnqueueBatchRequestPB request,
+                                                                long requestTimeoutMs) {
+        return executeGrpcCall(ip, port, stub -> stub.getRpcServiceStub().enqueueBatch(request), requestTimeoutMs, ServiceType.BATCH_ENQUEUE);
+    }
+
+    /**
+     * Cancel a request previously submitted through EnqueueBatch.
+     */
+    public EngineRpcService.EmptyPB cancel(String ip, int port, long requestId, long requestTimeoutMs) {
+        EngineRpcService.CancelRequestPB request = EngineRpcService.CancelRequestPB.newBuilder()
+                .setRequestId(requestId)
+                .build();
+        return executeGrpcCall(ip, port, stub -> stub.getRpcServiceStub().cancel(request), requestTimeoutMs, ServiceType.CANCEL);
+    }
+
+    /**
+     * Get worker status via gRPC (async)
+     */
+    public CompletableFuture<EngineRpcService.WorkerStatusPB> getWorkerStatusAsync(String ip, int port, EngineRpcService.StatusVersionPB request, long requestTimeoutMs) {
+        return executeGrpcCallAsync(ip, port, stub -> stub.getRpcServiceFutureStub().getWorkerStatus(request), requestTimeoutMs, ServiceType.WORKER_STATUS);
+    }
+
+    /**
+     * Get cache status via gRPC (async)
+     */
+    public CompletableFuture<EngineRpcService.CacheStatusPB> getCacheStatusAsync(String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
+        return executeGrpcCallAsync(ip, port, stub -> stub.getRpcServiceFutureStub().getCacheStatus(request), requestTimeoutMs, ServiceType.CACHE_STATUS);
+    }
+
+    /**
+     * Get multimodal worker status via gRPC (async)
+     */
+    public CompletableFuture<EngineRpcService.WorkerStatusPB> getMultimodalWorkerStatusAsync(String ip, int port, EngineRpcService.StatusVersionPB request, long requestTimeoutMs) {
+        return executeGrpcCallAsync(ip, port, stub -> stub.getMultimodalFutureStub().getWorkerStatus(request), requestTimeoutMs, ServiceType.MULTIMODAL_WORKER_STATUS);
+    }
+
+    /**
+     * Get multimodal cache status via gRPC (async)
+     */
+    public CompletableFuture<EngineRpcService.CacheStatusPB> getMultimodalCacheStatusAsync(String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
+        return executeGrpcCallAsync(ip, port, stub -> stub.getMultimodalFutureStub().getCacheStatus(request), requestTimeoutMs, ServiceType.MULTIMODAL_CACHE_STATUS);
+    }
+
+    /**
+     * Submit a batch of already-routed requests to a Prefill worker (async)
+     */
+    public CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> batchEnqueueAsync(String ip, int port, EngineRpcService.EnqueueBatchRequestPB request, long requestTimeoutMs) {
+        return executeGrpcCallAsync(ip, port, stub -> stub.getRpcServiceFutureStub().enqueueBatch(request), requestTimeoutMs, ServiceType.BATCH_ENQUEUE);
     }
 
     @Override

@@ -371,17 +371,7 @@ def start_frontend_server_impl(
 
 
 def _role_is_prefill(py_env_configs: PyEnvConfigs) -> bool:
-    role_type = py_env_configs.role_config.role_type
-    role_value = getattr(role_type, "value", role_type)
-    prefill_value = getattr(RoleType.PREFILL, "value", RoleType.PREFILL)
-    role_is_prefill = role_type == RoleType.PREFILL or str(role_type).endswith(
-        "PREFILL"
-    )
-    try:
-        role_is_prefill = role_is_prefill or int(role_value) == int(prefill_value)
-    except Exception:
-        pass
-    return role_is_prefill
+    return py_env_configs.role_config.role_type == RoleType.PREFILL
 
 
 def _is_startup_real_warmup_entry_rank(py_env_configs: PyEnvConfigs) -> bool:

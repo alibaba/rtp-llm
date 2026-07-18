@@ -417,6 +417,13 @@ std::string RuntimeConfig::to_string() const {
             oss << ", ";
     }
     oss << "]\n"
+        << "all_worker_grpc_addrs: [";
+    for (size_t i = 0; i < all_worker_grpc_addrs.size(); ++i) {
+        oss << all_worker_grpc_addrs[i];
+        if (i < all_worker_grpc_addrs.size() - 1)
+            oss << ", ";
+    }
+    oss << "]\n"
         << "specify_gpu_arch: " << specify_gpu_arch;
     return oss.str();
 }
@@ -548,24 +555,6 @@ std::string FfnDisAggregateConfig::to_string() const {
     return oss.str();
 }
 
-// Helper function to convert RoleType enum to string
-static std::string roleTypeToString(RoleType role_type) {
-    switch (role_type) {
-        case RoleType::PDFUSION:
-            return "PDFUSION";
-        case RoleType::PREFILL:
-            return "PREFILL";
-        case RoleType::DECODE:
-            return "DECODE";
-        case RoleType::VIT:
-            return "VIT";
-        case RoleType::FRONTEND:
-            return "FRONTEND";
-        default:
-            return "UNKNOWN(" + std::to_string(static_cast<int>(role_type)) + ")";
-    }
-}
-
 // PDSepConfig
 std::string PDSepConfig::to_string() const {
     std::ostringstream oss;
@@ -588,7 +577,9 @@ std::string PDSepConfig::to_string() const {
         << "load_cache_timeout_ms: " << load_cache_timeout_ms << "\n"
         << "max_rpc_timeout_ms: " << max_rpc_timeout_ms << "\n"
         << "worker_port_offset: " << worker_port_offset << "\n"
-        << "decode_entrance: " << decode_entrance;
+        << "decode_entrance: " << decode_entrance << "\n"
+        << "prefill_slot_pool_size: " << prefill_slot_pool_size << "\n"
+        << "prefill_stop_stream_wait_timeout_ms: " << prefill_stop_stream_wait_timeout_ms;
     return oss.str();
 }
 

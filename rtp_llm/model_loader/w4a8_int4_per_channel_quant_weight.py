@@ -4,9 +4,10 @@ from typing import Optional
 import torch
 
 from rtp_llm.config.quant_config import (
-    W4a8Int4PerChannelQuantConfig,
     QuantizationConfig,
+    W4a8Int4PerChannelQuantConfig,
 )
+from rtp_llm.model_loader.dynamic_fp8_quant_weight import quantize_weight_to_fp8
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.w8a8_weight import create_w8a8_fp8_weight
@@ -16,22 +17,29 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.model_loader.dynamic_fp8_quant_weight import quantize_weight_to_fp8
 from rtp_llm.utils.model_weight import W, WeightStyle
 
 
 def quantize_weight_to_int4b(input: torch.Tensor, group_size: int, eps: float = 1e-12):
-    from rtp_kernel.w4a8_group_gemm import unified_encode_int4b, reorder_tensor, pack_scale_fp8
+    try:
+        from rtp_kernel.w4a8_group_gemm import (
+            pack_scale_fp8,
+            reorder_tensor,
+            unified_encode_int4b,
+        )
+    except ImportError as e:
+        logging.warning(f"rtp_kernel.w4a8_group_gemm not available: {e}")
+        raise
 
     N, K = input.shape
-    assert (K % group_size == 0), f"invalid params {K} or {group_size}"
+    assert K % group_size == 0, f"invalid params {K} or {group_size}"
 
     n_groups = K // group_size
     input_g = input.view(N, n_groups, group_size)
 
     amax = input_g.abs().amax(dim=2, keepdim=True)
     finfo = torch.finfo(torch.float8_e4m3fn)
-    scale = (amax / 7.).clamp(min=eps, max=finfo.max / 8.)
+    scale = (amax / 7.0).clamp(min=eps, max=finfo.max / 8.0)
     scale_f = scale.to(torch.float8_e4m3fn).to(input.dtype)
 
     output_int8 = torch.round(input_g / scale).clamp_(min=-8, max=7).to(torch.int8)
@@ -168,11 +176,19 @@ class LoadW4a8Int4PerChannelQuantWeight(CompositeWeight, QuantWeight):
             N = kernel_tensor.shape[1]
             K = kernel_tensor.shape[2]
 
-            quant_kernel = torch.empty((E, N, K // 2), device=kernel_tensor.device, dtype=torch.int8)
-            scale = torch.empty((E, K // self.group_size, N, 8), device=kernel_tensor.device, dtype=torch.float8_e4m3fn)
+            quant_kernel = torch.empty(
+                (E, N, K // 2), device=kernel_tensor.device, dtype=torch.int8
+            )
+            scale = torch.empty(
+                (E, K // self.group_size, N, 8),
+                device=kernel_tensor.device,
+                dtype=torch.float8_e4m3fn,
+            )
 
             for i in range(E):
-                quant_kernel[i, :, :], scale[i] = quantize_weight_to_int4b(kernel_tensor[i, :, :], self.group_size)
+                quant_kernel[i, :, :], scale[i] = quantize_weight_to_int4b(
+                    kernel_tensor[i, :, :], self.group_size
+                )
 
         else:
             quant_kernel, scale = quantize_weight_to_fp8(kernel.get(self.kernel.name))

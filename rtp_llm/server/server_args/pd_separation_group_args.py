@@ -54,6 +54,24 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     )
 
     pd_separation_group.add_argument(
+        "--prefill_slot_pool_size",
+        env_name="PREFILL_SLOT_POOL_SIZE",
+        bind_to=(pd_separation_config, "prefill_slot_pool_size"),
+        type=int,
+        default=0,
+        help="Prefill slot 线程池大小，0 表示使用公式默认值",
+    )
+
+    pd_separation_group.add_argument(
+        "--prefill_stop_stream_wait_timeout_ms",
+        env_name="PREFILL_STOP_STREAM_WAIT_TIMEOUT_MS",
+        bind_to=(pd_separation_config, "prefill_stop_stream_wait_timeout_ms"),
+        type=int,
+        default=2000,
+        help="stopStream() 中等待 Engine Loop 调用 finish_internal() 的最大时间（毫秒）",
+    )
+
+    pd_separation_group.add_argument(
         "--decode_retry_times",
         env_name="DECODE_RETRY_TIMES",
         bind_to=(pd_separation_config, "decode_retry_times"),

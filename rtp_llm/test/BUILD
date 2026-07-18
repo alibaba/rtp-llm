@@ -307,3 +307,18 @@ py_test(
     imports=[],
     exec_properties={"gpu": "H20"},
 )
+
+py_test(
+    name="pdsep_config_pickle_test",
+    srcs=[
+        "test_pdsep_config_pickle.py",
+    ],
+    data=[
+        "//rtp_llm:sdk",
+    ],
+    deps=[
+        "//rtp_llm:testlib",
+    ],
+    imports=[],
+    exec_properties={"gpu": "H20"},
+)

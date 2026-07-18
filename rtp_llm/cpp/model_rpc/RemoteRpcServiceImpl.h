@@ -2,7 +2,7 @@
 #include <memory>
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServiceImpl.h"
-#include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PrefillBatchRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 
 namespace rtp_llm {
@@ -34,6 +34,48 @@ public:
             return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
         }
         return prefill_server_->RemoteFinish(context, request, response);
+    }
+
+    grpc::Status EnqueueBatch(grpc::ServerContext*         context,
+                              const EnqueueBatchRequestPB* request,
+                              EnqueueBatchResponsePB*      response) override {
+        if (!prefill_server_) {
+            auto error_msg = "server not implement EnqueueBatch";
+            RTP_LLM_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
+        }
+        return prefill_server_->EnqueueBatch(context, request, response);
+    }
+
+    grpc::Status EnqueueGroup(grpc::ServerContext*         context,
+                              const EnqueueGroupRequestPB* request,
+                              EnqueueBatchResponsePB*      response) override {
+        if (!prefill_server_) {
+            auto error_msg = "server not implement EnqueueGroup";
+            RTP_LLM_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
+        }
+        return prefill_server_->EnqueueGroup(context, request, response);
+    }
+
+    grpc::Status FetchResponse(grpc::ServerContext*                   context,
+                               const FetchRequestPB*                  request,
+                               grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+        if (!prefill_server_) {
+            auto error_msg = "server not implement FetchResponse";
+            RTP_LLM_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
+        }
+        return prefill_server_->FetchResponse(context, request, writer);
+    }
+
+    grpc::Status Cancel(grpc::ServerContext* context, const CancelRequestPB* request, EmptyPB* response) override {
+        if (!prefill_server_) {
+            auto error_msg = "server not implement Cancel";
+            RTP_LLM_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
+        }
+        return prefill_server_->Cancel(context, request, response);
     }
 
     grpc::Status RemoteLoad(grpc::ServerContext*          context,
@@ -88,8 +130,8 @@ public:
     }
 
 private:
-    std::shared_ptr<PrefillRpcServer> prefill_server_;
-    std::shared_ptr<DecodeRpcServer>  decode_server_;
+    std::shared_ptr<PrefillBatchRpcServer> prefill_server_;
+    std::shared_ptr<DecodeRpcServer>       decode_server_;
 };
 
 }  // namespace rtp_llm

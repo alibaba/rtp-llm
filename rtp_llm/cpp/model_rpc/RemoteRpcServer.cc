@@ -1,4 +1,5 @@
 #include "autil/NetUtil.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/MockCacheStore.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 
 using namespace std;
@@ -65,6 +66,24 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
         RTP_LLM_FAIL("role_type must be prefill or decode, but it is %d", init_params.pd_sep_config.role_type);
     }
     auto cache_manager = engine_->resourceContext().cache_manager;
+
+    // Check mock mode: if enabled, use MockCacheStore instead of NormalCacheStore.
+    // Mock mode skips actual KV transmission but keeps gRPC handshake, scheduling,
+    // cancel/timeout logic real. The engine still does real prefill forward + decode.
+    if (MockCacheStore::isMockModeEnabled()) {
+        RTP_LLM_LOG_INFO("CacheStore mock mode enabled, using MockCacheStore");
+        cache_store_ = std::make_shared<MockCacheStore>();
+        RTP_LLM_CHECK_WITH_INFO(cache_store_ != nullptr, "mock cache store init failed");
+        RTP_LLM_LOG_INFO("mock cache store init success");
+
+        cache_manager->setCacheStore(cache_store_);
+        // Skip regUserMr in mock mode: MockCacheStore::getMemoryUtil() returns nullptr,
+        // and there is no RDMA MR to register.
+        // resource_.cache_store (shared_ptr<NormalCacheStore>) remains nullptr —
+        // callers that use NormalCacheStore-specific methods (e.g. markRequestEnd)
+        // must null-check.
+        return;
+    }
 
     CacheStoreInitParams params;
     params.listen_port                  = init_params.pd_sep_config.cache_store_listen_port;

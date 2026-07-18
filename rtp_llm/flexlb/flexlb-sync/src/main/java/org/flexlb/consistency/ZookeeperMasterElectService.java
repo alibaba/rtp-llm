@@ -23,6 +23,7 @@ import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.env.Environment;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
@@ -50,6 +51,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     private LBConsistencyConfig lbConsistencyConfig;
     private final GeneralHttpNettyService generalHttpNettyService;
     private final EngineHealthReporter engineHealthReporter;
+    private final Environment environment;
     @Setter
     private String roleId;
     @Setter
@@ -69,12 +71,14 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     private final AtomicReference<CountDownLatch> leaderCloseLatchRef = new AtomicReference<>();
 
     public ZookeeperMasterElectService(GeneralHttpNettyService generalHttpNettyService,
-                                       EngineHealthReporter engineHealthReporter) {
+                                       EngineHealthReporter engineHealthReporter,
+                                       Environment environment) {
 
         Logger.warn("Initializing ZookeeperMasterElectService...");
 
         this.generalHttpNettyService = generalHttpNettyService;
         this.engineHealthReporter = engineHealthReporter;
+        this.environment = environment;
 
         init();
     }
@@ -105,7 +109,13 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         } catch (UnknownHostException e) {
             throw new RuntimeException("Failed to retrieve local host address", e);
         }
-        port = Integer.parseInt(System.getProperty("server.port", "7001"));
+        // Read from Spring Environment to respect --server.port= CLI args;
+        // fall back to JVM system property.
+        String portStr = environment.getProperty("server.port");
+        if (portStr == null) {
+            portStr = System.getProperty("server.port", "7001");
+        }
+        port = Integer.parseInt(portStr);
     }
 
     private void initializeLBConsistencyConfig() {
@@ -203,7 +213,8 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} waiting for leadership transfer to complete.", roleId, localIp);
 
         int waitCount = 0;
-        while (true) {
+        final int MAX_WAIT_COUNT = 30;  // 30 seconds max
+        while (waitCount < MAX_WAIT_COUNT) {
             try {
                 if (!isStillMaster()) {
                     LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} leadership transferred to {}, waitCount: {}.",
@@ -231,6 +242,8 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
                 }
             }
         }
+        LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} leadership transfer timeout after {} seconds, forcing exit.",
+                roleId, localIp, MAX_WAIT_COUNT);
     }
 
     private boolean isStillMaster() {
@@ -358,7 +371,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
             Collection<Participant> participants = leaderSelector.getParticipants();
             for (Participant participant : participants) {
                 // Only notify non-master participants
-                if (!participant.isLeader() && localIp.equals(participant.getId())) {
+                if (!participant.isLeader() && !localIp.equals(participant.getId())) {
                     notifyParticipant(participant.getId());
                 }
             }
@@ -387,7 +400,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         }
     }
 
-    @Scheduled(fixedRate = 1000)
+    @Scheduled(fixedRate = 2000L)
     private void reportMasterNode() {
         try {
             if (cachedMasterHostIp != null) {

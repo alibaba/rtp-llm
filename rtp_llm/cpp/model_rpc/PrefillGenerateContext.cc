@@ -74,13 +74,30 @@ void PrefillGenerateContext::stopStream() {
         // if is waiting, cancel it
         meta->dequeue(request_id, stream_);
         if (stream_->getStatus() != StreamState::FINISHED) {
-            stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
+            // The engine loop's advance() runs BEFORE process() in each step(),
+            // so GenerateDone set during process() won't be detected until the
+            // NEXT iteration. Wait for Engine Loop to call finish_internal()
+            // naturally, which sets FINISHED and triggers releaseResource() →
+            // tryReleaseKVBlock() → insertIntoCache() to persist KV cache.
+            // Only reportError for genuine errors (no GenerateDone, or hasError).
+            if (!(stream_->hasEvent(StreamEvents::GenerateDone) && !stream_->hasError())) {
+                stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
+            }
         }
         // if is running, waiting util done
+        int wait_iters = 0;
         while (stream_->getStatus() == StreamState::RUNNING) {
             RTP_LLM_LOG_DEBUG("waiting prefill stream [%d] running done to cancel",
                               stream_->generateInput()->request_id);
             usleep(1000);
+            if (++wait_iters > prefill_stop_stream_wait_timeout_ms_) {
+                RTP_LLM_LOG_WARNING("stopStream timeout (%ld ms) waiting for Engine Loop, "
+                                    "forcing cancel for request [%d]",
+                                    prefill_stop_stream_wait_timeout_ms_,
+                                    stream_->generateInput()->request_id);
+                stream_->reportError(ErrorCode::CANCELLED, "stopStream timeout waiting for Engine Loop");
+                break;
+            }
         }
         // stream status will only be set to finished by scheduler.
         markRequestEnd();
@@ -92,7 +109,7 @@ grpc::Status PrefillGenerateContext::closeGrpcStream() {
         return last_grpc_stream_closed_status;
     }
     grpc_stream_closed = true;
-    if (cancelled() && client_context) {
+    if ((cancelled() || isRequestCancelled()) && client_context) {
         client_context->TryCancel();
     }
     if (client_stream) {
@@ -117,6 +134,11 @@ void PrefillGenerateContext::reset() {
     last_grpc_stream_closed_status = grpc::Status::OK;
 }
 
+bool PrefillGenerateContext::isRequestCancelled() const {
+    // cancel state for Async BatchRequest
+    return GenerateContext::isRequestCancelled() || (cancel_state && cancel_state->load());
+}
+
 void PrefillGenerateContext::nextStage() {
     stat_info.nextStage();
 }
@@ -127,7 +149,9 @@ void PrefillGenerateContext::markRequestEnd() {
         real_id = stream_->streamId();
     }
     if (!resource->isTensorParallel()) {
-        resource->cache_store->markRequestEnd(std::to_string(real_id));
+        if (resource->cache_store) {
+            resource->cache_store->markRequestEnd(std::to_string(real_id));
+        }
         return;
     }
     const auto&           prefill_workers = resource->grpc_workers;

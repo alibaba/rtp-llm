@@ -1,14 +1,21 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PrefillMetrics.h"
+#include "rtp_llm/cpp/cache/PrefillCacheHitMetricsReporter.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <strings.h>
+#include <memory>
+#include <string>
+#include <vector>
 #include <unistd.h>
 
 using namespace std;
@@ -19,79 +26,7 @@ using grpc::ClientContext;
 
 namespace rtp_llm {
 
-namespace {
-
-bool envValueIsTrue(const char* value) {
-    return value != nullptr
-           && (strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 || strcasecmp(value, "on") == 0
-               || strcasecmp(value, "yes") == 0);
-}
-
-bool prefillTraceLogEnabled() {
-    static const bool enabled = []() {
-        const char* value = std::getenv("PREFILL_TRACE_LOG_ENABLE");
-        if (value == nullptr) {
-            value = std::getenv("PREFILL_CACHE_DEBUG_LOG");
-        }
-        if (value == nullptr) {
-            value = std::getenv("KV_CACHE_DEBUG_LOG");
-        }
-        return envValueIsTrue(value);
-    }();
-    return enabled;
-}
-
-const char* prefillStageName(PrefillStatInfo::ExecuteStage stage) {
-    switch (stage) {
-        case PrefillStatInfo::start:
-            return "start";
-        case PrefillStatInfo::getRpcConnection:
-            return "getRpcConnection";
-        case PrefillStatInfo::multimodalProcess:
-            return "multimodalProcess";
-        case PrefillStatInfo::remoteAllocateResource:
-            return "remoteAllocateResource";
-        case PrefillStatInfo::enqueueRequest:
-            return "enqueueRequest";
-        case PrefillStatInfo::remoteLoadCacheStart:
-            return "remoteLoadCacheStart";
-        case PrefillStatInfo::pollLocalOutput:
-            return "pollLocalOutput";
-        case PrefillStatInfo::remoteLoadCacheEnd:
-            return "remoteLoadCacheEnd";
-        case PrefillStatInfo::RemoteGenerate:
-            return "RemoteGenerate";
-        case PrefillStatInfo::pollRemoteOutput:
-            return "pollRemoteOutput";
-        case PrefillStatInfo::finish:
-            return "finish";
-        default:
-            return "unknown";
-    }
-}
-
-void logPrefillFailureTrace(const char* event, PrefillGenerateContext& prefill_context) {
-    if (!prefillTraceLogEnabled()) {
-        return;
-    }
-    RTP_LLM_LOG_WARNING("Prefill request trace: event=%s request_id=%ld request_key=%s stage=%s retry_times=%ld "
-                        "retry_cost_time_ms=%ld execute_time_ms=%ld decode_addr=%s grpc_code=%d grpc_message=%s "
-                        "error_code=%d error_message=%s",
-                        event,
-                        prefill_context.request_id,
-                        prefill_context.request_key.c_str(),
-                        prefillStageName(prefill_context.stat_info.stage),
-                        prefill_context.retry_times,
-                        prefill_context.retry_cost_time_ms,
-                        prefill_context.executeTimeMs(),
-                        prefill_context.decode_addr.c_str(),
-                        static_cast<int>(prefill_context.error_status.error_code()),
-                        prefill_context.error_status.error_message().c_str(),
-                        static_cast<int>(prefill_context.error_info.code()),
-                        prefill_context.error_info.ToString().c_str());
-}
-
-}  // namespace
+PrefillRpcServer::~PrefillRpcServer() = default;
 
 #define CLIENT_GRPC_RET_IF_ERROR(prefill_context, state, error_code_value)                                             \
     if (!(state)) {                                                                                                    \
@@ -161,13 +96,23 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
     if (!ret.ok()) {
         return ret;
     }
+    if (PrefillCacheHitMetricsReporter::enabled()) {
+        prefill_recent_cache_key_window_ = std::make_unique<RecentCacheKeyWindow>();
+    } else {
+        RTP_LLM_LOG_INFO("prefill recent-cache-key metrics disabled by PREFILL_CACHE_HIT_METRIC_ENABLE");
+    }
     return grpc::Status::OK;
 }
 
-ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
+ErrorInfo PrefillRpcServer::waitStreamBeforeRun(PrefillGenerateContext& prefill_context) {
+    auto       stream              = prefill_context.getStream();
     static int max_wait_timeout_us = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms * 1000;
     auto       begin_time_us       = currentTimeUs();
     while (!stream->hasError() && stream->getStatus() == StreamState::WAITING) {
+        if (prefill_context.isRequestCancelled()) {
+            stream->reportError(ErrorCode::CANCELLED, "request cancelled while waiting");
+            return ErrorInfo(ErrorCode::CANCELLED, "request cancelled while waiting to run");
+        }
         usleep(100);
         auto current_time_us = currentTimeUs();
         auto cost_time_us    = current_time_us - begin_time_us;
@@ -295,6 +240,9 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     alloc_request.set_request_id(prefill_context.request_id);
     // TODO(xinfei.sxf) reduce copy
     GenerateInputPB* new_request = new GenerateInputPB(*prefill_context.rpc_context.request);
+    new_request->clear_group_size();
+    new_request->clear_group_id();
+    new_request->mutable_generate_config()->clear_group_timeout();
     alloc_request.set_allocated_input(new_request);
     for (auto& addrs : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(addrs);
@@ -335,8 +283,8 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
 void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
-    auto start_time_us = currentTimeUs();
-    prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
+    auto start_time_us         = currentTimeUs();
+    prefill_context.error_info = waitStreamBeforeRun(prefill_context);
     prefill_context.stat_info.remote_load_cache_wait_stream_rt_us += currentTimeUs() - start_time_us;
     if (prefill_context.error_info.hasError()) {
         prefill_context.error_status =
@@ -463,7 +411,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
 
     auto first_token_rt_us = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
     while (prefill_context.client_stream->Read(&response)) {
-        if (prefill_context.server_context->IsCancelled()) {
+        if (prefill_context.isRequestCancelled()) {
             RTP_LLM_LOG_WARNING("request [%ld] cancel by user", request_id);
             prefill_context.error_status = grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
             return;
@@ -508,18 +456,76 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
         }
         if (!prefill_context.rpc_context.writer->Write(response)) {
             RTP_LLM_LOG_WARNING("request [%ld] write outputs pb failed", request_id);
-            prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
+            // Both the synchronous gRPC writer and ResponseBufferWriter return false when their downstream
+            // consumer is closed or cancelled. Treat this as cancellation so closeGrpcStream() calls TryCancel().
+            prefill_context.error_status = grpc::Status(grpc::StatusCode::CANCELLED, "request output consumer closed");
             return;
         }
     }
-    CLIENT_GRPC_RET_IF_ERROR(
-        prefill_context, prefill_context.closeGrpcStream().ok(), ErrorCode::REMOTE_GENERATE_FAILED);
+    auto status = prefill_context.closeGrpcStream();
+    if (!status.ok() && status.error_code() != grpc::StatusCode::CANCELLED) {
+        CLIENT_GRPC_RET_IF_ERROR(prefill_context, false, ErrorCode::REMOTE_GENERATE_FAILED);
+    }
 }
 
 grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& prefill_context) {
     EXECUTE_STAGE_FUNC(getRpcConnection, prefill_context);
     EXECUTE_STAGE_FUNC(multimodalProcess, prefill_context);
     EXECUTE_STAGE_FUNC(remoteAllocateResource, prefill_context);
+    return grpc::Status::OK;
+}
+
+void PrefillRpcServer::reportPrefillRecentCacheKeyMetricsOnce(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
+    if (prefill_context.recent_cache_key_metric_reported) {
+        return;
+    }
+    if (!PrefillCacheHitMetricsReporter::enabled()) {
+        return;
+    }
+    if (!prefill_recent_cache_key_window_) {
+        return;
+    }
+    if (!prefill_context.generate_input) {
+        return;
+    }
+    prefill_context.recent_cache_key_metric_reported = true;
+
+    const int seq_size_per_block = maga_init_params_.kv_cache_config.seq_size_per_block;
+    reportPrefillRecentCacheKeyMetrics(
+        prefill_recent_cache_key_window_.get(), metrics_reporter_, prefill_context, seq_size_per_block);
+}
+
+grpc::Status PrefillRpcServer::syncPrefix(PrefillGenerateContext& prefill_context) {
+    auto max_retry_times      = maga_init_params_.pd_sep_config.prefill_retry_times;
+    auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms;
+    int  retry_interval_ms    = 1;
+
+    EXECUTE_WITH_RETRY(
+        prepareAllocateResource, prefill_context, max_retry_times, max_retry_timeout_ms, retry_interval_ms);
+    if (prefill_context.hasError()) {
+        logPrefillFailureTrace("prepare_allocate_failed", prefill_context);
+        RTP_LLM_LOG_WARNING(
+            "request [%ld] prepare allocate resource failed after retry [%d] times, cost time ms [%ld], "
+            "max retry time [%ld], max retry timeout ms [%ld]",
+            prefill_context.request_id,
+            prefill_context.retry_times,
+            prefill_context.retry_cost_time_ms,
+            max_retry_times + 1,
+            max_retry_timeout_ms);
+        return prefill_context.error_status;
+    }
+    EXECUTE_STAGE_FUNC(enqueueRequest, prefill_context);
+    return grpc::Status::OK;
+}
+
+grpc::Status PrefillRpcServer::finishStream(PrefillGenerateContext& prefill_context) {
+    EXECUTE_STAGE_FUNC(remoteLoadCacheStart, prefill_context);
+    EXECUTE_STAGE_FUNC(pollLocalOutput, prefill_context);
+    EXECUTE_STAGE_FUNC(remoteLoadCacheEnd, prefill_context);
+    EXECUTE_STAGE_FUNC(remoteGenerate, prefill_context);
+    EXECUTE_STAGE_FUNC(pollRemoteOutput, prefill_context);
+    prefill_context.stat_info.nextStage();
     return grpc::Status::OK;
 }
 
@@ -561,36 +567,20 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   request->generate_config().timeout_ms(),
                                                   server_context,
                                                   metrics_reporter_,
-                                                  meta_);
+                                                  meta_,
+                                                  maga_init_params_.pd_sep_config.prefill_stop_stream_wait_timeout_ms);
     prefill_context.onflight_requests      = onflight_requests_;
     prefill_context.loading_cache_requests = loading_cache_requests_;
 
-    auto max_retry_times      = maga_init_params_.pd_sep_config.prefill_retry_times;
-    auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms;
-    int  retry_interval_ms    = 1;
-
     try {
-        EXECUTE_WITH_RETRY(
-            prepareAllocateResource, prefill_context, max_retry_times, max_retry_timeout_ms, retry_interval_ms);
-        if (prefill_context.hasError()) {
-            logPrefillFailureTrace("prepare_allocate_failed", prefill_context);
-            RTP_LLM_LOG_WARNING(
-                "request [%ld] prepare allocate resource failed after retry [%d] times, cost time ms [%ld], "
-                "max retry time [%ld], max retry timeout ms [%ld]",
-                prefill_context.request_id,
-                prefill_context.retry_times,
-                prefill_context.retry_cost_time_ms,
-                max_retry_times + 1,
-                max_retry_timeout_ms);
-            return prefill_context.error_status;
+        auto status = syncPrefix(prefill_context);
+        if (!status.ok()) {
+            return status;
         }
-        EXECUTE_STAGE_FUNC(enqueueRequest, prefill_context);
-        EXECUTE_STAGE_FUNC(remoteLoadCacheStart, prefill_context);
-        EXECUTE_STAGE_FUNC(pollLocalOutput, prefill_context);
-        EXECUTE_STAGE_FUNC(remoteLoadCacheEnd, prefill_context);
-        EXECUTE_STAGE_FUNC(remoteGenerate, prefill_context);
-        EXECUTE_STAGE_FUNC(pollRemoteOutput, prefill_context);
-        prefill_context.stat_info.nextStage();
+        status = finishStream(prefill_context);
+        if (!status.ok()) {
+            return status;
+        }
     } catch (const std::exception& e) {
         auto error_msg = "request [" + prefill_context.request_key + "] catch exception [" + e.what() + "]";
         prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
@@ -612,7 +602,11 @@ grpc::Status
 PrefillRpcServer::RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response) {
     RTP_LLM_PROFILE_FUNCTION();
     auto request_id = request->request_id();
-    resource_.cache_store->markRequestEnd(std::to_string(request_id));
+    // In mock mode, resource_.cache_store is nullptr (MockCacheStore is not a NormalCacheStore).
+    // markRequestEnd is a NormalCacheStore-specific cleanup method that is not needed in mock mode.
+    if (resource_.cache_store) {
+        resource_.cache_store->markRequestEnd(std::to_string(request_id));
+    }
     return grpc::Status::OK;
 }
 

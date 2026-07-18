@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.Set;
 
 @Getter
 @Slf4j
@@ -19,12 +20,25 @@ import java.util.Map;
 public class ConfigService {
 
     private static final String FLEXLB_CONFIG_ENV = "FLEXLB_CONFIG";
-    private static final String STRATEGY_CONFIGS_ENV = "STRATEGY_CONFIGS";
+    private static final String PREFILL_TIME_FORMULA_ENV = "PREFILL_TIME_FORMULA";
     private static final String TRAFFIC_POLICY_CONFIG_ENV = "TRAFFIC_POLICY_CONFIG";
     private static final String TRAFFIC_POLICY_CONFIG_FILE_ENV = "TRAFFIC_POLICY_CONFIG_FILE";
 
+    /**
+     * Critical config fields whose parse failures must abort startup (fail-fast)
+     * instead of silently falling back to defaults.
+     */
+    private static final Set<String> CRITICAL_CONFIG_FIELDS = Set.of(
+            "defaultScheduleMode",
+            "flexlbBatchAlgorithm",
+            "flexlbBatchMaxCapacity",
+            "flexlbBatchMaxInflight",
+            "flexlbBatchFixedMaxInflightBatches",
+            "flexlbBatchSloMaxInflightBatches",
+            "costFormula",
+            "prefillPredictorType");
+
     private final FlexlbConfig flexlbConfig;
-    private final StrategyConfigs strategyConfigs;
 
     public ConfigService() {
         this(System.getenv());
@@ -35,7 +49,12 @@ public class ConfigService {
         log.warn("FLEXLB_CONFIG = {}", lbConfigStr);
         FlexlbConfig config;
         if (lbConfigStr != null) {
-            config = JsonUtils.toObject(lbConfigStr, FlexlbConfig.class);
+            try {
+                config = JsonUtils.toObject(lbConfigStr, FlexlbConfig.class);
+            } catch (Exception e) {
+                throw new ConfigValidationException(FLEXLB_CONFIG_ENV,
+                    "Failed to parse FLEXLB_CONFIG JSON: " + e.getMessage(), e);
+            }
         } else {
             config = new FlexlbConfig();
         }
@@ -43,33 +62,20 @@ public class ConfigService {
         // If corresponding advanced environment variables exist, override and update
         applyEnvironmentOverrides(config, environment);
         applyTrafficPolicyOverride(config, environment);
+        applyPrefillFormulaOverride(config, environment);
 
+        // Pre-validate critical parsed config at startup (fail-fast).
+        // If these throw ConfigValidationException, startup must abort rather
+        // than letting every per-request call fail with a 500.
+        config.getDefaultScheduleModeEnum();
+        config.getParsedSloBuckets();
+
+        dumpEffectiveConfig(config);
         this.flexlbConfig = config;
-        this.strategyConfigs = loadStrategyConfigs(environment);
     }
 
     public FlexlbConfig loadBalanceConfig() {
         return flexlbConfig;
-    }
-
-    private StrategyConfigs loadStrategyConfigs(Map<String, String> environment) {
-        String strategyConfigsStr = environment.get(STRATEGY_CONFIGS_ENV);
-
-        StrategyConfigs configs;
-        if (StringUtils.isNotBlank(strategyConfigsStr)) {
-            log.warn("STRATEGY_CONFIGS = {}", strategyConfigsStr);
-            configs = JsonUtils.toObjectOrNull(strategyConfigsStr, StrategyConfigs.class);
-            if (configs == null) {
-                log.warn("Failed to parse STRATEGY_CONFIGS, use default strategy configs");
-                configs = new StrategyConfigs();
-            }
-        } else {
-            log.debug("STRATEGY_CONFIGS is not set, use default strategy configs");
-            configs = new StrategyConfigs();
-        }
-
-        configs.normalize();
-        return configs;
     }
 
     public synchronized void updateTrafficPolicy(TrafficPolicyConfig trafficPolicy) {
@@ -98,9 +104,10 @@ public class ConfigService {
             String envValue = environment.get(envVarName);
 
             if (envValue != null && !envValue.trim().isEmpty()) {
+                boolean isCritical = CRITICAL_CONFIG_FIELDS.contains(field.getName());
                 try {
                     field.setAccessible(true);
-                    Object parsedValue = parseValue(envValue.trim(), fieldType);
+                    Object parsedValue = parseValue(envValue.trim(), fieldType, envVarName);
                     Object oldValue = field.get(config);
                     field.set(config, parsedValue);
                     log.info(
@@ -109,7 +116,19 @@ public class ConfigService {
                             parsedValue,
                             field.getName(),
                             oldValue);
+                } catch (ConfigValidationException e) {
+                    if (isCritical) {
+                        throw e;
+                    }
+                    log.error(
+                            "Failed to apply environment variable {}: {}",
+                            envVarName,
+                            e.getMessage(),
+                            e);
                 } catch (Exception e) {
+                    if (isCritical) {
+                        throw new ConfigValidationException(envVarName, e.getMessage(), e);
+                    }
                     log.error(
                             "Failed to apply environment variable {}: {}",
                             envVarName,
@@ -136,9 +155,26 @@ public class ConfigService {
             return;
         }
 
-        TrafficPolicyConfig trafficPolicy = JsonUtils.toObject(trafficPolicyConfig, TrafficPolicyConfig.class);
-        config.setTrafficPolicy(trafficPolicy);
-        log.warn("Traffic policy loaded from standalone config: {}", JsonUtils.toStringOrEmpty(trafficPolicy));
+        try {
+            TrafficPolicyConfig trafficPolicy = JsonUtils.toObject(trafficPolicyConfig, TrafficPolicyConfig.class);
+            config.setTrafficPolicy(trafficPolicy);
+            log.warn("Traffic policy loaded from standalone config: {}", JsonUtils.toStringOrEmpty(trafficPolicy));
+        } catch (Exception e) {
+            log.error("Failed to parse traffic policy config, skipping.", e);
+        }
+    }
+
+    private void applyPrefillFormulaOverride(FlexlbConfig config, Map<String, String> environment) {
+        String formula = environment.get(PREFILL_TIME_FORMULA_ENV);
+        if (StringUtils.isBlank(formula)) {
+            // Blank or unset formula means skip the override, preserving any formula
+            // set via FLEXLB_CONFIG or COST_FORMULA. This maintains backward
+            // compatibility with deployment scripts that set PREFILL_TIME_FORMULA=""
+            // to cancel a formula override without clearing existing config.
+            return;
+        }
+        config.setCostFormula(formula);
+        log.warn("Prefill time formula loaded from {}: {}", PREFILL_TIME_FORMULA_ENV, formula);
     }
 
     private String readConfigFile(String filePath) {
@@ -161,6 +197,7 @@ public class ConfigService {
                 || type == Double.class
                 || type == boolean.class
                 || type == Boolean.class
+                || type == String.class
                 || type.isEnum();
     }
 
@@ -184,18 +221,51 @@ public class ConfigService {
      * Parse string value based on target type
      */
     @SuppressWarnings({"unchecked", "rawtypes"})
-    private Object parseValue(String value, Class<?> targetType) {
-        if (targetType == int.class || targetType == Integer.class) {
+    private Object parseValue(String value, Class<?> targetType, String fieldName) {
+        if (targetType == String.class) {
+            return value;
+        } else if (targetType == int.class || targetType == Integer.class) {
             return Integer.parseInt(value);
         } else if (targetType == long.class || targetType == Long.class) {
             return Long.parseLong(value);
         } else if (targetType == double.class || targetType == Double.class) {
             return Double.parseDouble(value);
         } else if (targetType == boolean.class || targetType == Boolean.class) {
-            return Boolean.parseBoolean(value);
+            return parseStrictBoolean(value, fieldName);
         } else if (targetType.isEnum()) {
-            return Enum.valueOf((Class<Enum>) targetType, value);
+            return JsonUtils.toObject("\"" + value + "\"", targetType);
         }
         throw new IllegalArgumentException("Unsupported type: " + targetType);
+    }
+
+    /**
+     * Strictly parse a boolean value, rejecting unrecognized strings.
+     *
+     * @throws ConfigValidationException if the value is not a recognized boolean literal.
+     */
+    static boolean parseStrictBoolean(String value, String fieldName) {
+        String v = value.trim().toLowerCase();
+        if ("true".equals(v) || "1".equals(v) || "yes".equals(v) || "on".equals(v) || "enabled".equals(v)) return true;
+        if ("false".equals(v) || "0".equals(v) || "no".equals(v) || "off".equals(v) || "disabled".equals(v)) return false;
+        throw new ConfigValidationException(fieldName,
+            "Invalid boolean value '" + value + "'. Expected: true/false/1/0/yes/no/on/off/enabled/disabled");
+    }
+
+    /**
+     * Log the effective configuration after all overrides have been applied.
+     * Only dumps critical scheduling config — no sensitive information.
+     */
+    private void dumpEffectiveConfig(FlexlbConfig config) {
+        log.info("===== FlexLB Effective Configuration =====");
+        log.info("scheduleMode={}, batchAlgorithm={}, batchEnabled={}",
+            config.getDefaultScheduleMode(), config.getFlexlbBatchAlgorithm(),
+            config.isFlexlbBatchEnabled());
+        log.info("batchMaxCapacity={}, batchMaxInflight={}",
+            config.getFlexlbBatchMaxCapacity(), config.getFlexlbBatchMaxInflight());
+        log.info("fixedMaxInflightBatches={}, sloMaxInflightBatches={}",
+            config.getFlexlbBatchFixedMaxInflightBatches(),
+            config.getFlexlbBatchSloMaxInflightBatches());
+        log.info("prefillPredictorType={}", config.getPrefillPredictorType());
+        log.info("==========================================");
     }
 }

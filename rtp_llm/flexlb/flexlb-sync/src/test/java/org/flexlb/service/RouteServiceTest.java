@@ -1,5 +1,6 @@
 package org.flexlb.service;
 
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.config.ConfigService;
@@ -35,7 +36,13 @@ class RouteServiceTest {
     private QueueManager queueManager;
 
     @Mock
+    private org.flexlb.balance.scheduler.FlexlbBatchScheduler flexlbBatchScheduler;
+
+    @Mock
     private RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
+
+    @Mock
+    private EndpointRegistry endpointRegistry;
 
     @Mock
     private BalanceContext balanceContext;
@@ -45,7 +52,9 @@ class RouteServiceTest {
     @BeforeEach
     void setUp() {
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
-        routeService = new RouteService(configService, defaultRouter, queueManager, recentCacheKeyTraceReporter);
+        routeService = new RouteService(configService, defaultRouter, queueManager,
+                flexlbBatchScheduler, recentCacheKeyTraceReporter,
+                endpointRegistry);
     }
 
     @Test
@@ -54,7 +63,7 @@ class RouteServiceTest {
         when(flexlbConfig.isEnableQueueing()).thenReturn(true);
         when(queueManager.tryRouteAsync(balanceContext)).thenReturn(Mono.just(response));
 
-        Response actual = routeService.route(balanceContext).block();
+        Response actual = routeService.route(balanceContext).join();
 
         assertSame(response, actual);
         verify(balanceContext).setConfig(flexlbConfig);
@@ -70,7 +79,7 @@ class RouteServiceTest {
         when(flexlbConfig.isEnableQueueing()).thenReturn(false);
         when(defaultRouter.route(balanceContext)).thenReturn(response);
 
-        Response actual = routeService.route(balanceContext).block();
+        Response actual = routeService.route(balanceContext).join();
 
         assertSame(response, actual);
         verify(balanceContext).setConfig(flexlbConfig);
@@ -87,7 +96,7 @@ class RouteServiceTest {
         when(flexlbConfig.isEnableQueueing()).thenReturn(false);
         when(defaultRouter.route(balanceContext)).thenReturn(response);
 
-        Response actual = routeService.route(balanceContext).block();
+        Response actual = routeService.route(balanceContext).join();
 
         assertSame(response, actual);
         verify(balanceContext).setConfig(flexlbConfig);

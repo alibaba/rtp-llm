@@ -25,18 +25,20 @@ message IntMatrix {
     repeated IntVector rows = 1;
 }
 
+enum RoleTypePB {
+    ROLE_TYPE_PDFUSION = 0;
+    ROLE_TYPE_PREFILL = 1;
+    ROLE_TYPE_DECODE = 2;
+    ROLE_TYPE_VIT = 3;
+    ROLE_TYPE_FRONTEND = 4;
+}
+
 message RoleAddrPB {
-    enum RoleType {
-        PDFUSION = 0;
-        PREFILL = 1;
-        DECODE = 2;
-        VIT = 3;
-        FRONTEND = 4;
-    }
-    RoleType role = 1;
+    string role = 1;              // 字符串角色名，如 "PREFILL"，向后兼容
     string ip = 2;
     int32 http_port = 3;
     int32 grpc_port = 4;
+    RoleTypePB role_type = 5;    // 类型安全的枚举字段
 }
 
 message GenerateConfigPB {
@@ -96,8 +98,8 @@ message GenerateConfigPB {
     bool enable_device_cache = 52;
     bool enable_remote_cache = 53;
     string unique_key = 54;
-    google.protobuf.Int32Value force_batch = 55;
-    google.protobuf.Int32Value batch_group_timeout = 56;
+    reserved 55;
+    google.protobuf.Int32Value group_timeout = 56;
     string profile_trace_name = 57;
     repeated int32 begin_think_token_ids = 58;
     google.protobuf.StringValue json_schema = 59;
@@ -152,8 +154,8 @@ message GenerateInputPB {
     GenerateConfigPB generate_config = 4;
     string client_id = 5;
     int64 start_time = 6;
-    int32 batch_group_size = 7;
-    google.protobuf.Int64Value batch_group_id = 8;
+    int32 group_size = 7;
+    google.protobuf.Int64Value group_id = 8;
     RequestInfoPB request_info = 9;
 }
 
@@ -395,6 +397,13 @@ message UpdateEplbConfigRequestPB {
     int32 update_time = 2;
 }
 
+enum TaskPhase {
+    TASK_PHASE_PENDING = 0;
+    TASK_PHASE_RECEIVED = 1;
+    TASK_PHASE_KV_ALLOCATED = 2;
+    TASK_PHASE_RUNNING = 3;
+}
+
 message TaskInfoPB {
     int64 request_id = 1;
     reserved 2;
@@ -405,7 +414,12 @@ message TaskInfoPB {
     int64 iterate_count = 6;
     int64 end_time_ms = 7;
     int64 dp_rank = 8;
-    bool is_waiting = 9;
+    reserved 9;
+    reserved "is_waiting";
+    ErrorDetailsPB error_info = 10;
+    int64 batch_id = 11;
+    TaskPhase phase = 12;
+    int64 execution_time_ms = 13;
 }
 
 message UpdateWeightsRequestPB {
@@ -415,7 +429,7 @@ message UpdateWeightsRequestPB {
 }
 
 message WorkerStatusPB {
-    string role = 1;
+    string role = 1;              // 字符串角色名，如 "PREFILL"，向后兼容
     int32 available_concurrency = 2;
     repeated TaskInfoPB running_task_info = 3;
     repeated TaskInfoPB finished_task_list = 4;
@@ -429,6 +443,12 @@ message WorkerStatusPB {
     bool alive = 13;
     string precision = 14;
     int64 latest_finished_version = 15;
+    int64 dp_rank = 16;
+    int64 available_kv_cache = 17;
+    int64 total_kv_cache = 18;
+    reserved 19;
+    reserved "role_str";
+    RoleTypePB role_type = 20;   // 类型安全的枚举字段
 }
 
 message EmbeddingInputPB {
@@ -638,6 +658,53 @@ message CpuTpBroadcastResponsePB {
     string error_message = 2;
 }
 
+message EnqueueBatchExternalInputPB {
+    GenerateInputPB input = 1;
+}
+
+message EnqueueBatchDpSlotPB {
+    int32 dp_rank = 1;
+    repeated EnqueueBatchExternalInputPB requests = 2;
+}
+
+message EnqueueBatchRequestPB {
+    int64 batch_id = 1;
+    repeated EnqueueBatchDpSlotPB dp_slots = 2;
+}
+
+message EnqueueGroupInputPB {
+    GenerateInputPB input = 1;
+}
+
+message EnqueueGroupRequestPB {
+    int64 batch_id = 1;
+    int32 dp_rank = 2;
+    repeated EnqueueGroupInputPB requests = 3;
+}
+
+message EnqueueBatchSuccessPB {
+    int64 request_id = 1;
+}
+
+message EnqueueBatchErrorPB {
+    int64 request_id = 1;
+    ErrorDetailsPB error_info = 2;
+}
+
+message EnqueueBatchResponsePB {
+    int64 batch_id = 1;
+    repeated EnqueueBatchSuccessPB successes = 2;
+    repeated EnqueueBatchErrorPB errors = 3;
+}
+
+message FetchRequestPB {
+    int64 request_id = 1;
+}
+
+message CancelRequestPB {
+    int64 request_id = 1;
+}
+
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
@@ -664,6 +731,10 @@ service RpcService {
     rpc CpuTpBroadcast(CpuTpBroadcastRequestPB) returns (CpuTpBroadcastResponsePB);
     rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
+    rpc EnqueueBatch(EnqueueBatchRequestPB) returns (EnqueueBatchResponsePB);
+    rpc EnqueueGroup(EnqueueGroupRequestPB) returns (EnqueueBatchResponsePB);
+    rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
+    rpc Cancel(CancelRequestPB) returns (EmptyPB);
 }
 
 service MultimodalRpcService {

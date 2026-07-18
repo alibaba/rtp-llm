@@ -216,6 +216,7 @@ class CPRotateMethod:
 
 class CacheStoreConfig:
     cache_store_rdma_mode: bool
+    cache_store_mock_mode: bool
     wrr_available_ratio: int
     rank_factor: int
     thread_count: int
@@ -1334,6 +1335,8 @@ class PDSepConfig:
     prefill_max_wait_timeout_ms: int
     prefill_retry_timeout_ms: int
     prefill_retry_times: int
+    prefill_slot_pool_size: int
+    prefill_stop_stream_wait_timeout_ms: int
     rdma_connect_retry_times: int
     remote_rpc_server_port: int
     role_type: RoleType
@@ -1779,6 +1782,7 @@ class RuntimeConfig:
     use_gather_batch_scheduler: bool
     warm_up: bool
     warm_up_with_loss: bool
+    all_worker_grpc_addrs: list[str]
     worker_addrs: list[str]
     worker_grpc_addrs: list[str]
 

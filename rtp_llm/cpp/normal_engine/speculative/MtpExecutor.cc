@@ -778,6 +778,14 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         saved_input_lengths = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
     }
 
+    if (isTpRank0() && stream_groups.totalContextBatchSize() > 0) {
+        RTP_LLM_LOG_INFO("prefill_batch_begin: ctx_batch=%zu gen_batch=%zu total_tokens=%zu max_seq=%zu",
+                         stream_groups.totalContextBatchSize(),
+                         stream_groups.totalDecodeBatchSize(),
+                         stream_groups.modelExecuteTokenSize(),
+                         stream_groups.maxSeqLen());
+    }
+
     // target model prefill
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
@@ -842,6 +850,40 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
         draft_model_output = std::move(draft_model_->forward(model_input));
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
+
+    if (isTpRank0() && stream_groups.totalContextBatchSize() > 0) {
+        auto        now_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        std::string details;
+        for (auto& s : stream_groups.contextStreams()) {
+            char    buf[256];
+            int64_t compute_ms = (now_us - s->beginTimeUs()) / 1000 - s->getTimeInfo().wait_time_us / 1000;
+            snprintf(
+                buf,
+                sizeof(buf),
+                "{id=%ld trace_id=%s input=%d prefix=%d reuse=%d ctx=%d grp=%ld/%d tokens=%d timeout=%ld compute_ms=%ld global_start_time_us=%ld} ",
+                s->streamId(),
+                s->traceId().empty() ? "-" : s->traceId().c_str(),
+                s->inputLength(),
+                s->prefixLength(),
+                s->reuseLength(),
+                s->contextLength(),
+                s->groupId(),
+                s->groupSize(),
+                s->currentExecuteTokenSize(),
+                s->getTimeoutMs(),
+                compute_ms,
+                s->generateInput()->global_start_time_us);
+            details += buf;
+        }
+        RTP_LLM_LOG_INFO(
+            "prefill_batch_end: ctx_batch=%zu gen_batch=%zu total_tokens=%zu max_seq=%zu forward_us=%ld streams=[%s]",
+            stream_groups.totalContextBatchSize(),
+            stream_groups.totalDecodeBatchSize(),
+            stream_groups.modelExecuteTokenSize(),
+            stream_groups.maxSeqLen(),
+            model_forward_us,
+            details.c_str());
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
