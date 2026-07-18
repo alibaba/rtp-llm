@@ -197,7 +197,7 @@ public class QueueManager {
         return Mono.just(Response.error(StrategyErrorType.NO_AVAILABLE_WORKER));
     }
 
-    @Scheduled(fixedRate = 1000)
+    @Scheduled(fixedRate = 2000L)
     public void reportQueueSize() {
         metrics.reportQueueSize(queue.size());
     }

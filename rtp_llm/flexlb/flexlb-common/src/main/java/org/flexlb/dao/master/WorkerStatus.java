@@ -2,16 +2,10 @@ package org.flexlb.dao.master;
 
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.collections4.MapUtils;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.TaskStateEnum;
-import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.Iterator;
 import java.util.Map;
-import java.util.Map.Entry;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -22,261 +16,87 @@ import java.util.concurrent.locks.ReentrantLock;
 public class WorkerStatus {
     private static final org.slf4j.Logger logger = LoggerFactory.getLogger("syncLogger");
     public final transient ReentrantLock lock = new ReentrantLock();
-    private String role;
+    private RoleType role;
     private String group;
     private String ip;
     private int port;
+    private int grpcPort;
     private String site;
     private Long availableConcurrency;
-    private boolean alive;
+    private volatile boolean alive;
     private AtomicLong availableKvCacheTokens = new AtomicLong();
-    private AtomicLong usedKvCacheTokens = new AtomicLong();
+    private AtomicLong totalKvCacheTokens = new AtomicLong();
     private CacheStatus cacheStatus;
-    private AtomicLong runningQueueTime = new AtomicLong();
-    private Map<String, TaskInfo> waitingTaskList;
     private Map<String, TaskInfo> runningTaskList;
     private AtomicLong latestFinishedTaskVersion = new AtomicLong(-1L);
 
-    private ConcurrentHashMap<Long/*requestId*/, TaskInfo> localTaskMap = new ConcurrentHashMap<>();
     private double stepLatencyMs;
     private long iterateCount;
     private long dpSize;
     private long tpSize;
+    private long dpRank;
 
-    private AtomicLong statusLastUpdateTime = new AtomicLong(-1); // Last status update time (microseconds)
-    private AtomicLong statusUpdateIntervalUs = new AtomicLong(0); // Actual interval between last two status updates (microseconds)
-    private AtomicLong cacheLastUpdateTime = new AtomicLong(-1); // Last cache status update time
-    private AtomicLong lastSelectedTime = new AtomicLong(-1); // Last selection time
-    private AtomicBoolean resourceAvailable = new AtomicBoolean(true); // Resource availability state
-    private AtomicBoolean statusCheckInProgress = new AtomicBoolean(false); // Status check in progress flag
-    private AtomicBoolean cacheCheckInProgress = new AtomicBoolean(false); // Cache check in progress flag
+    private AtomicLong statusLastUpdateTime = new AtomicLong(-1);
+    private AtomicLong statusUpdateIntervalUs = new AtomicLong(0);
+    private AtomicLong cacheLastUpdateTime = new AtomicLong(-1);
+    private AtomicLong lastSelectedTime = new AtomicLong(-1);
+    private AtomicBoolean resourceAvailable = new AtomicBoolean(true);
+    private AtomicBoolean statusCheckInProgress = new AtomicBoolean(false);
+    private AtomicBoolean cacheCheckInProgress = new AtomicBoolean(false);
     private AtomicLong statusVersion = new AtomicLong(-1L);
+    private AtomicLong consecutiveFailures = new AtomicLong(0);
 
     /**
-     * Add task to local running queue
-     * @param requestId Request ID
-     * @param taskInfo Task information
+     * Absorb all dynamic engine fields from a gRPC status response.
+     * Topology labels ({@code site}, {@code group}) are NOT set here —
+     * they are managed externally by the sync runner.
      */
-    public void putLocalTask(Long requestId, TaskInfo taskInfo) {
-        taskInfo.updateTaskState(TaskStateEnum.IN_TRANSIT);
-        AtomicReference<TaskInfo> replacedTaskRef = new AtomicReference<>();
-        localTaskMap.compute(requestId, (id, previousTask) -> {
-            if (previousTask != null) {
-                releaseLocalTaskResources(previousTask);
-                replacedTaskRef.set(previousTask);
-            }
-            reserveLocalTaskResources(taskInfo);
-            return taskInfo;
-        });
-
-        lastSelectedTime.set(System.nanoTime() / 1000);
-        Logger.debug("Task {} added to local queue with state: {}", requestId, TaskStateEnum.IN_TRANSIT);
-    }
-
-    /**
-     * Remove task from local running queue
-     * @param requestId Request ID
-     */
-    public void removeLocalTask(Long requestId) {
-        localTaskMap.computeIfPresent(requestId, (id, taskInfo) -> {
-            releaseLocalTaskResources(taskInfo);
-            return null;
-        });
-    }
-
-    private void reserveLocalTaskResources(TaskInfo taskInfo) {
-        this.addRunningQueueTime(taskInfo.estimatePrefillTime());
-        long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
-        this.decKvCacheFree(needNewKvCacheLen);
-        this.addKvCacheUsed(needNewKvCacheLen);
-    }
-
-    private void releaseLocalTaskResources(TaskInfo taskInfo) {
-        safeDecrementQueueTime(runningQueueTime, taskInfo.estimatePrefillTime());
-        long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
-        decKvCacheFree(-needNewKvCacheLen);
-        addKvCacheUsed(-needNewKvCacheLen);
-    }
-
-    /**
-     * Add estimated execution time to running queue
-     * @param len Estimated execution time to add
-     */
-    public void addRunningQueueTime(long len) {
-        runningQueueTime.addAndGet(len);
-    }
-
-    public void addKvCacheUsed(long len) {
-        usedKvCacheTokens.addAndGet(len);
-    }
-
-    public void decKvCacheFree(long len) {
-        availableKvCacheTokens.accumulateAndGet(len, (current, decrement) ->
-                Math.max(0, current - decrement));
-    }
-
-    /**
-     * Update task states
-     * Check for lost tasks, update running/waiting tasks, and clean up finished tasks
-     */
-    public void updateTaskStates(Map<String, TaskInfo> waitingTaskInfo, Map<String, TaskInfo> runningTaskInfo, Map<String, TaskInfo> finishedTaskInfo) {
-        Iterator<Map.Entry<Long, TaskInfo>> iterator = localTaskMap.entrySet().iterator();
-        while (iterator.hasNext()) {
-            Map.Entry<Long, TaskInfo> entry = iterator.next();
-            Long requestId = entry.getKey();
-            TaskInfo localTask = entry.getValue();
-            String requestIdStr = String.valueOf(requestId);
-
-            TaskInfo finishedTask = finishedTaskInfo != null ? finishedTaskInfo.get(requestIdStr) : null;
-            if (finishedTask != null) {
-                if (localTask.getTaskState() == TaskStateEnum.IN_TRANSIT) {
-                    localTask.updateTaskState(TaskStateEnum.CONFIRMED);
-                    Logger.debug("Task {} first confirmed by worker", requestId);
-                }
-                localTask.updateTaskState(TaskStateEnum.FINISHED);
-
-                if (RoleType.PREFILL.matches(role) || RoleType.PDFUSION.matches(role)) {
-                    long delta = finishedTask.estimatePrefillTime();
-                    safeDecrementQueueTime(runningQueueTime, delta);
-                }
-                Logger.debug("Task {} finished and removed", requestId);
-                iterator.remove();
-                continue;
-            }
-
-            TaskInfo runningTask = runningTaskInfo != null ? runningTaskInfo.get(requestIdStr) : null;
-            if (runningTask != null) {
-                localTask.setLastActiveTimeUs(System.nanoTime() / 1000);
-
-                if (localTask.getTaskState() == TaskStateEnum.IN_TRANSIT) {
-                    localTask.updateTaskState(TaskStateEnum.CONFIRMED);
-                    Logger.debug("Task {} first confirmed by worker", requestId);
-                }
-                if (localTask.getTaskState() != TaskStateEnum.RUNNING) {
-                    localTask.updateTaskState(TaskStateEnum.RUNNING);
-                }
-
-                localTask.setPrefixLength(runningTask.getPrefixLength());
-                localTask.setPrefillTime(runningTask.getPrefillTime());
-                localTask.setInputLength(runningTask.getInputLength());
-                localTask.setWaitingTime(runningTask.getWaitingTime());
-                localTask.setIterateCount(runningTask.getIterateCount());
-                localTask.setEndTimeMs(runningTask.getEndTimeMs());
-                localTask.setDpRank(runningTask.getDpRank());
-
-                continue;
-            }
-
-            TaskInfo waitingTask = waitingTaskInfo != null ? waitingTaskInfo.get(requestIdStr) : null;
-            if (waitingTask != null) {
-                localTask.setLastActiveTimeUs(System.nanoTime() / 1000);
-
-                if (localTask.getTaskState() == TaskStateEnum.IN_TRANSIT) {
-                    localTask.updateTaskState(TaskStateEnum.CONFIRMED);
-                    Logger.debug("Task {} first confirmed by worker (waiting)", requestId);
-                }
-
-                localTask.setPrefixLength(waitingTask.getPrefixLength());
-                localTask.setInputLength(waitingTask.getInputLength());
-                localTask.setWaitingTime(waitingTask.getWaitingTime());
-                localTask.setDpRank(waitingTask.getDpRank());
-
-                continue;
-            }
-
-            if (localTask.getTaskState() == TaskStateEnum.CONFIRMED || localTask.getTaskState() == TaskStateEnum.RUNNING) {
-                localTask.updateTaskState(TaskStateEnum.LOST);
-                logger.warn("Task {} marked as LOST - not in waiting, running or finished list", requestId);
-            }
-        }
-    }
-
-    /**
-     * Update total queue time for running queue
-     */
-    public void updateRunningQueueTime() {
-        int localTaskMapSize = localTaskMap.size();
-        if (localTaskMapSize == 0) {
-            runningQueueTime.getAndSet(0);
+    public void updateFromResponse(WorkerStatusResponse resp) {
+        if (resp == null) {
             return;
         }
-        long rectifiedEstimateRunningTime = 0;
-        for (Entry<Long, TaskInfo> entry : localTaskMap.entrySet()) {
-            TaskInfo taskInfo = entry.getValue();
-            // Recalculate based on accurate cache hit count, rectify local task running queue time
-            rectifiedEstimateRunningTime += taskInfo.estimatePrefillTime();
+        this.role = resp.getRole();
+        this.alive = resp.isAlive();
+        this.availableConcurrency = resp.getAvailableConcurrency();
+        this.stepLatencyMs = resp.getStepLatencyMs();
+        this.iterateCount = resp.getIterateCount();
+        this.dpSize = resp.getDpSize();
+        this.tpSize = resp.getTpSize();
+        this.dpRank = resp.getDpRank();
+        this.availableKvCacheTokens.set(resp.getAvailableKvCacheTokens());
+        this.totalKvCacheTokens.set(resp.getTotalKvCacheTokens());
+        // GetWorkerStatus response does not include cache status; preserve the one
+        // set by GrpcCacheStatusCheckRunner to avoid nullifying it on every status sync.
+        if (resp.getCacheStatus() != null) {
+            this.cacheStatus = resp.getCacheStatus();
         }
-        if (RoleType.PREFILL.matches(role) || RoleType.PDFUSION.matches(role)) {
-            // Only update when rectified time is less than estimated time, because engine layer returned running_list may include queuing tasks where prefixLength=0
-            if (runningQueueTime.get() > rectifiedEstimateRunningTime) {
-                runningQueueTime.getAndSet(rectifiedEstimateRunningTime);
-            }
-        }
-    }
+        this.runningTaskList = resp.getRunningTaskInfo();
+        this.statusVersion.set(resp.getStatusVersion());
+        // NOTE: latestFinishedTaskVersion is NOT set here. It is advanced only after
+        // calibrate has processed finished tasks, in GrpcWorkerStatusRunner.handleStatusResponse().
+        // Setting it here would advance the version before calibrate runs, causing the engine
+        // to filter out unprocessed finished tasks on the next poll — leaking inflight entries.
 
-    public void updateKvCacheTokens(long latestUsedKvCacheTokens, long latestAvailableKvCacheTokens) {
-
-        int localTaskMapSize = localTaskMap.size();
-        if (localTaskMapSize == 0) {
-            usedKvCacheTokens.getAndSet(latestUsedKvCacheTokens);
-            availableKvCacheTokens.getAndSet(latestAvailableKvCacheTokens);
-            return;
-        }
-
-        long inTransitTaskCacheUsed = 0;
-        for (Map.Entry<Long, TaskInfo> entry : localTaskMap.entrySet()) {
-            TaskInfo taskInfo = entry.getValue();
-            // Calculate tokens occupied by in-transit task cache miss portion
-            if (taskInfo.getTaskState() == TaskStateEnum.IN_TRANSIT) {
-                inTransitTaskCacheUsed = inTransitTaskCacheUsed + taskInfo.getInputLength() - taskInfo.getPrefixLength();
-            }
-        }
-        // Rectify KV cache tokens affected by in-transit tasks
-        latestUsedKvCacheTokens += inTransitTaskCacheUsed;
-        latestAvailableKvCacheTokens -= inTransitTaskCacheUsed;
-
-        usedKvCacheTokens.getAndSet(latestUsedKvCacheTokens);
-        availableKvCacheTokens.getAndSet(latestAvailableKvCacheTokens);
-
-    }
-
-    public long getLocalPendingTaskCount() {
-        long pendingTaskCount = 0;
-        for (TaskInfo taskInfo : localTaskMap.values()) {
-            if (isLocalPendingTask(taskInfo)) {
-                pendingTaskCount++;
-            }
-        }
-        return pendingTaskCount;
-    }
-
-    private boolean isLocalPendingTask(TaskInfo taskInfo) {
-        if (taskInfo == null) {
-            return false;
-        }
-        TaskStateEnum taskState = taskInfo.getTaskState();
-        return taskState == TaskStateEnum.IN_TRANSIT || taskState == TaskStateEnum.CONFIRMED;
+        updateStatusHeartbeatTime();
     }
 
     /**
-     * Safely decrement total queue time for running queue, ensuring it never becomes negative
-     *
-     * @param runningQueueTime Total queue time for running queue
-     * @param timeToReduce Time to reduce
+     * Record a successful status heartbeat without replacing versioned task data.
      */
-    public static void safeDecrementQueueTime(AtomicLong runningQueueTime, long timeToReduce) {
-        if (timeToReduce <= 0) {
-            logger.warn("Invalid tokens to reduce: {}", timeToReduce);
-            return;
-        }
-        runningQueueTime.accumulateAndGet(timeToReduce, (currentRunningQueueTime, reductionAmount) -> {
-            // Ensure reduction amount is positive, calculate new value, but not less than 0
-            long newRunningQueueTime = currentRunningQueueTime - reductionAmount;
-
-            // If result is negative, set to 0, ensuring token count never goes below 0
-            return Math.max(newRunningQueueTime, 0L);
-        });
+    public void refreshStatusHeartbeat(boolean alive) {
+        this.alive = alive;
+        updateStatusHeartbeatTime();
     }
+
+    private void updateStatusHeartbeatTime() {
+        long nowUs = System.nanoTime() / 1000;
+        long prev = this.statusLastUpdateTime.get();
+        if (prev > 0) {
+            this.statusUpdateIntervalUs.set(nowUs - prev);
+        }
+        this.statusLastUpdateTime.set(nowUs);
+    }
+
 
     /**
      * Update resource availability with hysteresis to prevent state oscillation.

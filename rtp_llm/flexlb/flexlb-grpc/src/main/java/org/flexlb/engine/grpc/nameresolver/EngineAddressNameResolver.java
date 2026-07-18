@@ -108,7 +108,7 @@ public class EngineAddressNameResolver implements CustomNameResolver {
         } else {
             List<String/*ip:port*/> ipPortList = new ArrayList<>(hostList.size());
             for (WorkerHost host : hostList) {
-                ipPortList.add(host.getIp() + ":" + host.getPort());
+                ipPortList.add(host.getIp() + ":" + host.getGrpcPort());
             }
             domainHostsMap.put(address, ipPortList);
         }

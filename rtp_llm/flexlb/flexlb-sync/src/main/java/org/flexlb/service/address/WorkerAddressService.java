@@ -2,6 +2,8 @@ package org.flexlb.service.address;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.apache.commons.lang3.tuple.Pair;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.Endpoint;
@@ -37,22 +39,25 @@ public class WorkerAddressService {
     /**
      * Service discovery request thread pool
      */
-    public static final ExecutorService serviceDiscoveryExecutor = new ThreadPoolExecutor(
-            10,
-            1000,
-            60L,
-            TimeUnit.SECONDS, new LinkedBlockingQueue<>(1000),
-            new NamedThreadFactory("service-discovery-executor"),
-            new ThreadPoolExecutor.CallerRunsPolicy()
-    );
+    public static ExecutorService serviceDiscoveryExecutor;
 
     public WorkerAddressService(EngineHealthReporter engineHealthReporter,
                                 ModelMetaConfig modelMetaConfig,
-                                ServiceDiscovery serviceDiscovery) {
+                                ServiceDiscovery serviceDiscovery,
+                                ConfigService configService) {
 
         this.engineHealthReporter = engineHealthReporter;
         this.modelMetaConfig = modelMetaConfig;
         this.serviceDiscovery = serviceDiscovery;
+        FlexlbConfig config = configService.loadBalanceConfig();
+        serviceDiscoveryExecutor = new ThreadPoolExecutor(
+                10,
+                config.getServiceDiscoveryMaxSize(),
+                60L,
+                TimeUnit.SECONDS, new LinkedBlockingQueue<>(1000),
+                new NamedThreadFactory("service-discovery-executor"),
+                new ThreadPoolExecutor.CallerRunsPolicy()
+        );
     }
 
     @PreDestroy
@@ -91,10 +96,10 @@ public class WorkerAddressService {
         } catch (Exception e) {
             if (e instanceof TimeoutException) {
                 logger.error("query service discovery timeout, model={}, address={}, msg:{}", modelName, address, "timeout");
-                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null, null);
+                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null, null, null);
             } else {
                 logger.error("query service discovery error, model={}, address={}, msg:{}", modelName, address, e.getMessage());
-                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null, null);
+                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null, null, null);
             }
             future.cancel(true);
             return new ArrayList<>();
@@ -143,7 +148,7 @@ public class WorkerAddressService {
             } catch (Throwable e) {
                 logger.error("query service discovery exception, cost={}ms, model={}, address={}, msg:{}",
                         System.nanoTime() / 1000 - start, modelName, address, e.getMessage());
-                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null, null);
+                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null, null, null);
                 return new ArrayList<>();
             }
         }

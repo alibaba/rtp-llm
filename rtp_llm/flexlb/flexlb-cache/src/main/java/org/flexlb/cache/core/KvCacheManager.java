@@ -29,16 +29,16 @@ import java.util.concurrent.atomic.LongAdder;
 @Getter
 @Component
 public class KvCacheManager {
-    
+
     @Autowired
     private GlobalCacheIndex globalCacheIndex;
-    
+
     @Autowired
     private EngineLocalView engineLocalView;
-    
+
     @Autowired
     private WorkerStatusProvider workerStatusProvider;
-    
+
     /**
      * Cache metrics reporter
      */
@@ -54,7 +54,7 @@ public class KvCacheManager {
     public void init() {
         log.info("KvCacheManager initialized successfully");
     }
-    
+
     @PreDestroy
     public void destroy() {
         log.info("KvCacheManager shutting down...");
@@ -123,11 +123,12 @@ public class KvCacheManager {
 
         totalUpdates.increment();
         // Report metrics
-        cacheMetricsReporter.reportEngineLocalMetrics(engineIPort, role, engineLocalView.size(engineIPort));
+        cacheMetricsReporter.reportEngineLocalMetrics(
+                engineIPort.split(":")[0], engineIPort, role, engineLocalView.size(engineIPort));
         cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
         cacheMetricsReporter.reportEngineViewsMapSize(engineLocalView.getEngineViewsMapSize());
     }
-    
+
     /**
      * Clear all data
      */
