@@ -19,21 +19,40 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final ConcurrentHashMap<Long, RequestInflight> inflightRequests = new ConcurrentHashMap<>();
+    private final AtomicLong inflightKvReservedTotal = new AtomicLong(0);
+    private final AtomicLong inflightExpectedKvReservedTotal = new AtomicLong(0);
     private final AtomicLong reportedKvAvailable = new AtomicLong();
     private volatile int confirmedRunningCount;
     private final InflightEvictor<Long, RequestInflight> requestEvictor;
 
     public DecodeEndpoint(WorkerStatus status) {
         super(status);
-        this.requestEvictor = new InflightEvictor<>(inflightRequests, req -> {});
+        this.requestEvictor = new InflightEvictor<>(inflightRequests, req -> {
+            inflightKvReservedTotal.addAndGet(-req.kvTokens());
+            inflightExpectedKvReservedTotal.addAndGet(-req.expectedKvTokens());
+        });
     }
 
     public void reserve(long requestId, long kvTokens, long expectedKvTokens) {
-        inflightRequests.put(requestId, new RequestInflight(kvTokens, expectedKvTokens));
+        RequestInflight newRi = new RequestInflight(kvTokens, expectedKvTokens);
+        RequestInflight prev = inflightRequests.putIfAbsent(requestId, newRi);
+        if (prev != null) {
+            // requestId already exists — subtract the old kvTokens before overwriting,
+            // otherwise the old value is silently lost and the counter stays inflated.
+            inflightKvReservedTotal.addAndGet(-prev.kvTokens());
+            inflightExpectedKvReservedTotal.addAndGet(-prev.expectedKvTokens());
+            inflightRequests.put(requestId, newRi);
+        }
+        inflightKvReservedTotal.addAndGet(kvTokens);
+        inflightExpectedKvReservedTotal.addAndGet(expectedKvTokens);
     }
 
     public void release(long requestId) {
-        inflightRequests.remove(requestId);
+        RequestInflight removed = inflightRequests.remove(requestId);
+        if (removed != null) {
+            inflightKvReservedTotal.addAndGet(-removed.kvTokens());
+            inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
+        }
     }
 
     @Override
@@ -72,7 +91,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
             for (TaskInfo task : runningTaskInfo.values()) {
                 TaskPhase phase = task.getPhase();
                 if (phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING) {
-                    inflightRequests.remove(task.getRequestId());
+                    RequestInflight removed = inflightRequests.remove(task.getRequestId());
+                    if (removed != null) {
+                        inflightKvReservedTotal.addAndGet(-removed.kvTokens());
+                        inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
+                    }
                 }
             }
         }
@@ -82,7 +105,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
             for (TaskInfo task : finishedTaskInfo.values()) {
                 if (task.getErrorCode() != 0) {
                     RequestInflight removed = inflightRequests.remove(task.getRequestId());
-                    if (removed == null && !isCancelError(task)) {
+                    if (removed != null) {
+                        inflightKvReservedTotal.addAndGet(-removed.kvTokens());
+                        inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
+                    } else if (!isCancelError(task)) {
                         logger.warn("Decode calibrate: finished failed request reqId={} not in inflight, error={}",
                                 task.getRequestId(), task.getErrorMessage());
                     }
@@ -92,7 +118,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // Phase 3: process finished success requests
             for (TaskInfo task : finishedTaskInfo.values()) {
                 if (task.getErrorCode() == 0) {
-                    inflightRequests.remove(task.getRequestId());
+                    RequestInflight removed = inflightRequests.remove(task.getRequestId());
+                    if (removed != null) {
+                        inflightKvReservedTotal.addAndGet(-removed.kvTokens());
+                        inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
+                    }
                 }
             }
         }
@@ -104,27 +134,20 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Local inflight KV reservation (conservative estimate) not yet confirmed by the engine.
      * Sums {@code expectedKvTokens} (seqLen + maxNewTokens) to account for generation-phase
      * KV growth. Used for scoring / load balancing.
-     * Computed on demand from the inflight map — no separate counter needed.
+     * Backed by {@code inflightExpectedKvReservedTotal} counter — O(1) incremental maintenance.
      */
     public long inflightKvReserved() {
-        long sum = 0;
-        for (RequestInflight ri : inflightRequests.values()) {
-            sum += ri.expectedKvTokens();
-        }
-        return sum;
+        return inflightExpectedKvReservedTotal.get();
     }
 
     /**
      * Local inflight KV reservation (hard demand) not yet confirmed by the engine.
      * Sums {@code kvTokens} (seqLen only) — the minimum KV needed for the prompt itself.
      * Used for hard-capacity filtering to ensure the prompt fits.
+     * Backed by {@code inflightKvReservedTotal} counter — O(1) incremental maintenance.
      */
     public long inflightHardKvReserved() {
-        long sum = 0;
-        for (RequestInflight ri : inflightRequests.values()) {
-            sum += ri.kvTokens();
-        }
-        return sum;
+        return inflightKvReservedTotal.get();
     }
 
     /**

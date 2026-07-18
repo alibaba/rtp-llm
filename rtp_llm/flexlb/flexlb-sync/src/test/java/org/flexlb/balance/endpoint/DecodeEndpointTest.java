@@ -50,6 +50,26 @@ class DecodeEndpointTest {
     }
 
     @Test
+    void duplicateReservationReplacesBothCounters() {
+        endpoint.reserve(100L, 500, 800);
+        endpoint.reserve(100L, 300, 600);
+
+        assertEquals(300, endpoint.inflightHardKvReserved());
+        assertEquals(600, endpoint.inflightKvReserved());
+    }
+
+    @Test
+    void evictionDecrementsBothCounters() throws InterruptedException {
+        endpoint.reserve(100L, 500, 800);
+        Thread.sleep(10);
+
+        endpoint.evictExpiredRequests(1);
+
+        assertEquals(0, endpoint.inflightHardKvReserved());
+        assertEquals(0, endpoint.inflightKvReserved());
+    }
+
+    @Test
     void release_neverGoesNegative() {
         endpoint.reserve(100L, 100, 100);
         endpoint.release(100L);
