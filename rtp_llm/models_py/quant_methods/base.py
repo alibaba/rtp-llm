@@ -10,6 +10,9 @@ class QuantizeMethodBase(ABC):
     def __init__(self, quant_config: Any = None):
         self.quant_config = quant_config
 
+    def validate_runtime_device(self, device: torch.device) -> None:
+        """Fail before device migration when no executable backend exists."""
+
     @abstractmethod
     def create_weights(
         self,

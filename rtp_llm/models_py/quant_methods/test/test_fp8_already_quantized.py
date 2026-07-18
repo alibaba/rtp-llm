@@ -21,8 +21,8 @@ from typing import Optional
 from unittest import mock
 
 import torch
-
 from rtp_llm.config.quant_config import Fp8PerTensorCompressedQuantConfig
+
 from rtp_llm.models_py.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -40,7 +40,9 @@ from rtp_llm.models_py.quant_methods.fp8 import (
     _is_hip_runtime,
     _resolve_per_tensor_quant,
     _runtime_fp8_dtype,
+    _select_fp8_runtime_backend,
     is_deep_gemm_e8m0_used,
+    per_block_quant_like_legacy,
 )
 from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
 
@@ -61,6 +63,22 @@ def _runtime_scale(scale: torch.Tensor) -> torch.Tensor:
     if _runtime_fp8_dtype() == torch.float8_e4m3fnuz:
         return scale.float() * 2.0
     return scale.float()
+
+
+class _LoadBackendMixin:
+    runtime_backend = "cuda_scaled_mm"
+
+    def setUp(self):
+        self._backend_patcher = mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._select_fp8_runtime_backend",
+            return_value=self.runtime_backend,
+        )
+        self._backend_patcher.start()
+        super().setUp()
+
+    def tearDown(self):
+        self._backend_patcher.stop()
+        super().tearDown()
 
 
 def _channel_scale_shape(channels: int):
@@ -130,7 +148,7 @@ assert "rtp_llm.models_py.quant_methods.fp8" not in sys.modules
             partially_ignored.get_quant_method(layer)
 
 
-class TestFp8PerTensorLoad(unittest.TestCase):
+class TestFp8PerTensorLoad(_LoadBackendMixin, unittest.TestCase):
     """Already-quantized FP8 per-tensor compressed -> ColumnParallel."""
 
     def test_load_into_column_parallel(self):
@@ -219,7 +237,7 @@ class TestFp8PerTensorLoad(unittest.TestCase):
                     layer.process_weights_after_loading()
 
 
-class TestFp8PerChannelLoad(unittest.TestCase):
+class TestFp8PerChannelLoad(_LoadBackendMixin, unittest.TestCase):
     """Already-quantized FP8 per-channel (compressed/Quark) -> {Col,Row}Parallel."""
 
     def test_e4m3fn_to_fnuz_matches_legacy_bit_conversion(self):
@@ -334,6 +352,7 @@ class TestFp8PerChannelLoad(unittest.TestCase):
     def test_rocm_apply_uses_legacy_aiter_ptpc_path(self):
         N, K = 16, 32
         method = Fp8PerChannelLinearMethod()
+        method._runtime_backend = "rocm_aiter_ptpc"
         layer = SimpleNamespace(
             weight=torch.zeros(N, K, dtype=torch.float8_e4m3fn),
             weight_scale=torch.ones(N, 1, dtype=torch.float32),
@@ -434,7 +453,7 @@ class TestRocmFp8PerChannelOnline(unittest.TestCase):
                 torch.testing.assert_close(actual, expected)
 
 
-class TestMergedColumnPerChannelScale(unittest.TestCase):
+class TestMergedColumnPerChannelScale(_LoadBackendMixin, unittest.TestCase):
     """gate_up_proj per-channel weight_scale should cat across shards."""
 
     def test_merged_column_per_channel_scale_cat(self):
@@ -509,7 +528,7 @@ class TestMergedColumnPerChannelScale(unittest.TestCase):
         self.assertAlmostEqual(layer.weight_scale.item(), expected, places=5)
 
 
-class TestQkvPerChannelScale(unittest.TestCase):
+class TestQkvPerChannelScale(_LoadBackendMixin, unittest.TestCase):
     """q_proj/k_proj/v_proj per-channel weight_scale should cat in qkv order."""
 
     def test_qkv_per_channel_scale_cat(self):
@@ -579,36 +598,48 @@ class TestQkvPerChannelScale(unittest.TestCase):
         )
 
 
-class TestFp8BlockLoad(unittest.TestCase):
+class TestFp8BlockLoad(_LoadBackendMixin, unittest.TestCase):
     """Already-quantized FP8 per-block (128x128) -> {Col,Row,Merged,QKV}Parallel.
 
     The ckpt provides:
       - weight: float8_e4m3fn [N, K]
       - weight_scale_inv: fp32 [ceil(N/128), ceil(K/128)]
-    With DeepGEMM, post-processing renames the scale to `weight_scale`.
-    Without it, the method dequantizes once to the BF16 fallback layout.
+    Load-routing tests use an explicit fake backend; real CUDA and ROCm block
+    kernels are exercised by TestFp8BlockForward.
     """
 
     BLOCK = 128
+    runtime_backend = "cuda_deep_gemm"
+
+    def test_noncanonical_block_size_fails_before_weight_allocation(self):
+        quant_config = QuantizationConfig(
+            "fp8_block",
+            source_config=SimpleNamespace(weight_block_size=[64, 128]),
+        )
+        with self.assertRaisesRegex(ValueError, "supports only.*128, 128"):
+            ColumnParallelLinear(
+                input_size=256,
+                output_size=256,
+                quant_config=quant_config,
+                prefix="test",
+                params_dtype=torch.bfloat16,
+            )
 
     def _assert_runtime_state(self, layer, expected_scale):
         self.assertFalse(hasattr(layer, "weight_scale_inv"))
-        if layer.quant_method._use_deep_gemm:
-            self.assertEqual(layer.weight.dtype, torch.float8_e4m3fn)
-            if is_deep_gemm_e8m0_used():
-                self.assertEqual(layer.weight_scale.dtype, torch.int32)
-            else:
-                torch.testing.assert_close(
-                    layer.weight_scale, expected_scale, rtol=0, atol=0
-                )
+        self.assertTrue(layer.quant_method._use_deep_gemm)
+        self.assertEqual(layer.weight.dtype, torch.float8_e4m3fn)
+        if is_deep_gemm_e8m0_used():
+            self.assertEqual(layer.weight_scale.dtype, torch.int32)
         else:
-            self.assertEqual(layer.weight.dtype, torch.bfloat16)
-            self.assertFalse(hasattr(layer, "weight_scale"))
+            torch.testing.assert_close(
+                layer.weight_scale, expected_scale, rtol=0, atol=0
+            )
 
-    def test_unsupported_runtime_forces_online_and_offline_fallbacks(self):
+    def test_unsupported_runtime_fails_before_expanding_block_weights(self):
         with mock.patch(
-            "rtp_llm.models_py.quant_methods.fp8.is_deep_gemm_runtime_available",
-            return_value=False,
+            "rtp_llm.models_py.quant_methods.fp8._select_fp8_runtime_backend",
+            side_effect=RuntimeError("unsupported FP8 block runtime"),
         ):
             online = ColumnParallelLinear(
                 input_size=self.BLOCK,
@@ -624,7 +655,8 @@ class TestFp8BlockLoad(unittest.TestCase):
                     )
                 }
             )
-            online.process_weights_after_loading()
+            with self.assertRaisesRegex(RuntimeError, "unsupported FP8 block"):
+                online.process_weights_after_loading()
 
             offline = ColumnParallelLinear(
                 input_size=self.BLOCK,
@@ -641,12 +673,48 @@ class TestFp8BlockLoad(unittest.TestCase):
                     "offline.weight_scale_inv": torch.ones(1, 1, dtype=torch.float32),
                 }
             )
-            offline.process_weights_after_loading()
+            with self.assertRaisesRegex(RuntimeError, "unsupported FP8 block"):
+                offline.process_weights_after_loading()
 
-        for layer in (online, offline):
-            self.assertFalse(layer.quant_method._use_deep_gemm)
-            self.assertEqual(layer.weight.dtype, torch.bfloat16)
-            self.assertFalse(hasattr(layer, "weight_scale"))
+        self.assertEqual(online.weight.dtype, torch.bfloat16)
+        self.assertTrue(hasattr(online, "weight_scale"))
+        self.assertEqual(offline.weight.dtype, torch.float8_e4m3fn)
+        self.assertTrue(hasattr(offline, "weight_scale_inv"))
+
+    def test_scaled_mm_rejects_unsupported_cuda_architecture(self):
+        properties = SimpleNamespace(gcnArchName="")
+        with mock.patch.object(
+            torch.cuda, "is_available", return_value=True
+        ), mock.patch.object(
+            torch.cuda, "get_device_capability", return_value=(8, 0)
+        ), mock.patch.object(
+            torch.cuda, "get_device_properties", return_value=properties
+        ), mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._is_hip_runtime",
+            return_value=False,
+        ), mock.patch.object(
+            torch, "_scaled_mm", create=True
+        ):
+            with self.assertRaisesRegex(RuntimeError, "SM89 or newer"):
+                _select_fp8_runtime_backend(torch.device("cuda:0"), "per_tensor")
+
+    def test_rocm_block_requires_aiter_kernel_symbol(self):
+        properties = SimpleNamespace(gcnArchName="gfx942:sramecc+:xnack-")
+        with mock.patch.object(
+            torch.cuda, "is_available", return_value=True
+        ), mock.patch.object(
+            torch.cuda, "get_device_capability", return_value=(9, 4)
+        ), mock.patch.object(
+            torch.cuda, "get_device_properties", return_value=properties
+        ), mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._is_hip_runtime",
+            return_value=True,
+        ), mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._aiter_has_symbol",
+            return_value=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "No executable ROCm"):
+                _select_fp8_runtime_backend(torch.device("cuda:0"), "block")
 
     @unittest.skipUnless(
         torch.cuda.is_available() and not _is_hip_runtime(),
@@ -933,27 +1001,24 @@ class TestFp8BlockLoad(unittest.TestCase):
             )
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA + DeepGEMM")
+@unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA/ROCm accelerator")
 class TestFp8BlockForward(unittest.TestCase):
     """End-to-end: load fp8-block ckpt vs online path, forward should match."""
 
     def test_forward_matches_online_path(self):
-        try:
+        if not _is_hip_runtime():
             from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
                 is_deep_gemm_runtime_available,
             )
-            from rtp_llm.models_py.kernels.cuda.fp8_kernel import per_block_cast_to_fp8
-        except ImportError:
-            self.skipTest("deepgemm/fp8_kernel not available")
-        if not is_deep_gemm_runtime_available(torch.device("cuda")):
-            self.skipTest("DeepGEMM kernel not available at runtime")
+
+            if not is_deep_gemm_runtime_available(torch.device("cuda")):
+                self.skipTest("DeepGEMM kernel not available at runtime")
 
         N, K, M = 256, 256, 32  # 2x2 weight blocks
         device = "cuda"
 
         weight_bf16 = torch.randn(N, K, dtype=torch.bfloat16, device=device) * 0.05
-        # Use the same kernel the online path uses to produce fp8 + scale.
-        fp8_weight, scale = per_block_cast_to_fp8(weight_bf16, use_ue8m0=False)
+        fp8_weight, scale = per_block_quant_like_legacy(weight_bf16, 128)
 
         # Offline path
         offline = ColumnParallelLinear(
@@ -985,6 +1050,11 @@ class TestFp8BlockForward(unittest.TestCase):
         ).to(device)
         online.load_weights({"on.weight": weight_bf16})
         online.process_weights_after_loading()
+
+        self.assertEqual(offline.weight.dtype, _runtime_fp8_dtype())
+        self.assertEqual(online.weight.dtype, _runtime_fp8_dtype())
+        self.assertTrue(hasattr(offline, "weight_scale"))
+        self.assertTrue(hasattr(online, "weight_scale"))
 
         if is_deep_gemm_e8m0_used():
             self.assertEqual(offline.weight_scale.dtype, torch.int32)

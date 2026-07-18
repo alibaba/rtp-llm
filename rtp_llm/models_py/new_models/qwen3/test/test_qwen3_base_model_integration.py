@@ -6,11 +6,11 @@ import unittest
 from unittest.mock import patch
 
 import torch
-from safetensors.torch import save_file
-
 from rtp_llm.config.quant_config import QuantizationConfig as SourceQuantizationConfig
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.models.base_model import BaseModel
+from safetensors.torch import save_file
+
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.qwen3.language import Qwen3ForCausalLM
@@ -293,6 +293,9 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
                     BaseModel, "_get_device_str", return_value="cpu"
                 ), patch.object(
                     BaseModel, "_init_custom_module", return_value=None
+                ), patch(
+                    "rtp_llm.models_py.quant_methods.fp8._select_fp8_runtime_backend",
+                    return_value="cuda_scaled_mm",
                 ), patch.dict(
                     os.environ, {"USE_NEW_LOADER": "1"}, clear=False
                 ):

@@ -95,6 +95,9 @@ class LinearBase(RtpModule):
         output = self.quant_method.apply(self, x, self.bias)
         return output
 
+    def validate_runtime_device(self, device: torch.device) -> None:
+        self.quant_method.validate_runtime_device(device)
+
     def process_weights_after_loading(self):
         # Called once by NewModelLoader._run_post_load_hooks after model.to(device)
         # and after every weight shard is in place. Doing the work here (rather

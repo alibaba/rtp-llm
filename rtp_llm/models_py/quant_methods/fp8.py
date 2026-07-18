@@ -84,6 +84,80 @@ def _is_hip_runtime() -> bool:
     return getattr(torch.version, "hip", None) is not None
 
 
+_CUDA_SCALED_MM = "cuda_scaled_mm"
+_ROCM_SCALED_MM = "rocm_scaled_mm"
+_ROCM_AITER_PTPC = "rocm_aiter_ptpc"
+_ROCM_AITER_BLOCK = "rocm_aiter_block"
+_CUDA_DEEP_GEMM = "cuda_deep_gemm"
+
+
+def _device_index(device: torch.device) -> int:
+    return torch.cuda.current_device() if device.index is None else device.index
+
+
+def _device_arch(device: torch.device) -> tuple[tuple[int, int], str]:
+    try:
+        index = _device_index(device)
+        capability = torch.cuda.get_device_capability(index)
+        properties = torch.cuda.get_device_properties(index)
+    except (AssertionError, RuntimeError, ValueError) as error:
+        raise RuntimeError(f"Unable to query FP8 capability for {device}: {error}")
+    return capability, getattr(properties, "gcnArchName", "")
+
+
+def _aiter_has_symbol(symbol: str) -> bool:
+    try:
+        import aiter
+    except ImportError:
+        return False
+    return callable(getattr(aiter, symbol, None))
+
+
+def _select_fp8_runtime_backend(device: torch.device, quant_kind: str) -> str:
+    """Resolve an executable FP8 backend before retaining runtime weights."""
+    device = torch.device(device)
+    if quant_kind not in ("per_tensor", "per_channel", "block"):
+        raise ValueError(f"Unknown FP8 quantization kind {quant_kind!r}")
+    if device.type != "cuda" or not torch.cuda.is_available():
+        raise RuntimeError(
+            f"FP8 {quant_kind} requires a supported accelerator, got {device}"
+        )
+
+    capability, gcn_arch = _device_arch(device)
+    if _is_hip_runtime():
+        supported_arch = any(name in gcn_arch for name in ("gfx942", "gfx950"))
+        if not supported_arch:
+            raise RuntimeError(
+                f"FP8 {quant_kind} is not supported on ROCm architecture "
+                f"{gcn_arch or capability}"
+            )
+        if quant_kind == "per_tensor" and hasattr(torch, "_scaled_mm"):
+            return _ROCM_SCALED_MM
+        if quant_kind == "per_channel" and _aiter_has_symbol("gemm_a8w8_bpreshuffle"):
+            return _ROCM_AITER_PTPC
+        if quant_kind == "block" and _aiter_has_symbol(
+            "gemm_a8w8_blockscale_bpreshuffle"
+        ):
+            return _ROCM_AITER_BLOCK
+        raise RuntimeError(
+            f"No executable ROCm FP8 {quant_kind} backend is available on {gcn_arch}"
+        )
+
+    if quant_kind == "block":
+        if is_deep_gemm_runtime_available(device):
+            return _CUDA_DEEP_GEMM
+        raise RuntimeError(
+            f"FP8 block requires DeepGEMM on CUDA device {device}; "
+            f"current capability is {capability}"
+        )
+    if hasattr(torch, "_scaled_mm") and capability >= (8, 9):
+        return _CUDA_SCALED_MM
+    raise RuntimeError(
+        f"FP8 {quant_kind} requires torch._scaled_mm on CUDA SM89 or newer; "
+        f"device {device} has capability {capability}"
+    )
+
+
 def _shuffle_rocm_fp8_weight(weight: torch.Tensor) -> torch.Tensor:
     from aiter.ops.shuffle import shuffle_weight
 
@@ -116,6 +190,80 @@ def _apply_rocm_fp8_per_channel(
     return output if original_dtype == torch.bfloat16 else output.to(out_dtype)
 
 
+def _apply_rocm_fp8_block(
+    input_2d: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+    block_size: int,
+) -> torch.Tensor:
+    import aiter
+
+    from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_group_quant_fp8
+
+    original_dtype = input_2d.dtype
+    input_bf16 = (
+        input_2d if original_dtype == torch.bfloat16 else input_2d.to(torch.bfloat16)
+    )
+    qinput, input_scale = rocm_per_token_group_quant_fp8(
+        input_bf16,
+        group_size=block_size,
+        eps=1e-4,
+        column_major_scales=False,
+        scale_tma_aligned=False,
+    )
+    fp8_max = float(torch.finfo(qinput.dtype).max)
+    input_scale = torch.clamp(input_scale, min=1e-4 / fp8_max).to(torch.float32)
+    shuffled_input_scale = input_scale.transpose(0, 1).contiguous().view_as(input_scale)
+    output = aiter.gemm_a8w8_blockscale_bpreshuffle(
+        qinput,
+        weight,
+        shuffled_input_scale,
+        weight_scale,
+    )
+    return output if original_dtype == torch.bfloat16 else output.to(out_dtype)
+
+
+def _validate_fp8_block_scales(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    block_n: int,
+    block_k: int,
+) -> None:
+    if block_n <= 0 or block_k <= 0:
+        raise ValueError(f"Invalid FP8 block size {(block_n, block_k)}")
+    expected = (
+        (weight.shape[0] + block_n - 1) // block_n,
+        (weight.shape[1] + block_k - 1) // block_k,
+    )
+    if tuple(scale.shape) != expected:
+        raise ValueError(
+            f"FP8 block scale shape must be {expected}, got {tuple(scale.shape)}"
+        )
+    if not bool(torch.isfinite(scale).all()) or bool((scale <= 0).any()):
+        raise ValueError("FP8 block scales must be finite and positive")
+
+
+def _prepare_rocm_fp8_block_weight(
+    weight: torch.Tensor, scale: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    runtime_dtype = _runtime_fp8_dtype()
+    if weight.dtype == runtime_dtype:
+        runtime_weight = weight.contiguous()
+        runtime_scale = scale.to(torch.float32).contiguous()
+    elif weight.dtype == torch.float8_e4m3fn and runtime_dtype == torch.float8_e4m3fnuz:
+        runtime_weight, runtime_scale = _convert_e4m3fn_to_fnuz(weight, scale)
+    else:
+        raise TypeError(
+            f"Unsupported ROCm FP8 block conversion from {weight.dtype} "
+            f"to {runtime_dtype}"
+        )
+    return (
+        _shuffle_rocm_fp8_weight(runtime_weight).contiguous(),
+        runtime_scale.to(torch.float32).contiguous(),
+    )
+
+
 # Hoist kernel imports to module scope. apply() is on the per-token decode hot
 # path: doing the import inside apply() (even though sys.modules caches it)
 # still costs a sys.modules lookup + LOAD_ATTR on every call. Importing once at
@@ -126,7 +274,6 @@ def _apply_rocm_fp8_per_channel(
 # only after runtime dispatch selects an FP8 key.
 try:
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-        per_block_cast_to_fp8,
         requant_weight_ue8m0,
         scaled_fp8_per_tensor_quant,
         scaled_fp8_per_token_quant,
@@ -138,7 +285,6 @@ except (
     logger.warning(
         "fp8 kernel imports unavailable: %s (will fall back to lazy import)", e
     )
-    per_block_cast_to_fp8 = None
     requant_weight_ue8m0 = None
     scaled_fp8_per_tensor_quant = None
     scaled_fp8_per_token_quant = None
@@ -147,8 +293,8 @@ except (
 try:
     from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
         fp8_gemm_nt,
-        is_deep_gemm_runtime_available,
         is_deep_gemm_e8m0_used,
+        is_deep_gemm_runtime_available,
     )
 except ImportError as e:  # pragma: no cover
     logger.warning(
@@ -265,18 +411,6 @@ def _resolve_per_token_quant():
     return scaled_fp8_per_token_quant
 
 
-def _resolve_per_block_cast():
-    """Return per_block_cast_to_fp8, lazy-importing on a hoist miss."""
-    global per_block_cast_to_fp8
-    if per_block_cast_to_fp8 is None:
-        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-            per_block_cast_to_fp8 as _fn,
-        )
-
-        per_block_cast_to_fp8 = _fn
-    return per_block_cast_to_fp8
-
-
 def _resolve_requant_weight_ue8m0():
     """Return requant_weight_ue8m0, lazy-importing on a hoist miss."""
     global requant_weight_ue8m0
@@ -362,9 +496,17 @@ class Fp8LinearMethod(QuantizeMethodBase):
         )
         layer.register_parameter("input_scale", input_scale)
 
+    def validate_runtime_device(self, device: torch.device) -> None:
+        _select_fp8_runtime_backend(device, "per_tensor")
+
     def apply(
         self, layer, x: torch.Tensor, bias: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        if getattr(self, "_runtime_backend", None) not in (
+            _CUDA_SCALED_MM,
+            _ROCM_SCALED_MM,
+        ):
+            raise RuntimeError("FP8 per-tensor backend was not initialized")
         out_dtype = x.dtype
         input_2d = x.reshape(-1, x.shape[-1])
         if not input_2d.is_contiguous():
@@ -400,6 +542,9 @@ class Fp8LinearMethod(QuantizeMethodBase):
         return output.view(*output_shape)
 
     def process_weights_after_loading(self, layer):
+        self._runtime_backend = _select_fp8_runtime_backend(
+            layer.weight.device, "per_tensor"
+        )
         fp8_weight, scale = _requant_per_tensor_to_runtime_fp8(
             layer.weight.data, layer.weight_scale.data
         )
@@ -470,20 +615,19 @@ class Fp8OnlineLinearMethod(QuantizeMethodBase):
             nn.Parameter(torch.ones(1, dtype=torch.float32), requires_grad=False),
         )
 
+    def validate_runtime_device(self, device: torch.device) -> None:
+        _select_fp8_runtime_backend(device, "per_tensor")
+
     def process_weights_after_loading(self, layer):
         weight = layer.weight.data
         if weight.ndim != 2:
             raise ValueError(f"expected 2D weight, got {weight.shape}")
 
-        if not weight.is_cuda:
-            raise RuntimeError(
-                "Online FP8 per-tensor postprocessing requires weights on the "
-                "configured accelerator device"
-            )
+        self._runtime_backend = _select_fp8_runtime_backend(weight.device, "per_tensor")
         fp8_weight, scale = _resolve_per_tensor_quant()(weight)
 
-        # nn.Parameter dtype is immutable; rebind both attributes so the
-        # post-load model.to(device) sees a consistent (cuda, fp8/fp32) pair.
+        # nn.Parameter dtype is immutable; rebind both attributes as a
+        # consistent accelerator-resident FP8/FP32 runtime pair.
         del layer.weight
         layer.register_parameter(
             "weight", nn.Parameter(fp8_weight, requires_grad=False)
@@ -511,6 +655,11 @@ class Fp8OnlineLinearMethod(QuantizeMethodBase):
     def apply(
         self, layer, x: torch.Tensor, bias: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        if getattr(self, "_runtime_backend", None) not in (
+            _CUDA_SCALED_MM,
+            _ROCM_SCALED_MM,
+        ):
+            raise RuntimeError("FP8 per-tensor backend was not initialized")
         out_dtype = x.dtype
         input_2d = x.reshape(-1, x.shape[-1])
         if not input_2d.is_contiguous():
@@ -596,15 +745,16 @@ class Fp8PerChannelOnlineLinearMethod(QuantizeMethodBase):
             ),
         )
 
+    def validate_runtime_device(self, device: torch.device) -> None:
+        _select_fp8_runtime_backend(device, "per_channel")
+
     def process_weights_after_loading(self, layer):
         weight = layer.weight.data
-        if not weight.is_cuda:
-            raise RuntimeError(
-                "Online FP8 per-channel postprocessing requires weights on the "
-                "configured accelerator device"
-            )
         if weight.ndim != 2:
             raise ValueError(f"expected 2D weight, got {weight.shape}")
+        self._runtime_backend = _select_fp8_runtime_backend(
+            weight.device, "per_channel"
+        )
 
         # Treat weight rows as "tokens" -> per-output-channel quant.
         # fp8_weight: [N, K] float8_e4m3fn, scale: [N, 1] float32.
@@ -651,6 +801,11 @@ class Fp8PerChannelOnlineLinearMethod(QuantizeMethodBase):
     def apply(
         self, layer, x: torch.Tensor, bias: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        if getattr(self, "_runtime_backend", None) not in (
+            _CUDA_SCALED_MM,
+            _ROCM_AITER_PTPC,
+        ):
+            raise RuntimeError("FP8 per-channel backend was not initialized")
         out_dtype = x.dtype
         input_2d = x.reshape(-1, x.shape[-1])
         if not input_2d.is_contiguous():
@@ -665,7 +820,7 @@ class Fp8PerChannelOnlineLinearMethod(QuantizeMethodBase):
                 "weight.shape=%s, weight_scale.shape=%s, total_quanted_weights=%d",
                 (
                     "AITer gemm_a8w8_bpreshuffle"
-                    if _is_hip_runtime()
+                    if self._runtime_backend == _ROCM_AITER_PTPC
                     else "torch._scaled_mm"
                 ),
                 getattr(layer, "prefix", "?"),
@@ -678,7 +833,7 @@ class Fp8PerChannelOnlineLinearMethod(QuantizeMethodBase):
             )
             Fp8PerChannelOnlineLinearMethod._apply_logged = True
 
-        if _is_hip_runtime():
+        if self._runtime_backend == _ROCM_AITER_PTPC:
             output = _apply_rocm_fp8_per_channel(
                 input_2d,
                 layer.weight,
@@ -749,10 +904,16 @@ class Fp8PerChannelLinearMethod(QuantizeMethodBase):
             ),
         )
 
+    def validate_runtime_device(self, device: torch.device) -> None:
+        _select_fp8_runtime_backend(device, "per_channel")
+
     def process_weights_after_loading(self, layer):
         # ckpt scale may arrive as [N] or [N, 1]. ROCm fp8 kernels expect the
         # platform runtime dtype (e4m3fnuz on MI308X), so convert already-FP8
         # checkpoint weights once after loading and store scale as [N, 1].
+        self._runtime_backend = _select_fp8_runtime_backend(
+            layer.weight.device, "per_channel"
+        )
         fp8_weight, scale = _requant_per_channel_to_runtime_fp8(
             layer.weight.data, layer.weight_scale.data
         )
@@ -776,6 +937,11 @@ class Fp8PerChannelLinearMethod(QuantizeMethodBase):
     def apply(
         self, layer, x: torch.Tensor, bias: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        if getattr(self, "_runtime_backend", None) not in (
+            _CUDA_SCALED_MM,
+            _ROCM_AITER_PTPC,
+        ):
+            raise RuntimeError("FP8 per-channel backend was not initialized")
         out_dtype = x.dtype
         input_2d = x.reshape(-1, x.shape[-1])
         if not input_2d.is_contiguous():
@@ -789,7 +955,7 @@ class Fp8PerChannelLinearMethod(QuantizeMethodBase):
                 "prefix=%r, x.shape=%s, weight.shape=%s, weight_scale.shape=%s",
                 (
                     "AITer gemm_a8w8_bpreshuffle"
-                    if _is_hip_runtime()
+                    if self._runtime_backend == _ROCM_AITER_PTPC
                     else "torch._scaled_mm"
                 ),
                 getattr(layer, "prefix", "?"),
@@ -799,7 +965,7 @@ class Fp8PerChannelLinearMethod(QuantizeMethodBase):
             )
             Fp8PerChannelLinearMethod._apply_logged = True
 
-        if _is_hip_runtime():
+        if self._runtime_backend == _ROCM_AITER_PTPC:
             output = _apply_rocm_fp8_per_channel(
                 input_2d,
                 layer.weight,
@@ -828,8 +994,9 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
     """Online FP8 per-block (128x128) quantization for the new loader.
 
     Loads BF16/FP16 weights from ckpt, quantizes to float8_e4m3fn at load time
-    using DeepSeek-style 128x128 block scales, and runs forward via DeepGEMM
-    fp8_gemm_nt with online per-token-group (128) activation quantization.
+    using DeepSeek-style 128x128 block scales. CUDA runs DeepGEMM and ROCm
+    runs the existing AITer blockscale kernel with online group activation
+    quantization.
     """
 
     BLOCK: int = 128
@@ -846,7 +1013,11 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
 
     def __init__(self, quant_config=None):
         super().__init__(quant_config)
+        self._runtime_backend = None
         self._use_deep_gemm = False
+
+    def validate_runtime_device(self, device: torch.device) -> None:
+        _select_fp8_runtime_backend(device, "block")
 
     def create_weights(
         self,
@@ -886,26 +1057,8 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
 
     def process_weights_after_loading(self, layer):
         weight = layer.weight.data
-        self._use_deep_gemm = is_deep_gemm_runtime_available(weight.device)
-        if not self._use_deep_gemm:
-            del layer.weight_scale
-            expected_stride = (1, layer.weight.shape[0])
-            if layer.weight.stride() != expected_stride:
-                raise RuntimeError(
-                    f"Online FP8 block fallback weight stride "
-                    f"{layer.weight.stride()} does not match {expected_stride}"
-                )
-            logger.warning(
-                "[Fp8BlockOnlineLinearMethod] DeepGEMM unavailable; keeping %r "
-                "in its loaded dtype for F.linear fallback",
-                getattr(layer, "prefix", "?"),
-            )
-            return
-        if not weight.is_cuda:
-            raise RuntimeError(
-                "Online FP8 block postprocessing requires weights on the "
-                "configured accelerator device"
-            )
+        self._runtime_backend = _select_fp8_runtime_backend(weight.device, "block")
+        self._use_deep_gemm = self._runtime_backend == _CUDA_DEEP_GEMM
         if weight.ndim != 2:
             raise ValueError(f"expected 2D weight, got {weight.shape}")
 
@@ -975,7 +1128,10 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
                 f"FP8 scale shape {tuple(scale.shape)} != {expected_scale_shape}"
             )
 
-        if is_deep_gemm_e8m0_used():
+        _validate_fp8_block_scales(fp8_weight, scale, self.BLOCK, self.BLOCK)
+        if self._runtime_backend == _ROCM_AITER_BLOCK:
+            fp8_weight, scale = _prepare_rocm_fp8_block_weight(fp8_weight, scale)
+        elif is_deep_gemm_e8m0_used():
             fp8_weight, scale = _resolve_requant_weight_ue8m0()(fp8_weight, scale)
 
         del layer.weight
@@ -1010,14 +1166,8 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
     def apply(
         self, layer, x: torch.Tensor, bias: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        if not self._use_deep_gemm:
-            if not hasattr(layer, "weight_scale"):
-                return torch.nn.functional.linear(x, layer.weight, bias)
-            raise RuntimeError(
-                "Fp8BlockOnlineLinearMethod requires DeepGEMM at forward time; "
-                "install the `deep_gemm` package or load fp8_block weights "
-                "through the no-DeepGEMM dequant fallback."
-            )
+        if self._runtime_backend not in (_CUDA_DEEP_GEMM, _ROCM_AITER_BLOCK):
+            raise RuntimeError("FP8 block backend was not initialized during loading")
 
         out_dtype = x.dtype
         input_2d = x.reshape(-1, x.shape[-1])
@@ -1033,46 +1183,44 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
             input_2d = torch.nn.functional.pad(input_2d, (0, padded_k - logical_k))
         output_shape = list(x.shape[:-1]) + [logical_n]
 
-        # Online per-token-group activation quant (group_size=128).
-        scale_ue8m0 = getattr(layer, "weight_scale", None) is not None and (
-            layer.weight_scale.dtype == torch.int32
-        )
-        qinput, x_scales = _resolve_sgl_per_token_group_quant()(
-            input_2d,
-            group_size=self.BLOCK,
-            eps=1e-4,
-            column_major_scales=True,
-            scale_tma_aligned=True,
-            scale_ue8m0=scale_ue8m0,
-        )
-
-        output = torch.empty(M, padded_n, dtype=out_dtype, device=input_2d.device)
-        # Keep runtime selection aligned with the legacy FP8_PER_BLOCK linear,
-        # which uses DeepGEMM for both prefill and decode. Switching only the
-        # M < 32 decode path to FlashInfer changes accumulation enough to make
-        # old/new loader outputs diverge despite byte-identical weights.
-        _resolve_fp8_gemm_nt()(
-            (qinput, x_scales),
-            (layer.weight, layer.weight_scale),
-            output,
-            c=None,
-            disable_ue8m0_cast=not scale_ue8m0,
-        )
+        if self._runtime_backend == _ROCM_AITER_BLOCK:
+            output = _apply_rocm_fp8_block(
+                input_2d,
+                layer.weight,
+                layer.weight_scale,
+                out_dtype,
+                self.BLOCK,
+            )
+        else:
+            scale_ue8m0 = layer.weight_scale.dtype == torch.int32
+            qinput, x_scales = _resolve_sgl_per_token_group_quant()(
+                input_2d,
+                group_size=self.BLOCK,
+                eps=1e-4,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=scale_ue8m0,
+            )
+            output = torch.empty(M, padded_n, dtype=out_dtype, device=input_2d.device)
+            _resolve_fp8_gemm_nt()(
+                (qinput, x_scales),
+                (layer.weight, layer.weight_scale),
+                output,
+                c=None,
+                disable_ue8m0_cast=not scale_ue8m0,
+            )
 
         output = output[:, :logical_n]
 
         if not Fp8BlockOnlineLinearMethod._apply_logged:
             logger.info(
-                "[Fp8BlockOnlineLinearMethod] FIRST forward via deep_gemm.fp8_gemm_nt: "
-                "prefix=%r, x.dtype=%s, x.shape=%s, qinput.dtype=%s, qinput.shape=%s, "
-                "x_scales.shape=%s, weight.dtype=%s, weight.shape=%s, "
+                "[Fp8BlockOnlineLinearMethod] FIRST forward via %s: "
+                "prefix=%r, x.dtype=%s, x.shape=%s, weight.dtype=%s, weight.shape=%s, "
                 "weight_scale.shape=%s, total_quanted_weights=%d",
+                self._runtime_backend,
                 getattr(layer, "prefix", "?"),
                 x.dtype,
                 tuple(x.shape),
-                qinput.dtype,
-                tuple(qinput.shape),
-                tuple(x_scales.shape),
                 layer.weight.dtype,
                 tuple(layer.weight.shape),
                 tuple(layer.weight_scale.shape),
@@ -1097,9 +1245,9 @@ class Fp8BlockLinearMethod(Fp8BlockOnlineLinearMethod):
     the weight is ALREADY fp8 + block-scaled. create_weights allocates the fp8
     weight plus a `weight_scale_inv` parameter; the parallel-linear load path
     (linear.py) TP-slices / shard-merges that block grid. process_weights_after_
-    loading simply renames `weight_scale_inv` -> `weight_scale` so the inherited
-    apply() (DeepGEMM fp8_gemm_nt, which reads `weight` + `weight_scale`) runs
-    identically to the online path — see TestFp8BlockForward.
+    loading normalizes the checkpoint dtype/layout and renames
+    `weight_scale_inv` -> `weight_scale`. The inherited apply() dispatches to
+    CUDA DeepGEMM or ROCm AITer using the same runtime state as the online path.
     """
 
     _create_logged: bool = False
@@ -1127,6 +1275,11 @@ class Fp8BlockLinearMethod(Fp8BlockOnlineLinearMethod):
                 raise ValueError(
                     f"FP8 {name} must be a positive integer, got {value!r}"
                 )
+        if [block_n, block_k] != [self.BLOCK, self.BLOCK]:
+            raise ValueError(
+                "FP8 block runtime supports only "
+                f"{[self.BLOCK, self.BLOCK]}, got {[block_n, block_k]}"
+            )
         if not Fp8BlockLinearMethod._create_logged:
             logger.info(
                 "[Fp8BlockLinearMethod] create_weights prefix=%r quant_type=%s "
@@ -1154,49 +1307,19 @@ class Fp8BlockLinearMethod(Fp8BlockOnlineLinearMethod):
         )
 
     def process_weights_after_loading(self, layer):
-        # The weight is already fp8. With DeepGEMM available, expose the block
-        # scale under the name the inherited apply() expects (`weight_scale`).
-        # ROCm/test containers do not provide CUDA DeepGEMM, so dequantize once
-        # at load time and use a plain bf16 linear fallback for smoke coverage.
         block_size = getattr(
             layer.quant_config, "weight_block_size", [self.BLOCK, self.BLOCK]
         )
-        self._use_deep_gemm = is_deep_gemm_runtime_available(layer.weight.device)
-        if not self._use_deep_gemm:
-            if list(block_size) == [self.BLOCK, self.BLOCK]:
-                weight_dequant = _dequant_block_to_bf16(
-                    layer.weight.data, layer.weight_scale_inv.data, self.BLOCK
-                )
-            else:
-                weight_dequant = _dequant_rectangular_blocks_to_bf16(
-                    layer.weight.data,
-                    layer.weight_scale_inv.data,
-                    block_size[0],
-                    block_size[1],
-                )
-            del layer.weight
-            layer.register_parameter(
-                "weight", nn.Parameter(weight_dequant.contiguous(), requires_grad=False)
-            )
-            del layer.weight_scale_inv
-            logger.info(
-                "[Fp8BlockLinearMethod] DeepGEMM unavailable; dequantized %r to bf16 for fallback linear",
-                getattr(layer, "prefix", "?"),
-            )
-            return
-
+        self._runtime_backend = _select_fp8_runtime_backend(
+            layer.weight.device, "block"
+        )
+        self._use_deep_gemm = self._runtime_backend == _CUDA_DEEP_GEMM
         weight = layer.weight.data
-        if list(block_size) != [self.BLOCK, self.BLOCK]:
-            weight_dequant = _dequant_rectangular_blocks_to_bf16(
-                weight,
-                layer.weight_scale_inv.data,
-                block_size[0],
-                block_size[1],
-            )
-            weight, scale = _resolve_per_block_cast()(weight_dequant, use_ue8m0=False)
-        else:
-            scale = layer.weight_scale_inv.data
-        if is_deep_gemm_e8m0_used():
+        scale = layer.weight_scale_inv.data
+        _validate_fp8_block_scales(weight, scale, block_size[0], block_size[1])
+        if self._runtime_backend == _ROCM_AITER_BLOCK:
+            weight, scale = _prepare_rocm_fp8_block_weight(weight, scale)
+        if self._runtime_backend == _CUDA_DEEP_GEMM and is_deep_gemm_e8m0_used():
             weight, scale = _resolve_requant_weight_ue8m0()(weight, scale)
         del layer.weight
         layer.register_parameter(
@@ -1207,38 +1330,3 @@ class Fp8BlockLinearMethod(Fp8BlockOnlineLinearMethod):
             "weight_scale",
             nn.Parameter(scale.contiguous(), requires_grad=False),
         )
-
-
-def _dequant_block_to_bf16(
-    weight: torch.Tensor, scale_inv: torch.Tensor, block: int = 128
-) -> torch.Tensor:
-    """Dequantize a DeepSeek FP8 per-block (128x128) weight [N,K] to bf16.
-
-    scale_inv is the standard [ceil(N/128), ceil(K/128)] block grid. Expand it
-    to full [N, K] (cropping any partial trailing block) and scale.
-    """
-    return _dequant_rectangular_blocks_to_bf16(weight, scale_inv, block, block)
-
-
-def _dequant_rectangular_blocks_to_bf16(
-    weight: torch.Tensor,
-    scale_inv: torch.Tensor,
-    block_n: int,
-    block_k: int,
-) -> torch.Tensor:
-    if block_n <= 0 or block_k <= 0:
-        raise ValueError(f"Invalid FP8 block size {(block_n, block_k)}")
-    rows, columns = weight.shape
-    expected = (
-        (rows + block_n - 1) // block_n,
-        (columns + block_k - 1) // block_k,
-    )
-    if tuple(scale_inv.shape) != expected:
-        raise ValueError(
-            f"FP8 block scale shape must be {expected}, got {tuple(scale_inv.shape)}"
-        )
-    if not bool(torch.isfinite(scale_inv).all()) or bool((scale_inv <= 0).any()):
-        raise ValueError("FP8 block scales must be finite and positive")
-    scales = scale_inv.to(torch.float32)
-    scales = scales.repeat_interleave(block_n, dim=0).repeat_interleave(block_k, dim=1)
-    return (weight.to(torch.float32) * scales[:rows, :columns]).to(torch.bfloat16)

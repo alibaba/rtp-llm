@@ -84,6 +84,18 @@ class FoundationLoaderTest(unittest.TestCase):
         self.assertEqual(model.post_device, "cpu")
         self.assertEqual(model.post_count, 1)
 
+    def test_runtime_backend_preflight_runs_before_device_migration(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(_weights(), os.path.join(model_path, "model.safetensors"))
+            with mock.patch.object(
+                _FoundationModel,
+                "validate_runtime_device",
+                side_effect=RuntimeError("unsupported runtime backend"),
+            ), mock.patch.object(_FoundationModel, "to", autospec=True) as move:
+                with self.assertRaisesRegex(RuntimeError, "unsupported runtime"):
+                    self._loader(model_path).load()
+                move.assert_not_called()
+
     def test_wrapped_pytorch_state_dict(self):
         with tempfile.TemporaryDirectory() as model_path:
             torch.save(

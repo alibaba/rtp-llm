@@ -140,6 +140,9 @@ class RtpModule(nn.Module):
     their post-load completeness checks.
     """
 
+    def validate_runtime_device(self, device: torch.device) -> None:
+        """Validate device-specific runtime requirements before migration."""
+
     def _apply(self, fn, recurse=True):
         alias_groups = _collect_tensor_alias_groups(self, recurse=recurse)
         apply_once = _memoize_tensor_apply(fn)

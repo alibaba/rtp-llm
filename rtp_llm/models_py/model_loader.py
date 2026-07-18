@@ -296,6 +296,13 @@ class NewModelLoader:
             if callable(hook):
                 hook()
 
+    @staticmethod
+    def _validate_runtime_backends(model: nn.Module, device: str) -> None:
+        target_device = torch.device(device)
+        for module in model.modules():
+            if isinstance(module, RtpModule):
+                module.validate_runtime_device(target_device)
+
     @torch.inference_mode()
     def load(self) -> nn.Module:
         method = self._resolve_load_method()
@@ -317,6 +324,7 @@ class NewModelLoader:
         self._validate_loaded_weights(model)
         logger.info("Streamed checkpoint tensors in %.2fs", time.time() - started)
 
+        self._validate_runtime_backends(model, self.load_config.device)
         model.to(self.load_config.device)
         self._validate_loaded_weights(model)
         self._run_post_load_hooks(model)
