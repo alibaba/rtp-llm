@@ -22,6 +22,12 @@ def make_config(**overrides: object) -> SubscriberConfig:
         host_ip_port="10.0.0.8:8088",
         storage_type="ST_EVENT_REPORT",
         medium="hbm",
+        model_name="default",
+        model_dtype="bfloat16",
+        use_mla=False,
+        tp_size=1,
+        dp_size=1,
+        pp_size=1,
         reset_on_start=True,
         log_level="INFO",
     )

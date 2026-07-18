@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from rtp_llm.kv_cache_subscriber.config import (
     _env_bool,
+    _normalize_dtype,
     build_parser,
     config_from_args,
 )
@@ -58,6 +59,31 @@ class SubscriberConfigTest(unittest.TestCase):
         with patch.dict(os.environ, {"TEST_BOOL": "off"}):
             self.assertFalse(_env_bool("TEST_BOOL", True))
 
+    def test_rtp_model_environment_populates_kvcm_deployment_metadata(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "KVCM_URL": "http://kvcm.test:6382",
+                "KVCM_INSTANCE_ID": "instance-a",
+                "CHECKPOINT_PATH": "/models/Qwen2-0.5B/",
+                "ACT_TYPE": "bf16",
+                "TP_SIZE": "2",
+                "DP_SIZE": "1",
+                "PP_SIZE": "1",
+            },
+            clear=True,
+        ):
+            config = config_from_args(build_parser().parse_args([]))
+
+        self.assertEqual(config.model_name, "Qwen2-0.5B")
+        self.assertEqual(config.model_dtype, "bfloat16")
+        self.assertEqual(config.tp_size, 2)
+
+    def test_model_dtype_aliases_are_normalized(self) -> None:
+        self.assertEqual(_normalize_dtype(" BF16 "), "bfloat16")
+        self.assertEqual(_normalize_dtype("fp16"), "float16")
+        self.assertEqual(_normalize_dtype("float8_e4m3fn"), "float8_e4m3fn")
+
     def test_required_kvcm_identity_fields_are_validated(self) -> None:
         with self.assertRaisesRegex(ValueError, "KVCM_URL"):
             make_config(kvcm_url="").validate()
@@ -70,6 +96,7 @@ class SubscriberConfigTest(unittest.TestCase):
             (make_config(deletion_confirmations=0), "deletion_confirmations"),
             (make_config(engine_failure_threshold=0), "engine_failure_threshold"),
             (make_config(kvcm_report_batch_size=0), "kvcm_report_batch_size"),
+            (make_config(tp_size=0), "tp_size"),
         ]
         for config, field_name in invalid_configs:
             with self.subTest(field_name=field_name):

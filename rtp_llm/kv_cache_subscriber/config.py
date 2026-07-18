@@ -36,6 +36,31 @@ def _local_host_identity() -> str:
     return f"{address}:8088"
 
 
+def _default_model_name() -> str:
+    explicit = os.environ.get("KVCM_MODEL_NAME", "")
+    if explicit:
+        return explicit
+    checkpoint_path = os.environ.get("CHECKPOINT_PATH", "").rstrip("/")
+    return os.path.basename(checkpoint_path) if checkpoint_path else "default"
+
+
+def _normalize_dtype(value: str) -> str:
+    normalized = value.strip().lower()
+    aliases = {
+        "bf16": "bfloat16",
+        "fp16": "float16",
+        "fp32": "float32",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _default_model_dtype() -> str:
+    value = os.environ.get(
+        "KVCM_MODEL_DTYPE", os.environ.get("ACT_TYPE", "bfloat16")
+    )
+    return _normalize_dtype(value)
+
+
 @dataclass(frozen=True)
 class SubscriberConfig:
     rtp_endpoints: tuple[str, ...]
@@ -53,6 +78,12 @@ class SubscriberConfig:
     host_ip_port: str
     storage_type: str
     medium: str
+    model_name: str
+    model_dtype: str
+    use_mla: bool
+    tp_size: int
+    dp_size: int
+    pp_size: int
     reset_on_start: bool
     log_level: str
 
@@ -87,6 +118,16 @@ class SubscriberConfig:
             raise ValueError("storage_type must not be empty")
         if not self.medium:
             raise ValueError("medium must not be empty")
+        if not self.model_name:
+            raise ValueError("model_name must not be empty")
+        if not self.model_dtype:
+            raise ValueError("model_dtype must not be empty")
+        if self.tp_size < 1:
+            raise ValueError("tp_size must be >= 1")
+        if self.dp_size < 1:
+            raise ValueError("dp_size must be >= 1")
+        if self.pp_size < 1:
+            raise ValueError("pp_size must be >= 1")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -125,6 +166,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("KVCM_STORAGE_TYPE", "ST_EVENT_REPORT"),
     )
     parser.add_argument("--medium", default=os.environ.get("KVCM_MEDIUM", "hbm"))
+    parser.add_argument("--model-name", default=_default_model_name())
+    parser.add_argument("--model-dtype", default=_default_model_dtype())
+    parser.add_argument(
+        "--use-mla",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("KVCM_USE_MLA", False),
+    )
+    parser.add_argument(
+        "--tp-size",
+        type=int,
+        default=os.environ.get("KVCM_TP_SIZE", os.environ.get("TP_SIZE", "1")),
+    )
+    parser.add_argument(
+        "--dp-size",
+        type=int,
+        default=os.environ.get("KVCM_DP_SIZE", os.environ.get("DP_SIZE", "1")),
+    )
+    parser.add_argument(
+        "--pp-size",
+        type=int,
+        default=os.environ.get("KVCM_PP_SIZE", os.environ.get("PP_SIZE", "1")),
+    )
     parser.add_argument(
         "--reset-on-start",
         action=argparse.BooleanOptionalAction,
@@ -158,6 +221,12 @@ def config_from_args(args: argparse.Namespace) -> SubscriberConfig:
         host_ip_port=args.host_ip_port,
         storage_type=args.storage_type,
         medium=args.medium,
+        model_name=args.model_name,
+        model_dtype=_normalize_dtype(args.model_dtype),
+        use_mla=args.use_mla,
+        tp_size=args.tp_size,
+        dp_size=args.dp_size,
+        pp_size=args.pp_size,
         reset_on_start=args.reset_on_start,
         log_level=args.log_level,
     )

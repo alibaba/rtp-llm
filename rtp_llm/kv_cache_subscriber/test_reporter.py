@@ -74,6 +74,35 @@ class HttpKvcmReporterTest(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_start_uses_explicit_rtp_metadata_without_engine_config(self) -> None:
+        manager = _FakeManager()
+        config = make_config(
+            model_name="Qwen2-0.5B",
+            model_dtype="bfloat16",
+            tp_size=2,
+            dp_size=1,
+            pp_size=1,
+        )
+        with patch.dict(os.environ, {"DS_LLM_ENGINE_CONFIG": "{}"}):
+            reporter = HttpKvcmReporter(config, manager)
+
+        await reporter.start(block_size=64)
+
+        self.assertEqual(
+            manager.register_requests[0]["model_deployment"],
+            {
+                "model_name": "Qwen2-0.5B",
+                "dtype": "bfloat16",
+                "use_mla": False,
+                "tp_size": 2,
+                "dp_size": 1,
+                "lora_name": "",
+                "pp_size": 1,
+                "extra": "",
+                "user_data": "",
+            },
+        )
+
     async def test_diff_is_mapped_and_split_into_bounded_requests(self) -> None:
         manager = _FakeManager()
         config = make_config(kvcm_report_batch_size=2)
