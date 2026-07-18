@@ -202,7 +202,7 @@ class QuantizationConfig:
                 expression = re.escape(canonical_pattern).replace(
                     re.escape("{i}"), r"\d+"
                 )
-                if re.fullmatch(expression, canonical_prefix):
+                if re.fullmatch(rf"{expression}(?:\..+)?", canonical_prefix):
                     return True
             elif "*" in canonical_pattern or "?" in canonical_pattern:
                 if fnmatch.fnmatch(

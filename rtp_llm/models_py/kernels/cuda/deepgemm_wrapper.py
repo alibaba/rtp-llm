@@ -1,12 +1,14 @@
 import functools
+import logging
 from contextlib import contextmanager
 from typing import Any, Callable, Generator, List, NoReturn, Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
-
 from rtp_llm.utils.module_util import has_module, resolve_symbol
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "fp8_gemm_nt",
@@ -47,6 +49,7 @@ _m_grouped_fp8_gemm_nt_masked_impl: Callable[..., Any] | None = None
 _bf16_gemm_nt_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_contiguous_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_masked_impl: Callable[..., Any] | None = None
+_runtime_probe_error: Optional[str] = None
 
 
 @functools.cache
@@ -59,7 +62,8 @@ def is_deep_gemm_runtime_available(
     device: Optional[torch.device] = None,
 ) -> bool:
     """Whether FP8 DeepGEMM can execute on the target CUDA device."""
-    if not has_deep_gemm() or _fp8_gemm_nt_impl is None:
+    global _runtime_probe_error
+    if not has_deep_gemm():
         return False
     if getattr(torch.version, "hip", None) is not None or not torch.cuda.is_available():
         return False
@@ -76,7 +80,18 @@ def is_deep_gemm_runtime_available(
         major, _ = torch.cuda.get_device_capability(device_index)
     except (AssertionError, RuntimeError, ValueError):
         return False
-    return major in (9, 10, 12)
+    if major not in (9, 10, 12):
+        return False
+    if _fp8_gemm_nt_impl is None:
+        try:
+            _lazy_init_deep_gemm(["fp8_gemm_nt"])
+        except (ImportError, OSError, RuntimeError, AttributeError) as error:
+            reason = str(error)
+            if reason != _runtime_probe_error:
+                logger.warning("DeepGEMM FP8 GEMM is unavailable: %s", reason)
+                _runtime_probe_error = reason
+            return False
+    return _fp8_gemm_nt_impl is not None
 
 
 @functools.cache
@@ -145,22 +160,6 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
             raise RuntimeError(
                 f"DeepGEMM symbol {_deep_gemm_impl_new_map[symbol]} and {_deep_gemm_impl_old_map[symbol]} not found in deep_gemm module"
             )
-
-
-def _lazy_init_deep_gemm_once():
-    _lazy_init_deep_gemm(
-        [
-            "fp8_gemm_nt",
-            "m_grouped_fp8_gemm_nt_contiguous",
-            "m_grouped_fp8_gemm_nt_masked",
-            "bf16_gemm_nt",
-            "m_grouped_bf16_gemm_nt_contiguous",
-            "m_grouped_bf16_gemm_nt_masked",
-        ]
-    )
-
-
-_lazy_init_deep_gemm_once()
 
 
 @triton.jit
@@ -413,6 +412,8 @@ def fp8_gemm_nt(
     """
     global _fp8_gemm_nt_impl
     if _fp8_gemm_nt_impl is None:
+        _lazy_init_deep_gemm(["fp8_gemm_nt"])
+    if _fp8_gemm_nt_impl is None:
         return _missing_deep_gemm()
     _fp8_gemm_nt_impl(
         a,
@@ -449,6 +450,8 @@ def m_grouped_fp8_gemm_nt_contiguous(
     """
 
     global _m_grouped_fp8_gemm_nt_contiguous_impl
+    if _m_grouped_fp8_gemm_nt_contiguous_impl is None:
+        _lazy_init_deep_gemm(["m_grouped_fp8_gemm_nt_contiguous"])
     if _m_grouped_fp8_gemm_nt_contiguous_impl is None:
         return _missing_deep_gemm()
     _m_grouped_fp8_gemm_nt_contiguous_impl(
@@ -513,6 +516,8 @@ def m_grouped_fp8_gemm_nt_masked(
     """
     global _m_grouped_fp8_gemm_nt_masked_impl
     if _m_grouped_fp8_gemm_nt_masked_impl is None:
+        _lazy_init_deep_gemm(["m_grouped_fp8_gemm_nt_masked"])
+    if _m_grouped_fp8_gemm_nt_masked_impl is None:
         return _missing_deep_gemm()
 
     disable_ue8m0_cast = (
@@ -553,6 +558,8 @@ def bf16_gemm_nt(
     """
     global _bf16_gemm_nt_impl
     if _bf16_gemm_nt_impl is None:
+        _lazy_init_deep_gemm(["bf16_gemm_nt"])
+    if _bf16_gemm_nt_impl is None:
         return _missing_deep_gemm()
     _bf16_gemm_nt_impl(a, b, output, c, compiled_dims)
 
@@ -575,6 +582,8 @@ def m_grouped_bf16_gemm_nt_contiguous(
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
     global _m_grouped_bf16_gemm_nt_contiguous_impl
+    if _m_grouped_bf16_gemm_nt_contiguous_impl is None:
+        _lazy_init_deep_gemm(["m_grouped_bf16_gemm_nt_contiguous"])
     if _m_grouped_bf16_gemm_nt_contiguous_impl is None:
         return _missing_deep_gemm()
     _m_grouped_bf16_gemm_nt_contiguous_impl(
@@ -605,6 +614,8 @@ def m_grouped_bf16_gemm_nt_masked(
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
     global _m_grouped_bf16_gemm_nt_masked_impl
+    if _m_grouped_bf16_gemm_nt_masked_impl is None:
+        _lazy_init_deep_gemm(["m_grouped_bf16_gemm_nt_masked"])
     if _m_grouped_bf16_gemm_nt_masked_impl is None:
         return _missing_deep_gemm()
     _m_grouped_bf16_gemm_nt_masked_impl(

@@ -2,12 +2,11 @@ import logging
 from typing import Optional, Tuple
 
 import torch
-from torch import nn
-
 from rtp_llm.models_py.quant_methods.base import (
     QuantizeMethodBase,
     register_quant_method,
 )
+from torch import nn
 
 logger = logging.getLogger(__name__)
 
@@ -275,7 +274,6 @@ def _apply_rocm_fp8_block(
     block_size: int,
 ) -> torch.Tensor:
     import aiter
-
     from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_group_quant_fp8
 
     original_dtype = input_2d.dtype
@@ -367,25 +365,28 @@ except (
     scaled_fp8_per_token_quant = None
     sgl_per_token_group_quant_fp8 = None
 
-try:
+fp8_gemm_nt = None
+
+
+def is_deep_gemm_runtime_available(
+    device: Optional[torch.device] = None,
+) -> bool:
+    """Probe DeepGEMM only when block FP8 selects its CUDA backend."""
+    try:
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+            is_deep_gemm_runtime_available as runtime_available,
+        )
+    except (ImportError, RuntimeError, AttributeError):
+        return False
+    return runtime_available(device)
+
+
+def is_deep_gemm_e8m0_used() -> bool:
     from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
-        fp8_gemm_nt,
-        is_deep_gemm_e8m0_used,
-        is_deep_gemm_runtime_available,
+        is_deep_gemm_e8m0_used as e8m0_used,
     )
-except ImportError as e:  # pragma: no cover
-    logger.warning(
-        "deepgemm_wrapper imports unavailable: %s (will fall back to lazy import)", e
-    )
-    fp8_gemm_nt = None
 
-    def is_deep_gemm_runtime_available(  # type: ignore[no-redef]
-        device: Optional[torch.device] = None,
-    ) -> bool:
-        return False
-
-    def is_deep_gemm_e8m0_used() -> bool:  # type: ignore[no-redef]
-        return False
+    return e8m0_used()
 
 
 def _hip_scaled_fp8_per_tensor_quant(

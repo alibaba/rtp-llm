@@ -22,7 +22,6 @@ from unittest import mock
 
 import torch
 from rtp_llm.config.quant_config import Fp8PerTensorCompressedQuantConfig
-
 from rtp_llm.models_py.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -154,6 +153,63 @@ assert "rtp_llm.models_py.quant_methods.fp8" not in sys.modules
                     layer, "layers.0.self_attn.q_proj"
                 )
                 self.assertIsInstance(method, method_type)
+
+    def test_index_template_excludes_parent_and_child_projections(self):
+        cases = (
+            (
+                "model.layers.{i}.mlp",
+                "layers.3.mlp.down_proj",
+                (),
+            ),
+            (
+                "model.layers.{i}.mlp",
+                "layers.3.mlp.gate_up_proj",
+                ("gate_proj", "up_proj"),
+            ),
+            (
+                "model.layers.{i}.self_attn",
+                "layers.2.self_attn.o_proj",
+                (),
+            ),
+            (
+                "model.layers.{i}.self_attn",
+                "layers.2.self_attn.qkv_proj",
+                ("q_proj", "k_proj", "v_proj"),
+            ),
+        )
+        for pattern, prefix, shard_names in cases:
+            with self.subTest(pattern=pattern, prefix=prefix):
+                method = QuantizationConfig(
+                    "fp8", ignored_layers=[pattern]
+                ).get_quant_method(SimpleNamespace(shard_names=shard_names), prefix)
+                self.assertIsInstance(method, UnquantizedLinearMethod)
+
+    def test_non_block_fp8_dispatch_does_not_import_deepgemm_wrapper(self):
+        script = """
+import builtins
+from types import SimpleNamespace
+
+real_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name == "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper":
+        raise AssertionError("non-block FP8 imported DeepGEMM")
+    return real_import(name, *args, **kwargs)
+
+builtins.__import__ = guarded_import
+from rtp_llm.models_py.quant_methods.base import QuantizationConfig
+
+for quant_type in ("fp8", "fp8_per_channel"):
+    QuantizationConfig(quant_type).get_quant_method(
+        SimpleNamespace(shard_names=[]), "layers.0.self_attn.q_proj"
+    )
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_fused_layer_requires_consistent_exclusions(self):
         layer = SimpleNamespace(shard_names=["gate_proj", "up_proj"])
@@ -449,7 +505,6 @@ class TestRocmFp8PerChannelOnline(unittest.TestCase):
     def test_fp16_bf16_tp_weights_use_ptpc_runtime(self):
         import aiter
         from aiter.ops.shuffle import shuffle_weight
-
         from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
 
         # Match the production PTPC shape family used by the tuned AITer path:
@@ -802,34 +857,67 @@ class TestFp8BlockLoad(_LoadBackendMixin, unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "No executable ROCm"):
                 _select_fp8_runtime_backend(torch.device("cuda:0"), "block")
 
-    @unittest.skipUnless(
-        torch.cuda.is_available() and not _is_hip_runtime(),
-        "requires a CUDA runtime",
-    )
-    def test_runtime_predicate_checks_symbol_and_cuda_arch(self):
+    def test_runtime_predicate_resolves_only_required_symbol(self):
         from rtp_llm.models_py.kernels.cuda import deepgemm_wrapper
 
+        def initialize_required_symbol(symbols):
+            self.assertEqual(symbols, ["fp8_gemm_nt"])
+            deepgemm_wrapper._fp8_gemm_nt_impl = object()
+
         with mock.patch.object(
             deepgemm_wrapper, "has_deep_gemm", return_value=True
-        ), mock.patch.object(deepgemm_wrapper, "_fp8_gemm_nt_impl", None):
+        ), mock.patch.object(
+            torch.cuda, "is_available", return_value=True
+        ), mock.patch.object(
+            torch.version, "hip", None
+        ), mock.patch.object(
+            deepgemm_wrapper, "_fp8_gemm_nt_impl", None
+        ), mock.patch.object(
+            torch.cuda, "get_device_capability", return_value=(9, 0)
+        ), mock.patch.object(
+            deepgemm_wrapper,
+            "_lazy_init_deep_gemm",
+            side_effect=RuntimeError("required symbol is incompatible"),
+        ):
             self.assertFalse(
-                deepgemm_wrapper.is_deep_gemm_runtime_available(
-                    torch.device("cuda", torch.cuda.current_device())
-                )
+                deepgemm_wrapper.is_deep_gemm_runtime_available(torch.device("cuda:0"))
             )
 
         with mock.patch.object(
             deepgemm_wrapper, "has_deep_gemm", return_value=True
         ), mock.patch.object(
-            deepgemm_wrapper, "_fp8_gemm_nt_impl", object()
+            torch.cuda, "is_available", return_value=True
+        ), mock.patch.object(
+            torch.version, "hip", None
+        ), mock.patch.object(
+            deepgemm_wrapper, "_fp8_gemm_nt_impl", None
+        ), mock.patch.object(
+            torch.cuda, "get_device_capability", return_value=(9, 0)
+        ), mock.patch.object(
+            deepgemm_wrapper,
+            "_lazy_init_deep_gemm",
+            side_effect=initialize_required_symbol,
+        ) as lazy_init:
+            self.assertTrue(
+                deepgemm_wrapper.is_deep_gemm_runtime_available(torch.device("cuda:0"))
+            )
+            lazy_init.assert_called_once_with(["fp8_gemm_nt"])
+
+        with mock.patch.object(
+            deepgemm_wrapper, "has_deep_gemm", return_value=True
+        ), mock.patch.object(
+            torch.cuda, "is_available", return_value=True
+        ), mock.patch.object(
+            torch.version, "hip", None
         ), mock.patch.object(
             torch.cuda, "get_device_capability", return_value=(8, 9)
-        ):
+        ), mock.patch.object(
+            deepgemm_wrapper, "_lazy_init_deep_gemm"
+        ) as lazy_init:
             self.assertFalse(
-                deepgemm_wrapper.is_deep_gemm_runtime_available(
-                    torch.device("cuda", torch.cuda.current_device())
-                )
+                deepgemm_wrapper.is_deep_gemm_runtime_available(torch.device("cuda:0"))
             )
+            lazy_init.assert_not_called()
 
     def test_load_into_column_parallel(self):
         N, K = 256, 256  # 2 blocks each
