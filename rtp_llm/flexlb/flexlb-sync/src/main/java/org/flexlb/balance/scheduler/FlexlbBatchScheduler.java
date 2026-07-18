@@ -419,8 +419,14 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             return;
         }
         if (prefillEp != null) {
-            PrefillTimePredictor predictor = prefillEp.getPredictor();
-            predMs = (long) predictor.predictBatchMs(dispatchable);
+            try {
+                PrefillTimePredictor predictor = prefillEp.getPredictor();
+                if (predictor != null) {
+                    predMs = (long) predictor.predictBatchMsUncached(dispatchable);
+                }
+            } catch (Exception e) {
+                Logger.warn("FlexLB prediction failed, using predMs=0, batchId={}", batchId, e);
+            }
             prefillEp.commitBatch(batchId, predMs, dispatchable);
         }
 

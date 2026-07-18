@@ -50,6 +50,19 @@ public interface BatcherAlgorithm {
     }
 
     /**
+     * Estimated time a new request would wait before its batch is dispatched.
+     * Deadline-based algorithms can use the head sort key directly; algorithms
+     * with different dispatch semantics should override this method.
+     */
+    default long queueWaitMs(BatcherContext ctx) {
+        BatchItem head = ctx.peek();
+        if (head == null) {
+            return 0;
+        }
+        return Math.max(0, head.sortKey() - ctx.now());
+    }
+
+    /**
      * Hook called by {@link WorkerBatcher#shutdown} before the queue is drained.
      * Gives the algorithm a chance to clean up internal state.
      */

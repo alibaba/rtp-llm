@@ -63,6 +63,57 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
     }
 
     @Override
+    public long queueWaitMs(BatcherContext ctx) {
+        long now = ctx.now();
+        long fixedWaitMs = ctx.cfg().getFlexlbBatchFixedWaitMs();
+        int batchMaxCount = Math.max(1, ctx.cfg().getFlexlbBatchSizeMax());
+
+        // 空队列 — 新请求启动新的 batch 周期
+        if (ctx.isEmpty()) {
+            if (batchMaxCount <= 1) {
+                return 0;
+            }
+            return fixedWaitMs;
+        }
+
+        BatchItem head = ctx.peek();
+        if (head == null) {
+            // 竞态：isEmpty() 和 peek() 之间队列被清空
+            return fixedWaitMs;
+        }
+
+        // batchMaxCount == 1：每个请求独立成 batch，立即 dispatch
+        if (batchMaxCount <= 1) {
+            return 0;
+        }
+
+        long elapsedMs = now - head.enqueuedAtMs();
+        int queueSize = ctx.size();
+
+        // 新请求恰好填满一个 batch（当前 batch 或前置 dispatch 后的最后一个 batch）
+        // 前面的满 batch 通过 step 2 (batch_full) 连续 dispatch，之间无 sleep 延迟
+        // 新请求所在 batch 立即触发 batch_full → 等待 ≈ 0
+        if (queueSize % batchMaxCount == batchMaxCount - 1) {
+            return 0;
+        }
+
+        // 队列深度 < batchMaxCount 且窗口已超时 → fixed_window_timeout 立即触发
+        if (queueSize < batchMaxCount && elapsedMs >= fixedWaitMs) {
+            return 0;
+        }
+
+        // 队列深度 < batchMaxCount 且窗口未超时 → 等窗口剩余时间
+        if (queueSize < batchMaxCount) {
+            return Math.max(0, fixedWaitMs - elapsedMs);
+        }
+
+        // 队列深度 >= batchMaxCount，新请求不填满最后一个 batch
+        // 前置 dispatch 后存在 partial batch，剩余 head 的 enqueuedAtMs 未知
+        // O(1) 约束下无法精确计算窗口剩余时间，保守返回 fixedWaitMs（上界估计）
+        return fixedWaitMs;
+    }
+
+    @Override
     public void processQueue(BatcherContext ctx) throws InterruptedException {
         if (ctx.isEmpty()) {
             return;

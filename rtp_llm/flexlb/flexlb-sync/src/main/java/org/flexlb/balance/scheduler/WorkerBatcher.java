@@ -107,6 +107,14 @@ public class WorkerBatcher {
         return Math.max(0, currentHeadSortKey - now);
     }
 
+    /**
+     * Estimated time a new request would wait in the queue before dispatch.
+     * Delegates to the algorithm-specific {@link BatcherAlgorithm#queueWaitMs}.
+     */
+    public long queueWaitMs() {
+        return algorithm.queueWaitMs(ctx);
+    }
+
     public void shutdown() {
         stopped = true;
         workerThread.interrupt();
