@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
+#include "rtp_llm/cpp/config/RoleTypes.h"
 
 #include "RPCPool.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -88,7 +89,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
 
     for (const auto& role_addr : config_proto->role_addrs()) {
         generate_config->role_addrs.emplace_back(
-            RoleType(role_addr.role()), role_addr.ip(), role_addr.http_port(), role_addr.grpc_port());
+            stringToRoleType(role_addr.role()), role_addr.ip(), role_addr.http_port(), role_addr.grpc_port());
     }
 
     generate_config->reuse_cache         = config_proto->reuse_cache();
@@ -96,8 +97,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->enable_memory_cache = config_proto->enable_memory_cache();
     generate_config->enable_remote_cache = config_proto->enable_remote_cache();
     TRANS_OPTIONAL(trace_id);
-    TRANS_OPTIONAL(batch_group_timeout);
-    TRANS_OPTIONAL(force_batch);
+    TRANS_OPTIONAL(group_timeout);
 
     return generate_config;
 }
@@ -116,6 +116,7 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     std::shared_ptr<GenerateInput> generate_input = std::make_shared<GenerateInput>();
     generate_input->request_id                    = input->request_id();
     generate_input->request_info                  = transRequestInfo(input->request_info());
+    generate_input->global_start_time_us          = input->start_time();
     generate_input->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
     if (input->has_generate_config()) {
         generate_input->generate_config = transGenerateConfig(&(input->generate_config()));
@@ -150,9 +151,9 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
-    generate_input->batch_group_size = input->batch_group_size() > 0 ? input->batch_group_size() : 1;
-    if (input->has_batch_group_id()) {
-        generate_input->batch_group_id = input->batch_group_id().value();
+    generate_input->group_size = input->group_size() > 0 ? input->group_size() : 1;
+    if (input->has_group_id()) {
+        generate_input->group_id = input->group_id().value();
     }
 
     return generate_input;
@@ -162,7 +163,7 @@ std::vector<RoleAddr> QueryConverter::getRoleAddrs(const GenerateConfigPB* confi
     std::vector<RoleAddr> role_addrs;
     for (const auto& role_addr : config_proto->role_addrs()) {
         role_addrs.emplace_back(
-            RoleType(role_addr.role()), role_addr.ip(), role_addr.http_port(), role_addr.grpc_port());
+            stringToRoleType(role_addr.role()), role_addr.ip(), role_addr.http_port(), role_addr.grpc_port());
     }
     return role_addrs;
 }

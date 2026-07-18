@@ -10,6 +10,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Union
 
+import psutil
+import requests
+
 
 class AtomicCounter:
     def __init__(self, initial: int = 0):
@@ -319,22 +322,27 @@ async def _handle_response(response) -> Dict[str, Any]:
         }
 
 
-def wait_sever_done(server_process, port: int, timeout: int = 1600):
-    import psutil
-    import requests
-
+def wait_sever_done(
+    server_process, port: int, timeout: int = 1600, health_check_path: str = "/health"
+):
     host = "localhost"
     retry_interval = 1  # 重试间隔（秒）
     start_time = time.time()
 
     port = str(port)
+    health_check_path = health_check_path or "/health"
+    if not health_check_path.startswith("/"):
+        health_check_path = "/" + health_check_path
 
-    logging.info(f"等待pid[{server_process.pid}]启动中...\n端口 {port}")
+    logging.info(
+        f"等待pid[{server_process.pid}]启动中...\n端口 {port}, health path {health_check_path}"
+    )
     while True:
         try:
             # 使用 HTTP health check 检查服务是否准备就绪
             response = requests.get(
-                f"http://{host}:{port}/health", timeout=retry_interval
+                f"http://{host}:{port}{health_check_path}",
+                timeout=retry_interval,
             )
             logging.info(
                 f"response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}"
@@ -380,8 +388,6 @@ def wait_sever_done(server_process, port: int, timeout: int = 1600):
 def stop_server(
     server_process,
 ):
-    import psutil
-
     if server_process is not None and server_process.pid is not None:
         try:
             # 如果只kill start_server，会残留 backend/frontend 占用显存。

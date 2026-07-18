@@ -62,6 +62,7 @@ cc_library(
         ":rpc_error_code",
         ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache:recent_cache_key_window",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
         "//rtp_llm/cpp/disaggregate/cache_store",

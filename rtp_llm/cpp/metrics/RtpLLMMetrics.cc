@@ -34,6 +34,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheMatchMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheReadMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheWriteMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheSDKMetrics);
+AUTIL_LOG_SETUP(rtp_llm, PrefillPoolMetrics);
 
 #define REPORT_QPS(name)                                                                                               \
     if (collector->name) {                                                                                             \
@@ -1101,6 +1102,27 @@ void RtpLLMDiskCacheMetrics::report(const kmonitor::MetricsTags*           tags,
 #undef REPORT_NON_ZERO_MUTABLE_METRIC
 #undef REPORT_QPS
 #undef REPORT_GAUGE
+
+bool PrefillPoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(active_metric, "rtp_llm_prefill_pool_active");
+    REGISTER_GAUGE_MUTABLE_METRIC(queued_metric, "rtp_llm_prefill_pool_queued");
+    REGISTER_GAUGE_MUTABLE_METRIC(completed_metric, "rtp_llm_prefill_pool_completed");
+    REGISTER_GAUGE_MUTABLE_METRIC(rejected_metric, "rtp_llm_prefill_pool_rejected");
+    REGISTER_GAUGE_MUTABLE_METRIC(fallback_metric, "rtp_llm_prefill_pool_fallback");
+    REGISTER_GAUGE_MUTABLE_METRIC(thread_max_metric, "rtp_llm_prefill_pool_thread_max");
+    REGISTER_GAUGE_MUTABLE_METRIC(queue_max_metric, "rtp_llm_prefill_pool_queue_max");
+    return true;
+}
+
+void PrefillPoolMetrics::report(const kmonitor::MetricsTags* tags, PrefillPoolMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(active_metric, collector->active);
+    REPORT_MUTABLE_METRIC(queued_metric, collector->queued);
+    REPORT_MUTABLE_METRIC(completed_metric, collector->completed);
+    REPORT_MUTABLE_METRIC(rejected_metric, collector->rejected);
+    REPORT_MUTABLE_METRIC(fallback_metric, collector->fallback);
+    REPORT_MUTABLE_METRIC(thread_max_metric, collector->thread_max);
+    REPORT_MUTABLE_METRIC(queue_max_metric, collector->queue_max);
+}
 
 bool initKmonitorFactory() {
     KmonParam param;

@@ -109,7 +109,7 @@ public:
                    size_t                                extra_reserve_token_num = 0,
                    bool                                  pert_test               = false);
     virtual ~GenerateStream() {
-        reportMetricOnce();
+        reportMetric();
         releaseResource();
         stream_magic_ = 0;
     }
@@ -235,12 +235,7 @@ public:
 
     int64_t getTimeoutMs() const;
     void    checkTimeout();
-    void    recordWaitLatency();
-    void    recordSchedulerEnqueueTime(int64_t time_us);
-    void    recordCanRunTime();
-    void    recordLoadingCacheStartTime();
-    void    recordLoadingCacheDoneTime();
-    void    recordRunningTime();
+    void    checkTimeoutWithoutLock();
 
     void reportEvent(StreamEvents::EventType event,
                      ErrorCode               error_code = ErrorCode::NONE_ERROR,
@@ -257,11 +252,17 @@ public:
     ErrorInfo    statusInfo();
     std::string  stopReason();
 
-    void        setReserveStep(size_t reserve_step);
-    size_t      reserveStep() const {
+    void   setReserveStep(size_t reserve_step);
+    size_t reserveStep() const {
         return reserve_step_;
     }
-    StreamState moveToNext();
+    // Lifecycle methods — replace moveToNext().
+    bool prepare();
+    bool isReady();
+    void activate();
+    void advance();
+    bool alive();
+    void finish();
 
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is active (no error and not finished)
@@ -442,30 +443,33 @@ public:
         return generate_input_->generate_config->trace_id;
     }
 
-    int batchGroupSize() const {
-        return generate_input_->batch_group_size;
+    int groupSize() const {
+        return generate_input_->group_size;
     }
 
-    int batchGroupTimeout() const {
-        return generate_input_->generate_config->batch_group_timeout.value_or(100);
+    int groupTimeout() const {
+        return generate_input_->generate_config->group_timeout.value_or(100);
     }
 
-    bool forceBatch() const {
-        return generate_input_->generate_config->force_batch;
+    bool isGroup() const {
+        return generate_input_->group_id != -1;
     }
-    int64_t batchGroupId() const {
-        return generate_input_->batch_group_id;
+
+    int64_t groupId() const {
+        return generate_input_->group_id;
     }
 
     int64_t enqueueTime() const {
         return generate_input_->begin_time_us;
     }
-    int64_t schedulerEnqueueTimeUs() const {
-        return scheduler_enqueue_time_us_ > 0 ? scheduler_enqueue_time_us_ : enqueueTime();
-    }
 
     /// Log-friendly stream id: numeric ``streamId()`` (``request_id`` / ``inter_request_id``) + ``trace_id`` string.
-    std::string streamLogTag() const;
+    std::string streamLogTag() const {
+        char        buf[256];
+        std::string tid = traceId();
+        snprintf(buf, sizeof(buf), "trace_id=%s req_id=%ld", tid.empty() ? "-" : tid.c_str(), streamId());
+        return std::string(buf);
+    }
 
     std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
         return logits_processor_list_;
@@ -695,7 +699,7 @@ protected:
 
     void reportStreamMetrics();
     void reportCacheReuseMetrics() const;
-    void reportMetricOnce();
+    void finish_internal();
 
 protected:
     uint64_t                              stream_magic_ = STREAM_MAGIC;
@@ -707,14 +711,6 @@ protected:
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
     int64_t                               begin_time_us_;
     int64_t                               wait_time_us_ = 0;
-    bool                                  metrics_reported_ = false;
-    int64_t                               scheduler_enqueue_time_us_ = 0;
-    int64_t                               can_run_time_us_ = 0;
-    int64_t                               loading_cache_start_time_us_ = 0;
-    int64_t                               loading_cache_done_time_us_ = 0;
-    int64_t                               first_running_time_us_ = 0;
-    int64_t                               loading_cache_latency_us_ = 0;
-    int64_t                               load_done_to_running_us_ = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;
     size_t                                iter_count_           = 0;
@@ -769,6 +765,7 @@ protected:
     size_t                             propose_step_         = 0;
     size_t                             score_len_            = 0;
     size_t                             reserve_step_         = 0;
+    bool                               needs_cache_loading_  = false;
     bool                               acceped_bouns_token_  = false;
     int                                sp_edit_search_index_ = 0;
     bool                               sp_edit_first_time_   = true;
@@ -797,10 +794,10 @@ protected:
     // Stream-async device-resident state for the next decode step's prepare.
     // These structs stay default-constructed (epoch=0, undefined tensors) until
     // their corresponding async/sync publisher installs a usable state.
-    MtpAsyncDeviceState    mtp_async_state_;
-    uint64_t               mtp_async_epoch_counter_ = 0;
-    NormalAsyncDeviceState normal_async_state_;
-    uint64_t               normal_async_epoch_counter_ = 0;
+    MtpAsyncDeviceState                mtp_async_state_;
+    uint64_t                           mtp_async_epoch_counter_ = 0;
+    NormalAsyncDeviceState             normal_async_state_;
+    uint64_t                           normal_async_epoch_counter_       = 0;
     std::shared_ptr<std::atomic<bool>> grpc_normal_device_state_pending_ = std::make_shared<std::atomic<bool>>(false);
 
     bool return_all_hidden_states_ = false;

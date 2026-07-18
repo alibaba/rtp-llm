@@ -272,7 +272,7 @@ TEST_F(InferenceServiceTest, InferResponseSuccess) {
     auto                           mock_stream = CreateMockGenerateStream();
     auto                           stream      = std::dynamic_pointer_cast<GenerateStream>(mock_stream);
     std::vector<GenerateStreamPtr> streams({stream});
-    EXPECT_CALL(*mock_engine_, batchEnqueue(Matcher<const std::vector<std::shared_ptr<GenerateInput>>&>(_)))
+    EXPECT_CALL(*mock_engine_, enqueueMultiple(Matcher<const std::vector<std::shared_ptr<GenerateInput>>&>(_)))
         .WillOnce(Return(streams));
 
     // stream
