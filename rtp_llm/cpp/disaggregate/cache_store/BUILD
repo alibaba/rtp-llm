@@ -75,7 +75,13 @@ cc_library(
         "//:rtp_compute_ops",
         ":arpc_dep",
         "//rtp_llm/cpp/utils:profiling_scope",
-    ],
+    ] + select({
+        "@//:using_cuda12": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }),
     visibility=['//visibility:public'],
     alwayslink = True,
 )

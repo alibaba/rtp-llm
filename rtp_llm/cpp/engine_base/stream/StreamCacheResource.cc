@@ -603,6 +603,8 @@ int StreamCacheResource::mallocFailedTimes() const {
 }
 
 bool StreamCacheResource::reuseCache() const {
+    // AND logic: global REUSE_CACHE=1 AND per-request reuse_cache both must be true.
+    // Per-request field flows frontend → FlexLB → engine via protobuf.
     return resource_context_.reuse_cache && stream_->reuseCache();
 }
 

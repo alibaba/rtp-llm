@@ -186,7 +186,7 @@ void InferenceService::inferResponse(int64_t                                    
         auto input = fillGenerateInput(request_id, req.input_texts[i], req.input_urls[i], req.generate_configs[i]);
         inputs.push_back(input);
     }
-    auto                                                ori_streams = engine_->batchEnqueue(inputs);
+    auto                                                ori_streams = engine_->enqueueMultiple(inputs);
     std::vector<std::shared_ptr<GenerateStreamWrapper>> streams;
     streams.reserve(ori_streams.size());
     for (size_t idx = 0; idx < ori_streams.size(); ++idx) {

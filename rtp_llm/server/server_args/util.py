@@ -10,7 +10,7 @@ def str2bool(v):
         return v
     if v.lower() in ("yes", "true", "t", "1", "on"):
         return True
-    if v.lower() in ("no", "false", "f", "0", "off"):
+    if v.lower() in ("no", "false", "f", "0", "off", ""):
         return False
     raise argparse.ArgumentTypeError("Boolean value expected.")
 

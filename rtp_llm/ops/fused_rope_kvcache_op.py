@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
@@ -8,11 +9,18 @@ from libth_transformer_config import (
     check_rope_cache,
     get_rope_cache_once,
 )
-from rtp_kernel.fused_rope_kvcache import (
-    convert_offset_to_block_array,
-    decode_fused_rope_kvcache,
-    prefill_fused_rope_kvcache,
-)
+
+try:
+    from rtp_kernel.fused_rope_kvcache import (
+        convert_offset_to_block_array,
+        decode_fused_rope_kvcache,
+        prefill_fused_rope_kvcache,
+    )
+except ImportError as e:
+    logging.warning(f"rtp_kernel.fused_rope_kvcache not available: {e}")
+    convert_offset_to_block_array = None
+    decode_fused_rope_kvcache = None
+    prefill_fused_rope_kvcache = None
 
 
 @dataclass

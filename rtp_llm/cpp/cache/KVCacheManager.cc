@@ -627,7 +627,7 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
         auto                      shared_cache = allocator_->sharedBlockCache();
         if (shared_cache) {
             device_cache_keys = shared_cache->allCacheKeys();
-            info.version = shared_cache->version();
+            info.version      = shared_cache->version();
         }
         // memory cache keys
         const auto mem_cache_keys = coordinator_->memoryCacheKeysForStatus();
@@ -647,7 +647,6 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
     info.block_size                = block_size_tokens;
     info.total_kv_cache            = allocator_->totalTokensNum();
     info.available_kv_cache        = allocator_->availableTokensNum();
-    // cached_keys left empty for now; can be populated when distributed cache is wired up.
 
     return info;
 }
