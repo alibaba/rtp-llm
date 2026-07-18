@@ -147,7 +147,7 @@ except (
 try:
     from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
         fp8_gemm_nt,
-        has_deep_gemm,
+        is_deep_gemm_runtime_available,
         is_deep_gemm_e8m0_used,
     )
 except ImportError as e:  # pragma: no cover
@@ -156,7 +156,9 @@ except ImportError as e:  # pragma: no cover
     )
     fp8_gemm_nt = None
 
-    def has_deep_gemm() -> bool:  # type: ignore[no-redef]
+    def is_deep_gemm_runtime_available(  # type: ignore[no-redef]
+        device: Optional[torch.device] = None,
+    ) -> bool:
         return False
 
     def is_deep_gemm_e8m0_used() -> bool:  # type: ignore[no-redef]
@@ -196,12 +198,7 @@ def _hip_scaled_fp8_per_tensor_quant(
         scale = torch.empty(1, dtype=torch.float32, device=input.device)
         dynamic_per_tensor_quant(output, input, scale)
     else:
-        if scale.numel() != 1 or not scale.is_floating_point():
-            raise ValueError("Static FP8 per-tensor scale must be one floating value")
-        scale = scale.to(device=input.device, dtype=torch.float32).reshape(1)
-        if not bool(torch.isfinite(scale).all()) or bool((scale <= 0).any()):
-            raise ValueError("Static FP8 per-tensor scale must be finite and positive")
-        static_per_tensor_quant(output, input, scale)
+        static_per_tensor_quant(output, input, scale.reshape(1))
     return output, scale
 
 
@@ -383,13 +380,10 @@ class Fp8LinearMethod(QuantizeMethodBase):
         if not Fp8LinearMethod._apply_logged:
             logger.info(
                 "[Fp8LinearMethod] FIRST forward via torch._scaled_mm: "
-                "prefix=%r, x.shape=%s, weight.shape=%s, weight_scale=%.6f, "
-                "x_scale=%.6f",
+                "prefix=%r, x.shape=%s, weight.shape=%s",
                 getattr(layer, "prefix", "?"),
                 tuple(x.shape),
                 tuple(layer.weight.shape),
-                float(layer.weight_scale.view(1)[0].item()),
-                float(x_scale.view(1)[0].item()),
             )
             Fp8LinearMethod._apply_logged = True
 
@@ -530,16 +524,13 @@ class Fp8OnlineLinearMethod(QuantizeMethodBase):
             logger.info(
                 "[Fp8OnlineLinearMethod] FIRST forward via torch._scaled_mm: "
                 "prefix=%r, x.dtype=%s, x.shape=%s, qinput.dtype=%s, "
-                "weight.dtype=%s, weight.shape=%s, weight_scale=%.6f, "
-                "x_scale=%.6f, total_quanted_weights=%d",
+                "weight.dtype=%s, weight.shape=%s, total_quanted_weights=%d",
                 getattr(layer, "prefix", "?"),
                 x.dtype,
                 tuple(x.shape),
                 qinput.dtype,
                 layer.weight.dtype,
                 tuple(layer.weight.shape),
-                float(layer.weight_scale.view(1)[0].item()),
-                float(x_scale.view(1)[0].item()),
                 Fp8OnlineLinearMethod._quant_count,
             )
             Fp8OnlineLinearMethod._apply_logged = True
@@ -853,6 +844,10 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
     _quant_count: int = 0
     required_checkpoint_parameters = ("weight",)
 
+    def __init__(self, quant_config=None):
+        super().__init__(quant_config)
+        self._use_deep_gemm = False
+
     def create_weights(
         self,
         layer,
@@ -891,7 +886,8 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
 
     def process_weights_after_loading(self, layer):
         weight = layer.weight.data
-        if not has_deep_gemm():
+        self._use_deep_gemm = is_deep_gemm_runtime_available(weight.device)
+        if not self._use_deep_gemm:
             del layer.weight_scale
             expected_stride = (1, layer.weight.shape[0])
             if layer.weight.stride() != expected_stride:
@@ -1014,7 +1010,7 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
     def apply(
         self, layer, x: torch.Tensor, bias: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        if not has_deep_gemm():
+        if not self._use_deep_gemm:
             if not hasattr(layer, "weight_scale"):
                 return torch.nn.functional.linear(x, layer.weight, bias)
             raise RuntimeError(
@@ -1165,7 +1161,8 @@ class Fp8BlockLinearMethod(Fp8BlockOnlineLinearMethod):
         block_size = getattr(
             layer.quant_config, "weight_block_size", [self.BLOCK, self.BLOCK]
         )
-        if not has_deep_gemm():
+        self._use_deep_gemm = is_deep_gemm_runtime_available(layer.weight.device)
+        if not self._use_deep_gemm:
             if list(block_size) == [self.BLOCK, self.BLOCK]:
                 weight_dequant = _dequant_block_to_bf16(
                     layer.weight.data, layer.weight_scale_inv.data, self.BLOCK

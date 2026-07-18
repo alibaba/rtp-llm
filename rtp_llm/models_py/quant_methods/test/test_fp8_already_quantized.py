@@ -40,7 +40,6 @@ from rtp_llm.models_py.quant_methods.fp8 import (
     _is_hip_runtime,
     _resolve_per_tensor_quant,
     _runtime_fp8_dtype,
-    has_deep_gemm,
     is_deep_gemm_e8m0_used,
 )
 from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
@@ -594,7 +593,7 @@ class TestFp8BlockLoad(unittest.TestCase):
 
     def _assert_runtime_state(self, layer, expected_scale):
         self.assertFalse(hasattr(layer, "weight_scale_inv"))
-        if has_deep_gemm():
+        if layer.quant_method._use_deep_gemm:
             self.assertEqual(layer.weight.dtype, torch.float8_e4m3fn)
             if is_deep_gemm_e8m0_used():
                 self.assertEqual(layer.weight_scale.dtype, torch.int32)
@@ -605,6 +604,78 @@ class TestFp8BlockLoad(unittest.TestCase):
         else:
             self.assertEqual(layer.weight.dtype, torch.bfloat16)
             self.assertFalse(hasattr(layer, "weight_scale"))
+
+    def test_unsupported_runtime_forces_online_and_offline_fallbacks(self):
+        with mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8.is_deep_gemm_runtime_available",
+            return_value=False,
+        ):
+            online = ColumnParallelLinear(
+                input_size=self.BLOCK,
+                output_size=self.BLOCK,
+                quant_config=_make_qc("fp8_block_online"),
+                prefix="online",
+                params_dtype=torch.bfloat16,
+            )
+            online.load_weights(
+                {
+                    "online.weight": torch.ones(
+                        self.BLOCK, self.BLOCK, dtype=torch.bfloat16
+                    )
+                }
+            )
+            online.process_weights_after_loading()
+
+            offline = ColumnParallelLinear(
+                input_size=self.BLOCK,
+                output_size=self.BLOCK,
+                quant_config=_make_qc("fp8_block"),
+                prefix="offline",
+                params_dtype=torch.bfloat16,
+            )
+            offline.load_weights(
+                {
+                    "offline.weight": torch.zeros(
+                        self.BLOCK, self.BLOCK, dtype=torch.float8_e4m3fn
+                    ),
+                    "offline.weight_scale_inv": torch.ones(1, 1, dtype=torch.float32),
+                }
+            )
+            offline.process_weights_after_loading()
+
+        for layer in (online, offline):
+            self.assertFalse(layer.quant_method._use_deep_gemm)
+            self.assertEqual(layer.weight.dtype, torch.bfloat16)
+            self.assertFalse(hasattr(layer, "weight_scale"))
+
+    @unittest.skipUnless(
+        torch.cuda.is_available() and not _is_hip_runtime(),
+        "requires a CUDA runtime",
+    )
+    def test_runtime_predicate_checks_symbol_and_cuda_arch(self):
+        from rtp_llm.models_py.kernels.cuda import deepgemm_wrapper
+
+        with mock.patch.object(
+            deepgemm_wrapper, "has_deep_gemm", return_value=True
+        ), mock.patch.object(deepgemm_wrapper, "_fp8_gemm_nt_impl", None):
+            self.assertFalse(
+                deepgemm_wrapper.is_deep_gemm_runtime_available(
+                    torch.device("cuda", torch.cuda.current_device())
+                )
+            )
+
+        with mock.patch.object(
+            deepgemm_wrapper, "has_deep_gemm", return_value=True
+        ), mock.patch.object(
+            deepgemm_wrapper, "_fp8_gemm_nt_impl", object()
+        ), mock.patch.object(
+            torch.cuda, "get_device_capability", return_value=(8, 9)
+        ):
+            self.assertFalse(
+                deepgemm_wrapper.is_deep_gemm_runtime_available(
+                    torch.device("cuda", torch.cuda.current_device())
+                )
+            )
 
     def test_load_into_column_parallel(self):
         N, K = 256, 256  # 2 blocks each
@@ -868,11 +939,13 @@ class TestFp8BlockForward(unittest.TestCase):
 
     def test_forward_matches_online_path(self):
         try:
-            from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import has_deep_gemm
+            from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+                is_deep_gemm_runtime_available,
+            )
             from rtp_llm.models_py.kernels.cuda.fp8_kernel import per_block_cast_to_fp8
         except ImportError:
             self.skipTest("deepgemm/fp8_kernel not available")
-        if not has_deep_gemm():
+        if not is_deep_gemm_runtime_available(torch.device("cuda")):
             self.skipTest("DeepGEMM kernel not available at runtime")
 
         N, K, M = 256, 256, 32  # 2x2 weight blocks
@@ -977,6 +1050,39 @@ class TestFp8AlreadyQuantizedForward(unittest.TestCase):
 
                 # _scaled_mm and the BF16 reference differ only in accumulation.
                 torch.testing.assert_close(out, ref, rtol=0.05, atol=0.05)
+
+    @unittest.skipUnless(_is_hip_runtime(), "requires ROCm")
+    def test_static_rocm_forward_does_not_revalidate_scale(self):
+        N, K = 32, 64
+        weight_scale = torch.tensor([0.25], dtype=torch.float32, device="cuda")
+        layer = ColumnParallelLinear(
+            input_size=K,
+            output_size=N,
+            quant_config=_make_qc("fp8", activation_dynamic=False),
+            prefix="static",
+            params_dtype=torch.bfloat16,
+        ).to("cuda")
+        layer.load_weights(
+            {
+                "static.weight": torch.ones(
+                    N, K, dtype=torch.float8_e4m3fn, device="cuda"
+                ),
+                "static.weight_scale": weight_scale,
+                "static.input_scale": torch.tensor(
+                    [0.5], dtype=torch.float32, device="cuda"
+                ),
+            }
+        )
+        layer.validate_weights_loaded()
+        layer.process_weights_after_loading()
+
+        with mock.patch.object(
+            torch,
+            "isfinite",
+            side_effect=AssertionError("forward must not validate static scale"),
+        ):
+            output = layer(torch.ones(2, K, dtype=torch.bfloat16, device="cuda"))
+        self.assertEqual(tuple(output.shape), (2, N))
 
 
 if __name__ == "__main__":

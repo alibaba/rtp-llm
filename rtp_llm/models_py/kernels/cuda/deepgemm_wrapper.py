@@ -16,6 +16,7 @@ __all__ = [
     "m_grouped_bf16_gemm_nt_contiguous",
     "m_grouped_bf16_gemm_nt_masked",
     "has_deep_gemm",
+    "is_deep_gemm_runtime_available",
     "is_deep_gemm_e8m0_used",
     "configure_deep_gemm_num_sms",
     "maybe_pack_ue8m0_scale",
@@ -52,6 +53,30 @@ _m_grouped_bf16_gemm_nt_masked_impl: Callable[..., Any] | None = None
 def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available."""
     return has_module("deep_gemm")
+
+
+def is_deep_gemm_runtime_available(
+    device: Optional[torch.device] = None,
+) -> bool:
+    """Whether FP8 DeepGEMM can execute on the target CUDA device."""
+    if not has_deep_gemm() or _fp8_gemm_nt_impl is None:
+        return False
+    if getattr(torch.version, "hip", None) is not None or not torch.cuda.is_available():
+        return False
+
+    target = (
+        torch.device("cuda", torch.cuda.current_device())
+        if device is None
+        else torch.device(device)
+    )
+    if target.type != "cuda":
+        return False
+    device_index = torch.cuda.current_device() if target.index is None else target.index
+    try:
+        major, _ = torch.cuda.get_device_capability(device_index)
+    except (AssertionError, RuntimeError, ValueError):
+        return False
+    return major in (9, 10, 12)
 
 
 @functools.cache
