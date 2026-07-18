@@ -1,3 +1,6 @@
+from .util import str2bool
+
+
 def init_master_group_args(parser, master_config):
     master_group = parser.add_argument_group("Master Configuration")
 
@@ -30,6 +33,15 @@ def init_master_group_args(parser, master_config):
     )
 
     master_group.add_argument(
+        "--master_connector_limit_per_host",
+        env_name="MASTER_CONNECTOR_LIMIT_PER_HOST",
+        bind_to=(master_config, "master_connector_limit_per_host"),
+        type=int,
+        default=0,
+        help="Max HTTP connections per master host (0 = use default 30)",
+    )
+
+    master_group.add_argument(
         "--master_session_timeout_s",
         env_name="MASTER_SESSION_TIMEOUT_S",
         bind_to=(master_config, "master_session_timeout_s"),
@@ -38,4 +50,14 @@ def init_master_group_args(parser, master_config):
         help="Master HTTP session total timeout (seconds). "
         "<0: auto (3600 when queue mode, 0.5 otherwise); "
         "==0: 不设超时（链路不超时）; >0: 使用该值",
+    )
+
+    master_group.add_argument(
+        "--master_disable_domain_fallback",
+        env_name="MASTER_DISABLE_DOMAIN_FALLBACK",
+        bind_to=(master_config, "disable_domain_fallback"),
+        type=str2bool,
+        default=False,
+        help="When True, disable domain fallback routing when master is unavailable or not configured. "
+        "Requests will fail with ROUTE_ERROR instead of falling back to VipServer domain routing.",
     )

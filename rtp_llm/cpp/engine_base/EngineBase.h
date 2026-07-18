@@ -52,7 +52,7 @@ public:
 
     virtual void enqueue(std::shared_ptr<GenerateStream>& stream) = 0;
 
-    virtual std::vector<GenerateStreamPtr> batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& inputs);
+    virtual std::vector<GenerateStreamPtr> enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs);
 
     virtual std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input);
 

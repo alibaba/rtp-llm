@@ -17,6 +17,8 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 
 import torch
 
+from rtp_llm.ops import RoleType
+
 _DENSE_GEMM_FALLBACK_M_GRID = [
     1,
     2,
@@ -140,7 +142,7 @@ def resolve_dense_gemm_warmup_max_m(
     *,
     max_seq_len: int,
     max_batch_size: int,
-    role_type_name: str,
+    role_type_name: RoleType,
     prefill_chunk_size: int = 0,
     max_tokens_per_rank: int = 0,
     is_speculative: bool = False,
@@ -150,8 +152,7 @@ def resolve_dense_gemm_warmup_max_m(
 ) -> int:
     """Return the largest M bucket DenseGEMM startup warmup should cover."""
 
-    role = str(role_type_name).upper().split(".")[-1]
-    if role != "DECODE":
+    if role_type_name != RoleType.DECODE:
         # Prefill/PDFusion runs dense kernels on chunked token blocks. Warm the
         # production chunk M directly instead of the full logical context M.
         prefill_chunk_size = int(prefill_chunk_size or 0)
@@ -1778,9 +1779,7 @@ def warmup_mhc_head_fused_jit(
         return
     _assert_not_capturing()
 
-    from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
-        tk_mhc_head_fused_enabled,
-    )
+    from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import tk_mhc_head_fused_enabled
 
     if not tk_mhc_head_fused_enabled():
         return
@@ -1816,13 +1815,9 @@ def warmup_mhc_head_fused_jit(
             _release_cuda_cache(device)
 
     t0 = time.time()
-    _run_deepgemm_warmup_launches_serialized(
-        "DSV4 mHCHeadFused", _run_warmup_launches
-    )
+    _run_deepgemm_warmup_launches_serialized("DSV4 mHCHeadFused", _run_warmup_launches)
     if rank == 0:
-        logging.info(
-            "[DSV4 mHCHeadFused] JIT warmup done in %.2fs", time.time() - t0
-        )
+        logging.info("[DSV4 mHCHeadFused] JIT warmup done in %.2fs", time.time() - t0)
     _MHC_HEAD_FUSED_JIT_WARMED_KEYS.add(warmup_key)
 
 

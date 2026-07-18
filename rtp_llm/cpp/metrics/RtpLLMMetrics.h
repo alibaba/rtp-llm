@@ -1406,6 +1406,37 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+// ==================== Prefill Thread Pool Metrics ====================
+
+class PrefillPoolMetricsCollector final {
+public:
+    int64_t active     = 0;  // currently executing tasks
+    int64_t queued     = 0;  // tasks waiting in queue
+    int64_t completed  = 0;  // total finished since creation
+    int64_t rejected   = 0;  // pushTask refused (pool full)
+    int64_t fallback   = 0;  // fallback to detached thread
+    int64_t thread_max = 0;  // configured thread count
+    int64_t queue_max  = 0;  // configured queue depth
+};
+
+class PrefillPoolMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, PrefillPoolMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* active_metric     = nullptr;
+    kmonitor::MutableMetric* queued_metric     = nullptr;
+    kmonitor::MutableMetric* completed_metric  = nullptr;
+    kmonitor::MutableMetric* rejected_metric   = nullptr;
+    kmonitor::MutableMetric* fallback_metric   = nullptr;
+    kmonitor::MutableMetric* thread_max_metric = nullptr;
+    kmonitor::MutableMetric* queue_max_metric  = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 bool initKmonitorFactory();
 void stopKmonitorFactory();
 

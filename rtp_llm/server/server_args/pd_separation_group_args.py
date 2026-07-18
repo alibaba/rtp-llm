@@ -54,6 +54,69 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     )
 
     pd_separation_group.add_argument(
+        "--batch_dispatch_timeout_ms",
+        env_name="BATCH_DISPATCH_TIMEOUT_MS",
+        bind_to=(pd_separation_config, "batch_dispatch_timeout_ms"),
+        type=int,
+        default=60000,
+        help="EnqueueBatch 跨 DP 分发超时（毫秒），防止远端 DP 卡死阻塞整个 batch",
+    )
+
+    pd_separation_group.add_argument(
+        "--batch_prepare_timeout_ms",
+        env_name="BATCH_PREPARE_TIMEOUT_MS",
+        bind_to=(pd_separation_config, "batch_prepare_timeout_ms"),
+        type=int,
+        default=10000,
+        help="EnqueueGroup 内部 prepareAllocateResource 超时（毫秒）",
+    )
+
+    pd_separation_group.add_argument(
+        "--batch_load_timeout_ms",
+        env_name="BATCH_LOAD_TIMEOUT_MS",
+        bind_to=(pd_separation_config, "batch_load_timeout_ms"),
+        type=int,
+        default=10000,
+        help="EnqueueGroup 内部 remoteLoadCacheStart 超时（毫秒）",
+    )
+
+    pd_separation_group.add_argument(
+        "--prefill_enqueue_pool_size",
+        env_name="PREFILL_ENQUEUE_POOL_SIZE",
+        bind_to=(pd_separation_config, "prefill_enqueue_pool_size"),
+        type=int,
+        default=0,
+        help="Prefill L1 enqueue 线程池大小，0 表示使用公式默认值",
+    )
+
+    pd_separation_group.add_argument(
+        "--prefill_worker_lambda_pool_size",
+        env_name="PREFILL_WORKER_LAMBDA_POOL_SIZE",
+        bind_to=(pd_separation_config, "prefill_worker_lambda_pool_size"),
+        type=int,
+        default=0,
+        help="Prefill worker lambda 线程池大小，0 表示使用公式默认值",
+    )
+
+    pd_separation_group.add_argument(
+        "--prefill_slot_pool_size",
+        env_name="PREFILL_SLOT_POOL_SIZE",
+        bind_to=(pd_separation_config, "prefill_slot_pool_size"),
+        type=int,
+        default=0,
+        help="Prefill slot 线程池大小，0 表示使用公式默认值",
+    )
+
+    pd_separation_group.add_argument(
+        "--prefill_stop_stream_wait_timeout_ms",
+        env_name="PREFILL_STOP_STREAM_WAIT_TIMEOUT_MS",
+        bind_to=(pd_separation_config, "prefill_stop_stream_wait_timeout_ms"),
+        type=int,
+        default=2000,
+        help="stopStream() 中等待 Engine Loop 调用 finish_internal() 的最大时间（毫秒）",
+    )
+
+    pd_separation_group.add_argument(
         "--decode_retry_times",
         env_name="DECODE_RETRY_TIMES",
         bind_to=(pd_separation_config, "decode_retry_times"),

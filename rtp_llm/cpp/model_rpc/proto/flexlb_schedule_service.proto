@@ -1,0 +1,109 @@
+syntax = "proto3";
+
+option java_package = "org.flexlb.schedule.grpc";
+option java_outer_classname = "FlexlbScheduleProtocol";
+
+// FlexLB scheduling control plane. Engine payloads are opaque bytes so this
+// contract can evolve independently from model_rpc_service.proto. Existing
+// field numbers and the FlexlbService method path remain wire-compatible.
+enum FlexlbScheduleModePB {
+    FLEXLB_SCHEDULE_AUTO = 0;
+    FLEXLB_SCHEDULE_BATCH = 1;
+    FLEXLB_SCHEDULE_DIRECT = 2;
+    FLEXLB_SCHEDULE_QUEUE = 3;
+}
+
+enum RequestStatePB {
+    REQUEST_STATE_UNSPECIFIED = 0;
+    REQUEST_STATE_QUEUED = 1;
+    REQUEST_STATE_DISPATCHING = 2;
+    REQUEST_STATE_ACKNOWLEDGED = 3;
+    REQUEST_STATE_CANCEL_REQUESTED = 4;
+    REQUEST_STATE_CANCELLED = 5;
+    REQUEST_STATE_TIMED_OUT = 6;
+    REQUEST_STATE_FAILED = 7;
+    REQUEST_STATE_COMPLETED = 8;
+}
+
+// Lifecycle transitions owned by the scheduling master:
+// QUEUED -> DISPATCHING | CANCELLED | TIMED_OUT | FAILED
+// DISPATCHING -> ACKNOWLEDGED | CANCEL_REQUESTED | TIMED_OUT | FAILED | COMPLETED
+// ACKNOWLEDGED -> CANCEL_REQUESTED | TIMED_OUT | FAILED | COMPLETED
+// CANCEL_REQUESTED -> CANCELLED | TIMED_OUT
+// Terminal states CANCELLED/TIMED_OUT/FAILED/COMPLETED are immutable.
+
+enum CancelReasonPB {
+    CANCEL_REASON_UNSPECIFIED = 0;
+    CANCEL_REASON_CLIENT_CANCELLED = 1;
+    CANCEL_REASON_DEADLINE_EXCEEDED = 2;
+}
+
+message RequestLifecyclePB {
+    int64 request_id = 1;
+    RequestStatePB state = 2;
+    int64 batch_id = 3;
+}
+
+message FlexlbScheduleRequestPB {
+    int64 request_id = 1;
+    // Wire-compatible with the historical GenerateInputPB message field:
+    // message and bytes are both length-delimited on the wire.
+    bytes generate_input = 2;
+    repeated int64 block_cache_keys = 3;
+    int64 seq_len = 4;
+    int64 generate_timeout = 5;
+    int64 request_time_ms = 6;
+    int32 max_new_tokens = 7;
+    int32 num_beams = 8;
+    bool force_disable_sp_run = 9;
+    string model = 10;
+    string api_key = 11;
+    FlexlbScheduleModePB schedule_mode = 12;
+    int64 cache_key_block_size = 13;
+}
+
+message FlexlbServerStatusPB {
+    string role = 1;
+    string server_ip = 2;
+    int32 http_port = 3;
+    int32 grpc_port = 4;
+    reserved 5;
+}
+
+message FlexlbScheduleResponsePB {
+    bool success = 1;
+    int32 code = 2;
+    string error_message = 3;
+    repeated FlexlbServerStatusPB server_status = 4;
+    string real_master_host = 5;
+    int32 queue_length = 6;
+    bool enqueued_by_master = 7;
+    RequestLifecyclePB lifecycle = 8;
+}
+
+message FlexlbCancelRequestPB {
+    int64 request_id = 1;
+    int64 batch_id = 2;
+    CancelReasonPB reason = 3;
+}
+
+message FlexlbCancelResponsePB {
+    bool found = 1;
+    RequestLifecyclePB lifecycle = 2;
+}
+
+message GetRequestStateRequestPB {
+    int64 request_id = 1;
+    int64 batch_id = 2;
+}
+
+message GetRequestStateResponsePB {
+    bool found = 1;
+    RequestLifecyclePB lifecycle = 2;
+}
+
+service FlexlbService {
+    rpc Schedule(FlexlbScheduleRequestPB) returns (FlexlbScheduleResponsePB);
+    rpc Cancel(FlexlbCancelRequestPB) returns (FlexlbCancelResponsePB);
+    rpc GetRequestState(GetRequestStateRequestPB) returns (GetRequestStateResponsePB);
+}

@@ -1,10 +1,16 @@
+import logging
 from typing import Any, Dict, Optional
 
 import torch
-from rtp_kernel.fp8_group_gemm import (
-    get_cutlass_batched_moe_mm_data,
-)
-from rtp_kernel.w4a8_group_gemm import w4a8_group_gemm_ptpc, compute_reorder_stride
+
+try:
+    from rtp_kernel.fp8_group_gemm import get_cutlass_batched_moe_mm_data
+    from rtp_kernel.w4a8_group_gemm import compute_reorder_stride, w4a8_group_gemm_ptpc
+except ImportError as e:
+    logging.warning(f"rtp_kernel MoE kernels not available: {e}")
+    get_cutlass_batched_moe_mm_data = None
+    w4a8_group_gemm_ptpc = None
+    compute_reorder_stride = None
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -24,8 +30,8 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
 )
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     cutlass_moe_pre_reorder,
-    post_reorder_triton_kernel,
     get_cutlass_moe_mm_without_permute_info,
+    post_reorder_triton_kernel,
 )
 from rtp_llm.utils.model_weight import W
 

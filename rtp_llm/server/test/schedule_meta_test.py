@@ -122,6 +122,16 @@ class TestScheduleMetaRoleConversion(unittest.TestCase):
         schedule_meta = ScheduleMeta.model_validate(test_data)
         self.assertEqual(len(schedule_meta.server_status), 0)
 
+    def test_schedule_meta_enqueued_by_master_defaults_false(self):
+        schedule_meta = ScheduleMeta.model_validate(self.valid_schedule_meta)
+        self.assertFalse(schedule_meta.enqueued_by_master)
+
+    def test_schedule_meta_accepts_enqueued_by_master(self):
+        test_data = dict(self.valid_schedule_meta)
+        test_data["enqueued_by_master"] = True
+        schedule_meta = ScheduleMeta.model_validate(test_data)
+        self.assertTrue(schedule_meta.enqueued_by_master)
+
 
 if __name__ == "__main__":
     unittest.main()
