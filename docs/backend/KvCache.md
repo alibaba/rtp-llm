@@ -27,8 +27,13 @@ Optional overrides:
   to `0`, preventing duplicate reporters in a distributed launch.
 - `KVCM_SUBSCRIBER_COMMAND`: executable and optional arguments; defaults to
   `subscriber`.
+- `KVCM_SUBSCRIBER_REQUIRED`: set to `1`, `true`, `yes`, or `on` to make
+  Subscriber startup and runtime failures fail the RTP service. It defaults to
+  the optional mode.
 
-If the configured file is missing, the command is empty, or DP is greater than
-1 without explicit endpoints, RTP fails startup instead of silently running
-without cache-state reporting. The Subscriber is registered with RTP's process
-manager, so either child exiting causes the whole service group to shut down.
+Subscriber reporting is fail-open by default: invalid configuration, a missing
+executable, or a runtime crash disables cache-state reporting without taking
+down inference. The child remains lifecycle-managed and is stopped when RTP
+exits. Set `KVCM_SUBSCRIBER_REQUIRED=1` where reporting is mandatory; in that
+mode the same failures shut down the service group instead of serving without
+cache-state reporting.

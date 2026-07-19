@@ -15,6 +15,26 @@ _COMMAND_ENV = "KVCM_SUBSCRIBER_COMMAND"
 _ENDPOINTS_ENV = "RTP_LLM_CACHE_SUBSCRIBER_ENDPOINTS"
 _HOST_IP_PORT_ENV = "KVCM_HOST_IP_PORT"
 _WORLD_RANK_ENV = "KVCM_SUBSCRIBER_WORLD_RANK"
+_REQUIRED_ENV = "KVCM_SUBSCRIBER_REQUIRED"
+
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"", "0", "false", "no", "off"}
+
+
+def is_kvcm_subscriber_required() -> bool:
+    """Return whether Subscriber failures should fail the inference service."""
+
+    value = os.environ.get(_REQUIRED_ENV, "").strip().lower()
+    if value in _TRUE_VALUES:
+        return True
+    if value in _FALSE_VALUES:
+        return False
+    logging.warning(
+        "invalid %s=%r; defaulting to optional Subscriber mode",
+        _REQUIRED_ENV,
+        value,
+    )
+    return False
 
 
 def _local_ip_address() -> str:
@@ -140,19 +160,33 @@ def _exec_kvcm_subscriber(command: tuple[str, ...]) -> None:
 
 def start_kvcm_subscriber(
     py_env_configs: PyEnvConfigs,
+    *,
+    required: bool | None = None,
 ) -> multiprocessing.Process | None:
-    command = build_kvcm_subscriber_command(py_env_configs)
-    if command is None:
-        return None
+    if required is None:
+        required = is_kvcm_subscriber_required()
 
-    logging.info(
-        "starting external KVCM Subscriber: engine_type=rtp_llm endpoint=%s",
-        command[command.index("--rtp-endpoints") + 1],
-    )
-    process = multiprocessing.Process(
-        target=_exec_kvcm_subscriber,
-        args=(command,),
-        name="kvcm_subscriber",
-    )
-    process.start()
-    return process
+    try:
+        command = build_kvcm_subscriber_command(py_env_configs)
+        if command is None:
+            return None
+
+        logging.info(
+            "starting external KVCM Subscriber: engine_type=rtp_llm endpoint=%s",
+            command[command.index("--rtp-endpoints") + 1],
+        )
+        process = multiprocessing.Process(
+            target=_exec_kvcm_subscriber,
+            args=(command,),
+            name="kvcm_subscriber",
+        )
+        process.start()
+        return process
+    except Exception:
+        if required:
+            raise
+        logging.exception(
+            "optional KVCM Subscriber failed to start; inference will continue "
+            "without cache-state reporting"
+        )
+        return None

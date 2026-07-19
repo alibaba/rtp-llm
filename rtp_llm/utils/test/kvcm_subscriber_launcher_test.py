@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from rtp_llm.utils.kvcm_subscriber_launcher import (
     build_kvcm_subscriber_command,
+    is_kvcm_subscriber_required,
     start_kvcm_subscriber,
 )
 
@@ -53,6 +54,32 @@ def _configs(
 
 
 class KvcmSubscriberLauncherTest(unittest.TestCase):
+    def test_required_mode_parses_common_boolean_values(self) -> None:
+        for value in ("1", "true", "TRUE", "yes", "on"):
+            with self.subTest(value=value), patch.dict(
+                os.environ,
+                {"KVCM_SUBSCRIBER_REQUIRED": value},
+                clear=True,
+            ):
+                self.assertTrue(is_kvcm_subscriber_required())
+
+        for value in ("", "0", "false", "FALSE", "no", "off"):
+            with self.subTest(value=value), patch.dict(
+                os.environ,
+                {"KVCM_SUBSCRIBER_REQUIRED": value},
+                clear=True,
+            ):
+                self.assertFalse(is_kvcm_subscriber_required())
+
+    def test_invalid_required_value_defaults_to_optional(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"KVCM_SUBSCRIBER_REQUIRED": "invalid"},
+            clear=True,
+        ), patch("logging.warning") as warning:
+            self.assertFalse(is_kvcm_subscriber_required())
+            warning.assert_called_once()
+
     def test_absent_config_disables_subscriber(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(build_kvcm_subscriber_command(_configs()))
@@ -181,6 +208,52 @@ class KvcmSubscriberLauncherTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(FileNotFoundError, "does not exist"):
                 build_kvcm_subscriber_command(_configs())
+
+    def test_optional_start_failure_does_not_escape(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"KVCM_SUBSCRIBER_CONFIG": "/missing/subscriber.yaml"},
+            clear=True,
+        ), patch("logging.exception") as exception_log:
+            self.assertIsNone(start_kvcm_subscriber(_configs()))
+            exception_log.assert_called_once()
+
+    def test_required_start_failure_escapes(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"KVCM_SUBSCRIBER_CONFIG": "/missing/subscriber.yaml"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(FileNotFoundError, "does not exist"):
+                start_kvcm_subscriber(_configs(), required=True)
+
+    def test_optional_process_start_failure_does_not_escape(self) -> None:
+        with tempfile.NamedTemporaryFile() as config:
+            with patch.dict(
+                os.environ,
+                {"KVCM_SUBSCRIBER_CONFIG": config.name},
+                clear=True,
+            ), patch(
+                "rtp_llm.utils.kvcm_subscriber_launcher.multiprocessing.Process"
+            ) as process_cls, patch("logging.exception") as exception_log:
+                process_cls.return_value.start.side_effect = OSError("spawn failed")
+
+                self.assertIsNone(start_kvcm_subscriber(_configs()))
+                exception_log.assert_called_once()
+
+    def test_required_process_start_failure_escapes(self) -> None:
+        with tempfile.NamedTemporaryFile() as config:
+            with patch.dict(
+                os.environ,
+                {"KVCM_SUBSCRIBER_CONFIG": config.name},
+                clear=True,
+            ), patch(
+                "rtp_llm.utils.kvcm_subscriber_launcher.multiprocessing.Process"
+            ) as process_cls:
+                process_cls.return_value.start.side_effect = OSError("spawn failed")
+
+                with self.assertRaisesRegex(OSError, "spawn failed"):
+                    start_kvcm_subscriber(_configs(), required=True)
 
     def test_start_registers_exec_child_with_expected_command(self) -> None:
         with tempfile.NamedTemporaryFile() as config:

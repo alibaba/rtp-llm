@@ -12,11 +12,13 @@ class ProcessManager:
 
     def __init__(self, shutdown_timeout: int = 50, monitor_interval: int = 1):
         self.processes: List[Process] = []
+        self.auxiliary_processes: List[Process] = []
         self.shutdown_requested = False
         self.terminated = False
         self.first_dead_time = 0
         self.shutdown_timeout = shutdown_timeout
         self.monitor_interval = monitor_interval
+        self._reported_auxiliary_exits: set[int] = set()
 
         # Health check related attributes
         self.health_check_processes: List[Process] = []
@@ -53,13 +55,21 @@ class ProcessManager:
         if processes:
             self.processes.extend(processes)
 
+    def add_auxiliary_process(self, process: Process):
+        """Add a lifecycle-managed process that is not required for availability."""
+        if process:
+            self.auxiliary_processes.append(process)
+
+    def _all_managed_processes(self) -> List[Process]:
+        return [*self.processes, *self.auxiliary_processes]
+
     def _terminate_processes(self):
         """Terminate all managed processes"""
         if self.terminated:
             return
 
         logging.info("Shutdown requested, terminating processes...")
-        for proc in self.processes:
+        for proc in self._all_managed_processes():
             if proc.is_alive():
                 logging.info(f"Sending SIGTERM to process {proc.pid}")
                 proc.terminate()
@@ -73,7 +83,7 @@ class ProcessManager:
         logging.warning(
             f"Graceful shutdown timeout ({self.shutdown_timeout}s), force killing..."
         )
-        for proc in self.processes:
+        for proc in self._all_managed_processes():
             if proc.is_alive():
                 logging.warning(f"Force killing process {proc.pid}")
                 try:
@@ -84,18 +94,34 @@ class ProcessManager:
 
     def _is_any_process_alive(self) -> bool:
         """Check if any process is still alive"""
-        return any(proc.is_alive() for proc in self.processes)
+        return any(proc.is_alive() for proc in self._all_managed_processes())
 
     def _is_all_processes_alive(self) -> bool:
         """Check if all processes are still alive"""
         return all(proc.is_alive() for proc in self.processes)
+
+    def _report_exited_auxiliary_processes(self):
+        for proc in self.auxiliary_processes:
+            process_key = id(proc)
+            if proc.exitcode is None or process_key in self._reported_auxiliary_exits:
+                continue
+            self._reported_auxiliary_exits.add(process_key)
+            logging.warning(
+                "Auxiliary process %s pid[%s] exited with code %s; "
+                "required processes will continue",
+                proc.name,
+                proc.pid,
+                proc.exitcode,
+            )
 
     def is_available(self) -> bool:
         """
         Check if ProcessManager is available.
         Returns False if:
         - Shutdown has been requested
-        - Any managed process has died
+        - Any required process has died
+
+        Auxiliary process failures do not change service availability.
         """
         if self.shutdown_requested:
             return False
@@ -112,7 +138,7 @@ class ProcessManager:
             else:
                 deadline = time.time() + self.shutdown_timeout
 
-        for proc in self.processes:
+        for proc in self._all_managed_processes():
             try:
                 timeout = None
                 if deadline is not None:
@@ -125,6 +151,8 @@ class ProcessManager:
     def _monitor_processes_health(self):
         """Monitor process health and handle failures"""
         while self._is_any_process_alive():
+            self._report_exited_auxiliary_processes()
+
             # Check shutdown signal
             if self.shutdown_requested and not self.terminated:
                 self._terminate_processes()
@@ -149,14 +177,16 @@ class ProcessManager:
                 break
 
             time.sleep(self.monitor_interval)
+        self._report_exited_auxiliary_processes()
 
     def monitor_and_release_processes(self):
         """Monitor all processes until completion or failure"""
-        if not self.processes:
+        managed_processes = self._all_managed_processes()
+        if not managed_processes:
             logging.info("No processes to monitor")
             return
 
-        logging.info(f"Monitoring {len(self.processes)} processes")
+        logging.info(f"Monitoring {len(managed_processes)} processes")
         self._monitor_processes_health()
         self._join_all_processes()
         logging.info("Process monitoring completed")
