@@ -25,7 +25,7 @@ from .quant_layouts import (
 
 logger = logging.getLogger(__name__)
 
-_CUDA_GRAPH_CLONE_FP8_BUF_CACHE: dict[tuple, object] = {}
+_MIN_DEEPGEMM_MOE_TOKENS_PER_RANK = 128
 
 
 def _ceil_div(x: int, y: int) -> int:
@@ -88,45 +88,6 @@ def _reshape_fp8_scale_for_recipe(
     )
 
 
-def _get_or_create_cuda_graph_clone_buf_fp8(src_buf, group, cfg: GLM5MegaMoeCfg):
-    if src_buf is None or group is None:
-        return src_buf
-    key = (
-        id(src_buf),
-        id(group),
-        cfg.n_routed_experts,
-        cfg.max_tokens_per_rank,
-        cfg.n_activated_experts,
-        cfg.dim,
-        cfg.moe_inter_dim,
-    )
-    cached = _CUDA_GRAPH_CLONE_FP8_BUF_CACHE.get(key)
-    if cached is not None:
-        return cached
-
-    import deep_gemm
-
-    cached = deep_gemm.get_symm_buffer_for_mega_moe_fp8(
-        group=group,
-        num_experts=cfg.n_routed_experts,
-        num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
-        num_topk=cfg.n_activated_experts,
-        hidden=cfg.dim,
-        intermediate_hidden=cfg.moe_inter_dim,
-        use_fp8_dispatch=True,
-        activation=_cfg_activation_name(cfg),
-    )
-    _CUDA_GRAPH_CLONE_FP8_BUF_CACHE[key] = cached
-    logging.info(
-        "[MegaMoE FP8] allocated CUDA graph clone symm buffer: layer=%d "
-        "max_tokens_per_rank=%d hidden=%d",
-        cfg.layer_id,
-        cfg.max_tokens_per_rank,
-        cfg.dim,
-    )
-    return cached
-
-
 class GLM5MegaMoEFP8(GLM5MegaMoE):
     """MegaMoE wrapper for DeepGEMM ``fp8_fp8_mega_moe``.
 
@@ -148,9 +109,10 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
         clone._mega_l1_sf = self._mega_l1_sf
         clone._mega_l2_w = self._mega_l2_w
         clone._mega_l2_sf = self._mega_l2_sf
-        clone._mega_buf = _get_or_create_cuda_graph_clone_buf_fp8(
-            self._mega_buf, self._mega_group, self.cfg
-        )
+        # DeepGEMM FP8 MegaMoE symmetric buffers are process/group scoped.
+        # Reusing the initialized buffer avoids duplicate graph-clone allocation
+        # and keeps the captured buffer capacity identical to eager.
+        clone._mega_buf = self._mega_buf
         clone._mega_y = (
             torch.empty_like(self._mega_y) if self._mega_y is not None else None
         )
@@ -299,7 +261,9 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
         self._mega_buf = get_or_create_mega_buf_fp8(
             group=group,
             num_experts=cfg.n_routed_experts,
-            num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
+            num_max_tokens_per_rank=max(
+                cfg.max_tokens_per_rank, _MIN_DEEPGEMM_MOE_TOKENS_PER_RANK
+            ),
             num_topk=cfg.n_activated_experts,
             hidden=cfg.dim,
             intermediate_hidden=cfg.moe_inter_dim,
@@ -370,7 +334,6 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
             f"mega_moe_fp8.layer{self.cfg.layer_id}.before_deepgemm",
             x.device,
         )
-
         y = self._mega_y[:T]
         kwargs = {
             "recipe": (1, 1, FP4_BLOCK),

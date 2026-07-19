@@ -318,14 +318,24 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
                                 "input_hiddens numel mismatch: %zu >= %zu",
                                 inputs.input_hiddens.numel(),
                                 py_model_inputs_.input_hiddens.numel());
+        const auto input_hiddens_dtype = std::string(inputs.input_hiddens.dtype().name());
+        const auto graph_hiddens_dtype = std::string(py_model_inputs_.input_hiddens.dtype().name());
         RTP_LLM_CHECK_WITH_INFO(inputs.input_hiddens.dtype() == py_model_inputs_.input_hiddens.dtype(),
                                 "input_hiddens dtype mismatch: %s != %s",
-                                inputs.input_hiddens.dtype().name(),
-                                py_model_inputs_.input_hiddens.dtype().name());
+                                input_hiddens_dtype.c_str(),
+                                graph_hiddens_dtype.c_str());
 
         optimizedCopyAsync(inputs.input_hiddens,
                            py_model_inputs_.input_hiddens,
                            inputs.input_hiddens.numel() * inputs.input_hiddens.element_size());
+        if (!is_prefill_cuda_graph_mode_) {
+            const int64_t copied_rows = inputs.input_hiddens.dim() > 0 ? inputs.input_hiddens.size(0) : 0;
+            const int64_t captured_rows =
+                py_model_inputs_.input_hiddens.dim() > 0 ? py_model_inputs_.input_hiddens.size(0) : 0;
+            if (copied_rows > 0 && copied_rows < captured_rows) {
+                py_model_inputs_.input_hiddens.slice(0, copied_rows, captured_rows).zero_();
+            }
+        }
     }
 
     if (is_prefill_cuda_graph_mode_) {
@@ -373,6 +383,14 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                             state.current_batch_size,
                             captured_batch_capacity,
                             graph_idx);
+
+    // Tensor storage is fixed by capture, but these scalar fields describe the
+    // current replay. Keep them coherent before the attention implementation
+    // prepares its CUDA Graph metadata for a padded capture bucket.
+    py_model_inputs_.attention_inputs.context_total_kv_length = inputs.attention_inputs.context_total_kv_length;
+    py_model_inputs_.attention_inputs.total_tokens            = inputs.attention_inputs.total_tokens;
+    py_model_inputs_.attention_inputs.is_prefill              = inputs.attention_inputs.is_prefill;
+    py_model_inputs_.attention_inputs.is_target_verify        = inputs.attention_inputs.is_target_verify;
 
     // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
     // Worst case here is ~8 contiguous + (1 + group_count) strided copies,
@@ -765,6 +783,19 @@ bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, 
     if (state.current_seq_len <= 0) {
         RTP_LLM_CHECK_WITH_INFO(false, "prefill cuda graph: cannot infer total tokens without CPU sync");
         return false;
+    }
+    const bool draft_prefill_graph_mode = num_tokens_per_bs_ != max_seq_len_;
+    if (draft_prefill_graph_mode) {
+        const int expected_tokens = state.current_batch_size * num_tokens_per_bs_;
+        if (state.current_seq_len != expected_tokens) {
+            RTP_LLM_LOG_DEBUG("draft-prefill cuda graph requires full token layout: tokens=%d expected=%d "
+                              "(batch=%d, num_tokens_per_bs=%d); run eager forward",
+                              state.current_seq_len,
+                              expected_tokens,
+                              state.current_batch_size,
+                              num_tokens_per_bs_);
+            return false;
+        }
     }
     if (capture_range_.empty()) {
         RTP_LLM_CHECK_WITH_INFO(false, "prefill cuda graph: capture_range_ is empty, cannot run");
@@ -1192,6 +1223,22 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 outputs                                   = py_outputs_obj.cast<PyModelOutputs>();
             } catch (const py::error_already_set& e) {
                 RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
+                try {
+                    graph.capture_end();
+                } catch (...) {
+                    RTP_LLM_LOG_WARNING("capture_end() also failed for %s %d during cleanup", key_type, key);
+                }
+                throw;
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
+                try {
+                    graph.capture_end();
+                } catch (...) {
+                    RTP_LLM_LOG_WARNING("capture_end() also failed for %s %d during cleanup", key_type, key);
+                }
+                throw;
+            } catch (...) {
+                RTP_LLM_LOG_ERROR("Capture forward failed for %s %d with unknown exception", key_type, key);
                 try {
                     graph.capture_end();
                 } catch (...) {

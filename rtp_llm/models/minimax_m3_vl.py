@@ -50,24 +50,9 @@ class MiniMaxM3_VL(MiniMaxM3):
         return super()._create_config(ckpt_path)
 
     def _create_python_model(self):
-        """Wire MiniMax-M3 VL into the Python forward path.
+        from rtp_llm.models_py.model_desc.minimax_m3 import MiniMaxM3MultimodalModel
 
-        Reuses MiniMaxM3's text-side wiring (MSA sparse attention, FP8 fusion,
-        Gemma-norm-fused QK, SwiGLU-OAI) by going through MultimodalGenericModel,
-        which is a strict superset of GenericMoeModel (the desc that MiniMaxM3
-        inherits via DeepSeekV2). All M3-specific behaviour is driven by
-        ``model_config`` fields (``msa_sparse_config``, ``swiglu_alpha/limit``,
-        ``qk_norm``, ``quant_config``) and the per-layer weight dict, so no
-        further override is required here. The only delta over the text-only
-        path is ``MultimodalEmbeddingInjector``, which splices ViT features
-        into the embedding stream at the VISION_START/END placeholder spans
-        before the decoder stack runs.
-        """
-        from rtp_llm.models_py.model_desc.multimodal_generic import (
-            MultimodalGenericModel,
-        )
-
-        self.py_model = MultimodalGenericModel(
+        self.py_model = MiniMaxM3MultimodalModel(
             self.model_config,
             self.parallelism_config,
             self.weight,
