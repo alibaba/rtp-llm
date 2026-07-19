@@ -15,20 +15,28 @@ def init_fmha_group_args(parser, fmha_config):
         help="控制是否启用Fused Multi-Head Attention (FMHA) 功能。可选值: True (启用), False (禁用)。",
     )
     fmha_group.add_argument(
-        "--enable_trt_fmha",
-        env_name="ENABLE_TRT_FMHA",
-        bind_to=(fmha_config, "enable_trt_fmha"),
+        "--enable_flashinfer_trtllm_gen",
+        env_name="ENABLE_FLASHINFER_TRTLLM_GEN",
+        bind_to=(fmha_config, "enable_flashinfer_trtllm_gen"),
         type=str2bool,
         default=True,
-        help="控制是否启用经TensorRT(V2版本)优化的FMHA功能。可选值: True (启用), False (禁用)。",
+        help="控制是否启用FlashInfer TRT-LLM Gen Attention实现。支持SM100。可选值: True (启用), False (禁用)。",
     )
     fmha_group.add_argument(
-        "--enable_paged_trt_fmha",
-        env_name="ENABLE_PAGED_TRT_FMHA",
-        bind_to=(fmha_config, "enable_paged_trt_fmha"),
+        "--enable_flashinfer_trt_fmha_v2",
+        env_name="ENABLE_FLASHINFER_TRT_FMHA_V2",
+        bind_to=(fmha_config, "enable_flashinfer_trt_fmha_v2"),
         type=str2bool,
         default=True,
-        help="控制是否启用Paged TensorRT FMHA功能。可选值: True (启用), False (禁用)。",
+        help="控制是否启用FlashInfer TRT-LLM FMHA v2连续Prefill。支持SM90和SM12x。可选值: True (启用), False (禁用)。",
+    )
+    fmha_group.add_argument(
+        "--enable_paged_flashinfer_trt_fmha_v2",
+        env_name="ENABLE_PAGED_FLASHINFER_TRT_FMHA_V2",
+        bind_to=(fmha_config, "enable_paged_flashinfer_trt_fmha_v2"),
+        type=str2bool,
+        default=True,
+        help="控制是否启用FlashInfer TRT-LLM FMHA v2 Paged Prefill。支持SM90和SM12x。可选值: True (启用), False (禁用)。",
     )
     fmha_group.add_argument(
         "--enable_open_source_fmha",
@@ -47,20 +55,12 @@ def init_fmha_group_args(parser, fmha_config):
         help="控制是否启用Paged开源版本的FMHA实现。可选值: True (启用), False (禁用)。",
     )
     fmha_group.add_argument(
-        "--enable_trtv1_fmha",
-        env_name="ENABLE_TRTV1_FMHA",
-        bind_to=(fmha_config, "enable_trtv1_fmha"),
-        type=str2bool,
-        default=True,
-        help="控制是否启用TRTv1风格的FMHA功能。可选值: True (启用), False (禁用)。",
-    )
-    fmha_group.add_argument(
-        "--disable_flash_infer",
-        env_name="DISABLE_FLASH_INFER",
-        bind_to=(fmha_config, "disable_flash_infer"),
+        "--disable_flashinfer_native",
+        env_name="DISABLE_FLASHINFER_NATIVE",
+        bind_to=(fmha_config, "disable_flashinfer_native"),
         type=str2bool,
         default=False,
-        help="控制是否禁用FlashInfer Attention机制。设置为 True 启用, False 禁用。",
+        help="控制是否禁用FlashInfer Native Attention实现。True表示禁用，False表示启用。",
     )
     fmha_group.add_argument(
         "--enable_xqa",

@@ -111,14 +111,14 @@ class XQAImpl(FMHAImplBase):
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        common.update_trt_params(
+        common.update_attention_params(
             self.fmha_impl,
             self.rope_kvcache_impl,
             self.fmha_params,
             self.rope_params,
             attn_inputs,
         )
-        # update_trt_params only copies kv_cache_offset. The TRT XQA kernel also
+        # update_attention_params only copies kv_cache_offset. XQA also
         # reads sequence_lengths via the captured data_ptr(), so we must update
         # the data in-place at the address recorded during CUDA graph capture.
         new_seq_lens = attn_inputs.sequence_lengths

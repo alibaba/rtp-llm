@@ -262,22 +262,33 @@ class BaseAttentionTest(unittest.TestCase):
         Note: For HND layout, kv_cache_base should be a 5D tensor:
         [total_blocks, 2, num_kv_heads, seq_size_per_block, head_dim]
         where dimension 1 index 0 is K cache and index 1 is V cache.
+        FP8 caches also include the scale buffer required by fused cache writes.
         """
         kv_cache = LayerKVCache()
 
         # Create combined KV cache with shape [total_blocks, 2, num_kv_heads, seq_size_per_block, head_dim]
         # where dim=1, index=0 is K and index=1 is V
+        is_fp8 = dtype == torch.float8_e4m3fn
         kv_cache_combined = torch.randn(
             total_blocks,
             2,  # K and V
             num_kv_heads,
             seq_size_per_block,
             head_dim,
-            dtype=dtype,
+            dtype=torch.bfloat16 if is_fp8 else dtype,
             device=self.device,
         )
+        if is_fp8:
+            kv_cache_combined = kv_cache_combined.to(dtype)
 
         kv_cache.kv_cache_base = kv_cache_combined
+        if is_fp8:
+            kv_cache.kv_scale_base = torch.ones(
+                total_blocks,
+                2 * num_kv_heads * seq_size_per_block,
+                dtype=torch.float32,
+                device=self.device,
+            )
 
         # Extract separate K and V for reference computation
         k_cache = kv_cache_combined[
