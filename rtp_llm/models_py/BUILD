@@ -164,6 +164,7 @@ py_library(
         "quant_methods/*.py",
     ]),
     deps = [
+        ":kernels",
         ":modules",
         "//rtp_llm:_ft_pickler",
         "//rtp_llm:config",
