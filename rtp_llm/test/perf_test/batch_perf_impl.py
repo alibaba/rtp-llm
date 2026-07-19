@@ -236,6 +236,17 @@ class BatchPerfImpl(object):
             f"tolerance={tolerance:.2f}, trace={self.profile_trace_name}",
         )
 
+    def _validate_request_success(self, metric: TestResultMetrics) -> None:
+        if os.environ.get("PERF_REQUIRE_ALL_SUCCESS", "0") != "1":
+            return
+        check_with_info(
+            metric.total_requests > 0
+            and metric.success_requests == metric.total_requests,
+            "perf requests failed: "
+            f"{metric.success_requests}/{metric.total_requests} succeeded, "
+            f"trace={self.profile_trace_name}",
+        )
+
     def _prearm_profile(self) -> None:
         # Pre-arm via /start_profile with enable_all_rank=true so that all
         # TP/DP ranks profile the upcoming request. Controlled by env
@@ -286,6 +297,7 @@ class BatchPerfImpl(object):
                 input_queries=self._next_input_queries()
             )
             metric = analyze_results(responses)
+            self._validate_request_success(metric)
             self._validate_reuse_metric(metric)
             logging.info(
                 "[PERF_MEASURE_RUN] %d/%d trace=%s success=%d/%d "
@@ -304,6 +316,7 @@ class BatchPerfImpl(object):
             )
             all_measure_responses.extend(responses)
         results = analyze_results(all_measure_responses)
+        self._validate_request_success(results)
         self._validate_reuse_metric(results)
 
         if self.profile and self.profile_runs > 0:

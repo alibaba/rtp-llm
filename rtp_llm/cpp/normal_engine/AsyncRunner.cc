@@ -79,11 +79,8 @@ void AsyncRunner::workerLoop() {
 
         std::exception_ptr exception;
         auto               run_task = [&]() {
-            // REBASE CONFLICT CONTEXT(704f3c147): new base disables record
-            // function callbacks in this worker; source branch added the
-            // explicit async thread profile scope. Keep both around the worker
-            // task body.
-            RTP_LLM_PROFILE_SCOPE("async_runner.thread");
+            // Kineto callbacks are thread-affine; async worker tasks must not
+            // inherit or create record-function scopes.
             at::DisableRecordFunctionGuard record_function_guard;
             cuda_graph::GraphStreamGuard   stream_guard(cuda_graph::toGraphStream(stream_));
             task.fn();

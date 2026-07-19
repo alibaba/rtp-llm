@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalSamplerInputGatherer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 
 namespace rtp_llm {
@@ -212,8 +213,11 @@ void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&        
             size_t    processor_idx = 0;
             for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
                 if (processor->isStateful()) {
-                    ++processor_idx;
-                    continue;
+                    auto spec_processor = std::dynamic_pointer_cast<SpecLogitsProcessor>(processor);
+                    if (!spec_processor || !spec_processor->isSpecVerifyEligible()) {
+                        ++processor_idx;
+                        continue;
+                    }
                 }
                 for (int i = 0; i < score_len; ++i) {
                     state_ptr->insert(processor, idx + i, idx + i + 1, stream_id, processor_idx);

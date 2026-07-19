@@ -1670,6 +1670,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("pre_seq_len", &ModelConfig::pre_seq_len)
         .def_readwrite("use_kvcache", &ModelConfig::use_kvcache)
         .def_readwrite("logit_scale", &ModelConfig::logit_scale)
+        .def_readwrite("use_opaque_kv_cache_store", &ModelConfig::use_opaque_kv_cache_store)
         .def_readwrite("qk_norm", &ModelConfig::qk_norm)
         .def_readwrite("expert_num", &ModelConfig::expert_num)
         .def_readwrite("moe_n_group", &ModelConfig::moe_n_group)
