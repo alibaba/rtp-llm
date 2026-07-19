@@ -3,9 +3,26 @@ import os
 import weakref
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import torch
+
+
+def _normalize_module_patterns(value: Any, label: str) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple, set)):
+        raise TypeError(f"{label} must be a sequence of strings")
+    result: List[str] = []
+    for pattern in value:
+        if not isinstance(pattern, str):
+            raise TypeError(f"{label} entries must be strings")
+        pattern = pattern.strip()
+        if pattern and pattern not in result:
+            result.append(pattern)
+    return result
 
 
 class QuantizationType(str, Enum):
@@ -29,7 +46,16 @@ class QuantizationConfig(ABC):
         self._bits = bits
         self._group_size = group_size
         self._is_quanted = is_quanted
-        self.exclude_modules: set = set()
+        self.ignored_layers: List[str] = _normalize_module_patterns(
+            kwargs.get("ignored_layers", kwargs.get("ignore_patterns", [])),
+            "ignored_layers",
+        )
+        self.exclude_modules: Set[str] = set(
+            _normalize_module_patterns(
+                kwargs.get("exclude_modules", kwargs.get("exclude", [])),
+                "exclude_modules",
+            )
+        )
 
     @property
     def bits(self):
@@ -95,6 +121,10 @@ class QuantizationConfig(ABC):
     def group_size(self) -> int:
         return self._group_size
 
+    def get_runtime_method_key(self) -> str:
+        """Return the newloader quant-method key, or empty when unsupported."""
+        return ""
+
     @classmethod
     def load_from_ckpt(cls, ckpt_path: str) -> Optional["QuantizationConfig"]:
         """
@@ -157,6 +187,8 @@ class QuantizationConfig(ABC):
 
         if quant_config is None:
             return None
+        ignored_layers = quant_config.get("ignore", [])
+        exclude_modules = quant_config.get("exclude", [])
         group_size = quant_config["group_size"] if "group_size" in quant_config else 0
         bits = quant_config["bits"] if "bits" in quant_config else 0
         if quant_method == "fp8":
@@ -194,6 +226,8 @@ class QuantizationConfig(ABC):
                         "dynamic": activation_config["dynamic"],
                         "act_scale_suffix": ".input_scale",
                         "weight_scale_suffix": ".weight_scale",
+                        "ignored_layers": ignored_layers,
+                        "exclude_modules": exclude_modules,
                     }
                 )
             elif (
@@ -271,10 +305,19 @@ class QuantizationConfig(ABC):
                 "method": quant_method,
                 "group_size": group_size,
                 "is_quanted": True,
+                "ignored_layers": ignored_layers,
+                "exclude_modules": exclude_modules,
             }
         )
-        if quant_config and "exclude" in quant_config:
-            result.exclude_modules = set(quant_config["exclude"])
+        # Some legacy config subclasses accept but do not forward **kwargs.
+        # Preserve their established post-parse exclusion contract while
+        # keeping string/list normalization identical for every config type.
+        result.ignored_layers = _normalize_module_patterns(
+            ignored_layers, "ignored_layers"
+        )
+        result.exclude_modules = set(
+            _normalize_module_patterns(exclude_modules, "exclude_modules")
+        )
         return result
 
 
@@ -317,7 +360,7 @@ class Fp8PerTensorQuantConfig(QuantizationConfig):
         assert (
             bits == 8 and group_size == 0
         ), f"invalid params {bits} != 8 or {group_size} != 0"
-        super().__init__(bits=8, group_size=0, is_quanted=is_quanted)
+        super().__init__(bits=8, group_size=0, is_quanted=is_quanted, **kwargs)
 
     @classmethod
     def get_method(cls) -> str:
@@ -332,6 +375,9 @@ class Fp8PerTensorQuantConfig(QuantizationConfig):
 
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float8_e4m3fn]
+
+    def get_runtime_method_key(self) -> str:
+        return "fp8" if self.is_quanted() else "fp8_online"
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -352,7 +398,7 @@ class Fp8DynamicPerTensorQuantConfig(QuantizationConfig):
         assert (
             bits == 8 and group_size == 0
         ), f"invalid params {bits} != 8 or {group_size} != 0"
-        super().__init__(bits=8, group_size=0, is_quanted=is_quanted)
+        super().__init__(bits=8, group_size=0, is_quanted=is_quanted, **kwargs)
 
     @classmethod
     def get_method(cls) -> str:
@@ -367,6 +413,9 @@ class Fp8DynamicPerTensorQuantConfig(QuantizationConfig):
 
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float8_e4m3fn, torch.float16, torch.bfloat16]
+
+    def get_runtime_method_key(self) -> str:
+        return "fp8" if self.is_quanted() else "fp8_online"
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -388,7 +437,9 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
         is_quanted: bool = False,
         **kwargs: Any,
     ):
-        super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+        super().__init__(
+            bits=bits, group_size=group_size, is_quanted=is_quanted, **kwargs
+        )
 
     @classmethod
     def get_method(cls) -> str:
@@ -404,14 +455,25 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
 
+    def get_runtime_method_key(self) -> str:
+        return "fp8_block" if self.is_quanted() else "fp8_block_online"
+
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8BlockWiseQuantConfig(**config)
 
 
 class CompressedTensorsQuantConfig(QuantizationConfig):
-    def __init__(self, bits: int = 0, is_quanted: bool = False):
-        super().__init__(bits=bits, group_size=0, is_quanted=is_quanted)
+    def __init__(
+        self,
+        bits: int = 0,
+        group_size: int = 0,
+        is_quanted: bool = False,
+        **kwargs: Any,
+    ):
+        super().__init__(
+            bits=bits, group_size=group_size, is_quanted=is_quanted, **kwargs
+        )
 
     @classmethod
     def get_method(cls) -> str:
@@ -431,7 +493,7 @@ class CompressedTensorsQuantConfig(QuantizationConfig):
 
 class Fp8PerTensorCompressedQuantConfig(CompressedTensorsQuantConfig):
     def __init__(self, bits: int = 8, is_quanted: bool = False, **kwargs: Any):
-        super().__init__(bits=bits, is_quanted=is_quanted)
+        super().__init__(bits=bits, is_quanted=is_quanted, **kwargs)
         self._dynamic = kwargs.get("dynamic", False)
         self._weight_s_suffix = kwargs.get("weight_scale_suffix", None)
         self._act_s_suffix = kwargs.get("act_scale_suffix", None)
@@ -456,6 +518,9 @@ class Fp8PerTensorCompressedQuantConfig(CompressedTensorsQuantConfig):
     def is_dynamic(self) -> bool:
         return self._dynamic
 
+    def get_runtime_method_key(self) -> str:
+        return "fp8" if self.is_quanted() else "fp8_online"
+
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerTensorCompressedQuantConfig(**config)
@@ -463,7 +528,7 @@ class Fp8PerTensorCompressedQuantConfig(CompressedTensorsQuantConfig):
 
 class Fp8PerChannelCompressedQuantConfig(CompressedTensorsQuantConfig):
     def __init__(self, bits: int = 8, is_quanted: bool = False, **kwargs: Any):
-        super().__init__(bits=bits, is_quanted=is_quanted)
+        super().__init__(bits=bits, is_quanted=is_quanted, **kwargs)
 
     @classmethod
     def get_method(cls) -> str:
@@ -482,6 +547,9 @@ class Fp8PerChannelCompressedQuantConfig(CompressedTensorsQuantConfig):
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
 
+    def get_runtime_method_key(self) -> str:
+        return "fp8_per_channel" if self.is_quanted() else "fp8_per_channel_online"
+
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerChannelCompressedQuantConfig(**config)
@@ -491,7 +559,9 @@ class QuarkQuantConfig(QuantizationConfig):
     def __init__(
         self, bits: int = 0, group_size: int = 0, is_quanted: bool = False, **kwargs: Any
     ):
-        super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+        super().__init__(
+            bits=bits, group_size=group_size, is_quanted=is_quanted, **kwargs
+        )
 
     @classmethod
     def get_method(cls) -> str:
@@ -511,7 +581,7 @@ class QuarkQuantConfig(QuantizationConfig):
 
 class Fp8PerChannelQuarkQuantConfig(QuarkQuantConfig):
     def __init__(self, bits: int = 8, is_quanted: bool = False, **kwargs: Any):
-        super().__init__(bits=bits, is_quanted=is_quanted)
+        super().__init__(bits=bits, is_quanted=is_quanted, **kwargs)
 
     @classmethod
     def get_method(cls) -> str:
@@ -529,6 +599,9 @@ class Fp8PerChannelQuarkQuantConfig(QuarkQuantConfig):
 
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
+
+    def get_runtime_method_key(self) -> str:
+        return "fp8_per_channel" if self.is_quanted() else "fp8_per_channel_online"
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
