@@ -49,7 +49,8 @@ def _setup_jit_cache(remote_jit_dir: str, local_rank: int, jit_cache_ready):
     from rtp_llm.utils import jit_cache_manager as jit
 
     # Local JIT management always runs (redirects every rank's JIT env at the
-    # shared dir); REMOTE_JIT_DIR only adds restore/sync on top.
+    # shared dir); REMOTE_JIT_DIR only adds restore/sync. Setup is fail-open, so
+    # a broken cache tree cannot block rank startup.
     components, compatible = jit.setup_jit_cache_env()
     if not remote_jit_dir:
         return None

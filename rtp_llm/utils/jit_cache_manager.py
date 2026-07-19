@@ -226,14 +226,17 @@ def _resolve_components(root: Path | str | None = None) -> tuple[Component, ...]
 
 
 def clear_stale_jit_locks() -> None:
-    # Builders (deep_gemm/torch/ninja) leave *_lock files a SIGKILL can't release;
-    # reap only ones idle past the cutoff so a live builder's lock is never deleted.
+    # Reap only builder lock files idle past the cutoff, so a live builder's
+    # lock is never deleted. The walk itself is guarded to keep startup fail-open.
     cutoff = time.time() - STALE_LOCK_TIMEOUT_S
-    for lock in Path(LOCAL_JIT_DIR).rglob("*"):
-        if lock.name.endswith(("_lock", ".lock")):
-            with suppress(OSError):
-                if lock.is_file() and lock.stat().st_mtime < cutoff:
-                    lock.unlink()
+    try:
+        for lock in Path(LOCAL_JIT_DIR).rglob("*"):
+            if lock.name.endswith(("_lock", ".lock")):
+                with suppress(OSError):
+                    if lock.is_file() and lock.stat().st_mtime < cutoff:
+                        lock.unlink()
+    except OSError:
+        logging.warning("JIT stale-lock cleanup skipped", exc_info=True)
 
 
 def setup_jit_cache_env() -> tuple[tuple[Component, ...], bool]:
@@ -247,13 +250,20 @@ def setup_jit_cache_env() -> tuple[tuple[Component, ...], bool]:
         return (), False
     clear_stale_jit_locks()
     compatible = any("torch" in item.scopes for item in components)
-    managed = tuple(
-        item
-        for item in components
-        if os.environ.setdefault(item.env_name, str(item.local_dir))
-        == str(item.local_dir)
-    )
-    return managed, compatible
+    managed = []
+    for item in components:
+        local = str(item.local_dir)
+        resolved = os.environ.setdefault(item.env_name, local)
+        if resolved == local:
+            managed.append(item)
+        else:
+            logging.warning(
+                "JIT %s uses preset %s=%s; not managed, excluded from remote sync",
+                item.name,
+                item.env_name,
+                resolved,
+            )
+    return tuple(managed), compatible
 
 
 class _EventHandler(FileSystemEventHandler):

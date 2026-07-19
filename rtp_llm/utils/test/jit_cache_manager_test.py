@@ -526,6 +526,42 @@ class JitCacheTest(unittest.TestCase):
             load.assert_called_once()
         self.assertFalse((build_dir / "lock").exists())
 
+    def test_runtime_fingerprint_scopes_torch_extensions_dir(self):
+        with mock.patch.object(jit, "_cpp_runtime_scope", return_value="cxx-fixed"):
+            base = jit._torch_scope("cuda-12_9-sm_90")
+            self.assertNotEqual(base, jit._torch_scope("cuda-12_9-sm_80"))
+            self.assertNotEqual(base, jit._torch_scope("cuda-12_6-sm_90"))
+            with mock.patch("torch.__version__", "0.0.0+fingerprint"):
+                self.assertNotEqual(base, jit._torch_scope("cuda-12_9-sm_90"))
+        with mock.patch.object(jit, "_cpp_runtime_scope", return_value=None):
+            self.assertIsNone(jit._torch_scope("cuda-12_9-sm_90"))
+
+        with _fake_scopes(self.root / "local"):
+            managed, _ = jit.setup_jit_cache_env()
+        torch_ext = component(managed, "torch_extensions")
+        self.assertEqual(os.environ["TORCH_EXTENSIONS_DIR"], str(torch_ext.local_dir))
+        self.assertIn("torch-test", os.environ["TORCH_EXTENSIONS_DIR"])
+
+    def test_preset_component_dir_excluded_and_warns(self):
+        os.environ["TRITON_CACHE_DIR"] = str(self.root / "preset_triton")
+        with _fake_scopes(self.root / "local"), self.assertLogs(
+            level="WARNING"
+        ) as logs:
+            managed, _ = jit.setup_jit_cache_env()
+        self.assertNotIn("triton", {item.name for item in managed})
+        self.assertTrue(
+            any("triton" in line and "TRITON_CACHE_DIR" in line for line in logs.output)
+        )
+
+    def test_stale_lock_cleanup_walk_error_is_fail_open(self):
+        with _fake_scopes(self.root / "local"), mock.patch.object(
+            jit.Path, "rglob", side_effect=OSError("unreadable cache tree")
+        ):
+            jit.clear_stale_jit_locks()
+            managed, compatible = jit.setup_jit_cache_env()
+        self.assertTrue(compatible)
+        self.assertTrue(managed)
+
 
 if __name__ == "__main__":
     unittest.main()
