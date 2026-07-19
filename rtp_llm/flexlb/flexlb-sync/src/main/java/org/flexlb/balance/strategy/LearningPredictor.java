@@ -102,6 +102,19 @@ public class LearningPredictor implements PrefillTimePredictor {
         return predictBatchMs(items);
     }
 
+    @Override
+    public double predictBatchMs(List<BatchItem> existingItems, long newSeqLen, long newCacheHit) {
+        if (existingItems.isEmpty()) {
+            return estimateMs(newSeqLen, newCacheHit);
+        }
+        double[] inputs = this.collectInputWithExtra(existingItems, newSeqLen, newCacheHit);
+        double[] weights = this.weightsRef.get();
+        double linear = calcLinear(inputs, weights);
+        double[] values = new double[5];
+        calcNonLinear(weights, linear, values);
+        return values[0];
+    }
+
     private double calcLinear(double[] inputs, double[] weights) {
         double sum = 0.0;
         for (int i = 0; i < inputs.length; i++) {
@@ -148,6 +161,47 @@ public class LearningPredictor implements PrefillTimePredictor {
         double[] inputs = new double[this.linear_param_count];
         inputs[0] = 1.0;
         inputs[1] = (double) items.size();
+        inputs[2] = reuse;
+        inputs[3] = compute;
+        inputs[4] = compute_square;
+        inputs[5] = reuse_mul_compute;
+        return inputs;
+    }
+
+    /**
+     * Like {@link #collectInput(List)} but appends a virtual item for a new
+     * request that hasn't been enqueued yet. The virtual item's {@code seqLen}
+     * and {@code hitCache} participate in all aggregations, and
+     * {@code batchSize = items.size() + 1}.
+     */
+    private double[] collectInputWithExtra(List<BatchItem> items, long extraSeqLen, long extraCacheHit) {
+        double reuse = 0.0;
+        double compute = 0.0;
+        double compute_square = 0.0;
+        double reuse_mul_compute = 0.0;
+        for (BatchItem item : items) {
+            long seq = Math.max(0L, item.seqLen());
+            long hit = Math.max(0L, Math.min(item.hitCache(), seq));
+            double thisReuse = hit / 1024.0;
+            double thisCompute = (seq - hit) / 1024.0;
+            reuse += thisReuse;
+            compute += thisCompute;
+            compute_square += thisCompute * thisCompute;
+            reuse_mul_compute += thisReuse * thisCompute;
+        }
+        // Virtual item for the new request
+        long extraSeq = Math.max(0L, extraSeqLen);
+        long extraHit = Math.max(0L, Math.min(extraCacheHit, extraSeq));
+        double extraReuse = extraHit / 1024.0;
+        double extraCompute = (extraSeq - extraHit) / 1024.0;
+        reuse += extraReuse;
+        compute += extraCompute;
+        compute_square += extraCompute * extraCompute;
+        reuse_mul_compute += extraReuse * extraCompute;
+
+        double[] inputs = new double[this.linear_param_count];
+        inputs[0] = 1.0;
+        inputs[1] = (double) (items.size() + 1);
         inputs[2] = reuse;
         inputs[3] = compute;
         inputs[4] = compute_square;
