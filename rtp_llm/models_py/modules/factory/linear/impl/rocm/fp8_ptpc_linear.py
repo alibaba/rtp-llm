@@ -10,8 +10,6 @@ from typing import Optional, Tuple
 import aiter
 import torch
 import torch.nn.functional as F
-from aiter.ops.gemm_op_a8w8 import gemm_a8w8_bpreshuffle_cktile
-
 from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 from rtp_llm.ops import HWKernelConfig
@@ -124,6 +122,8 @@ def run_rocm_fp8_ptpc_no_swizzle(
     k = input_fp8.shape[-1]
     use_cktile = k < 192 or m >= 1536 or (m >= 512 and output_size > 1536)
     if use_cktile:
+        from aiter.ops.gemm_op_a8w8 import gemm_a8w8_bpreshuffle_cktile
+
         output = torch.empty(
             (m, output_size), dtype=input_bf16.dtype, device=input_bf16.device
         )

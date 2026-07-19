@@ -9,12 +9,11 @@ import torch
 from rtp_llm.config.quant_config import QuantizationConfig as SourceQuantizationConfig
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.models.base_model import BaseModel
-from safetensors.torch import save_file
-
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.qwen3.language import Qwen3ForCausalLM
 from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
+from safetensors.torch import save_file
 
 
 def _model_config():
@@ -301,6 +300,9 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
                 ), patch(
                     "rtp_llm.models_py.quant_methods.fp8._is_hip_runtime",
                     return_value=False,
+                ), patch(
+                    "rtp_llm.models_py.quant_methods.fp8._runtime_fp8_dtype",
+                    return_value=torch.float8_e4m3fn,
                 ), patch.dict(
                     os.environ, {"USE_NEW_LOADER": "1"}, clear=False
                 ):

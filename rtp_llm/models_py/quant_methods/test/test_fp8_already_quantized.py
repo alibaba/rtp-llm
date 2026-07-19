@@ -22,6 +22,12 @@ from unittest import mock
 
 import torch
 from rtp_llm.config.quant_config import Fp8PerTensorCompressedQuantConfig
+from rtp_llm.models_py.kernels.cuda.fp8_quant import (
+    create_per_token_group_quant_fp8_output_scale,
+    scaled_fp8_per_tensor_quant,
+    scaled_fp8_per_token_quant,
+    sgl_per_token_group_quant_fp8,
+)
 from rtp_llm.models_py.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -117,6 +123,73 @@ def _channel_scale_shape(channels: int):
 
 
 class TestQuantMethodDispatch(unittest.TestCase):
+    def test_only_online_fp8_methods_require_staged_postprocess(self):
+        expected = {
+            "fp8": False,
+            "fp8_per_channel": False,
+            "fp8_block": False,
+            "fp8_online": True,
+            "fp8_per_channel_online": True,
+            "fp8_block_online": True,
+        }
+        layer = SimpleNamespace(shard_names=[])
+        for quant_type, staged in expected.items():
+            with self.subTest(quant_type=quant_type):
+                method = QuantizationConfig(quant_type).get_quant_method(
+                    layer, "layers.0.proj"
+                )
+                self.assertEqual(method.requires_staged_device_postprocess, staged)
+
+    def test_cuda_quant_helpers_reject_invalid_native_kernel_inputs(self):
+        with self.assertRaisesRegex(ValueError, "requires 2D"):
+            scaled_fp8_per_tensor_quant(torch.ones(4))
+        with self.assertRaisesRegex(ValueError, "requires 2D"):
+            scaled_fp8_per_token_quant(torch.ones(4))
+        with self.assertRaisesRegex(ValueError, "must be divisible"):
+            sgl_per_token_group_quant_fp8(
+                torch.ones(2, 192),
+                group_size=128,
+            )
+        with self.assertRaisesRegex(ValueError, "must be even"):
+            sgl_per_token_group_quant_fp8(
+                torch.ones(2, 255),
+                group_size=1,
+                fuse_silu_and_mul=True,
+            )
+        with self.assertRaisesRegex(ValueError, "requires group_size=128"):
+            create_per_token_group_quant_fp8_output_scale(
+                (2, 256),
+                torch.device("cpu"),
+                group_size=64,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=True,
+            )
+
+    def test_runtime_dtype_and_ue8m0_probe_use_target_device(self):
+        gfx942 = SimpleNamespace(gcnArchName="gfx942:sramecc+:xnack-")
+        gfx950 = SimpleNamespace(gcnArchName="gfx950:sramecc+:xnack-")
+        with mock.patch.object(torch.version, "hip", "7.0"), mock.patch.object(
+            torch.cuda,
+            "get_device_properties",
+            side_effect=lambda index: gfx950 if index == 1 else gfx942,
+        ):
+            self.assertEqual(
+                _runtime_fp8_dtype(torch.device("cuda:0")),
+                torch.float8_e4m3fnuz,
+            )
+            self.assertEqual(
+                _runtime_fp8_dtype(torch.device("cuda:1")),
+                torch.float8_e4m3fn,
+            )
+
+        with mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._device_arch",
+            return_value=((10, 0), ""),
+        ) as device_arch:
+            self.assertTrue(is_deep_gemm_e8m0_used(torch.device("cuda:1")))
+            device_arch.assert_called_once_with(torch.device("cuda:1"))
+
     def test_unquantized_dispatch_does_not_import_fp8_provider(self):
         script = """
 import sys
@@ -347,6 +420,9 @@ assert not any(name == "rtp_kernel" or name.startswith("rtp_kernel.") for name i
         ), mock.patch(
             "rtp_llm.models_py.quant_methods.fp8._rocm_cktile_ptpc_available",
             return_value=True,
+        ), mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._rocm_ptpc_executor_available",
+            return_value=True,
         ):
             self.assertEqual(
                 _select_fp8_runtime_backend(
@@ -356,6 +432,36 @@ assert not any(name == "rtp_kernel" or name.startswith("rtp_kernel.") for name i
                 ),
                 "rocm_aiter_ptpc",
             )
+            self.assertEqual(
+                _select_fp8_runtime_backend(
+                    torch.device("cuda:0"),
+                    "per_channel",
+                    SimpleNamespace(use_swizzleA=True),
+                ),
+                "rocm_hipblaslt_ptpc",
+            )
+
+    def test_rocm_swizzle_selector_does_not_require_cktile(self):
+        properties = SimpleNamespace(gcnArchName="gfx942:sramecc+:xnack-")
+        with mock.patch.object(
+            torch.cuda, "is_available", return_value=True
+        ), mock.patch.object(
+            torch.cuda, "get_device_capability", return_value=(9, 4)
+        ), mock.patch.object(
+            torch.cuda, "get_device_properties", return_value=properties
+        ), mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._is_hip_runtime",
+            return_value=True,
+        ), mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._aiter_has_symbol",
+            return_value=True,
+        ), mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._rocm_cktile_ptpc_available",
+            side_effect=AssertionError("swizzle path must not import CKTile"),
+        ), mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._rocm_ptpc_executor_available",
+            return_value=True,
+        ):
             self.assertEqual(
                 _select_fp8_runtime_backend(
                     torch.device("cuda:0"),
@@ -949,7 +1055,32 @@ class TestFp8BlockLoad(_LoadBackendMixin, unittest.TestCase):
             "rtp_llm.models_py.quant_methods.fp8._aiter_has_symbol",
             return_value=False,
         ):
-            with self.assertRaisesRegex(RuntimeError, "No executable ROCm"):
+            with self.assertRaisesRegex(RuntimeError, "requires the AITer block"):
+                _select_fp8_runtime_backend(torch.device("cuda:0"), "block")
+
+    def test_rocm_preflight_requires_selected_quant_helpers(self):
+        properties = SimpleNamespace(gcnArchName="gfx942:sramecc+:xnack-")
+        with mock.patch.object(
+            torch.cuda, "is_available", return_value=True
+        ), mock.patch.object(
+            torch.cuda, "get_device_capability", return_value=(9, 4)
+        ), mock.patch.object(
+            torch.cuda, "get_device_properties", return_value=properties
+        ), mock.patch.object(
+            torch, "_scaled_mm", create=True
+        ), mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._is_hip_runtime",
+            return_value=True,
+        ), mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._aiter_has_symbol",
+            return_value=True,
+        ), mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._rocm_quant_helpers_available",
+            return_value=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "dynamic/static quantization"):
+                _select_fp8_runtime_backend(torch.device("cuda:0"), "per_tensor")
+            with self.assertRaisesRegex(RuntimeError, "group quantization"):
                 _select_fp8_runtime_backend(torch.device("cuda:0"), "block")
 
     def test_runtime_predicate_resolves_only_required_symbol(self):
@@ -1348,6 +1479,31 @@ class TestFp8AlreadyQuantizedForward(unittest.TestCase):
             _select_fp8_runtime_backend(torch.device("cuda"), "per_tensor")
         except RuntimeError as error:
             self.skipTest(str(error))
+
+    def test_cuda_quant_helpers_validate_native_layout_contract(self):
+        empty_group_input = torch.empty(0, 128, device="cuda")
+        empty_output, empty_scale = sgl_per_token_group_quant_fp8(
+            empty_group_input, group_size=128
+        )
+        self.assertEqual(tuple(empty_output.shape), (0, 128))
+        self.assertEqual(tuple(empty_scale.shape), (0, 1))
+
+        non_contiguous = torch.ones(8, 8, device="cuda").T
+        with self.assertRaisesRegex(ValueError, "must be contiguous"):
+            scaled_fp8_per_tensor_quant(non_contiguous)
+
+        misaligned = torch.ones(2, 3, dtype=torch.float16, device="cuda")
+        with self.assertRaisesRegex(ValueError, "native vector width"):
+            scaled_fp8_per_tensor_quant(misaligned)
+
+        invalid_width = torch.ones(2, 10, device="cuda")
+        with self.assertRaisesRegex(ValueError, "divisible by 8"):
+            scaled_fp8_per_token_quant(invalid_width)
+
+        input_tensor = torch.ones(2, 8, device="cuda")
+        invalid_scale = torch.ones(1, dtype=torch.float16, device="cuda")
+        with self.assertRaisesRegex(TypeError, "contiguous float32"):
+            scaled_fp8_per_tensor_quant(input_tensor, invalid_scale)
 
     def test_fp8_per_tensor_static_and_dynamic_forward_match_reference(self):
         N, K, M = 32, 64, 8

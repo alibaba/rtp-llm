@@ -1,3 +1,5 @@
+import subprocess
+import sys
 import unittest
 
 import torch
@@ -9,6 +11,32 @@ from rtp_llm.models_py.quant_methods.fp8 import (
     _runtime_fp8_dtype,
     _select_fp8_runtime_backend,
 )
+
+
+class TestFp8RocmImportIsolation(unittest.TestCase):
+    def test_swizzle_executor_import_does_not_require_cktile(self):
+        script = r"""
+import builtins
+
+real_import = builtins.__import__
+def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "aiter.ops.gemm_op_a8w8" and "gemm_a8w8_bpreshuffle_cktile" in fromlist:
+        raise AssertionError("swizzle executor imported CKTile eagerly")
+    return real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = guarded_import
+from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
+    RocmFp8PTPCLinearWithSwizzle,
+)
+assert RocmFp8PTPCLinearWithSwizzle is not None
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
 
 @unittest.skipUnless(

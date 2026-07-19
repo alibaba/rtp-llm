@@ -3,7 +3,6 @@ from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
-
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.module_base import RtpModule, copy_weight_
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
@@ -97,6 +96,9 @@ class LinearBase(RtpModule):
 
     def validate_runtime_device(self, device: torch.device) -> None:
         self.quant_method.validate_runtime_device(device)
+
+    def requires_staged_device_postprocess(self) -> bool:
+        return bool(self.quant_method.requires_staged_device_postprocess)
 
     def process_weights_after_loading(self):
         # Called once by NewModelLoader._run_post_load_hooks after model.to(device)

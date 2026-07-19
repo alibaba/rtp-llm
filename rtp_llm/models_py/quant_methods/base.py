@@ -7,6 +7,8 @@ import torch
 
 
 class QuantizeMethodBase(ABC):
+    requires_staged_device_postprocess = False
+
     def __init__(self, quant_config: Any = None):
         self.quant_config = quant_config
 

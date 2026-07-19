@@ -143,6 +143,10 @@ class RtpModule(nn.Module):
     def validate_runtime_device(self, device: torch.device) -> None:
         """Validate device-specific runtime requirements before migration."""
 
+    def requires_staged_device_postprocess(self) -> bool:
+        """Whether this leaf must postprocess immediately after device migration."""
+        return False
+
     def _apply(self, fn, recurse=True):
         alias_groups = _collect_tensor_alias_groups(self, recurse=recurse)
         apply_once = _memoize_tensor_apply(fn)

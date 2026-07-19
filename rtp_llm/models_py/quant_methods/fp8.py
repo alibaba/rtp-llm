@@ -1,3 +1,4 @@
+import importlib
 import logging
 from typing import Optional, Tuple
 
@@ -32,9 +33,28 @@ def _convert_e4m3fn_to_fnuz(
     return bits.view(torch.float8_e4m3fnuz), scale.float() * 2.0
 
 
-def _runtime_fp8_dtype() -> torch.dtype:
+def _runtime_fp8_dtype(device: Optional[torch.device] = None) -> torch.dtype:
     if getattr(torch.version, "hip", None) is None:
         return torch.float8_e4m3fn
+    if device is not None:
+        target = torch.device(device)
+        if target.type != "cuda":
+            raise ValueError(f"ROCm FP8 runtime requires a CUDA device, got {target}")
+        try:
+            index = (
+                torch.cuda.current_device() if target.index is None else target.index
+            )
+            properties = torch.cuda.get_device_properties(index)
+        except (AssertionError, RuntimeError, ValueError) as error:
+            raise RuntimeError(
+                f"Unable to query ROCm FP8 dtype for {target}: {error}"
+            ) from error
+        return (
+            torch.float8_e4m3fn
+            if "gfx950" in getattr(properties, "gcnArchName", "")
+            else torch.float8_e4m3fnuz
+        )
+
     from rtp_llm.device.device_impl import is_gfx950
 
     return torch.float8_e4m3fn if is_gfx950() else torch.float8_e4m3fnuz
@@ -50,7 +70,7 @@ def _requant_per_tensor_to_runtime_fp8(
         raise ValueError(
             f"FP8 per-tensor scale must be finite and positive: {scale_value}"
         )
-    runtime_dtype = _runtime_fp8_dtype()
+    runtime_dtype = _runtime_fp8_dtype(weight.device)
     if weight.dtype == runtime_dtype:
         return weight.contiguous(), scale.view(1).contiguous()
     if weight.dtype == torch.float8_e4m3fn and runtime_dtype == torch.float8_e4m3fnuz:
@@ -65,7 +85,7 @@ def _requant_per_tensor_to_runtime_fp8(
 def _requant_per_channel_to_runtime_fp8(
     weight: torch.Tensor, scale: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    runtime_dtype = _runtime_fp8_dtype()
+    runtime_dtype = _runtime_fp8_dtype(weight.device)
     scale_rows = scale.float().view(-1, 1)
     if scale_rows.shape[0] != weight.shape[0]:
         raise ValueError(
@@ -115,7 +135,7 @@ def _device_arch(device: torch.device) -> tuple[tuple[int, int], str]:
 def _aiter_has_symbol(symbol: str) -> bool:
     try:
         import aiter
-    except ImportError:
+    except (ImportError, OSError, RuntimeError, AttributeError):
         return False
     return callable(getattr(aiter, symbol, None))
 
@@ -130,9 +150,27 @@ def _use_rocm_swizzle_a(hw_kernel_config: object) -> bool:
 def _rocm_cktile_ptpc_available() -> bool:
     try:
         from aiter.ops.gemm_op_a8w8 import gemm_a8w8_bpreshuffle_cktile
-    except ImportError:
+    except (ImportError, OSError, RuntimeError, AttributeError):
         return False
     return callable(gemm_a8w8_bpreshuffle_cktile)
+
+
+def _rocm_ptpc_executor_available(symbol: str) -> bool:
+    try:
+        module = importlib.import_module(
+            "rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear"
+        )
+    except (ImportError, OSError, RuntimeError, AttributeError):
+        return False
+    return callable(getattr(module, symbol, None))
+
+
+def _rocm_quant_helpers_available(*symbols: str) -> bool:
+    try:
+        module = importlib.import_module("rtp_llm.models_py.kernels.rocm.fp8_kernel")
+    except (ImportError, OSError, RuntimeError, AttributeError):
+        return False
+    return all(callable(getattr(module, symbol, None)) for symbol in symbols)
 
 
 def _select_fp8_runtime_backend(
@@ -157,30 +195,46 @@ def _select_fp8_runtime_backend(
                 f"FP8 {quant_kind} is not supported on ROCm architecture "
                 f"{gcn_arch or capability}"
             )
-        if quant_kind == "per_tensor" and hasattr(torch, "_scaled_mm"):
-            return _ROCM_SCALED_MM
+        if quant_kind == "per_tensor":
+            if hasattr(torch, "_scaled_mm") and _rocm_quant_helpers_available(
+                "dynamic_per_tensor_quant", "static_per_tensor_quant"
+            ):
+                return _ROCM_SCALED_MM
+            raise RuntimeError(
+                "ROCm FP8 per-tensor requires torch._scaled_mm and the AITer "
+                "dynamic/static quantization helpers"
+            )
         if quant_kind == "per_channel":
             if _use_rocm_swizzle_a(hw_kernel_config):
-                if _aiter_has_symbol("hipb_create_extension") and _aiter_has_symbol(
-                    "hipb_mm"
+                if (
+                    _aiter_has_symbol("hipb_create_extension")
+                    and _aiter_has_symbol("hipb_mm")
+                    and _rocm_ptpc_executor_available("RocmFp8PTPCLinearWithSwizzle")
                 ):
                     return _ROCM_HIPBLASLT_PTPC
                 raise RuntimeError(
-                    "ROCm FP8 per-channel use_swizzleA requires AITer hipBLASLt"
+                    "ROCm FP8 per-channel use_swizzleA requires the complete "
+                    "AITer hipBLASLt executor"
                 )
             if (
                 _aiter_has_symbol("gemm_a8w8_bpreshuffle")
                 and _rocm_cktile_ptpc_available()
+                and _rocm_ptpc_executor_available("run_rocm_fp8_ptpc_no_swizzle")
             ):
                 return _ROCM_AITER_PTPC
             raise RuntimeError(
                 "ROCm FP8 per-channel without use_swizzleA requires both "
                 "AITer and CKTile PTPC kernels"
             )
-        if quant_kind == "block" and _aiter_has_symbol(
-            "gemm_a8w8_blockscale_bpreshuffle"
-        ):
-            return _ROCM_AITER_BLOCK
+        if quant_kind == "block":
+            if _aiter_has_symbol(
+                "gemm_a8w8_blockscale_bpreshuffle"
+            ) and _rocm_quant_helpers_available("rocm_per_token_group_quant_fp8"):
+                return _ROCM_AITER_BLOCK
+            raise RuntimeError(
+                "ROCm FP8 block requires the AITer block GEMM and group "
+                "quantization helpers"
+            )
         raise RuntimeError(
             f"No executable ROCm FP8 {quant_kind} backend is available on {gcn_arch}"
         )
@@ -346,7 +400,7 @@ def _validate_fp8_block_scales(
 def _prepare_rocm_fp8_block_weight(
     weight: torch.Tensor, scale: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    runtime_dtype = _runtime_fp8_dtype()
+    runtime_dtype = _runtime_fp8_dtype(weight.device)
     if weight.dtype == runtime_dtype:
         runtime_weight = weight.contiguous()
         runtime_scale = scale.to(torch.float32).contiguous()
@@ -379,7 +433,14 @@ def is_deep_gemm_runtime_available(
     return runtime_available(device)
 
 
-def is_deep_gemm_e8m0_used() -> bool:
+def is_deep_gemm_e8m0_used(device: Optional[torch.device] = None) -> bool:
+    if device is not None:
+        target = torch.device(device)
+        if target.type != "cuda":
+            return False
+        capability, _ = _device_arch(target)
+        return capability[0] in (10, 12)
+
     from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
         is_deep_gemm_e8m0_used as e8m0_used,
     )
@@ -400,7 +461,7 @@ def _hip_scaled_fp8_per_tensor_quant(
         raise ValueError("ROCm FP8 per-tensor quantization requires a GPU tensor")
     if not input.is_contiguous():
         input = input.contiguous()
-    runtime_dtype = _runtime_fp8_dtype()
+    runtime_dtype = _runtime_fp8_dtype(input.device)
     from rtp_llm.models_py.kernels.rocm.fp8_kernel import (
         dynamic_per_tensor_quant,
         static_per_tensor_quant,
@@ -595,7 +656,7 @@ class Fp8LinearMethod(QuantizeMethodBase):
         )
         convert_e4m3fn_to_fnuz = (
             layer.weight.dtype == torch.float8_e4m3fn
-            and _runtime_fp8_dtype() == torch.float8_e4m3fnuz
+            and _runtime_fp8_dtype(layer.weight.device) == torch.float8_e4m3fnuz
         )
         fp8_weight, scale = _requant_per_tensor_to_runtime_fp8(
             layer.weight.data, layer.weight_scale.data
@@ -650,6 +711,7 @@ class Fp8OnlineLinearMethod(QuantizeMethodBase):
     _quant_logged: bool = False
     _apply_logged: bool = False
     _quant_count: int = 0
+    requires_staged_device_postprocess = True
     required_checkpoint_parameters = ("weight",)
 
     def create_weights(
@@ -778,6 +840,7 @@ class Fp8PerChannelOnlineLinearMethod(QuantizeMethodBase):
     _quant_logged: bool = False
     _apply_logged: bool = False
     _quant_count: int = 0
+    requires_staged_device_postprocess = True
     required_checkpoint_parameters = ("weight",)
 
     def create_weights(
@@ -1105,6 +1168,7 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
     _quant_logged: bool = False
     _apply_logged: bool = False
     _quant_count: int = 0
+    requires_staged_device_postprocess = True
     required_checkpoint_parameters = ("weight",)
 
     def __init__(self, quant_config=None):
@@ -1227,7 +1291,7 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
         _validate_fp8_block_scales(fp8_weight, scale, self.BLOCK, self.BLOCK)
         if self._runtime_backend == _ROCM_AITER_BLOCK:
             fp8_weight, scale = _prepare_rocm_fp8_block_weight(fp8_weight, scale)
-        elif is_deep_gemm_e8m0_used():
+        elif is_deep_gemm_e8m0_used(weight.device):
             fp8_weight, scale = _resolve_requant_weight_ue8m0()(fp8_weight, scale)
 
         del layer.weight
@@ -1347,6 +1411,7 @@ class Fp8BlockLinearMethod(Fp8BlockOnlineLinearMethod):
     """
 
     _create_logged: bool = False
+    requires_staged_device_postprocess = False
     required_checkpoint_parameters = ("weight", "weight_scale_inv")
 
     def create_weights(
@@ -1415,7 +1480,9 @@ class Fp8BlockLinearMethod(Fp8BlockOnlineLinearMethod):
         _validate_fp8_block_scales(weight, scale, block_size[0], block_size[1])
         if self._runtime_backend == _ROCM_AITER_BLOCK:
             weight, scale = _prepare_rocm_fp8_block_weight(weight, scale)
-        if self._runtime_backend == _CUDA_DEEP_GEMM and is_deep_gemm_e8m0_used():
+        if self._runtime_backend == _CUDA_DEEP_GEMM and is_deep_gemm_e8m0_used(
+            weight.device
+        ):
             weight, scale = _resolve_requant_weight_ue8m0()(weight, scale)
         del layer.weight
         layer.register_parameter(

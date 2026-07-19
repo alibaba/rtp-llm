@@ -10,6 +10,40 @@ fp8_dtype = torch.float8_e4m3fn
 fp8_max = torch.finfo(fp8_dtype).max
 fp8_min = -fp8_max
 
+_NATIVE_INPUT_DTYPES = (torch.float32, torch.float16, torch.bfloat16)
+
+
+def _validate_native_quant_input(
+    input: torch.Tensor, label: str, *, allow_empty: bool = False
+) -> None:
+    if not input.is_cuda:
+        raise ValueError(f"{label} input must be on a CUDA device")
+    if input.dtype not in _NATIVE_INPUT_DTYPES:
+        raise TypeError(
+            f"{label} input must be float32, float16, or bfloat16, got "
+            f"{input.dtype}"
+        )
+    if not input.is_contiguous():
+        raise ValueError(f"{label} input must be contiguous")
+    if input.numel() == 0 and not allow_empty:
+        raise ValueError(f"{label} input must not be empty")
+
+
+def _validate_native_output(
+    output: torch.Tensor, input: torch.Tensor, dtype: torch.dtype, label: str
+) -> None:
+    if output.shape != input.shape or output.dtype != dtype:
+        raise ValueError(
+            f"{label} output must have shape {tuple(input.shape)} and dtype "
+            f"{dtype}, got {tuple(output.shape)} and {output.dtype}"
+        )
+    if output.device != input.device:
+        raise ValueError(
+            f"{label} output must be on {input.device}, got {output.device}"
+        )
+    if not output.is_contiguous():
+        raise ValueError(f"{label} output must be contiguous")
+
 
 @lru_cache(maxsize=None)
 def _resolve_compute_op(name: str):
@@ -59,7 +93,7 @@ def _transform_scale_ue8m0(sf, mn):
     import deep_gemm.utils.layout
 
     if not sf.is_cuda:
-        sf = sf.cuda()
+        raise ValueError("UE8M0 scale packing requires a CUDA tensor")
     sf = sf.index_select(-2, torch.arange(mn, device=sf.device) // 128)
     return deep_gemm.utils.layout.get_mn_major_tma_aligned_packed_ue8m0_tensor(sf)
 
@@ -72,10 +106,32 @@ def create_per_token_group_quant_fp8_output_scale(
     scale_tma_aligned: bool,
     scale_ue8m0: bool,
 ):
+    if (
+        isinstance(group_size, bool)
+        or not isinstance(group_size, int)
+        or group_size <= 0
+    ):
+        raise ValueError(f"group_size must be a positive integer, got {group_size!r}")
+    if len(x_shape) < 2:
+        raise ValueError(
+            f"FP8 group quantization requires at least 2D shape, got {x_shape}"
+        )
+    if x_shape[-1] % group_size != 0:
+        raise ValueError(
+            f"FP8 quantized width {x_shape[-1]} must be divisible by group_size "
+            f"{group_size}"
+        )
     if scale_ue8m0:
-        assert column_major_scales and scale_tma_aligned
+        if not column_major_scales or not scale_tma_aligned:
+            raise ValueError(
+                "UE8M0 scales require column_major_scales and scale_tma_aligned"
+            )
+        if group_size != 128:
+            raise ValueError(
+                f"UE8M0 scale packing requires group_size=128, got {group_size}"
+            )
         *x_batch, x_q_mn, x_q_k = x_shape
-        x_s_mn, x_s_k = x_q_mn, x_q_k // 128
+        x_s_mn, x_s_k = x_q_mn, x_q_k // group_size
         aligned_mn = ceil_align(x_s_mn, 4)
         aligned_k = ceil_align(x_s_k, 4)
         return torch.empty(
@@ -113,12 +169,28 @@ def sgl_per_token_group_quant_fp8(
     fuse_silu_and_mul: bool = False,
     masked_m: Optional[torch.Tensor] = None,
 ):
-    assert (
-        x.shape[-1] % group_size == 0
-    ), "the last dimension of `x` cannot be divisible by `group_size`"
-    assert x.is_contiguous(), "`x` is not contiguous"
+    if x.ndim < 2:
+        raise ValueError(
+            f"FP8 group quantization requires at least 2D input, got {x.shape}"
+        )
+    if (
+        isinstance(group_size, bool)
+        or not isinstance(group_size, int)
+        or group_size <= 0
+    ):
+        raise ValueError(f"group_size must be a positive integer, got {group_size!r}")
+    if not x.is_contiguous():
+        raise ValueError("FP8 group quantization input must be contiguous")
+    if fuse_silu_and_mul and x.shape[-1] % 2 != 0:
+        raise ValueError(f"fused SiLU input width must be even, got {x.shape[-1]}")
 
     out_shape = (*x.shape[:-1], x.shape[-1] // (2 if fuse_silu_and_mul else 1))
+    if out_shape[-1] % group_size != 0:
+        raise ValueError(
+            f"FP8 quantized width {out_shape[-1]} must be divisible by group_size "
+            f"{group_size}"
+        )
+    _validate_native_quant_input(x, "FP8 group quantization", allow_empty=True)
     x_q = torch.empty(out_shape, device=x.device, dtype=fp8_dtype)
     x_s = create_per_token_group_quant_fp8_output_scale(
         x_shape=out_shape,
@@ -128,24 +200,26 @@ def sgl_per_token_group_quant_fp8(
         scale_tma_aligned=scale_tma_aligned,
         scale_ue8m0=scale_ue8m0,
     )
-    if x.shape[0] > 0:
+    if x.numel() > 0:
         if masked_m is not None:
-            _resolve_compute_op("per_token_group_quant_fp8_v2")(
-                x,
-                x_q,
-                x_s,
-                group_size,
-                eps,
-                fp8_min,
-                fp8_max,
-                scale_ue8m0,
-                fuse_silu_and_mul,
-                masked_m,
-            )
+            with torch.cuda.device(x.device):
+                _resolve_compute_op("per_token_group_quant_fp8_v2")(
+                    x,
+                    x_q,
+                    x_s,
+                    group_size,
+                    eps,
+                    fp8_min,
+                    fp8_max,
+                    scale_ue8m0,
+                    fuse_silu_and_mul,
+                    masked_m,
+                )
         else:
-            _resolve_compute_op("per_token_group_quant_fp8")(
-                x, x_q, x_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0
-            )
+            with torch.cuda.device(x.device):
+                _resolve_compute_op("per_token_group_quant_fp8")(
+                    x, x_q, x_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0
+                )
     return x_q, x_s
 
 
@@ -154,20 +228,39 @@ def scaled_fp8_per_tensor_quant(
     scale: Optional[torch.Tensor] = None,
     output: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    assert input.ndim == 2
+    if input.ndim != 2:
+        raise ValueError(
+            f"FP8 per-tensor quantization requires 2D input, got {input.shape}"
+        )
+    _validate_native_quant_input(input, "FP8 per-tensor quantization")
+    vector_width = 16 // input.element_size()
+    if input.numel() % vector_width != 0:
+        raise ValueError(
+            f"FP8 per-tensor input element count {input.numel()} must be divisible "
+            f"by native vector width {vector_width}"
+        )
     shape: Union[Tuple[int, int], torch.Size] = input.shape
     out_dtype = torch.float8_e4m3fn
     if output is None:
         output = torch.empty(shape, device=input.device, dtype=out_dtype)
     else:
-        assert output.dtype == out_dtype
+        _validate_native_output(output, input, out_dtype, "FP8 per-tensor")
 
     if scale is None:
         scale = torch.zeros(1, device=input.device, dtype=torch.float32)
-        _resolve_compute_op("per_tensor_quant_fp8")(input, output, scale, False)
+        with torch.cuda.device(input.device):
+            _resolve_compute_op("per_tensor_quant_fp8")(input, output, scale, False)
     else:
-        assert scale.numel() == 1, f"{scale.shape}"
-        _resolve_compute_op("per_tensor_quant_fp8")(input, output, scale, True)
+        if scale.numel() != 1:
+            raise ValueError(
+                f"FP8 per-tensor scale must contain one value, got {scale.shape}"
+            )
+        if scale.device != input.device:
+            raise ValueError(f"FP8 scale must be on {input.device}, got {scale.device}")
+        if scale.dtype != torch.float32 or not scale.is_contiguous():
+            raise TypeError("FP8 per-tensor scale must be contiguous float32")
+        with torch.cuda.device(input.device):
+            _resolve_compute_op("per_tensor_quant_fp8")(input, output, scale, True)
     return output, scale
 
 
@@ -175,14 +268,24 @@ def scaled_fp8_per_token_quant(
     input: torch.Tensor,
     output: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    if input.ndim != 2:
+        raise ValueError(
+            f"FP8 per-token quantization requires 2D input, got {input.shape}"
+        )
+    _validate_native_quant_input(input, "FP8 per-token quantization")
+    if input.shape[1] % 8 != 0:
+        raise ValueError(
+            f"FP8 per-token input width must be divisible by 8, got {input.shape[1]}"
+        )
     scale = torch.zeros(input.size(0), device=input.device, dtype=torch.float32)
     if output is not None:
-        assert output.dtype == torch.float8_e4m3fn
+        _validate_native_output(output, input, torch.float8_e4m3fn, "FP8 per-token")
     else:
         output = torch.empty(
             input.shape, device=input.device, dtype=torch.float8_e4m3fn
         )
-    _resolve_compute_op("per_token_quant_fp8")(input, output, scale)
+    with torch.cuda.device(input.device):
+        _resolve_compute_op("per_token_quant_fp8")(input, output, scale)
     return output, scale.reshape(-1, 1)
 
 
@@ -192,8 +295,30 @@ def block_quant_dequant(
     block_size: List[int],
     dtype: torch.dtype,
 ) -> torch.Tensor:
+    if (
+        not isinstance(block_size, (list, tuple))
+        or len(block_size) != 2
+        or any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in block_size
+        )
+    ):
+        raise ValueError(
+            f"block_size must contain two positive integers, got {block_size!r}"
+        )
+    if x_q_block.ndim < 2 or x_s.ndim < 2:
+        raise ValueError("FP8 block weight and scale tensors must be at least 2D")
     block_n, block_k = block_size[0], block_size[1]
     *_, n, k = x_q_block.shape
+    expected_scale_shape = (
+        *x_q_block.shape[:-2],
+        ceil_div(n, block_n),
+        ceil_div(k, block_k),
+    )
+    if tuple(x_s.shape) != expected_scale_shape:
+        raise ValueError(
+            f"FP8 block scale shape must be {expected_scale_shape}, got {tuple(x_s.shape)}"
+        )
     x_scale_repeat = x_s.repeat_interleave(block_n, dim=-2).repeat_interleave(
         block_k, dim=-1
     )
@@ -204,7 +329,8 @@ def block_quant_dequant(
 def per_block_cast_to_fp8(
     x: torch.Tensor, use_ue8m0: bool
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    assert x.dim() == 2
+    if x.dim() != 2:
+        raise ValueError(f"FP8 block quantization requires 2D input, got {x.shape}")
     m, n = x.shape
     x_padded = torch.zeros(
         (align(m, 128), align(n, 128)), dtype=x.dtype, device=x.device
@@ -224,10 +350,19 @@ def quant_weight_ue8m0(
     weight_dequant: torch.Tensor,
     weight_block_size: List[int],
 ):
-    assert weight_block_size == [128, 128]
-    assert (
-        weight_dequant.dtype == torch.bfloat16
-    ), f"{weight_dequant.dtype=} {weight_dequant.shape=}"
+    if not isinstance(weight_block_size, (list, tuple)) or list(weight_block_size) != [
+        128,
+        128,
+    ]:
+        raise ValueError(
+            f"UE8M0 weight conversion requires block size [128, 128], got "
+            f"{weight_block_size!r}"
+        )
+    if weight_dequant.dtype != torch.bfloat16:
+        raise TypeError(
+            "UE8M0 weight conversion requires bfloat16 input, got "
+            f"{weight_dequant.dtype} with shape {tuple(weight_dequant.shape)}"
+        )
     *batch_dims, n, k = weight_dequant.shape
     weight_dequant_flat = weight_dequant.view((-1, k))
     out_w_flat, out_s_flat = per_block_cast_to_fp8(weight_dequant_flat, True)

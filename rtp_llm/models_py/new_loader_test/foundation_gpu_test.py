@@ -5,11 +5,10 @@ import unittest
 
 import torch
 import torch.nn as nn
-from safetensors.torch import save_file
-
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.registry import register_model
+from safetensors.torch import save_file
 
 
 class _GpuModel(RtpModule):
@@ -150,6 +149,51 @@ class FoundationGpuTest(unittest.TestCase):
         self.assertIs(model.embed.weight, model.head.weight)
         self.assertIs(model.embed.weight, model.weight_alias)
         self.assertIsInstance(model.embed.weight, nn.Parameter)
+
+    def test_staged_postprocess_bounds_online_quantization_peak_memory(self):
+        class StagedLinear(RtpModule):
+            def __init__(self, numel):
+                super().__init__()
+                self.weight = nn.Parameter(
+                    torch.empty(numel, dtype=torch.bfloat16), requires_grad=False
+                )
+
+            def requires_staged_device_postprocess(self):
+                return True
+
+            def process_weights_after_loading(self):
+                compressed = self.weight.detach().to(torch.uint8)
+                del self.weight
+                self.register_parameter(
+                    "weight", nn.Parameter(compressed, requires_grad=False)
+                )
+
+        layer_count = 4
+        layer_numel = 16 * 1024 * 1024
+        model = RtpModule()
+        model.layers = nn.ModuleList(
+            [StagedLinear(layer_numel) for _ in range(layer_count)]
+        )
+        full_bf16_bytes = (
+            layer_count
+            * layer_numel
+            * torch.empty((), dtype=torch.bfloat16).element_size()
+        )
+
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        baseline = torch.cuda.memory_allocated()
+        with torch.inference_mode():
+            NewModelLoader._migrate_staged_modules(model, "cuda")
+            model.to("cuda")
+        torch.cuda.synchronize()
+        extra_peak = torch.cuda.max_memory_allocated() - baseline
+
+        self.assertLess(extra_peak, full_bf16_bytes)
+        self.assertTrue(
+            all(layer.weight.dtype == torch.uint8 for layer in model.layers)
+        )
 
 
 if __name__ == "__main__":
