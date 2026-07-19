@@ -40,6 +40,7 @@ class Qwen3MLP(RtpModule):
         tp_rank: int = 0,
         quant_config: Optional[QuantizationConfig] = None,
         params_dtype: torch.dtype = torch.float16,
+        prefix: str = "mlp",
     ):
         super().__init__()
         self.tp_size = tp_size
@@ -49,7 +50,7 @@ class Qwen3MLP(RtpModule):
             tp_size=tp_size,
             tp_rank=tp_rank,
             quant_config=quant_config,
-            prefix="gate_up_proj",
+            prefix=f"{prefix}.gate_up_proj",
             bias=False,
             shard_names=["gate_proj", "up_proj"],
             params_dtype=params_dtype,
@@ -60,7 +61,7 @@ class Qwen3MLP(RtpModule):
             tp_size=tp_size,
             tp_rank=tp_rank,
             quant_config=quant_config,
-            prefix="down_proj",
+            prefix=f"{prefix}.down_proj",
             bias=False,
             params_dtype=params_dtype,
         )
@@ -93,6 +94,7 @@ class Qwen3Attention(RtpModule):
         quant_config: Optional[QuantizationConfig] = None,
         params_dtype: torch.dtype = torch.float16,
         rms_norm_eps: float = 1e-6,
+        prefix: str = "self_attn",
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -110,7 +112,7 @@ class Qwen3Attention(RtpModule):
             tp_size=tp_size,
             tp_rank=tp_rank,
             quant_config=quant_config,
-            prefix="qkv_proj",
+            prefix=f"{prefix}.qkv_proj",
             bias=False,
             params_dtype=params_dtype,
         )
@@ -126,7 +128,7 @@ class Qwen3Attention(RtpModule):
             tp_size=tp_size,
             tp_rank=tp_rank,
             quant_config=quant_config,
-            prefix="o_proj",
+            prefix=f"{prefix}.o_proj",
             bias=False,
             params_dtype=params_dtype,
         )
@@ -223,6 +225,7 @@ class Qwen3DecoderLayer(RtpModule):
         quant_config: Optional[QuantizationConfig] = None,
         params_dtype: torch.dtype = torch.float16,
         rms_norm_eps: float = 1e-6,
+        prefix: str = "layer",
     ):
         super().__init__()
         self.input_layernorm = RMSNorm(
@@ -239,6 +242,7 @@ class Qwen3DecoderLayer(RtpModule):
             quant_config=quant_config,
             params_dtype=params_dtype,
             rms_norm_eps=rms_norm_eps,
+            prefix=f"{prefix}.self_attn",
         )
         self.post_attention_layernorm = RMSNorm(
             hidden_size, eps=rms_norm_eps, params_dtype=params_dtype
@@ -250,6 +254,7 @@ class Qwen3DecoderLayer(RtpModule):
             tp_rank=ffn_tp_rank,
             quant_config=quant_config,
             params_dtype=params_dtype,
+            prefix=f"{prefix}.mlp",
         )
 
     def forward(
@@ -536,6 +541,7 @@ class Qwen3ForCausalLM(GptModelBase):
                     quant_config=cfg["quant_config"],
                     params_dtype=cfg["params_dtype"],
                     rms_norm_eps=cfg["rms_norm_eps"],
+                    prefix=f"layers.{i}",
                 )
                 for i in range(cfg["num_layers"])
             ]
