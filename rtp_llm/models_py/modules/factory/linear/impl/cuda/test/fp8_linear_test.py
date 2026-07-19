@@ -878,8 +878,8 @@ class CudaFp8GEMMDispatchTest(CudaFp8LinearTestBase, unittest.TestCase):
     def test_flashinfer_can_handle_only_sm90(self):
         quant_config = init_quant_config("FP8_PER_BLOCK")
         with mock.patch(
-            "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear.get_sm",
-            return_value=(9, 0),
+            "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear.is_sm90",
+            return_value=True,
         ), mock.patch(
             "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear._has_flashinfer_sm90_fp8_gemm",
             return_value=True,
@@ -896,8 +896,8 @@ class CudaFp8GEMMDispatchTest(CudaFp8LinearTestBase, unittest.TestCase):
                 CudaFp8FlashinferLinear.can_handle(quant_config, weight, weight_scales)
             )
         with mock.patch(
-            "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear.get_sm",
-            return_value=(10, 0),
+            "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear.is_sm90",
+            return_value=False,
         ), mock.patch(
             "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear._has_flashinfer_sm90_fp8_gemm",
             return_value=True,
