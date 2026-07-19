@@ -62,33 +62,6 @@ cc_library(
 )
 
 cc_library(
-    name = "trt_v2_attn",
-    srcs = [
-        "cufmha/TrtV2FmhaRunner.cc",
-        "cufmha/TRTAttn.cc",
-    ],
-    hdrs = [
-        "cufmha/TrtV2FmhaRunner.h",
-        "cufmha/TRTAttn.h",
-    ],
-    deps = [
-        ":cuda_host_utils",
-        "//rtp_llm/models_py/bindings/core:types",
-        "//rtp_llm/models_py/bindings/core:types_hdr",
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/models_py/bindings/common/kernels:kernels_tensor_ops",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-        "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
-        "//3rdparty/contextFusedMultiHeadAttentionSm70:trt_sm70_fmha_impl",
-        "//rtp_llm/models_py/bindings/core:op_data",
-        "//rtp_llm/models_py/bindings/common/kernels:kernels_kv_cache"
-    ],
-    # for fused_multihead_attention_utils.h: alpha = reinterpret_cast<uint32_t const&>(h2)
-    copts = copts() + ["-fno-strict-aliasing"],
-)
-
-cc_library(
     name = "trt_utils",
     hdrs = [
         "trt_utils.h",
@@ -107,7 +80,6 @@ cc_library(
     srcs = [
     ],
     deps = [
-        ":trt_v2_attn",
         ":cuda_host_utils",
         "//rtp_llm/cpp/utils:core_utils",
         "@local_config_cuda//cuda:cuda_headers",
@@ -168,6 +140,7 @@ cc_library(
     ]),
     copts = cuda_copts(),
     deps = torch_deps() + [
+        ":cuda_host_utils",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/models_py/bindings/core:types_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
