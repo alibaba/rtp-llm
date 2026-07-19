@@ -623,6 +623,10 @@ class Fp8LinearMethod(QuantizeMethodBase):
         self._runtime_backend = _select_fp8_runtime_backend(
             layer.weight.device, "per_tensor"
         )
+        convert_e4m3fn_to_fnuz = (
+            layer.weight.dtype == torch.float8_e4m3fn
+            and _runtime_fp8_dtype() == torch.float8_e4m3fnuz
+        )
         fp8_weight, scale = _requant_per_tensor_to_runtime_fp8(
             layer.weight.data, layer.weight_scale.data
         )
@@ -650,6 +654,13 @@ class Fp8LinearMethod(QuantizeMethodBase):
                 raise ValueError(
                     "Static FP8 per-tensor input_scale must be finite and positive"
                 )
+            if convert_e4m3fn_to_fnuz:
+                input_scale = input_scale * 2.0
+            del layer.input_scale
+            layer.register_parameter(
+                "input_scale",
+                nn.Parameter(input_scale.contiguous(), requires_grad=False),
+            )
 
 
 @register_quant_method("fp8_online", "FP8_DYNAMIC_PER_TENSOR")

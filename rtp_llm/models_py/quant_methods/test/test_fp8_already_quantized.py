@@ -1179,15 +1179,13 @@ class TestFp8BlockLoad(_LoadBackendMixin, unittest.TestCase):
 class TestFp8BlockForward(unittest.TestCase):
     """End-to-end: load fp8-block ckpt vs online path, forward should match."""
 
+    def setUp(self):
+        try:
+            _select_fp8_runtime_backend(torch.device("cuda"), "block")
+        except RuntimeError as error:
+            self.skipTest(str(error))
+
     def test_forward_matches_online_path(self):
-        if not _is_hip_runtime():
-            from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
-                is_deep_gemm_runtime_available,
-            )
-
-            if not is_deep_gemm_runtime_available(torch.device("cuda")):
-                self.skipTest("DeepGEMM kernel not available at runtime")
-
         N, K, M = 256, 256, 32  # 2x2 weight blocks
         device = "cuda"
 
@@ -1250,6 +1248,12 @@ class TestFp8BlockForward(unittest.TestCase):
 class TestFp8AlreadyQuantizedForward(unittest.TestCase):
     """End-to-end: load already-quantized ckpt -> forward via _scaled_mm."""
 
+    def setUp(self):
+        try:
+            _select_fp8_runtime_backend(torch.device("cuda"), "per_tensor")
+        except RuntimeError as error:
+            self.skipTest(str(error))
+
     def test_fp8_per_tensor_static_and_dynamic_forward_match_reference(self):
         N, K, M = 32, 64, 8
         device = "cuda"
@@ -1282,10 +1286,13 @@ class TestFp8AlreadyQuantizedForward(unittest.TestCase):
                 layer.process_weights_after_loading()
 
                 out = layer(x)
-                expected_input_scale = None if activation_dynamic else static_scale
+                expected_input_scale = None if activation_dynamic else layer.input_scale
                 qinput, x_scale = _resolve_per_tensor_quant()(x, expected_input_scale)
                 if not activation_dynamic:
-                    torch.testing.assert_close(x_scale, static_scale)
+                    expected_runtime_scale = static_scale
+                    if _runtime_fp8_dtype() == torch.float8_e4m3fnuz:
+                        expected_runtime_scale = static_scale * 2.0
+                    torch.testing.assert_close(x_scale, expected_runtime_scale)
                 input_dequant = qinput.float() * x_scale.float()
                 weight_dequant = layer.weight.float() * layer.weight_scale.float()
                 ref = torch.nn.functional.linear(input_dequant, weight_dequant).to(
