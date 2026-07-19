@@ -10,8 +10,10 @@ from unittest.mock import MagicMock, call, patch
 
 from rtp_llm.utils.kvcm_subscriber_launcher import (
     _log_optional_failure,
+    _parse_endpoint,
     _stop_subscriber_process,
     _supervise_kvcm_subscriber,
+    _wait_for_rtp_endpoints,
     build_kvcm_subscriber_command,
     is_kvcm_subscriber_required,
     start_kvcm_subscriber,
@@ -351,6 +353,9 @@ class KvcmSubscriberLauncherTest(unittest.TestCase):
         stop_event = _FakeStopEvent([False, False, False, True])
 
         with patch("signal.signal"), patch(
+            "rtp_llm.utils.kvcm_subscriber_launcher._wait_for_rtp_endpoints",
+            return_value=True,
+        ), patch(
             "rtp_llm.utils.kvcm_subscriber_launcher.subprocess.Popen",
             side_effect=[first, second],
         ) as popen, patch("logging.warning") as warning:
@@ -369,6 +374,9 @@ class KvcmSubscriberLauncherTest(unittest.TestCase):
         stop_event = _FakeStopEvent([True])
 
         with patch("signal.signal"), patch(
+            "rtp_llm.utils.kvcm_subscriber_launcher._wait_for_rtp_endpoints",
+            return_value=True,
+        ), patch(
             "rtp_llm.utils.kvcm_subscriber_launcher.subprocess.Popen",
             side_effect=FileNotFoundError("subscriber missing"),
         ), patch("logging.warning") as warning:
@@ -396,6 +404,9 @@ class KvcmSubscriberLauncherTest(unittest.TestCase):
         stop_event = _FakeStopEvent([False])
 
         with patch("signal.signal"), patch(
+            "rtp_llm.utils.kvcm_subscriber_launcher._wait_for_rtp_endpoints",
+            return_value=True,
+        ), patch(
             "rtp_llm.utils.kvcm_subscriber_launcher.subprocess.Popen",
             return_value=child,
         ):
@@ -416,6 +427,9 @@ class KvcmSubscriberLauncherTest(unittest.TestCase):
         stop_event = _FakeStopEvent([True])
 
         with patch("signal.signal"), patch(
+            "rtp_llm.utils.kvcm_subscriber_launcher._wait_for_rtp_endpoints",
+            return_value=True,
+        ), patch(
             "rtp_llm.utils.kvcm_subscriber_launcher.subprocess.Popen",
             return_value=child,
         ), patch("os.killpg") as killpg:
@@ -428,6 +442,56 @@ class KvcmSubscriberLauncherTest(unittest.TestCase):
 
         killpg.assert_called_once_with(104, signal.SIGTERM)
         child.wait.assert_called_once()
+
+    def test_endpoint_parser_supports_ipv4_dns_and_ipv6(self) -> None:
+        self.assertEqual(
+            _parse_endpoint("127.0.0.1:8089"),
+            ("127.0.0.1", 8089),
+        )
+        self.assertEqual(
+            _parse_endpoint("rtp.example:8089"),
+            ("rtp.example", 8089),
+        )
+        self.assertEqual(
+            _parse_endpoint("[2001:db8::1]:8089"),
+            ("2001:db8::1", 8089),
+        )
+
+    def test_endpoint_parser_rejects_invalid_values(self) -> None:
+        for endpoint in ("missing-port", "host:not-a-port", "host:0", "[::1]"):
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
+                _parse_endpoint(endpoint)
+
+    def test_supervisor_waits_for_cache_api_endpoint(self) -> None:
+        stop_event = _FakeStopEvent([False])
+        connection = MagicMock()
+
+        with patch(
+            "rtp_llm.utils.kvcm_subscriber_launcher.socket.create_connection",
+            side_effect=[OSError("not ready"), connection],
+        ) as create_connection, patch("logging.info"):
+            ready = _wait_for_rtp_endpoints(
+                ("subscriber", "--rtp-endpoints", "127.0.0.1:8089"),
+                stop_event,
+            )
+
+        self.assertTrue(ready)
+        self.assertEqual(create_connection.call_count, 2)
+        connection.close.assert_called_once_with()
+
+    def test_endpoint_wait_stops_without_launching_subscriber(self) -> None:
+        stop_event = _FakeStopEvent([True])
+
+        with patch(
+            "rtp_llm.utils.kvcm_subscriber_launcher.socket.create_connection",
+            side_effect=OSError("not ready"),
+        ), patch("logging.info"):
+            ready = _wait_for_rtp_endpoints(
+                ("subscriber", "--rtp-endpoints", "127.0.0.1:8089"),
+                stop_event,
+            )
+
+        self.assertFalse(ready)
 
     def test_shutdown_force_kills_subscriber_after_grace_timeout(self) -> None:
         child = MagicMock(pid=105)

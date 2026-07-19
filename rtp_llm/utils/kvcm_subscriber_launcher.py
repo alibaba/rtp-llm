@@ -26,6 +26,8 @@ _FALSE_VALUES = {"", "0", "false", "no", "off"}
 _RESTART_INTERVAL_SECONDS = 5.0
 _CHILD_POLL_INTERVAL_SECONDS = 0.2
 _CHILD_SHUTDOWN_TIMEOUT_SECONDS = 10.0
+_ENDPOINT_POLL_INTERVAL_SECONDS = 0.2
+_ENDPOINT_PROBE_TIMEOUT_SECONDS = 1.0
 _RETRY_LOG_EVERY = 12
 
 
@@ -206,6 +208,62 @@ def _log_optional_failure(
     )
 
 
+def _parse_endpoint(endpoint: str) -> tuple[str, int]:
+    if endpoint.startswith("["):
+        closing_bracket = endpoint.find("]")
+        if (
+            closing_bracket < 0
+            or endpoint[closing_bracket + 1 : closing_bracket + 2] != ":"
+        ):
+            raise ValueError(f"invalid RTP endpoint: {endpoint}")
+        host = endpoint[1:closing_bracket]
+        port_text = endpoint[closing_bracket + 2 :]
+    else:
+        host, separator, port_text = endpoint.rpartition(":")
+        if not separator:
+            raise ValueError(f"invalid RTP endpoint: {endpoint}")
+
+    try:
+        port = int(port_text)
+    except ValueError:
+        raise ValueError(f"invalid RTP endpoint port: {endpoint}") from None
+    if not host or not 0 < port <= 65535:
+        raise ValueError(f"invalid RTP endpoint: {endpoint}")
+    return host, port
+
+
+def _wait_for_rtp_endpoints(command: tuple[str, ...], stop_event) -> bool:
+    endpoint_value = command[command.index("--rtp-endpoints") + 1]
+    endpoints = [_parse_endpoint(item) for item in endpoint_value.split(",")]
+    logged_wait = False
+
+    while not stop_event.is_set():
+        pending = []
+        for host, port in endpoints:
+            try:
+                connection = socket.create_connection(
+                    (host, port),
+                    timeout=_ENDPOINT_PROBE_TIMEOUT_SECONDS,
+                )
+                connection.close()
+            except OSError:
+                pending.append(f"{host}:{port}")
+
+        if not pending:
+            if logged_wait:
+                logging.info("RTP Cache API endpoints are ready: %s", endpoint_value)
+            return True
+        if not logged_wait:
+            logging.info(
+                "waiting for RTP Cache API endpoints before starting KVCM Subscriber: %s",
+                ",".join(pending),
+            )
+            logged_wait = True
+        if stop_event.wait(_ENDPOINT_POLL_INTERVAL_SECONDS):
+            return False
+    return False
+
+
 def _supervise_kvcm_subscriber(
     command: tuple[str, ...],
     required: bool,
@@ -230,6 +288,8 @@ def _supervise_kvcm_subscriber(
         reason = ""
         exc_info = None
         try:
+            if not _wait_for_rtp_endpoints(command, stop_event):
+                return
             process = subprocess.Popen(
                 list(command),
                 env=os.environ.copy(),
