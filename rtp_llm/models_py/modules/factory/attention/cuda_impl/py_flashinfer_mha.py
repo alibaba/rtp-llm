@@ -707,7 +707,7 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        self.fmha_impl = PyFlashinferDecodeAttnOp(attn_configs)
+        self.fmha_impl = self._create_fmha_impl(attn_configs)
         self.attn_configs = attn_configs
 
         # Store input info
@@ -735,6 +735,11 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
             self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
 
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+
+    def _create_fmha_impl(
+        self, attn_configs: AttentionConfigs
+    ) -> PyFlashinferDecodeAttnOp:
+        return PyFlashinferDecodeAttnOp(attn_configs)
 
     @classmethod
     def support(

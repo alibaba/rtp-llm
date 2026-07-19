@@ -307,3 +307,10 @@ py_test(
     imports=[],
     exec_properties={"gpu": "H20"},
 )
+
+py_test(
+    name = "minimax_m3_eagle1_test",
+    srcs = ["minimax_m3_eagle1_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    timeout = "short",
+)

@@ -1,5 +1,3 @@
-import logging
-import os
 from typing import Any, Dict, NamedTuple, Optional
 
 import torch
@@ -468,58 +466,15 @@ class GenericMoeDecoderLayer(nn.Module):
 
         # Get quant_config from model_config
         quant_config = config.quant_config
-        if config.attn_config.use_mla:
-            self.self_attn = MlaAttention(
-                config.attn_config,
-                parallelism_config,
-                weights,
-                layer_idx,
-                config.layernorm_eps,
-                quant_config,
-                hw_kernel_config,
-                global_weights=global_weights,
-                has_indexer=dsa_layer_has_indexer(config, layer_idx),
-                reuse_topk_indices=dsa_layer_skips_topk(config, layer_idx),
-            )
-        else:
-            attn_configs = config.getAttentionConfigs(
-                parallelism_config.get_attn_tp_size()
-            )
-            # MiniMax-M3 sparse layers (MSA): route to the Triton sparse
-            # attention path when this layer is sparse AND its index-branch
-            # weights are present (gated by M3_LOAD_MSA_INDEX at load time).
-            # Otherwise fall back to dense CausalAttention (numerically
-            # equivalent to MSA for short prompts).
-            msa_cfg = getattr(config, "msa_sparse_config", None)
-            is_msa_layer = (
-                msa_cfg is not None
-                and layer_idx in set(msa_cfg.get("sparse_layer_ids", []))
-                and W.msa_idx_q_w in weights
-            )
-            if is_msa_layer:
-                from rtp_llm.models_py.modules.hybrid.msa_attention import MSAAttention
-
-                self.self_attn = MSAAttention(
-                    attn_configs,
-                    parallelism_config,
-                    weights,
-                    config.layernorm_eps,
-                    msa_cfg,
-                    layer_idx,
-                    quant_config,
-                    hw_kernel_config,
-                )
-            else:
-                self.self_attn = CausalAttention(
-                    attn_configs,
-                    parallelism_config,
-                    weights,
-                    config.layernorm_eps,
-                    quant_config,
-                    hw_kernel_config,
-                    layer_idx,
-                )
-        self._is_msa_attn = self.self_attn.__class__.__name__ == "MSAAttention"
+        self.self_attn = self._create_attention(
+            config,
+            parallelism_config,
+            weights,
+            global_weights,
+            layer_idx,
+            quant_config,
+            hw_kernel_config,
+        )
 
         # Determine if this is a Dense layer (before first MoE layer or dense only)
         if layer_idx not in config.moe_layer_index:
@@ -560,29 +515,11 @@ class GenericMoeDecoderLayer(nn.Module):
         self._fuse_input_norm_quant = False
         self._fuse_input_norm_quant_params = None
         if _fuse_on and (fused_add_rmsnorm_fp8_quant_with_bf16_output is not None):
-            if isinstance(self.self_attn, CausalAttention):
-                _qkv = getattr(self.self_attn, "qkv_proj", None)
-                _params = _get_fused_fp8_quant_params(_qkv)
-                if _params is not None:
-                    self._fuse_input_norm_quant = True
-                    self._fuse_input_norm_quant_params = _params
-            elif isinstance(self.self_attn, MlaAttention):
-                _proj = getattr(self.self_attn, "fused_qkv_a_proj", None) or getattr(
-                    self.self_attn, "fused_qkv_proj", None
-                )
-                _params = _get_fused_fp8_quant_params(_proj)
-                if _params is not None:
-                    self._fuse_input_norm_quant = True
-                    self._fuse_input_norm_quant_params = _params
-            elif self._is_msa_attn:
-                # MSA's qkv_proj is built by LinearFactory and is FP8 under M3
-                # quant config; the idx_q/idx_k branches stay bf16 and consume
-                # the bf16_normed output from the fused kernel.
-                _qkv = getattr(self.self_attn, "qkv_proj", None)
-                _params = _get_fused_fp8_quant_params(_qkv)
-                if _params is not None:
-                    self._fuse_input_norm_quant = True
-                    self._fuse_input_norm_quant_params = _params
+            projection = self._input_quant_projection()
+            params = _get_fused_fp8_quant_params(projection)
+            if params is not None:
+                self._fuse_input_norm_quant = True
+                self._fuse_input_norm_quant_params = params
 
         # Fuse post_attention_layernorm + fp8_quant for DenseMLP
         self._fuse_post_norm_quant_params = (
@@ -611,6 +548,84 @@ class GenericMoeDecoderLayer(nn.Module):
             and self._fuse_post_norm_quant_moe_params is not None
         )
 
+    def _create_attention(
+        self,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        weights: Dict[str, torch.Tensor],
+        global_weights: Dict[str, torch.Tensor],
+        layer_idx: int,
+        quant_config: Any,
+        hw_kernel_config: Optional["HWKernelConfig"],
+    ) -> nn.Module:
+        if config.attn_config.use_mla:
+            return MlaAttention(
+                config.attn_config,
+                parallelism_config,
+                weights,
+                layer_idx,
+                config.layernorm_eps,
+                quant_config,
+                hw_kernel_config,
+                global_weights=global_weights,
+                has_indexer=dsa_layer_has_indexer(config, layer_idx),
+                reuse_topk_indices=dsa_layer_skips_topk(config, layer_idx),
+            )
+        attn_configs = config.getAttentionConfigs(parallelism_config.get_attn_tp_size())
+        return CausalAttention(
+            attn_configs,
+            parallelism_config,
+            weights,
+            config.layernorm_eps,
+            quant_config,
+            hw_kernel_config,
+            layer_idx,
+        )
+
+    def _input_quant_projection(self) -> Optional[nn.Module]:
+        if isinstance(self.self_attn, CausalAttention):
+            return getattr(self.self_attn, "qkv_proj", None)
+        if isinstance(self.self_attn, MlaAttention):
+            return getattr(self.self_attn, "fused_qkv_a_proj", None) or getattr(
+                self.self_attn, "fused_qkv_proj", None
+            )
+        return None
+
+    def _forward_attention(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: FMHAImplBase,
+        kv_cache: Optional[LayerKVCache],
+        prev_topk_indices: Optional[torch.Tensor],
+        force_reuse_topk_indices: bool,
+        attn_inputs: Optional[Any],
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        quantized_inputs = {}
+        if x_fp8 is not None:
+            quantized_inputs = {"x_fp8": x_fp8, "x_scale": x_scale}
+
+        if isinstance(self.self_attn, MlaAttention):
+            hidden_states, topk_indices = self.self_attn(
+                hidden_states=hidden_states,
+                fmha_impl=fmha_impl,
+                kv_cache=kv_cache,
+                prev_topk_indices=prev_topk_indices,
+                force_reuse_topk_indices=force_reuse_topk_indices,
+                return_topk=True,
+                **quantized_inputs,
+            )
+            return hidden_states, topk_indices
+
+        hidden_states = self.self_attn(
+            hidden_states=hidden_states,
+            fmha_impl=fmha_impl,
+            kv_cache=kv_cache,
+            **quantized_inputs,
+        )
+        return hidden_states, None
+
     def clone_for_cuda_graph(self) -> "GenericMoeDecoderLayer":
         clone = object.__new__(type(self))
         nn.Module.__init__(clone)
@@ -628,7 +643,6 @@ class GenericMoeDecoderLayer(nn.Module):
         clone._fuse_post_norm_quant_params = self._fuse_post_norm_quant_params
         clone._fuse_post_norm_quant_moe = self._fuse_post_norm_quant_moe
         clone._fuse_post_norm_quant_moe_params = self._fuse_post_norm_quant_moe_params
-        clone._is_msa_attn = self._is_msa_attn
         return clone
 
     def forward(
@@ -641,87 +655,38 @@ class GenericMoeDecoderLayer(nn.Module):
         force_reuse_topk_indices: bool = False,
         attn_inputs: Optional[Any] = None,
     ) -> DecodeLayerOutput:
-        topk_indices = None
-        if self._is_msa_attn:
-            # Sparse MSA path: bypass the shared FMHA impl; the MSA module
-            # consumes PyAttentionInputs directly and runs its own index
-            # branch + Triton sparse kernels. When ``_fuse_input_norm_quant``
-            # is on we still get the fused residual-add+rmsnorm+fp8-quant,
-            # but the bf16 normed output feeds the index F.linear branches
-            # while the fp8 output feeds the main qkv_proj — same trick as
-            # the MoE shared-expert path uses for its dual-output fusion.
-            if self._fuse_input_norm_quant and hidden_states.dim() == 2:
-                _params = self._fuse_input_norm_quant_params
-                assert _params is not None
-                bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
-                    hidden_states,
-                    residual,
-                    self.input_layernorm.weight.data,
-                    self.input_layernorm.variance_epsilon,
-                    group_size=_params.group_size,
-                    scale_ue8m0=_params.scale_ue8m0,
-                    round_to_pow2=_params.round_to_pow2,
-                )
-                hidden_states = self.self_attn(
-                    hidden_states=bf16_hs,
-                    attn_inputs=attn_inputs,
-                    kv_cache=kv_cache,
-                    x_fp8=fp8_hs,
-                    x_scale=scale,
-                )
-            else:
-                hidden_states, residual = self.input_layernorm(hidden_states, residual)
-                hidden_states = self.self_attn(
-                    hidden_states=hidden_states,
-                    attn_inputs=attn_inputs,
-                    kv_cache=kv_cache,
-                )
-        elif self._fuse_input_norm_quant and hidden_states.dim() == 2:
-            _params = self._fuse_input_norm_quant_params
-            assert _params is not None
+        if self._fuse_input_norm_quant and hidden_states.dim() == 2:
+            params = self._fuse_input_norm_quant_params
+            assert params is not None
             bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
                 hidden_states,
                 residual,
                 self.input_layernorm.weight.data,
                 self.input_layernorm.variance_epsilon,
-                group_size=_params.group_size,
-                scale_ue8m0=_params.scale_ue8m0,
-                round_to_pow2=_params.round_to_pow2,
+                group_size=params.group_size,
+                scale_ue8m0=params.scale_ue8m0,
+                round_to_pow2=params.round_to_pow2,
             )
-            if isinstance(self.self_attn, MlaAttention):
-                hidden_states, topk_indices = self.self_attn(
-                    hidden_states=bf16_hs,
-                    fmha_impl=fmha_impl,
-                    kv_cache=kv_cache,
-                    x_fp8=fp8_hs,
-                    x_scale=scale,
-                    prev_topk_indices=prev_topk_indices,
-                    force_reuse_topk_indices=force_reuse_topk_indices,
-                    return_topk=True,
-                )
-            else:
-                hidden_states = self.self_attn(
-                    hidden_states=bf16_hs,
-                    fmha_impl=fmha_impl,
-                    kv_cache=kv_cache,
-                    x_fp8=fp8_hs,
-                    x_scale=scale,
-                )
+            hidden_states, topk_indices = self._forward_attention(
+                bf16_hs,
+                fmha_impl,
+                kv_cache,
+                prev_topk_indices,
+                force_reuse_topk_indices,
+                attn_inputs,
+                fp8_hs,
+                scale,
+            )
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-            if isinstance(self.self_attn, MlaAttention):
-                hidden_states, topk_indices = self.self_attn(
-                    hidden_states=hidden_states,
-                    fmha_impl=fmha_impl,
-                    kv_cache=kv_cache,
-                    prev_topk_indices=prev_topk_indices,
-                    force_reuse_topk_indices=force_reuse_topk_indices,
-                    return_topk=True,
-                )
-            else:
-                hidden_states = self.self_attn(
-                    hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
-                )
+            hidden_states, topk_indices = self._forward_attention(
+                hidden_states,
+                fmha_impl,
+                kv_cache,
+                prev_topk_indices,
+                force_reuse_topk_indices,
+                attn_inputs,
+            )
 
         if self._fuse_post_norm_quant and hidden_states.dim() == 2:
             _params = self._fuse_post_norm_quant_params
@@ -754,12 +719,13 @@ class GenericMoeDecoderLayer(nn.Module):
                 hidden_states, residual
             )
             hidden_states = self.mlp(hidden_states)
-
         return DecodeLayerOutput(hidden_states, residual, topk_indices)
 
 
 class GenericMoeModel(GptModelBase):
     """Generic MoE model supporting Qwen3-MoE, internal model, and other MoE architectures."""
+
+    decoder_layer_cls = GenericMoeDecoderLayer
 
     def __init__(
         self,
@@ -793,7 +759,7 @@ class GenericMoeModel(GptModelBase):
         )
         self.layers = nn.ModuleList(
             [
-                GenericMoeDecoderLayer(
+                self.decoder_layer_cls(
                     model_config,
                     parallelism_config,
                     weights.weights[idx],
