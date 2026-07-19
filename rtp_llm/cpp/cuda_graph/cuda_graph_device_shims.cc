@@ -167,6 +167,12 @@ void graphMemGetInfo(size_t* free_bytes, size_t* total_bytes) {
 #endif
 }
 
+void graphEmptyCache() {
+#if USING_CUDA
+    c10::cuda::CUDACachingAllocator::emptyCache();
+#endif
+}
+
 size_t graphReservedBytes() {
 #if USING_CUDA
     return c10::cuda::CUDACachingAllocator::getDeviceStats(at::cuda::current_device()).reserved_bytes[0].current;

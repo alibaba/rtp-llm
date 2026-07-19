@@ -1077,14 +1077,22 @@ void CudaGraphRunner::initCapture() {
             // same per-request KV length capturePrefill() will see. Otherwise
             // get_mla_impl() chooses use_fast_path=True (dense) here while every
             // captured graph picks sparse — same kind of mismatch as the warmup
-            // (see initCaptureAttentionInputs note). Keep prefix=0 path (embedding
+            // (see initCaptureAttentionInputs note). This probe collapses all
+            // max_bs_ requests into one request with max_num_token_ input tokens,
+            // so its prefix must shrink by max_num_token_, not num_tokens_per_bs_.
+            // Keeping the per-request prefix here makes prefix + input exceed
+            // max_seq_len_ whenever max_bs_ > 1. Keep prefix=0 path (embedding
             // prefill) unchanged.
             const bool is_draft_prefill_post = num_tokens_per_bs_ != max_seq_len_ && max_seq_len_ > num_tokens_per_bs_;
-            const int  post_prefix_len       = is_draft_prefill_post ? (max_seq_len_ - num_tokens_per_bs_) : 0;
+            const int  post_prefix_len       = is_draft_prefill_post ? (max_seq_len_ - max_num_token_) : 0;
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_host[1] = max_num_token_;
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens[1]      = max_num_token_;
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens[1]   = max_num_token_ + post_prefix_len;
             capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths[0]   = max_num_token_;
+            if (capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.defined()
+                && capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.numel() > 0) {
+                capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths[0] = post_prefix_len;
+            }
 
             PyModelInputs inputs = capture_mem_hold_.py_model_inputs_;
             inputs.attention_inputs.cu_seqlens_host =
@@ -1164,6 +1172,11 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     {
         // sync before capture
         cuda_graph::graphDeviceSynchronize();
+        // Captured allocations use a private graph pool and cannot reuse free blocks
+        // retained by the default caching allocator. Release those inactive blocks
+        // after warmup so memory-constrained captures do not OOM despite having a
+        // large reserved-but-unallocated default pool.
+        cuda_graph::graphEmptyCache();
 
         CudaGraphStreamLife stream_life(capture_stream_);
         auto&               graph               = graph_instances_[key].graph_;

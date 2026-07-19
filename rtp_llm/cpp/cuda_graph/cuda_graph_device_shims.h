@@ -135,6 +135,7 @@ void            exit_graph_capture(GraphNcclCaptureContext* ctx);
 void            graphMemcpyAsync(void* dst, const void* src, size_t size, GraphMemcpyKind kind, void* stream);
 void            graphDeviceSynchronize();
 void            graphMemGetInfo(size_t* free_bytes, size_t* total_bytes);
+void            graphEmptyCache();
 size_t          graphReservedBytes();
 size_t          graphAllocatedBytes();
 GraphPoolHandle graphPoolHandle();
