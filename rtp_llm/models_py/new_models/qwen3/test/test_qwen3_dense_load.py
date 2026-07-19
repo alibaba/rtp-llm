@@ -162,6 +162,17 @@ class LinearPartitionTest(unittest.TestCase):
                 params_dtype=torch.float32,
             )
 
+    def test_qkv_rejects_misaligned_gcd_topology(self):
+        with self.assertRaisesRegex(ValueError, "mutually divisible"):
+            QKVParallelLinear(
+                hidden_size=12,
+                num_heads=12,
+                num_kv_heads=6,
+                head_dim=1,
+                tp_size=4,
+                params_dtype=torch.float32,
+            )
+
 
 class Qwen3LoadTest(unittest.TestCase):
     def _config(self):
@@ -517,7 +528,7 @@ class Qwen3LoadTest(unittest.TestCase):
             model.load_weights(weights)
 
     def test_unsupported_quantization_fails_fast(self):
-        config = QuantizationConfig("fp8")
+        config = QuantizationConfig("definitely_unsupported")
         with self.assertRaisesRegex(ValueError, "not supported"):
             QKVParallelLinear(
                 hidden_size=4,
