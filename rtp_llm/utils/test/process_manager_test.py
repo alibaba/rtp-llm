@@ -309,6 +309,42 @@ class TestProcessManager(unittest.TestCase):
             )
         )
 
+    def test_auxiliary_exit_is_reaped_while_waiting_for_health_check(self):
+        """A failed optional child must not remain a zombie during startup"""
+        self.manager.monitor_interval = 0.01
+        required_process = multiprocessing.Process(
+            target=dummy_worker, args=(1,)
+        )
+        auxiliary_process = multiprocessing.Process(target=immediate_crash_worker)
+        self.manager.add_process(required_process)
+        self.manager.add_auxiliary_process(auxiliary_process)
+        required_process.start()
+        auxiliary_process.start()
+
+        def delayed_ready():
+            time.sleep(0.1)
+            return True
+
+        self.manager.register_health_check(
+            processes=[required_process],
+            process_name="delayed_service",
+            check_ready_fn=delayed_ready,
+            retry_interval_seconds=0.01,
+        )
+
+        with patch("logging.warning") as warning:
+            self.assertTrue(self.manager.run_health_checks(timeout=1))
+
+        self.assertIsNotNone(auxiliary_process.exitcode)
+        self.assertTrue(required_process.is_alive())
+        self.assertFalse(self.manager.terminated)
+        self.assertTrue(
+            any(
+                "required processes will continue" in str(call)
+                for call in warning.call_args_list
+            )
+        )
+
     def test_required_crash_terminates_auxiliary_process(self):
         """A service failure still cleans up optional children"""
         self.manager.monitor_interval = 0.01

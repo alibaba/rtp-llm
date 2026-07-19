@@ -319,7 +319,26 @@ class ProcessManager:
         )
 
         for thread in self.health_check_threads:
-            thread.join(timeout=timeout)
+            if not self.auxiliary_processes:
+                # Preserve the original wait path when no optional service is enabled.
+                thread.join(timeout=timeout)
+                continue
+
+            # Health checks can take much longer than it takes an optional child to
+            # fail. Poll only in this opt-in path so exited children are reaped and
+            # reported before the regular process-monitoring loop starts.
+            deadline = None if timeout is None else time.monotonic() + timeout
+            poll_interval = max(0.01, min(float(self.monitor_interval), 1.0))
+            while thread.is_alive():
+                wait_timeout = poll_interval
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    wait_timeout = min(wait_timeout, remaining)
+                thread.join(timeout=wait_timeout)
+                self._report_exited_auxiliary_processes()
+            self._report_exited_auxiliary_processes()
 
         # Check results
         all_ready = True
