@@ -723,7 +723,7 @@ size_t GenerateStream::maxTokenNum() const {
 }
 
 bool GenerateStream::needFinish() {
-    return seqLength() >= maxTokenNum() || needFinishBySPTokens();
+    return needFinishBySPTokens() || seqLength() >= maxTokenNum();
 }
 
 bool GenerateStream::needFinishBySPTokens() {
@@ -737,6 +737,7 @@ bool GenerateStream::needFinishBySPTokens() {
         matchEosToken();
         matchStopWordsList();
     }
+    matchThinkEndToken();
 
     // check if all batch finished
     return std::all_of(sub_generate_status_.begin(), sub_generate_status_.end(), [](StreamState state) {
@@ -799,6 +800,24 @@ void GenerateStream::matchStopWordsList(int batch_id) {
         }
     }
     if (match) {
+        sub_generate_status_[batch_id] = StreamState::FINISHED;
+    }
+}
+
+void GenerateStream::matchThinkEndToken() {
+    for (int i = 0; i < currentBatchSize(); ++i) {
+        matchThinkEndToken(i);
+    }
+}
+
+void GenerateStream::matchThinkEndToken(int batch_id) {
+    const auto& config = generate_input_->generate_config;
+    if (!maxTokensExcludeThinking() || !config->in_think_mode || config->end_think_token_ids.empty()) {
+        return;
+    }
+
+    if (complete_token_ids_->matchThinkEndToken(
+            batch_id, config->end_think_token_ids, inputLength(), config->max_new_tokens)) {
         sub_generate_status_[batch_id] = StreamState::FINISHED;
     }
 }

@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
+#include <algorithm>
 #include <sstream>
 
 namespace rtp_llm {
@@ -134,6 +135,38 @@ bool CompleteTokenIds::matchStopWordsList(int batch_id, const std::vector<int>& 
             seq_length_ = i;
             return true;
         }
+    }
+    return false;
+}
+
+bool CompleteTokenIds::matchThinkEndToken(int                     batch_id,
+                                          const std::vector<int>& end_think_token_ids,
+                                          int                     input_length,
+                                          int                     max_new_tokens) {
+    if (end_think_token_ids.empty() || max_new_tokens < 0) {
+        return false;
+    }
+
+    int*      token_ids     = data(batch_id);
+    const int end_token_num = static_cast<int>(end_think_token_ids.size());
+    const int search_begin  = std::max(start_check_seq_length_, input_length + end_token_num);
+
+    for (int i = search_begin; i <= seq_length_; ++i) {
+        const int begin_index = i - end_token_num;
+        bool      match       = begin_index >= input_length;
+        for (int j = 0; match && j < end_token_num; ++j) {
+            match = token_ids[begin_index + j] == end_think_token_ids[j];
+        }
+        if (!match) {
+            continue;
+        }
+
+        const int max_seq_length_after_think = i + max_new_tokens;
+        if (seq_length_ >= max_seq_length_after_think) {
+            seq_length_ = max_seq_length_after_think;
+            return true;
+        }
+        return false;
     }
     return false;
 }

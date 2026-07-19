@@ -284,6 +284,8 @@ public:
     void matchEosToken(int batch_id);
     void matchStopWordsList();
     void matchStopWordsList(int batch_id);
+    void matchThinkEndToken();
+    void matchThinkEndToken(int batch_id);
 
     void        setMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter);
     void        reportMetric();

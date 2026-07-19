@@ -18,6 +18,7 @@ class GenerateStreamBuilder {
 public:
     GenerateStreamBuilder() {
         model_config_.max_seq_len = 2048;
+        model_config_.vocab_size  = 128;
     }
 
     CacheConfig init_config() {
@@ -124,7 +125,7 @@ TEST_F(GenerateStreamTest, testMaxTokenNumExcludesThinkingTokens) {
     config->end_think_token_ids   = {8, 9};
     auto stream                   = builder.createContextStream({1, 2}, config);
 
-    ASSERT_EQ(stream->maxTokenNum(), 7);
+    ASSERT_EQ(stream->maxTokenNum(), 8);
 
     auto processors = stream->getAllLogitsProcessorPtr();
     ASSERT_FALSE(processors.empty());
@@ -134,6 +135,45 @@ TEST_F(GenerateStreamTest, testMaxTokenNumExcludesThinkingTokens) {
     think_processor->updateStatus(torch::tensor({{8, 9}}, torch::kInt32), 2);
     ASSERT_EQ(think_processor->finishedThinkOutputLen(), 2);
     ASSERT_EQ(stream->maxTokenNum(), 5);
+}
+
+TEST_F(GenerateStreamTest, testThinkEndTrimsMtpBatchToOneContentToken) {
+    autil::EnvGuard guard("RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING", "true");
+    auto            builder       = GenerateStreamBuilder();
+    auto            config        = std::make_shared<GenerateConfig>();
+    config->max_new_tokens        = 1;
+    config->in_think_mode         = true;
+    config->max_thinking_tokens   = 100;
+    config->begin_think_token_ids = {7};
+    config->end_think_token_ids   = {8, 9};
+    auto stream                   = builder.createContextStream({1, 2}, config);
+
+    // Simulate one speculative accept batch crossing the think boundary:
+    // one think token, a two-token </think>, and two content tokens.
+    auto new_tokens = torch::tensor({{10, 8, 9, 11, 12}}, torch::kInt32);
+    stream->update({new_tokens, 5});
+
+    ASSERT_FALSE(stream->hasError());
+    ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+    ASSERT_EQ(stream->completeTokenIdsVec(), std::vector<int>({1, 2, 10, 8, 9, 11}));
+
+    auto processors = stream->getAllLogitsProcessorPtr();
+    ASSERT_FALSE(processors.empty());
+    auto think_processor = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processors[0]);
+    ASSERT_NE(think_processor, nullptr);
+    ASSERT_EQ(think_processor->finishedThinkOutputLen(), 3);
+    ASSERT_EQ(think_processor->acceptedTokenLen(), 4);
+
+    // The dynamic limit is input + actual think output + exactly one content token.
+    ASSERT_EQ(stream->seqLength(), stream->maxTokenNum());
+    ASSERT_EQ(stream->outputTokenLen() - think_processor->finishedThinkOutputLen(), 1);
+
+    auto output = stream->nextOutput();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().generate_outputs.size(), 1);
+    ASSERT_TRUE(output.value().generate_outputs[0].finished);
+    ASSERT_EQ(output.value().generate_outputs[0].output_ids.numel(), 4);
+    ASSERT_EQ(output.value().generate_outputs[0].output_ids.data_ptr<int32_t>()[3], 11);
 }
 
 // clearMtpAsyncDeviceState rejects stale epochs. A worker that
