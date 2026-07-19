@@ -4,7 +4,10 @@ import logging
 import multiprocessing
 import os
 import shlex
+import signal
 import socket
+import subprocess
+import threading
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -19,6 +22,11 @@ _REQUIRED_ENV = "KVCM_SUBSCRIBER_REQUIRED"
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"", "0", "false", "no", "off"}
+
+_RESTART_INTERVAL_SECONDS = 5.0
+_CHILD_POLL_INTERVAL_SECONDS = 0.2
+_CHILD_SHUTDOWN_TIMEOUT_SECONDS = 10.0
+_RETRY_LOG_EVERY = 12
 
 
 def is_kvcm_subscriber_required() -> bool:
@@ -154,8 +162,115 @@ def build_kvcm_subscriber_command(
     )
 
 
-def _exec_kvcm_subscriber(command: tuple[str, ...]) -> None:
-    os.execvpe(command[0], list(command), os.environ.copy())
+def _signal_process_group(process, signum: int) -> None:
+    try:
+        os.killpg(process.pid, signum)
+    except ProcessLookupError:
+        return
+    except OSError:
+        try:
+            if process.poll() is None:
+                process.send_signal(signum)
+        except OSError:
+            pass
+
+
+def _stop_subscriber_process(process) -> None:
+    if process.poll() is not None:
+        return
+    _signal_process_group(process, signal.SIGTERM)
+    try:
+        process.wait(timeout=_CHILD_SHUTDOWN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        _signal_process_group(process, signal.SIGKILL)
+        process.wait()
+
+
+def _log_optional_failure(
+    failure_count: int,
+    reason: str,
+    restart_interval_s: float,
+    *,
+    exc_info=None,
+) -> None:
+    if failure_count != 1 and failure_count % _RETRY_LOG_EVERY != 0:
+        return
+    logging.warning(
+        "optional KVCM Subscriber %s; restarting in %.1fs (failure %s)",
+        reason,
+        restart_interval_s,
+        failure_count,
+        exc_info=exc_info,
+    )
+
+
+def _supervise_kvcm_subscriber(
+    command: tuple[str, ...],
+    required: bool,
+    restart_interval_s: float,
+    *,
+    stop_event=None,
+) -> None:
+    """Keep the optional sidecar alive without changing RTP's ProcessManager."""
+
+    if stop_event is None:
+        stop_event = threading.Event()
+
+    def request_shutdown(_signum, _frame) -> None:
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, request_shutdown)
+    signal.signal(signal.SIGINT, request_shutdown)
+
+    failure_count = 0
+    while not stop_event.is_set():
+        process = None
+        reason = ""
+        exc_info = None
+        try:
+            process = subprocess.Popen(
+                list(command),
+                env=os.environ.copy(),
+                start_new_session=True,
+            )
+            logging.info(
+                "KVCM Subscriber child started with pid %s",
+                process.pid,
+            )
+            while not stop_event.wait(_CHILD_POLL_INTERVAL_SECONDS):
+                returncode = process.poll()
+                if returncode is not None:
+                    break
+
+            if stop_event.is_set():
+                _stop_subscriber_process(process)
+                return
+
+            returncode = process.poll()
+            if returncode is None:
+                continue
+            if required:
+                raise RuntimeError(
+                    f"required KVCM Subscriber exited with code {returncode}"
+                )
+            reason = f"exited with code {returncode}"
+        except Exception as exc:
+            if process is not None:
+                _stop_subscriber_process(process)
+            if required:
+                raise
+            reason = f"failed with {exc.__class__.__name__}: {exc}"
+            exc_info = (exc.__class__, exc, exc.__traceback__)
+
+        failure_count += 1
+        _log_optional_failure(
+            failure_count,
+            reason,
+            restart_interval_s,
+            exc_info=exc_info,
+        )
+        if stop_event.wait(restart_interval_s):
+            return
 
 
 def start_kvcm_subscriber(
@@ -176,9 +291,10 @@ def start_kvcm_subscriber(
             command[command.index("--rtp-endpoints") + 1],
         )
         process = multiprocessing.Process(
-            target=_exec_kvcm_subscriber,
-            args=(command,),
-            name="kvcm_subscriber",
+            target=_supervise_kvcm_subscriber,
+            args=(command, required, _RESTART_INTERVAL_SECONDS),
+            name="kvcm_subscriber_supervisor",
+            daemon=True,
         )
         process.start()
         return process

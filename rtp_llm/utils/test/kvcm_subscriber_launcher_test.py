@@ -1,16 +1,41 @@
 from __future__ import annotations
 
 import os
+import signal
+import subprocess
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from rtp_llm.utils.kvcm_subscriber_launcher import (
+    _log_optional_failure,
+    _stop_subscriber_process,
+    _supervise_kvcm_subscriber,
     build_kvcm_subscriber_command,
     is_kvcm_subscriber_required,
     start_kvcm_subscriber,
 )
+
+
+class _FakeStopEvent:
+    def __init__(self, wait_results: list[bool]) -> None:
+        self._is_set = False
+        self._wait_results = list(wait_results)
+
+    def is_set(self) -> bool:
+        return self._is_set
+
+    def set(self) -> None:
+        self._is_set = True
+
+    def wait(self, _timeout: float) -> bool:
+        if self._is_set:
+            return True
+        result = self._wait_results.pop(0)
+        if result:
+            self._is_set = True
+        return result
 
 
 class _ServerConfig:
@@ -255,7 +280,7 @@ class KvcmSubscriberLauncherTest(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "spawn failed"):
                     start_kvcm_subscriber(_configs(), required=True)
 
-    def test_start_registers_exec_child_with_expected_command(self) -> None:
+    def test_start_registers_supervisor_with_expected_command(self) -> None:
         with tempfile.NamedTemporaryFile() as config:
             with patch.dict(
                 os.environ,
@@ -272,10 +297,118 @@ class KvcmSubscriberLauncherTest(unittest.TestCase):
         self.assertIs(result, process)
         process.start.assert_called_once_with()
         kwargs = process_cls.call_args.kwargs
-        self.assertEqual(kwargs["name"], "kvcm_subscriber")
+        self.assertEqual(kwargs["name"], "kvcm_subscriber_supervisor")
+        self.assertTrue(kwargs["daemon"])
+        self.assertIs(kwargs["target"], _supervise_kvcm_subscriber)
+        self.assertFalse(kwargs["args"][1])
         self.assertEqual(
             kwargs["args"][0][kwargs["args"][0].index("--rtp-endpoints") + 1],
             "127.0.0.1:8089",
+        )
+
+    def test_optional_supervisor_restarts_exited_subscriber(self) -> None:
+        first = MagicMock(pid=101)
+        first.poll.return_value = 7
+        second = MagicMock(pid=102)
+        second.poll.return_value = 8
+        stop_event = _FakeStopEvent([False, False, False, True])
+
+        with patch("signal.signal"), patch(
+            "rtp_llm.utils.kvcm_subscriber_launcher.subprocess.Popen",
+            side_effect=[first, second],
+        ) as popen, patch("logging.warning") as warning:
+            _supervise_kvcm_subscriber(
+                ("subscriber", "--config", "/tmp/config.yaml"),
+                False,
+                0.01,
+                stop_event=stop_event,
+            )
+
+        self.assertEqual(popen.call_count, 2)
+        warning.assert_called_once()
+        self.assertIn("exited with code 7", str(warning.call_args))
+
+    def test_optional_supervisor_retries_exec_failure(self) -> None:
+        stop_event = _FakeStopEvent([True])
+
+        with patch("signal.signal"), patch(
+            "rtp_llm.utils.kvcm_subscriber_launcher.subprocess.Popen",
+            side_effect=FileNotFoundError("subscriber missing"),
+        ), patch("logging.warning") as warning:
+            _supervise_kvcm_subscriber(
+                ("missing-subscriber",),
+                False,
+                0.01,
+                stop_event=stop_event,
+            )
+
+        warning.assert_called_once()
+        self.assertIn("FileNotFoundError", str(warning.call_args))
+        self.assertIsInstance(warning.call_args.kwargs["exc_info"], tuple)
+
+    def test_optional_restart_warning_is_throttled(self) -> None:
+        with patch("logging.warning") as warning:
+            for failure_count in range(1, 13):
+                _log_optional_failure(failure_count, "exited", 5.0)
+
+        self.assertEqual(warning.call_count, 2)
+
+    def test_required_supervisor_propagates_subscriber_exit(self) -> None:
+        child = MagicMock(pid=103)
+        child.poll.return_value = 9
+        stop_event = _FakeStopEvent([False])
+
+        with patch("signal.signal"), patch(
+            "rtp_llm.utils.kvcm_subscriber_launcher.subprocess.Popen",
+            return_value=child,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "required KVCM Subscriber exited with code 9",
+            ):
+                _supervise_kvcm_subscriber(
+                    ("subscriber",),
+                    True,
+                    0.01,
+                    stop_event=stop_event,
+                )
+
+    def test_supervisor_forwards_shutdown_to_subscriber_group(self) -> None:
+        child = MagicMock(pid=104)
+        child.poll.return_value = None
+        stop_event = _FakeStopEvent([True])
+
+        with patch("signal.signal"), patch(
+            "rtp_llm.utils.kvcm_subscriber_launcher.subprocess.Popen",
+            return_value=child,
+        ), patch("os.killpg") as killpg:
+            _supervise_kvcm_subscriber(
+                ("subscriber",),
+                False,
+                0.01,
+                stop_event=stop_event,
+            )
+
+        killpg.assert_called_once_with(104, signal.SIGTERM)
+        child.wait.assert_called_once()
+
+    def test_shutdown_force_kills_subscriber_after_grace_timeout(self) -> None:
+        child = MagicMock(pid=105)
+        child.poll.return_value = None
+        child.wait.side_effect = [
+            subprocess.TimeoutExpired("subscriber", 10),
+            None,
+        ]
+
+        with patch("os.killpg") as killpg:
+            _stop_subscriber_process(child)
+
+        self.assertEqual(
+            killpg.call_args_list,
+            [
+                call(105, signal.SIGTERM),
+                call(105, signal.SIGKILL),
+            ],
         )
 
 

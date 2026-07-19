@@ -20,10 +20,7 @@ from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.ops import RoleType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
-from rtp_llm.utils.kvcm_subscriber_launcher import (
-    is_kvcm_subscriber_required,
-    start_kvcm_subscriber,
-)
+from rtp_llm.utils.kvcm_subscriber_launcher import start_kvcm_subscriber
 from rtp_llm.utils.process_manager import ProcessManager
 
 setup_logging()
@@ -393,15 +390,7 @@ def start_server(py_env_configs: PyEnvConfigs):
             process_manager.add_processes(frontend_process)
 
         if backend_process is not None:
-            subscriber_required = is_kvcm_subscriber_required()
-            subscriber_process = start_kvcm_subscriber(
-                py_env_configs, required=subscriber_required
-            )
-            if subscriber_process is not None:
-                if subscriber_required:
-                    process_manager.add_process(subscriber_process)
-                else:
-                    process_manager.add_auxiliary_process(subscriber_process)
+            process_manager.add_process(start_kvcm_subscriber(py_env_configs))
 
         if not process_manager.run_health_checks():
             logging.error("[START_SERVER] Health checks failed")

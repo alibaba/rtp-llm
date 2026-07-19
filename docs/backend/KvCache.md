@@ -31,9 +31,10 @@ Optional overrides:
   Subscriber startup and runtime failures fail the RTP service. It defaults to
   the optional mode.
 
-Subscriber reporting is fail-open by default: invalid configuration, a missing
-executable, or a runtime crash disables cache-state reporting without taking
-down inference. The child remains lifecycle-managed and is stopped when RTP
-exits. Set `KVCM_SUBSCRIBER_REQUIRED=1` where reporting is mandatory; in that
-mode the same failures shut down the service group instead of serving without
-cache-state reporting.
+Subscriber reporting is fail-open by default: invalid configuration disables
+reporting without taking down inference, while a missing executable or runtime
+exit is retried by the dedicated supervisor. The supervisor is managed through
+RTP's unchanged process lifecycle and stops the whole Subscriber process group
+when RTP exits. Set `KVCM_SUBSCRIBER_REQUIRED=1` where reporting is mandatory;
+in that mode the same failures shut down the service group instead of retrying
+in the background.

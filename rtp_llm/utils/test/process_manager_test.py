@@ -17,15 +17,6 @@ def dummy_worker(duration=1, should_crash=False):
     time.sleep(duration)
 
 
-def immediate_crash_worker():
-    raise RuntimeError("Simulated crash")
-
-
-def terminable_worker(duration=5):
-    signal.signal(signal.SIGTERM, signal.SIG_DFL)
-    time.sleep(duration)
-
-
 def forever_worker(queue):
     # Signal that we are ready
     queue.put("ready")
@@ -58,7 +49,7 @@ class TestProcessManager(unittest.TestCase):
     def tearDown(self):
         """Clean up after tests"""
         # Ensure all processes are terminated
-        for proc in self.manager._all_managed_processes():
+        for proc in self.manager.processes:
             # Skip mock processes
             if hasattr(proc, "_mock_name"):
                 continue
@@ -79,7 +70,6 @@ class TestProcessManager(unittest.TestCase):
     def test_init(self):
         """Test ProcessManager initialization"""
         self.assertEqual(self.manager.processes, [])
-        self.assertEqual(self.manager.auxiliary_processes, [])
         self.assertFalse(self.manager.shutdown_requested)
         self.assertFalse(self.manager.terminated)
         self.assertEqual(self.manager.first_dead_time, 0)
@@ -108,15 +98,6 @@ class TestProcessManager(unittest.TestCase):
         # Test adding empty list
         self.manager.add_processes([])
         self.assertEqual(len(self.manager.processes), 3)
-
-    def test_add_auxiliary_process(self):
-        """Test adding a non-critical lifecycle-managed process"""
-        proc = multiprocessing.Process(target=dummy_worker)
-        self.manager.add_auxiliary_process(proc)
-        self.assertEqual(self.manager.auxiliary_processes, [proc])
-
-        self.manager.add_auxiliary_process(None)
-        self.assertEqual(self.manager.auxiliary_processes, [proc])
 
     def test_set_processes(self):
         """Test setting processes (replacing existing)"""
@@ -284,100 +265,6 @@ class TestProcessManager(unittest.TestCase):
             self.assertFalse(proc.is_alive())
         self.assertTrue(self.manager.terminated)
 
-    def test_auxiliary_crash_does_not_terminate_required_process(self):
-        """An optional child failure must not affect service availability"""
-        self.manager.monitor_interval = 0.01
-        required_process = multiprocessing.Process(
-            target=dummy_worker, args=(0.3,)
-        )
-        auxiliary_process = multiprocessing.Process(target=immediate_crash_worker)
-        self.manager.add_process(required_process)
-        self.manager.add_auxiliary_process(auxiliary_process)
-        required_process.start()
-        auxiliary_process.start()
-
-        with patch("logging.warning") as warning:
-            self.manager.monitor_and_release_processes()
-
-        self.assertFalse(required_process.is_alive())
-        self.assertFalse(auxiliary_process.is_alive())
-        self.assertFalse(self.manager.terminated)
-        self.assertTrue(
-            any(
-                "required processes will continue" in str(call)
-                for call in warning.call_args_list
-            )
-        )
-
-    def test_auxiliary_exit_is_reaped_while_waiting_for_health_check(self):
-        """A failed optional child must not remain a zombie during startup"""
-        self.manager.monitor_interval = 0.01
-        required_process = multiprocessing.Process(
-            target=dummy_worker, args=(1,)
-        )
-        auxiliary_process = multiprocessing.Process(target=immediate_crash_worker)
-        self.manager.add_process(required_process)
-        self.manager.add_auxiliary_process(auxiliary_process)
-        required_process.start()
-        auxiliary_process.start()
-
-        def delayed_ready():
-            time.sleep(0.1)
-            return True
-
-        self.manager.register_health_check(
-            processes=[required_process],
-            process_name="delayed_service",
-            check_ready_fn=delayed_ready,
-            retry_interval_seconds=0.01,
-        )
-
-        with patch("logging.warning") as warning:
-            self.assertTrue(self.manager.run_health_checks(timeout=1))
-
-        self.assertIsNotNone(auxiliary_process.exitcode)
-        self.assertTrue(required_process.is_alive())
-        self.assertFalse(self.manager.terminated)
-        self.assertTrue(
-            any(
-                "required processes will continue" in str(call)
-                for call in warning.call_args_list
-            )
-        )
-
-    def test_required_crash_terminates_auxiliary_process(self):
-        """A service failure still cleans up optional children"""
-        self.manager.monitor_interval = 0.01
-        required_process = multiprocessing.Process(target=immediate_crash_worker)
-        auxiliary_process = multiprocessing.Process(
-            target=terminable_worker, args=(5,)
-        )
-        self.manager.add_process(required_process)
-        self.manager.add_auxiliary_process(auxiliary_process)
-        required_process.start()
-        auxiliary_process.start()
-
-        self.manager.monitor_and_release_processes()
-
-        self.assertFalse(required_process.is_alive())
-        self.assertFalse(auxiliary_process.is_alive())
-        self.assertTrue(self.manager.terminated)
-
-    def test_dead_auxiliary_process_does_not_change_availability(self):
-        """Availability depends only on required processes"""
-        required_process = multiprocessing.Process(
-            target=dummy_worker, args=(1,)
-        )
-        dead_auxiliary_process = multiprocessing.Process(target=dummy_worker)
-        self.manager.add_process(required_process)
-        self.manager.add_auxiliary_process(dead_auxiliary_process)
-        required_process.start()
-
-        self.assertTrue(self.manager.is_available())
-
-        required_process.terminate()
-        required_process.join()
-
     def test_monitor_with_shutdown_signal(self):
         """Test monitoring with shutdown signal"""
         proc = multiprocessing.Process(target=dummy_worker, args=(5,))
@@ -517,7 +404,7 @@ class TestProcessManagerHealthCheck(unittest.TestCase):
 
     def tearDown(self):
         """Clean up after tests"""
-        for proc in self.manager._all_managed_processes():
+        for proc in self.manager.processes:
             if hasattr(proc, "_mock_name"):
                 continue
             if proc.is_alive():
