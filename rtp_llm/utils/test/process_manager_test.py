@@ -21,6 +21,11 @@ def immediate_crash_worker():
     raise RuntimeError("Simulated crash")
 
 
+def terminable_worker(duration=5):
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    time.sleep(duration)
+
+
 def forever_worker(queue):
     # Signal that we are ready
     queue.put("ready")
@@ -309,7 +314,7 @@ class TestProcessManager(unittest.TestCase):
         self.manager.monitor_interval = 0.01
         required_process = multiprocessing.Process(target=immediate_crash_worker)
         auxiliary_process = multiprocessing.Process(
-            target=dummy_worker, args=(5,)
+            target=terminable_worker, args=(5,)
         )
         self.manager.add_process(required_process)
         self.manager.add_auxiliary_process(auxiliary_process)

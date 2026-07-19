@@ -106,13 +106,25 @@ class ProcessManager:
             if proc.exitcode is None or process_key in self._reported_auxiliary_exits:
                 continue
             self._reported_auxiliary_exits.add(process_key)
-            logging.warning(
-                "Auxiliary process %s pid[%s] exited with code %s; "
-                "required processes will continue",
-                proc.name,
-                proc.pid,
-                proc.exitcode,
-            )
+            if (
+                not self.shutdown_requested
+                and not self.terminated
+                and any(required.is_alive() for required in self.processes)
+            ):
+                logging.warning(
+                    "Auxiliary process %s pid[%s] exited with code %s; "
+                    "required processes will continue",
+                    proc.name,
+                    proc.pid,
+                    proc.exitcode,
+                )
+            else:
+                logging.info(
+                    "Auxiliary process %s pid[%s] exited with code %s",
+                    proc.name,
+                    proc.pid,
+                    proc.exitcode,
+                )
 
     def is_available(self) -> bool:
         """
