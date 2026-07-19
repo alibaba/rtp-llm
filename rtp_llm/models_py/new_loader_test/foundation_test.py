@@ -9,8 +9,6 @@ from unittest import mock
 
 import torch
 import torch.nn as nn
-from safetensors.torch import save_file
-
 from rtp_llm.models_py.model_loader import (
     NewLoaderConfig,
     NewLoaderLoadMethod,
@@ -23,6 +21,7 @@ from rtp_llm.models_py.registry import (
     register_model,
 )
 from rtp_llm.models_py.weight_mapper import discover_ckpt_files, get_all_weights
+from safetensors.torch import save_file
 
 
 class _Block(RtpModule):
@@ -83,6 +82,72 @@ class FoundationLoaderTest(unittest.TestCase):
         self.assertTrue(torch.equal(model.final, _weights()["final"]))
         self.assertEqual(model.post_device, "cpu")
         self.assertEqual(model.post_count, 1)
+
+    def test_runtime_backend_preflight_runs_before_device_migration(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(_weights(), os.path.join(model_path, "model.safetensors"))
+            with mock.patch.object(
+                _FoundationModel,
+                "validate_runtime_device",
+                side_effect=RuntimeError("unsupported runtime backend"),
+            ), mock.patch.object(_FoundationModel, "to", autospec=True) as move:
+                with self.assertRaisesRegex(RuntimeError, "unsupported runtime"):
+                    self._loader(model_path).load()
+                move.assert_not_called()
+
+    def test_staged_modules_move_and_postprocess_one_at_a_time(self):
+        events = []
+
+        class StagedLeaf(RtpModule):
+            def __init__(self, name):
+                super().__init__()
+                self.name = name
+
+            def requires_staged_device_postprocess(self):
+                return True
+
+            def to(self, device):
+                events.append((self.name, "move", str(device)))
+                return self
+
+            def process_weights_after_loading(self):
+                events.append((self.name, "postprocess"))
+
+        model = RtpModule()
+        model.first = StagedLeaf("first")
+        model.second = StagedLeaf("second")
+
+        NewModelLoader._migrate_staged_modules(model, "cpu")
+
+        self.assertEqual(
+            events,
+            [
+                ("first", "move", "cpu"),
+                ("first", "postprocess"),
+                ("second", "move", "cpu"),
+                ("second", "postprocess"),
+            ],
+        )
+
+    def test_staged_module_rejects_shared_weight_aliases(self):
+        class StagedLeaf(RtpModule):
+            def requires_staged_device_postprocess(self):
+                return True
+
+        for cross_module in (False, True):
+            with self.subTest(cross_module=cross_module):
+                shared = nn.Parameter(torch.ones(1))
+                model = RtpModule()
+                model.first = StagedLeaf()
+                model.first.register_parameter("weight", shared)
+                if cross_module:
+                    model.second = RtpModule()
+                    model.second.register_parameter("weight", shared)
+                else:
+                    model.first.register_buffer("weight_alias", shared, persistent=True)
+
+                with self.assertRaisesRegex(RuntimeError, "shared tensor aliases"):
+                    NewModelLoader._migrate_staged_modules(model, "cpu")
 
     def test_wrapped_pytorch_state_dict(self):
         with tempfile.TemporaryDirectory() as model_path:
