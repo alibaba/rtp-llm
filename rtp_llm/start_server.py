@@ -389,12 +389,12 @@ def start_server(py_env_configs: PyEnvConfigs):
             )
             process_manager.add_processes(frontend_process)
 
-        if backend_process is not None:
-            process_manager.add_process(start_kvcm_subscriber(py_env_configs))
-
         if not process_manager.run_health_checks():
             logging.error("[START_SERVER] Health checks failed")
             raise Exception("Health checks failed")
+
+        if backend_process is not None:
+            process_manager.add_process(start_kvcm_subscriber(py_env_configs))
 
     except Exception as e:
         logging.error(f"start failed, trace: {traceback.format_exc()}")

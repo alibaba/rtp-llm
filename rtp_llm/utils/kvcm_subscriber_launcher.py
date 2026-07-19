@@ -128,7 +128,9 @@ def build_kvcm_subscriber_command(
 
     host_ip_port = os.environ.get(_HOST_IP_PORT_ENV, "").strip()
     if not host_ip_port:
-        host_ip = py_env_configs.server_config.ip or _local_ip_address()
+        host_ip = py_env_configs.server_config.ip
+        if not host_ip or host_ip in {"0.0.0.0", "::"}:
+            host_ip = _local_ip_address()
         if ":" in host_ip and not host_ip.startswith("["):
             host_ip = f"[{host_ip}]"
         host_ip_port = f"{host_ip}:{py_env_configs.server_config.server_port}"
@@ -278,6 +280,8 @@ def start_kvcm_subscriber(
     *,
     required: bool | None = None,
 ) -> multiprocessing.Process | None:
+    """Start reporting and return only a required-mode managed process."""
+
     if required is None:
         required = is_kvcm_subscriber_required()
 
@@ -294,10 +298,13 @@ def start_kvcm_subscriber(
             target=_supervise_kvcm_subscriber,
             args=(command, required, _RESTART_INTERVAL_SECONDS),
             name="kvcm_subscriber_supervisor",
-            daemon=True,
+            daemon=not required,
         )
         process.start()
-        return process
+        # Optional reporting must never become an RTP health dependency.  A
+        # daemon child follows the parent lifecycle but is deliberately not
+        # returned to (and therefore not monitored by) ProcessManager.
+        return process if required else None
     except Exception:
         if required:
             raise

@@ -141,6 +141,12 @@ py_library(
 )
 
 py_library(
+    name = "kvcm_subscriber_launcher",
+    srcs = ["utils/kvcm_subscriber_launcher.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",
@@ -414,7 +420,7 @@ py_library(
     ],
     deps = [
         "//rtp_llm/server:server",
-        ":utils",
+        ":kvcm_subscriber_launcher",
         ":uvicorn",
         ":fastapi",
         ":psutil",

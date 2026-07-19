@@ -174,6 +174,25 @@ class KvcmSubscriberLauncherTest(unittest.TestCase):
             "service.example:80",
         )
 
+    def test_wildcard_bind_address_uses_discovered_host_identity(self) -> None:
+        with tempfile.NamedTemporaryFile() as config:
+            with patch.dict(
+                os.environ,
+                {"KVCM_SUBSCRIBER_CONFIG": config.name},
+                clear=True,
+            ), patch(
+                "rtp_llm.utils.kvcm_subscriber_launcher._local_ip_address",
+                return_value="10.0.0.9",
+            ):
+                command = build_kvcm_subscriber_command(_configs(ip="0.0.0.0"))
+
+        self.assertIsNotNone(command)
+        assert command is not None
+        self.assertEqual(
+            command[command.index("--host-ip-port") + 1],
+            "10.0.0.9:8088",
+        )
+
     def test_multi_dp_requires_explicit_endpoints(self) -> None:
         with tempfile.NamedTemporaryFile() as config:
             with patch.dict(
@@ -280,7 +299,33 @@ class KvcmSubscriberLauncherTest(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "spawn failed"):
                     start_kvcm_subscriber(_configs(), required=True)
 
-    def test_start_registers_supervisor_with_expected_command(self) -> None:
+    def test_required_start_returns_supervisor_with_expected_command(self) -> None:
+        with tempfile.NamedTemporaryFile() as config:
+            with patch.dict(
+                os.environ,
+                {"KVCM_SUBSCRIBER_CONFIG": config.name},
+                clear=True,
+            ), patch(
+                "rtp_llm.utils.kvcm_subscriber_launcher.multiprocessing.Process"
+            ) as process_cls:
+                process = MagicMock()
+                process_cls.return_value = process
+
+                result = start_kvcm_subscriber(_configs(), required=True)
+
+        self.assertIs(result, process)
+        process.start.assert_called_once_with()
+        kwargs = process_cls.call_args.kwargs
+        self.assertEqual(kwargs["name"], "kvcm_subscriber_supervisor")
+        self.assertFalse(kwargs["daemon"])
+        self.assertIs(kwargs["target"], _supervise_kvcm_subscriber)
+        self.assertTrue(kwargs["args"][1])
+        self.assertEqual(
+            kwargs["args"][0][kwargs["args"][0].index("--rtp-endpoints") + 1],
+            "127.0.0.1:8089",
+        )
+
+    def test_optional_start_is_not_a_managed_service_dependency(self) -> None:
         with tempfile.NamedTemporaryFile() as config:
             with patch.dict(
                 os.environ,
@@ -294,17 +339,9 @@ class KvcmSubscriberLauncherTest(unittest.TestCase):
 
                 result = start_kvcm_subscriber(_configs())
 
-        self.assertIs(result, process)
+        self.assertIsNone(result)
         process.start.assert_called_once_with()
-        kwargs = process_cls.call_args.kwargs
-        self.assertEqual(kwargs["name"], "kvcm_subscriber_supervisor")
-        self.assertTrue(kwargs["daemon"])
-        self.assertIs(kwargs["target"], _supervise_kvcm_subscriber)
-        self.assertFalse(kwargs["args"][1])
-        self.assertEqual(
-            kwargs["args"][0][kwargs["args"][0].index("--rtp-endpoints") + 1],
-            "127.0.0.1:8089",
-        )
+        self.assertTrue(process_cls.call_args.kwargs["daemon"])
 
     def test_optional_supervisor_restarts_exited_subscriber(self) -> None:
         first = MagicMock(pid=101)

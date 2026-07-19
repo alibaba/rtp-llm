@@ -40,7 +40,7 @@ py_test(
         "kvcm_subscriber_launcher_test.py",
     ],
     deps = [
-        "//rtp_llm:utils",
+        "//rtp_llm:kvcm_subscriber_launcher",
     ],
 )
 
