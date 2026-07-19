@@ -1,4 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/device_group/DeviceKVCacheGroup.h"
+
+#include <algorithm>
+
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -65,6 +68,39 @@ bool DeviceKVCacheGroup::ensureFreeBlocks(int required_blocks) {
         }
     }
 
+    return true;
+}
+
+bool DeviceKVCacheGroup::materializePositions(BlockIds& block_ids, const std::vector<size_t>& positions) {
+    std::vector<size_t> missing_positions;
+    missing_positions.reserve(positions.size());
+    for (size_t position : positions) {
+        RTP_LLM_CHECK_WITH_INFO(position < block_ids.blocksNum(),
+                                "load-back position out of range, group=%d position=%zu blocks=%zu",
+                                group_id_,
+                                position,
+                                block_ids.blocksNum());
+        if (isNullBlockIdx(block_ids.blocks()[position])
+            && std::find(missing_positions.begin(), missing_positions.end(), position) == missing_positions.end()) {
+            missing_positions.push_back(position);
+        }
+    }
+    if (missing_positions.empty()) {
+        return true;
+    }
+
+    const int required_blocks = static_cast<int>(missing_positions.size());
+    if (!ensureFreeBlocks(required_blocks)) {
+        return false;
+    }
+    auto allocated = block_pool_->malloc(missing_positions.size());
+    if (!allocated.has_value() || allocated->size() != missing_positions.size()) {
+        return false;
+    }
+    block_pool_->incRef(*allocated);
+    for (size_t i = 0; i < missing_positions.size(); ++i) {
+        block_ids.setAt(missing_positions[i], (*allocated)[i]);
+    }
     return true;
 }
 

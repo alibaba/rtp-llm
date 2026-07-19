@@ -158,12 +158,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCa
     EXPECT_EQ(resource->cacheKeys(0).size(), 0);
 }
 
-// malloc() should use the manager-level cpSlotMapper.
-// With CP sharding (cp_size=2, block_size=4), virtual_block_size=8.
-// A sequence of 16 tokens needs ceil(16/8)=2 physical blocks per batch (not 4).
-// DISABLED: needs multi-rank NCCL harness (KVCacheManager::allocateAndSync calls
-// execAllGather across the tp_size group); covered end-to-end in Stage 6 smoke.
-TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocAutoInjectReducesBlockCount) {
+TEST_F(KVCacheManagerCPSlotMapperTest, ManagerInjectsSameMapperIntoAllocator) {
     const int seq_size_per_block = 4;
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
 
@@ -172,137 +167,16 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocAutoInjectReducesBlockCoun
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = true;
 
-    // warmup=true skips allocateAndSync (which would NCCL all-gather across the
-    // tp_size process group; in single-process UT there are no peers).  cp_slot_mapper_
-    // is constructed regardless of warmup, so cpSlotMapper() check is unaffected.
     auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
-    const int seq_len   = 16;
-    auto      resource  = makeResource(1, config.layer_num);
-    auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
-
-    MallocInfo info{resource, token_ids};
-    auto result = mgr->malloc(info);
-    ASSERT_TRUE(result.success);
-
-    // virtual_block_size = 4 * 2 = 8
-    // effectiveSeqLenForAlloc(16) = ceil(16/8) * 4 = 8 tokens worth => ceil(8/4) = 2 blocks
-    EXPECT_EQ(resource->blocksNum(0, 0), 2);
-}
-
-// Without CP sharding, the same seq_len should allocate more blocks.
-// DISABLED: needs multi-rank NCCL harness (KVCacheManager::allocateAndSync calls
-// execAllGather across the tp_size group); covered end-to-end in Stage 6 smoke.
-TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocWithoutCPAllocatesFullBlocks) {
-    const int seq_size_per_block = 4;
-    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
-
-    ParallelismConfig par;
-    par.tp_rank                            = 0;
-    par.tp_size                            = 2;
-    par.prefill_cp_config.kv_cache_sharded = false;
-
-    // warmup=true skips allocateAndSync (which would NCCL all-gather across the
-    // tp_size process group; in single-process UT there are no peers).  cp_slot_mapper_
-    // is constructed regardless of warmup, so cpSlotMapper() check is unaffected.
-    auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
-    ASSERT_TRUE(mgr->init());
-
-    const int seq_len   = 16;
-    auto      resource  = makeResource(1, config.layer_num);
-    auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
-
-    MallocInfo info{resource, token_ids};
-    auto       result = mgr->malloc(info);
-    ASSERT_TRUE(result.success);
-
-    // Without CP: ceil(16/4) = 4 blocks
-    EXPECT_EQ(resource->blocksNum(0, 0), 4);
-}
-
-// Allocator-level cp_slot_mapper should drive malloc sharding.
-// DISABLED: needs multi-rank NCCL harness (KVCacheManager::allocateAndSync calls
-// execAllGather across the tp_size group); covered end-to-end in Stage 6 smoke.
-TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_AllocatorMapperControlsMalloc) {
-    const int seq_size_per_block = 4;
-    auto      config             = makeTestConfig(/*block_num=*/30, seq_size_per_block);
-
-    ParallelismConfig par;
-    par.tp_rank                            = 0;
-    par.tp_size                            = 2;
-    par.prefill_cp_config.kv_cache_sharded = true;
-
-    // warmup=true skips allocateAndSync (which would NCCL all-gather across the
-    // tp_size process group; in single-process UT there are no peers).  cp_slot_mapper_
-    // is constructed regardless of warmup, so cpSlotMapper() check is unaffected.
-    auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
-    ASSERT_TRUE(mgr->init());
-
-    const int seq_len   = 64;
-    auto      resource  = makeResource(1, config.layer_num);
-    auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
-
-    auto explicit_mapper = std::make_shared<CPSlotMapper>(0, 4, seq_size_per_block);
-    // virtual_block_size = 4 * 4 = 16
-    // effectiveSeqLenForAlloc(64) = ceil(64/16)*4 = 16 tokens => ceil(16/4) = 4 blocks
-
-    MallocInfo info{resource, token_ids};
-    mgr->cp_slot_mapper_ = explicit_mapper;
-    mgr->allocator_->setCPSlotMapper(explicit_mapper);
-    auto result         = mgr->malloc(info);
-    ASSERT_TRUE(result.success);
-
-    EXPECT_EQ(resource->blocksNum(0, 0), 4);
-}
-
-// insertIntoCache() should also use the manager-level mapper.
-// DISABLED: same reason as above (multi-rank harness needed).
-TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
-    const int seq_size_per_block = 4;
-    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
-
-    ParallelismConfig par;
-    par.tp_rank                            = 0;
-    par.tp_size                            = 2;
-    par.prefill_cp_config.kv_cache_sharded = true;
-
-    KVCacheConfig kv_cfg;
-    kv_cfg.reuse_cache         = true;
-    kv_cfg.enable_device_cache = true;
-
-    auto mgr = std::make_shared<KVCacheManager>(config, false, nullptr, kv_cfg, par);
-    ASSERT_TRUE(mgr->init());
-    // virtual_block_size = 4 * 2 = 8
-    // effectiveSeqLenForAlloc(16) = ceil(16/8) * 4 = 8 tokens worth => ceil(8/4) = 2 blocks
-
-    const int seq_len   = 16;
-    auto      resource  = makeResource(1, config.layer_num);
-    auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
-
-    MallocInfo malloc_info{resource, token_ids};
-    malloc_info.reuse_cache         = true;
-    malloc_info.enable_device_cache = true;
-    auto result                     = mgr->malloc(malloc_info);
-    ASSERT_TRUE(result.success);
-
-    // Insert into cache using the allocator-level cp_slot_mapper.
-    // This should not crash and should use sharded insert logic.
-    InsertInfo insert_info{resource, token_ids, /*is_resident=*/false};
-    EXPECT_NO_THROW(mgr->insertIntoCache(insert_info));
-
-    // Now try to malloc again with the same token_ids -- should get reuse hit.
-    auto       resource2 = makeResource(1, config.layer_num);
-    MallocInfo malloc_info2{resource2, token_ids};
-    malloc_info2.reuse_cache         = true;
-    malloc_info2.enable_device_cache = true;
-    auto result2                     = mgr->malloc(malloc_info2);
-    ASSERT_TRUE(result2.success);
-    // With CP sharding (cp_size=2, block_size=4), virtual_block_size=8.
-    // seq_len=16 produces 2 cache keys (each covering 8 tokens).
-    // match drops the last key → 1 matched key → reuse_len = 1 * virtual_block_size = 8.
-    // The sharded reuse_length adjustment ensures this is 1 * virtual_block_size = 8, not 1 * seq_size_per_block = 4.
-    EXPECT_EQ(result2.reuse_len, seq_size_per_block * par.tp_size);  // = 4 * 2 = 8
+    const auto manager_mapper   = mgr->cpSlotMapper();
+    const auto allocator_mapper = mgr->allocator_->cpSlotMapper();
+    ASSERT_NE(manager_mapper, nullptr);
+    EXPECT_EQ(allocator_mapper, manager_mapper);
+    EXPECT_EQ(manager_mapper->cpRank(), par.tp_rank);
+    EXPECT_EQ(manager_mapper->cpSize(), par.tp_size);
+    EXPECT_EQ(manager_mapper->blockSize(), seq_size_per_block);
 }
 
 }  // namespace test

@@ -261,66 +261,6 @@ TEST_F(DeviceLinearKVCacheGroupTest, RemoveSkippedBlocksFreesNonStepBlocksButKee
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 2);
 }
 
-// TODO(block_tree_cache refactor): re-enable after SharedBlockCache is replaced
-#if 0
-TEST_F(DeviceLinearKVCacheGroupTest, PutIntoCacheSkipsNullBlocks) {
-    auto block_pool = createDeviceBlockPool();
-    ASSERT_TRUE(block_pool->init());
-
-    auto                      shared_cache = std::make_shared<SharedBlockCache>();
-    std::vector<DeviceBlockPoolPtr> group_pools(4, block_pool);
-    shared_cache->init(4, group_pools);
-
-    auto block1 = block_pool->malloc(1).value()[0];
-    auto block2 = block_pool->malloc(1).value()[0];
-
-    // Only put entries with non-NULL blocks (simulating allocator-level filtering)
-    std::vector<BlockIdxType> slots1(4, NULL_BLOCK_IDX);
-    slots1[3] = block1;
-    shared_cache->put(101, slots1, /*is_resident=*/false);
-
-    std::vector<BlockIdxType> slots2(4, NULL_BLOCK_IDX);
-    slots2[3] = block2;
-    shared_cache->put(103, slots2, /*is_resident=*/false);
-
-    EXPECT_FALSE(shared_cache->contains(100));
-    EXPECT_TRUE(shared_cache->contains(101));
-    EXPECT_FALSE(shared_cache->contains(102));
-    EXPECT_TRUE(shared_cache->contains(103));
-}
-#endif
-
-// TODO(block_tree_cache refactor): re-enable after SharedBlockCache is replaced
-#if 0
-TEST_F(DeviceLinearKVCacheGroupTest, MatchSingleKeyReturnsMatchedBlockOrEmpty) {
-    auto block_pool = createDeviceBlockPool();
-    ASSERT_TRUE(block_pool->init());
-
-    auto                      shared_cache = std::make_shared<SharedBlockCache>();
-    std::vector<DeviceBlockPoolPtr> group_pools(8, block_pool);
-    shared_cache->init(8, group_pools);
-
-    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    DeviceLinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/7, /*linear_step=*/2, shared_cache.get());
-    ASSERT_TRUE(group.init());
-
-    // Allocate a block, then put it into cache for group_id=7.
-    auto blocks = block_pool->malloc(1).value();
-    ASSERT_EQ(blocks.size(), 1u);
-
-    std::vector<BlockIdxType> group_slots(8, NULL_BLOCK_IDX);
-    group_slots[7] = blocks[0];
-    shared_cache->put(123, group_slots, /*is_resident=*/false);
-
-    auto hit = group.matchSingleKey(123);
-    ASSERT_EQ(hit.block_indices.size(), 1u);
-    EXPECT_EQ(hit.block_indices[0], blocks[0]);
-
-    auto miss = group.matchSingleKey(999);
-    EXPECT_TRUE(miss.block_indices.empty());
-}
-#endif
-
 TEST_F(DeviceLinearKVCacheGroupTest, MallocNoNewBlocksReturnsTrueAndKeepsState) {
     auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
@@ -362,49 +302,6 @@ TEST_F(DeviceLinearKVCacheGroupTest, MallocFailsWhenBlockPoolExhausted) {
     // Cleanup to avoid leaking refs in the test process.
     block_pool->decRef(all_blocks);
 }
-
-// TODO(block_tree_cache refactor): re-enable after SharedBlockCache is replaced
-#if 0
-TEST_F(DeviceLinearKVCacheGroupTest, MallocEnsuresFreeBlocksByEvictingCache) {
-    auto block_pool = createDeviceBlockPool();
-    ASSERT_TRUE(block_pool->init());
-    ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
-
-    auto                      shared_cache = std::make_shared<SharedBlockCache>();
-    std::vector<DeviceBlockPoolPtr> group_pools  = {block_pool};
-    shared_cache->init(1, group_pools);
-
-    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    DeviceLinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2, shared_cache.get());
-    ASSERT_TRUE(group.init());
-
-    // Put one block into cache (non-resident) and release request reference so it becomes evictable.
-    auto cached = block_pool->malloc(1).value();
-    ASSERT_EQ(cached.size(), 1u);
-    // Take a request ref (new pool malloc leaves refCount 0). put() adds the cache ref
-    // (refCount 2); releasing the request ref drops it back to 1 so the block is held
-    // only by the cache and becomes evictable (eviction candidate requires refCount == 1).
-    block_pool->incRef(cached);
-    std::vector<BlockIdxType> slots = {cached[0]};
-    shared_cache->put(123, slots, /*is_resident=*/false);
-    block_pool->decRef(cached);
-
-    // Exhaust the remaining free blocks so malloc must evict from cache to proceed.
-    auto occupied = block_pool->malloc(block_pool->freeBlocksNum()).value();
-    // Hold a request ref so the cleanup decRef() below has a holder to drop.
-    block_pool->incRef(occupied);
-    ASSERT_EQ(block_pool->freeBlocksNum(), 0u);
-
-    BlockIds blocks;
-    ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/4, /*enable_reuse_cache=*/false));
-    ASSERT_EQ(blocks.blocksNum(), 1u);
-    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[0]));
-
-    // Cleanup to avoid leaking refs in the test process.
-    group.free(blocks.blocks());
-    block_pool->decRef(occupied);
-}
-#endif
 
 TEST_F(DeviceLinearKVCacheGroupTest, RemoveSkippedBlocksWithReserveStepKeepsLastTwoAndReserveTail) {
     auto block_pool = createDeviceBlockPool();

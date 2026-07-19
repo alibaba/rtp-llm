@@ -45,23 +45,26 @@ protected:
     // when gid is out of range. Replaces the old allocator-owned kv_cache_groups_ vector.
     DeviceKVCacheGroupPtr group(int gid) const;
 
-    int reuseCache(const CacheKeysType&                 cache_keys,
-                   BatchKVCacheResource&                kv_resource,
-                   const std::shared_ptr<CPSlotMapper>& cp_mapper,
-                   std::shared_ptr<LoadBackTicket>&     ticket);
+    int  reuseCache(const CacheKeysType&                 cache_keys,
+                    BatchKVCacheResource&                kv_resource,
+                    const std::shared_ptr<CPSlotMapper>& cp_mapper,
+                    std::shared_ptr<LoadBackTicket>&     ticket,
+                    std::vector<BlockIndicesType>&       referenced_blocks);
+    bool preflightLoadBackMappings(const std::shared_ptr<LoadBackTicket>& ticket) const;
 
     virtual void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const = 0;
     virtual void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false)            = 0;
     virtual bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const;
+    bool         hasAvailableBlocksForReserveWithPendingTargets(const MallocInfo&          malloc_info,
+                                                                size_t                     reserve_blocks,
+                                                                const std::vector<size_t>& pending_target_blocks) const;
     bool         skipReuseCacheGroup(int gid) const;
     bool         cpCompactSwaGroup(int gid, const std::shared_ptr<CPSlotMapper>& mapper) const;
     void         rollbackBlockIdsToSize(int gid, BlockIds& block_ids, size_t original_size);
-    void         rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
-                                    const std::vector<BlockIndicesType>& referenced_blocks,
-                                    const std::vector<size_t>&           original_sizes);
-    void         rollbackIncrMalloc(BatchKVCacheResource&                   kv_resource,
-                                    const std::vector<std::vector<size_t>>& original_sizes,
-                                    int                                     failed_batch);
+    void rollbackInitMalloc(BatchKVCacheResource& kv_resource, const std::vector<BlockIndicesType>& referenced_blocks);
+    void rollbackIncrMalloc(BatchKVCacheResource&                   kv_resource,
+                            const std::vector<std::vector<size_t>>& original_sizes,
+                            int                                     failed_batch);
 
     std::vector<int> full_group_ids_;
     std::vector<int> linear_group_ids_;

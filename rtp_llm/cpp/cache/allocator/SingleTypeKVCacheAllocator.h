@@ -6,6 +6,8 @@
 
 namespace rtp_llm {
 
+class LoadBackTicket;
+
 // SingleTypedKVCacheAllocator is used for model with full attentions only
 class SingleTypeKVCacheAllocator:
     public KVCacheAllocator,
@@ -36,6 +38,9 @@ public:
     int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                               int                            seq_len,
                               int                            reserve_step) const override;
+
+protected:
+    bool preflightLoadBackMappings(const std::shared_ptr<LoadBackTicket>& ticket) const;
 
 private:
     bool         doInit() override;

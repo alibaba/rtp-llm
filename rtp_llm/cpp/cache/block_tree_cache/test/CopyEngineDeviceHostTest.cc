@@ -199,6 +199,13 @@ static void installStrategyRecorders(DeviceHostTransferExecutor& executor, std::
     }
 }
 
+static bool expectCudaBatchStrategyDone() {
+    int        runtime_version       = 0;
+    const auto runtime_version_error = cudaRuntimeGetVersion(&runtime_version);
+    return CUDART_VERSION >= 12080 && runtime_version_error == cudaSuccess && runtime_version >= 12080
+           && (CUDART_VERSION >= 13000) == (runtime_version >= 13000);
+}
+
 // ---- CopyEngine submit() tests (real CUDA) ----
 
 class CopyEngineTest: public ::testing::Test {
@@ -811,6 +818,8 @@ TEST_F(CopyEngineStrategyTest, GenericStrategyRoundTrip) {
 }
 
 TEST_F(CopyEngineStrategyTest, BatchStrategyExecutesWhenSupportedOtherwiseFallsBack) {
+    const bool expect_batch_done = expectCudaBatchStrategyDone();
+
     DeviceHostCopyOptions options;
     options.cuda_batch_copy_enabled             = true;
     auto                            copy_engine = makeCopyEngine(options);
@@ -844,17 +853,21 @@ TEST_F(CopyEngineStrategyTest, BatchStrategyExecutesWhenSupportedOtherwiseFallsB
         EXPECT_EQ(b, 0x11);
     for (auto b : d1)
         EXPECT_EQ(b, 0x22);
+
+    EXPECT_EQ(counters[0].attempts, 2);
+    EXPECT_EQ(counters[0].done, 0);
     EXPECT_EQ(counters[0].not_applicable, 2);
-#if CUDART_VERSION >= 12080
-    EXPECT_EQ(counters[1].done, 2);
-    EXPECT_EQ(counters[1].not_applicable, 0);
-    EXPECT_EQ(counters[2].attempts, 0);
-#else
-    EXPECT_EQ(counters[1].done, 0);
-    EXPECT_EQ(counters[1].not_applicable, 2);
-    EXPECT_EQ(counters[2].attempts, 2);
-    EXPECT_EQ(counters[2].done, 2);
-#endif
+    EXPECT_EQ(counters[0].failed, 0);
+
+    EXPECT_EQ(counters[1].attempts, 2);
+    EXPECT_EQ(counters[1].done, expect_batch_done ? 2 : 0);
+    EXPECT_EQ(counters[1].not_applicable, expect_batch_done ? 0 : 2);
+    EXPECT_EQ(counters[1].failed, 0);
+
+    EXPECT_EQ(counters[2].attempts, expect_batch_done ? 0 : 2);
+    EXPECT_EQ(counters[2].done, expect_batch_done ? 0 : 2);
+    EXPECT_EQ(counters[2].not_applicable, 0);
+    EXPECT_EQ(counters[2].failed, 0);
 
     host_pool_->free(host_block);
 }

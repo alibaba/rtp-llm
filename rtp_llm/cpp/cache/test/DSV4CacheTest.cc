@@ -1,6 +1,5 @@
 #include <gtest/gtest.h>
 #include <algorithm>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -1560,6 +1559,97 @@ static CacheConfig makeDSV4CpAllocatorConfig(uint32_t cp_size) {
     return config;
 }
 
+static BatchKVCacheResourcePtr makeDsv4CacheResource(const CacheConfig& config, const CacheKeysType& cache_keys) {
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(1);
+    initDsv4BatchGroups(*resource, config);
+    resource->setBatchCacheKeys(/*batch_id=*/0, cache_keys);
+    return resource;
+}
+
+static CompleteTokenIdsPtr makeDsv4CacheTokens(int seq_length, int seq_size_per_block) {
+    auto tokens = std::make_shared<CompleteTokenIds>(1, 1, seq_length + seq_size_per_block, seq_size_per_block);
+    auto input  = std::make_shared<GenerateInput>();
+    input->input_ids       = torch::arange(seq_length, torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    tokens->init(input);
+    return tokens;
+}
+
+struct Dsv4RealCacheSeed {
+    std::vector<BlockIndicesType> group_blocks;
+};
+
+static Dsv4RealCacheSeed seedDsv4RealCachePath(const HybridPoolKVCacheAllocatorPtr& allocator,
+                                               const CacheConfig&                   config,
+                                               const CacheKeysType&                 cache_keys,
+                                               int                                  seq_length,
+                                               const std::vector<size_t>&           omitted_groups = {}) {
+    Dsv4RealCacheSeed seed;
+    auto              resource = makeDsv4CacheResource(config, cache_keys);
+    auto              tokens   = makeDsv4CacheTokens(seq_length, static_cast<int>(config.seq_size_per_block));
+
+    MallocInfo malloc_info{resource, tokens};
+    malloc_info.reuse_cache         = false;
+    malloc_info.enable_device_cache = false;
+    const auto result               = allocator->malloc(malloc_info);
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.async_context, nullptr);
+    if (!result.success) {
+        return seed;
+    }
+
+    seed.group_blocks.reserve(static_cast<size_t>(resource->groupNums()));
+    for (int gid = 0; gid < resource->groupNums(); ++gid) {
+        seed.group_blocks.push_back(resource->blocks(/*batch_id=*/0, gid));
+    }
+
+    // Keep the request and its holders real while modeling a cache insertion boundary
+    // where one aggregated tail component did not produce a slot. Restoring the
+    // request-owned ids before allocator->free keeps every holder transition on the
+    // allocator path.
+    for (size_t omitted_group : omitted_groups) {
+        if (omitted_group >= seed.group_blocks.size()) {
+            ADD_FAILURE() << "invalid omitted DSV4 group " << omitted_group;
+            allocator->free(FreeInfo{resource, tokens});
+            return seed;
+        }
+        resource->mutableBlockIds(/*batch_id=*/0, omitted_group)
+            .assign(BlockIndicesType(seed.group_blocks[omitted_group].size(), NULL_BLOCK_IDX));
+    }
+    allocator->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false});
+    for (size_t omitted_group : omitted_groups) {
+        resource->mutableBlockIds(/*batch_id=*/0, omitted_group).assign(seed.group_blocks[omitted_group]);
+    }
+    allocator->free(FreeInfo{resource, tokens});
+    EXPECT_EQ(resource->curBlocksNum(), 0u);
+    return seed;
+}
+
+struct Dsv4PoolCounters {
+    size_t free_blocks;
+    size_t total_blocks;
+};
+
+static std::vector<Dsv4PoolCounters> snapshotDsv4PoolCounters(const HybridPoolKVCacheAllocatorPtr& allocator) {
+    std::vector<Dsv4PoolCounters> counters;
+    counters.reserve(allocator->groupBlockPools().size());
+    for (const auto& pool : allocator->groupBlockPools()) {
+        counters.push_back({pool->freeBlocksNum(), pool->totalBlocksNum()});
+    }
+    return counters;
+}
+
+static void expectDsv4PoolCountersEq(const HybridPoolKVCacheAllocatorPtr& allocator,
+                                     const std::vector<Dsv4PoolCounters>& expected) {
+    ASSERT_EQ(allocator->groupBlockPools().size(), expected.size());
+    for (size_t gid = 0; gid < expected.size(); ++gid) {
+        const auto& pool = allocator->groupBlockPools()[gid];
+        EXPECT_EQ(pool->freeBlocksNum(), expected[gid].free_blocks) << "gid=" << gid;
+        EXPECT_EQ(pool->totalBlocksNum(), expected[gid].total_blocks) << "gid=" << gid;
+    }
+}
+
 // ============================================================
 // HybridTypeKVCacheAllocator integration tests with DSV4 7-group config
 // ============================================================
@@ -1871,439 +1961,182 @@ TEST_F(DSV4AllocatorTest, FlashMallocAndFree) {
 // Prefix cache: insertIntoCache skips HCA_STATE but keeps other groups reusable.
 // ============================================================
 
-// TODO(block_tree_cache refactor): re-enable after SharedBlockCache is replaced
-#if 0
-TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
-    auto config       = makeDSV4AllocatorConfig();
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    auto shared_cache = std::make_shared<SharedBlockCache>();
-    allocator->setSharedBlockCache(shared_cache);
-    ASSERT_TRUE(allocator->init());
-
-    auto block_pool = allocator->getDeviceBlockPool();
-
-    // Manually set up a BatchKVCacheResource with blocks for all 7 groups
-    auto batch_res = std::make_shared<BatchKVCacheResource>();
-    batch_res->resetBatchSize(1);
-    initDsv4BatchGroups(*batch_res, config);
-
-    CacheKeysType keys = {200, 201, 202, 203};
-    batch_res->setBatchCacheKeys(0, keys);
-
-    // Allocate 3 blocks per group (simulating 3 full blocks)
-    for (int gid = 0; gid < 7; gid++) {
-        auto blocks = block_pool->malloc(3).value();
-        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
-        ASSERT_EQ(blocks.size(), 3u);
-        batch_res->mutableBlockIds(0, gid).assign(BlockIndicesType(blocks.begin(), blocks.end()));
-    }
-
-    // Create CompleteTokenIds: 3 full blocks * seq_size_per_block tokens + partial
-    int  seq_size_per_block         = allocator->seqSizePerBlock();
-    auto complete_token_ids         = std::make_shared<CompleteTokenIds>(1, 1, 4096, seq_size_per_block);
-    auto generate_input             = std::make_shared<GenerateInput>();
-    int  total_tokens               = 3 * seq_size_per_block + 1;  // 3 full blocks + 1 partial
-    generate_input->input_ids       = torch::arange(total_tokens, torch::kInt32);
-    generate_input->generate_config = std::make_shared<GenerateConfig>();
-    complete_token_ids->init(generate_input);
-
-    InsertInfo insert_info{batch_res, complete_token_ids, /*is_resident=*/false};
-    allocator->insertIntoCache(insert_info);
-
-    // HCA_STATE is runtime scratch state and must not be persisted as reusable prefix cache.
-    for (int gid = 0; gid < 7; gid++) {
-        if (config.tagForGroup(gid) == "hca_state") {
-            EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(200, gid))) << "HCA_STATE should skip key 200";
-            EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(201, gid))) << "HCA_STATE should skip tail key 201";
-            EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(202, gid))) << "HCA_STATE should skip tail key 202";
-            continue;
-        }
-        EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(200, gid))) << config.tagForGroup(gid);
-        if (config.typeForGroup(gid) != CacheGroupType::FULL) {
-            EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(201, gid))) << config.tagForGroup(gid);
-            EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(202, gid))) << config.tagForGroup(gid);
-        }
-    }
-
-    // Free all blocks
-    for (int gid = 0; gid < 7; gid++) {
-        const auto& blocks = batch_res->blocks(0, gid);
-        block_pool->decRef(blocks);
-    }
-}
-#endif
-
-// ============================================================
-// Prefix cache: Flash config insertIntoCache skips HCA_STATE.
-// ============================================================
-
-// TODO(block_tree_cache refactor): re-enable after SharedBlockCache is replaced
-#if 0
 TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
-    auto config       = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    auto shared_cache = std::make_shared<SharedBlockCache>();
-    allocator->setSharedBlockCache(shared_cache);
+    auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
-    auto block_pool = allocator->getDeviceBlockPool();
+    const auto baseline = snapshotDsv4PoolCounters(allocator);
+    const int  spb      = allocator->seqSizePerBlock();
+    const auto seed     =
+        seedDsv4RealCachePath(allocator, config, CacheKeysType{300, 301, 302}, /*seq_length=*/3 * spb);
+    ASSERT_EQ(seed.group_blocks.size(), static_cast<size_t>(config.groupNums()));
 
-    auto batch_res = std::make_shared<BatchKVCacheResource>();
-    batch_res->resetBatchSize(1);
-    initDsv4BatchGroups(*batch_res, config);
+    auto cache_match = block_tree_caches_.back()->match(CacheKeysType{300, 301, 302});
+    const size_t matched_blocks = cache_match.matched_blocks;
+    const auto   matched_groups = cache_match.group_block_indices;
+    block_tree_caches_.back()->releaseMatchedBlocks(cache_match.matched_block_sets);
 
-    CacheKeysType keys = {300, 301, 302, 303};
-    batch_res->setBatchCacheKeys(0, keys);
+    EXPECT_EQ(matched_blocks, 3u);
+    const size_t hca_state_gid = gidForTag(config, "hca_state");
+    EXPECT_EQ(matched_groups.count(static_cast<int>(hca_state_gid)), 0u);
 
-    for (int gid = 0; gid < 7; gid++) {
-        auto blocks = block_pool->malloc(3).value();
-        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
-        ASSERT_EQ(blocks.size(), 3u);
-        batch_res->mutableBlockIds(0, gid).assign(BlockIndicesType(blocks.begin(), blocks.end()));
-    }
-
-    int  seq_size_per_block         = allocator->seqSizePerBlock();
-    auto complete_token_ids         = std::make_shared<CompleteTokenIds>(1, 1, 4096, seq_size_per_block);
-    auto generate_input             = std::make_shared<GenerateInput>();
-    int  total_tokens               = 3 * seq_size_per_block + 1;
-    generate_input->input_ids       = torch::arange(total_tokens, torch::kInt32);
-    generate_input->generate_config = std::make_shared<GenerateConfig>();
-    complete_token_ids->init(generate_input);
-
-    InsertInfo insert_info{batch_res, complete_token_ids, /*is_resident=*/false};
-    allocator->insertIntoCache(insert_info);
-
-    for (int gid = 0; gid < 7; gid++) {
-        if (config.tagForGroup(gid) == "hca_state") {
-            EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(300, gid))) << "Flash HCA_STATE should skip key 300";
-            EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(301, gid))) << "Flash HCA_STATE should skip tail key 301";
-            EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(302, gid))) << "Flash HCA_STATE should skip tail key 302";
+    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+        const auto& pool   = allocator->groupBlockPools()[gid];
+        const auto& blocks = seed.group_blocks[gid];
+        ASSERT_EQ(blocks.size(), 3u) << config.tagForGroup(gid);
+        if (config.policyForGroup(gid).reuse_policy == CacheReusePolicy::NON_REUSABLE) {
+            for (BlockIdxType block : blocks) {
+                if (!isNullBlockIdx(block)) {
+                    EXPECT_FALSE(pool->isAllocated(block)) << config.tagForGroup(gid);
+                }
+            }
             continue;
         }
-        EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(300, gid))) << config.tagForGroup(gid);
-        if (config.typeForGroup(gid) != CacheGroupType::FULL) {
-            EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(301, gid))) << config.tagForGroup(gid);
-            EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(302, gid))) << config.tagForGroup(gid);
-        }
-    }
 
-    for (int gid = 0; gid < 7; gid++) {
-        block_pool->decRef(batch_res->blocks(0, gid));
-    }
-}
-#endif
-
-// ============================================================
-// Prefix cache: paged FULL groups reuse; reusable SWA/state groups require a matched latest tail block.
-// ============================================================
-
-// TODO(block_tree_cache refactor): re-enable after SharedBlockCache is replaced
-#if 0
-TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
-    auto config       = makeDSV4AllocatorConfig();
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    auto shared_cache = std::make_shared<SharedBlockCache>();
-    allocator->setSharedBlockCache(shared_cache);
-    ASSERT_TRUE(allocator->init());
-
-    auto block_pool = allocator->getDeviceBlockPool();
-
-    // Pre-populate cache for ALL 7 groups with keys {100,101,102}
-    constexpr int                          group_num   = 7;
-    CacheKeysType                          cached_keys = {100, 101, 102};
-    std::vector<std::vector<BlockIdxType>> cached_blocks(group_num);
-    for (int gid = 0; gid < group_num; gid++) {
-        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size())).value();
-        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
-        ASSERT_EQ(blocks.size(), cached_keys.size());
-        for (size_t i = 0; i < cached_keys.size(); ++i) {
-            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
-            group_slots[gid] = blocks[i];
-            shared_cache->put(cached_keys[i], group_slots, true);
-        }
-        cached_blocks[gid] = blocks;
-        block_pool->decRef(blocks);
-    }
-
-    // Now do a malloc with reuse enabled — keys {100,101,102,103}
-    auto batch_res = std::make_shared<BatchKVCacheResource>();
-    batch_res->resetBatchSize(1);
-    initDsv4BatchGroups(*batch_res, config);
-    batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
-
-    int  seq_size_per_block         = allocator->seqSizePerBlock();
-    int  seq_len                    = 3 * seq_size_per_block + 1;  // 3 full + partial
-    auto complete_token_ids         = std::make_shared<CompleteTokenIds>(1, 1, 4096, seq_size_per_block);
-    auto generate_input             = std::make_shared<GenerateInput>();
-    generate_input->input_ids       = torch::arange(seq_len, torch::kInt32);
-    generate_input->generate_config = std::make_shared<GenerateConfig>();
-    complete_token_ids->init(generate_input);
-
-    MallocInfo info{batch_res, complete_token_ids};
-    info.enable_device_cache = true;
-    info.reuse_cache         = true;
-    auto result              = allocator->malloc(info);
-    ASSERT_TRUE(result.success);
-
-    EXPECT_GT(result.reuse_len, 0) << "Prefix cache reuse should work with paged DSV4 groups";
-
-    for (int gid = 0; gid < group_num; gid++) {
-        const auto& out_blocks = batch_res->blocks(0, gid);
-        ASSERT_GE(out_blocks.size(), 3u) << config.tagForGroup(gid);
+        const auto match_it = matched_groups.find(static_cast<int>(gid));
+        ASSERT_NE(match_it, matched_groups.end()) << config.tagForGroup(gid);
+        ASSERT_FALSE(match_it->second.empty()) << config.tagForGroup(gid);
         if (config.typeForGroup(gid) == CacheGroupType::FULL) {
-            EXPECT_EQ(out_blocks[0], cached_blocks[gid][0]) << config.tagForGroup(gid);
-            EXPECT_EQ(out_blocks[1], cached_blocks[gid][1]) << config.tagForGroup(gid);
+            EXPECT_EQ(match_it->second, blocks) << config.tagForGroup(gid);
+        } else {
+            EXPECT_EQ(match_it->second.back(), blocks.back()) << config.tagForGroup(gid);
+        }
+    }
+    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+        if (config.policyForGroup(gid).reuse_policy == CacheReusePolicy::NON_REUSABLE) {
             continue;
         }
-        EXPECT_TRUE(isNullBlockIdx(out_blocks[1])) << config.tagForGroup(gid);
-        if (config.tagForGroup(gid) == "hca_state") {
-            EXPECT_TRUE(isNullBlockIdx(out_blocks[2])) << "HCA_STATE should not reuse a cached tail block";
-            continue;
+        const auto& pool = allocator->groupBlockPools()[gid];
+        for (BlockIdxType block : seed.group_blocks[gid]) {
+            if (!isNullBlockIdx(block)) {
+                EXPECT_EQ(pool->refCount(block), 1u) << config.tagForGroup(gid);
+            }
         }
-        EXPECT_EQ(out_blocks[2], cached_blocks[gid][2]) << config.tagForGroup(gid);
     }
 
-    // Clean up
-    FreeInfo free_info{batch_res};
-    allocator->free(free_info);
+    EXPECT_GT(allocator->blockTreeCache()->reclaimBlocks(
+                  static_cast<size_t>(config.block_num) * static_cast<size_t>(config.groupNums()), Tier::DEVICE),
+              0u);
+    expectDsv4PoolCountersEq(allocator, baseline);
 }
-#endif
 
-// TODO(block_tree_cache refactor): re-enable after SharedBlockCache is replaced
-#if 0
 TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
-    auto config       = makeDSV4AllocatorConfig();
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    auto shared_cache = std::make_shared<SharedBlockCache>();
-    allocator->setSharedBlockCache(shared_cache);
+    auto config    = makeDSV4AllocatorConfig();
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
-    auto block_pool = allocator->getDeviceBlockPool();
-
-    constexpr int                          group_num   = 7;
-    CacheKeysType                          cached_keys = {100, 101, 102};
-    std::vector<std::vector<BlockIdxType>> cached_blocks(3);
-    for (int gid = 0; gid < 3; gid++) {
-        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size())).value();
-        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
-        ASSERT_EQ(blocks.size(), cached_keys.size());
-        for (size_t i = 0; i < cached_keys.size(); ++i) {
-            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
-            group_slots[gid] = blocks[i];
-            shared_cache->put(cached_keys[i], group_slots, true);
+    const auto baseline = snapshotDsv4PoolCounters(allocator);
+    const int  spb      = allocator->seqSizePerBlock();
+    std::vector<size_t> reusable_swa_gids;
+    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+        if (config.typeForGroup(gid) == CacheGroupType::SWA
+            && config.policyForGroup(gid).reuse_policy == CacheReusePolicy::REUSABLE) {
+            reusable_swa_gids.push_back(gid);
         }
-        cached_blocks[gid] = blocks;
-        block_pool->decRef(blocks);
     }
+    ASSERT_FALSE(reusable_swa_gids.empty());
+    const auto seed = seedDsv4RealCachePath(allocator,
+                                            config,
+                                            CacheKeysType{100},
+                                            /*seq_length=*/spb,
+                                            /*omitted_groups=*/reusable_swa_gids);
+    ASSERT_EQ(seed.group_blocks.size(), static_cast<size_t>(config.groupNums()));
 
-    auto batch_res = std::make_shared<BatchKVCacheResource>();
-    batch_res->resetBatchSize(1);
-    initDsv4BatchGroups(*batch_res, config);
-    batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
-
-    int  seq_size_per_block         = allocator->seqSizePerBlock();
-    int  seq_len                    = 3 * seq_size_per_block + 1;
-    auto complete_token_ids         = std::make_shared<CompleteTokenIds>(1, 1, 4096, seq_size_per_block);
-    auto generate_input             = std::make_shared<GenerateInput>();
-    generate_input->input_ids       = torch::arange(seq_len, torch::kInt32);
-    generate_input->generate_config = std::make_shared<GenerateConfig>();
-    complete_token_ids->init(generate_input);
-
-    MallocInfo info{batch_res, complete_token_ids};
-    info.enable_device_cache = true;
-    info.reuse_cache         = true;
-    auto result              = allocator->malloc(info);
-    ASSERT_TRUE(result.success);
-
-    EXPECT_EQ(result.reuse_len, 0) << "SWA tail miss should veto paged prefix reuse";
-
-    FreeInfo free_info{batch_res};
-    allocator->free(free_info);
-}
-#endif
-
-// TODO(block_tree_cache refactor): re-enable after SharedBlockCache is replaced
-#if 0
-TEST_F(DSV4AllocatorTest, PrefixCacheReuseDoesNotRequireHCAStateHit) {
-    auto config       = makeDSV4AllocatorConfig();
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    auto shared_cache = std::make_shared<SharedBlockCache>();
-    allocator->setSharedBlockCache(shared_cache);
-    ASSERT_TRUE(allocator->init());
-
-    auto block_pool = allocator->getDeviceBlockPool();
-
-    constexpr int                          group_num   = 7;
-    CacheKeysType                          cached_keys = {1100, 1101, 1102};
-    std::vector<std::vector<BlockIdxType>> cached_blocks(group_num);
-    for (int gid = 0; gid < group_num; gid++) {
-        if (config.tagForGroup(gid) == "hca_state") {
-            continue;
-        }
-        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size())).value();
-        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
-        ASSERT_EQ(blocks.size(), cached_keys.size());
-        for (size_t i = 0; i < cached_keys.size(); ++i) {
-            if (config.typeForGroup(gid) != CacheGroupType::FULL && i + 1 < cached_keys.size()) {
-                continue;
-            }
-            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
-            group_slots[gid] = blocks[i];
-            shared_cache->put(cached_keys[i], group_slots, true);
-        }
-        cached_blocks[gid] = blocks;
-        block_pool->decRef(blocks);
-    }
-
-    auto batch_res = std::make_shared<BatchKVCacheResource>();
-    batch_res->resetBatchSize(1);
-    initDsv4BatchGroups(*batch_res, config);
-    batch_res->setBatchCacheKeys(0, CacheKeysType{1100, 1101, 1102, 1103});
-
-    const int spb       = allocator->seqSizePerBlock();
-    auto      cti       = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
-    auto      gi        = std::make_shared<GenerateInput>();
-    gi->input_ids       = torch::arange(3 * spb + 1, torch::kInt32);
-    gi->generate_config = std::make_shared<GenerateConfig>();
-    cti->init(gi);
-
-    MallocInfo info{batch_res, cti};
-    info.enable_device_cache = true;
-    info.reuse_cache         = true;
-    auto result              = allocator->malloc(info);
-    ASSERT_TRUE(result.success);
-
-    EXPECT_GT(result.reuse_len, 0) << "HCA_STATE miss should not veto DSV4 prefix reuse";
-    const auto hca_state_gid = gidForTag(config, "hca_state");
-    const auto swa_gid       = gidForTag(config, "swa_kv");
-    EXPECT_TRUE(isNullBlockIdx(batch_res->blocks(0, hca_state_gid).at(2))) << "HCA_STATE should remain non-reused";
-    EXPECT_EQ(batch_res->blocks(0, swa_gid).at(2), cached_blocks[swa_gid][2]) << "SWA_KV tail should still gate reuse";
-
-    FreeInfo free_info{batch_res};
-    allocator->free(free_info);
-}
-#endif
-
-// TODO(block_tree_cache refactor): re-enable after SharedBlockCache is replaced
-#if 0
-TEST_F(DSV4AllocatorTest, PrefixCacheReuseAcceptsSingleLatestSWATailHit) {
-    auto config       = makeDSV4AllocatorConfig();
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    auto shared_cache = std::make_shared<SharedBlockCache>();
-    allocator->setSharedBlockCache(shared_cache);
-    ASSERT_TRUE(allocator->init());
-
-    auto block_pool = allocator->getDeviceBlockPool();
-
-    constexpr int group_num   = 7;
-    CacheKeysType cached_keys = {100, 101, 102};
-    for (int gid = 0; gid < group_num; gid++) {
-        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size())).value();
-        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
-        ASSERT_EQ(blocks.size(), cached_keys.size());
-        for (size_t i = 0; i < cached_keys.size(); ++i) {
-            if (config.typeForGroup(gid) != CacheGroupType::FULL && i + 1 < cached_keys.size()) {
-                continue;
-            }
-            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
-            group_slots[gid] = blocks[i];
-            shared_cache->put(cached_keys[i], group_slots, true);
-        }
-        block_pool->decRef(blocks);
-    }
-
-    auto batch_res = std::make_shared<BatchKVCacheResource>();
-    batch_res->resetBatchSize(1);
-    initDsv4BatchGroups(*batch_res, config);
-    batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
-
-    const int spb       = allocator->seqSizePerBlock();
-    auto      cti       = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
-    auto      gi        = std::make_shared<GenerateInput>();
-    gi->input_ids       = torch::arange(3 * spb + 1, torch::kInt32);
-    gi->generate_config = std::make_shared<GenerateConfig>();
-    cti->init(gi);
-
-    MallocInfo info{batch_res, cti};
-    info.enable_device_cache = true;
-    info.reuse_cache         = true;
-    auto result              = allocator->malloc(info);
-    ASSERT_TRUE(result.success);
-
-    EXPECT_GT(result.reuse_len, 0) << "latest SWA tail hit should allow paged prefix reuse";
-
-    FreeInfo free_info{batch_res};
-    allocator->free(free_info);
-}
-#endif
-
-// TODO(block_tree_cache refactor): re-enable after SharedBlockCache is replaced
-#if 0
-TEST_F(DSV4AllocatorTest, FlashPrefixCacheReusePagedGroupsOnly) {
-    auto config       = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    auto shared_cache = std::make_shared<SharedBlockCache>();
-    allocator->setSharedBlockCache(shared_cache);
-    ASSERT_TRUE(allocator->init());
-
-    auto block_pool = allocator->getDeviceBlockPool();
-
-    constexpr int                          group_num   = 7;
-    CacheKeysType                          cached_keys = {500, 501, 502};
-    std::vector<std::vector<BlockIdxType>> cached_blocks(group_num);
-    for (int gid = 0; gid < group_num; gid++) {
-        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size())).value();
-        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
-        ASSERT_EQ(blocks.size(), cached_keys.size());
-        for (size_t i = 0; i < cached_keys.size(); ++i) {
-            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
-            group_slots[gid] = blocks[i];
-            shared_cache->put(cached_keys[i], group_slots, true);
-        }
-        cached_blocks[gid] = blocks;
-        block_pool->decRef(blocks);
-    }
-
-    auto batch_res = std::make_shared<BatchKVCacheResource>();
-    batch_res->resetBatchSize(1);
-    initDsv4BatchGroups(*batch_res, config);
-    batch_res->setBatchCacheKeys(0, CacheKeysType{500, 501, 502, 503});
-
-    int  seq_size_per_block         = allocator->seqSizePerBlock();
-    int  seq_len                    = 3 * seq_size_per_block + 1;
-    auto complete_token_ids         = std::make_shared<CompleteTokenIds>(1, 1, 4096, seq_size_per_block);
-    auto generate_input             = std::make_shared<GenerateInput>();
-    generate_input->input_ids       = torch::arange(seq_len, torch::kInt32);
-    generate_input->generate_config = std::make_shared<GenerateConfig>();
-    complete_token_ids->init(generate_input);
-
-    MallocInfo info{batch_res, complete_token_ids};
-    info.enable_device_cache = true;
-    info.reuse_cache         = true;
-    auto result              = allocator->malloc(info);
-    ASSERT_TRUE(result.success);
-
-    EXPECT_GT(result.reuse_len, 0) << "Flash prefix cache reuse should work for paged groups";
-
-    for (int gid = 0; gid < group_num; gid++) {
-        const auto& out_blocks = batch_res->blocks(0, gid);
-        ASSERT_GE(out_blocks.size(), 3u) << config.tagForGroup(gid);
+    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+        const auto& pool   = allocator->groupBlockPools()[gid];
+        const auto& blocks = seed.group_blocks[gid];
+        ASSERT_EQ(blocks.size(), 1u) << config.tagForGroup(gid);
         if (config.typeForGroup(gid) == CacheGroupType::FULL) {
-            EXPECT_EQ(out_blocks[0], cached_blocks[gid][0]) << config.tagForGroup(gid);
-            continue;
+            for (BlockIdxType block : blocks) {
+                ASSERT_FALSE(isNullBlockIdx(block)) << config.tagForGroup(gid);
+                EXPECT_EQ(pool->refCount(block), 1u) << config.tagForGroup(gid);
+            }
         }
-        EXPECT_TRUE(isNullBlockIdx(out_blocks[1])) << config.tagForGroup(gid);
-        if (config.tagForGroup(gid) == "hca_state") {
-            EXPECT_TRUE(isNullBlockIdx(out_blocks[2])) << "Flash HCA_STATE should not reuse a cached tail block";
-            continue;
+    }
+    for (size_t gid : reusable_swa_gids) {
+        for (BlockIdxType block : seed.group_blocks[gid]) {
+            if (!isNullBlockIdx(block)) {
+                EXPECT_FALSE(allocator->groupBlockPools()[gid]->isAllocated(block)) << config.tagForGroup(gid);
+            }
         }
-        EXPECT_EQ(out_blocks[2], cached_blocks[gid][2]) << config.tagForGroup(gid);
     }
 
-    FreeInfo free_info{batch_res};
-    allocator->free(free_info);
+    auto resource = makeDsv4CacheResource(config, CacheKeysType{100, 101});
+    auto tokens   = makeDsv4CacheTokens(/*seq_length=*/spb + 1, spb);
+    MallocInfo malloc_info{resource, tokens};
+    malloc_info.reuse_cache         = true;
+    malloc_info.enable_device_cache = true;
+    const auto result               = allocator->malloc(malloc_info);
+    EXPECT_TRUE(result.success);
+    if (result.success) {
+        EXPECT_EQ(result.reuse_len, 0) << "missing latest SWA tail must veto the cached paged prefix";
+    }
+
+    allocator->free(FreeInfo{resource, tokens});
+    EXPECT_EQ(resource->curBlocksNum(), 0u);
+    EXPECT_GT(allocator->blockTreeCache()->reclaimBlocks(
+                  static_cast<size_t>(config.block_num) * static_cast<size_t>(config.groupNums()), Tier::DEVICE),
+              0u);
+    expectDsv4PoolCountersEq(allocator, baseline);
 }
-#endif
+
+TEST_F(DSV4AllocatorTest, FlashPrefixCacheReusePagedGroupsOnly) {
+    auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
+
+    const auto baseline = snapshotDsv4PoolCounters(allocator);
+    const int  spb      = allocator->seqSizePerBlock();
+    const auto seed     =
+        seedDsv4RealCachePath(allocator, config, CacheKeysType{500, 501, 502}, /*seq_length=*/3 * spb);
+    ASSERT_EQ(seed.group_blocks.size(), static_cast<size_t>(config.groupNums()));
+
+    auto resource = makeDsv4CacheResource(config, CacheKeysType{500, 501, 502, 503});
+    auto tokens   = makeDsv4CacheTokens(/*seq_length=*/3 * spb + 1, spb);
+    MallocInfo malloc_info{resource, tokens};
+    malloc_info.reuse_cache         = true;
+    malloc_info.enable_device_cache = true;
+    const auto result               = allocator->malloc(malloc_info);
+    EXPECT_TRUE(result.success);
+    if (result.success) {
+        EXPECT_EQ(result.reuse_len, 3 * spb);
+
+        for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+            const auto& out_blocks = resource->blocks(/*batch_id=*/0, gid);
+            EXPECT_EQ(out_blocks.size(), 4u) << config.tagForGroup(gid);
+            if (out_blocks.size() < 4u) {
+                continue;
+            }
+            if (config.typeForGroup(gid) == CacheGroupType::FULL) {
+                EXPECT_EQ(seed.group_blocks[gid].size(), 3u);
+                if (seed.group_blocks[gid].size() == 3u) {
+                    EXPECT_EQ(BlockIndicesType(out_blocks.begin(), out_blocks.begin() + 3), seed.group_blocks[gid])
+                        << config.tagForGroup(gid);
+                }
+                continue;
+            }
+            if (config.policyForGroup(gid).reuse_policy == CacheReusePolicy::NON_REUSABLE) {
+                EXPECT_TRUE(isNullBlockIdx(out_blocks[2])) << config.tagForGroup(gid);
+                continue;
+            }
+            EXPECT_GE(seed.group_blocks[gid].size(), 3u) << config.tagForGroup(gid);
+            if (seed.group_blocks[gid].size() >= 3u) {
+                EXPECT_EQ(out_blocks[2], seed.group_blocks[gid][2]) << config.tagForGroup(gid);
+            }
+        }
+    }
+
+    allocator->free(FreeInfo{resource, tokens});
+    EXPECT_EQ(resource->curBlocksNum(), 0u);
+    EXPECT_GT(allocator->blockTreeCache()->reclaimBlocks(
+                  static_cast<size_t>(config.block_num) * static_cast<size_t>(config.groupNums()), Tier::DEVICE),
+              0u);
+    expectDsv4PoolCountersEq(allocator, baseline);
+}
 
 TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksAreDistributedAcrossGroups) {
     auto config      = makeDSV4AllocatorConfig(/*use_flash=*/true);
@@ -2378,129 +2211,6 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksDoNotReduceExplicitHcaStateCapa
     FreeInfo free_info{batch_res};
     allocator->free(free_info);
 }
-
-// ============================================================
-// SWA (group 6) prefix cache: verify SWA blocks participate in reuse
-// ============================================================
-
-// TODO(block_tree_cache refactor): re-enable after SharedBlockCache is replaced
-#if 0
-TEST_F(DSV4AllocatorTest, SWAGroupParticipatesInPrefixCacheReuse) {
-    auto config       = makeDSV4AllocatorConfig();
-    config.block_num  = 100;
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    auto shared_cache = std::make_shared<SharedBlockCache>();
-    allocator->setSharedBlockCache(shared_cache);
-    ASSERT_TRUE(allocator->init());
-
-    auto block_pool = allocator->getDeviceBlockPool();
-
-    constexpr int group_num = 7;
-
-    // Only populate SWA group (6) and one paged group (0) to verify SWA participates
-    CacheKeysType             cached_keys = {700, 701};
-    std::vector<BlockIdxType> swa_blocks, csa_blocks;
-
-    // Group 0 (CSA KV)
-    {
-        auto blocks = block_pool->malloc(2).value();
-        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
-        for (size_t i = 0; i < 2; ++i) {
-            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
-            group_slots[0] = blocks[i];
-            shared_cache->put(cached_keys[i], group_slots, true);
-        }
-        csa_blocks = blocks;
-        block_pool->decRef(blocks);
-    }
-    // Group 6 (SWA KV)
-    {
-        auto blocks = block_pool->malloc(2).value();
-        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
-        for (size_t i = 0; i < 2; ++i) {
-            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
-            group_slots[6] = blocks[i];
-            shared_cache->put(cached_keys[i], group_slots, true);
-        }
-        swa_blocks = blocks;
-        block_pool->decRef(blocks);
-    }
-
-    // Verify both groups have cache entries
-    EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(700, 0)));
-    EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(700, 6)));
-    EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(701, 0)));
-    EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(701, 6)));
-
-    // Groups 1,2,3,4,5 not populated — they will limit reuse to 0
-    // But this verifies SWA group 6 IS in the reuse path
-    EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(700, 3)));
-    EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(700, 4)));
-    EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(700, 5)));
-}
-#endif
-
-// ============================================================
-// SWA prefix cache: cache entries exist and the matched tail window gates reuse.
-// ============================================================
-
-// TODO(block_tree_cache refactor): re-enable after SharedBlockCache is replaced
-#if 0
-TEST_F(DSV4AllocatorTest, SWAPrefixCacheRestoresTailReuse) {
-    auto config       = makeDSV4AllocatorConfig();
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    auto shared_cache = std::make_shared<SharedBlockCache>();
-    allocator->setSharedBlockCache(shared_cache);
-    ASSERT_TRUE(allocator->init());
-
-    auto block_pool = allocator->getDeviceBlockPool();
-
-    // Populate ALL 7 groups with same keys
-    constexpr int                          group_num   = 7;
-    CacheKeysType                          cached_keys = {800, 801};
-    std::vector<std::vector<BlockIdxType>> cached_blocks(group_num);
-    for (int gid = 0; gid < group_num; gid++) {
-        auto blocks = block_pool->malloc(2).value();
-        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
-        for (size_t i = 0; i < 2; ++i) {
-            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
-            group_slots[gid] = blocks[i];
-            shared_cache->put(cached_keys[i], group_slots, true);
-        }
-        cached_blocks[gid] = blocks;
-        block_pool->decRef(blocks);
-    }
-
-    // Malloc with reuse — keys {800, 801, 802}
-    auto batch_res = std::make_shared<BatchKVCacheResource>();
-    batch_res->resetBatchSize(1);
-    initDsv4BatchGroups(*batch_res, config);
-    batch_res->setBatchCacheKeys(0, CacheKeysType{800, 801, 802});
-
-    int  spb            = allocator->seqSizePerBlock();
-    int  seq_len        = 2 * spb + 1;
-    auto cti            = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
-    auto gi             = std::make_shared<GenerateInput>();
-    gi->input_ids       = torch::arange(seq_len, torch::kInt32);
-    gi->generate_config = std::make_shared<GenerateConfig>();
-    cti->init(gi);
-
-    MallocInfo info{batch_res, cti};
-    info.enable_device_cache = true;
-    info.reuse_cache         = true;
-    auto result              = allocator->malloc(info);
-    ASSERT_TRUE(result.success);
-    EXPECT_GT(result.reuse_len, 0);
-
-    const auto& swa_out = batch_res->blocks(0, 6);
-    ASSERT_GE(swa_out.size(), 2u);
-    EXPECT_TRUE(isNullBlockIdx(swa_out[0])) << "SWA previous matched tail is evicted after new tail allocation";
-    EXPECT_EQ(swa_out[1], cached_blocks[6][1]) << "SWA last matched tail block should remain";
-
-    FreeInfo free_info{batch_res};
-    allocator->free(free_info);
-}
-#endif
 
 // ============================================================
 // incrMalloc: decode grows sequence after initial prefill

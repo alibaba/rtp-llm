@@ -197,6 +197,7 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
         stream->fakeInitKVBlock(reserved_blocks);
     } else if (mode == preRunMode::build_system_prompt) {
         THROW_IF_STATUS_ERROR(stream->initKVBlock());
+        THROW_IF_STATUS_ERROR(stream->streamCacheResource().waitForAllocatorLoad());
     };
     std::list<GenerateStreamPtr> streams{stream};
     THROW_IF_STATUS_ERROR(executor_->process(streams));
@@ -372,6 +373,21 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
 }
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
+    if (kv_cache_config.device_cache_min_free_blocks <= 0) {
+        int64_t max_prefill_tokens =
+            runtime_config.fifo_scheduler_config.max_context_batch_size * model_config_.max_seq_len;
+        if (runtime_config.fifo_scheduler_config.max_batch_tokens_size > 0) {
+            max_prefill_tokens =
+                std::min(max_prefill_tokens, runtime_config.fifo_scheduler_config.max_batch_tokens_size);
+        }
+        RTP_LLM_CHECK_WITH_INFO(kv_cache_config.seq_size_per_block > 0,
+                                "seq_size_per_block must be positive, got %d",
+                                kv_cache_config.seq_size_per_block);
+        kv_cache_config.device_cache_min_free_blocks =
+            (max_prefill_tokens + kv_cache_config.seq_size_per_block - 1) / kv_cache_config.seq_size_per_block;
+        RTP_LLM_LOG_INFO("resolved device_cache_min_free_blocks=%ld before KVCacheManager initialization",
+                         kv_cache_config.device_cache_min_free_blocks);
+    }
     const bool use_cuda_malloc_block_pool = shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config);
     if (propose_params_ && propose_params_->draftModel()) {
         auto config = CacheConfigCreator::createSpConfig(model_config_,

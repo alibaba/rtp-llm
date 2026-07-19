@@ -501,8 +501,9 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
         const auto group_type             = config_.typeForGroup(static_cast<size_t>(gid));
         const int  group_common_seq       = cpEffectiveSeqLenForReserve(cp_mapper, group_type, raw_common_seq_len);
         const int  group_seq_len          = cpEffectiveSeqLenForReserve(cp_mapper, group_type, raw_seq_len);
-        const int  group_reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, gid) : 0;
-        const auto need                   = group(gid)->getNeedBlocks(
+        const int group_reuse_blocks_len =
+            reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, gid) : 0;
+        const auto need = group(gid)->getNeedBlocks(
             group_common_seq, group_seq_len, reserve_step, group_reuse_blocks_len, reuse_enabled);
         const int need_blocks = need.common_blocks + batch_size * need.extra_blocks;
         if (need_blocks <= 0) {

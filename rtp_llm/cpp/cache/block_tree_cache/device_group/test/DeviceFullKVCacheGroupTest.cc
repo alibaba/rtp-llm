@@ -71,55 +71,6 @@ TEST_F(DeviceFullKVCacheGroupTest, RemoveSkippedBlocksTest) {
     ASSERT_EQ(old_indices, block_ids.blocks());
 }
 
-// TODO(block_tree_cache refactor): re-enable after SharedBlockCache is replaced
-#if 0
-
-    auto block_pool = createDeviceBlockPool();
-    block_pool->init();
-
-    auto                            shared_cache = std::make_shared<SharedBlockCache>();
-    std::vector<DeviceBlockPoolPtr> group_pools  = {block_pool};
-    shared_cache->init(1, group_pools);
-
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 4;
-
-    DeviceFullKVCacheGroup group1({}, spec, block_pool, 0, shared_cache.get());
-
-    // Put items into shared cache: cache_key -> group_slots (group 0 = block_idx)
-    shared_cache->put(101, {1}, false);
-    shared_cache->put(102, {2}, false);
-
-    // zero match
-    CacheKeysType cache_keys    = {103, 104, 105, 106};
-    auto          match_result1 = group1.match(cache_keys);
-    ASSERT_EQ(match_result1.reuse_blocks, 0);
-    ASSERT_EQ(match_result1.reuse_length, 0);
-    BlockIndicesType expected_result = {};
-    ASSERT_EQ(match_result1.block_indices, expected_result);
-
-    // part match
-    cache_keys         = {101, 102, 103, 1046};
-    auto match_result2 = group1.match(cache_keys);
-    ASSERT_EQ(match_result2.reuse_blocks, 2);
-    ASSERT_EQ(match_result2.reuse_length, 2 * 4);
-    expected_result = {1, 2};
-    ASSERT_EQ(match_result2.block_indices, expected_result);
-
-    // all match
-    shared_cache->put(103, {3}, false);
-    shared_cache->put(104, {4}, false);
-
-    cache_keys         = {101, 102, 103, 104};
-    auto match_result3 = group1.match(cache_keys);
-    ASSERT_EQ(match_result3.reuse_blocks, 4);
-    ASSERT_EQ(match_result3.reuse_length, 4 * 4);
-
-    expected_result = {1, 2, 3, 4};
-    ASSERT_EQ(match_result3.block_indices, expected_result);
-}
-#endif
-
 TEST_F(DeviceFullKVCacheGroupTest, MallocFreeTest) {
     auto block_pool = createDeviceBlockPool();
     block_pool->init();
@@ -148,6 +99,31 @@ TEST_F(DeviceFullKVCacheGroupTest, MallocFreeTest) {
 
     BlockIds block_ids2(/*kernel_blocks_per_kv_block=*/1);
     ASSERT_FALSE(group1.malloc(block_ids2, 180));
+}
+
+TEST_F(DeviceFullKVCacheGroupTest, MallocBackfillsMatchedLoadBackPlaceholder) {
+    auto block_pool = createDeviceBlockPool();
+    ASSERT_TRUE(block_pool->init());
+
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
+    spec->seq_size_per_block = 2;
+    DeviceFullKVCacheGroup group({}, spec, block_pool, 0);
+
+    auto resident = block_pool->malloc();
+    ASSERT_TRUE(resident.has_value());
+    block_pool->incRef(*resident);
+
+    BlockIds block_ids(/*kernel_blocks_per_kv_block=*/1);
+    block_ids.assign({NULL_BLOCK_IDX, *resident});
+    ASSERT_TRUE(group.malloc(block_ids, /*seq_len=*/4));
+
+    ASSERT_EQ(block_ids.blocksNum(), 2u);
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[0]));
+    EXPECT_EQ(block_ids.blocks()[1], *resident);
+    EXPECT_EQ(block_pool->refCount(block_ids.blocks()[0]), 1u);
+    EXPECT_EQ(block_pool->refCount(*resident), 1u);
+
+    group.free(block_ids.blocks());
 }
 
 // Single-count co-hold: a block held by both a request (via group malloc) and a cache

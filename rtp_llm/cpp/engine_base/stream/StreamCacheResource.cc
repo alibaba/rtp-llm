@@ -1,241 +1,16 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/Types.h"
-#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
-#include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
-#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include <thread>
-#include <torch/extension.h>
 
 using namespace std;
 
 namespace rtp_llm {
-
-// ----------------------------- KVCacheConnectorReadWriteContextImpl -----------------------------
-
-class KVCacheConnectorReadWriteContextImpl: public KVCacheConnectorReadWriteContext {
-public:
-    KVCacheConnectorReadWriteContextImpl(const std::shared_ptr<BatchKVCacheResource>& batch_resource,
-                                         const std::shared_ptr<Meta>&                 meta):
-        batch_resource_(batch_resource), meta_(meta) {}
-    ~KVCacheConnectorReadWriteContextImpl() override = default;
-
-public:
-    const KVCacheResource& kvCacheResource() const override {
-        return batch_resource_->cacheResource(0);
-    }
-    const std::shared_ptr<Meta>& meta() const override {
-        return meta_;
-    }
-
-private:
-    std::shared_ptr<BatchKVCacheResource> batch_resource_;
-    std::shared_ptr<Meta>                 meta_;
-};
-
-class MetaImpl: public Meta {
-public:
-    MetaImpl(bool enable_memory_cache, bool enable_remote_cache, std::string trace_id):
-        enable_memory_cache_(enable_memory_cache), enable_remote_cache_(enable_remote_cache), trace_id_(trace_id) {}
-    virtual ~MetaImpl() = default;
-
-public:
-    bool enableMemoryCache() const override {
-        return enable_memory_cache_;
-    }
-    bool enableRemoteCache() const override {
-        return enable_remote_cache_;
-    }
-    const std::string& trace_id() const override {
-        return trace_id_;
-    }
-    const std::string& unique_id() const override {
-        return unique_id_;
-    }
-    const std::vector<int64_t>& tokens() const override {
-        return tokens_;
-    }
-
-    // P2P read extension field
-    GenerateStream* generateStream() const override {
-        return generate_stream_;
-    }
-
-    // P2P routing context: cached at construction time, read-only access thereafter
-    std::optional<P2PRoutingContext> p2pRouting() const override {
-        if (!routing_ctx_.has_value()) {
-            return std::nullopt;
-        }
-        return routing_ctx_;
-    }
-
-    // Fill routing context once from GenerateStream (called after construction)
-    void fillRoutingContext(GenerateStream* stream) {
-        if (stream && !routing_ctx_.has_value()) {
-            auto& ctx           = routing_ctx_.emplace();
-            ctx.request_id      = stream->streamId();
-            ctx.unique_key      = stream->uniqueKey();
-            ctx.deadline_ms     = stream->deadlineMs();
-            ctx.prefill_addr    = stream->prefillAddr();
-            ctx.prefill_tp_size = stream->getPrefillTpSize();
-        }
-    }
-
-    GenerateStream*                  generate_stream_ = nullptr;
-    std::optional<P2PRoutingContext> routing_ctx_;
-
-private:
-    bool                 enable_memory_cache_{false};
-    bool                 enable_remote_cache_{false};
-    std::string          trace_id_;
-    std::string          unique_id_ = "";
-    std::vector<int64_t> tokens_;  // TODO : get tokens (remote connector)
-};
-
-// ----------------------------- P2P Side-Channel Apply -----------------------------
-
-// Extract P2P side-channel payload from FusedAsyncReadContext and apply to GenerateStream.
-// Returns true if P2P payload was found and applied, false otherwise.
-static bool tensorPbHasPayload(const TensorPB& tensor_pb) {
-    return !tensor_pb.fp32_data().empty() || !tensor_pb.fp16_data().empty() || !tensor_pb.bf16_data().empty()
-           || !tensor_pb.int32_data().empty();
-}
-
-static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadContext>& read_context,
-                                        GenerateStream*                               stream) {
-    if (!read_context || !stream) {
-        return false;
-    }
-
-    // Traverse fused read contexts to find P2PConnectorAsyncReadContext
-    auto fused_read_ctx = read_context->fusedReadContext();
-    if (!fused_read_ctx) {
-        return false;
-    }
-
-    const P2PSideChannelPayload* payload = nullptr;
-    for (const auto& ctx : fused_read_ctx->contexts()) {
-        auto p2p_ctx = std::dynamic_pointer_cast<P2PConnectorAsyncReadContext>(ctx);
-        if (p2p_ctx) {
-            payload = p2p_ctx->sideChannelPayload();
-            if (payload) {
-                break;
-            }
-        }
-    }
-    if (!payload) {
-        return false;
-    }
-
-    // Apply side-channel data to GenerateStream
-    // 1. First token: append to stream
-    if (payload->first_token_id >= 0) {
-        stream->setIsContextStream(false);
-        stream->step();
-        auto new_tokens                   = torch::zeros({(int64_t)stream->nextBatchSize(), 1}, torch::kInt32);
-        new_tokens.data_ptr<int32_t>()[0] = static_cast<int32_t>(payload->first_token_id);
-        stream->incLastOutputPos();
-        stream->update({.new_tokens        = new_tokens,
-                        .num_new_tokens    = 1,
-                        .hidden_states     = {},
-                        .logits            = {},
-                        .softmax_probs     = {},
-                        .cum_log_probs     = {},
-                        .all_probs         = {},
-                        .loss              = {},
-                        .src_batch_indices = {},
-                        .all_hidden_states = {}});
-        if (stream->nextBatchSize() == 1) {
-            const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-            stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
-                .epoch                 = 0,
-                .last_sample_token_gpu = new_tokens.reshape({1}).to(cuda_i32),
-                .next_seq_len_gpu      = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32),
-            });
-        }
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: appended first_token_id=%ld, stream_id=%ld",
-                          payload->first_token_id,
-                          stream->streamId());
-    }
-
-    // 2. Reuse lengths
-    if (payload->total_reuse_len > 0) {
-        stream->setInitialReuseLength(payload->total_reuse_len);
-        stream->setReuseLength(payload->total_reuse_len);
-        stream->setLocalReuseLength(payload->local_reuse_len + payload->memory_reuse_len);
-        stream->setMtpTokenIndex(payload->total_reuse_len);
-        stream->setMemoryReuseLength(payload->memory_reuse_len);
-        stream->setRemoteReuseLength(payload->remote_reuse_len);
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: reuse total=%d, local=%d, remote=%d, memory=%d",
-                          payload->total_reuse_len,
-                          payload->local_reuse_len,
-                          payload->remote_reuse_len,
-                          payload->memory_reuse_len);
-    }
-
-    // 3. Speculative proposal info
-    if (!payload->propose_tokens.empty()) {
-        stream->setReuseLength(stream->seqLength() - 1);
-        stream->setSpEditRun(false);
-        stream->setMtpTokenIndex(stream->seqLength() - 1);
-        stream->setContainProposeToken(true);
-        stream->setProposeToken(payload->propose_tokens);
-
-        auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
-        sp_output_buffer->propose_step = payload->propose_tokens.size() > 0 ? payload->propose_tokens.size() - 1 : 0;
-        sp_output_buffer->tokens       = torch::zeros({1, (int64_t)payload->propose_tokens.size()}, torch::kInt32);
-        memcpy(sp_output_buffer->tokens.data_ptr<int>(),
-               payload->propose_tokens.data(),
-               payload->propose_tokens.size() * sizeof(int));
-
-        const auto cuda_i32                  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-        sp_output_buffer->propose_tokens_gpu = sp_output_buffer->tokens.to(cuda_i32, /*non_blocking=*/true);
-        if (tensorPbHasPayload(payload->propose_probs)) {
-            sp_output_buffer->all_probs = TensorPbConvert::pbToTorch(payload->propose_probs).to(torch::kCUDA);
-        }
-        if (tensorPbHasPayload(payload->propose_hidden)) {
-            sp_output_buffer->hidden_states = TensorPbConvert::pbToTorch(payload->propose_hidden).to(torch::kCUDA);
-        }
-
-        stream->setSPOutputBuffer(sp_output_buffer);
-
-        if (payload->propose_tokens.size() >= 2) {
-            auto propose_tokens_gpu = sp_output_buffer->tokens.narrow(1, 1, 1).to(cuda_i32, /*non_blocking=*/true);
-            auto accept_len         = torch::ones({1}, cuda_i32);
-            auto accept_tokens      = torch::zeros({1, static_cast<int64_t>(payload->propose_tokens.size())}, cuda_i32);
-            accept_tokens[0][0]     = sp_output_buffer->tokens[0][0];
-            auto next_seq_len       = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32);
-
-            stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
-                .epoch                  = 0,
-                .accept_len_gpu         = std::move(accept_len),
-                .accept_tokens_gpu      = std::move(accept_tokens),
-                .next_seq_len_gpu       = std::move(next_seq_len),
-                .propose_tokens_gpu     = std::move(propose_tokens_gpu),
-                .last_hidden_states_gpu = sp_output_buffer->hidden_states,
-                .draft_all_probs_gpu    = sp_output_buffer->all_probs,
-                .last_real_seq_len      = stream->seqLength(),
-                .next_real_seq_len      = stream->seqLength(),
-            });
-        }
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: propose_tokens count=%zu", payload->propose_tokens.size());
-    }
-
-    // 4. Position IDs
-    if (!payload->position_ids.empty()) {
-        auto position_ids = torch::tensor(payload->position_ids, torch::dtype(torch::kInt32).device(torch::kCPU));
-        stream->setContextPositionIds(std::move(position_ids));
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: position_ids count=%zu", payload->position_ids.size());
-    }
-
-    return true;
-}
 
 // ----------------------------- StreamCacheResource -----------------------------
 
@@ -288,7 +63,7 @@ void StreamCacheResource::releaseResource() {
                           std::hash<std::thread::id>{}(std::this_thread::get_id()));
         abort();
     }
-    load_cache_context_.reset();
+    allocator_load_context_.reset();
     // do not reuse cache from stopped beam search streams, whose states are likely corrupted
     if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->hasError())) {
         return;
@@ -300,7 +75,6 @@ void StreamCacheResource::releaseResource() {
     tryReleaseKVBlock(curBlocksNum());
     batch_kv_cache_resource_->clearBlocks();
     resource_released_ = true;
-    load_cache_once_.store(false, std::memory_order_release);
 }
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
@@ -330,9 +104,6 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
                 resource_context_.cache_manager->insertIntoCache(insert_info);
             }
-            storeCacheAsync(batch_kv_cache_resource_,
-                            reuseCache() && enableMemoryCache() && !enableTieredMemoryCache(),
-                            reuseCache() && enableRemoteCache());
         } else {
             RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, NOT storing cache, reuseCache=%d, hasError=%d, status=%s",
                               stream_->streamId(),
@@ -398,12 +169,40 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
         stream_->setInitialReuseLength(result.reuse_len);
         stream_->setLocalReuseLength(result.reuse_len);
     }
+    allocator_load_context_ = std::move(result.async_context);
     return absl::OkStatus();
+}
+
+absl::Status StreamCacheResource::waitForAllocatorLoad() {
+    if (!allocator_load_context_) {
+        return absl::OkStatus();
+    }
+
+    auto load_context = allocator_load_context_;
+    load_context->waitDone();
+    if (!load_context->done()) {
+        return absl::InternalError("allocator load context is non-terminal after waitDone");
+    }
+
+    const bool      load_success = load_context->success();
+    const ErrorInfo error        = load_context->errorInfo();
+    allocator_load_context_.reset();
+    if (load_success) {
+        return absl::OkStatus();
+    }
+
+    const std::string& error_text = error.ToString();
+    return absl::InternalError(error_text.empty() ? "allocator load-back failed" :
+                                                    "allocator load-back failed: " + error_text);
 }
 
 absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step, int seq_len_override) {
     RTP_LLM_PROFILE_FUNCTION();
     // TODO(xinfei.sxf) add reserver_blocks
+    if (batch_kv_cache_resource_->curBlocksNum() == 0) {
+        return absl::FailedPreconditionError("incrKVBlock requires an initialized KV cache resource");
+    }
+
     if (fake_inited_) {
         return absl::InternalError("fake inited not allow to incr block");
     }
@@ -432,101 +231,37 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step, int seq_len_o
         stream_->setLocalReuseLength(result.reuse_len);
     }
 
+    if (result.async_context) {
+        allocator_load_context_ = std::move(result.async_context);
+        return absl::FailedPreconditionError("async incremental KV block allocation is unsupported");
+    }
+
     return absl::OkStatus();
 }
 
 bool StreamCacheResource::asyncLoadCache() {
     RTP_LLM_PROFILE_FUNCTION();
-    if (!resource_context_.cache_manager || !resource_context_.cache_manager->hasActiveConnectors()) {
-        return false;
-    }
-    // Memory/remote connectors require reuseCache(); P2P connector does not.
-    // Skip when only memory/remote connectors are active and reuseCache is disabled.
-    const bool has_reuse_path = reuseCache() && (enableMemoryCache() || enableRemoteCache());
-    const bool has_p2p_path   = resource_context_.cache_manager->hasP2PConnector();
-    if (!has_reuse_path && !has_p2p_path) {
-        return false;
-    }
-    if (load_cache_context_) {
-        return true;  // 已有进行中的 load 任务（幂等）
-    }
-    // Second+ initKVBlock (same stream): skip — reuse lengths already set on first load.
-    if (load_cache_once_.exchange(true)) {
-        return true;
-    }
-    auto meta = std::make_shared<MetaImpl>(
-        reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
-    meta->generate_stream_ = stream_;
-    meta->fillRoutingContext(stream_);  // Fill routing context once from GenerateStream
-    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
-    load_cache_context_    = resource_context_.cache_manager->asyncLoadCache(connector_context);
-    return load_cache_context_ != nullptr;
+    return allocator_load_context_ != nullptr;
 }
 
 bool StreamCacheResource::loadCacheDone() {
-    if (!load_cache_context_) {
-        return true;  // 没有 context，视为已完成
-    }
-    if (!load_cache_context_->done()) {
-        return false;  // coordinator 后台线程尚未处理完
-    }
-    // 加载完成（无论成功失败），更新 reuse lengths
-    waitLoadCacheDone(load_cache_context_);
-    if (!load_cache_context_->success()) {
-        // 区分匹配失败和传输失败
-        auto      read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
-        bool      should_retry = false;
-        const int max_retry    = resource_context_.load_cache_retry_times;
-        if (read_context && read_context->fusedMatchContext()) {
-            // 检查是否有匹配到的块
-            size_t matched_blocks = 0;
-            for (const auto& match_ctx : read_context->fusedMatchContext()->contexts()) {
-                auto async_match_ctx = std::dynamic_pointer_cast<AsyncMatchContext>(match_ctx);
-                if (async_match_ctx) {
-                    matched_blocks = std::max(matched_blocks, async_match_ctx->matchedBlockCount());
-                }
-            }
-            // 如果匹配到了块（matched_blocks > 0），说明是传输失败，需要重试，否则是匹配失败，不重试
-            if (matched_blocks > 0) {
-                should_retry = true;
-                // 即使传输失败，也更新已匹配到的 reuse lengths
-                updateReuseLengthsFromContext(read_context);
-                RTP_LLM_LOG_WARNING(
-                    "load cache failed (matched %zu blocks but transfer failed), retry count: %d/%d, stream: [%ld]",
-                    matched_blocks,
-                    load_cache_retry_count_,
-                    max_retry,
-                    stream_->streamId());
-            } else {
-                RTP_LLM_LOG_WARNING("load cache failed (no blocks matched), continuing without cache, stream: [%ld]",
-                                    stream_->streamId());
-            }
+    if (allocator_load_context_) {
+        if (!allocator_load_context_->done()) {
+            return false;
         }
-
-        load_cache_context_.reset();
-
-        if (should_retry) {
-            // 传输失败：保持重试逻辑
-            if (load_cache_retry_count_ >= max_retry) {
-                RTP_LLM_LOG_WARNING("load cache failed after %d retries (transfer error), stream: [%ld]",
-                                    load_cache_retry_count_,
-                                    stream_->streamId());
-                stream_->reportEventWithoutLock(StreamEvents::Error,
-                                                ErrorCode::LOAD_CACHE_TIMEOUT,
-                                                "load cache failed after " + std::to_string(max_retry)
-                                                    + " retries (transfer error)");
-                releaseResource();
-                return true;
-            }
-            load_cache_retry_count_++;
-            asyncLoadCache();
-            return false;  // 失败重试
-        } else {
-            // 匹配失败：不重试，继续执行
+        const bool allocator_load_success = allocator_load_context_->success();
+        if (!allocator_load_success) {
+            const ErrorInfo error = allocator_load_context_->errorInfo();
+            RTP_LLM_LOG_WARNING("block tree load_back failed, stream: [%s], error: %s",
+                                stream_->streamLogTag().c_str(),
+                                error.ToString().c_str());
+            allocator_load_context_.reset();
+            stream_->reportEventWithoutLock(
+                StreamEvents::Error, ErrorCode::LOAD_CACHE_TIMEOUT, "block tree cache load_back failed");
             return true;
         }
+        allocator_load_context_.reset();
     }
-    load_cache_context_.reset();
     return true;
 }
 
@@ -613,104 +348,6 @@ bool StreamCacheResource::enableDeviceCache() const {
 
 bool StreamCacheResource::enableTieredMemoryCache() const {
     return resource_context_.enable_tiered_memory_cache && enableMemoryCache() && enableDeviceCache();
-}
-
-void StreamCacheResource::loadCacheSync() {
-    RTP_LLM_PROFILE_FUNCTION();
-    if (!resource_context_.cache_manager || !resource_context_.cache_manager->hasActiveConnectors()) {
-        return;
-    }
-    // Memory/remote connectors require reuseCache(); P2P connector does not.
-    // Skip when only memory/remote connectors are active and reuseCache is disabled.
-    const bool has_reuse_path = reuseCache() && (enableMemoryCache() || enableRemoteCache());
-    const bool has_p2p_path   = resource_context_.cache_manager->hasP2PConnector();
-    if (!has_reuse_path && !has_p2p_path) {
-        return;
-    }
-    // Second+ initKVBlock (same stream): skip — reuse lengths already set on first load.
-    if (load_cache_once_.exchange(true)) {
-        return;
-    }
-    auto meta = std::make_shared<MetaImpl>(
-        reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
-    meta->generate_stream_ = stream_;
-    meta->fillRoutingContext(stream_);  // Fill routing context once from GenerateStream
-    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
-    std::shared_ptr<AsyncContext> load_cache_context;
-    {
-        RTP_LLM_PROFILE_SCOPE("asyncLoadCache");
-        load_cache_context = resource_context_.cache_manager->asyncLoadCache(connector_context);
-    }
-    waitLoadCacheDone(load_cache_context);
-    // TODO: scheduler will call incrkvblock after load cache, or may lack block on p2p connector
-}
-
-void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context) {
-    RTP_LLM_PROFILE_FUNCTION();
-    if (!load_context) {
-        return;
-    }
-    load_context->waitDone();
-    if (!(load_context->success())) {
-        auto error = load_context->errorInfo();
-        RTP_LLM_LOG_WARNING("load cache done but not success, stream: [%s], error: %s",
-                            stream_->streamLogTag().c_str(),
-                            error.ToString().c_str());
-        if (error.hasError()) {
-            stream_->reportError(error.code(), error.ToString());
-        }
-        return;
-    }
-    auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_context);
-    if (!read_context) {
-        RTP_LLM_LOG_WARNING("load cache success but cast context failed, stream: [%s]",
-                            stream_->streamLogTag().c_str());
-        return;
-    }
-    updateReuseLengthsFromContext(read_context);
-}
-
-void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context) {
-    const int block_tokens     = reuseBlockTokens();
-    const int total_reuse_len  = read_context->resource()->reuseBlockNum() * block_tokens;
-    const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * block_tokens;
-    const int remote_reuse_len = read_context->resource()->remoteReuseBlockNum() * block_tokens;
-    const int device_reuse_len = read_context->resource()->deviceReuseBlockNum() * block_tokens;
-    if (total_reuse_len > 0) {
-        stream_->setInitialReuseLength(total_reuse_len);
-        stream_->setReuseLength(total_reuse_len);
-        stream_->setLocalReuseLength(device_reuse_len + memory_reuse_len);
-        stream_->setMtpTokenIndex(total_reuse_len);
-        stream_->setMemoryReuseLength(memory_reuse_len);
-        stream_->setRemoteReuseLength(remote_reuse_len);
-    }
-
-    // Apply P2P side-channel data (first token, reuse, SP info, position_ids) from read context
-    if (!applyP2PSideChannelToStream(read_context, stream_)) {
-        // Not a P2P read or no side-channel payload — this is normal for non-P2P paths
-    }
-}
-
-std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(
-    const std::shared_ptr<BatchKVCacheResource>& batch_resource, bool enable_memory_cache, bool enable_remote_cache) {
-    RTP_LLM_PROFILE_FUNCTION();
-    auto meta              = std::make_shared<MetaImpl>(enable_memory_cache, enable_remote_cache, stream_->traceId());
-    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_resource, meta);
-    auto store_context     = resource_context_.cache_manager->asyncStoreCache(connector_context);
-    if (resource_context_.write_cache_sync) {
-        waitStoreCacheDone(store_context);
-    }
-    return store_context;
-}
-
-void StreamCacheResource::waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context) {
-    RTP_LLM_PROFILE_FUNCTION();
-    if (!store_context) {
-        return;
-    }
-    while (!store_context->done()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
 }
 
 void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs) {

@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <exception>
 #include <numeric>
 #include <utility>
 
@@ -125,13 +126,12 @@ BlockIdxType poolMalloc(IBlockPool& pool) {
     return copy_engine_test::poolMalloc(pool);
 }
 
-std::unique_ptr<BlockTreeCache>
-makeBlockTreeCacheForTest(std::unique_ptr<BlockTree>        tree,
-                          std::vector<ComponentGroupPtr>    component_groups,
-                          std::vector<Component>            components,
-                          BlockTreeCacheConfig              config,
-                          std::shared_ptr<StorageBackend>   storage_backend,
-                          std::shared_ptr<BroadcastManager> broadcast_manager) {
+std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::unique_ptr<BlockTree>        tree,
+                                                          std::vector<ComponentGroupPtr>    component_groups,
+                                                          std::vector<Component>            components,
+                                                          BlockTreeCacheConfig              config,
+                                                          std::shared_ptr<StorageBackend>   storage_backend,
+                                                          std::shared_ptr<BroadcastManager> broadcast_manager) {
     return BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree),
                                                       std::move(component_groups),
                                                       std::move(components),
@@ -156,6 +156,70 @@ void BlockTreeCacheTestPeer::setCopyEngineForTest(BlockTreeCache& cache, CopyEng
 void BlockTreeCacheTestPeer::runMaintenanceForTest(BlockTreeCache& cache) {
     std::lock_guard<std::mutex> lock(cache.mutex_);
     cache.checkWatermark();
+}
+
+BlockTreeCacheTestPeer::ScopedQueueRejectionGuard::ScopedQueueRejectionGuard(BlockTreeCache& cache):
+    cache_(&cache), armed_(BlockTreeCacheTestPeer::armQueueRejectionForTest(cache)) {
+    if (!armed_) {
+        cache_ = nullptr;
+    }
+}
+
+BlockTreeCacheTestPeer::ScopedQueueRejectionGuard::~ScopedQueueRejectionGuard() {
+    (void)restore();
+}
+
+bool BlockTreeCacheTestPeer::ScopedQueueRejectionGuard::armed() const {
+    return armed_;
+}
+
+bool BlockTreeCacheTestPeer::ScopedQueueRejectionGuard::restore() {
+    if (!armed_ || cache_ == nullptr) {
+        return false;
+    }
+    BlockTreeCache* cache = cache_;
+    cache_                = nullptr;
+    armed_                = false;
+    return BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(*cache);
+}
+
+int BlockTreeCacheTestPeer::pendingTasksForTest(const BlockTreeCache& cache) {
+    return cache.pending_tasks_.load();
+}
+
+bool BlockTreeCacheTestPeer::armQueueRejectionForTest(BlockTreeCache& cache) {
+    cache.waitForPendingTasks();
+    if (cache.pending_tasks_.load() != 0) {
+        ADD_FAILURE() << "queue-rejection guard requires zero pending cache tasks";
+        return false;
+    }
+    if (cache.thread_pool_ == nullptr) {
+        ADD_FAILURE() << "queue-rejection guard requires an initialized thread pool";
+        return false;
+    }
+    cache.thread_pool_->stop(autil::ThreadPool::STOP_AFTER_QUEUE_EMPTY);
+    cache.thread_pool_->join();
+    return true;
+}
+
+bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& cache) {
+    try {
+        auto replacement = std::make_shared<autil::LockFreeThreadPool>(
+            static_cast<size_t>(cache.config_.eviction_thread_pool_size), 1000, nullptr, "BlockTreeEvictionPool");
+        if (!replacement->start()) {
+            ADD_FAILURE() << "queue-rejection guard failed to start replacement thread pool";
+            cache.thread_pool_.reset();
+            return false;
+        }
+        cache.thread_pool_ = std::move(replacement);
+        return true;
+    } catch (const std::exception& error) {
+        ADD_FAILURE() << "queue-rejection guard failed to restore thread pool: " << error.what();
+    } catch (...) {
+        ADD_FAILURE() << "queue-rejection guard failed to restore thread pool with unknown exception";
+    }
+    cache.thread_pool_.reset();
+    return false;
 }
 
 ScriptedCopyEngine::ScriptedCopyEngine(const std::vector<ComponentGroupPtr>& groups,
@@ -300,10 +364,8 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
         std::make_shared<ScriptedCopyEngine>(environment->groups, environment->components);
 
     std::vector<ComponentGroupPtr> cache_groups = environment->groups;
-    environment->cache = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(2),
-                                                   std::move(cache_groups),
-                                                   environment->components,
-                                                   std::move(config));
+    environment->cache                          = makeBlockTreeCacheForTest(
+        std::make_unique<BlockTree>(2), std::move(cache_groups), environment->components, std::move(config));
     if (environment->cache == nullptr) {
         ADD_FAILURE() << "failed to initialize BlockTreeCache test environment";
         return nullptr;

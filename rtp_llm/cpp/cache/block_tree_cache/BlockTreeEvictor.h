@@ -49,9 +49,9 @@ public:
                      bool                            enable_reverse_eviction);
 
     bool init(const std::vector<Component>& components,
-              EvictionPolicy               device_policy,
-              EvictionPolicy               host_policy,
-              EvictionPolicy               disk_policy);
+              EvictionPolicy                device_policy,
+              EvictionPolicy                host_policy,
+              EvictionPolicy                disk_policy);
 
     // ---- Semantic events (must be called while holding BlockTreeCache mutex) ----
     // Initialize candidate meta for new nodes and refresh their candidacy.
@@ -60,10 +60,14 @@ public:
     void onMatched(const std::vector<TreeNode*>& path);
     // A match-protection reference was released: re-evaluate candidacy (lazy ref).
     void refreshCandidatesAfterRelease(const GroupBlockSet& set);
+    // Re-evaluate candidacy for every tree node across all component groups.
+    // Called after external refcount changes (e.g. request free) that may make
+    // previously non-evictable blocks evictable.
+    void refreshAllCandidates(const BlockTree& tree);
     // A node's topology changed (e.g. became a leaf after child deletion).
     void onTopologyChanged(TreeNode* parent);
     // A node is about to be removed from the tree: drop it from all heaps.
-    void onNodeAboutToRemove(TreeNode* node);
+    void           onNodeAboutToRemove(TreeNode* node);
     CandidateStats candidateStats() const;
 
     // ---- Eviction selection & migration (caller owns synchronization) ----
@@ -72,13 +76,13 @@ public:
     std::optional<EvictionMove> chooseVictim(Tier tier);
     std::optional<EvictionMove> chooseVictim(int component_group_id, Tier tier);
     std::vector<EvictionMove>   chooseWatermarkVictims(ComponentGroup& group, Tier tier, double watermark_ratio);
-    std::optional<EvictionPlan>   buildPlan(EvictionMove eviction_move);
-    CopyResultSet                 performCopy(const EvictionPlan& plan);
-    void                          complete(BlockTree& tree, const EvictionPlan& plan, const CopyResultSet& results);
-    void                          rollbackPreparedPlan(const EvictionPlan& plan);
-    void                          writeRemoteThrough(const std::shared_ptr<StorageBackend>& storage_backend,
-                                                     CacheKeyType                           cache_key,
-                                                     int                                    component_group_id);
+    std::optional<EvictionPlan> buildPlan(EvictionMove eviction_move);
+    CopyResultSet               performCopy(const EvictionPlan& plan);
+    void                        complete(BlockTree& tree, const EvictionPlan& plan, const CopyResultSet& results);
+    void                        rollbackPreparedPlan(const EvictionPlan& plan);
+    void                        writeRemoteThrough(const std::shared_ptr<StorageBackend>& storage_backend,
+                                                   CacheKeyType                           cache_key,
+                                                   int                                    component_group_id);
     static bool buildTransferDescriptor(const EvictionMove& eviction_move, TransferDescriptor& descriptor);
 
     // ---- Load-back state transitions (owned here; driven by BlockTreeCache) ----

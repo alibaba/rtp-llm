@@ -311,21 +311,15 @@ TEST_F(GenerateStreamStateTest, testLoadInitiatedSkipsAsyncLoadCache) {
     auto stream = createStream();
     ASSERT_EQ(stream->getStatus(), StreamState::WAITING);
 
-    // Simulate DecodeRpcServer: only initKVBlock, no asyncLoadCache
+    // Simulate DecodeRpcServer: initialize blocks before FIFO admission.
     auto& resource = stream->streamCacheResource();
     ASSERT_TRUE(resource.initKVBlock().ok());
     stream->reportEvent(StreamEvents::LoadInitiated);
 
-    // Verify load_cache_context_ is null (no asyncLoadCache was called)
-    ASSERT_FALSE(resource.load_cache_context_);
-
-    // moveToNext should not trigger asyncLoadCache because LoadInitiated is set
+    // moveToNext should not repeat initial allocator readiness because LoadInitiated is set.
     stream->reportEvent(StreamEvents::CanRun);
     auto new_state = stream->moveToNext();
     ASSERT_EQ(new_state, StreamState::RUNNING);
-
-    // Still no asyncLoadCache context
-    ASSERT_FALSE(resource.load_cache_context_);
 }
 
 TEST_F(GenerateStreamStateTest, testPrefillFallbackDecodeGrowsBlocksAfterContext) {

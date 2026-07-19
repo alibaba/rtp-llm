@@ -57,8 +57,31 @@ makeBlockTreeCacheForTest(std::unique_ptr<BlockTree>        tree,
 
 class BlockTreeCacheTestPeer {
 public:
+    class ScopedQueueRejectionGuard {
+    public:
+        explicit ScopedQueueRejectionGuard(BlockTreeCache& cache);
+        ~ScopedQueueRejectionGuard();
+
+        ScopedQueueRejectionGuard(const ScopedQueueRejectionGuard&)            = delete;
+        ScopedQueueRejectionGuard& operator=(const ScopedQueueRejectionGuard&) = delete;
+        ScopedQueueRejectionGuard(ScopedQueueRejectionGuard&&)                 = delete;
+        ScopedQueueRejectionGuard& operator=(ScopedQueueRejectionGuard&&)      = delete;
+
+        bool armed() const;
+        bool restore();
+
+    private:
+        BlockTreeCache* cache_{nullptr};
+        bool            armed_{false};
+    };
+
     static void setCopyEngineForTest(BlockTreeCache& cache, CopyEnginePtr copy_engine);
     static void runMaintenanceForTest(BlockTreeCache& cache);
+    static int  pendingTasksForTest(const BlockTreeCache& cache);
+
+private:
+    static bool armQueueRejectionForTest(BlockTreeCache& cache);
+    static bool restoreQueueAfterRejectionForTest(BlockTreeCache& cache);
 };
 
 class ScriptedCopyEngine: public CopyEngine {

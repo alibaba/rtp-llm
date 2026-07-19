@@ -218,38 +218,6 @@ TEST_F(DeviceSWAKVCacheGroupTest, GetNeedBlocks_CommonSeqLenIgnored) {
     EXPECT_EQ(need1.common_blocks, 0);
 }
 
-// ==================== match ====================
-
-// TODO(block_tree_cache refactor): re-enable after match/matchSingleKey is added to DeviceKVCacheGroup
-#if 0
-TEST_F(DeviceSWAKVCacheGroupTest, MatchAlwaysThrows) {
-    auto group = makeGroup(4);
-    EXPECT_THROW(group.match({101, 102, 103}), std::exception);
-}
-#endif
-
-// TODO(block_tree_cache refactor): re-enable after matchSingleKey is added to DeviceKVCacheGroup
-#if 0
-TEST_F(DeviceSWAKVCacheGroupTest, MatchSingleKey_NotFound) {
-    auto group  = makeGroup(4);
-    auto result = group.matchSingleKey(999);
-    EXPECT_TRUE(result.block_indices.empty());
-}
-#endif
-
-// TODO(block_tree_cache refactor): re-enable after SharedBlockCache is replaced
-#if 0
-TEST_F(DeviceSWAKVCacheGroupTest, MatchSingleKey_Found) {
-    auto                      group       = makeGroup(4);
-    std::vector<BlockIdxType> group_slots = {1};  // group_id=0, block_index=1
-    shared_cache_->put(101, group_slots, false);
-
-    auto result = group.matchSingleKey(101);
-    ASSERT_EQ(result.block_indices.size(), 1u);
-    EXPECT_EQ(result.block_indices[0], 1);
-}
-#endif
-
 // ==================== malloc (default step=0, acts like step=1, tail-only) ====================
 
 TEST_F(DeviceSWAKVCacheGroupTest, Malloc_ShortSeq_OnlyOneBlock) {
@@ -431,6 +399,23 @@ TEST_F(DeviceSWAKVCacheGroupTest, Malloc_WithStep_ReserveAllocated) {
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[3]));
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[4]));
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 3);
+}
+
+TEST_F(DeviceSWAKVCacheGroupTest, MaterializePositionsOnlyBackfillsTicketSlots) {
+    auto group = makeGroupWithStep(4, 2);
+
+    BlockIds block_ids(1);
+    block_ids.assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    ASSERT_TRUE(group.materializePositions(block_ids, {1, 2, 3}));
+
+    ASSERT_EQ(block_ids.blocksNum(), 4u);
+    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[0]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[1]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[2]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[3]));
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 3);
+
+    group.free(block_ids.blocks());
 }
 
 // ==================== removeSkippedBlocks ====================
@@ -625,38 +610,6 @@ TEST_F(DeviceSWAKVCacheGroupTest, Reference_NullBlocksNotReffed) {
     group.reference(block_ids2, original);
     EXPECT_EQ(block_ids2.blocksNum(), original.size());
 }
-
-// ==================== put into cache (allocator-level) ====================
-
-// TODO(block_tree_cache refactor): re-enable after SharedBlockCache is replaced
-#if 0
-TEST_F(DeviceSWAKVCacheGroupTest, PutIntoCache_SkipsNullBlocks) {
-    auto     group = makeGroup(4);
-    BlockIds block_ids(1);
-    ASSERT_TRUE(group.malloc(block_ids, 20));
-    CacheKeysType keys = {101, 102, 103, 104, 105};
-
-    // Simulate allocator-level insertIntoCache: only put non-NULL blocks
-    for (size_t i = 0; i < keys.size() && i < block_ids.blocksNum(); ++i) {
-        if (!isNullBlockIdx(block_ids.blocks()[i])) {
-            std::vector<BlockIdxType> slots = {block_ids.blocks()[i]};
-            shared_cache_->put(keys[i], slots, false);
-        }
-    }
-
-    auto result1 = group.matchSingleKey(101);
-    EXPECT_TRUE(result1.block_indices.empty());
-
-    // The last two active tail blocks are real.
-    auto result4 = group.matchSingleKey(104);
-    ASSERT_EQ(result4.block_indices.size(), 1u);
-    EXPECT_EQ(result4.block_indices[0], block_ids.blocks()[3]);
-
-    auto result5 = group.matchSingleKey(105);
-    ASSERT_EQ(result5.block_indices.size(), 1u);
-    EXPECT_EQ(result5.block_indices[0], block_ids.blocks()[4]);
-}
-#endif
 
 // ==================== batch allocation atomicity (regression: mid-loop leak) ====================
 

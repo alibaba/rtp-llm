@@ -39,12 +39,6 @@ struct BlockIdPair {
     BlockIdxType dst;
 };
 
-struct MatchResult {
-    size_t           reuse_length = 0;
-    size_t           reuse_blocks = 0;
-    BlockIndicesType block_indices;
-};
-
 // for p2p connector when TP settings of prefill & decode are different.
 struct KVPartitionBytes {
     size_t k_off = 0;

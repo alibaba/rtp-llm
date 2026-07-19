@@ -72,6 +72,12 @@ public:
         return node_pool_.size();
     }
 
+    // Iterate over all live tree nodes. Used by the evictor to re-evaluate
+    // candidacy after external refcount changes (e.g. request free).
+    const std::vector<std::unique_ptr<TreeNode>>& nodes() const {
+        return node_pool_;
+    }
+
 private:
     TreeNode* createNode(CacheKeyType key, TreeNode* parent);
 

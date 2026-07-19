@@ -10,6 +10,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/config_creator/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/allocator/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/allocator/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/config_creator/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTransferConverter.h"
@@ -832,7 +833,56 @@ TEST_F(KVCacheManagerTest, Init_CreatesBlockTreeCache) {
     EXPECT_FALSE(kv_cache_manager->hasP2PConnector());
 }
 
-TEST_F(KVCacheManagerTest, HasActiveConnectors_WhenMemoryCacheEnabled) {
+// C007-T01: the manager path delegates a non-empty release to the allocator. Once the
+// request holder is gone, the real tree candidate becomes reclaimable and all capacity
+// returns to the device pool.
+TEST_F(KVCacheManagerTest, FreeMakesSingleTypeCacheOnlyBlockReclaimable) {
+    auto config  = makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/5, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
+    auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
+    ASSERT_TRUE(manager->init());
+
+    auto allocator = std::dynamic_pointer_cast<SingleTypeKVCacheAllocator>(manager->allocator_);
+    ASSERT_NE(allocator, nullptr);
+    auto pool  = allocator->getDeviceBlockPool();
+    auto cache = manager->blockTreeCache();
+    ASSERT_NE(pool, nullptr);
+    ASSERT_NE(cache, nullptr);
+
+    const size_t free_before = allocator->freeBlocksNum();
+    auto         resource    = makeDSV4BatchResource(config);
+    auto         tokens      = makeDSV4CompleteTokenIds(/*initial_seq_len=*/4, /*max_seq_len=*/4, 4);
+
+    MallocInfo malloc_info{resource, tokens};
+    malloc_info.reuse_cache         = true;
+    malloc_info.enable_device_cache = false;
+    ASSERT_TRUE(manager->malloc(malloc_info).success);
+    ASSERT_EQ(resource->blocksNum(/*batch_id=*/0, /*group_id=*/0), 1);
+    const auto block = resource->blocks(/*batch_id=*/0, /*group_id=*/0)[0];
+    EXPECT_EQ(pool->refCount(block), 1u);
+
+    manager->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false});
+    EXPECT_EQ(pool->refCount(block), 2u);
+    EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
+    EXPECT_EQ(allocator->activeTreeCachedBlocksNum(), 1u);
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before - 1);
+
+    manager->free(FreeInfo{resource, tokens});
+    EXPECT_EQ(resource->curBlocksNum(), 0);
+    EXPECT_TRUE(pool->isAllocated(block));
+    EXPECT_EQ(pool->refCount(block), 1u);
+    EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
+    EXPECT_EQ(allocator->activeTreeCachedBlocksNum(), 0u);
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before - 1);
+
+    EXPECT_EQ(cache->reclaimBlocks(/*num_blocks=*/1, Tier::DEVICE), 1);
+    EXPECT_FALSE(pool->isAllocated(block));
+    EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
+    EXPECT_EQ(allocator->activeTreeCachedBlocksNum(), 0u);
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+}
+
+TEST_F(KVCacheManagerTest, InternalMemoryTierIsNotReportedAsExternalConnector) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_memory_cache  = true;
@@ -840,8 +890,8 @@ TEST_F(KVCacheManagerTest, HasActiveConnectors_WhenMemoryCacheEnabled) {
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     EXPECT_TRUE(kv_cache_manager->init());
-    // Memory cache enabled → hasActiveConnectors returns true.
-    EXPECT_TRUE(kv_cache_manager->hasActiveConnectors());
+    // Internal BlockTree tiers are allocator-managed, not external connectors.
+    EXPECT_FALSE(kv_cache_manager->hasActiveConnectors());
 }
 
 TEST_F(KVCacheManagerTest, AsyncMethodsReturnNull_WithoutStorageBackend) {
@@ -898,8 +948,9 @@ static void expectExecuteFunctionRoutesTransferLocally(const std::shared_ptr<KVC
 TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesTransferLocally) {
     CacheConfig   cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache  = true;
-    kv_cache_config.memory_cache_size_mb = 1;
+    kv_cache_config.enable_memory_cache        = true;
+    kv_cache_config.enable_tiered_memory_cache = true;
+    kv_cache_config.memory_cache_size_mb       = 1;
 
     std::shared_ptr<KVCacheManager> kv_cache_manager =
         std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
@@ -934,10 +985,13 @@ TEST_F(KVCacheManagerTest, RankZeroCreatesBroadcastManagerAndRoutesLocally) {
     KVCacheConfig     kv_cache_config;
     ParallelismConfig parallelism_config;
     RuntimeConfig     runtime_config;
-    parallelism_config.tp_size       = 2;
-    parallelism_config.tp_rank       = 0;
-    parallelism_config.world_size    = 2;
-    runtime_config.worker_grpc_addrs = {"127.0.0.1:12345", "127.0.0.1:12346"};
+    kv_cache_config.enable_memory_cache        = true;
+    kv_cache_config.enable_tiered_memory_cache = true;
+    kv_cache_config.memory_cache_size_mb       = 1;
+    parallelism_config.tp_size                 = 2;
+    parallelism_config.tp_rank                 = 0;
+    parallelism_config.world_size              = 2;
+    runtime_config.worker_grpc_addrs           = {"127.0.0.1:12345", "127.0.0.1:12346"};
 
     std::shared_ptr<KVCacheManager> kv_cache_manager = std::make_shared<KVCacheManager>(
         cache_config, true, nullptr, kv_cache_config, parallelism_config, runtime_config);
@@ -955,11 +1009,14 @@ TEST_F(KVCacheManagerTest, NonZeroRankRoutesTransferWithoutBroadcastManager) {
     KVCacheConfig     kv_cache_config;
     ParallelismConfig parallelism_config;
     RuntimeConfig     runtime_config;
-    parallelism_config.tp_size       = 2;
-    parallelism_config.tp_rank       = 1;
-    parallelism_config.world_size    = 2;
-    parallelism_config.world_rank    = 1;
-    runtime_config.worker_grpc_addrs = {"127.0.0.1:12345", "127.0.0.1:12346"};
+    kv_cache_config.enable_memory_cache        = true;
+    kv_cache_config.enable_tiered_memory_cache = true;
+    kv_cache_config.memory_cache_size_mb       = 1;
+    parallelism_config.tp_size                 = 2;
+    parallelism_config.tp_rank                 = 1;
+    parallelism_config.world_size              = 2;
+    parallelism_config.world_rank              = 1;
+    runtime_config.worker_grpc_addrs           = {"127.0.0.1:12345", "127.0.0.1:12346"};
 
     std::shared_ptr<KVCacheManager> kv_cache_manager = std::make_shared<KVCacheManager>(
         cache_config, true, nullptr, kv_cache_config, parallelism_config, runtime_config);
@@ -1077,7 +1134,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_IncludesMemoryBlocksInTotalAndAvailabl
     EXPECT_GE(info.available_kv_cache, device_only_available);
 }
 
-TEST_F(KVCacheManagerTest, DISABLED_DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
+TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
     // This test verifies that when block pools are exhausted by cached (but freed) requests,
     // a new allocation correctly triggers LRU eviction from each group's independent BlockCache.
     //
@@ -1094,7 +1151,11 @@ TEST_F(KVCacheManagerTest, DISABLED_DSV4EvictionTriggeredWhenPoolExhaustedByCach
     //
     // The fourth allocation MUST succeed via eviction on FULL groups.
     auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/8);
-    auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
+    // Preserve production free-only admission; disable only the unrelated reserve threshold in this focused test.
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.reserve_block_ratio = 0;
+    auto manager                        = std::make_shared<KVCacheManager>(
+        manager_config, /*warmup=*/false, /*metrics_reporter=*/nullptr, kv_cache_config);
     ASSERT_TRUE(manager->init());
 
     const int    spb         = static_cast<int>(manager_config.seq_size_per_block);
@@ -1200,7 +1261,10 @@ TEST_F(KVCacheManagerTest, DISABLED_DSV4EvictionTriggeredWhenPoolExhaustedByCach
     // Expect freeBlocksNum >= free_after_c (at least as good as before D was allocated).
     EXPECT_GE(manager->freeBlocksNum(), free_after_c);
 
-    manager->blockTreeCache()->reclaimBlocks(100, Tier::DEVICE);
+    // --- Canonically reclaim all remaining cached primary plans and verify full pool recovery ---
+    const int reclaimed = manager->blockTreeCache()->reclaimBlocks(/*num_blocks=*/100, Tier::DEVICE);
+    EXPECT_GT(reclaimed, 0);
+    EXPECT_LE(reclaimed, 100);
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 
@@ -1272,11 +1336,13 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
     }
 
     manager->free(FreeInfo{reuse_res, reuse_tokens});
-    manager->blockTreeCache()->reclaimBlocks(100, Tier::DEVICE);
+    const int reclaimed = manager->blockTreeCache()->reclaimBlocks(/*num_blocks=*/100, Tier::DEVICE);
+    EXPECT_GT(reclaimed, 0);
+    EXPECT_LE(reclaimed, 100);
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 
-TEST_F(KVCacheManagerTest, DISABLED_DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeContinuation) {
+TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeContinuation) {
     // This test simulates full DSV4 inference including SWA group eviction.
     //
     // Tight stress layout:
@@ -1293,7 +1359,11 @@ TEST_F(KVCacheManagerTest, DISABLED_DSV4EvictionOnSWAGroupsDuringInferenceWithDe
     //   Phase 3: Decode-phase incrKVBlock triggers further FULL/SWA eviction + removeSkippedBlocks
     //   Phase 4: Free and verify pool recovery
     auto manager_config = makeDSV4ConfigWithConcurrencyPool(/*full_block_num=*/8, /*swa_batch_size=*/4);
-    auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
+    // Preserve production free-only admission; disable only the unrelated reserve threshold in this focused test.
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.reserve_block_ratio = 0;
+    auto manager                        = std::make_shared<KVCacheManager>(
+        manager_config, /*warmup=*/false, /*metrics_reporter=*/nullptr, kv_cache_config);
     ASSERT_TRUE(manager->init());
 
     const int spb     = static_cast<int>(manager_config.seq_size_per_block);
@@ -1405,7 +1475,10 @@ TEST_F(KVCacheManagerTest, DISABLED_DSV4EvictionOnSWAGroupsDuringInferenceWithDe
     // === Phase 4: Free all and verify full pool recovery ===
     manager->free(FreeInfo{res_c, tokens_c});
 
-    manager->blockTreeCache()->reclaimBlocks(100, Tier::DEVICE);
+    // Canonically reclaim remaining cached primary plans to restore every independent pool.
+    const int reclaimed = manager->blockTreeCache()->reclaimBlocks(/*num_blocks=*/100, Tier::DEVICE);
+    EXPECT_GT(reclaimed, 0);
+    EXPECT_LE(reclaimed, 100);
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle) {

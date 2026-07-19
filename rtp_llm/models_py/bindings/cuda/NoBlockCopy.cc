@@ -255,10 +255,36 @@ bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
     }
 
 #if CUDART_VERSION >= 12080
+    int        runtime_version       = 0;
+    const auto runtime_version_error = cudaRuntimeGetVersion(&runtime_version);
+    if (runtime_version_error != cudaSuccess) {
+        RTP_LLM_LOG_WARNING("execBatchedMemoryCopy unavailable: compile-time CUDART_VERSION=%d, failed to query "
+                            "runtime version (%s); cannot prove cudaMemcpyBatchAsync ABI compatibility",
+                            CUDART_VERSION,
+                            cudaGetErrorString(runtime_version_error));
+        return false;
+    }
+    if (runtime_version < 12080) {
+        RTP_LLM_LOG_WARNING("execBatchedMemoryCopy unavailable: compile-time CUDART_VERSION=%d, runtime version=%d "
+                            "predates cudaMemcpyBatchAsync; falling back to generic copy",
+                            CUDART_VERSION,
+                            runtime_version);
+        return false;
+    }
+    const bool compiled_with_cuda13_batch_abi = CUDART_VERSION >= 13000;
+    const bool runtime_uses_cuda13_batch_abi  = runtime_version >= 13000;
+    if (compiled_with_cuda13_batch_abi != runtime_uses_cuda13_batch_abi) {
+        RTP_LLM_LOG_WARNING("execBatchedMemoryCopy unavailable: compile-time CUDART_VERSION=%d and runtime version=%d "
+                            "use incompatible cudaMemcpyBatchAsync signatures; falling back to generic copy",
+                            CUDART_VERSION,
+                            runtime_version);
+        return false;
+    }
+
     check_cuda_value(cudaSetDevice(params.device_index));
     auto stream = getNoBlockCopyStream().stream();
 
-    const size_t tile_num = params.tiles.size();
+    const size_t             tile_num = params.tiles.size();
     std::vector<void*>       dsts;
     std::vector<const void*> srcs;
     std::vector<size_t>      sizes;

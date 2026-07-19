@@ -88,12 +88,7 @@ TEST(BlockTreeCacheFactoryTest, RejectsDiskCacheWithoutMemoryCache) {
     EXPECT_EQ(cache, nullptr);
 }
 
-// BTC-ISSUE-19: the mount-lock conflict is fixed (per-group Disk pools now share one
-// DiskMountGuard), so the Factory builds both groups' Disk pools. The test still aborts
-// when executing a D2H transfer: DeviceBlockPool maps the descriptor's global layer id to
-// layout_id=-1 (DeviceBlockPool::checkLayoutValidity), so the built descriptor is not yet
-// executable. Re-enable once the factory layout wiring yields a valid device layout mapping.
-TEST(BlockTreeCacheFactoryTest, DISABLED_Factory_CreatesExecutableFullSWAConfig) {
+TEST(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
     if (!block_tree_cache_test::cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -138,6 +133,7 @@ TEST(BlockTreeCacheFactoryTest, DISABLED_Factory_CreatesExecutableFullSWAConfig)
     KVCacheConfig                  kv_cache_config;
     kv_cache_config.enable_device_cache           = true;
     kv_cache_config.enable_memory_cache           = true;
+    kv_cache_config.enable_tiered_memory_cache    = true;
     kv_cache_config.memory_cache_size_mb          = 1;
     kv_cache_config.enable_memory_cache_disk      = true;
     kv_cache_config.memory_cache_disk_size_mb     = 1;

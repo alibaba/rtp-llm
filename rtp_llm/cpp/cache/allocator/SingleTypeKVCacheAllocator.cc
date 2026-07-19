@@ -78,8 +78,7 @@ bool SingleTypeKVCacheAllocator::doInit() {
                                 || spec->type == rtp_llm::KVCacheSpecType::MultiHeadLatentAttention,
                             "SingleTypeKVCacheAllocator only support Full Attention");
 
-    auto device_config =
-        std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfig(config_));
+    auto device_config = std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfig(config_));
     device_config->use_cuda_malloc_backing = use_cuda_malloc_block_pool_;
 
     std::shared_ptr<const DeviceBlockPoolConfig> const_config = device_config;
@@ -103,6 +102,22 @@ DeviceKVCacheGroupPtr SingleTypeKVCacheAllocator::fullGroup() const {
     return group;
 }
 
+bool SingleTypeKVCacheAllocator::preflightLoadBackMappings(const std::shared_ptr<LoadBackTicket>& ticket) const {
+    if (ticket == nullptr || ticket->empty()) {
+        return true;
+    }
+    for (const PendingLoadBackItem& item : ticket->items()) {
+        if (!block_tree_cache_->validateDeviceGroupIdsForComponentGroup(item.group_id, item.device_group_ids)) {
+            RTP_LLM_LOG_WARNING("load_back mapping rejected: boundary=allocator_preflight "
+                                "allocator=SingleType component_group_id=%d actual_cardinality=%zu",
+                                item.group_id,
+                                item.device_group_ids.size());
+            return false;
+        }
+    }
+    return true;
+}
+
 MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
     auto& kv_resource = malloc_info.batch_kv_cache_resource;
     int   reuse_len   = 0;
@@ -117,9 +132,10 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     auto&       block_ids_0        = kv_resource->mutableBlockIds(0);
     int64_t     match_cost_time_us = 0;
 
-    const size_t reserve_blocks   = reserveBlockNum();
-    const int    estimated_blocks = (reserve_blocks > 0) ? getNeedBlocks(malloc_info) : 0;
-    int          reuse_blocks     = 0;
+    const size_t reserve_blocks        = reserveBlockNum();
+    const int    estimated_blocks      = (reserve_blocks > 0) ? getNeedBlocks(malloc_info) : 0;
+    int          reuse_blocks          = 0;
+    int          resident_reuse_blocks = 0;
 
     std::shared_ptr<AsyncContext>   async_ctx;
     std::shared_ptr<LoadBackTicket> load_back_ticket;
@@ -147,14 +163,46 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         // those refs immediately, leaving KVCacheGroup::reference() as the sole owner.
         BlockTreeMatchResult tree_match =
             block_tree_cache_ ? block_tree_cache_->match(match_keys) : BlockTreeMatchResult{};
-        load_back_ticket          = tree_match.load_back_ticket;
+        load_back_ticket = tree_match.load_back_ticket;
+        if (!preflightLoadBackMappings(load_back_ticket)) {
+            block_tree_cache_->releaseMatchedBlocks(tree_match.matched_block_sets);
+            return {false, 0};
+        }
         const int        group_id = fullGroup()->group_id();
         BlockIndicesType matched_block_indices;
         auto             it = tree_match.group_block_indices.find(group_id);
         if (it != tree_match.group_block_indices.end()) {
             matched_block_indices = it->second;
         }
-        reuse_blocks = static_cast<int>(tree_match.matched_blocks);
+        const int ready_reuse_blocks = static_cast<int>(tree_match.matched_blocks);
+        reuse_blocks                 = load_back_ticket != nullptr && !load_back_ticket->empty() ?
+                                           static_cast<int>(load_back_ticket->logicalMatchedBlocks()) :
+                                           ready_reuse_blocks;
+        matched_block_indices.resize(static_cast<size_t>(reuse_blocks), NULL_BLOCK_IDX);
+        if (load_back_ticket != nullptr) {
+            bool resident_items_valid = true;
+            for (const PendingLoadBackItem& item : load_back_ticket->items()) {
+                if (item.source_tier != Tier::DEVICE) {
+                    continue;
+                }
+                if (item.device_group_ids.size() != 1 || item.device_group_ids.front() != fullGroup()->group_id()
+                    || item.source_blocks.size() != 1 || item.path_index >= matched_block_indices.size()) {
+                    resident_items_valid = false;
+                    break;
+                }
+                BlockIdxType& target = matched_block_indices[item.path_index];
+                if (!isNullBlockIdx(target) && target != item.source_blocks.front()) {
+                    resident_items_valid = false;
+                    break;
+                }
+                target = item.source_blocks.front();
+            }
+            if (!resident_items_valid) {
+                block_tree_cache_->releaseMatchedBlocks(tree_match.matched_block_sets);
+                RTP_LLM_LOG_WARNING("SingleType initMalloc rejected invalid resident logical suffix");
+                return {false, 0};
+            }
+        }
         if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
             // virtual block ⇒ reuse_length covers cp_size physical blocks of
             // tokens; reuse_blocks counts virtual blocks.
@@ -163,18 +211,34 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
             reuse_len = reuse_blocks * fullGroup()->seqSizePerBlock();
         }
         match_cost_time_us = currentTimeUs() - match_begin_time_us;
-        kv_resource->cacheResource(0).setDeviceReuseBlockNum(reuse_blocks);
-        fullGroup()->reference(block_ids_0, matched_block_indices);
+        BlockIndicesType resident_blocks;
+        resident_blocks.reserve(matched_block_indices.size());
+        for (BlockIdxType block : matched_block_indices) {
+            if (!isNullBlockIdx(block)) {
+                resident_blocks.push_back(block);
+            }
+        }
+        resident_reuse_blocks = static_cast<int>(resident_blocks.size());
+        block_ids_0.assign(std::move(matched_block_indices));
+        fullGroup()->reference(resident_blocks);
         if (block_tree_cache_) {
             block_tree_cache_->releaseMatchedBlocks(tree_match.matched_block_sets);
         }
     }
 
+    auto rollback_request = [&]() {
+        if (kv_resource->curBlocksNum() > 0) {
+            FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
+            free(free_info);
+        }
+        kv_resource->cacheResource(0).setDeviceReuseBlockNum(0);
+    };
+
     // Reserve-headroom gate (formerly the inline admission arithmetic). load_back is now
     // deferred until commit, so this simply rejects the request before malloc; on any
     // early return the ticket's destructor aborts the planned load_back.
     if (reserve_blocks > 0 && estimated_blocks > 0) {
-        const int actual_blocks = std::max(estimated_blocks - reuse_blocks, 0);
+        const int actual_blocks = std::max(estimated_blocks - resident_reuse_blocks, 0);
         if (actual_blocks > 0) {
             const size_t required_blocks = static_cast<size_t>(actual_blocks) + reserve_blocks;
             const size_t free_blocks = freeBlocksNum();
@@ -190,12 +254,14 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
                                      free_blocks,
                                      reserve_blocks);
                 }
+                rollback_request();
                 return {false, 0};
             }
         }
     }
 
     if (!fullGroup()->malloc(block_ids_0, common_seq_len)) {
+        rollback_request();
         return {false, 0};
     }
 
@@ -207,15 +273,29 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     // All allocations succeeded: commit the deferred load_back (allocate device targets
     // and submit the async copies). Returns the async context for the scheduler to await.
     if (load_back_ticket != nullptr && !load_back_ticket->empty()) {
+        const BlockIndicesType& request_blocks = block_ids_0.blocks();
+        for (PendingLoadBackItem& item : load_back_ticket->items()) {
+            item.target_device_blocks.clear();
+            if (item.device_group_ids.size() != 1 || item.device_group_ids.front() != fullGroup()->group_id()
+                || item.path_index >= request_blocks.size() || isNullBlockIdx(request_blocks[item.path_index])
+                || (item.source_tier == Tier::DEVICE
+                    && (item.source_blocks.size() != 1 || request_blocks[item.path_index] != item.source_blocks[0]))) {
+                rollback_request();
+                RTP_LLM_LOG_WARNING("SingleType initMalloc failed to bind load_back target at path=%zu",
+                                    item.path_index);
+                return {false, 0};
+            }
+            item.target_device_blocks.push_back(request_blocks[item.path_index]);
+        }
         async_ctx = load_back_ticket->commit();
         if (async_ctx == nullptr) {
-            FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
-            free(free_info);
+            rollback_request();
             RTP_LLM_LOG_WARNING("SingleType initMalloc failed because load_back target allocation was not atomic");
             return {false, 0};
         }
     }
 
+    kv_resource->cacheResource(0).setDeviceReuseBlockNum(reuse_blocks);
     return {true, reuse_len, match_cost_time_us, async_ctx};
 }
 
@@ -284,6 +364,9 @@ void SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
         fullGroup()->free(blocks);
     }
     kv_cache_resource->clearBlocks();
+    if (block_tree_cache_) {
+        block_tree_cache_->onBlocksReleased();
+    }
 }
 
 void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {

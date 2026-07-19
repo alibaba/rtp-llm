@@ -32,6 +32,10 @@ struct CacheStats {
     size_t host_heap_total_size{0};
     size_t disk_heap_total_size{0};
 };
+struct BlockTreeKeySnapshot {
+    int64_t                   version{0};
+    std::vector<CacheKeyType> keys;
+};
 
 // Unified configuration for BlockTreeCache behavior and pool sizing.
 struct BlockTreeCacheConfig {
@@ -49,6 +53,10 @@ struct BlockTreeCacheConfig {
     TierWatermark watermark_device;
     TierWatermark watermark_host;
     TierWatermark watermark_disk;
+
+    // Absolute device headroom. Applied after request references are released;
+    // unlike ratio watermarks this maps directly to device_cache_min_free_blocks.
+    size_t device_min_free_blocks{0};
 
     // ---- Load-back control ----
     bool enable_load_back{false};
@@ -149,8 +157,10 @@ public:
     // group (target_tier = NONE, content dropped). Returns the number actually freed.
     int evictForGroup(int component_group_id, size_t num_blocks);
 
-    CacheStats getStats() const;
-    void       waitForPendingTasks();
+    CacheStats           getStats() const;
+    BlockTreeKeySnapshot getKeySnapshot(size_t limit) const;
+    void                 waitForPendingTasks();
+    void                 onBlocksReleased();
 
     // Release path-lock references acquired during match().
     void releaseMatchedBlocks(const std::vector<GroupBlockSet>& sets);
@@ -184,6 +194,8 @@ public:
     const std::vector<ComponentGroupPtr>& componentGroups() const {
         return component_groups_;
     }
+    bool validateDeviceGroupIdsForComponentGroup(int                     component_group_id,
+                                                 const std::vector<int>& device_group_ids) const;
     // Allocator-facing per-tag DeviceKVCacheGroup, including NON_REUSABLE tags.
     DeviceKVCacheGroupPtr deviceKVGroup(int gid) const {
         if (gid < 0 || static_cast<size_t>(gid) >= per_tag_device_groups_.size()) {
@@ -225,7 +237,9 @@ public:
 private:
     void taskStarted();
     void taskFinished();
+    void drainTreeHolds();
     void checkWatermark();
+    bool reclaimOneForGroup(int component_group_id, Tier tier);
     bool submitEvictionLocked(EvictionMove& eviction_move);
     void performEvictionCopy(const BlockTreeEvictor::EvictionPlan& plan);
     bool buildEvictionTransferRequest(const BlockTreeEvictor::EvictionPlan& plan,
@@ -244,17 +258,24 @@ private:
         std::vector<BlockIdxType> source_blocks;
         std::vector<BlockIdxType> target_device_blocks;
     };
-    void prepareMatchedBlocks(const std::vector<TreeNode*>& matched_path, BlockTreeMatchResult& result);
-    void prepareMatchedLoadBackItem(TreeNode*                path_node,
-                                    const ComponentGroupPtr& component_group,
-                                    const GroupSlot&         group_slot,
-                                    BlockTreeMatchResult&    result);
+    bool deviceGroupIdsForComponentGroup(int               component_group_id,
+                                         std::vector<int>& device_group_ids,
+                                         const char*       validation_boundary) const;
+    void prepareMatchedBlocks(const std::vector<TreeNode*>&     matched_path,
+                              const std::vector<bool>&          candidate_logically_valid,
+                              BlockTreeMatchResult&             result,
+                              std::vector<PendingLoadBackItem>& pending_load_back_items);
+    void prepareMatchedLoadBackItem(TreeNode*                         path_node,
+                                    const ComponentGroupPtr&          component_group,
+                                    const GroupSlot&                  group_slot,
+                                    size_t                            path_index,
+                                    const std::vector<int>&           device_group_ids,
+                                    BlockTreeMatchResult&             result,
+                                    std::vector<PendingLoadBackItem>& pending_load_back_items);
 
     std::shared_ptr<AsyncContext> commitLoadBack(const std::vector<PendingLoadBackItem>& items);
     void                          abortLoadBack(const std::vector<PendingLoadBackItem>& items);
-    void                          abortLoadBackUnsafe(const std::vector<PendingLoadBackItem>& pending_items,
-                                                      const std::vector<LoadBackItem>&        allocated_items,
-                                                      size_t                                  started_item_count);
+    void                          abortLoadBackUnsafe(const std::vector<PendingLoadBackItem>& items);
     bool executeLoadBackTransferBatch(const std::vector<TransferDescriptor>& descriptors, int timeout_ms);
     void performLoadBack(std::vector<LoadBackItem> items, std::shared_ptr<AsyncContext> ctx);
 
@@ -274,6 +295,7 @@ private:
     std::vector<DeviceKVCacheGroupPtr> per_tag_device_groups_;
     // Per-tag gid -> (component_group_id, local_pool_index).
     std::vector<PerTagMapping>                 per_tag_mapping_;
+    std::shared_ptr<LoadBackTicketRegistry>    load_back_ticket_registry_;
     CopyEnginePtr                              copy_engine_;
     std::shared_ptr<StorageBackend>            storage_backend_;
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
@@ -284,7 +306,10 @@ private:
     std::atomic<int>        pending_tasks_{0};
     std::mutex              wait_mutex_;
     std::condition_variable wait_cv_;
-    mutable std::mutex      mutex_;
+    // Installed only by the shutdown test peer; production keeps this empty.
+    std::function<void()> pending_task_wait_observer_for_test_;
+    mutable std::mutex    mutex_;
+    int64_t               mutation_version_{0};
 };
 
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;

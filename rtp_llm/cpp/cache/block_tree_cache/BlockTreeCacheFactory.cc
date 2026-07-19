@@ -126,9 +126,8 @@ createHostPool(const std::string& pool_name, size_t payload_bytes, size_t usable
     return pool;
 }
 
-std::shared_ptr<DiskMountGuard> createDiskMountGuard(const KVCacheConfig& kv_cache_config,
-                                                     int64_t              local_rank,
-                                                     int64_t              local_world_size) {
+std::shared_ptr<DiskMountGuard>
+createDiskMountGuard(const KVCacheConfig& kv_cache_config, int64_t local_rank, int64_t local_world_size) {
     RTP_LLM_CHECK_WITH_INFO(!kv_cache_config.memory_cache_disk_paths.empty(),
                             "disk cache enabled but memory_cache_disk_paths is empty");
     const std::string mount_path =
@@ -313,12 +312,30 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                        const ParallelismConfig&                 parallelism_config,
                                        std::shared_ptr<StorageBackend>          storage_backend,
                                        std::shared_ptr<BroadcastManager>        broadcast_manager) {
-    const int group_num = cache_config.groupNums();
-    RTP_LLM_CHECK_WITH_INFO(group_num > 0, "cache_config must have at least one group");
+    const int  group_num     = cache_config.groupNums();
+    const bool tiered_memory = kv_cache_config.enable_tiered_memory_cache && kv_cache_config.enable_memory_cache;
+    const bool tiered_disk   = tiered_memory && kv_cache_config.enable_memory_cache_disk;
     if (kv_cache_config.enable_memory_cache_disk && !kv_cache_config.enable_memory_cache) {
         RTP_LLM_LOG_ERROR("createBlockTreeCache: enable_memory_cache_disk requires enable_memory_cache = true");
         return nullptr;
     }
+    RTP_LLM_CHECK_WITH_INFO(!kv_cache_config.enable_tiered_memory_cache || kv_cache_config.enable_memory_cache,
+                            "enable_tiered_memory_cache requires enable_memory_cache");
+    RTP_LLM_CHECK_WITH_INFO(!kv_cache_config.enable_memory_cache_disk || tiered_memory,
+                            "enable_memory_cache_disk requires tiered memory cache");
+    RTP_LLM_CHECK_WITH_INFO(!tiered_memory || kv_cache_config.memory_cache_size_mb > 0,
+                            "tiered memory cache requires memory_cache_size_mb > 0");
+    RTP_LLM_CHECK_WITH_INFO(!tiered_disk || kv_cache_config.memory_cache_disk_size_mb > 0,
+                            "disk cache requires memory_cache_disk_size_mb > 0");
+    if (kv_cache_config.enable_memory_cache && !tiered_memory) {
+        RTP_LLM_LOG_WARNING("enable_memory_cache without enable_tiered_memory_cache does not create a BlockTree host "
+                            "tier; legacy external connector support is unavailable");
+    }
+    if (kv_cache_config.enable_remote_cache && storage_backend == nullptr) {
+        RTP_LLM_LOG_WARNING("enable_remote_cache is configured but no BlockTree storage backend is bound; remote "
+                            "cache remains unavailable");
+    }
+    RTP_LLM_CHECK_WITH_INFO(group_num > 0, "cache_config must have at least one group");
 
     // 1. Aggregate per-tag groups by group_type (REUSABLE only). component_group_id is
     // per-group_type; the per-tag pool/component space is preserved for the allocator.
@@ -381,16 +398,47 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             cg_pools.push_back(pool);
 
             // Component descriptor (one per REUSABLE tag): host packing layout is one slot
-            // per layer, each slot sized by that tag's per-layer device stride.
+            // per layer, each slot sized by that layer's physical device stride.
             Component comp;
-            comp.component_id       = static_cast<int>(components.size());
-            comp.component_group_id = cg_id;
-            comp.type               = type;
-            comp.device_pool_index  = static_cast<int>(local);
-            const size_t stride     = cache_config.kvBlockStrideBytesForGroup(static_cast<size_t>(tag_gid))
-                                  + cache_config.kvScaleStrideBytesForGroup(static_cast<size_t>(tag_gid));
+            comp.component_id         = static_cast<int>(components.size());
+            comp.component_group_id   = cg_id;
+            comp.type                 = type;
+            comp.device_pool_index    = static_cast<int>(local);
+            const size_t group_stride = cache_config.kvBlockStrideBytesForGroup(static_cast<size_t>(tag_gid))
+                                        + cache_config.kvScaleStrideBytesForGroup(static_cast<size_t>(tag_gid));
+            const bool legacy_shared_single_pool = !cache_config.use_independent_block_pools && group_num == 1
+                                                   && cache_config.mtp_sub_configs.empty()
+                                                   && cache_config.layer_to_block_stride_bytes.empty();
+            if (!cache_config.use_independent_block_pools && cache_config.layer_to_block_stride_bytes.empty()) {
+                RTP_LLM_CHECK_WITH_INFO(legacy_shared_single_pool,
+                                        "device pool mode=shared requires a complete per-layer physical stride table: "
+                                        "group_num=%d mtp_modules=%zu stride_table_size=%zu",
+                                        group_num,
+                                        cache_config.mtp_sub_configs.size(),
+                                        cache_config.layer_to_block_stride_bytes.size());
+                RTP_LLM_LOG_WARNING("legacy shared SingleType cache has no per-layer physical stride table; "
+                                    "falling back to group stride %zu",
+                                    group_stride);
+            }
             const auto& tag = cache_config.tagForGroup(static_cast<size_t>(tag_gid));
             for (int layer_id : cache_config.layerIdsForGroup(static_cast<size_t>(tag_gid))) {
+                size_t stride = group_stride;
+                if (!cache_config.use_independent_block_pools && !legacy_shared_single_pool) {
+                    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0
+                                                && static_cast<size_t>(layer_id)
+                                                       < cache_config.layer_to_block_stride_bytes.size(),
+                                            "shared device pool layer %d is outside physical stride table size %zu",
+                                            layer_id,
+                                            cache_config.layer_to_block_stride_bytes.size());
+                    const int physical_stride = cache_config.layer_to_block_stride_bytes[static_cast<size_t>(layer_id)];
+                    RTP_LLM_CHECK_WITH_INFO(physical_stride > 0,
+                                            "shared device pool layer %d has invalid physical stride %d",
+                                            layer_id,
+                                            physical_stride);
+                    stride = static_cast<size_t>(physical_stride);
+                }
+                RTP_LLM_CHECK_WITH_INFO(
+                    stride > 0, "component tag %s layer %d has zero physical stride", tag.c_str(), layer_id);
                 comp.memory_block_layer_tag_slots.push_back(MemoryBlockLayerTagSlot{layer_id, tag, stride});
                 host_block_size += stride;
             }
@@ -432,7 +480,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     // 6. Create per-ComponentGroup Host pools (L2). All groups share a unified usable block
     // count N so a host-resident tree node occupies one block in every group's pool:
     // N = memory_cache_size_bytes / Sum(alignUp(host_block_size_g)) - 1 (reserved block 0).
-    if (kv_cache_config.enable_memory_cache && kv_cache_config.memory_cache_size_mb > 0) {
+    if (tiered_memory && kv_cache_config.memory_cache_size_mb > 0) {
         size_t sum_aligned = 0;
         for (int cg_id = 0; cg_id < cg_num; ++cg_id) {
             sum_aligned += alignUp(cg_host_block_size[static_cast<size_t>(cg_id)], kBlockTreeCachePoolAlignment);
@@ -448,12 +496,14 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         for (int cg_id = 0; cg_id < cg_num; ++cg_id) {
             const size_t payload = cg_host_block_size[static_cast<size_t>(cg_id)];
             auto host_pool = createHostPool("block_tree_host_g" + std::to_string(cg_id), payload, usable_block_count);
+            RTP_LLM_CHECK_WITH_INFO(
+                host_pool != nullptr, "failed to create tiered host pool for component group %d", cg_id);
             component_groups[static_cast<size_t>(cg_id)]->setHostPool(host_pool);
         }
     }
 
     // 7. Create per-ComponentGroup Disk pools (L3) with the same unified usable count.
-    if (kv_cache_config.enable_memory_cache_disk && kv_cache_config.memory_cache_disk_size_mb > 0) {
+    if (tiered_disk && kv_cache_config.memory_cache_disk_size_mb > 0) {
         size_t sum_aligned = 0;
         for (int cg_id = 0; cg_id < cg_num; ++cg_id) {
             sum_aligned += alignUp(cg_host_block_size[static_cast<size_t>(cg_id)], kBlockTreeCachePoolAlignment);
@@ -461,8 +511,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         const size_t disk_size_bytes = static_cast<size_t>(kv_cache_config.memory_cache_disk_size_mb) * 1024UL * 1024UL;
         const size_t usable_block_count =
             sum_aligned > 0 ? computeHostUsableBlockCount(disk_size_bytes, sum_aligned) : 0;
-        auto disk_mount_guard = createDiskMountGuard(
-            kv_cache_config, parallelism_config.local_rank, parallelism_config.local_world_size);
+        auto disk_mount_guard =
+            createDiskMountGuard(kv_cache_config, parallelism_config.local_rank, parallelism_config.local_world_size);
         if (disk_mount_guard == nullptr) {
             RTP_LLM_LOG_ERROR("createBlockTreeCache: failed to create disk mount guard");
             return nullptr;
@@ -481,16 +531,22 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                             pool_disk_bytes,
                                             parallelism_config.world_rank,
                                             parallelism_config.local_rank);
+            RTP_LLM_CHECK_WITH_INFO(
+                disk_pool != nullptr, "failed to create tiered disk pool for component group %d", cg_id);
             component_groups[static_cast<size_t>(cg_id)]->setDiskPool(disk_pool);
         }
     }
 
     // 8. Build BlockTreeCacheConfig.
     BlockTreeCacheConfig config;
-    config.enable_device_cache = kv_cache_config.enable_device_cache;
-    config.enable_memory_cache = kv_cache_config.enable_memory_cache;
-    config.enable_disk_cache   = kv_cache_config.enable_memory_cache_disk;
-    config.enable_remote_cache = kv_cache_config.enable_remote_cache;
+    config.enable_device_cache    = kv_cache_config.enable_device_cache;
+    config.enable_memory_cache    = tiered_memory;
+    config.enable_disk_cache      = tiered_disk;
+    config.enable_remote_cache    = kv_cache_config.enable_remote_cache;
+    config.enable_load_back       = tiered_memory;
+    config.device_min_free_blocks = kv_cache_config.device_cache_min_free_blocks > 0 ?
+                                        static_cast<size_t>(kv_cache_config.device_cache_min_free_blocks) :
+                                        0;
     config.memory_cache_sync_timeout_ms =
         checkedTransferTimeoutMs(kv_cache_config.memory_cache_sync_timeout_ms, "memory_cache_sync_timeout_ms");
     if (config.enable_disk_cache) {
@@ -518,8 +574,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                      group_num,
                      cg_num,
                      kv_cache_config.enable_device_cache,
-                     kv_cache_config.enable_memory_cache,
-                     kv_cache_config.enable_memory_cache_disk,
+                     tiered_memory,
+                     tiered_disk,
                      kv_cache_config.enable_remote_cache);
 
     return cache;
