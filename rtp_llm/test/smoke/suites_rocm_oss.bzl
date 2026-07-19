@@ -23,7 +23,7 @@ def rocm_oss_suites():
             smoke_test(
                 name="rocm_basic_beam_search_tp2",
                 task_info="data/model/qwen25/bs_q_r_mi308x.json",
-                smoke_args="--tp_size 2 --warm_up 0 --seq_size_per_block 16 --use_asm_pa 0 --use_aiter_pa 1 --disable_flash_infer 1 --act_type BF16",
+                smoke_args="--tp_size 2 --warm_up 0 --seq_size_per_block 16 --use_asm_pa 0 --use_aiter_pa 1 --disable_flashinfer_native 1 --act_type BF16",
                 gpu_type=["MI308X-ROCM7"],
             ),
         ],
@@ -37,14 +37,14 @@ def rocm_oss_suites():
             smoke_test(
                 name="rocm_dense_qwen3_8b_hipgraph_tp2",
                 task_info="data/model/qwen3/q_r_new_model_py.json",
-                smoke_args="--use_swizzleA 1 --use_asm_pa 1 --disable_flash_infer 1 --warm_up 0 --use_aiter_pa 1 --seq_size_per_block 16 --act_type BF16 --test_block_num 1000 --reserver_runtime_mem_mb 70000 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 1 --decode_capture_config '1,2,3,4,5,6,7,8' --tp_size 2 --world_size 2",
+                smoke_args="--use_swizzleA 1 --use_asm_pa 1 --disable_flashinfer_native 1 --warm_up 0 --use_aiter_pa 1 --seq_size_per_block 16 --act_type BF16 --test_block_num 1000 --reserver_runtime_mem_mb 70000 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 1 --decode_capture_config '1,2,3,4,5,6,7,8' --tp_size 2 --world_size 2",
                 gpu_type=["MI308X-ROCM7"]
             ),
             # Simplified from Qwen3-32B-FP8-Dynamic → Qwen3-8B; result placeholder, needs rewrite_smoke regen on MI308X
             smoke_test(
                 name="rocm_dense_qwen3_8b_ptpc",
                 task_info="data/model/qwen3/ptpc_q_r_8b.json",
-                smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --use_asm_pa 1 --disable_flash_infer 1 --warm_up 0 --use_aiter_pa 1 --seq_size_per_block 16 --act_type BF16 --test_block_num 1000 --reserver_runtime_mem_mb 70000",
+                smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --use_asm_pa 1 --disable_flashinfer_native 1 --warm_up 0 --use_aiter_pa 1 --seq_size_per_block 16 --act_type BF16 --test_block_num 1000 --reserver_runtime_mem_mb 70000",
                 gpu_type=["MI308X-ROCM7"],
             ),
             smoke_test(
@@ -62,7 +62,7 @@ def rocm_oss_suites():
             smoke_test(
                 name="rocm_dense_qwen3_8b_ptpc_no_asm_pa",
                 task_info="data/model/qwen3/ptpc_q_r_8b.json",
-                smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --use_asm_pa 0 --disable_flash_infer 1 --warm_up 0 --use_aiter_pa 1 --seq_size_per_block 16 --act_type BF16 --test_block_num 1000 --reserver_runtime_mem_mb 70000",
+                smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --use_asm_pa 0 --disable_flashinfer_native 1 --warm_up 0 --use_aiter_pa 1 --seq_size_per_block 16 --act_type BF16 --test_block_num 1000 --reserver_runtime_mem_mb 70000",
                 gpu_type=["MI308X-ROCM7"],
             ),
         ],
@@ -111,8 +111,8 @@ def rocm_oss_suites():
                 name="rocm_pd_qwen3_8b",
                 task_info="data/model/qwen3/q_r_new_model_py.json",
                 smoke_args= {
-                    "prefill": "--test_block_num 10 --warm_up 0 --seq_size_per_block 16 --act_type bf16 --use_swizzleA 1 --use_asm_pa 1 --disable_flash_infer 1 --use_aiter_pa 1 --use_local 1 --role_type PREFILL --world_size 1",
-                    "decode": "--test_block_num 10 --warm_up 0 --seq_size_per_block 16 --act_type bf16 --use_swizzleA 1 --use_asm_pa 1 --disable_flash_infer 1 --use_aiter_pa 1 --use_local 1 --role_type DECODE --world_size 1"
+                    "prefill": "--test_block_num 10 --warm_up 0 --seq_size_per_block 16 --act_type bf16 --use_swizzleA 1 --use_asm_pa 1 --disable_flashinfer_native 1 --use_aiter_pa 1 --use_local 1 --role_type PREFILL --world_size 1",
+                    "decode": "--test_block_num 10 --warm_up 0 --seq_size_per_block 16 --act_type bf16 --use_swizzleA 1 --use_asm_pa 1 --disable_flashinfer_native 1 --use_aiter_pa 1 --use_local 1 --role_type DECODE --world_size 1"
                 },
                 gpu_type=["MI308X-ROCM7"]
             ),
@@ -175,9 +175,9 @@ def rocm_oss_suites():
                 gpu_type=["MI308X-ROCM7"],
             ),
             smoke_test(
-                name="rocm_embedding_bge_reranker_trt_fmha",
+                name="rocm_embedding_bge_reranker_fmha_fallback",
                 task_info="data/model/bert/classifier_q_r.json",
-                smoke_args="--enable_trt_fmha 0 --enable_open_source_fmha 0 --seq_size_per_block 16 --use_aiter_pa 1 --use_asm_pa 1 --act_type FP16",
+                smoke_args="--enable_flashinfer_trt_fmha_v2 0 --enable_open_source_fmha 0 --seq_size_per_block 16 --use_aiter_pa 1 --use_asm_pa 1 --act_type FP16",
                 gpu_type=["MI308X-ROCM7"],
             ),
             smoke_test(
@@ -188,4 +188,3 @@ def rocm_oss_suites():
             ),
         ],
     )
-

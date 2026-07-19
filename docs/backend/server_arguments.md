@@ -25,16 +25,31 @@ This page lists server arguments used to configure the behavior and performance 
 
 | Arguments | Description | Defaults |
 |-----------|-------------|----------|
-| `--enable-fmha` | Enables Fused Multi-Head Attention (FMHA) feature. | True |
-| `--enable-trt-fmha` | Enables TensorRT optimized FMHA feature. | True |
-| `--enable-paged-trt-fmha` | Enables Paged TensorRT FMHA. | True |
-| `--enable-open-source-fmha` | Enables open-source FMHA implementation. | True |
-| `--enable-paged-open-source-fmha` | Enables Paged open-source FMHA implementation. | True |
-| `--enable-trtv1-fmha` | Enables TRTv1-style FMHA. | True |
-| `--fmha-perf-instrument` | Enables NVTX performance profiling for FMHA. | False |
-| `--fmha-show-params` | Displays FMHA parameter information. | False |
-| `--disable-flash-infer` | Disables FlashInfer Attention mechanism. | False |
-| `--enable-xqa` | Enables XQA feature (requires SM90+ GPU). | True |
+| `--enable_fmha` | Enables Fused Multi-Head Attention (FMHA) feature. | True |
+| `--enable_flashinfer_trtllm_gen` | Enables FlashInfer TRT-LLM Gen attention on SM100. | True |
+| `--enable_flashinfer_trt_fmha_v2` | Enables FlashInfer TRT-LLM FMHA v2 contiguous prefill. | True |
+| `--enable_paged_flashinfer_trt_fmha_v2` | Enables FlashInfer TRT-LLM FMHA v2 paged prefill. | True |
+| `--enable_open_source_fmha` | Enables open-source FMHA implementation. | True |
+| `--enable_paged_open_source_fmha` | Enables Paged open-source FMHA implementation. | True |
+| `--disable_flashinfer_native` | Disables FlashInfer native attention backends. | False |
+| `--enable_xqa` | Enables XQA feature (requires SM90+ GPU). | True |
+
+### Removed FMHA options
+
+The following legacy options and environment variables were removed and must no longer be used:
+
+| Removed CLI option | Removed environment variable | Replacement |
+|--------------------|------------------------------|-------------|
+| `--enable_trt_fmha` | `ENABLE_TRT_FMHA` | `--enable_flashinfer_trt_fmha_v2` / `ENABLE_FLASHINFER_TRT_FMHA_V2` for contiguous prefill |
+| `--enable_paged_trt_fmha` | `ENABLE_PAGED_TRT_FMHA` | `--enable_paged_flashinfer_trt_fmha_v2` / `ENABLE_PAGED_FLASHINFER_TRT_FMHA_V2` for paged prefill |
+| `--enable_trtv1_fmha` | `ENABLE_TRTV1_FMHA` | None; select another supported attention backend |
+| `--disable_flash_infer` | `DISABLE_FLASH_INFER` | To preserve global disable behavior, set `--disable_flashinfer_native=true`, `--enable_flashinfer_trtllm_gen=false`, `--enable_flashinfer_trt_fmha_v2=false`, and `--enable_paged_flashinfer_trt_fmha_v2=false` |
+
+#### Compatibility and rollout contract
+
+This migration intentionally establishes a new FMHA configuration contract and is a required breaking change. The embedded TensorRT cubin implementations and their configuration fields were removed in favor of FlashInfer TRT-LLM FMHA v2. The new contiguous and paged implementations have different support constraints and are not aliases for the removed implementations, so the legacy CLI options and environment variables are deliberately not preserved, translated, or warned on. FlashInfer TRT-LLM FMHA v2 requires CUDA 12.9 or later and an SM90 or SM12x GPU.
+
+RTP-LLM deployments are released as versioned, immutable container images, with the matching configuration delivered as part of the same deployment revision. Image and configuration updates therefore form one atomic rollout unit; reusing an older FMHA configuration with a newer image is not a supported deployment mode. Rollback likewise restores the previous image and its configuration together. This image-scoped migration model has also been used for previous backend configuration changes, so no cross-version compatibility aliases are required for this removal.
 
 ## KV Cache Configuration
 

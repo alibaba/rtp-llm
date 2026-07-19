@@ -6,13 +6,7 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAImplBase,
     MlaImplBase,
 )
-from rtp_llm.ops import (
-    AttentionConfigs,
-    FMHAConfig,
-    FMHAType,
-    KvCacheDataType,
-    ParallelismConfig,
-)
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -21,6 +15,12 @@ PREFILL_MHA_IMPS: List[type[FMHAImplBase]] = []
 DECODE_MHA_IMPS: List[type[FMHAImplBase]] = []
 PREFILL_MLA_IMPS: List[type[MlaImplBase]] = []
 DECODE_MLA_IMPS: List[type[MlaImplBase]] = []
+
+FLASHINFER_TRTLLM_GEN_IMPLS = {
+    "FlashInferTRTLLMPrefillImpl",
+    "FlashInferTRTLLMSpecDecodeImpl",
+    "FlashInferTRTLLMDecodeImpl",
+}
 
 
 def get_mla_impl(
@@ -44,7 +44,8 @@ def get_mla_impl(
         # TODO: support fast path for cp prefill
         use_fast_path = (
             attn_inputs.is_prefill
-            and attn_inputs.cu_kv_seqlens_device.max().item() <= attn_configs.indexer_topk
+            and attn_inputs.cu_kv_seqlens_device.max().item()
+            <= attn_configs.indexer_topk
             and not (
                 parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
             )
@@ -100,17 +101,17 @@ def _is_fmha_impl_disabled(
     # XQA implementations
     if "XQA" in impl_class_name:
         return not fmha_config.enable_xqa
-    # TRT implementations
-    elif impl_class_name == "TRTMHAImpl":
-        return not fmha_config.enable_trt_fmha
-    elif impl_class_name == "TRTPagedMHAImpl":
-        return not fmha_config.enable_paged_trt_fmha
-    # FlashInfer TRTLLM implementations
-    elif "FlashInferTRTLLM" in impl_class_name:
-        return fmha_config.disable_flash_infer
-    # FlashInfer implementations
+    # FlashInfer TRT-LLM FMHA v2 implementations
+    elif impl_class_name == "FlashInferTRTLLMFMHAv2PrefillImpl":
+        return not fmha_config.enable_flashinfer_trt_fmha_v2
+    elif impl_class_name == "FlashInferTRTLLMFMHAv2PagedPrefillImpl":
+        return not fmha_config.enable_paged_flashinfer_trt_fmha_v2
+    # FlashInfer TRT-LLM Gen implementations (SM100)
+    elif impl_class_name in FLASHINFER_TRTLLM_GEN_IMPLS:
+        return not fmha_config.enable_flashinfer_trtllm_gen
+    # FlashInfer native implementations
     elif "FlashInfer" in impl_class_name or "Flashinfer" in impl_class_name:
-        return fmha_config.disable_flash_infer
+        return fmha_config.disable_flashinfer_native
     # Aiter ASM / Paged prefill
     elif (
         "AiterPrefillImplAsm" in impl_class_name
