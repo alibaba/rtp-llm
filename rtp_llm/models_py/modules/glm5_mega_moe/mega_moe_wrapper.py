@@ -21,6 +21,24 @@ logger = logging.getLogger(__name__)
 _CHUNKED_GLM5_MOE_LOGGED = False
 
 
+def _prefill_cp_size(parallelism_config, is_decode_role: bool) -> int:
+    if is_decode_role or parallelism_config is None:
+        return 1
+
+    cp_config = getattr(parallelism_config, "prefill_cp_config", None)
+    if cp_config is None:
+        return 1
+
+    try:
+        if cp_config.is_enabled():
+            return max(int(getattr(parallelism_config, "tp_size", 1) or 1), 1)
+        if cp_config.is_prefill_enabled():
+            return max(int(getattr(cp_config, "prefill_cp_size", 0) or 1), 1)
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return 1
+
+
 def _split_stacked_moe_w1_up_gate(
     w1: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -102,19 +120,8 @@ class MegaMoeWrapper(nn.Module):
         except Exception:
             pass
 
-        # Resolve CP: when prefill_cp_config is enabled, per-rank tokens
-        # are bounded by max_seq_len / cp_size (same logic as DSv4).
-        cp_size = 1
-        if (
-            not is_decode_role
-            and parallelism_config is not None
-            and getattr(parallelism_config, "prefill_cp_config", None) is not None
-        ):
-            try:
-                if parallelism_config.prefill_cp_config.is_enabled():
-                    cp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
-            except Exception:
-                pass
+        # Bound prefill buffers by the number of tokens processed on each CP rank.
+        cp_size = _prefill_cp_size(parallelism_config, is_decode_role)
 
         # Resolve max_tokens_per_rank based on role
         max_generate_batch_size = (

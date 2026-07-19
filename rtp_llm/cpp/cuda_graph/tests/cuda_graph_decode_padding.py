@@ -15,6 +15,16 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs, get_typemeta
 
 
+def _model_data_type_name(dtype: torch.dtype) -> str:
+    if dtype is torch.bfloat16:
+        return "bf16"
+    if dtype is torch.float16:
+        return "fp16"
+    if dtype is torch.float32:
+        return "fp32"
+    raise ValueError(f"unsupported cuda graph decode test dtype: {dtype}")
+
+
 class TestCudaGraphDecodePadding(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
@@ -69,6 +79,7 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
             self.tokens_per_block,
             self.kernel_tokens_per_block,
             self.decode_capture_batch_sizes,
+            _model_data_type_name(self.compute_dtype),
         )
         print(f"CUDA Graph initialized with batch sizes: 1 to {self.max_batch_size}")
 
@@ -100,10 +111,10 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         # input_lengths [batch_size, int32] (decode only)
         attention_inputs.input_lengths = torch.ones(batch_size, dtype=torch.int32)
 
-        # sequence_lengths [batch_size, int32] (decode only), with pin_memory
+        # sequence_lengths [batch_size, int32] (decode only)
         attention_inputs.sequence_lengths = torch.ones(
-            batch_size, dtype=torch.int32
-        ).pin_memory()
+            batch_size, dtype=torch.int32, device="cuda"
+        )
 
         # sequence_lengths_plus_1_d [batch_size] int32 on cuda (decode: 1 token per batch -> 2)
         attention_inputs.sequence_lengths_plus_1_d = torch.full(
@@ -137,7 +148,7 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
 
         # Set attention parameters
         attention_inputs.is_prefill = False
-        attention_inputs.dtype = get_typemeta(torch.zeros(1, dtype=torch.float16))
+        attention_inputs.dtype = get_typemeta(torch.zeros(1, dtype=self.compute_dtype))
 
         # cu_seqlens
         cu_len = batch_size + 1

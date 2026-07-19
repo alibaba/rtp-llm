@@ -135,7 +135,7 @@ class AutoModel:
         self.kv_cache.num_kv_heads = self.kv_head_num
         self.kv_cache.head_dim = self.size_per_head
         # Explicitly mark every layer as full-attention.
-        self.kv_cache.layer_attn_types = [
+        self.kv_cache.layer_group_types = [
             CacheGroupType.FULL for _ in range(self.layer_num)
         ]
 
