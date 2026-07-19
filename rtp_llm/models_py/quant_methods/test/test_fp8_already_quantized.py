@@ -211,6 +211,101 @@ for quant_type in ("fp8", "fp8_per_channel"):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
+    def test_cuda_124_126_preflight_does_not_require_rtp_kernel(self):
+        script = r"""
+import builtins
+import sys
+import types
+from types import SimpleNamespace
+from unittest import mock
+
+import torch
+
+real_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name == "rtp_kernel" or name.startswith("rtp_kernel."):
+        raise AssertionError(f"FP8 quant helper imported {name}")
+    if name == "rtp_llm.models_py.kernels.cuda.fp8_kernel" or name.startswith(
+        "rtp_llm.models_py.kernels.cuda.fp8_kernel."
+    ):
+        raise AssertionError(f"newloader imported grouped-GEMM package {name}")
+    return real_import(name, *args, **kwargs)
+
+builtins.__import__ = guarded_import
+if getattr(torch.version, "hip", None) is not None:
+    compute_ops = types.ModuleType("librtp_compute_ops.rtp_llm_ops")
+    for op_name in (
+        "per_tensor_quant_fp8",
+        "per_token_quant_fp8",
+        "per_token_group_quant_fp8",
+        "per_token_group_quant_fp8_v2",
+    ):
+        setattr(compute_ops, op_name, lambda *args, **kwargs: None)
+    sys.modules["librtp_compute_ops.rtp_llm_ops"] = compute_ops
+
+from rtp_llm.models_py.quant_methods import fp8
+
+properties = SimpleNamespace(gcnArchName="")
+for cuda_version in ("12.4", "12.6"):
+    with mock.patch.object(torch.version, "cuda", cuda_version), mock.patch.object(
+        torch.cuda, "is_available", return_value=True
+    ), mock.patch.object(
+        torch.cuda, "get_device_capability", return_value=(8, 9)
+    ), mock.patch.object(
+        torch.cuda, "get_device_properties", return_value=properties
+    ), mock.patch.object(
+        torch, "_scaled_mm", create=True
+    ), mock.patch.object(
+        fp8, "_is_hip_runtime", return_value=False
+    ):
+        assert fp8._select_fp8_runtime_backend(
+            torch.device("cuda:0"), "per_tensor"
+        ) == "cuda_scaled_mm"
+        assert fp8._select_fp8_runtime_backend(
+            torch.device("cuda:0"), "per_channel"
+        ) == "cuda_scaled_mm"
+
+        with mock.patch.object(
+            fp8, "is_deep_gemm_runtime_available", return_value=True
+        ), mock.patch.object(fp8, "_resolve_fp8_gemm_nt", return_value=lambda: None):
+            assert fp8._select_fp8_runtime_backend(
+                torch.device("cuda:0"), "block"
+            ) == "cuda_deep_gemm"
+
+assert "rtp_llm.models_py.kernels.cuda.fp8_kernel" not in sys.modules
+assert "rtp_llm.ops.compute_ops" not in sys.modules
+assert not any(name == "rtp_kernel" or name.startswith("rtp_kernel.") for name in sys.modules)
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_cuda_helper_failure_is_reported_by_backend_preflight(self):
+        properties = SimpleNamespace(gcnArchName="")
+        with mock.patch.object(
+            torch.cuda, "is_available", return_value=True
+        ), mock.patch.object(
+            torch.cuda, "get_device_capability", return_value=(8, 9)
+        ), mock.patch.object(
+            torch.cuda, "get_device_properties", return_value=properties
+        ), mock.patch.object(
+            torch, "_scaled_mm", create=True
+        ), mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._is_hip_runtime",
+            return_value=False,
+        ), mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8.require_cuda_fp8_quant_helpers",
+            side_effect=ImportError("per_tensor_quant_fp8 missing"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "per_tensor CUDA helper is unavailable"
+            ):
+                _select_fp8_runtime_backend(torch.device("cuda:0"), "per_tensor")
+
     def test_fused_layer_requires_consistent_exclusions(self):
         layer = SimpleNamespace(shard_names=["gate_proj", "up_proj"])
         prefix = "layers.0.mlp.gate_up_proj"

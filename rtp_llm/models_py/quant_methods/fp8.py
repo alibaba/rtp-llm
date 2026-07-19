@@ -2,6 +2,13 @@ import logging
 from typing import Optional, Tuple
 
 import torch
+from rtp_llm.models_py.kernels.cuda.fp8_quant import (
+    requant_weight_ue8m0,
+    require_cuda_fp8_quant_helpers,
+    scaled_fp8_per_tensor_quant,
+    scaled_fp8_per_token_quant,
+    sgl_per_token_group_quant_fp8,
+)
 from rtp_llm.models_py.quant_methods.base import (
     QuantizeMethodBase,
     register_quant_method,
@@ -180,12 +187,29 @@ def _select_fp8_runtime_backend(
 
     if quant_kind == "block":
         if is_deep_gemm_runtime_available(device):
+            try:
+                require_cuda_fp8_quant_helpers("group")
+                _resolve_fp8_gemm_nt()
+            except (ImportError, RuntimeError, AttributeError) as error:
+                raise RuntimeError(
+                    "FP8 block backend is present, but its CUDA quant/GEMM "
+                    f"helpers are unavailable: {error}"
+                ) from error
             return _CUDA_DEEP_GEMM
         raise RuntimeError(
             f"FP8 block requires DeepGEMM on CUDA device {device}; "
             f"current capability is {capability}"
         )
     if hasattr(torch, "_scaled_mm") and capability >= (8, 9):
+        try:
+            if quant_kind == "per_tensor":
+                require_cuda_fp8_quant_helpers("per_tensor")
+            else:
+                require_cuda_fp8_quant_helpers("per_token")
+        except (ImportError, RuntimeError, AttributeError) as error:
+            raise RuntimeError(
+                f"FP8 {quant_kind} CUDA helper is unavailable: {error}"
+            ) from error
         return _CUDA_SCALED_MM
     raise RuntimeError(
         f"FP8 {quant_kind} requires torch._scaled_mm on CUDA SM89 or newer; "
@@ -339,32 +363,6 @@ def _prepare_rocm_fp8_block_weight(
     )
 
 
-# Hoist kernel imports to module scope. apply() is on the per-token decode hot
-# path: doing the import inside apply() (even though sys.modules caches it)
-# still costs a sys.modules lookup + LOAD_ATTR on every call. Importing once at
-# module load amortizes that cost across the lifetime of the process.
-#
-# Each method that uses a kernel still falls back to a lazy `_resolve_*()` helper
-# below when the module-level symbol is None. The FP8 provider itself is imported
-# only after runtime dispatch selects an FP8 key.
-try:
-    from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-        requant_weight_ue8m0,
-        scaled_fp8_per_tensor_quant,
-        scaled_fp8_per_token_quant,
-        sgl_per_token_group_quant_fp8,
-    )
-except (
-    ImportError
-) as e:  # pragma: no cover - kernel package may be absent on CPU-only setups
-    logger.warning(
-        "fp8 kernel imports unavailable: %s (will fall back to lazy import)", e
-    )
-    requant_weight_ue8m0 = None
-    scaled_fp8_per_tensor_quant = None
-    scaled_fp8_per_token_quant = None
-    sgl_per_token_group_quant_fp8 = None
-
 fp8_gemm_nt = None
 
 
@@ -427,16 +425,9 @@ def _hip_scaled_fp8_per_tensor_quant(
 
 
 def _resolve_per_tensor_quant():
-    """Return scaled_fp8_per_tensor_quant, lazy-importing on a hoist miss."""
+    """Return the selected per-tensor helper without grouped-GEMM imports."""
     if _is_hip_runtime():
         return _hip_scaled_fp8_per_tensor_quant
-    global scaled_fp8_per_tensor_quant
-    if scaled_fp8_per_tensor_quant is None:
-        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-            scaled_fp8_per_tensor_quant as _fn,
-        )
-
-        scaled_fp8_per_tensor_quant = _fn
     return scaled_fp8_per_tensor_quant
 
 
@@ -474,42 +465,21 @@ def per_block_quant_like_legacy(
 
 
 def _resolve_per_token_quant():
-    """Return scaled_fp8_per_token_quant, lazy-importing on a hoist miss."""
+    """Return the selected per-token helper without grouped-GEMM imports."""
     if _is_hip_runtime():
         from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
 
         return rocm_per_token_quant_fp8
-    global scaled_fp8_per_token_quant
-    if scaled_fp8_per_token_quant is None:
-        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-            scaled_fp8_per_token_quant as _fn,
-        )
-
-        scaled_fp8_per_token_quant = _fn
     return scaled_fp8_per_token_quant
 
 
 def _resolve_requant_weight_ue8m0():
-    """Return requant_weight_ue8m0, lazy-importing on a hoist miss."""
-    global requant_weight_ue8m0
-    if requant_weight_ue8m0 is None:
-        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-            requant_weight_ue8m0 as _fn,
-        )
-
-        requant_weight_ue8m0 = _fn
+    """Return UE8M0 requantization without importing grouped-GEMM code."""
     return requant_weight_ue8m0
 
 
 def _resolve_sgl_per_token_group_quant():
-    """Return sgl_per_token_group_quant_fp8, lazy-importing on a hoist miss."""
-    global sgl_per_token_group_quant_fp8
-    if sgl_per_token_group_quant_fp8 is None:
-        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-            sgl_per_token_group_quant_fp8 as _fn,
-        )
-
-        sgl_per_token_group_quant_fp8 = _fn
+    """Return group quantization without importing grouped-GEMM code."""
     return sgl_per_token_group_quant_fp8
 
 
