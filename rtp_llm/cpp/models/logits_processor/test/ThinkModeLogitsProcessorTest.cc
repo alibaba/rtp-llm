@@ -330,6 +330,37 @@ TEST_F(SamplerTest, testThinkingAllowsNaturalThinkEndBeforeBudgetEnforce) {
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
 }
 
+TEST_F(SamplerTest, testNegativeThinkBudgetTracksNaturalEndForMtp) {
+    auto generate_input                                    = std::make_shared<GenerateInput>();
+    generate_input->generate_config                        = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->in_think_mode         = true;
+    generate_input->generate_config->max_thinking_tokens   = -1;
+    generate_input->generate_config->begin_think_token_ids = {7};
+    generate_input->generate_config->end_think_token_ids   = {8, 9};
+    generate_input->input_ids                              = torch::tensor({1, 2}, torch::kInt32);
+
+    auto processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1);
+    ASSERT_NE(processor, nullptr);
+
+    const int            propose_step = 3;
+    const size_t         words        = SpecLogitsProcessor::bitmaskWordCount(16);
+    std::vector<int32_t> draft_tokens = {8, 9, 10};
+    std::vector<int32_t> bitmask((propose_step + 1) * words, SpecLogitsProcessor::kBitmaskAllowAll);
+
+    SpecLogitsProcessorRequest request;
+    request.draft_tokens       = draft_tokens.data();
+    request.propose_step       = propose_step;
+    request.bitmask_cpu_out    = bitmask.data();
+    request.bitmask_size_int32 = words;
+    request.vocab_size         = 16;
+
+    EXPECT_TRUE(processor->isSpecVerifyEligible());
+    EXPECT_EQ(processor->tryAcceptAndFillBitmask(request), propose_step);
+
+    processor->updateStatus(torch::tensor({{8, 9, 10}}, torch::kInt32), 3);
+    EXPECT_EQ(processor->finishedThinkOutputLen(), 2);
+}
+
 TEST_F(SamplerTest, testThinkingMasksThinkBoundaryTokensAfterThinkEnd) {
     SamplerDataBuilder builder;
 
