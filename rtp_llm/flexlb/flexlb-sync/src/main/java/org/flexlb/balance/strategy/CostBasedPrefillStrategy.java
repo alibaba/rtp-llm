@@ -209,7 +209,6 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         int eligibleSize = eligible.size();
         CandidateSet feasible = eligible;
         Map<String, Integer> rejections = new java.util.HashMap<>();
-        FormulaEstimateMemo formulaEstimateMemo = new FormulaEstimateMemo(seqLen);
         long sumWaitMs = 0;
         long sumPendingCount = 0;
 
@@ -224,11 +223,11 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             }
 
             long cacheHit = calculateCacheHit(ep, cacheMatchResults, seqLen);
-            long singlePrefillMs = formulaEstimateMemo.estimate(predictor, cacheHit);
+            long prefillMs = ep.estimateBatchPrefillMs(seqLen, cacheHit);
 
             long endpointWaitMs = ep.realWaitTimeMs();
 
-            if (sloFilterEnabled && endpointWaitMs + singlePrefillMs > sloMs - sloRiskMarginMs) {
+            if (sloFilterEnabled && endpointWaitMs + prefillMs > sloMs - sloRiskMarginMs) {
                 rejections.merge("SLO_VIOLATION", 1, Integer::sum);
                 continue;
             }
@@ -236,7 +235,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             long pendingCount = ep.realPendingCount();
             long batcherWaitMs = ep.batcherWaitMs();
             feasible.setCandidate(feasibleCount++, ep, cacheHit,
-                    singlePrefillMs + endpointWaitMs + batcherWaitMs,
+                    prefillMs + endpointWaitMs + batcherWaitMs,
                     endpointWaitMs, pendingCount);
             sumWaitMs += endpointWaitMs;
             sumPendingCount += pendingCount;
@@ -316,48 +315,6 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             return new EndpointFilterResult(result, Map.of("NO_REGISTERED", 1));
         }
         return new EndpointFilterResult(result, rejections);
-    }
-
-    private static final class FormulaEstimateMemo {
-        private static final int MAX_CACHE_HITS = 16;
-
-        private final long seqLen;
-        private String formulaKey;
-        private long[] estimates;
-        private int estimateCount;
-
-        private FormulaEstimateMemo(long seqLen) {
-            this.seqLen = seqLen;
-        }
-
-        private long estimate(PrefillTimePredictor predictor, long cacheHit) {
-            if (!(predictor instanceof FormulaPredictor formulaPredictor)) {
-                return predictor.estimateMs(seqLen, cacheHit);
-            }
-            String key = formulaPredictor.immutableFormulaKey();
-            if (key == null) {
-                return predictor.estimateMs(seqLen, cacheHit);
-            }
-            if (formulaKey == null) {
-                formulaKey = key;
-                estimates = new long[MAX_CACHE_HITS * 2];
-            } else if (!formulaKey.equals(key)) {
-                return predictor.estimateMs(seqLen, cacheHit);
-            }
-            for (int i = 0; i < estimateCount; i++) {
-                int offset = i * 2;
-                if (estimates[offset] == cacheHit) {
-                    return estimates[offset + 1];
-                }
-            }
-            long estimate = predictor.estimateMs(seqLen, cacheHit);
-            if (estimateCount < MAX_CACHE_HITS) {
-                int offset = estimateCount++ * 2;
-                estimates[offset] = cacheHit;
-                estimates[offset + 1] = estimate;
-            }
-            return estimate;
-        }
     }
 
     private Map<String, Integer> getCacheMatchResults(BalanceContext balanceContext, RoleType roleType, String group) {

@@ -121,6 +121,27 @@ public class WorkerBatcher {
         return algorithm.queueWaitMs(ctx);
     }
 
+    /**
+     * Return queue items that would be in the same batch as a new request.
+     * Uses remaining = queueSize % batchMaxCount to determine which items
+     * the new request would join after full-batch dispatches.
+     *
+     * @return the last 'remaining' sorted items, or empty list if remaining == 0
+     */
+    public List<BatchItem> peekBatchItems() {
+        int queueSize = queueDepth.get();
+        if (queueSize == 0) {
+            return List.of();
+        }
+        int batchMaxCount = Math.max(1, cfg.getFlexlbBatchSizeMax());
+        int remaining = queueSize % batchMaxCount;
+        if (remaining == 0) {
+            return List.of();
+        }
+        List<BatchItem> sorted = ctx.sortedItems();
+        return new ArrayList<>(sorted.subList(sorted.size() - remaining, sorted.size()));
+    }
+
     public void shutdown() {
         stopped = true;
         workerThread.interrupt();
