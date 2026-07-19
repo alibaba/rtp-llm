@@ -6,10 +6,9 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Optional
 
+import rtp_llm.models_py.weight_mapper as weight_mapper
 import torch
 import torch.nn as nn
-
-import rtp_llm.models_py.weight_mapper as weight_mapper
 from rtp_llm.models_py.module_base import RtpModule, collect_loaded_tensor_ids
 from rtp_llm.models_py.registry import get_model_class, list_models
 
@@ -296,6 +295,61 @@ class NewModelLoader:
             if callable(hook):
                 hook()
 
+    @staticmethod
+    def _validate_runtime_backends(model: nn.Module, device: str) -> None:
+        target_device = torch.device(device)
+        for module in model.modules():
+            if isinstance(module, RtpModule):
+                module.validate_runtime_device(target_device)
+
+    @staticmethod
+    def _migrate_staged_modules(model: nn.Module, device: str) -> None:
+        """Move and compress online-quantized leaves one at a time.
+
+        Migrating the entire model first would retain every BF16 staging weight on
+        the accelerator until post-load hooks run. Processing each marked leaf
+        immediately bounds the extra accelerator memory to one staging layer.
+        """
+        target_device = torch.device(device)
+        staged_modules = [
+            module
+            for module in model.modules()
+            if isinstance(module, RtpModule)
+            and module.requires_staged_device_postprocess()
+        ]
+        staged_set = set(staged_modules)
+        tensor_registrations = {}
+        for module in model.modules():
+            tensors = list(
+                module.named_parameters(recurse=False, remove_duplicate=False)
+            ) + list(module.named_buffers(recurse=False, remove_duplicate=False))
+            for name, tensor in tensors:
+                if tensor is not None:
+                    tensor_registrations.setdefault(id(tensor), []).append(
+                        (module, name)
+                    )
+        for registrations in tensor_registrations.values():
+            if (
+                any(module in staged_set for module, _ in registrations)
+                and len(registrations) > 1
+            ):
+                aliases = sorted(
+                    f"{type(module).__name__}.{name}" for module, name in registrations
+                )
+                raise RuntimeError(
+                    "Online-quantized staging does not support shared tensor "
+                    f"aliases: {aliases}"
+                )
+
+        for module in staged_modules:
+            if any(True for _ in module.children()):
+                raise RuntimeError(
+                    "Staged device postprocess is supported only for leaf modules, "
+                    f"got {type(module).__name__}"
+                )
+            module.to(target_device)
+            module.process_weights_after_loading()
+
     @torch.inference_mode()
     def load(self) -> nn.Module:
         method = self._resolve_load_method()
@@ -317,6 +371,8 @@ class NewModelLoader:
         self._validate_loaded_weights(model)
         logger.info("Streamed checkpoint tensors in %.2fs", time.time() - started)
 
+        self._validate_runtime_backends(model, self.load_config.device)
+        self._migrate_staged_modules(model, self.load_config.device)
         model.to(self.load_config.device)
         self._validate_loaded_weights(model)
         self._run_post_load_hooks(model)
