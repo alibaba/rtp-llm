@@ -142,15 +142,15 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
     tryAddD2DCopy(inputs.attention_inputs.input_lengths_device,
                   py_model_inputs_.attention_inputs.input_lengths_device,
                   state.current_batch_size * sizeof(int));
+    tryAddD2DCopy(inputs.attention_inputs.prefix_lengths_device,
+                  py_model_inputs_.attention_inputs.prefix_lengths_device,
+                  state.current_batch_size * sizeof(int));
     // Strided 2D D2D copy for flat kv_cache_block_id
     tryAddStridedD2DCopy(inputs.attention_inputs.kv_cache_kernel_block_id_device,
                          py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device);
 
     if (!is_prefill_cuda_graph_mode_) {
         // D2D copies — collected for single batched kernel launch
-        tryAddD2DCopy(inputs.attention_inputs.prefix_lengths_device,
-                      py_model_inputs_.attention_inputs.prefix_lengths_device,
-                      state.current_batch_size * sizeof(int));
         tryAddD2DCopy(inputs.attention_inputs.sequence_lengths_plus_1_device,
                       py_model_inputs_.attention_inputs.sequence_lengths_plus_1_device,
                       state.current_batch_size * sizeof(int));
@@ -245,9 +245,22 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
             py_model_inputs_.attention_inputs.sequence_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
         }
     } else {
-        optimizedCopyAsync(inputs.attention_inputs.padding_offset,
-                           py_model_inputs_.attention_inputs.padding_offset,
-                           state.current_seq_len * sizeof(int));
+        if (isEmbeddingStylePrefillCudaGraph()) {
+            auto* input_lengths      = inputs.attention_inputs.input_lengths.data_ptr<int32_t>();
+            auto* padding_offset     = py_model_inputs_.attention_inputs.padding_offset.data_ptr<int32_t>();
+            int   cumulative_padding = 0;
+            int   token_idx          = 0;
+            for (int batch_idx = 0; batch_idx < state.current_batch_size; ++batch_idx) {
+                const int input_length = input_lengths[batch_idx];
+                std::fill_n(padding_offset + token_idx, input_length, cumulative_padding);
+                token_idx += input_length;
+                cumulative_padding += state.current_real_graph_seq_len - input_length;
+            }
+        } else {
+            optimizedCopyAsync(inputs.attention_inputs.padding_offset,
+                               py_model_inputs_.attention_inputs.padding_offset,
+                               state.current_seq_len * sizeof(int));
+        }
 
         if (py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params) {
             auto* batch_size_ptr = py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params
@@ -269,6 +282,9 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         if (state.current_batch_size < max_bs_) {
             py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
             py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
+            py_model_inputs_.attention_inputs.prefix_lengths_device.slice(0, state.current_batch_size, max_bs_)
+                .fill_(0);
+            py_model_inputs_.attention_inputs.input_lengths_device.slice(0, state.current_batch_size, max_bs_).fill_(0);
         }
 
         int last_valid_q = state.current_seq_len;
