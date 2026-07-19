@@ -62,13 +62,14 @@ CacheConfig HybridConfigCreator::initializeConfig(const ModelConfig&      model_
     int64_t layer_num = model_config.num_layers;
 
     CacheConfig config;
-    config.layer_num          = static_cast<uint32_t>(layer_num);
-    config.layer_all_num      = static_cast<uint32_t>(layer_num);
-    config.block_num          = 0;
-    config.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-    config.use_mla            = model_config.attn_config.use_mla;
-    config.dtype              = dtype;
-    config.linear_step        = 1;
+    config.layer_num                 = static_cast<uint32_t>(layer_num);
+    config.layer_all_num             = static_cast<uint32_t>(layer_num);
+    config.block_num                 = 0;
+    config.seq_size_per_block        = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    config.use_mla                   = model_config.attn_config.use_mla;
+    config.dtype                     = dtype;
+    config.linear_step               = 1;
+    config.use_opaque_kv_cache_store = model_config.use_opaque_kv_cache_store;
 
     config.global_layer_ids.push_back(linear_layers);
     config.global_layer_ids.push_back(full_layers);

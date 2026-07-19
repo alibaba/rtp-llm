@@ -6,6 +6,24 @@
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace py = pybind11;
+
+namespace {
+
+c10::ScalarType parseModelDataType(const std::string& dtype) {
+    if (dtype == "bf16" || dtype == "bfloat16") {
+        return c10::ScalarType::BFloat16;
+    }
+    if (dtype == "fp16" || dtype == "float16" || dtype == "half") {
+        return c10::ScalarType::Half;
+    }
+    if (dtype == "fp32" || dtype == "float32" || dtype == "float") {
+        return c10::ScalarType::Float;
+    }
+    throw std::invalid_argument("unsupported cuda graph test model_data_type: " + dtype);
+}
+
+}  // namespace
+
 namespace rtp_llm {
 
 // Single wrapper for both prefill and decode tests; init_prefill / init_decode
@@ -39,12 +57,13 @@ public:
         runner_ = CudaGraphRunner::createForPrefill(std::move(py_instance), std::move(params));
     }
 
-    void init_decode(py::object       py_instance,
-                     int64_t          hidden_size,
-                     int64_t          max_seq_len,
-                     int64_t          tokens_per_block,
-                     int64_t          kernel_tokens_per_block,
-                     std::vector<int> decode_capture_batch_sizes) {
+    void init_decode(py::object         py_instance,
+                     int64_t            hidden_size,
+                     int64_t            max_seq_len,
+                     int64_t            tokens_per_block,
+                     int64_t            kernel_tokens_per_block,
+                     std::vector<int>   decode_capture_batch_sizes,
+                     const std::string& model_data_type) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = false;
@@ -54,7 +73,7 @@ public:
         params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
         params.num_tokens_per_bs            = 1;
         params.hidden_size                  = static_cast<size_t>(hidden_size);
-        params.model_data_type              = c10::ScalarType::Half;
+        params.model_data_type              = parseModelDataType(model_data_type);
         params.max_context_batch_size       = 128;
         params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
         params.kv_cache_layer_to_group      = {};  // test: no hybrid kv cache
@@ -113,7 +132,8 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("max_seq_len"),
              py::arg("tokens_per_block"),
              py::arg("kernel_tokens_per_block"),
-             py::arg("decode_capture_batch_sizes"))
+             py::arg("decode_capture_batch_sizes"),
+             py::arg("model_data_type"))
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);

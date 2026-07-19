@@ -24,9 +24,10 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.block_num          = 0;
     config.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
 
-    config.use_mla   = model_config.attn_config.use_mla;
-    config.dtype     = dtype;
-    config.is_sparse = model_config.attn_config.is_sparse;
+    config.use_mla                   = model_config.attn_config.use_mla;
+    config.dtype                     = dtype;
+    config.is_sparse                 = model_config.attn_config.is_sparse;
+    config.use_opaque_kv_cache_store = model_config.use_opaque_kv_cache_store;
 
     KVCacheSpecPtr spec;
     if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {

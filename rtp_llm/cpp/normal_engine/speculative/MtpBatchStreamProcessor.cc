@@ -424,6 +424,21 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                           tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
     }
 
+    if (!model_output.logits.defined()) {
+        return absl::InternalError("target verify output logits must be defined for speculative sampling");
+    }
+    if (model_output.logits.dim() != 2) {
+        return absl::InternalError(fmtstr("target verify logits must be 2-D, got dim=%ld", model_output.logits.dim()));
+    }
+    if (model_output.logits.size(0) != static_cast<int64_t>(total_batch_size)) {
+        return absl::InternalError(fmtstr("target verify logits row mismatch: rows=%ld expected=%zu "
+                                          "(stream_count=%zu score_len=%zu propose_step=%zu)",
+                                          model_output.logits.size(0),
+                                          total_batch_size,
+                                          stream_groups.size(),
+                                          score_len,
+                                          propose_step_));
+    }
     auto vocab_size           = (size_t)model_output.logits.size(1);
     sampler_inputs.vocab_size = vocab_size;
     if (return_all_probs != ReturnAllProbsMode::NONE) {
@@ -628,6 +643,8 @@ void MtpBatchStreamProcessor::prepareOneStepSpecDecodeModelInput(const StreamGro
     if (batch_size == 0) {
         return;
     }
+    RTP_LLM_CHECK_WITH_INFO(
+        propose_step_ == 1, "prepareOneStepSpecDecodeModelInput requires propose_step=1, got %zu", propose_step_);
 
     if (gatherMtpDecodeModelInputFromDeviceState(stream_groups, model_input, host_holder)) {
         return;
@@ -651,10 +668,17 @@ void MtpBatchStreamProcessor::prepareOneStepSpecDecodeModelInput(const StreamGro
 
     auto target_last_gpu = torch::cat(target_last_slices, 0).to(torch::kInt32);
     auto propose_gpu     = torch::cat(propose_slices, 0).to(torch::kInt32);
+    auto verify_pairs    = interleaveTokenPairs(target_last_gpu, propose_gpu);
+    RTP_LLM_CHECK_WITH_INFO(verify_pairs.numel() == static_cast<int64_t>(batch_size * (propose_step_ + 1)),
+                            "one-step target verify token shape mismatch: tokens=%ld, batch=%zu, propose_step=%zu",
+                            verify_pairs.numel(),
+                            batch_size,
+                            propose_step_);
 
-    model_input.prefix_lengths = toCudaInt32(model_input.sequence_lengths, host_holder).clone();
-    setVerifyPairInputs(
-        model_input, interleaveTokenPairs(target_last_gpu, propose_gpu), batch_size, propose_step_ + 1, host_holder);
+    // Normal decode gatherer stores sequence_lengths as the current decode
+    // position (seqLength - 1), which is also the first verify token position.
+    model_input.prefix_lengths = toCudaInt32(model_input.sequence_lengths, host_holder).to(torch::kInt32);
+    setVerifyPairInputs(model_input, std::move(verify_pairs), batch_size, propose_step_ + 1, host_holder);
 }
 
 void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&        model_input,
@@ -737,7 +761,31 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     // Keep dense accept_tokens for CUDA graph reuse; lm_output_indexes selects
     // only the last accepted position. All outputs stay on CUDA so the next
     // stream-async step can prepare without waiting for worker D2H.
-    int total_tokens = (propose_step_ + 1) * batch_size;
+    const int total_tokens = (propose_step_ + 1) * batch_size;
+    RTP_LLM_CHECK_WITH_INFO(speculative_sampler_output.accept_len.defined(),
+                            "decode post-draft update requires accept_len");
+    RTP_LLM_CHECK_WITH_INFO(speculative_sampler_output.accept_tokens.defined(),
+                            "decode post-draft update requires accept_tokens");
+    RTP_LLM_CHECK_WITH_INFO(speculative_sampler_output.accept_len.numel() == static_cast<int64_t>(batch_size),
+                            "accept_len shape mismatch: numel=%ld, batch=%zu",
+                            speculative_sampler_output.accept_len.numel(),
+                            batch_size);
+    RTP_LLM_CHECK_WITH_INFO(speculative_sampler_output.accept_tokens.numel() == total_tokens,
+                            "accept_tokens shape mismatch: numel=%ld, expected=%d, batch=%zu, propose_step=%zu",
+                            speculative_sampler_output.accept_tokens.numel(),
+                            total_tokens,
+                            batch_size,
+                            propose_step_);
+    RTP_LLM_CHECK_WITH_INFO(model_output.all_hidden_states.defined(),
+                            "target verify output must carry all_hidden_states for draft prefill");
+    RTP_LLM_CHECK_WITH_INFO(model_output.all_hidden_states.dim() == 2
+                                && model_output.all_hidden_states.size(0) >= total_tokens,
+                            "target verify hidden shape mismatch: dim=%ld, rows=%ld, required_rows=%d",
+                            model_output.all_hidden_states.dim(),
+                            model_output.all_hidden_states.defined() && model_output.all_hidden_states.dim() > 0 ?
+                                model_output.all_hidden_states.size(0) :
+                                0,
+                            total_tokens);
     model_input.combo_tokens =
         toCudaInt32(speculative_sampler_output.accept_tokens.reshape({(int64_t)total_tokens}), host_holder);
     auto accept_len_d = toCudaInt32(speculative_sampler_output.accept_len, host_holder);

@@ -101,9 +101,9 @@ public:
     int64_t hc_sinkhorn_iters = 0;
     double  hc_eps            = 1e-6;
     // Clamp limit for SwiGLU (linear in [-limit,limit], gate <= limit). 0 disables clamp.
-    double  swiglu_limit      = 0.0;
+    double swiglu_limit = 0.0;
     // Number of leading MoE layers that route via deterministic token-id hash.
-    int64_t num_hash_layers   = 0;
+    int64_t num_hash_layers = 0;
 
     bool   has_positional_encoding    = false;
     bool   has_pre_decoder_layernorm  = false;
@@ -115,6 +115,8 @@ public:
     bool   has_moe_norm               = false;
     double logit_scale                = 1.0;
     bool   use_kvcache                = true;
+
+    bool use_opaque_kv_cache_store = false;
 
     int64_t pre_seq_len       = 0;
     bool    prefix_projection = false;

@@ -203,6 +203,74 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
               sc_v_off);
 }
 
+TEST_F(BlockPoolTest, MTPLayoutUsesSubConfigOpaqueTransferFlag) {
+    auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/1, /*block_num=*/4);
+    cache_cfg.use_opaque_kv_cache_store = true;
+    ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 1u);
+    ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
+    ASSERT_FALSE(cache_cfg.mtp_sub_configs[0]->use_opaque_kv_cache_store);
+
+    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
+    ASSERT_EQ(pool_cfg.memory_layouts.size(), 2u);
+    EXPECT_TRUE(pool_cfg.memory_layouts[0].transfer_whole_block);
+    EXPECT_FALSE(pool_cfg.memory_layouts[1].transfer_whole_block);
+
+    block_pool_ = std::make_shared<BlockPool>(pool_cfg);
+    ASSERT_TRUE(block_pool_->init());
+
+    const int global_mtp_layer = static_cast<int>(cache_cfg.layer_num);
+    auto      parts =
+        block_pool_->convertIndexToBuffer(global_mtp_layer, /*block_id=*/1, /*partition_count=*/2, /*partition_id=*/0);
+    EXPECT_EQ(parts.size(), 4u);
+}
+
+TEST_F(BlockPoolTest, MTPModelCapabilityEnablesOpaqueDraftTransfer) {
+    auto score_model_config                         = makeTestModelConfig(/*num_layers=*/2);
+    auto propose_model_config                       = makeTestModelConfig(/*num_layers=*/1);
+    score_model_config.attn_config.indexer_head_dim = 1;
+
+    propose_model_config.use_opaque_kv_cache_store = true;
+    rtp_llm::ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+
+    rtp_llm::RuntimeConfig runtime_config;
+
+    rtp_llm::KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 4;
+
+    rtp_llm::SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_EAGLE;
+    sp_config.gen_num_per_cycle = 3;
+
+    auto cache_cfg = rtp_llm::CacheConfigCreator::createSpConfig(score_model_config,
+                                                                 propose_model_config,
+                                                                 parallelism_config,
+                                                                 runtime_config,
+                                                                 kv_cache_config,
+                                                                 sp_config,
+                                                                 /*warm_up_result=*/std::nullopt,
+                                                                 /*is_mtp=*/true,
+                                                                 /*is_eagle=*/true);
+
+    ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 1u);
+    ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
+    EXPECT_TRUE(cache_cfg.use_opaque_kv_cache_store);
+    EXPECT_TRUE(cache_cfg.mtp_sub_configs[0]->use_opaque_kv_cache_store);
+
+    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
+    ASSERT_EQ(pool_cfg.memory_layouts.size(), 2u);
+    EXPECT_TRUE(pool_cfg.memory_layouts[0].transfer_whole_block);
+    EXPECT_TRUE(pool_cfg.memory_layouts[1].transfer_whole_block);
+
+    block_pool_ = std::make_shared<BlockPool>(pool_cfg);
+    ASSERT_TRUE(block_pool_->init());
+
+    const int global_mtp_layer = static_cast<int>(cache_cfg.layer_num);
+    auto      parts =
+        block_pool_->convertIndexToBuffer(global_mtp_layer, /*block_id=*/1, /*partition_count=*/2, /*partition_id=*/0);
+    EXPECT_EQ(parts.size(), 2u);
+}
+
 // Allocation Test
 TEST_F(BlockPoolTest, AllocSingleBlock) {
     auto config = createTestConfig();

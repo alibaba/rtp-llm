@@ -79,7 +79,6 @@ from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.ops import SpeculativeType
 
 __all__ = [
     "DeepepWrapperConfig",
@@ -620,10 +619,8 @@ class DeepEPWrapper:
 
         if self._use_accl_ep:
             os.environ.setdefault("ACCL_LOW_LATENCY_OPTIMIZE", "1")
-            # MiniMax-M3 decode CUDA Graph uses DeepEP low-latency with BF16
-            # activation payloads. Keep the ACCL-EP low-latency buffer default
-            # aligned with router use_fp8=False even when users bypass the
-            # checked launch scripts.
+            # Match the ACCL-EP low-latency buffer format to the router's
+            # BF16 activation payloads even when launch scripts are bypassed.
             os.environ.setdefault("ACCL_LOW_LATENCY_BUFFER_FP8_OPT", "0")
             init_kwargs["allow_nvlink_for_low_latency_mode"] = True
             if allow_mnnvl():
@@ -733,8 +730,6 @@ def init_deepep_wrapper(
             getattr(engine_config.moe_config, "ll_num_max_token", 0)
             or engine_config.runtime_config.max_generate_batch_size
         )
-        if engine_config.sp_config.type != SpeculativeType.NONE:
-            ll_num_max_token *= engine_config.sp_config.gen_num_per_cycle + 1
         ll_num_max_token_per_rank = (
             DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
                 ll_num_max_token,

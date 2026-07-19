@@ -361,6 +361,8 @@ def _decode_index_score_kernel(
     batch_size,
     num_idx_heads: tl.constexpr,
     head_dim: tl.constexpr,
+    max_blocks,
+    num_phys_blocks,
     init_blocks,
     local_blocks,
     decode_query_len,
@@ -388,7 +390,7 @@ def _decode_index_score_kernel(
     q_mask = q_offsets < decode_query_len
     q_ids = pid_r * decode_query_len + q_offsets
 
-    seq_len = tl.load(seq_lens + pid_r)
+    seq_len = tl.minimum(tl.load(seq_lens + pid_r), max_blocks * BLOCK_SIZE_K)
     query_pos = seq_len - decode_query_len + q_offsets
     kv_len = tl.maximum(query_pos + 1, 0)
     num_blocks_q = (kv_len + BLOCK_SIZE_K - 1) // BLOCK_SIZE_K
@@ -415,19 +417,24 @@ def _decode_index_score_kernel(
     )
 
     for blk in tl.range(chunk_start_block, chunk_end_block):
-        page = tl.load(bt_row + blk).to(tl.int64)
+        valid_logical_block = blk < max_blocks
+        page = tl.load(bt_row + blk, mask=valid_logical_block, other=-1).to(tl.int64)
+        valid_page = valid_logical_block & (page >= 0) & (page < num_phys_blocks)
+        safe_page = tl.where(valid_page, page, 0)
         pos = blk * BLOCK_SIZE_K + off_k
-        pos_mask = pos[:, None] < kv_len[None, :]
+        pos_mask = valid_page & (pos[:, None] < kv_len[None, :])
         k = tl.load(
             ik_cache_ptr
-            + page * stride_ik_blk
+            + safe_page * stride_ik_blk
             + off_k[:, None] * stride_ik_pos
             + off_d * stride_ik_d,
+            mask=valid_page,
+            other=0.0,
         )
         kq = tl.dot(k, q, out_dtype=tl.float32)
         kq = tl.where(pos_mask & q_mask[None, :], kq, float("-inf"))
         score = tl.max(kq, axis=0)
-        is_visible_block = blk < num_blocks_q
+        is_visible_block = (blk < num_blocks_q) & valid_page
         is_init = (blk < init_blocks) & is_visible_block
         is_local = (blk >= local_start) & is_visible_block
         score = tl.where(is_local, 1e29, tl.where(is_init, 1e30, score))
@@ -1257,6 +1264,8 @@ def flash_decode_with_topk_idx_paged(
             batch_size,
             num_q_heads,
             head_dim,
+            int(block_table.shape[1]),
+            int(num_phys_blocks),
             init_blocks,
             local_blocks,
             1,

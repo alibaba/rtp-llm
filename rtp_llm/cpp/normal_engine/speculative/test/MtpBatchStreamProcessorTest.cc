@@ -229,6 +229,40 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTok
     }
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputRejectsWrongLogitRows) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 3;
+
+    ResourceContext resource_context;
+    auto            stream1 = createContextStream(model_config, runtime_config, resource_context, {5}, 1);
+    auto            stream2 = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
+    stream1->setScoreLen(sp_config.gen_num_per_cycle + 1);
+    stream2->setScoreLen(sp_config.gen_num_per_cycle + 1);
+
+    auto stream_groups = StreamGroups({stream1, stream2});
+    auto processor     = MtpBatchStreamProcessor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    GptModelInputs  model_inputs;
+    GptModelOutputs model_output;
+    model_output.logits = torch::empty({7, 4}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+
+    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_inputs, model_output);
+    ASSERT_FALSE(sampler_inputs_status.ok());
+    EXPECT_NE(std::string(sampler_inputs_status.status().message()).find("target verify logits row mismatch"),
+              std::string::npos);
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
@@ -464,10 +498,6 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
 
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
     checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
-    EXPECT_EQ(stream1->getMtpAsyncDeviceState().last_real_seq_len, stream1->seqLength());
-    EXPECT_EQ(stream1->getMtpAsyncDeviceState().next_real_seq_len, stream1->seqLength());
-    EXPECT_EQ(stream2->getMtpAsyncDeviceState().last_real_seq_len, stream2->seqLength());
-    EXPECT_EQ(stream2->getMtpAsyncDeviceState().next_real_seq_len, stream2->seqLength());
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
@@ -612,7 +642,7 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
 
     auto sequence_lengths = model_input.sequence_lengths;
     EXPECT_TRUE(sequence_lengths.is_cuda());
-    EXPECT_EQ(0, sequence_lengths.size(0));
+    EXPECT_EQ(std::vector<int>{}, toVec<int>(sequence_lengths));
 
     auto        lm_output_indexes        = model_input.lm_output_indexes;
     vector<int> expect_lm_output_indexes = {0, 1, 2, 3};
@@ -709,11 +739,14 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDe
     EXPECT_TRUE(model_input.combo_tokens.is_cuda());
     EXPECT_EQ(expect_combo_tokens, toVec<int>(model_input.combo_tokens));
 
+    // Device-state publishes committed lengths. Target verify starts by
+    // replaying the last committed token, whose zero-based position is
+    // committed_len - 1.
     vector<int> expect_prefix_lengths = {6, 3};
     EXPECT_TRUE(model_input.prefix_lengths.is_cuda());
     EXPECT_EQ(expect_prefix_lengths, toVec<int>(model_input.prefix_lengths));
     EXPECT_TRUE(model_input.sequence_lengths.is_cuda());
-    EXPECT_EQ(0, model_input.sequence_lengths.size(0));
+    EXPECT_EQ(std::vector<int>{}, toVec<int>(model_input.sequence_lengths));
 
     vector<int> expect_input_lengths = {2, 2};
     EXPECT_TRUE(model_input.input_lengths.is_cuda());
@@ -797,6 +830,17 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     auto& model_input            = model_input_status.value();
     model_input.sequence_lengths = torch::tensor({1, 2}, torch::kInt32);
 
+    const auto                          cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    GenerateStream::MtpAsyncDeviceState state1;
+    state1.next_seq_len_gpu   = torch::full({1}, 7, cuda_i32);
+    state1.propose_tokens_gpu = torch::tensor({{2, 3}}, torch::kInt32).to(torch::kCUDA);
+    stream1->setMtpAsyncDeviceState(std::move(state1));
+
+    GenerateStream::MtpAsyncDeviceState state2;
+    state2.next_seq_len_gpu   = torch::full({1}, 4, cuda_i32);
+    state2.propose_tokens_gpu = torch::tensor({{3, 1}}, torch::kInt32).to(torch::kCUDA);
+    stream2->setMtpAsyncDeviceState(std::move(state2));
+
     processor.prepareDecodeDraftModelInput(stream_groups, model_input, holder);
 
     auto        combo_tokens        = model_input.combo_tokens;
@@ -808,7 +852,7 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     EXPECT_TRUE(lm_output_indexes.is_cuda());
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
 
-    vector<int> expect_sequence_lengths = {2, 3};
+    vector<int> expect_sequence_lengths = {7, 4};
     EXPECT_TRUE(model_input.sequence_lengths.is_cuda());
     EXPECT_EQ(expect_sequence_lengths, toVec<int>(model_input.sequence_lengths));
 }

@@ -8,16 +8,15 @@ import triton.language as tl
 
 from ..common.utils import robust_allocator
 
-
 _HEUR_gqa_share_sparse_decode_kernel = {
-        "BLOCK_SIZE_H": lambda args: max(
-            16, triton.next_power_of_2(args["gqa_group_size"])
-        ),
-        "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
-        "BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["max_topk"]),
-        "HAS_SINK": lambda args: args["sink_ptr"] is not None,
-        "BATCH_SIZE_BUCKET": lambda args: triton.next_power_of_2(args["batch_size"]),
-    }
+    "BLOCK_SIZE_H": lambda args: max(
+        16, triton.next_power_of_2(args["gqa_group_size"])
+    ),
+    "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
+    "BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["max_topk"]),
+    "HAS_SINK": lambda args: args["sink_ptr"] is not None,
+    "BATCH_SIZE_BUCKET": lambda args: triton.next_power_of_2(args["batch_size"]),
+}
 
 
 @triton.heuristics(_HEUR_gqa_share_sparse_decode_kernel)
@@ -372,56 +371,68 @@ def _gqa_share_sparse_decode_paged_kernel(
         q = tl.load(q_ptrs, boundary_check=(0, 1), padding_option="zero")
     acc_o = tl.full((BLOCK_SIZE_H, BLOCK_SIZE_D), 0, dtype=tl.float32)
     cur_idx_ptr = idx_base + chunk_start_topk * stride_ti_t
+    max_blocks = (max_kv_len + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N
     for _ in tl.range(chunk_start_topk, chunk_end_topk):
         # logical block id -> physical page via the block table; within-page
         # offset is off_n because page_size == block_size == BLOCK_SIZE_N.
         c = tl.load(cur_idx_ptr).to(tl.int32)
         cur_idx_ptr = cur_idx_ptr + stride_ti_t
-        page = tl.load(bt_row + c * stride_bt_blk).to(tl.int64)
-        page = (page + num_phys_blocks) % num_phys_blocks  # guard negatives
-        base_pos = c * BLOCK_SIZE_N
-        pos_mask = (base_pos + off_n) < seq_len
+        valid_logical_block = (c >= 0) & (c < max_blocks)
+        safe_c = tl.where(valid_logical_block, c, 0)
+        page = tl.load(
+            bt_row + safe_c * stride_bt_blk, mask=valid_logical_block, other=-1
+        ).to(tl.int64)
+        valid_page = valid_logical_block & (page >= 0) & (page < num_phys_blocks)
+        safe_page = tl.where(valid_page, page, 0)
+        base_pos = safe_c * BLOCK_SIZE_N
+        pos_mask = valid_page & ((base_pos + off_n) < seq_len)
         # load K as (head_dim, BLOCK_SIZE_N)
         k_off = (
-            page * stride_k_blk
+            safe_page * stride_k_blk
             + pid_kh * stride_k_h
             + off_n[None, :] * stride_k_p
             + off_d[:, None] * stride_k_d
         )
         k = tl.load(
             k_paged_ptr + k_off,
-            mask=dim_mask[:, None] & pos_mask[None, :],
+            mask=valid_page & dim_mask[:, None] & pos_mask[None, :],
             other=0.0,
         )
         # load V as (BLOCK_SIZE_N, head_dim)
         v_off = (
-            page * stride_v_blk
+            safe_page * stride_v_blk
             + pid_kh * stride_v_h
             + off_n[:, None] * stride_v_p
             + off_d[None, :] * stride_v_d
         )
         v = tl.load(
             v_paged_ptr + v_off,
-            mask=pos_mask[:, None] & dim_mask[None, :],
+            mask=valid_page & pos_mask[:, None] & dim_mask[None, :],
             other=0.0,
         )
+        block_active = tl.sum(tl.where(pos_mask, 1, 0), axis=0) > 0
         # Upconvert to Q's dtype so an FP8 (e4m3) paged pool feeds the bf16/fp16
         # matmuls (no-op when the pool already matches Q). The M3 sparse KV is a
         # "no-scale" e4m3 cast, so a plain widening cast reconstructs it.
         k = k.to(q.dtype)
         v = v.to(q.dtype)
         qk = tl.zeros((BLOCK_SIZE_H, BLOCK_SIZE_N), dtype=tl.float32)
-        qk += tl.where(off_n[None, :] < seq_len - base_pos, 0, float("-inf"))
+        qk += tl.where(pos_mask[None, :], 0, float("-inf"))
         qk += tl.dot(q, k) * sm_scale
-        m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
-        p = tl.exp(qk - m_ij[:, None])
+        m_ij_candidate = tl.maximum(m_i, tl.max(qk, axis=1))
+        m_ij = tl.where(block_active, m_ij_candidate, m_i)
+        p = tl.where(block_active, tl.exp(qk - m_ij[:, None]), 0.0)
         l_ij = tl.sum(p, axis=1)
-        acc_o_scale = tl.exp(m_i - m_ij)
+        acc_o_scale = tl.where(block_active, tl.exp(m_i - m_ij), 1.0)
         acc_o = acc_o * acc_o_scale[:, None]
         p = p.to(v.dtype)
         acc_o += tl.dot(p.to(v.dtype), v)
         m_i = m_ij
-        lse_i = m_ij + tl.log(tl.exp(lse_i - m_ij) + l_ij)
+        lse_i = tl.where(
+            block_active,
+            m_ij + tl.log(tl.exp(lse_i - m_ij) + l_ij),
+            lse_i,
+        )
     scale = tl.where(
         lse_i > float("-inf"),
         tl.exp(m_i - lse_i),
@@ -449,8 +460,8 @@ def _gqa_share_sparse_decode_paged_kernel(
 
 
 _HEUR_merge_topk_attn_out_kernel = {
-        "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
-    }
+    "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
+}
 
 
 @triton.heuristics(_HEUR_merge_topk_attn_out_kernel)
@@ -638,11 +649,10 @@ def flash_decode_with_gqa_share_sparse_paged(
     history into a token-major scratch. Requires ``block_size == page_size`` so
     each topk logical block maps 1:1 to a physical page."""
     triton.set_allocator(robust_allocator)
-    assert (
-        q.dtype == torch.bfloat16
-        or q.dtype == torch.float16
-        and k_paged.dtype == q.dtype
-    )
+    assert q.dtype in (torch.bfloat16, torch.float16)
+    # k_paged may be an FP8 (e4m3) paged pool; the kernel upconverts to q.dtype.
+    assert k_paged.dtype in (q.dtype, torch.float8_e4m3fn)
+    assert v_paged.dtype == k_paged.dtype
     batch_size, num_q_heads, head_dim = q.shape
     num_phys_blocks, num_kv_heads, page_size, _ = k_paged.shape
     assert (

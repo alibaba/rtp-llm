@@ -945,6 +945,7 @@ class ModelConfig:
     use_fp32_to_compute_logit: bool
     use_kvcache: bool
     use_norm_attn_out_residual: bool
+    use_opaque_kv_cache_store: bool
     use_norm_input_residual: bool
     vocab_size: int
     def __init__(self) -> None:

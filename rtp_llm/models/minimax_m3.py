@@ -854,6 +854,20 @@ class MiniMaxM3(DeepSeekV2):
             config.attn_config.indexer_head_dim = idx_head_dim
         logging.info("minimax-m3 MSA sparse config: %s", config.msa_sparse_config)
 
+    def _create_python_model(self):
+        from rtp_llm.models_py.model_desc.minimax_m3 import MiniMaxM3Model
+
+        self.py_model = MiniMaxM3Model(
+            self.model_config,
+            self.parallelism_config,
+            self.weight,
+            self.moe_config,
+            max_generate_batch_size=self.max_generate_batch_size,
+            fmha_config=self.fmha_config,
+            py_hw_kernel_config=self.hw_kernel_config,
+            device_resource_config=self.device_resource_config,
+        )
+
     @staticmethod
     def get_weight_cls() -> type[MiniMaxM3Weight]:
         return MiniMaxM3Weight

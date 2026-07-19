@@ -67,6 +67,14 @@ py_test (
 )
 
 py_test (
+    name = "mxfp8_linear_test",
+    srcs = ["mxfp8_linear_test.py"],
+    deps = py_test_deps,
+    tags = ["open_skip", "SM100"],
+    exec_properties = {'gpu':'SM100'},
+)
+
+py_test (
     name = "fp8_quant_gemm_microbench",
     srcs = ["fp8_quant_gemm_microbench.py"],
     deps = py_test_deps,
