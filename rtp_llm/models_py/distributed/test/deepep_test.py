@@ -6,7 +6,7 @@ import time
 from functools import partial
 from typing import Any, Dict, Tuple
 from unittest import TestCase, main
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
 import torch.distributed as dist
@@ -91,6 +91,33 @@ class DeepEPTest(TestCase):
 
     def setUp(self) -> None:
         pass
+
+    def test_init_low_latency_uses_configured_speculative_capacity_once(self):
+        engine_config = MagicMock()
+        engine_config.moe_config.use_deepep_low_latency = True
+        engine_config.moe_config.ll_num_max_token = 128
+        engine_config.parallelism_config.tp_size = 1
+        engine_config.hw_kernel_config.enable_cuda_graph = True
+        model_config = MagicMock()
+
+        with (
+            patch.object(DeepEPWrapper, "supported", return_value=True),
+            patch.object(DeepEPWrapper, "create") as create,
+            patch.object(
+                DeepepWrapperConfig,
+                "calc_low_latency_max_token_per_rank",
+                return_value=128,
+            ) as calc_capacity,
+            patch.object(
+                DeepepWrapperConfig,
+                "from_config_adapter",
+                return_value=MagicMock(),
+            ),
+        ):
+            init_deepep_wrapper(engine_config, model_config)
+
+        calc_capacity.assert_called_once_with(128, 1, model_config.quant_config)
+        create.assert_called_once()
 
     @staticmethod
     def _test_intranode_main(
@@ -1806,6 +1833,7 @@ class DeepEPTest(TestCase):
             grpc_config=py_env.grpc_config,
             dash_sc_grpc_config=py_env.dash_sc_grpc_config,
             load_config=py_env.load_config,
+            grammar_config=py_env.grammar_config,
         )
 
         return nccl_comm_config, master_port, engine_config, model_config

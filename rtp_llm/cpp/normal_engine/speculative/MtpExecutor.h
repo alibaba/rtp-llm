@@ -96,11 +96,9 @@ protected:
 
     absl::Status decodeStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);
 
-    // decodeStep helpers — extracted to keep decodeStep readable. Each helper
+    // decodeStep helpers: each helper
     // owns a single phase (sync, prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
-    // REBASE CONFLICT CONTEXT(518707c73): keep new base async target/draft
-    // prepare runners and add source branch previous-bookkeeping stream ordering.
     void            waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStreamPtr>& streams);
     void            prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& streams, TensorHolder& host_holder);
     void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
@@ -157,8 +155,7 @@ protected:
     // RTP_LLM_STREAM_ASYNC=1 is exported at server start.
     bool useStreamAsync() const;
 
-    // REBASE CONFLICT CONTEXT(cdc1b18b6): source branch added async device-state
-    // gating for GLM5 MTP; keep it with the new base stop_requested_ path.
+    // GLM5 MTP can keep the next-step sequence state on device.
     bool useAsyncDeviceState() const;
 
     bool useAsyncPrepare() const;
@@ -198,9 +195,6 @@ private:
     ParallelismConfig                                                        parallelism_config_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
-    // REBASE CONFLICT CONTEXT(b08feda05): source branch did not have the new
-    // wall-clock TPS reporter. Keep it because constructor initialization and
-    // process metrics in the new base depend on it.
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
     std::shared_ptr<ExpertBalancer>                                                            expert_balancer_;
     size_t                                                                                     vocab_size_;
@@ -243,7 +237,6 @@ private:
     AsyncRunner                             draft_prefill_prepare_runner_;
     AsyncRunner                             spec_logits_verify_async_runner_;
     std::unique_ptr<SpecLogitsVerifyRunner> spec_logits_verify_runner_;
-
     // Bookkeeping worker for stream-async decode dispatch. It owns a CUDA
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.
     AsyncRunner spec_bookkeeping_runner_;

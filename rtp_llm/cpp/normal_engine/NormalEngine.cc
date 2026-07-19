@@ -291,10 +291,23 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     // Without this, CudaGraphRunner inside the warmup executor sees
     // kv_cache_group_num_=0 and skips per-group block_table setup.
     {
-        const int cache_gen_num_per_cycle =
-            sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
-        auto cfg = CacheConfigCreator::createBasicConfig(
-            model_config_, parallelism_config, kv_cache_config, false, cache_gen_num_per_cycle);
+        CacheConfig cfg;
+        if (propose_params_ && propose_params_->draftModel()) {
+            cfg = CacheConfigCreator::createSpConfig(model_config_,
+                                                     propose_params_->getEngineInitParams().model_config_,
+                                                     parallelism_config,
+                                                     runtime_config,
+                                                     kv_cache_config,
+                                                     sp_config,
+                                                     std::nullopt,
+                                                     isMTPEagle(),
+                                                     isEagle());
+        } else {
+            const int cache_gen_num_per_cycle =
+                sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
+            cfg = CacheConfigCreator::createBasicConfig(
+                model_config_, parallelism_config, kv_cache_config, false, cache_gen_num_per_cycle);
+        }
         kv_cache_group_num_      = cfg.groupNums();
         kv_cache_layer_to_group_ = cfg.layer_to_group_id;
     }
@@ -321,10 +334,23 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
 
-    const int cache_gen_num_per_cycle =
-        sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
-    auto cache_config = CacheConfigCreator::createBasicConfig(
-        model_config_, parallelism_config, kv_cache_config, false, cache_gen_num_per_cycle);
+    CacheConfig cache_config;
+    if (propose_params_ && propose_params_->draftModel()) {
+        cache_config = CacheConfigCreator::createSpConfig(model_config_,
+                                                          propose_params_->getEngineInitParams().model_config_,
+                                                          parallelism_config,
+                                                          runtime_config,
+                                                          kv_cache_config,
+                                                          sp_config,
+                                                          std::nullopt,
+                                                          isMTPEagle(),
+                                                          isEagle());
+    } else {
+        const int cache_gen_num_per_cycle =
+            sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
+        cache_config = CacheConfigCreator::createBasicConfig(
+            model_config_, parallelism_config, kv_cache_config, false, cache_gen_num_per_cycle);
+    }
     // Do NOT override seq_size_per_block here. createBasicConfig already
     // returns the correct value: model_config.attn_config.tokens_per_block
     // for non-DSV4 (via SingleConfigCreator / HybridConfigCreator), and the
@@ -673,7 +699,8 @@ bool NormalEngine::isTimelineProfilingEnabled() const {
 
 bool NormalEngine::isMTPEagle() {
     if (propose_params_) {
-        return propose_params_->sp_type == SP_TYPE_MTP || propose_params_->sp_type == SP_TYPE_EAGLE;
+        return propose_params_->sp_type == SP_TYPE_MTP || propose_params_->sp_type == SP_TYPE_EAGLE
+               || propose_params_->sp_type == SP_TYPE_EAGLE3;
     }
     return false;
 }
