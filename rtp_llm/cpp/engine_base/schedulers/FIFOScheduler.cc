@@ -7,22 +7,12 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
-#include <cstring>
 #include <memory>
 #include <mutex>
 #include <unordered_set>
 
 using namespace std;
 namespace rtp_llm {
-namespace {
-
-bool workerStatusSnapshotEnabled() {
-    const char* env = std::getenv("RTP_LLM_WORKER_STATUS_SNAPSHOT");
-    return env != nullptr && std::strcmp(env, "1") == 0;
-}
-
-}  // namespace
 
 FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_config,
                              const ModelConfig&                     model_config,
@@ -43,19 +33,13 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
     cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()
                              && runtime_config.fifo_scheduler_config.cp_force_single_prefill),
-    worker_status_snapshot_enabled_(workerStatusSnapshotEnabled()),
     metrics_reporter_(metrics_reporter) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], "
-                     "cp_force_single_prefill is [%d], max_inited_kv_cache_streams is [%zu], "
-                     "worker_status_snapshot_enabled is [%d]",
+                     "cp_force_single_prefill is [%d], max_inited_kv_cache_streams is [%zu]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_,
                      cp_force_single_prefill_,
-                     max_inited_kv_cache_streams_,
-                     worker_status_snapshot_enabled_);
-    if (worker_status_snapshot_enabled_) {
-        publishWorkerStatusSnapshotLocked();
-    }
+                     max_inited_kv_cache_streams_);
 }
 
 FIFOScheduler::~FIFOScheduler() {
@@ -84,7 +68,6 @@ absl::Status FIFOScheduler::stop() {
         cancelStreams(waiting_streams_);
         cancelStreams(loading_cache_streams_);
         cancelStreams(running_streams_);
-        publishWorkerStatusSnapshotLocked();
     }
     cond_.notify_all();
     return absl::OkStatus();
@@ -219,9 +202,8 @@ bool FIFOScheduler::waitPredicate() {
 }
 
 // 通过 GenerateStateMachine 驱动每个 stream 的状态转移，状态变化的 stream 移入对应队列
-bool FIFOScheduler::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams) {
+void FIFOScheduler::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams) {
     RTP_LLM_PROFILE_FUNCTION();
-    bool changed = false;
     for (auto it = streams.begin(); it != streams.end();) {
         auto state = (*it)->getStatus();
         // avoid running_streams_ size exceed max_generate_batch_size_
@@ -234,13 +216,11 @@ bool FIFOScheduler::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams) {
         auto new_state = (*it)->moveToNext();
         if (new_state != state) {
             addStreamToNewState(*it, new_state);
-            it      = streams.erase(it);
-            changed = true;
+            it = streams.erase(it);
         } else {
             it++;
         }
     }
-    return changed;
 }
 
 void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_streams) {
@@ -395,7 +375,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     // LOADING_CACHE -> DONE/WAITING: error / load cache done
     evaluateAndUpdateStreams(loading_cache_streams_);
     // RUNNING -> DONE: error / finished
-    bool running_streams_changed = evaluateAndUpdateStreams(running_streams_);
+    evaluateAndUpdateStreams(running_streams_);
 
     // WAITING -> RUNNING: can run
     // WAITING -> LOADING_CACHE: load cache ok
@@ -405,7 +385,6 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     // allocate KV blocks, so a permanent CanRun bit alone must not bypass capacity checks.
     size_t prev_waiting_size = waiting_streams_.size();
     evaluateWaitingStreams(waiting_streams_);
-    running_streams_changed = running_streams_changed || !new_streams_.empty();
     running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
     new_streams_.clear();
 
@@ -416,9 +395,6 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
 
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
-    if (running_streams_changed) {
-        publishWorkerStatusSnapshotLocked();
-    }
     return running_streams_;
 }
 
@@ -463,27 +439,6 @@ std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::runningTaskList() {
         running_task_list_.emplace_back(task_info);
     }
     return running_task_list_;
-}
-
-std::shared_ptr<const std::unordered_set<int64_t>> FIFOScheduler::workerStatusRunningTaskIdsSnapshot() const {
-    if (!worker_status_snapshot_enabled_) {
-        return nullptr;
-    }
-    return std::atomic_load_explicit(&worker_status_running_task_ids_snapshot_, std::memory_order_acquire);
-}
-
-void FIFOScheduler::publishWorkerStatusSnapshotLocked() {
-    if (!worker_status_snapshot_enabled_) {
-        return;
-    }
-    auto snapshot = std::make_shared<std::unordered_set<int64_t>>();
-    snapshot->reserve(running_streams_.size());
-    for (const auto& stream : running_streams_) {
-        snapshot->insert(stream->streamId());
-    }
-    std::atomic_store_explicit(&worker_status_running_task_ids_snapshot_,
-                               std::shared_ptr<const std::unordered_set<int64_t>>(std::move(snapshot)),
-                               std::memory_order_release);
 }
 
 void FIFOScheduler::reportMetrics() {

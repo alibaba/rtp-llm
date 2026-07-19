@@ -3,7 +3,6 @@
 #include <list>
 #include <vector>
 #include <memory>
-#include <unordered_set>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
@@ -38,9 +37,6 @@ public:
     }
     virtual std::vector<EngineScheduleInfo::TaskInfo> runningTaskList() {
         return {};
-    }
-    virtual std::shared_ptr<const std::unordered_set<int64_t>> workerStatusRunningTaskIdsSnapshot() const {
-        return nullptr;
     }
     virtual void updateSchedulerInfo(const std::string& scheduler_info) {}
 };

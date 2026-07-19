@@ -5,13 +5,9 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include <atomic>
-#include <cstdlib>
-#include <cstring>
 #include <mutex>
 #include <condition_variable>
 #include <list>
-#include <memory>
-#include <unordered_set>
 
 namespace rtp_llm {
 
@@ -38,9 +34,6 @@ public:
         batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
         scheduler_type_   = SchedulerType::kBatchDecode;
         dp_rank_          = dp_rank;
-        const char* env   = std::getenv("RTP_LLM_WORKER_STATUS_SNAPSHOT");
-        worker_status_snapshot_enabled_ = env != nullptr && std::strcmp(env, "1") == 0;
-        publishWorkerStatusSnapshotLocked();
     }
     virtual ~BatchDecodeScheduler() = default;
 
@@ -100,20 +93,17 @@ public:
     }
 
     // 通过 GenerateStateMachine 驱动每个 stream 的状态转移，状态变化的 stream 移入对应队列
-    bool evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams) {
-        bool changed = false;
+    void evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams) {
         for (auto it = streams.begin(); it != streams.end();) {
             auto state     = (*it)->getStatus();
             auto new_state = (*it)->moveToNext();
             if (new_state != state) {
                 addStreamToNewState(*it, new_state);
-                it      = streams.erase(it);
-                changed = true;
+                it = streams.erase(it);
             } else {
                 it++;
             }
         }
-        return changed;
     }
 
     void cancelStreams(std::list<GenerateStreamPtr>& streams) {
@@ -124,7 +114,7 @@ public:
         streams.clear();
     }
 
-    bool evaluateWaitingStreams() {
+    void evaluateWaitingStreams() {
         // 清理 waiting_streams_ 中有错误的 stream
         waiting_streams_.remove_if([](const auto& s) { return s->hasError(); });
 
@@ -154,9 +144,7 @@ public:
             for (auto& stream : new_streams) {
                 waiting_streams_.remove(stream);
             }
-            return !new_streams.empty();
         }
-        return false;
     }
 
     void initRunningStreams() {
@@ -190,10 +178,10 @@ public:
         // 统一通过状态机驱动各队列中 stream 的状态转移
         // LOADING_CACHE -> DONE/WAITING: error / load cache done
         evaluateAndUpdateStreams(loading_cache_streams_);
-        bool running_streams_changed = evaluateAndUpdateStreams(running_streams_);
+        evaluateAndUpdateStreams(running_streams_);
 
         if (running_streams_.empty() && waiting_streams_.size() >= batch_size_) {
-            running_streams_changed = evaluateWaitingStreams() || running_streams_changed;
+            evaluateWaitingStreams();
             if (!running_streams_.empty()) {
                 initRunningStreams();
                 RTP_LLM_LOG_INFO("BatchDecodeScheduler::schedule: running_streams_.size() = %d, start run",
@@ -201,9 +189,6 @@ public:
             }
         }
 
-        if (running_streams_changed) {
-            publishWorkerStatusSnapshotLocked();
-        }
         return running_streams_;
     }
 
@@ -214,7 +199,6 @@ public:
             cancelStreams(waiting_streams_);
             cancelStreams(loading_cache_streams_);
             cancelStreams(running_streams_);
-            publishWorkerStatusSnapshotLocked();
         }
         cond_.notify_all();
         return absl::OkStatus();
@@ -234,28 +218,7 @@ public:
         return waiting_streams_.size() + loading_cache_streams_.size() + running_streams_.size();
     }
 
-    std::shared_ptr<const std::unordered_set<int64_t>> workerStatusRunningTaskIdsSnapshot() const override {
-        if (!worker_status_snapshot_enabled_) {
-            return nullptr;
-        }
-        return std::atomic_load_explicit(&worker_status_running_task_ids_snapshot_, std::memory_order_acquire);
-    }
-
 private:
-    void publishWorkerStatusSnapshotLocked() {
-        if (!worker_status_snapshot_enabled_) {
-            return;
-        }
-        auto snapshot = std::make_shared<std::unordered_set<int64_t>>();
-        snapshot->reserve(running_streams_.size());
-        for (const auto& stream : running_streams_) {
-            snapshot->insert(stream->streamId());
-        }
-        std::atomic_store_explicit(&worker_status_running_task_ids_snapshot_,
-                                   std::shared_ptr<const std::unordered_set<int64_t>>(std::move(snapshot)),
-                                   std::memory_order_release);
-    }
-
     std::mutex                   lock_;
     std::condition_variable      cond_;
     std::list<GenerateStreamPtr> waiting_streams_;
@@ -266,12 +229,10 @@ private:
     bool                         reorder_request_;
     uint32_t                     current_step_ = 0;
 
-    std::shared_ptr<KVCacheManager>                    cache_manager_;
-    kmonitor::MetricsReporterPtr                       metrics_reporter_;
-    SchedulerType                                      scheduler_type_;
-    int                                                dp_rank_                        = 0;
-    bool                                               worker_status_snapshot_enabled_ = false;
-    std::shared_ptr<const std::unordered_set<int64_t>> worker_status_running_task_ids_snapshot_;
+    std::shared_ptr<KVCacheManager> cache_manager_;
+    kmonitor::MetricsReporterPtr    metrics_reporter_;
+    SchedulerType                   scheduler_type_;
+    int                             dp_rank_ = 0;
 };
 
 }  // namespace rtp_llm

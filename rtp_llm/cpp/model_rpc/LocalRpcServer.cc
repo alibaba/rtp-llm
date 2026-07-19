@@ -362,20 +362,15 @@ size_t LocalRpcServer::onflightRequestNum() {
 }
 
 EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finished_version) {
-    EngineScheduleInfo info                      = meta_->getEngineScheduleInfo(latest_finished_version);
-    auto               running_task_ids_snapshot = engine_->getScheduler().workerStatusRunningTaskIdsSnapshot();
-    std::unordered_set<int64_t>        fallback_running_task_ids;
-    const std::unordered_set<int64_t>* running_task_ids = running_task_ids_snapshot.get();
-    if (running_task_ids == nullptr) {
-        std::vector<EngineScheduleInfo::TaskInfo> running_task_info_list = engine_->getScheduler().runningTaskList();
-        fallback_running_task_ids.reserve(running_task_info_list.size());
-        for (const auto& running_task : running_task_info_list) {
-            fallback_running_task_ids.insert(running_task.request_id);
-        }
-        running_task_ids = &fallback_running_task_ids;
+    EngineScheduleInfo                        info = meta_->getEngineScheduleInfo(latest_finished_version);
+    std::vector<EngineScheduleInfo::TaskInfo> running_task_info_list = engine_->getScheduler().runningTaskList();
+    std::unordered_set<int64_t>               running_task_ids;
+    running_task_ids.reserve(running_task_info_list.size());
+    for (const auto& running_task : running_task_info_list) {
+        running_task_ids.insert(running_task.request_id);
     }
     for (auto& task_info : info.running_task_info_list) {
-        if (running_task_ids->find(task_info.request_id) != running_task_ids->end()) {
+        if (running_task_ids.find(task_info.request_id) != running_task_ids.end()) {
             task_info.is_waiting = false;
         }
     }

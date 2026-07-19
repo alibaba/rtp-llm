@@ -55,7 +55,7 @@ public:
         // LOADING_CACHE -> DONE/WAITING: error / load cache done
         evaluateAndUpdateStreams(loading_cache_streams_);
         // RUNNING -> DONE: error / finished
-        bool running_streams_changed = evaluateAndUpdateStreams(running_streams_);
+        evaluateAndUpdateStreams(running_streams_);
 
         // PyWrappedModel currently does not support a mixed prefill+decode batch (see
         // PyWrappedModel::buildPyAttentionInputs cu_seqlens slicing). Defer the gather
@@ -90,7 +90,6 @@ public:
                 new_streams.sort([](const GenerateStreamPtr& a, const GenerateStreamPtr& b) {
                     return a->streamId() < b->streamId();
                 });
-                running_streams_changed = running_streams_changed || !new_streams.empty();
                 running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
                 // Remove scheduled streams from waiting_streams_
                 for (auto& stream : new_streams) {
@@ -100,9 +99,6 @@ public:
             gather_batch_size_ = 1;
         }
 
-        if (running_streams_changed) {
-            publishWorkerStatusSnapshotLocked();
-        }
         return running_streams_;
     }
 
