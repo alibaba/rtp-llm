@@ -106,7 +106,12 @@ void RpcWorkerStatusMetrics::report(const kmonitor::MetricsTags* tags, RpcWorker
 void RpcMetrics::report(const kmonitor::MetricsTags* tags, RpcMetricsCollector* collector) {
     REPORT_QPS(qps);
     REPORT_QPS(cancel_qps);
-    REPORT_QPS(error_qps);
+    if (collector->error_qps) {
+        auto error_tags = tags ? kmonitor::MetricsTags(*tags) : kmonitor::MetricsTags();
+        error_tags.AddTag("error_code", std::to_string(static_cast<int>(collector->error_code)));
+        error_tags.AddTag("error_code_name", ErrorCodeToString(collector->error_code));
+        error_qps_metric->Report(&error_tags, 1);
+    }
     REPORT_GAUGE(onflight_request);
     REPORT_GAUGE(total_rt_us);
 

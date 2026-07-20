@@ -423,7 +423,7 @@ struct PDSepConfig {
     int64_t  decode_polling_call_prefill_ms  = 30;
     int64_t  rdma_connect_retry_times        = 0;
     int64_t  load_cache_timeout_ms           = 5000;
-    int64_t  max_rpc_timeout_ms              = 0;
+    int64_t  max_rpc_timeout_ms              = 2 * 3600 * 1000;  // 2h default
     int64_t  worker_port_offset              = 0;
     bool     decode_entrance                 = false;
 

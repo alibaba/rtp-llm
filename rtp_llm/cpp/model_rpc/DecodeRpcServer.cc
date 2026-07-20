@@ -152,6 +152,7 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
     auto input                        = QueryConverter::transQuery(&decode_context.allocate_request.input());
+    decode_context.request_info       = input->request_info;
     auto generate_stream              = engine_->makeStream(input);
     decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
 
@@ -207,6 +208,9 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     load_response.mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     GRPC_RET_IF_ERROR(
         decode_context, grpc_stream->Write(load_response), grpc::StatusCode::INTERNAL, "send load response failed");
+    if (!error_info.ok()) {
+        decode_context.error_info = error_info;
+    }
     GRPC_RET_IF_ERROR(decode_context, error_info.ok(), grpc::StatusCode::INTERNAL, error_info.ToString().c_str());
     RTP_LLM_LOG_DEBUG("request [%s] load cache from prefill done", decode_context.request_key.c_str());
 }
@@ -456,10 +460,17 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
     auto load_cache_timeout_ms = maga_init_params_.pd_sep_config.load_cache_timeout_ms;
     load_cache_timeout_ms      = load_cache_timeout_ms > 0 ? load_cache_timeout_ms : LOAD_TIMEOUT_MS;
     auto max_rpc_timeout_ms    = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
-    auto rpc_timeout           = max_rpc_timeout_ms > 0 ? max_rpc_timeout_ms : MAX_GRPC_TIMEOUT_MS;
-    auto min_timeout_ms        = std::min(load_cache_timeout_ms, rpc_timeout);
     auto request_timeout_ms    = decode_context.request_timeout_ms;
-    min_timeout_ms             = request_timeout_ms > 0 ? std::min(request_timeout_ms, min_timeout_ms) : min_timeout_ms;
+    // load_cache_timeout_ms is the KV-cache loading deadline and always applies;
+    // max_rpc_timeout_ms / request_timeout_ms only participate in min when > 0
+    // (<= 0 means unlimited for that knob).
+    int64_t min_timeout_ms = load_cache_timeout_ms;
+    if (max_rpc_timeout_ms > 0) {
+        min_timeout_ms = std::min(min_timeout_ms, max_rpc_timeout_ms);
+    }
+    if (request_timeout_ms > 0) {
+        min_timeout_ms = std::min(min_timeout_ms, request_timeout_ms);
+    }
 
     LoadKVCacheContext load_context{decode_context.request_id,
                                     decode_context.request_key,

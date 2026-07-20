@@ -37,8 +37,6 @@ from rtp_llm.utils.grpc_util import (
     trans_tensor,
 )
 
-MAX_GRPC_TIMEOUT_SECONDS = 3600
-
 
 class StreamState:
     def __init__(self):
@@ -77,21 +75,26 @@ def trans_input(input_py: GenerateInput):
     if input_py.batch_group_id != -1:
         input_pb.batch_group_id.value = input_py.batch_group_id
 
-    request_info = input_py.request_info
-    input_pb.request_info.frontend_ip = request_info.frontend_ip
-    input_pb.request_info.dash_ip = request_info.dash_ip
-    input_pb.request_info.trace_id = request_info.trace_id
-    input_pb.request_info.request_id = request_info.request_id
-    input_pb.request_info.source_role = request_info.source_role
+    request_info = getattr(input_py, "request_info", None)
+    if request_info is not None:
+        input_pb.request_info.frontend_ip = (
+            getattr(request_info, "frontend_ip", "") or ""
+        )
+        input_pb.request_info.dash_ip = getattr(request_info, "dash_ip", "") or ""
+        input_pb.request_info.trace_id = getattr(request_info, "trace_id", "") or ""
+        input_pb.request_info.request_id = getattr(request_info, "request_id", "") or ""
+        input_pb.request_info.source_role = (
+            getattr(request_info, "source_role", "") or ""
+        )
     if not input_pb.request_info.trace_id:
         input_pb.request_info.trace_id = str(
             input_py.generate_config.trace_id
-            or extract_trace_id(input_py.headers)
+            or extract_trace_id(getattr(input_py, "headers", None))
             or ""
         )
     if not input_pb.request_info.request_id:
         input_pb.request_info.request_id = extract_correlation_request_id(
-            input_py.headers
+            getattr(input_py, "headers", None)
         ) or str(input_pb.request_info.trace_id or input_py.request_id)
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
@@ -486,7 +489,9 @@ class ModelRpcClient(object):
 
         Args:
             addresses: List of RPC addresses for data parallel communication
-            max_rpc_timeout_ms: Maximum RPC timeout in milliseconds
+            max_rpc_timeout_ms: Maximum RPC timeout in milliseconds. <= 0 disables
+                the gRPC deadline. Callers normally pass pd_sep_config.max_rpc_timeout_ms
+                (args: --max_rpc_timeout_ms / env: MAX_RPC_TIMEOUT_MS).
             decode_entrance: Whether this is a decode entrance
         """
         self._addresses = addresses
@@ -516,14 +521,21 @@ class ModelRpcClient(object):
             return rpc_timeout_ms / 1000
         return timeout_ms / 1000
 
-    def _handle_grpc_error(self, e: grpc.RpcError, request_desc: str) -> None:
+    def _handle_grpc_error(
+        self, e: grpc.RpcError, request_desc: str, target_address: str = ""
+    ) -> None:
+        # NOTE: keep the backend peer (target_address) in the log lines ONLY.
+        # Do NOT append it to the FtRuntimeException message, which is
+        # serialized into the client-facing error response and would leak
+        # internal cluster topology (worker ip:port) to callers.
+        peer_desc = f" to [{target_address}]" if target_address else ""
         error_details = ErrorDetailsPB()
         metadata = e.trailing_metadata()
         if "grpc-status-details-bin" in metadata and error_details.ParseFromString(
             metadata["grpc-status-details-bin"]
         ):
             logging.error(
-                f"{request_desc} RPC failed: "
+                f"{request_desc} RPC{peer_desc} failed: "
                 f"{e.code()}, {e.details()}, detail error code is "
                 f"{ExceptionType.from_value(error_details.error_code)}"
             )
@@ -532,13 +544,26 @@ class ModelRpcClient(object):
             )
         else:
             logging.error(
-                f"{request_desc} RPC failed: "
+                f"{request_desc} RPC{peer_desc} failed: "
                 f"error code is {e.code()}, detail is {e.details()}"
             )
             if e.code() == StatusCode.DEADLINE_EXCEEDED:
                 raise FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, e.details())
             elif e.code() == StatusCode.CANCELLED:
                 raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, e.details())
+            elif e.code() == StatusCode.UNAVAILABLE:
+                details = e.details() or ""
+                lower_details = details.lower()
+                if (
+                    "socket closed" in lower_details
+                    or "connection reset" in lower_details
+                ):
+                    exception_type = ExceptionType.CONNECTION_RESET_BY_PEER
+                elif "timed out" in lower_details or "timeout" in lower_details:
+                    exception_type = ExceptionType.CONNECT_TIMEOUT
+                else:
+                    exception_type = ExceptionType.CONNECT_FAILED
+                raise FtRuntimeException(exception_type, details)
             else:
                 raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
 
@@ -567,32 +592,34 @@ class ModelRpcClient(object):
 
         if not address_list:
             raise ValueError(f"No address found for request: {input_py.request_id}")
+        # Select target address before entering the try block so it is always
+        # available to the error handlers below (surfaced in logs only)
+        # details to identify which backend peer dropped the connection).
+        target_address = address_list[input_py.request_id % len(address_list)]
         logging.debug(
-            f"request: [{input_py.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
+            f"request: [{input_py.request_id}] send to address: {target_address}"
         )
 
         input_pb = trans_input(input_py)
 
         try:
-            # Select target address
-            target_address = address_list[input_py.request_id % len(address_list)]
-            logging.debug(f"target_address: {target_address}")
             # Get channel from pool
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
 
-            response_iterator = stub.GenerateStreamCall(
-                input_pb, timeout=grpc_timeout_seconds
-            )
+            grpc_kwargs = {"timeout": effective_ms / 1000.0} if effective_ms > 0 else {}
+            response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
                 yield trans_output(input_py, response, stream_state)
         except grpc.RpcError as e:
             if response_iterator:
                 response_iterator.cancel()
-            self._handle_grpc_error(e, f"request: [{input_pb.request_id}]")
+            self._handle_grpc_error(e, f"request: [{input_pb.request_id}]", target_address)
         except Exception as e:
-            logging.error(f"rpc unknown error:{str(e)}")
+            logging.error(
+                f"request: [{input_pb.request_id}] rpc to [{target_address}] unknown error: {str(e)}"
+            )
             raise e
         finally:
             if response_iterator:

@@ -72,7 +72,8 @@ namespace rtp_llm {
             prefill_context.getStream()->reportEvent(StreamEvents::Error, new_error_code, new_error_msg);              \
         }                                                                                                              \
         prefill_context.error_info   = ErrorInfo(new_error_code, new_error_msg);                                       \
-        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);     \
+        prefill_context.error_status =                                                                                 \
+            serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);  \
         return;                                                                                                        \
     }
 
@@ -111,6 +112,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
     auto input                            = QueryConverter::transQuery(prefill_context.rpc_context.request);
+    prefill_context.request_info          = input->request_info;
     input->generate_config->pd_separation = true;
     if (engine_->isMTPEagle()) {
         input->generate_config->force_disable_sp_run = false;
@@ -149,7 +151,8 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     if (!host || host->ip.empty()) {
         prefill_context.error_info =
             ErrorInfo(ErrorCode::GET_HOST_FAILED, "get host for decode cluster " + decode_cluster_name_ + " failed");
-        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        prefill_context.error_status =
+            serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
         return;
     }
     auto decode_addr    = host->ip + ":" + std::to_string(host->rpc_port);
@@ -157,7 +160,9 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     if (!connect_status.ok()) {
         prefill_context.error_info   = ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
                                                "get grpc connection for decode addr " + decode_addr + " failed");
-        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        prefill_context.error_status =
+            serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
+        prefill_context.decode_addr  = decode_addr;
         return;
     }
     prefill_context.decode_addr     = decode_addr;
@@ -187,13 +192,14 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote allocate resource", prefill_context.request_id);
     prefill_context.client_context.reset(new ClientContext());
-    auto request_timeout_ms = prefill_context.request_timeout_ms;
-    auto max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
-    auto final_timeout_ms   = max_rpc_timeout_ms > 0 ? max_rpc_timeout_ms : MAX_GRPC_TIMEOUT_MS;
-    final_timeout_ms        = request_timeout_ms > 0 ? request_timeout_ms : final_timeout_ms;
-
-    auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(final_timeout_ms);
-    prefill_context.client_context->set_deadline(deadline);
+    auto    request_timeout_ms = prefill_context.request_timeout_ms;
+    auto    max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
+    int64_t final_timeout_ms   = request_timeout_ms > 0 ? request_timeout_ms : max_rpc_timeout_ms;
+    if (final_timeout_ms > 0) {
+        auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(final_timeout_ms);
+        prefill_context.client_context->set_deadline(deadline);
+    }
+    // final_timeout_ms <= 0: skip set_deadline; gRPC treats it as no deadline.
     prefill_context.client_stream =
         std::move(prefill_context.grpc_connection.stub->RemoteGenerate(prefill_context.client_context.get()));
     auto&             client_stream = prefill_context.client_stream;
@@ -230,7 +236,8 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
     prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
     if (prefill_context.error_info.hasError()) {
-        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        prefill_context.error_status =
+            serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
         return;
     }
     AtomicGuard       request_guard(loading_cache_requests_);

@@ -10,7 +10,9 @@ from typing import Any, Dict, List, Optional
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
+from rtp_llm.config.py_config_modules import MasterConfig
 from rtp_llm.server.host_service import HostService
+from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.server.worker_status import ScheduleMeta
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 
@@ -97,21 +99,29 @@ class MasterClient:
     """Client for FlexLB schedule API (master and optional slave)."""
 
     def __init__(self, host_service=None, server_config=None, master_config=None):
-        self.master_config = master_config
-        self.host_service: Optional[HostService] = host_service
-        self.max_connect_pool_size = (
-            master_config.master_max_connect_pool_size if master_config else 1000
+        # Always use a MasterConfig instance; when the caller passes None we fall
+        # back to dataclass defaults aligned with the args registration
+        # (master_default_timeout_ms=3600000).
+        self.master_config = (
+            master_config if master_config is not None else MasterConfig()
         )
         self._session: Optional[Any] = None
         self.latest_queue_length: int = 0
         self.session_timeout_s = self._get_session_timeout_s()
 
-    def _get_session_timeout_s(self) -> float:
+    def _get_session_timeout_s(self) -> Optional[float]:
         # Session-level timeout is a safety net for the connection pool lifetime,
         # not for individual requests. Per-request timeout in _send_schedule_request
         # always takes precedence (aiohttp per-request timeout overrides session timeout).
-        if self.master_config and self.master_config.master_session_timeout_s >= 0:
-            return float(self.master_config.master_session_timeout_s)
+        # master_session_timeout_s semantics:
+        #   >  0  -> use that value
+        #   == 0  -> None (aiohttp treats it as no total timeout; unlimited)
+        #   <  0  -> auto (3600s in queue mode, 0.5s otherwise)
+        ts = self.master_config.master_session_timeout_s
+        if ts == 0:
+            return None
+        if ts > 0:
+            return float(ts)
         if self.host_service and self.host_service.master_vip.domain:
             return 3600.0
         return DEFAULT_REQUEST_TIMEOUT_SEC
@@ -144,6 +154,7 @@ class MasterClient:
         payload: Dict[str, Any],
         generate_timeout_ms: int,
         request_id: int,
+        request_headers: Optional[Dict[str, str]] = None,
     ) -> FlexlbResponse:
         """
         Send one schedule request to the given host (master or slave).
@@ -152,10 +163,10 @@ class MasterClient:
         """
         url = f"http://{addr}{SCHEDULE_PATH}"
         headers = {"Content-Type": "application/json"}
-        timeout_sec = (
-            (generate_timeout_ms / 1000.0)
-            if generate_timeout_ms > 0
-            else DEFAULT_REQUEST_TIMEOUT_SEC
+        headers.update(normalize_request_headers(request_headers))
+        # generate_timeout_ms <= 0 -> ClientTimeout(total=None); aiohttp treats as unlimited.
+        timeout_total = (
+            generate_timeout_ms / 1000.0 if generate_timeout_ms > 0 else None
         )
         start = time.time()
         import aiohttp
@@ -163,7 +174,7 @@ class MasterClient:
 
         try:
             session = await self._get_session()
-            request_timeout = ClientTimeout(total=timeout_sec)
+            request_timeout = ClientTimeout(total=timeout_total)
             async with session.post(
                 url,
                 data=json.dumps(payload),
@@ -239,12 +250,10 @@ class MasterClient:
         ttft_timeout_ms = getattr(
             input.generate_config, "ttft_timeout_ms", None
         ) or getattr(input.generate_config, "timeout_ms", None)
-        if not ttft_timeout_ms or ttft_timeout_ms <= 0:
-            ttft_timeout_ms = (
-                self.master_config.master_default_timeout_ms
-                if self.master_config
-                else 3600000
-            )
+        if ttft_timeout_ms is None or ttft_timeout_ms <= 0:
+            # per-request not provided -> use args default (master_default_timeout_ms).
+            # When that default is <= 0, _send_schedule_request builds ClientTimeout(total=None).
+            ttft_timeout_ms = self.master_config.master_default_timeout_ms
         request_priority = getattr(
             input.generate_config,
             "traffic_reject_priority",
@@ -263,8 +272,9 @@ class MasterClient:
             "request_time_ms": int(start * 1000),
         }
 
+        request_headers = getattr(input, "headers", None)
         resp = await self._send_schedule_request(
-            master_addr, payload, ttft_timeout_ms, request_id
+            master_addr, payload, ttft_timeout_ms, request_id, request_headers
         )
 
         if resp.connection_failed and slave_addr:
@@ -274,7 +284,7 @@ class MasterClient:
                 request_id,
             )
             resp = await self._send_schedule_request(
-                slave_addr, payload, ttft_timeout_ms, request_id
+                slave_addr, payload, ttft_timeout_ms, request_id, request_headers
             )
 
         if resp.result is None:

@@ -226,6 +226,63 @@ class ModelRpcClientTest(TestCase):
         self.assertAlmostEqual(logits_2[0][0], 0.0, places=6)
         self.assertAlmostEqual(logits_2[0][1], 0.0, places=6)
 
+    def test_trans_input_request_info(self):
+        input_pb = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(trace_id="trace-from-config"),
+                request_id=123,
+                mm_inputs=[],
+                headers={"x-request-id": "header-request-id"},
+                request_info=RequestInfo(
+                    frontend_ip="10.0.0.1",
+                    dash_ip="10.0.0.2",
+                    trace_id="trace-from-info",
+                    request_id="source-request-id",
+                    source_role="frontend",
+                ),
+            )
+        )
+
+        self.assertEqual(input_pb.request_info.frontend_ip, "10.0.0.1")
+        self.assertEqual(input_pb.request_info.dash_ip, "10.0.0.2")
+        self.assertEqual(input_pb.request_info.trace_id, "trace-from-info")
+        self.assertEqual(input_pb.request_info.request_id, "source-request-id")
+        self.assertEqual(input_pb.request_info.source_role, "frontend")
+
+    def test_trans_input_request_info_fallback(self):
+        input_pb = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(trace_id="trace-from-config"),
+                request_id=123,
+                mm_inputs=[],
+                headers={"x-request-id": "header-request-id"},
+            )
+        )
+
+        self.assertEqual(input_pb.request_info.trace_id, "trace-from-config")
+        self.assertEqual(input_pb.request_info.request_id, "header-request-id")
+
+    def test_trans_input_request_info_trace_header_fallback(self):
+        traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"
+        input_pb = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(),
+                request_id=123,
+                mm_inputs=[],
+                headers={"traceparent": traceparent},
+            )
+        )
+
+        self.assertEqual(
+            input_pb.request_info.trace_id, "4bf92f3577b34da6a3ce929d0e0e4736"
+        )
+        self.assertEqual(
+            input_pb.request_info.request_id, "4bf92f3577b34da6a3ce929d0e0e4736"
+        )
+
 
 if __name__ == "__main__":
     setup_logging()

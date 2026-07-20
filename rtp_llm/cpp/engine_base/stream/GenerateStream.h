@@ -164,6 +164,7 @@ public:
     std::vector<int>                 textTokensMask() const;
     bool                             isStreaming() const;
     int64_t                          streamId() const;
+    std::string                      streamLogTag() const;
     std::string                      adapterName() const;
     rtp_llm::SpecialTokens           specialTokens() const;
 

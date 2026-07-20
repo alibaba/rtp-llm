@@ -25,6 +25,7 @@ from rtp_llm.ops import (
     VitSeparation,
 )
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,
@@ -179,6 +180,7 @@ class Pipeline(object):
         if request_id == None:
             request_id = request_counter.increment()
 
+        request_headers = normalize_request_headers(kwargs.pop("headers", None))
         generate_config_json = kwargs.pop("generate_config", {})
         generate_config = self.create_generate_config(
             generate_config_json,
@@ -260,7 +262,12 @@ class Pipeline(object):
         kmonitor.report(GaugeMetrics.NUM_BEAMS_METRIC, generate_config.max_num_beams())
         kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, len(token_ids))
         return self.generate_stream(
-            request_id, token_ids, mm_inputs, generate_config, **kwargs
+            request_id,
+            token_ids,
+            mm_inputs,
+            generate_config,
+            headers=request_headers,
+            **kwargs,
         )
 
     @staticmethod
@@ -506,6 +513,7 @@ class Pipeline(object):
         **kwargs: Any,
     ) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
+        request_headers = normalize_request_headers(kwargs.pop("headers", None))
 
         token_ids = torch.tensor(token_ids, dtype=torch.int)
 
@@ -518,6 +526,7 @@ class Pipeline(object):
             token_type_ids=token_type_ids,
             batch_group_size=kwargs.get("batch_group_size", 1),
             batch_group_id=kwargs.get("batch_group_id", -1),
+            headers=request_headers,
         )
 
         stop_word_strs = generate_config.stop_words_str

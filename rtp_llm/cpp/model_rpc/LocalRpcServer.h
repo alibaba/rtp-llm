@@ -103,6 +103,9 @@ public:
 
 protected:
     grpc::Status serializeErrorMsg(const std::string& request_key, ErrorInfo error_info);
+    grpc::Status serializeErrorMsg(const std::string& request_key,
+                                   const RequestInfo& request_info,
+                                   ErrorInfo          error_info);
     grpc::Status pollStreamOutput(grpc::ServerContext*             context,
                                   const std::string&               request_key,
                                   WriterInterface*                 writer,

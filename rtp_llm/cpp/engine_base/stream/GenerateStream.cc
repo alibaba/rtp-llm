@@ -242,6 +242,25 @@ bool GenerateStream::isStreaming() const {
 int64_t GenerateStream::streamId() const {
     return generate_input_->request_id;
 }
+
+std::string GenerateStream::streamLogTag() const {
+    const auto& request_info = generate_input_->request_info;
+    std::string tag = std::string("request_id=") + std::to_string(streamId()) + " trace_id=" + traceId();
+    if (!request_info.request_id.empty()) {
+        tag += " source_request_id=" + request_info.request_id;
+    }
+    if (!request_info.frontend_ip.empty()) {
+        tag += " frontend_ip=" + request_info.frontend_ip;
+    }
+    if (!request_info.dash_ip.empty()) {
+        tag += " dash_ip=" + request_info.dash_ip;
+    }
+    if (!request_info.source_role.empty()) {
+        tag += " source_role=" + request_info.source_role;
+    }
+    return tag;
+}
+
 std::string GenerateStream::adapterName() const {
     return generate_input_->generate_config->adapter_name;
 }
