@@ -30,6 +30,7 @@ public:
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
     absl::Status         initKVBlock();
+    absl::Status         waitForAllocatorLoad();
     absl::Status         incrKVBlock();
     void                 fakeInitKVBlock(size_t reserved_blocks = 0);
     int                  tryReleaseKVBlock(size_t nums);
@@ -135,12 +136,12 @@ public:
 
 private:
     void loadCacheSync();
+    bool launchConnectorLoad();
     void waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context);
     void updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context);
     std::shared_ptr<AsyncContext> storeCacheAsync(const std::shared_ptr<BatchKVCacheResource>& batch_resource,
                                                   bool                                         enable_memory_cache,
                                                   bool                                         enable_remote_cache);
-    void                          evictDeviceCacheToMemory();
     void                          waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context);
 
 private:
@@ -154,6 +155,7 @@ private:
     int                           malloc_failed_times_   = 0;
     bool                          fake_inited_           = false;
     bool                          resource_released_     = false;
+    std::shared_ptr<AsyncContext> allocator_load_context_;
     std::shared_ptr<AsyncContext> load_cache_context_;
     int                           load_cache_retry_count_ = 0;
 

@@ -256,6 +256,12 @@ void StreamCacheResource::releaseResource() {
                           std::hash<std::thread::id>{}(std::this_thread::get_id()));
         abort();
     }
+    if (allocator_load_context_) {
+        resource_context_.cache_manager->cancelLoadBack(allocator_load_context_);
+        allocator_load_context_.reset();
+    }
+    load_cache_context_.reset();
+    load_cache_retry_count_ = 0;
     // do not reuse cache from stopped beam search streams, whose states are likely corrupted
     if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->hasError())) {
         return;
@@ -300,10 +306,6 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
             storeCacheAsync(batch_kv_cache_resource_,
                             reuseCache() && enableMemoryCache() && !enableTieredMemoryCache(),
                             reuseCache() && enableRemoteCache());
-            // only evict when succeeds
-            if (enableTieredMemoryCache()) {
-                evictDeviceCacheToMemory();
-            }
         } else {
             RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, NOT storing cache, reuseCache=%d, hasError=%d, status=%s",
                               stream_->streamId(),
@@ -352,11 +354,12 @@ absl::Status StreamCacheResource::initKVBlock() {
     malloc_info.request_id              = stream_->streamId();
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
 
-    const bool is_hybrid       = resource_context_.cache_manager->cacheConfig().groupNums() > 1;
+    const bool disable_first_malloc_reuse =
+        resource_context_.cache_manager->cacheConfig().disable_decode_first_malloc_device_reuse;
     const bool is_decode_role  = (resource_context_.role_type == RoleType::DECODE);
     const bool is_first_malloc = (batch_kv_cache_resource_->curBlocksNum() == 0);
 
-    if (is_hybrid && is_decode_role && is_first_malloc) {
+    if (disable_first_malloc_reuse && is_decode_role && is_first_malloc) {
         malloc_info.reuse_cache         = false;
         malloc_info.enable_device_cache = false;
     } else {
@@ -377,7 +380,28 @@ absl::Status StreamCacheResource::initKVBlock() {
         stream_->setInitialReuseLength(result.reuse_len);
         stream_->setLocalReuseLength(result.reuse_len);
     }
+    allocator_load_context_ = std::move(result.async_context);
     return absl::OkStatus();
+}
+
+absl::Status StreamCacheResource::waitForAllocatorLoad() {
+    if (!allocator_load_context_) {
+        return absl::OkStatus();
+    }
+    auto load_context = allocator_load_context_;
+    load_context->waitDone();
+    if (!load_context->done()) {
+        return absl::InternalError("allocator load context is non-terminal after waitDone");
+    }
+    const bool      load_success = load_context->success();
+    const ErrorInfo error        = load_context->errorInfo();
+    allocator_load_context_.reset();
+    if (load_success) {
+        return absl::OkStatus();
+    }
+    const std::string error_text = error.ToString();
+    return absl::InternalError(error_text.empty() ? "allocator load-back failed" :
+                                                    "allocator load-back failed: " + error_text);
 }
 
 absl::Status StreamCacheResource::incrKVBlock() {
@@ -408,11 +432,23 @@ absl::Status StreamCacheResource::incrKVBlock() {
         stream_->setInitialReuseLength(result.reuse_len);
         stream_->setLocalReuseLength(result.reuse_len);
     }
+    if (result.async_context) {
+        resource_context_.cache_manager->cancelLoadBack(result.async_context);
+        return absl::FailedPreconditionError("async incremental KV block allocation is unsupported");
+    }
 
     return absl::OkStatus();
 }
 
 bool StreamCacheResource::asyncLoadCache() {
+    RTP_LLM_PROFILE_FUNCTION();
+    if (allocator_load_context_) {
+        return true;
+    }
+    return launchConnectorLoad();
+}
+
+bool StreamCacheResource::launchConnectorLoad() {
     RTP_LLM_PROFILE_FUNCTION();
     if (!resource_context_.cache_manager || !resource_context_.cache_manager->hasActiveConnectors()) {
         return false;
@@ -441,6 +477,22 @@ bool StreamCacheResource::asyncLoadCache() {
 }
 
 bool StreamCacheResource::loadCacheDone() {
+    if (allocator_load_context_) {
+        if (!allocator_load_context_->done()) {
+            return false;
+        }
+        if (!allocator_load_context_->success()) {
+            const ErrorInfo error = allocator_load_context_->errorInfo();
+            RTP_LLM_LOG_WARNING(
+                "block tree load-back failed, stream=%ld error=%s", stream_->streamId(), error.ToString().c_str());
+            allocator_load_context_.reset();
+            stream_->reportEventWithoutLock(
+                StreamEvents::Error, ErrorCode::LOAD_CACHE_TIMEOUT, "block tree cache load-back failed");
+            return true;
+        }
+        allocator_load_context_.reset();
+        launchConnectorLoad();
+    }
     if (!load_cache_context_) {
         return true;  // 没有 context，视为已完成
     }
@@ -582,6 +634,12 @@ bool StreamCacheResource::enableTieredMemoryCache() const {
 
 void StreamCacheResource::loadCacheSync() {
     RTP_LLM_PROFILE_FUNCTION();
+    const absl::Status allocator_status = waitForAllocatorLoad();
+    if (!allocator_status.ok()) {
+        stream_->reportEventWithoutLock(
+            StreamEvents::Error, ErrorCode::LOAD_CACHE_TIMEOUT, allocator_status.ToString());
+        return;
+    }
     if (!resource_context_.cache_manager || !resource_context_.cache_manager->hasActiveConnectors()) {
         return;
     }
@@ -673,44 +731,6 @@ std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(
         waitStoreCacheDone(store_context);
     }
     return store_context;
-}
-
-void StreamCacheResource::evictDeviceCacheToMemory() {
-    const auto min_free_blocks = resource_context_.device_cache_min_free_blocks;
-    if (!reuseCache() || !enableMemoryCache() || min_free_blocks <= 0) {
-        return;
-    }
-    // Use notInUseBlocksNum() instead of freeBlocksNum() to account for
-    // in-flight connector blocks (being async-written to memory). These blocks
-    // are neither held by requests nor in BlockCache, so they will become free
-    // once the async write completes. This prevents concurrent streams from
-    // over-evicting when multiple streams finish simultaneously.
-    const auto not_in_use_blocks = resource_context_.cache_manager->notInUseBlocksNum();
-    if (not_in_use_blocks >= static_cast<size_t>(min_free_blocks)) {
-        return;
-    }
-
-    const auto need_blocks      = static_cast<size_t>(min_free_blocks) - not_in_use_blocks;
-    auto       evicted_resource = resource_context_.cache_manager->popBlocksFromCache(need_blocks);
-    if (!evicted_resource || !evicted_resource->hasCacheKeys()) {
-        RTP_LLM_LOG_INFO(
-            "tiered memory cache skip eviction, stream[%ld], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu",
-            stream_->streamId(),
-            not_in_use_blocks,
-            min_free_blocks,
-            need_blocks);
-        return;
-    }
-
-    RTP_LLM_LOG_INFO(
-        "tiered memory cache evict, stream[%ld], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu, evict_keys=%zu",
-        stream_->streamId(),
-        not_in_use_blocks,
-        min_free_blocks,
-        need_blocks,
-        evicted_resource->cacheKeys(0).size());
-    storeCacheAsync(evicted_resource, /*enable_memory_cache=*/true, /*enable_remote_cache=*/false);
-    resource_context_.cache_manager->blockCacheFree(evicted_resource);
 }
 
 void StreamCacheResource::waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context) {
