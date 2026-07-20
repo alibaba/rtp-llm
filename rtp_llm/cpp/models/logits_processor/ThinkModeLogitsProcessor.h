@@ -66,9 +66,7 @@ struct StreamThinkInfo {
         current_output_length(output_length),
         is_beam_search(is_beam_search),
         dfa_ptr(dfa_ptr) {
-        // 0 disables thinking; negative values mean unbounded thinking and
-        // must still track the natural think-end sequence.
-        if (think_mode && max_thinking_tokens != 0 && dfa_ptr) {
+        if (think_mode && max_thinking_tokens > 0 && dfa_ptr) {
             process_state = ThinkProcessState::IN_THINK;
         }
     }
