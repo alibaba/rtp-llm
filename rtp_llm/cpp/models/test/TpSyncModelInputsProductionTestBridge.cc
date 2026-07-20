@@ -81,6 +81,7 @@ py::dict runProductionTpSyncModelInputs(const std::string& transformer_path,
     config.local_rank       = tp_rank;
 
     GptModelInputs inputs;
+    inputs.pd_separation = include_gpu;
     if (tp_rank == 0) {
         inputs.combo_tokens          = int32Tensor({11, 12, 13});
         inputs.input_lengths         = int32Tensor({2, 1});
@@ -96,6 +97,27 @@ py::dict runProductionTpSyncModelInputs(const std::string& transformer_path,
             inputs.combo_tokens = inputs.combo_tokens.to(torch::Device(torch::kCUDA, tp_rank));
         }
         if (include_gpu) {
+            inputs.kv_cache_kernel_block_id = int32Tensor({1, 2, 3, 4}).reshape({1, 2, 2});
+            inputs.kv_cache_block_id        = int32Tensor({10, 11, 12, 20, 21, 22}).reshape({1, 2, 3});
+            inputs.kv_cache_layer_to_group  = int32Tensor({0, 0});
+            inputs.kv_cache_group_types     = int32Tensor({1});
+            inputs.kv_cache_update_mapping  = int32Tensor({4, 5, 6, 7}).reshape({2, 2});
+            inputs.cache_keys               = int64Tensor({1001, 1002, 1003, 2001, 2002, 2003}).reshape({2, 3});
+            inputs.mm_features_locs         = int32Tensor({0, 2});
+            inputs.multimodal_features      = std::vector<torch::Tensor>{
+                torch::tensor(std::vector<float>{10.5f, 11.5f, 12.5f, 13.5f}, torch::TensorOptions(torch::kFloat32))
+                    .reshape({2, 2})
+                    .to(torch::Device(torch::kCUDA, tp_rank)),
+                torch::tensor(std::vector<float>{20.5f, 21.5f}, torch::TensorOptions(torch::kFloat32))
+                    .reshape({1, 2})
+                    .to(torch::Device(torch::kCUDA, tp_rank)),
+            };
+            inputs.mm_extra_input = std::vector<torch::Tensor>{
+                torch::tensor(std::vector<float>{30.5f, 31.5f, 32.5f}, torch::TensorOptions(torch::kFloat32))
+                    .to(torch::Device(torch::kCUDA, tp_rank)),
+                torch::tensor(std::vector<float>{40.5f}, torch::TensorOptions(torch::kFloat32))
+                    .to(torch::Device(torch::kCUDA, tp_rank)),
+            };
             inputs.last_hidden_states = torch::tensor(std::vector<float>{1.25f, 2.5f, 3.75f, 4.5f, 5.25f, 6.5f},
                                                       torch::TensorOptions(torch::kFloat32).device(torch::kCPU))
                                             .reshape({3, 2})
@@ -117,7 +139,18 @@ py::dict runProductionTpSyncModelInputs(const std::string& transformer_path,
     result["combo_position_ids"]    = inputs.combo_position_ids;
     result["text_tokens_mask"]      = inputs.text_tokens_mask;
     if (include_gpu) {
-        result["last_hidden_states"] = inputs.last_hidden_states.cpu();
+        result["kv_cache_kernel_block_id"] = inputs.kv_cache_kernel_block_id;
+        result["kv_cache_block_id"]        = inputs.kv_cache_block_id;
+        result["kv_cache_layer_to_group"]  = inputs.kv_cache_layer_to_group;
+        result["kv_cache_group_types"]     = inputs.kv_cache_group_types;
+        result["kv_cache_update_mapping"]  = inputs.kv_cache_update_mapping;
+        result["cache_keys"]               = inputs.cache_keys;
+        result["mm_features_locs"]         = inputs.mm_features_locs;
+        result["multimodal_feature_0"]     = inputs.multimodal_features.value()[0].cpu();
+        result["multimodal_feature_1"]     = inputs.multimodal_features.value()[1].cpu();
+        result["mm_extra_input_0"]         = inputs.mm_extra_input.value()[0].cpu();
+        result["mm_extra_input_1"]         = inputs.mm_extra_input.value()[1].cpu();
+        result["last_hidden_states"]       = inputs.last_hidden_states.cpu();
     }
     return result;
 }

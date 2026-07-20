@@ -28,7 +28,7 @@ std::vector<torch::Tensor*> collectModelInputTensors(GptModelInputs& inputs) {
         collect(inputs.kv_cache_block_id);
         collect(inputs.kv_cache_layer_to_group);
         collect(inputs.kv_cache_group_types);
-        if (inputs.pd_separation) {
+        if (has_blocks && inputs.pd_separation) {
             collect(inputs.cache_keys);
         }
         collect(inputs.kv_cache_update_mapping);
