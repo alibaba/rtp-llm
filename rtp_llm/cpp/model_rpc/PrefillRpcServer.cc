@@ -403,7 +403,6 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   grpc::ServerWriter<GenerateOutputsPB>* writer) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start generate stream call", request->request_id());
-    c10::InferenceMode inference_guard(true);
     auto pd_separation = request->generate_config().max_new_tokens() > 1 && request->generate_config().num_beams() <= 1
                          && request->generate_config().variable_num_beams().size() == 0
                          && request->generate_config().num_return_sequences() <= 1
@@ -412,9 +411,15 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         return LocalRpcServer::GenerateStreamCall(server_context, request, writer);
     }
 
-    AtomicGuardPtr request_guard = make_shared<AtomicGuard>(onflight_requests_);
-    RPCContext     rpc_context{request, writer};
-    auto           prefill_context         = PrefillGenerateContext(&this->resource(),
+    auto admission = acquireAdmission();
+    if (!admission.detail.admitted) {
+        return AdmissionGate::toGrpcStatus(admission.detail);
+    }
+    auto               admission_lease = std::move(admission.lease);
+    c10::InferenceMode inference_guard(true);
+    AtomicGuardPtr     request_guard = make_shared<AtomicGuard>(onflight_requests_);
+    RPCContext         rpc_context{request, writer};
+    auto               prefill_context     = PrefillGenerateContext(&this->resource(),
                                                   rpc_context,
                                                   request->generate_config().timeout_ms(),
                                                   server_context,

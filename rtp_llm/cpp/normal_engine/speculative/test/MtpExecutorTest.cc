@@ -1041,4 +1041,33 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
               toVec<int>(model_input.combo_position_ids));
 }
 
+// M2: a speculative (MTP) executor must carry the sleep pause marker through its
+// empty skip-run step, exactly like NormalExecutor, so a TP-only sleep quiesce
+// wave releases worker ranks AND makes the engine loop self-pause. Before the fix
+// MtpExecutor inherited Executor::processForPause() (empty step, no marker) and
+// the base consumeLastPauseSignal() (always false), so this returned false.
+TEST_F(MtpExecutorTest, testProcessForPauseSignalsSelfPause) {
+    MtpExecutorTestConfig test_config;
+    auto                  components = createMtpExecutorComponents(test_config);
+
+    // No fake model outputs required: an empty pause step skips forward/sampling
+    // after the (single-rank no-op) tp sync.
+    setupFakeModels(components.executor.get(),
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler));
+
+    // A plain empty step (normal serving with nothing to do) must NOT raise a
+    // pause signal.
+    ASSERT_TRUE(components.executor->process({}).ok());
+    EXPECT_FALSE(components.executor->consumeLastPauseSignal());
+
+    // The pause wave must raise exactly one self-pause signal, then drain.
+    ASSERT_TRUE(components.executor->processForPause().ok());
+    EXPECT_TRUE(components.executor->consumeLastPauseSignal());
+    EXPECT_FALSE(components.executor->consumeLastPauseSignal());
+}
+
 }  // namespace rtp_llm

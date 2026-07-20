@@ -30,6 +30,8 @@ public:
     bool                         hasOutput() override;
     ErrorResult<GenerateOutputs> nextOutput() override;
     void                         updateOutput(const StreamUpdateInfo& update_info) override;
+    void                         reportError(ErrorCode error_code = ErrorCode::NONE_ERROR,
+                                             const std::string& error_msg = "") override;
 
 private:
     GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);

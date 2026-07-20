@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -30,6 +31,8 @@ public:
                             const std::vector<int32_t>&            kv_cache_layer_to_group = {});
     ~NormalExecutor();
     absl::Status process(const std::list<GenerateStreamPtr>& streams) override;
+    absl::Status processForPause() override;
+    bool         consumeLastPauseSignal() override;
     void         reportMetrics(const StreamGroups&             stream_groups,
                                RtpLLMExecutorMetricsCollector& executor_collector,
                                RtpLLMTokenPSMetricsCollector&  tps_collector);
@@ -49,6 +52,9 @@ public:
     bool updateEplbConfig(const EPLBConfig& config) override;
 
 private:
+    absl::Status processImpl(const std::list<GenerateStreamPtr>& streams, bool pause_signal);
+
+private:
     std::unique_ptr<ModelBase>                                               model_;
     std::unique_ptr<Sampler>                                                 sampler_;
     std::unique_ptr<NormalBatchStreamProcessor>                              batch_stream_processor_;
@@ -65,6 +71,7 @@ private:
     int               propose_model_index_ = 0;
     int               tp_rank_             = 0;
     ParallelismConfig parallelism_config_;
+    std::atomic<bool> last_pause_signal_{false};
 };
 
 }  // namespace rtp_llm

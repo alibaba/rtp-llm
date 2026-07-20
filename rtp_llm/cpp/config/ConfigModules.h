@@ -364,6 +364,13 @@ struct RuntimeConfig {
     int64_t reserve_runtime_mem_mb = 0;
     bool    warm_up                = false;
     bool    warm_up_with_loss      = false;
+    bool    enable_sleep_mode      = false;
+    // Startup-selected sleep level for this process (torch_memory_saver binds the
+    // weights region's cpu_backup at allocation time, so the level cannot change per
+    // request). 1 = weights backed to pinned host on sleep (fast wake, holds host
+    // RAM). 2 = weights discarded entirely (frees GPU + host); wake reloads them from
+    // a local-disk raw backup. A /sleep request's level must match this value.
+    int64_t sleep_mode_level = 1;
 
     // Scheduler configuration
     bool                       use_batch_decode_scheduler = false;

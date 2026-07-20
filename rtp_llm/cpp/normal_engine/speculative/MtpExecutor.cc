@@ -360,8 +360,14 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(tp_sync_input)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+        if (pause_signal_requested_.load(std::memory_order_acquire) && model_input.skip_run) {
+            // Reuse the skip-run shape broadcast to carry a TP pause marker so
+            // worker ranks self-pause after this step (see processForPause).
+            model_input.is_fake_stream = true;
+        }
         tpSyncModelInputs(model_input, parallelism_config_);
         if (model_input.skip_run) {
+            last_pause_signal_.store(model_input.is_fake_stream, std::memory_order_release);
             return absl::OkStatus();
         }
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -581,7 +587,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
         if (model_input.skip_run) {
+            if (pause_signal_requested_.load(std::memory_order_acquire)) {
+                // Tag the skip-run broadcast so worker ranks self-pause (see processForPause).
+                model_input.is_fake_stream = true;
+            }
             tpSyncModelInputs(model_input, parallelism_config_);
+            last_pause_signal_.store(model_input.is_fake_stream, std::memory_order_release);
             return absl::OkStatus();
         }
         executor_collector.tp_sync_input_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -602,6 +613,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
         tpSyncModelInputs(model_input, parallelism_config_);
         if (model_input.skip_run) {
+            // Worker ranks reach the skip-run branch here; record the broadcast
+            // pause marker so the loop self-pauses (see processForPause).
+            last_pause_signal_.store(model_input.is_fake_stream, std::memory_order_release);
             return absl::OkStatus();
         }
     }
@@ -795,8 +809,36 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
     }
 }
 
+absl::Status MtpExecutor::processForPause() {
+    // Drive an empty synchronized step tagged as a pause wave. pause_signal_requested_
+    // makes the skip-run branch set model_input.is_fake_stream on this rank; the flag
+    // is broadcast to worker ranks via tpSyncModelInputs (see prefillStep/decodeStep).
+    //
+    // process() reaches THROW_IF_STATUS_ERROR in prefillStep/decodeStep, so a step
+    // failure during quiesce THROWS rather than returns. Reset the flag via RAII so a
+    // throw cannot leave it stuck true -- otherwise every later idle skip-run step on
+    // rank0 would spuriously tag is_fake_stream and self-pause the engine mid-serving.
+    struct ResetGuard {
+        std::atomic<bool>& flag;
+        ~ResetGuard() {
+            flag.store(false, std::memory_order_release);
+        }
+    } reset_guard{pause_signal_requested_};
+    pause_signal_requested_.store(true, std::memory_order_release);
+    std::list<GenerateStreamPtr> empty_streams;
+    return process(empty_streams);
+}
+
+bool MtpExecutor::consumeLastPauseSignal() {
+    return last_pause_signal_.exchange(false, std::memory_order_acq_rel);
+}
+
 absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.process(stream_size=%zu,mtp_step=%zu)", streams.size(), propose_step_);
+
+    // Clear any stale pause marker; prefill/decode skip paths set it when the
+    // broadcast model input carries is_fake_stream.
+    last_pause_signal_.store(false, std::memory_order_release);
 
     MtpMetricsCollector metrics_collector;
 

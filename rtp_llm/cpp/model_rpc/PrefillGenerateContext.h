@@ -73,6 +73,9 @@ public:
     void         closeGrpcConnection();
 
 private:
+    int64_t requestIdForCacheStore() const;
+    void    markLocalRequestEnd(int64_t request_id);
+    void    markRemoteWorkersRequestEnd(int64_t request_id);
     void markRequestEnd();
     void reportTime();
     void stopStream();

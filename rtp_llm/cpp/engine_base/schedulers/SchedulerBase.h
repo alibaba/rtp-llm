@@ -19,6 +19,7 @@ public:
     virtual std::vector<GenerateStreamPtr> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) = 0;
     virtual absl::StatusOr<std::list<GenerateStreamPtr>> schedule()                                    = 0;
     virtual absl::Status                                 stop()                                        = 0;
+    virtual void                                         wake() {}
     virtual bool                                         empty()                                       = 0;
     virtual int64_t                                      lastScheduleTime()                            = 0;
     virtual int64_t                                      onflightStreams()                             = 0;

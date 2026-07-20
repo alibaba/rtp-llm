@@ -53,6 +53,14 @@ absl::Status FIFOSchedulerBase::stop() {
     return absl::OkStatus();
 }
 
+void FIFOSchedulerBase::wake() {
+    {
+        lock_guard<mutex> lock(lock_);
+        schedule_trigger_ = true;
+    }
+    cond_.notify_all();
+}
+
 int64_t FIFOSchedulerBase::lastScheduleTime() {
     return empty() ? autil::TimeUtility::currentTimeInMilliSeconds() : last_schedule_time_.load();
 }

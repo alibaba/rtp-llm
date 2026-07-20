@@ -11,7 +11,10 @@
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
 #include "gtest/gtest.h"
+#include <atomic>
 #include <memory>
+#include <thread>
+#include <vector>
 
 using namespace std;
 namespace W = rtp_llm::W;
@@ -364,6 +367,53 @@ TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOff) {
         ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(!output2.ok());
+    }
+}
+
+// Regression guard for the pause/quiesce acknowledgement ordering. pauseAndWaitQuiesced()
+// bumps pause_epoch_ and blocks until the loop thread's enterPausedState() records a quiesce
+// for that epoch. If the acknowledgement could be lost (a stale-epoch ack, or an ack clobbered
+// by the pause publish) the coordinator would block until the deadline and return
+// DeadlineExceeded. Driving many cycles against the live loop thread exercises that interleaving.
+TEST_F(NormalEngineTest, testPauseQuiesceAckNoLostNotification) {
+    CustomConfig config;
+    auto         engine = createMockEngine(config);
+
+    constexpr int kCycles = 300;
+    for (int i = 0; i < kCycles; ++i) {
+        auto status = engine->pauseAndWaitQuiesced(5000);
+        ASSERT_TRUE(status.ok()) << "cycle " << i << ": " << status.ToString();
+        // The quiesce acknowledgement reached at least the epoch this pause published.
+        ASSERT_GE(engine->quiesced_pause_epoch_, engine->pause_epoch_.load());
+        engine->restart();
+    }
+}
+
+// Multiple coordinators race to pause the same engine. Only one wins the CAS and bumps the
+// epoch, but every waiter must observe the single quiesce acknowledgement for that epoch and
+// return OK -- none may be stranded by the pause/ack interleaving.
+TEST_F(NormalEngineTest, testConcurrentPauseWaitersAllQuiesce) {
+    CustomConfig config;
+    auto         engine = createMockEngine(config);
+
+    constexpr int kThreads = 8;
+    constexpr int kRounds  = 50;
+    for (int round = 0; round < kRounds; ++round) {
+        std::atomic<int>         ok_count{0};
+        std::vector<std::thread> waiters;
+        waiters.reserve(kThreads);
+        for (int t = 0; t < kThreads; ++t) {
+            waiters.emplace_back([&] {
+                if (engine->pauseAndWaitQuiesced(5000).ok()) {
+                    ok_count.fetch_add(1, std::memory_order_relaxed);
+                }
+            });
+        }
+        for (auto& w : waiters) {
+            w.join();
+        }
+        ASSERT_EQ(ok_count.load(), kThreads) << "round " << round;
+        engine->restart();
     }
 }
 

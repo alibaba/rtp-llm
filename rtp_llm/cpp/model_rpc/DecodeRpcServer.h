@@ -22,6 +22,8 @@ public:
                             const BroadcastLoadRequestPB* request,
                             BroadcastLoadResponsePB*      response);
 
+    size_t activeCacheTransferCount() override;
+
     class LoadKVCacheContext {
     public:
         LoadKVCacheContext(int64_t                          request_id,
@@ -64,6 +66,12 @@ private:
         size_t                  cache_model_id;
     };
 
+    struct RemoteLoadPlan {
+        std::vector<std::string> peer_addrs;
+        int                      partition_count = 1;
+        int                      partition_id    = 0;
+    };
+
     void         initThreadPool();
     void         prepareGenerateContext(DecodeGenerateContext& decode_context);
     void         allocateResource(DecodeGenerateContext& decode_context);
@@ -75,6 +83,9 @@ private:
     ErrorInfo              loadCacheForAllRank(DecodeGenerateContext& decode_context);
     ErrorInfo              loadCacheAsyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
     ErrorInfo              loadCacheSyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
+    RemoteLoadPlan         buildRemoteLoadPlan(int                             index,
+                                               const std::vector<std::string>& peer_ips,
+                                               bool                            use_full_kv_peer) const;
     BroadcastLoadRequestPB constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
                                                       int                             index,
                                                       const std::vector<std::string>& peer_ips) const;

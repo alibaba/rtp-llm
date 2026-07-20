@@ -66,6 +66,38 @@ cc_test(
 )
 
 cc_test(
+    name = "local_rpc_server_sleep_abort_test",
+    srcs = [
+        "LocalRpcServerSleepAbortTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+)
+
+cc_test(
+    name = "decode_rpc_server_load_plan_test",
+    srcs = [
+        "DecodeRpcServerLoadPlanTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+)
+
+cc_test(
+    name = "prefill_generate_context_test",
+    srcs = [
+        "PrefillGenerateContextTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/disaggregate/cache_store/test:cache_store_test_base",
+    ],
+    env = {},
+)
+
+cc_test(
     name = "broadcast_manager_test",
     srcs = [
         "BroadcastManagerTest.cc",

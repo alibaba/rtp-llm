@@ -33,6 +33,7 @@ public:
     absl::Status                                 enqueue(const GenerateStreamPtr& stream) override;
     std::vector<std::shared_ptr<GenerateStream>> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override;
     absl::Status                                 stop() override;
+    void                                         wake() override;
     bool                                         empty() override;
     int64_t                                      lastScheduleTime() override;
     int64_t                                      onflightStreams() override;

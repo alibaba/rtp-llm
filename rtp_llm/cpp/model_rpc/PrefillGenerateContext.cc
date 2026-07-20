@@ -119,24 +119,32 @@ void PrefillGenerateContext::nextStage() {
     stat_info.nextStage();
 }
 
-void PrefillGenerateContext::markRequestEnd() {
-    int64_t real_id = request_id;
+int64_t PrefillGenerateContext::requestIdForCacheStore() const {
     if (stream_) {
-        real_id = stream_->streamId();
+        return stream_->streamId();
     }
-    if (!resource->isTensorParallel()) {
-        resource->cache_store->markRequestEnd(std::to_string(real_id));
+    return request_id;
+}
+
+void PrefillGenerateContext::markLocalRequestEnd(int64_t request_id) {
+    if (resource && resource->cache_store) {
+        resource->cache_store->markRequestEnd(std::to_string(request_id));
+    }
+}
+
+void PrefillGenerateContext::markRemoteWorkersRequestEnd(int64_t request_id) {
+    if (!resource || !resource->isTensorParallel()) {
         return;
     }
     const auto&           prefill_workers = resource->grpc_workers;
     RemoteFinishRequestPB finish_request;
-    finish_request.set_request_id(real_id);
+    finish_request.set_request_id(request_id);
     for (int i = 0; i < prefill_workers.size(); i++) {
         auto& prefill_worker = prefill_workers[i];
         auto  connect_status = resource->rpc_pool.getConnection(prefill_worker);
         if (!connect_status.ok()) {
             RTP_LLM_LOG_WARNING("request [%d], get grpc connection for ip %s failed, ignore markRequestEnd for it",
-                                real_id,
+                                request_id,
                                 prefill_worker.c_str());
             continue;
         }
@@ -146,11 +154,17 @@ void PrefillGenerateContext::markRequestEnd() {
         auto          grpc_status = stub->RemoteFinish(&client_context, finish_request, &response);
         if (!grpc_status.ok()) {
             RTP_LLM_LOG_WARNING("request [%d], remote finish for ip %s failed, ignore markRequestEnd for it",
-                                real_id,
+                                request_id,
                                 prefill_worker.c_str());
             continue;
         }
     }
+}
+
+void PrefillGenerateContext::markRequestEnd() {
+    const auto cache_store_request_id = requestIdForCacheStore();
+    markLocalRequestEnd(cache_store_request_id);
+    markRemoteWorkersRequestEnd(cache_store_request_id);
 }
 
 void PrefillGenerateContext::reportTime() {

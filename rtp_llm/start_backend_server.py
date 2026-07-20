@@ -22,6 +22,9 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
 )
+from rtp_llm.model_loader.weight_memory_saver import (
+    start_configured_process as start_memory_saver_configured_process,
+)
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
@@ -175,7 +178,7 @@ def _create_rank_processes(
             args=(global_controller, py_env_configs, world_rank, writer),
             name=f"rank-{world_rank}",
         )
-        proc.start()
+        start_memory_saver_configured_process(proc)
         writer.close()  # Parent process closes write end
         processes.append(proc)
         rank_pipe_readers.append(reader)

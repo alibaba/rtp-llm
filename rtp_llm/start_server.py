@@ -17,6 +17,9 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
+from rtp_llm.model_loader.weight_memory_saver import (
+    start_configured_process as start_memory_saver_configured_process,
+)
 from rtp_llm.ops import RoleType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
@@ -61,7 +64,7 @@ def start_backend_server_impl(
         args=(global_controller, py_env_configs, pipe_writer),
         name="backend_manager",
     )
-    backend_process.start()
+    start_memory_saver_configured_process(backend_process)
     pipe_writer.close()  # Parent process closes write end
 
     # Create check_ready_fn for pipe-based health check
