@@ -9,6 +9,7 @@ import io.grpc.ManagedChannel;
 import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
@@ -164,6 +165,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         cfg.setFlexlbBatchMaxInflight(20_000);
         cfg.setFlexlbBatchDispatchPoolSize(32);
         cfg.setFlexlbBatchDispatchQueueSize(2_048);
+        cfg.setFlexlbBatchFixedMaxInflightBatches(0);
         cfg.setPrefillQueueSizeThreshold(1_000_000L);
         return cfg;
     }
@@ -232,11 +234,14 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         try (ServerSocket socket = new ServerSocket(0)) {
             grpcPort = socket.getLocalPort();
         }
+        // Set executor sizes directly on the config object (FlexlbGrpcServer reads
+        // from FlexlbConfig, not from Environment properties).
+        config.setFlexlbGrpcExecutorCoreSize(16);
+        config.setFlexlbGrpcExecutorMaxSize(32);
+        config.setFlexlbGrpcExecutorQueueSize(4096);
+
         MockEnvironment environment = new MockEnvironment()
-                .withProperty("server.port", Integer.toString(grpcPort - 2))
-                .withProperty("FLEXLB_GRPC_EXECUTOR_CORE_SIZE", "16")
-                .withProperty("FLEXLB_GRPC_EXECUTOR_MAX_SIZE", "32")
-                .withProperty("FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE", "4096");
+                .withProperty("server.port", Integer.toString(grpcPort - 2));
         masterServer = new FlexlbGrpcServer(
                 service,
                 configService,
@@ -613,6 +618,20 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         dispatchReasonCounts.clear();
         for (MockPrefillWorker worker : allPrefillWorkers()) {
             worker.resetRecords();
+        }
+        // Reset decode endpoint inflight KV state, simulating production's periodic
+        // status sync. In the mock test there are no engine status reports, so
+        // inflight KV reservations accumulate permanently across QPS levels. This
+        // causes the weighted random selection (exp(-decayFactor * kvDelta)) to
+        // degenerate to greedy minimum-load selection, starving some endpoints.
+        // A status update resets reportedKvAvailable and confirmedRunningCount;
+        // evictExpiredRequests(0) clears all inflight requests and their KV reservations.
+        for (DecodeEndpoint ep : endpointRegistry.getDecodeEndpoints().values()) {
+            WorkerStatusResponse response = new WorkerStatusResponse();
+            response.setRunningTaskInfo(Map.of());
+            response.setFinishedTaskInfo(Map.of());
+            ep.onWorkerStatusUpdate(ep.getStatus(), response);
+            ep.evictExpiredRequests(0);
         }
     }
 
