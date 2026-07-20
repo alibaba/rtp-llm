@@ -100,9 +100,8 @@ def _cpu_tp_broadcaster_group_consensus(
     gather_error_message: str,
     inconsistent_message: str,
 ) -> bool:
+    tp_group, group_size = _cpu_tp_broadcaster_tp_group()
     try:
-        tp_group = _get_group(Group.TP)
-        group_size = tp_group.size()
         group_values: List[bool] = [False] * group_size
         torch.distributed.all_gather_object(
             group_values, bool(local_value), group=tp_group
@@ -116,6 +115,18 @@ def _cpu_tp_broadcaster_group_consensus(
     if any(group_values):
         logging.warning(inconsistent_message, group_values)
     return False
+
+
+def _cpu_tp_broadcaster_tp_group():
+    try:
+        tp_group = _get_group(Group.TP)
+        group_size = tp_group.size()
+    except Exception as e:
+        raise RuntimeError(
+            "CpuTpBroadcaster cannot access the TP group; refusing a local "
+            "fallback because peer ranks may already be entering TP collectives"
+        ) from e
+    return tp_group, group_size
 
 
 def _cpu_tp_broadcaster_initialized_for_group(actual_initialized: bool) -> bool:
@@ -259,15 +270,9 @@ def _cpu_tp_broadcaster_preflight_for_group(
             )
         return base_path is not None and local_error is None
 
-    try:
-        tp_group = _get_group(Group.TP)
-        group_size = tp_group.size()
-    except Exception as e:
-        logging.warning(
-            "Skip CpuTpBroadcaster init: failed to access TP group for UDS preflight: %s",
-            e,
-        )
-        return False
+    # Group lookup is intentionally fail-fast. Returning locally here could
+    # leave peer ranks blocked in one of the fixed preflight collectives below.
+    tp_group, group_size = _cpu_tp_broadcaster_tp_group()
     tp_rank = _parallelism_config.tp_rank
     normalized_path = (
         os.path.realpath(os.path.abspath(base_path)) if base_path is not None else None

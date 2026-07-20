@@ -316,6 +316,20 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
                 getattr(os, "O_NOFOLLOW", 0),
             )
 
+    def test_preflight_fails_fast_when_tp_group_is_unavailable(self):
+        ct._parallelism_config = self._parallelism_config(tp_size=2, local_world_size=2)
+        ct._initialized = True
+
+        with patch(
+            "rtp_llm.models_py.distributed.collective_torch.torch.distributed.is_initialized",
+            return_value=True,
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch._get_group",
+            side_effect=RuntimeError("missing TP group"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "cannot access the TP group"):
+                ct._cpu_tp_broadcaster_preflight_for_group("/tmp/session", None)
+
     def test_init_cpu_tp_broadcaster_skips_when_tp_group_eligibility_diverges(self):
         fake_ops = _FakeLibrtpComputeOps()
         ct._parallelism_config = self._parallelism_config(tp_size=2, local_world_size=4)
