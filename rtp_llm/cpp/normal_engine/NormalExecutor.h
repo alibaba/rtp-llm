@@ -28,10 +28,11 @@ public:
                             bool                                   warm_up             = false,
                             bool                                   is_propose          = false,
                             int                                    propose_model_index = 0,
+                            MlaOpsType                             mla_ops_type        = MlaOpsType::AUTO,
                             std::function<void()>                  profile_step_start  = nullptr,
                             std::function<void()>                  profile_step_finish = nullptr);
     ~NormalExecutor();
-    absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) override;
+    absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     void         reportMetrics(const StreamGroups&                        stream_groups,
                                RtpLLMExecutorMetricsCollector&            executor_collector,
                                RtpLLMTokenPSMetricsCollector&             tps_collector,
@@ -44,6 +45,10 @@ public:
 
     void setModel(std::unique_ptr<ModelBase> model) {
         model_ = std::move(model);
+    }
+
+    ModelBase* getModel() {
+        return model_.get();
     }
 
     // Test hook: if set, used to create model when py_model is None
@@ -70,8 +75,7 @@ protected:
                                      GptModelOutputs               model_output,
                                      SamplerOutput                 sampler_output,
                                      std::shared_ptr<torch::Event> sampler_event,
-                                     std::function<void()>          profile_step_finish = nullptr,
-                                     std::shared_ptr<RecordedBatch> recorded_batch      = nullptr);
+                                     std::function<void()>         profile_step_finish = nullptr);
 
     bool has_engram_ = false;
     void publishNormalDeviceState(const StreamGroups& stream_groups, const SamplerOutput& sampler_output);
@@ -102,6 +106,7 @@ private:
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
+    bool enable_ffn_disaggregate_ = false;
     bool enable_detail_log_       = false;
 
     bool                  is_propose_          = false;
