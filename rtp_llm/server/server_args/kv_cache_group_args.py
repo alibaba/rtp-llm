@@ -117,7 +117,15 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "kv_cache_event_request_timeout_ms"),
         type=int,
         default=1500,
-        help="KVCM HTTP 请求超时。",
+        help="KVCM 注册、心跳和增量 HTTP 请求超时。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_snapshot_timeout_ms",
+        env_name="KV_CACHE_EVENT_SNAPSHOT_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "kv_cache_event_snapshot_timeout_ms"),
+        type=int,
+        default=30000,
+        help="KVCM 全量 snapshot HTTP 请求超时；全量请求可能包含大量 key。",
     )
     kv_cache_group.add_argument(
         "--kv_cache_event_retry_interval_ms",

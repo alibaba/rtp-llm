@@ -29,25 +29,38 @@ Events describe reusable logical cache keys, not physical block indices.
   event order matches cache state transitions. Network I/O remains exclusively on the publisher worker thread.
 
 Only `tp_rank=0` is an event owner. Each DP replica has an independent owner and must use a distinct
-`KV_CACHE_EVENT_HOST_IP_PORT`. Other TP ranks use `NullPublisher`.
+`KV_CACHE_EVENT_HOST_IP_PORT`; the same identity must not be concurrently owned by two live replicas. Other TP ranks
+use `NullPublisher`.
 The HBM location spec is named `rtp_llm_hbm_<block_size_tokens>` and uses an
-`rtp-llm://<host_ip_port>/hbm` URI.
+`rtp-llm://<host_ip_port>/hbm` URI. It represents the complete DP-replica location; its registered size is the sum of
+all cache groups across all TP shards, while only the owner rank emits state transitions.
 
 ## KVCM synchronization
 
 `KVCMPublisher` uses the KVCM Meta HTTP APIs:
 
 1. `POST /api/registerInstance`
-2. `EVENT_HOST_DOWN` to remove stale state for the same reporter identity
-3. `EVENT_NODE_REGISTER` for the `hbm` medium
-4. `EVENT_BLOCK_SNAPSHOT` from the current `BlockCache`
-5. batched `EVENT_BLOCK_ADD` and `EVENT_BLOCK_DELETE`
-6. periodic `EVENT_HEARTBEAT`
+2. `EVENT_NODE_REGISTER` for the `hbm` medium
+3. `EVENT_BLOCK_SNAPSHOT` from the current `BlockCache`
+4. batched `EVENT_BLOCK_ADD` and `EVENT_BLOCK_DELETE`
+5. periodic `EVENT_HEARTBEAT`
+6. `EVENT_HOST_DOWN` only when the engine actually shuts down
 
-The queue is bounded and producers use `try_lock`; inference threads never wait for queue space or network I/O. A
+`EVENT_HOST_DOWN` is a terminal lifecycle event, not a reconnect reset. Startup and recovery use an authoritative
+snapshot to replace stale metadata. Within one mutation request, repeated transitions for the same block key are
+coalesced to the last state because KVCM applies aggregated ADDs before aggregated DELETEs.
+
+The queue is a bounded lock-free MPMC ring. Inference threads never wait for queue space, a consumer mutex, or network
+I/O; enqueue fails only when the configured capacity is actually exhausted or shutdown has started. A
 queue overflow, request failure, heartbeat failure, or periodic reconciliation marks the publisher dirty. After KVCM
-is reachable, it resets the reporter scope and sends a new complete snapshot. Reporting is fail-open and never changes
+is reachable, it registers the node and commits a new complete snapshot. Reporting is fail-open and never changes
 cache allocation, reuse, eviction, engine readiness, or inference responses.
+
+A snapshot is one authoritative replacement for a host and medium, so it is not split into independently committed
+pages. It uses a separate, longer request timeout from control and incremental traffic. Choose the snapshot interval
+and timeout from the deployment's maximum logical-key count and KVCM capacity; keep the KVCM heartbeat expiry longer
+than the maximum accepted snapshot processing time. The KVCM endpoint must support `EVENT_BLOCK_SNAPSHOT` with
+per-scope in-flight fencing and crash-safe commit semantics.
 
 The first implementation publishes the device `BlockCache` as the `hbm` medium. DRAM cache events are not included.
 
@@ -66,7 +79,8 @@ The following server arguments also have equivalent upper-case environment varia
 | `--kv_cache_event_report_batch_size` | `1000` | Maximum mutations per `ReportEvent` request |
 | `--kv_cache_event_flush_interval_ms` | `20` | Maximum batch wait |
 | `--kv_cache_event_heartbeat_interval_ms` | `1000` | Node heartbeat period |
-| `--kv_cache_event_request_timeout_ms` | `1500` | HTTP connect and request timeout |
+| `--kv_cache_event_request_timeout_ms` | `1500` | Registration, heartbeat, and incremental request timeout |
+| `--kv_cache_event_snapshot_timeout_ms` | `30000` | Full snapshot request timeout |
 | `--kv_cache_event_retry_interval_ms` | `500` | Retry interval after registration or report failure |
 | `--kv_cache_event_snapshot_interval_ms` | `300000` | Periodic authoritative reconciliation interval |
 | `--kv_cache_event_log_max_keys` | `8` | Maximum key samples in each log batch |
@@ -75,6 +89,13 @@ The following server arguments also have equivalent upper-case environment varia
 disables the publisher while leaving inference available. `log` mode does not require KVCM settings.
 The manager endpoint must be a resolved HTTP endpoint; this version does not perform KVCM service discovery or
 leader switching inside RTP-LLM.
+
+Publisher state, queue depth, accepted events, and dropped events are exported as
+`rtp_llm_kv_cache_event_publisher_state`, `rtp_llm_kv_cache_event_queue_size`,
+`rtp_llm_kv_cache_event_accepted_count`, and `rtp_llm_kv_cache_event_dropped_count`. A non-zero dropped count means an
+authoritative resync is required; alert on sustained non-`READY` state in `kvcm` mode and on queue growth or drops.
+State values are `DISABLED=0`, `STARTING=1`, `LOGGING=2`, `REGISTERING=3`, `RESYNCING=4`, `READY=5`, `DEGRADED=6`, and
+`STOPPED=7`.
 
 Example validation rollout:
 

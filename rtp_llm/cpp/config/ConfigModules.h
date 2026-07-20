@@ -178,6 +178,7 @@ struct KVCacheConfig {
     int         kv_cache_event_flush_interval_ms     = 20;
     int         kv_cache_event_heartbeat_interval_ms = 1000;
     int         kv_cache_event_request_timeout_ms    = 1500;
+    int         kv_cache_event_snapshot_timeout_ms   = 30000;
     int         kv_cache_event_retry_interval_ms     = 500;
     int         kv_cache_event_snapshot_interval_ms  = 300000;
     int64_t     kv_cache_event_log_max_keys          = 8;

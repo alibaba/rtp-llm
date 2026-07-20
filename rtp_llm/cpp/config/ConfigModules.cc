@@ -142,6 +142,7 @@ std::string KVCacheConfig::to_string() const {
         << "kv_cache_event_flush_interval_ms: " << kv_cache_event_flush_interval_ms << "\n"
         << "kv_cache_event_heartbeat_interval_ms: " << kv_cache_event_heartbeat_interval_ms << "\n"
         << "kv_cache_event_request_timeout_ms: " << kv_cache_event_request_timeout_ms << "\n"
+        << "kv_cache_event_snapshot_timeout_ms: " << kv_cache_event_snapshot_timeout_ms << "\n"
         << "kv_cache_event_retry_interval_ms: " << kv_cache_event_retry_interval_ms << "\n"
         << "kv_cache_event_snapshot_interval_ms: " << kv_cache_event_snapshot_interval_ms << "\n"
         << "kv_cache_event_log_max_keys: " << kv_cache_event_log_max_keys << "\n";

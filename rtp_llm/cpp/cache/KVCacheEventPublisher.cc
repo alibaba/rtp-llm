@@ -4,7 +4,6 @@
 #include <atomic>
 #include <condition_variable>
 #include <curl/curl.h>
-#include <deque>
 #include <exception>
 #include <mutex>
 #include <rapidjson/document.h>
@@ -12,6 +11,7 @@
 #include <rapidjson/writer.h>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -34,60 +34,77 @@ const char* eventTypeName(KVCacheEventType type) {
 enum class QueuePushResult {
     ACCEPTED,
     STOPPED,
-    BUSY,
     FULL,
 };
 
 class BoundedEventQueue {
 public:
-    explicit BoundedEventQueue(size_t capacity): capacity_(std::max<size_t>(capacity, 1)) {}
-
-    QueuePushResult tryPush(KVCacheEvent event) noexcept {
-        try {
-            std::unique_lock<std::mutex> lock(mu_, std::try_to_lock);
-            if (!lock.owns_lock()) {
-                return QueuePushResult::BUSY;
-            }
-            if (stopped_) {
-                return QueuePushResult::STOPPED;
-            }
-            if (events_.size() >= capacity_) {
-                return QueuePushResult::FULL;
-            }
-            events_.push_back(std::move(event));
-            size_.store(events_.size(), std::memory_order_relaxed);
-            lock.unlock();
-            cv_.notify_one();
-            return QueuePushResult::ACCEPTED;
-        } catch (...) {
-            return QueuePushResult::FULL;
+    explicit BoundedEventQueue(size_t capacity):
+        capacity_(std::max<size_t>(capacity, 1)),
+        ring_capacity_(std::max<size_t>(capacity_, 2)),
+        cells_(std::make_unique<Cell[]>(ring_capacity_)) {
+        for (size_t i = 0; i < ring_capacity_; ++i) {
+            cells_[i].sequence.store(i, std::memory_order_relaxed);
         }
     }
 
-    std::vector<KVCacheEvent> waitPop(size_t max_batch_size, std::chrono::milliseconds timeout) {
-        std::unique_lock<std::mutex> lock(mu_);
-        cv_.wait_for(lock, timeout, [this] { return stopped_ || !events_.empty(); });
-
-        const size_t              count = std::min(events_.size(), std::max<size_t>(max_batch_size, 1));
-        std::vector<KVCacheEvent> batch;
-        batch.reserve(count);
-        for (size_t i = 0; i < count; ++i) {
-            batch.push_back(std::move(events_.front()));
-            events_.pop_front();
+    QueuePushResult tryPush(KVCacheEvent event) noexcept {
+        if (stopped_.load(std::memory_order_acquire)) {
+            return QueuePushResult::STOPPED;
         }
-        size_.store(events_.size(), std::memory_order_relaxed);
+
+        size_t current_size = size_.load(std::memory_order_relaxed);
+        do {
+            if (current_size >= capacity_) {
+                return QueuePushResult::FULL;
+            }
+        } while (!size_.compare_exchange_weak(
+            current_size, current_size + 1, std::memory_order_acq_rel, std::memory_order_relaxed));
+
+        // stop() may race the capacity reservation. Do not create a new item
+        // after shutdown has become visible.
+        if (stopped_.load(std::memory_order_acquire)) {
+            size_.fetch_sub(1, std::memory_order_release);
+            return QueuePushResult::STOPPED;
+        }
+
+        enqueue(std::move(event));
+        cv_.notify_one();
+        return QueuePushResult::ACCEPTED;
+    }
+
+    std::vector<KVCacheEvent> waitPop(size_t max_batch_size, std::chrono::milliseconds timeout) {
+        const size_t max_count = std::max<size_t>(max_batch_size, 1);
+        if (published_size_.load(std::memory_order_acquire) == 0) {
+            std::unique_lock<std::mutex> lock(wait_mu_);
+            cv_.wait_for(lock, timeout, [this] {
+                return stopped_.load(std::memory_order_acquire)
+                       || published_size_.load(std::memory_order_acquire) > 0;
+            });
+        }
+
+        std::vector<KVCacheEvent> batch;
+        batch.reserve(std::min(max_count, published_size_.load(std::memory_order_acquire)));
+        KVCacheEvent event;
+        while (batch.size() < max_count && tryDequeue(event)) {
+            batch.push_back(std::move(event));
+        }
         return batch;
     }
 
     void waitForStop(std::chrono::milliseconds timeout) {
-        std::unique_lock<std::mutex> lock(mu_);
-        cv_.wait_for(lock, timeout, [this] { return stopped_; });
+        std::unique_lock<std::mutex> lock(wait_mu_);
+        cv_.wait_for(lock, timeout, [this] { return stopped_.load(std::memory_order_acquire); });
     }
 
     void discardPending() {
-        std::lock_guard<std::mutex> lock(mu_);
-        events_.clear();
-        size_.store(0, std::memory_order_relaxed);
+        // Drain only the events that were fully published at this boundary.
+        // Concurrently published events remain queued and are applied after the
+        // snapshot ACK (duplicates are harmless set operations).
+        const size_t target = published_size_.load(std::memory_order_acquire);
+        KVCacheEvent event;
+        for (size_t i = 0; i < target && tryDequeue(event); ++i) {
+        }
     }
 
     void wake() {
@@ -95,10 +112,7 @@ public:
     }
 
     void stop() {
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            stopped_ = true;
-        }
+        stopped_.store(true, std::memory_order_release);
         cv_.notify_all();
     }
 
@@ -107,12 +121,71 @@ public:
     }
 
 private:
-    const size_t             capacity_;
-    mutable std::mutex       mu_;
-    std::condition_variable  cv_;
-    std::deque<KVCacheEvent> events_;
-    std::atomic<size_t>      size_{0};
-    bool                     stopped_ = false;
+    struct Cell {
+        std::atomic<size_t> sequence{0};
+        KVCacheEvent       event;
+    };
+
+    void enqueue(KVCacheEvent event) noexcept {
+        size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
+        Cell*  cell;
+        for (;;) {
+            cell             = &cells_[pos % ring_capacity_];
+            const size_t seq = cell->sequence.load(std::memory_order_acquire);
+            const auto   dif = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos);
+            if (dif == 0) {
+                if (enqueue_pos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
+                    break;
+                }
+            } else {
+                // Logical capacity was reserved before entering this method,
+                // so the ring cannot be full. Reload after another producer's
+                // progress instead of ever waiting on a mutex.
+                pos = enqueue_pos_.load(std::memory_order_relaxed);
+            }
+        }
+        cell->event = std::move(event);
+        // Publish the count before the slot. Once the sequence release makes
+        // the item visible, a consumer may dequeue it immediately.
+        published_size_.fetch_add(1, std::memory_order_relaxed);
+        cell->sequence.store(pos + 1, std::memory_order_release);
+    }
+
+    bool tryDequeue(KVCacheEvent& event) noexcept {
+        size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
+        Cell*  cell;
+        for (;;) {
+            cell             = &cells_[pos % ring_capacity_];
+            const size_t seq = cell->sequence.load(std::memory_order_acquire);
+            const auto   dif = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
+            if (dif == 0) {
+                if (dequeue_pos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
+                    break;
+                }
+            } else if (dif < 0) {
+                return false;
+            } else {
+                pos = dequeue_pos_.load(std::memory_order_relaxed);
+            }
+        }
+        event = std::move(cell->event);
+        cell->sequence.store(pos + ring_capacity_, std::memory_order_release);
+        published_size_.fetch_sub(1, std::memory_order_release);
+        size_.fetch_sub(1, std::memory_order_release);
+        return true;
+    }
+
+private:
+    const size_t            capacity_;
+    const size_t            ring_capacity_;
+    std::unique_ptr<Cell[]> cells_;
+    std::atomic<size_t>     enqueue_pos_{0};
+    std::atomic<size_t>     dequeue_pos_{0};
+    std::atomic<size_t>     size_{0};
+    std::atomic<size_t>     published_size_{0};
+    std::atomic<bool>       stopped_{false};
+    mutable std::mutex      wait_mu_;
+    std::condition_variable cv_;
 };
 
 PublishResult toPublishResult(QueuePushResult result) {
@@ -121,8 +194,6 @@ PublishResult toPublishResult(QueuePushResult result) {
             return PublishResult::ACCEPTED;
         case QueuePushResult::STOPPED:
             return PublishResult::NOT_RUNNING;
-        case QueuePushResult::BUSY:
-            return PublishResult::QUEUE_BUSY;
         case QueuePushResult::FULL:
             return PublishResult::QUEUE_FULL;
     }
@@ -369,6 +440,26 @@ std::string buildMutationReport(const KVCacheEventPublisherContext& context,
     }
     writeReportFooter(writer);
     return buffer.GetString();
+}
+
+std::vector<KVCacheEvent> coalesceMutations(const std::vector<KVCacheEvent>& events) {
+    // KVCM aggregates all ADDs before all DELETEs inside one ReportEvent
+    // request. Sending both transitions for one key can therefore invert a
+    // DELETE -> ADD sequence. Mutations are idempotent set operations, so the
+    // final transition for each key is the state this unsent batch must leave.
+    std::vector<KVCacheEvent>           coalesced;
+    std::unordered_map<int64_t, size_t> key_to_index;
+    coalesced.reserve(events.size());
+    key_to_index.reserve(events.size());
+    for (const auto& event : events) {
+        const auto [it, inserted] = key_to_index.emplace(event.block_key, coalesced.size());
+        if (inserted) {
+            coalesced.push_back(event);
+        } else {
+            coalesced[it->second] = event;
+        }
+    }
+    return coalesced;
 }
 
 enum class ControlEventType {
@@ -621,9 +712,16 @@ public:
         snapshot_provider_(std::move(snapshot_provider)),
         reporter_(std::move(reporter)),
         queue_(config_.queue_capacity) {
-        if (!reporter_ && !config_.manager_endpoint.empty()) {
+        if (reporter_) {
+            snapshot_reporter_ = reporter_;
+        } else if (!config_.manager_endpoint.empty()) {
             reporter_ =
                 std::make_shared<CurlKVCacheEventReporter>(config_.manager_endpoint, config_.request_timeout_ms);
+            // An authoritative snapshot is one atomic KVCM replacement and
+            // may contain every local cache key. Keep its timeout independent
+            // from latency-sensitive registration, heartbeat, and deltas.
+            snapshot_reporter_ =
+                std::make_shared<CurlKVCacheEventReporter>(config_.manager_endpoint, config_.snapshot_timeout_ms);
         }
     }
 
@@ -697,7 +795,8 @@ public:
 
 private:
     bool isConfigValid() const {
-        return reporter_ && snapshot_provider_ && !context_.instance_group.empty() && !context_.instance_id.empty()
+        return reporter_ && snapshot_reporter_ && snapshot_provider_ && !context_.instance_group.empty()
+               && !context_.instance_id.empty()
                && !context_.host_ip_port.empty() && !context_.model_name.empty() && !context_.dtype.empty()
                && !context_.spec_name.empty() && !context_.location_uri.empty() && context_.block_size_tokens > 0
                && context_.spec_size_bytes > 0;
@@ -713,14 +812,10 @@ private:
         return reporter_->post(route, request, response);
     }
 
-    bool registerAndReset() {
+    bool registerNode() {
         state_.store(PublisherState::REGISTERING, std::memory_order_relaxed);
         auto trace_id = nextTraceId("register");
         if (!post("/api/registerInstance", buildRegisterInstanceRequest(context_, trace_id))) {
-            return false;
-        }
-        trace_id = nextTraceId("host-down");
-        if (!post("/api/reportEvent", buildControlReport(context_, trace_id, ControlEventType::HOST_DOWN))) {
             return false;
         }
         trace_id = nextTraceId("node-register");
@@ -746,7 +841,9 @@ private:
         }
 
         const auto trace_id = nextTraceId("snapshot");
-        if (!post("/api/reportEvent", buildSnapshotReport(context_, trace_id, snapshot))) {
+        std::string response;
+        if (!snapshot_reporter_->post(
+                "/api/reportEvent", buildSnapshotReport(context_, trace_id, snapshot), response)) {
             return false;
         }
 
@@ -766,8 +863,9 @@ private:
         if (batch.empty()) {
             return true;
         }
+        const auto coalesced = coalesceMutations(batch);
         const auto trace_id = nextTraceId("mutation");
-        return post("/api/reportEvent", buildMutationReport(context_, trace_id, batch));
+        return post("/api/reportEvent", buildMutationReport(context_, trace_id, coalesced));
     }
 
     bool heartbeat() {
@@ -787,7 +885,7 @@ private:
         try {
             while (!stopping_.load(std::memory_order_relaxed)) {
                 if (!registered) {
-                    if (!registerAndReset()) {
+                    if (!registerNode()) {
                         state_.store(PublisherState::DEGRADED, std::memory_order_relaxed);
                         waitBeforeRetry();
                         continue;
@@ -857,6 +955,7 @@ private:
     KVCacheEventPublisherContext          context_;
     KVCacheSnapshotProvider               snapshot_provider_;
     std::shared_ptr<KVCacheEventReporter> reporter_;
+    std::shared_ptr<KVCacheEventReporter> snapshot_reporter_;
     BoundedEventQueue                     queue_;
     std::thread                           worker_;
     std::atomic<bool>                     started_{false};

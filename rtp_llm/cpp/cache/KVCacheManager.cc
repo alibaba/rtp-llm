@@ -75,13 +75,14 @@ bool KVCacheManager::init() {
         RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "SingleTypeKVCacheAllocator init failed");
     }
 
+    initConnectorCoordinator();
+    initCacheEventPublisher();
+    // Start metrics only after the publisher pointer becomes stable. The
+    // destructor joins this thread before stopping/resetting the publisher.
     if (metrics_reporter_) {
         stop_.store(false, std::memory_order_relaxed);
         metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
     }
-
-    initConnectorCoordinator();
-    initCacheEventPublisher();
     return true;
 }
 
@@ -596,6 +597,7 @@ void KVCacheManager::initCacheEventPublisher() {
         publisher_config.flush_interval_ms     = std::max(kv_cache_config_.kv_cache_event_flush_interval_ms, 1);
         publisher_config.heartbeat_interval_ms = std::max(kv_cache_config_.kv_cache_event_heartbeat_interval_ms, 1);
         publisher_config.request_timeout_ms    = std::max(kv_cache_config_.kv_cache_event_request_timeout_ms, 1);
+        publisher_config.snapshot_timeout_ms   = std::max(kv_cache_config_.kv_cache_event_snapshot_timeout_ms, 1);
         publisher_config.retry_interval_ms     = std::max(kv_cache_config_.kv_cache_event_retry_interval_ms, 1);
         publisher_config.snapshot_interval_ms  = std::max(kv_cache_config_.kv_cache_event_snapshot_interval_ms, 1);
         publisher_config.log_max_keys_per_batch =
@@ -615,6 +617,10 @@ void KVCacheManager::initCacheEventPublisher() {
         for (size_t group_id = 0; group_id < static_cast<size_t>(config_.groupNums()); ++group_id) {
             publisher_context.spec_size_bytes += static_cast<int64_t>(config_.blockSizeBytesForGroup(group_id));
         }
+        // The published location is one logical DP-replica endpoint. Its
+        // aggregate spec therefore accounts for the same block's shards on
+        // every TP rank, even though only tp_rank=0 owns event publication.
+        publisher_context.spec_size_bytes *= std::max<int64_t>(parallelism_config_.tp_size, 1);
         publisher_context.tp_size = static_cast<int32_t>(parallelism_config_.tp_size);
         publisher_context.dp_size = static_cast<int32_t>(parallelism_config_.dp_size);
         publisher_context.pp_size = static_cast<int32_t>(parallelism_config_.pp_size);
@@ -735,6 +741,12 @@ void KVCacheManager::reportMetricsLoop() {
                 0.0f :
                 static_cast<float>(100.0 * (total_blocks - available_blocks) / static_cast<double>(total_blocks));
         collector.mr_cost_time_ms = allocator_->getMrCostTimeMs();
+
+        const auto publisher_status = cacheEventPublisherStatus();
+        collector.kv_cache_event_publisher_state = static_cast<int64_t>(publisher_status.state);
+        collector.kv_cache_event_queue_size      = static_cast<int64_t>(publisher_status.queue_size);
+        collector.kv_cache_event_accepted_count  = static_cast<int64_t>(publisher_status.accepted_count);
+        collector.kv_cache_event_dropped_count   = static_cast<int64_t>(publisher_status.dropped_count);
 
         metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(&tags, &collector);
         std::this_thread::sleep_for(std::chrono::seconds(1));  // 1s

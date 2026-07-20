@@ -59,6 +59,17 @@ TEST_F(BlockCacheTest, ConstructorTest) {
     EXPECT_EQ(cache1.size(), 0);
 }
 
+TEST_F(BlockCacheTest, LogicalSnapshotWorksWithoutPublisher) {
+    CacheItem item1 = {101, 0, 1, false};
+    CacheItem item2 = {102, 0, 2, false};
+    ASSERT_TRUE(cache_->put(item1));
+    ASSERT_TRUE(cache_->put(item2));
+
+    const auto snapshot = cache_->logicalCacheSnapshot();
+    EXPECT_EQ(std::vector<CacheKeyType>({101, 102}), snapshot.cache_keys);
+    EXPECT_GE(snapshot.version, 0);
+}
+
 TEST_F(BlockCacheTest, MatchBasicTest) {
     // 测试put和match的基本功能
     // 空匹配

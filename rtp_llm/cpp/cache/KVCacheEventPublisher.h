@@ -32,7 +32,6 @@ enum class PublishResult {
     ACCEPTED,
     DISABLED,
     NOT_RUNNING,
-    QUEUE_BUSY,
     QUEUE_FULL,
 };
 
@@ -64,6 +63,7 @@ struct KVCacheEventPublisherConfig {
     int    flush_interval_ms      = 20;
     int    heartbeat_interval_ms  = 1000;
     int    request_timeout_ms     = 1500;
+    int    snapshot_timeout_ms    = 30000;
     int    retry_interval_ms      = 500;
     int    snapshot_interval_ms   = 300000;
     size_t log_max_keys_per_batch = 8;

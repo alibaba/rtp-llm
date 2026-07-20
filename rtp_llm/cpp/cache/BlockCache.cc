@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/BlockCache.h"
 
 #include <algorithm>
+#include <limits>
 
 #include "rtp_llm/cpp/utils/LRUCache.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -127,22 +128,43 @@ BlockCache::CacheSnapshot BlockCache::cacheSnapshot(int64_t latest_version) cons
 }
 
 BlockCache::LogicalCacheSnapshot BlockCache::logicalCacheSnapshot() const {
-    std::lock_guard<std::mutex>              lock(mu_);
-    const auto                               snapshot = lru_cache_.cacheSnapshot(-1);
-    std::unordered_map<CacheKeyType, size_t> group_counts;
-    group_counts.reserve(snapshot.values.size());
-    for (const auto& item : snapshot.values) {
-        ++group_counts[item.cache_key];
-    }
-
     LogicalCacheSnapshot logical_snapshot;
-    logical_snapshot.version = snapshot.version;
-    logical_snapshot.cache_keys.reserve(group_counts.size());
-    for (const auto& [cache_key, group_count] : group_counts) {
-        if (group_count >= static_cast<size_t>(required_group_count_)) {
-            logical_snapshot.cache_keys.push_back(cache_key);
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        // Requesting a version newer than any practical cache version avoids
+        // copying every physical CacheItem merely to read the version.
+        logical_snapshot.version =
+            lru_cache_.cacheSnapshot(std::numeric_limits<int64_t>::max()).version;
+
+        if (event_publisher_) {
+            // This index is maintained by the same state transitions as the
+            // events. Hybrid caches copy one entry per logical key instead of
+            // rebuilding counts from every group.
+            logical_snapshot.cache_keys.reserve(key_group_counts_.size());
+            for (const auto& [cache_key, group_count] : key_group_counts_) {
+                if (group_count >= static_cast<size_t>(required_group_count_)) {
+                    logical_snapshot.cache_keys.push_back(cache_key);
+                }
+            }
+        } else {
+            // Preserve the public method's diagnostic behavior when no
+            // publisher is installed.
+            std::unordered_map<CacheKeyType, size_t> group_counts;
+            group_counts.reserve(lru_cache_.size());
+            for (const auto& [key, item] : lru_cache_.items()) {
+                (void)key;
+                ++group_counts[item.cache_key];
+            }
+            logical_snapshot.cache_keys.reserve(group_counts.size());
+            for (const auto& [cache_key, group_count] : group_counts) {
+                if (group_count >= static_cast<size_t>(required_group_count_)) {
+                    logical_snapshot.cache_keys.push_back(cache_key);
+                }
+            }
         }
     }
+    // Sorting is deterministic but does not participate in the cache-state
+    // capture boundary, so keep it outside the inference-facing mutex.
     std::sort(logical_snapshot.cache_keys.begin(), logical_snapshot.cache_keys.end());
     return logical_snapshot;
 }
