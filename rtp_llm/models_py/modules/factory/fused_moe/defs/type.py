@@ -14,6 +14,7 @@ class RouterType(Enum):
     PURE_TP = 5  # optimize when EP=TP, use all_reduce as gather
     MORI_EP_INTRANODE = 6  # MORI intra-node EP router
     MORI_EP_INTERNODE = 7  # MORI inter-node EP router
+    MEGAMOE = 8  # FlyDSL 2-stage fused MegaMoE (dispatch+GEMM1 / GEMM2+combine)
 
 
 class ExecutorType(Enum):
@@ -36,3 +37,4 @@ class ExecutorType(Enum):
     )
     TRTLLM_FP4 = 7  # TRTLLM FP4 executor (specialized)
     CUTEDSL_FP4 = 8  # CuteDSL FP4 executor (FP4 optimized)
+    MEGAMOE_FUSED = 9  # FlyDSL fused MegaMoE executor (full 2-stage pipeline)

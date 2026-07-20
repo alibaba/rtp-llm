@@ -51,6 +51,19 @@ class MoEConfigAdapter:
         self.moe_strategy = moe_config.moe_strategy
         self.use_mori_ep = moe_config.use_mori_ep
         self.use_deepep_moe = moe_config.use_deepep_moe
+        # MegaMoE (FlyDSL 2-stage fused) toggle. No dedicated C++ MoeConfig field
+        # yet, so read the USE_MEGAMOE env var directly (falls back to a
+        # moe_config attribute if one is added later).
+        self.use_megamoe = getattr(moe_config, "use_megamoe", None)
+        if self.use_megamoe is None:
+            import os
+
+            self.use_megamoe = os.environ.get("USE_MEGAMOE", "0").lower() in (
+                "1",
+                "true",
+                "on",
+                "yes",
+            )
         self.enable_cuda_graph = enable_cuda_graph
 
     @property

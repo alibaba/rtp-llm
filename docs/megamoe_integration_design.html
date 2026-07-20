@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FlyDSL MegaMoE 移植到 rtp-llm 集成设计方案</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#161b22; --panel2:#1c232c; --border:#2d333b;
+    --fg:#c9d1d9; --muted:#8b949e; --accent:#58a6ff; --accent2:#3fb950;
+    --warn:#d29922; --danger:#f85149; --purple:#bc8cff; --pink:#ff7b9c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,"Segoe UI",Roboto,"Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif;
+    line-height:1.65;font-size:15px}
+  .wrap{max-width:1180px;margin:0 auto;padding:32px 28px 80px}
+  h1{font-size:30px;font-weight:700;letter-spacing:.3px;margin:.2em 0 .1em;
+    background:linear-gradient(90deg,#58a6ff,#bc8cff);-webkit-background-clip:text;background-clip:text;color:transparent}
+  h2{font-size:23px;margin:1.9em 0 .5em;padding-bottom:8px;border-bottom:2px solid var(--border);color:#e6edf3}
+  h3{font-size:18px;margin:1.4em 0 .4em;color:var(--accent)}
+  h4{font-size:15px;margin:1.1em 0 .3em;color:var(--purple)}
+  p,li{color:var(--fg)}
+  code{background:#20262e;padding:1px 6px;border-radius:5px;font-family:"JetBrains Mono",Consolas,monospace;font-size:13px;color:#ffb3c7}
+  pre{background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:14px 16px;overflow-x:auto;font-size:12.5px;line-height:1.55}
+  pre code{background:none;padding:0;color:#c9d1d9}
+  .sub{color:var(--muted);font-size:14px;margin-top:2px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:20px 22px;margin:18px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+  @media(max-width:820px){.grid2,.grid3{grid-template-columns:1fr}}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:8px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#e6edf3;font-weight:600}
+  tr:nth-child(even) td{background:#12171e}
+  .tag{display:inline-block;padding:2px 9px;border-radius:20px;font-size:12px;font-weight:600;margin:2px 4px 2px 0}
+  .t-new{background:rgba(63,185,80,.15);color:var(--accent2);border:1px solid rgba(63,185,80,.4)}
+  .t-mod{background:rgba(210,153,34,.15);color:var(--warn);border:1px solid rgba(210,153,34,.4)}
+  .t-dep{background:rgba(88,166,255,.13);color:var(--accent);border:1px solid rgba(88,166,255,.4)}
+  .t-risk{background:rgba(248,81,73,.13);color:var(--danger);border:1px solid rgba(248,81,73,.4)}
+  .callout{border-left:4px solid var(--accent);background:var(--panel2);padding:12px 16px;border-radius:0 8px 8px 0;margin:14px 0}
+  .callout.warn{border-color:var(--warn)}
+  .callout.danger{border-color:var(--danger)}
+  .callout.ok{border-color:var(--accent2)}
+  .toc{columns:2;column-gap:30px}
+  .toc a{color:var(--accent);text-decoration:none;display:block;padding:3px 0;font-size:14px}
+  .toc a:hover{text-decoration:underline}
+  .num{display:inline-flex;width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#58a6ff,#bc8cff);
+    color:#fff;align-items:center;justify-content:center;font-weight:700;font-size:13px;margin-right:8px}
+  .bar-row{display:flex;align-items:center;margin:6px 0;font-size:13px}
+  .bar-label{width:70px;color:var(--muted);flex-shrink:0}
+  .bar-track{flex:1;background:#0d1117;border-radius:5px;height:22px;position:relative;margin:0 8px;overflow:hidden}
+  .bar-fill{height:100%;border-radius:5px;display:flex;align-items:center;padding-left:8px;font-size:11px;color:#fff;font-weight:600;white-space:nowrap}
+  .legend{display:flex;gap:18px;font-size:12.5px;color:var(--muted);margin:6px 0 14px}
+  .legend span{display:inline-flex;align-items:center}
+  .dot{width:11px;height:11px;border-radius:3px;margin-right:5px;display:inline-block}
+  .foot{color:var(--muted);font-size:12.5px;text-align:center;margin-top:40px;padding-top:18px;border-top:1px solid var(--border)}
+  svg{max-width:100%;height:auto}
+  .kbd{font-family:monospace;background:#20262e;border:1px solid var(--border);border-bottom-width:2px;border-radius:5px;padding:1px 6px;font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>FlyDSL MegaMoE 移植到 rtp-llm 集成设计方案</h1>
+<div class="sub">目标模型：Qwen3.5-397B-A17B &nbsp;·&nbsp; 硬件：AMD Instinct MI308X ×8 (gfx942 / CDNA3) &nbsp;·&nbsp; EP8 / TP8 &nbsp;·&nbsp; 日期：2026-07-15</div>
+
+<div class="card">
+<strong>文档目的</strong>：把 FlyDSL 中已验证的「2-stage 融合 MegaMoE」方案（stage1 = dispatch+GEMM1 融合，stage2 = GEMM2+combine 融合，e2e 全档 <b>1.29×~1.73×</b> 反超 aiter CK 基线）移植进 rtp-llm 推理引擎，通过环境变量开关控制启用，补充单元测试，并在 Qwen3.5-397B-A17B 上完成端到端验证。本文先给出<strong>设计</strong>供评审，不含实现代码改动。
+</div>
+
+<h2>目录</h2>
+<div class="toc card">
+  <a href="#s1">1. 背景与目标</a>
+  <a href="#s2">2. FlyDSL MegaMoE 方案架构</a>
+  <a href="#s3">3. rtp-llm MoE 架构现状</a>
+  <a href="#s4">4. 核心难点：融合边界错配</a>
+  <a href="#s5">5. 集成设计（总体架构）</a>
+  <a href="#s6">6. 数据流与张量规格</a>
+  <a href="#s7">7. 权重准备（preshuffle / 量化）</a>
+  <a href="#s8">8. 环境变量开关设计</a>
+  <a href="#s9">9. 单元测试方案</a>
+  <a href="#s10">10. 端到端验证方案</a>
+  <a href="#s11">11. 文件改动清单</a>
+  <a href="#s12">12. 里程碑与风险</a>
+</div>
+
+<!-- ============ 1 ============ -->
+<h2 id="s1"><span class="num">1</span>背景与目标</h2>
+<div class="grid2">
+  <div class="card">
+    <h3 style="margin-top:0">已有成果（FlyDSL 侧）</h3>
+    <p>在 <code>FlyDSL/kernels/</code> 中已实现并验证 gfx942 plain-FP8 的两段式融合 MoE：</p>
+    <ul>
+      <li><b>Stage1</b>：mori dispatch + GEMM1(gate_up·silu·mul) 融合进单 kernel</li>
+      <li><b>Stage2</b>：GEMM2(down) + P2P combine 融合进单 kernel</li>
+      <li>kernel 内直接 emit sorted 表（<code>atom_sorted</code>），e2e forward <b>零 host sync</b></li>
+      <li>8 卡多 batch 精度全 PASS，支持 CUDAGraph</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:0">本次目标（rtp-llm 侧）</h3>
+    <ul>
+      <li>把该方案作为一个新的 MoE 后端接入 rtp-llm 的 Strategy/Router/Executor 框架</li>
+      <li>新增环境变量 <span class="kbd">USE_MEGAMOE</span> 控制启用，与现有 Mori / DeepEP 互斥</li>
+      <li>补充与现有 <code>moriep_intranode_router_test.py</code> 同风格的多卡单测</li>
+      <li>集成进 <code>GenericMoeLayer</code> 端到端路径</li>
+      <li>参考 <code>start_mori.sh</code> 产出 <code>start_megamoe.sh</code>，在 Qwen3.5-397B-A17B 上验证</li>
+    </ul>
+  </div>
+</div>
+
+<div class="card">
+<h4 style="margin-top:0">FlyDSL 侧 e2e 性能基准（μs，8 卡 EP8，model_dim=4096/inter_dim=2048/experts=32/topk=4）</h4>
+<div class="legend">
+  <span><span class="dot" style="background:#3fb950"></span>MegaMoE (当前)</span>
+  <span><span class="dot" style="background:#8b949e"></span>Baseline (aiter CK)</span>
+  <span style="margin-left:auto;color:var(--accent2)">全档 1.29×~1.73×</span>
+</div>
+<!-- bar chart -->
+<div class="bar-row"><div class="bar-label">64 tok</div><div class="bar-track"><div class="bar-fill" style="width:15%;background:#3fb950">256</div></div></div>
+<div class="bar-row"><div class="bar-label"></div><div class="bar-track"><div class="bar-fill" style="width:26%;background:#484f58">443 &nbsp;→ 1.73×</div></div></div>
+<div class="bar-row"><div class="bar-label">256 tok</div><div class="bar-track"><div class="bar-fill" style="width:24%;background:#3fb950">406</div></div></div>
+<div class="bar-row"><div class="bar-label"></div><div class="bar-track"><div class="bar-fill" style="width:35%;background:#484f58">594 &nbsp;→ 1.46×</div></div></div>
+<div class="bar-row"><div class="bar-label">1024 tok</div><div class="bar-track"><div class="bar-fill" style="width:71%;background:#3fb950">1210</div></div></div>
+<div class="bar-row"><div class="bar-label"></div><div class="bar-track"><div class="bar-fill" style="width:99%;background:#484f58">1682 &nbsp;→ 1.39×</div></div></div>
+<p class="sub">数据来源：<code>FlyDSL/docs/fused_moe_stage1/PROGRESS.md</code>（条形长度按 1682μs 归一化）。</p>
+</div>
+
+<!-- ============ 2 ============ -->
+<h2 id="s2"><span class="num">2</span>FlyDSL MegaMoE 方案架构</h2>
+<p>核心是一个 per-rank 的端到端模块 <code>FusedMoEZeroCopyFp8</code>（<code>kernels/moe_fused_chained_fp8.py</code>），把整条 MoE 前向压缩成 5 个 GPU 步骤，全程走 mori 对称显存做跨卡通信。</p>
+
+<div class="card">
+<svg viewBox="0 0 1080 300" font-family="monospace" font-size="12">
+  <!-- input -->
+  <rect x="10" y="120" width="90" height="56" rx="8" fill="#1c232c" stroke="#58a6ff"/>
+  <text x="55" y="143" fill="#c9d1d9" text-anchor="middle">x_bf16</text>
+  <text x="55" y="160" fill="#8b949e" text-anchor="middle" font-size="10">[T,4096]</text>
+  <!-- step1 quant -->
+  <rect x="130" y="120" width="120" height="56" rx="8" fill="#161b22" stroke="#3fb950"/>
+  <text x="190" y="140" fill="#3fb950" text-anchor="middle" font-weight="bold">① Quant</text>
+  <text x="190" y="158" fill="#8b949e" text-anchor="middle" font-size="10">aiter per-token</text>
+  <text x="190" y="170" fill="#8b949e" text-anchor="middle" font-size="10">bf16→fp8</text>
+  <!-- step2 stage1 -->
+  <rect x="280" y="95" width="180" height="106" rx="8" fill="#161b22" stroke="#bc8cff" stroke-width="2"/>
+  <text x="370" y="116" fill="#bc8cff" text-anchor="middle" font-weight="bold">② Stage1 融合</text>
+  <text x="370" y="135" fill="#c9d1d9" text-anchor="middle" font-size="11">mori dispatch</text>
+  <text x="370" y="151" fill="#c9d1d9" text-anchor="middle" font-size="11">+ GEMM1 (gate·silu·mul)</text>
+  <text x="370" y="167" fill="#c9d1d9" text-anchor="middle" font-size="11">+ emit sorted 表</text>
+  <text x="370" y="187" fill="#8b949e" text-anchor="middle" font-size="10">→ atom-logical [T·k,2048] f16</text>
+  <!-- step3 requant -->
+  <rect x="490" y="120" width="110" height="56" rx="8" fill="#161b22" stroke="#3fb950"/>
+  <text x="545" y="140" fill="#3fb950" text-anchor="middle" font-weight="bold">③ Requant</text>
+  <text x="545" y="158" fill="#8b949e" text-anchor="middle" font-size="10">f16→fp8</text>
+  <text x="545" y="170" fill="#8b949e" text-anchor="middle" font-size="10">host 上界(无 sync)</text>
+  <!-- step4 stage2 -->
+  <rect x="630" y="95" width="180" height="106" rx="8" fill="#161b22" stroke="#bc8cff" stroke-width="2"/>
+  <text x="720" y="116" fill="#bc8cff" text-anchor="middle" font-weight="bold">④ Stage2 融合</text>
+  <text x="720" y="135" fill="#c9d1d9" text-anchor="middle" font-size="11">GEMM2 (down)</text>
+  <text x="720" y="151" fill="#c9d1d9" text-anchor="middle" font-size="11">+ P2P scatter</text>
+  <text x="720" y="167" fill="#c9d1d9" text-anchor="middle" font-size="11">+ combine (加权归约)</text>
+  <text x="720" y="187" fill="#8b949e" text-anchor="middle" font-size="10">combine_no_stage1</text>
+  <!-- output -->
+  <rect x="840" y="120" width="95" height="56" rx="8" fill="#1c232c" stroke="#58a6ff"/>
+  <text x="887" y="143" fill="#c9d1d9" text-anchor="middle">out_tok</text>
+  <text x="887" y="160" fill="#8b949e" text-anchor="middle" font-size="10">[T,4096]bf16</text>
+  <!-- arrows -->
+  <g stroke="#8b949e" stroke-width="1.5" fill="none" marker-end="url(#ah)">
+    <line x1="100" y1="148" x2="128" y2="148"/>
+    <line x1="250" y1="148" x2="278" y2="148"/>
+    <line x1="460" y1="148" x2="488" y2="148"/>
+    <line x1="600" y1="148" x2="628" y2="148"/>
+    <line x1="810" y1="148" x2="838" y2="148"/>
+  </g>
+  <defs><marker id="ah" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#8b949e"/></marker></defs>
+  <!-- shmem note -->
+  <rect x="280" y="230" width="530" height="40" rx="8" fill="#0d1117" stroke="#2d333b" stroke-dasharray="4"/>
+  <text x="545" y="248" fill="#d29922" text-anchor="middle" font-size="11">mori 对称显存 (symmetric heap) — 跨卡 P2P 通信底座，rtp-llm 已通过 MoriEP 引入</text>
+  <text x="545" y="263" fill="#8b949e" text-anchor="middle" font-size="10">Stage1/Stage2 共享同一个 dispatch-combine op 的 shmem 缓冲</text>
+</svg>
+</div>
+
+<h3>关键 API 面（移植目标）</h3>
+<table>
+<tr><th>组件</th><th>文件</th><th>作用</th></tr>
+<tr><td><code>FusedMoEZeroCopyFp8</code></td><td>kernels/moe_fused_chained_fp8.py</td><td>e2e 胶合模块，<code>forward(x_bf16, wts, topk_ids, w1, scale_w1)</code></td></tr>
+<tr><td><code>FusedMoEGemm1PlainFp8</code></td><td>kernels/fused_moe_stage1_plain_fp8.py</td><td>Stage1 facade（dispatch+GEMM1）</td></tr>
+<tr><td><code>compile_moe_gemm2_combine_fused</code></td><td>kernels/moe_gemm2_combine_fused.py</td><td>Stage2 编译入口</td></tr>
+<tr><td><code>FlyDSLMoeGemm2CombineOpGfx942</code></td><td class="t-risk">tests/kernels/test_profiler_moe_gemm2_combine.py</td><td>Stage2 wrapper（当前在 tests/ 下，需上移到 kernels/）</td></tr>
+<tr><td><code>FlyDSLDispatchCombineIntraNodeOp</code></td><td>kernels/dispatch_combine_intranode_op.py</td><td>mori shmem dispatch/combine op</td></tr>
+</table>
+
+<h3>构造与 forward 签名</h3>
+<pre><code># 构造（per-rank）
+FusedMoEZeroCopyFp8(rank, world_size, model_dim, inter_dim, experts, topk,
+    max_tok_per_rank,              # 必须是 2 的幂
+    stage1_tile_m=64, tile_n=128, tile_k=256,
+    stage2_tile_m=32, stage2_tile_n=256, stage2_tile_k=128)
+
+# 前向：一次完整 MoE
+out_tok, out_wts = forward(
+    x_bf16,      # [cur_tok, model_dim]  bf16
+    wts,         # [cur_tok, topk]       f32  路由权重
+    topk_ids,    # [cur_tok, topk]       i32  全局 expert id
+    w1,          # [epr, 2*inter_dim, model_dim]  fp8 (preshuffled 16x16)
+    scale_w1,    # [epr*2*inter_dim]     f32
+    stream=None)
+# W2 / scale_w2 在构造后由模块内部持有（本设计改为外部注入，见 §7）</code></pre>
+
+<div class="callout"><b>依赖：</b><span class="tag t-dep">flydsl</span>（MLIR DSL 编译器，最大外部依赖）<span class="tag t-dep">mori.shmem</span>（rtp-llm 已通过 MoriEP 引入）<span class="tag t-dep">aiter</span>（ROCm，已可用，用于 per-token quant）。约束：<code>world_size ≤ 8</code>（mori intra-node）、<code>experts % world_size == 0</code>、<code>topk ≤ world_size</code>、<code>max_tok_per_rank</code> 为 2 的幂。</div>
+
+<!-- ============ 3 ============ -->
+<h2 id="s3"><span class="num">3</span>rtp-llm MoE 架构现状</h2>
+<p>rtp-llm 用 <b>Strategy + Factory + Registry</b> 模式组织 MoE，核心把 <b>Router</b>（跨卡 dispatch/combine）与 <b>Executor</b>（专家计算）解耦：</p>
+
+<div class="card">
+<svg viewBox="0 0 1040 250" font-family="monospace" font-size="12">
+  <!-- FusedMoe -->
+  <rect x="20" y="20" width="1000" height="46" rx="8" fill="#1c232c" stroke="#58a6ff"/>
+  <text x="520" y="40" fill="#58a6ff" text-anchor="middle" font-weight="bold">FusedMoe.forward(hidden_states, topk_weights, topk_ids)</text>
+  <text x="520" y="57" fill="#8b949e" text-anchor="middle" font-size="10">GenericMoeLayer 调用；由 Factory 根据 Strategy 优先级选择 router+executor</text>
+  <!-- three phases -->
+  <rect x="60" y="110" width="270" height="90" rx="8" fill="#161b22" stroke="#3fb950"/>
+  <text x="195" y="132" fill="#3fb950" text-anchor="middle" font-weight="bold">router.prepare()</text>
+  <text x="195" y="152" fill="#c9d1d9" text-anchor="middle" font-size="11">跨卡 dispatch</text>
+  <text x="195" y="168" fill="#8b949e" text-anchor="middle" font-size="10">→ ExpertForwardPayload</text>
+  <text x="195" y="184" fill="#8b949e" text-anchor="middle" font-size="10">(MoriEP: mori_op.dispatch)</text>
+
+  <rect x="385" y="110" width="270" height="90" rx="8" fill="#161b22" stroke="#bc8cff"/>
+  <text x="520" y="132" fill="#bc8cff" text-anchor="middle" font-weight="bold">executor.execute()</text>
+  <text x="520" y="152" fill="#c9d1d9" text-anchor="middle" font-size="11">专家 GEMM1+act+GEMM2</text>
+  <text x="520" y="168" fill="#8b949e" text-anchor="middle" font-size="10">→ CombineForwardPayload</text>
+  <text x="520" y="184" fill="#8b949e" text-anchor="middle" font-size="10">(ROCm: aiter.fused_moe)</text>
+
+  <rect x="710" y="110" width="270" height="90" rx="8" fill="#161b22" stroke="#d29922"/>
+  <text x="845" y="132" fill="#d29922" text-anchor="middle" font-weight="bold">router.finalize()</text>
+  <text x="845" y="152" fill="#c9d1d9" text-anchor="middle" font-size="11">跨卡 combine</text>
+  <text x="845" y="168" fill="#8b949e" text-anchor="middle" font-size="10">→ 最终输出 Tensor</text>
+  <text x="845" y="184" fill="#8b949e" text-anchor="middle" font-size="10">(MoriEP: mori_op.combine)</text>
+
+  <g stroke="#8b949e" stroke-width="1.5" fill="none" marker-end="url(#ah2)">
+    <line x1="330" y1="155" x2="383" y2="155"/>
+    <line x1="655" y1="155" x2="708" y2="155"/>
+    <line x1="195" y1="66" x2="195" y2="108"/>
+  </g>
+  <defs><marker id="ah2" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#8b949e"/></marker></defs>
+</svg>
+</div>
+
+<div class="grid2">
+<div class="card">
+<h4 style="margin-top:0">现有 ROCm 后端选择逻辑</h4>
+<p><code>RocmEpNormalStrategy</code> 是一个策略根据 config 返回不同 router：</p>
+<ul>
+<li><code>use_mori_ep=1</code> → <code>MoriEpIntranodeRouter</code> + aiter executor</li>
+<li><code>use_deepep_moe=1</code> → <code>DeepepNormalRouter</code> + FusedMoeExecutor</li>
+<li>两者同时开 → 抛 <code>ValueError</code>（互斥）</li>
+</ul>
+</div>
+<div class="card">
+<h4 style="margin-top:0">优先级与注册</h4>
+<p>优先级 = <code>router_type.value*10 + executor_type.value</code>，自动计算。</p>
+<p>设备相关策略在 <code>fused_moe/__init__.py</code> 内按 <code>get_device_type()</code> 注册。ROCm 分支已注册 5 个策略。新增后端在此 <code>registry.register(...)</code> 即可。</p>
+</div>
+</div>
+
+<!-- ============ 4 ============ -->
+<h2 id="s4"><span class="num">4</span>核心难点：融合边界错配</h2>
+<div class="callout danger">
+<b>关键矛盾</b>：rtp-llm 把 MoE 切成 <b>prepare(dispatch) → execute(GEMM) → finalize(combine)</b> 三段；而 FlyDSL MegaMoE 把 <b>dispatch+GEMM1</b> 融进 stage1、<b>GEMM2+combine</b> 融进 stage2 —— <u>融合恰好跨越了 rtp-llm 的相位边界</u>。无法按「router 只做 dispatch / executor 只做 GEMM / router 只做 combine」的方式拆开塞进去。
+</div>
+
+<h3>三种候选方案对比</h3>
+<table>
+<tr><th>方案</th><th>做法</th><th>评价</th></tr>
+<tr><td>A. 纯 Router 独占</td><td>prepare() 内部做完整条流水线，execute/finalize 空转</td><td class="t-risk">违背框架语义，executor 形同虚设，量化配置解析链路割裂</td></tr>
+<tr><td><b>B. Executor 独占 + 透传 Router</b> ✅</td><td>Router 只算路由(gate→topk)并透传张量；Executor 持有 <code>FusedMoEZeroCopyFp8</code> 跑完整流水线；finalize 透传结果</td><td class="t-new">最贴合：融合边界整体落在 executor 内，对框架侵入最小，量化/权重走 executor 既有通道</td></tr>
+<tr><td>C. 双 kernel 拆分对齐</td><td>把 stage1/stage2 拆开分别塞进 prepare/execute/finalize</td><td class="t-risk">需要拆散已验证的融合 kernel，等于重做，丧失融合收益</td></tr>
+</table>
+
+<div class="callout ok"><b>选定方案 B</b>：新增「透传式 MegaMoE Router」+「独占式 MegaMoE Executor」。Router 的 <code>prepare</code> 不做实际跨卡 dispatch（原样返回 hidden_states + 全局 topk_ids/weights），Executor 的 <code>execute</code> 调用 <code>FusedMoEZeroCopyFp8.forward()</code> 完成 dispatch+GEMM1+requant+GEMM2+combine，Router 的 <code>finalize</code> 直接透传 executor 已 combine 的输出。</div>
+
+<!-- ============ 5 ============ -->
+<h2 id="s5"><span class="num">5</span>集成设计（总体架构）</h2>
+<div class="card">
+<svg viewBox="0 0 1060 430" font-family="monospace" font-size="12">
+  <!-- layer -->
+  <rect x="30" y="15" width="1000" height="40" rx="8" fill="#1c232c" stroke="#58a6ff"/>
+  <text x="530" y="40" fill="#58a6ff" text-anchor="middle" font-weight="bold">GenericMoeLayer.forward  →  FusedMoeFactory.create_fused_moe()</text>
+
+  <!-- strategy -->
+  <rect x="30" y="80" width="1000" height="66" rx="8" fill="#161b22" stroke="#3fb950"/>
+  <text x="530" y="102" fill="#3fb950" text-anchor="middle" font-weight="bold">【新增】RocmMegaMoeStrategy  (注册于 fused_moe/__init__.py)</text>
+  <text x="530" y="122" fill="#c9d1d9" text-anchor="middle" font-size="11">check_conditions: is_ep_enabled &amp;&amp; USE_MEGAMOE &amp;&amp; MegaMoeWrapper.supported() &amp;&amp; gfx942 &amp;&amp; ep_size==world_size</text>
+  <text x="530" y="138" fill="#8b949e" text-anchor="middle" font-size="10">get_attributes → (router=MegaMoeRouter, executor=MegaMoeExecutor, quant=FP8_E4M3FNUZ per-token)</text>
+
+  <!-- router -->
+  <rect x="40" y="180" width="300" height="150" rx="8" fill="#161b22" stroke="#bc8cff"/>
+  <text x="190" y="203" fill="#bc8cff" text-anchor="middle" font-weight="bold">【新增】MegaMoeRouter</text>
+  <text x="190" y="226" fill="#c9d1d9" text-anchor="middle" font-size="11">prepare(): 透传</text>
+  <text x="190" y="242" fill="#8b949e" text-anchor="middle" font-size="10">expert_x = hidden_states</text>
+  <text x="190" y="256" fill="#8b949e" text-anchor="middle" font-size="10">expert_topk_ids = 全局 id</text>
+  <text x="190" y="272" fill="#8b949e" text-anchor="middle" font-size="10">expert_ids_are_local=False</text>
+  <text x="190" y="294" fill="#c9d1d9" text-anchor="middle" font-size="11">finalize(): 透传 executor 输出</text>
+  <text x="190" y="313" fill="#8b949e" text-anchor="middle" font-size="10">(combine 已在 executor 内完成)</text>
+
+  <!-- executor -->
+  <rect x="380" y="180" width="330" height="150" rx="8" fill="#161b22" stroke="#d29922"/>
+  <text x="545" y="203" fill="#d29922" text-anchor="middle" font-weight="bold">【新增】MegaMoeExecutor</text>
+  <text x="545" y="226" fill="#c9d1d9" text-anchor="middle" font-size="11">execute(payload):</text>
+  <text x="545" y="243" fill="#8b949e" text-anchor="middle" font-size="10">wrapper.forward(x_bf16, wts, topk_ids,</text>
+  <text x="545" y="257" fill="#8b949e" text-anchor="middle" font-size="10">w1, scale_w1) — 整条融合流水线</text>
+  <text x="545" y="278" fill="#c9d1d9" text-anchor="middle" font-size="11">→ CombineForwardPayload</text>
+  <text x="545" y="297" fill="#8b949e" text-anchor="middle" font-size="10">(内部: quant→stage1→requant</text>
+  <text x="545" y="311" fill="#8b949e" text-anchor="middle" font-size="10">→stage2→combine)</text>
+
+  <!-- wrapper -->
+  <rect x="750" y="180" width="280" height="150" rx="8" fill="#161b22" stroke="#58a6ff"/>
+  <text x="890" y="203" fill="#58a6ff" text-anchor="middle" font-weight="bold">【新增】MegaMoeWrapper</text>
+  <text x="890" y="224" fill="#8b949e" text-anchor="middle" font-size="10">singleton, 仿 MoriEPWrapper</text>
+  <text x="890" y="242" fill="#c9d1d9" text-anchor="middle" font-size="11">持有 per-layer</text>
+  <text x="890" y="257" fill="#c9d1d9" text-anchor="middle" font-size="11">FusedMoEZeroCopyFp8 实例</text>
+  <text x="890" y="276" fill="#8b949e" text-anchor="middle" font-size="10">supported(): import flydsl</text>
+  <text x="890" y="291" fill="#8b949e" text-anchor="middle" font-size="10">init: mori shmem + pg 注册</text>
+  <text x="890" y="309" fill="#8b949e" text-anchor="middle" font-size="10">(backend_manager 启动时初始化)</text>
+
+  <!-- flydsl -->
+  <rect x="380" y="360" width="330" height="50" rx="8" fill="#0d1117" stroke="#2d333b" stroke-dasharray="4"/>
+  <text x="545" y="382" fill="#ff7b9c" text-anchor="middle" font-size="11" font-weight="bold">FlyDSL kernels (只读引用，不改逻辑)</text>
+  <text x="545" y="398" fill="#8b949e" text-anchor="middle" font-size="10">FusedMoEZeroCopyFp8 / stage1 / stage2 / dispatch_combine_op</text>
+
+  <g stroke="#8b949e" stroke-width="1.5" fill="none" marker-end="url(#ah3)">
+    <line x1="530" y1="55" x2="530" y2="78"/>
+    <line x1="530" y1="146" x2="530" y2="178"/>
+    <line x1="340" y1="240" x2="378" y2="240"/>
+    <line x1="710" y1="255" x2="748" y2="255"/>
+    <line x1="545" y1="330" x2="545" y2="358"/>
+  </g>
+  <defs><marker id="ah3" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#8b949e"/></marker></defs>
+</svg>
+</div>
+
+<h3>新增组件职责表</h3>
+<table>
+<tr><th>组件</th><th>类型</th><th>职责</th><th>参照现有</th></tr>
+<tr><td><code>MegaMoeWrapper</code></td><td><span class="tag t-new">新增</span></td><td>单例，管理 flydsl 依赖探测、mori shmem 初始化、per-layer <code>FusedMoEZeroCopyFp8</code> 实例缓存</td><td>MoriEPWrapper</td></tr>
+<tr><td><code>MegaMoeRouter</code></td><td><span class="tag t-new">新增</span></td><td>透传式：prepare 返回未 dispatch 的 hidden_states + 全局路由；finalize 透传</td><td>MoriEpIntranodeRouter</td></tr>
+<tr><td><code>MegaMoeExecutor</code></td><td><span class="tag t-new">新增</span></td><td>调用 wrapper 的融合前向，完成整条流水线</td><td>RocmExpertsFp8PerChannel</td></tr>
+<tr><td><code>RocmMegaMoeStrategy</code></td><td><span class="tag t-new">新增</span></td><td>条件判定 + 返回 router/executor/quant 组合</td><td>RocmEpNormalStrategy</td></tr>
+<tr><td><code>RouterType.MEGAMOE</code></td><td><span class="tag t-mod">改</span></td><td>枚举新增值（如 =8）</td><td>defs/type.py</td></tr>
+<tr><td><code>MoeConfig.use_megamoe</code></td><td><span class="tag t-mod">改</span></td><td>C++/pyi 配置字段 + CLI/env 绑定</td><td>use_mori_ep</td></tr>
+</table>
+
+<!-- ============ 6 ============ -->
+<h2 id="s6"><span class="num">6</span>数据流与张量规格</h2>
+<p>Qwen3.5-397B-A17B 在 EP8 下的形状（需从模型 config 读取并校验）：</p>
+<table>
+<tr><th>符号</th><th>含义</th><th>Qwen3.5-397B-A17B (EP8) 取值*</th></tr>
+<tr><td>model_dim</td><td>hidden size</td><td>需从 config 确认（例：4096/6144 量级）</td></tr>
+<tr><td>inter_dim</td><td>专家 FFN 中间维</td><td>moe_intermediate_size（需确认）</td></tr>
+<tr><td>experts</td><td>全局专家数</td><td>需确认（须 % 8 == 0）</td></tr>
+<tr><td>epr</td><td>每卡专家数 = experts/8</td><td>experts/8</td></tr>
+<tr><td>topk</td><td>每 token 激活专家</td><td>需确认（须 ≤ 8）</td></tr>
+<tr><td>max_tok_per_rank</td><td>每卡 token 容量</td><td>向上取 2 的幂（≥ 单卡最大 batch·seq）</td></tr>
+</table>
+<p class="sub">*具体数值在实现阶段从 <code>~/.cache/modelscope/.../Qwen3.5-397B-A17B/config.json</code> 读取，若违反约束（topk&gt;8 或 experts%8≠0）需在 <code>check_conditions</code> 中拒绝并回退到 Mori/DeepEP。</p>
+
+<h3>executor.execute 内张量映射</h3>
+<pre><code>ExpertForwardPayload:
+  expert_x            [cur_tok, model_dim]  bf16   ← 未 dispatch 的原始激活
+  expert_topk_ids     [cur_tok, topk]       i32    ← 全局 expert id
+  expert_topk_weights [cur_tok, topk]       f32
+        │
+        ▼   wrapper.forward(x_bf16=expert_x, wts=weights, topk_ids=ids, w1, scale_w1)
+        │   (内部 quant→stage1→requant→stage2→combine)
+        ▼
+CombineForwardPayload:
+  fused_expert_output [cur_tok, model_dim]  bf16   ← combine 已完成的最终输出
+        │
+        ▼   router.finalize() 透传
+   最终 MoE 输出 → 回到 GenericMoeLayer</code></pre>
+
+<div class="callout warn"><b>路由权重语义对齐</b>：FlyDSL 的 combine 在 kernel 内做加权归约（<code>doweight_fused</code>），而 rtp-llm 的 finalize 通常也做加权。需确保权重只乘一次——设计上让 MegaMoE 全程持有 <code>topk_weights</code> 并在 combine 内应用，finalize 不再乘权重（<code>apply_router_weight_on_input</code> 语义需核对）。</div>
+
+<!-- ============ 7 ============ -->
+<h2 id="s7"><span class="num">7</span>权重准备（preshuffle / 量化）</h2>
+<p>FlyDSL kernel 要求 W1/W2 为 <b>fp8_e4m3fnuz + 16×16 preshuffle</b> 布局，且带 per-N f32 scale。rtp-llm 的权重加载在模型 init 阶段完成，需要一个转换步骤：</p>
+<table>
+<tr><th>权重</th><th>原始（HF ckpt）</th><th>MegaMoE 需要</th><th>转换</th></tr>
+<tr><td>W1 (gate_up)</td><td>bf16 [E, 2·inter, model]</td><td>fp8 [epr, 2·inter, model] preshuffled</td><td>切本卡 epr + per-N quant + shuffle_weight(16×16)</td></tr>
+<tr><td>W2 (down)</td><td>bf16 [E, model, inter]</td><td>fp8 [epr, model, inter] preshuffled</td><td>同上</td></tr>
+<tr><td>scale_w1/w2</td><td>—</td><td>f32 per-N</td><td>量化时产出</td></tr>
+</table>
+
+<div class="callout"><b>设计决策</b>：把 W2 从 FlyDSL 模块内部「随机生成」改为 <b>外部注入</b>——由 <code>MegaMoeWrapper</code> 在建实例时接收 rtp-llm 已加载并转换好的真实权重。需为 <code>FusedMoEZeroCopyFp8</code> 增加一个「注入外部 w2/scale_w2」的入口（或在构造函数暴露参数），这是移植中对 FlyDSL 侧唯一必要的小改动。W1 保持 per-call 传入。</div>
+
+<div class="callout warn"><b>依赖上移</b>：Stage2 wrapper 类 <code>FlyDSLMoeGemm2CombineOpGfx942</code> 目前位于 <code>tests/</code> 目录，生产集成需将其（及 <code>tests/utils.shuffle_weight</code>）上移到 <code>kernels/</code> 稳定包路径，避免 rtp-llm 依赖测试代码。</div>
+
+<!-- ============ 8 ============ -->
+<h2 id="s8"><span class="num">8</span>环境变量开关设计</h2>
+<p>沿用 rtp-llm 现有 <code>moe_group_args.py</code> 的 <code>env_name + bind_to</code> 模式，新增：</p>
+<pre><code># rtp_llm/server/server_args/moe_group_args.py
+moe_group.add_argument(
+    "--use_megamoe", env_name="USE_MEGAMOE",
+    bind_to=(moe_config, "use_megamoe"), type=str2bool, default=False,
+    help="Enable FlyDSL 2-stage fused MegaMoE on AMD gfx942 (EP<=8, fp8).")
+
+# 可选调优旋钮（env）
+#   MEGAMOE_STAGE1_TILE_M (默认 64)   MEGAMOE_TILE_K (默认 256)
+#   MEGAMOE_STAGE2_TILE_N (默认 256)  MEGAMOE_ENABLE_CUDAGRAPH (默认继承 ENABLE_CUDA_GRAPH)</code></pre>
+
+<h4>互斥与回退</h4>
+<table>
+<tr><th>USE_MEGAMOE</th><th>USE_MORI_EP</th><th>USE_DEEPEP_MOE</th><th>结果</th></tr>
+<tr><td>1</td><td>0</td><td>0</td><td class="t-new">启用 MegaMoE（满足 gfx942/EP8/fp8 约束时）</td></tr>
+<tr><td>1</td><td>1</td><td>-</td><td class="t-risk">check_conditions 报错互斥（仿现有 Mori+DeepEP 互斥）</td></tr>
+<tr><td>1</td><td>0</td><td>0</td><td class="t-mod">若不满足约束（topk&gt;8 等）→ 策略优先级落选 → 自动回退 Mori/DeepEP</td></tr>
+<tr><td>0</td><td>...</td><td>...</td><td>维持现状，零影响</td></tr>
+</table>
+
+<!-- ============ 9 ============ -->
+<h2 id="s9"><span class="num">9</span>单元测试方案</h2>
+<p>遵循 <code>moriep_intranode_router_test.py</code> 的多卡 <code>mp.spawn</code> 模式（<code>unittest</code> + Bazel <code>py_test</code>，<code>tags=["rocm"]</code>，<code>exec_properties={'gpu':'MI308X-ROCM7'}</code>）。</p>
+<div class="grid2">
+<div class="card">
+<h4 style="margin-top:0">① Router/Executor 集成单测</h4>
+<p><code>impl/rocm/test/megamoe_router_test.py</code></p>
+<ul>
+<li>spawn 8 worker，init dist + mori shmem</li>
+<li>构造 MegaMoeRouter+Executor，跑 prepare→execute→finalize</li>
+<li>与 <code>torch_moe_ref</code>（CPU/torch fp32 参考）对比 <code>assert_close(rtol=0.05, atol=0.05)</code></li>
+<li>覆盖 batch = {1,8,64,256}</li>
+</ul>
+</div>
+<div class="card">
+<h4 style="margin-top:0">② Wrapper 单测</h4>
+<p><code>distributed/test/megamoe_test.py</code></p>
+<ul>
+<li>验证 <code>MegaMoeWrapper.supported()</code> 对缺 flydsl 的降级</li>
+<li>验证单例 init/reset、shmem heap 生命周期</li>
+<li><code>MEGAMOE_TEST_MAX_GPUS</code> 控制 2/4/8 卡跳过</li>
+</ul>
+</div>
+</div>
+<div class="card">
+<h4 style="margin-top:0">③ 策略选择单测（CPU，无需 GPU）</h4>
+<p><code>fused_moe/tests/test_rocm_strategies.py</code>（或扩展现有）— mock config 验证：<code>USE_MEGAMOE=1</code> 且满足约束时 <code>RocmMegaMoeStrategy</code> 被选中；不满足时回退；与 Mori 同开时报错。</p>
+</div>
+<div class="callout"><b>精度基线</b>：复用 FlyDSL 已有的 <code>test_full_pipeline.py</code> 三重精度对比思路（vs torch fp32 参考 + vs 非融合 baseline chain），在 rtp-llm 侧以 <code>torch_moe_ref</code> 为金标准。</div>
+
+<!-- ============ 10 ============ -->
+<h2 id="s10"><span class="num">10</span>端到端验证方案</h2>
+<p>基于 <code>start_mori.sh</code> 派生 <code>start_megamoe.sh</code>，唯一关键差异是开关：</p>
+<pre><code># start_megamoe.sh（关键差异）
+export USE_MORI_EP=0
+export USE_DEEPEP_MOE=0
+export USE_MEGAMOE=1          # ← 新增开关
+export ROCM_PATH=/opt/rocm-7.2.0
+export HIP_PATH=/opt/rocm-7.2.0
+export MORI_SHMEM_HEAP_SIZE=40G   # ← MegaMoE 需要（mori 对称堆）
+export WORLD_SIZE=8; export TP_SIZE=8; export EP_SIZE=8; export DP_SIZE=1
+export ACT_TYPE=bf16; export MAX_SEQ_LEN=2048
+model_path=~/.cache/modelscope/hub/models/Qwen/Qwen3.5-397B-A17B/
+START_PORT=6655 TOKENIZER_PATH=$model_path CHECKPOINT_PATH=$model_path \
+  MODEL_TYPE=qwen35_moe FT_SERVER_TEST=1 \
+  python3.10 -m rtp_llm.start_server 2>&1 | tee megamoe_e2e.log</code></pre>
+
+<h4>验证步骤与验收标准</h4>
+<table>
+<tr><th>#</th><th>步骤</th><th>验收标准</th></tr>
+<tr><td>1</td><td>服务拉起，MegaMoE 策略被选中</td><td>日志出现 <code>RocmMegaMoeStrategy selected</code>，无 fallback</td></tr>
+<tr><td>2</td><td>正确性：与 <code>USE_MORI_EP=1</code> 同 prompt 对比输出</td><td>生成文本一致 / logits 相对误差在容忍内</td></tr>
+<tr><td>3</td><td>性能：decode 延迟对比 Mori/DeepEP</td><td>参考 <code>deepep_vs_mori_perf_summary.md</code> 口径，MegaMoE decode 延迟 ≤ Mori</td></tr>
+<tr><td>4</td><td>稳定性：CONCURRENCY_LIMIT 压测</td><td>无 shmem OOM、无 hang、无精度漂移</td></tr>
+</table>
+<div class="callout warn"><b>先决条件</b>：验证前需确认 Qwen3.5-397B-A17B 的 MoE 形状满足 MegaMoE 约束（<code>topk≤8</code>、<code>experts%8==0</code>）。若不满足，需先在小配置（如 Qwen3.5-35B-A3B）上验证融合正确性，再评估大模型适配。</div>
+
+<!-- ============ 11 ============ -->
+<h2 id="s11"><span class="num">11</span>文件改动清单</h2>
+<h4><span class="tag t-new">新增</span></h4>
+<table>
+<tr><th>文件</th><th>内容</th></tr>
+<tr><td>rtp_llm/models_py/distributed/megamoe_wrapper.py</td><td>MegaMoeWrapper + MegaMoeWrapperConfig + init_megamoe_wrapper</td></tr>
+<tr><td>.../fused_moe/impl/rocm/routers/megamoe_router.py</td><td>MegaMoeRouter（透传式）</td></tr>
+<tr><td>.../fused_moe/impl/rocm/executors/megamoe_executor.py</td><td>MegaMoeExecutor（融合流水线调用）</td></tr>
+<tr><td>.../fused_moe/impl/rocm/strategy/megamoe.py</td><td>RocmMegaMoeStrategy</td></tr>
+<tr><td>.../impl/rocm/test/megamoe_router_test.py</td><td>多卡集成单测</td></tr>
+<tr><td>.../distributed/test/megamoe_test.py</td><td>wrapper 单测</td></tr>
+<tr><td>start_megamoe.sh</td><td>e2e 启动脚本</td></tr>
+</table>
+<h4><span class="tag t-mod">修改</span></h4>
+<table>
+<tr><th>文件</th><th>内容</th></tr>
+<tr><td>.../fused_moe/__init__.py</td><td>ROCm 分支 <code>registry.register(RocmMegaMoeStrategy())</code></td></tr>
+<tr><td>.../fused_moe/defs/type.py</td><td>RouterType 增 <code>MEGAMOE</code></td></tr>
+<tr><td>.../impl/rocm/strategy/__init__.py</td><td>导出 RocmMegaMoeStrategy</td></tr>
+<tr><td>rtp_llm/server/server_args/moe_group_args.py</td><td>新增 <code>--use_megamoe / USE_MEGAMOE</code></td></tr>
+<tr><td>cpp/config/ConfigModules.* + libth_transformer_config.pyi</td><td>MoeConfig 增 <code>use_megamoe</code> 字段</td></tr>
+<tr><td>rtp_llm/server/backend_manager.py</td><td>启动时 <code>init_megamoe_wrapper</code> 分支</td></tr>
+<tr><td>各相关 BUILD</td><td>py_library / py_test 条目</td></tr>
+</table>
+<h4><span class="tag t-dep">FlyDSL 侧（最小改动）</span></h4>
+<table>
+<tr><td>kernels/moe_gemm2_combine_op.py（新）</td><td>把 <code>FlyDSLMoeGemm2CombineOpGfx942</code> 从 tests/ 上移到 kernels/</td></tr>
+<tr><td>kernels/moe_fused_chained_fp8.py</td><td>暴露「注入外部 W2/scale_w2」入口（替代内部随机权重）</td></tr>
+<tr><td>打包</td><td>flydsl 作为 rtp-llm 可 import 的依赖（whl 或 PYTHONPATH）</td></tr>
+</table>
+
+<!-- ============ 12 ============ -->
+<h2 id="s12"><span class="num">12</span>里程碑与风险</h2>
+<div class="card">
+<svg viewBox="0 0 1020 120" font-family="monospace" font-size="11">
+  <line x1="40" y1="60" x2="980" y2="60" stroke="#2d333b" stroke-width="2"/>
+  <g fill="#fff" text-anchor="middle">
+    <circle cx="120" cy="60" r="9" fill="#58a6ff"/><text x="120" y="64" font-size="10">1</text>
+    <circle cx="330" cy="60" r="9" fill="#bc8cff"/><text x="330" y="64" font-size="10">2</text>
+    <circle cx="540" cy="60" r="9" fill="#3fb950"/><text x="540" y="64" font-size="10">3</text>
+    <circle cx="750" cy="60" r="9" fill="#d29922"/><text x="750" y="64" font-size="10">4</text>
+    <circle cx="930" cy="60" r="9" fill="#ff7b9c"/><text x="930" y="64" font-size="10">5</text>
+  </g>
+  <g fill="#c9d1d9" text-anchor="middle" font-size="10.5">
+    <text x="120" y="35">依赖打包+权重转换</text>
+    <text x="330" y="35">Wrapper+Router+Executor</text>
+    <text x="540" y="35">Strategy+env 开关</text>
+    <text x="750" y="35">单测通过(8卡)</text>
+    <text x="930" y="35">397B e2e</text>
+  </g>
+  <g fill="#8b949e" text-anchor="middle" font-size="9.5">
+    <text x="120" y="90">flydsl import + preshuffle</text>
+    <text x="330" y="90">小配置正确性打通</text>
+    <text x="540" y="90">回退/互斥逻辑</text>
+    <text x="750" y="90">精度 vs torch ref</text>
+    <text x="930" y="90">对比 Mori 性能</text>
+  </g>
+</svg>
+</div>
+
+<h3>风险登记</h3>
+<table>
+<tr><th>风险</th><th>等级</th><th>缓解</th></tr>
+<tr><td>flydsl 依赖打包（MLIR runtime）进 rtp-llm 生产环境</td><td><span class="tag t-risk">高</span></td><td>先以 PYTHONPATH 引入验证；后续评估 whl 化；<code>supported()</code> 缺失时优雅降级</td></tr>
+<tr><td>Qwen3.5-397B MoE 形状可能违反约束（topk≤8 / experts%8）</td><td><span class="tag t-risk">高</span></td><td>实现前先读 config 校验；不满足则先在 35B-A3B 验证</td></tr>
+<tr><td>权重 preshuffle/量化与 aiter 布局一致性</td><td><span class="tag t-mod">中</span></td><td>复用 FlyDSL <code>shuffle_weight</code>；单测逐值比对 scale</td></tr>
+<tr><td>路由权重重复相乘 / combine 语义错配</td><td><span class="tag t-mod">中</span></td><td>finalize 不再乘权重；单测对比 torch ref</td></tr>
+<tr><td>mori shmem 堆与现有 MoriEP 复用冲突</td><td><span class="tag t-mod">中</span></td><td>MegaMoE 独占 shmem，与 Mori 互斥，不同时初始化</td></tr>
+<tr><td>CUDAGraph 与 rtp-llm 现有 capture 冲突</td><td><span class="tag t-dep">低</span></td><td>首版 <code>ENABLE_CUDA_GRAPH=0</code>，decode 优化作为后续增量</td></tr>
+</table>
+
+<div class="callout ok"><b>结论</b>：采用<strong>方案 B（透传 Router + 独占 Executor）</strong>对 rtp-llm 框架侵入最小，能完整保留 FlyDSL 已验证的融合收益。首要前置动作是（a）确认 397B 的 MoE 形状约束、（b）打通 flydsl 依赖引入与真实权重的 preshuffle。建议先在 <code>Qwen3.5-35B-A3B</code> 上打通正确性，再上 397B 做性能验证。</div>
+
+<div class="foot">
+生成：Qoder · 基于 FlyDSL <code>PROGRESS.md</code> + rtp-llm fused_moe 框架源码 + start_mori.sh 分析 · 本文为设计评审稿，不含代码改动
+</div>
+
+</div>
+</body>
+</html>

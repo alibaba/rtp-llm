@@ -15,6 +15,15 @@ from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.swizzle_utils import swizzle_tensor
 
 
+def _use_megamoe() -> bool:
+    """Whether the MegaMoE (FlyDSL 2-stage fused) MoE backend is enabled.
+
+    No dedicated C++ MoeConfig field yet, so this mirrors the USE_MEGAMOE env
+    parse used by backend_manager.py and the MoE config adapter.
+    """
+    return os.environ.get("USE_MEGAMOE", "0").lower() in ("1", "true", "on", "yes")
+
+
 def is_gfx950(arch_fallback: Optional[str] = None) -> bool:
     """Detect whether the current ROCm device is gfx950 (MI355X).
 
@@ -893,6 +902,12 @@ class RocmImpl(GpuImpl):
 
         is_gate = name in [W.moe_w1, W.moe_s1]
         do_shuffle = name in [W.moe_w1, W.moe_w2]
+        # MegaMoE (FlyDSL 2-stage fused) applies its OWN shuffle_weight inside the
+        # executor. Applying the aiter (16,16) pre-shuffle here would double-shuffle
+        # and corrupt the weight layout, so skip it. The [up,gate]->[gate,up] swap
+        # below must still run — the executor consumes w1 in [gate, up] order.
+        if do_shuffle and _use_megamoe():
+            do_shuffle = False
         if x.dim() == 2:
             x = x.unsqueeze(-1)
         x_ = (

@@ -95,6 +95,17 @@ class BackendManager(object):
         ):
             deepep_init_success = False
             moriep_init_success = False
+            megamoe_init_success = False
+
+            # MegaMoE (FlyDSL 2-stage fused) toggle: env-based, no C++ field yet.
+            import os
+
+            use_megamoe = os.environ.get("USE_MEGAMOE", "0").lower() in (
+                "1",
+                "true",
+                "on",
+                "yes",
+            )
 
             # Initialize DeepEP if enabled
             if engine_config.moe_config.use_deepep_moe:
@@ -121,12 +132,29 @@ class BackendManager(object):
                 except Exception as e:
                     logging.error(f"Failed to initialize MoriEP wrapper: {e}")
 
+            # Initialize MegaMoE if enabled (FlyDSL 2-stage fused pipeline)
+            if use_megamoe:
+                try:
+                    from rtp_llm.models_py.distributed.megamoe_wrapper import (
+                        init_megamoe_wrapper,
+                    )
+
+                    init_megamoe_wrapper(engine_config, model_config)
+                    megamoe_init_success = True
+                    logging.info("MegaMoE wrapper initialized successfully")
+                except Exception as e:
+                    logging.error(f"Failed to initialize MegaMoE wrapper: {e}")
+
             # Raise if a requested EP backend failed to initialize
             if engine_config.moe_config.use_deepep_moe and not deepep_init_success:
                 raise RuntimeError("DeepEP was requested but failed to initialize")
             if engine_config.moe_config.use_mori_ep and not moriep_init_success:
                 raise RuntimeError(
                     "use_mori_ep is set but MoriEP wrapper failed to initialize"
+                )
+            if use_megamoe and not megamoe_init_success:
+                raise RuntimeError(
+                    "USE_MEGAMOE is set but MegaMoE wrapper failed to initialize"
                 )
 
         # Optional propose model config
