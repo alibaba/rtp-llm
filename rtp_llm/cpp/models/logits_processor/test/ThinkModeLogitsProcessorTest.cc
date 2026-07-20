@@ -278,11 +278,12 @@ TEST_F(SamplerTest, testNoThinkingMasksThinkBoundaryTokensBeforeSampling) {
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
 }
 
-TEST_F(SamplerTest, testZeroThinkBudgetMasksThinkBoundaryTokensBeforeSampling) {
+TEST_F(SamplerTest, testZeroThinkBudgetUsesMaxNewTokens) {
     SamplerDataBuilder builder;
 
     auto generate_input                                    = std::make_shared<GenerateInput>();
     generate_input->generate_config                        = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->max_new_tokens        = 5;
     generate_input->generate_config->in_think_mode         = true;
     generate_input->generate_config->max_thinking_tokens   = 0;
     generate_input->generate_config->begin_think_token_ids = {128821, 201};
@@ -291,6 +292,8 @@ TEST_F(SamplerTest, testZeroThinkBudgetMasksThinkBoundaryTokensBeforeSampling) {
 
     auto processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1);
     ASSERT_NE(processor, nullptr);
+    EXPECT_EQ(generate_input->generate_config->max_thinking_tokens, 0);
+    EXPECT_TRUE(processor->isSpecVerifyEligible());
 
     SamplerInputs sampler_inputs    = builder.allocate({1, 128900, 8}, {processor}, {1});
     sampler_inputs.input_lengths    = torch::tensor({3}, torch::kInt32);
@@ -299,7 +302,7 @@ TEST_F(SamplerTest, testZeroThinkBudgetMasksThinkBoundaryTokensBeforeSampling) {
 
     float neg_inf = -std::numeric_limits<float>::max();
     EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128821].item<float>());
-    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128822].item<float>());
+    EXPECT_EQ(0, sampler_inputs.logits[0][128822].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][201].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
 }
@@ -328,6 +331,39 @@ TEST_F(SamplerTest, testThinkingAllowsNaturalThinkEndBeforeBudgetEnforce) {
     EXPECT_EQ(0, sampler_inputs.logits[0][201].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][128822].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
+}
+
+TEST_F(SamplerTest, testNegativeThinkBudgetUsesMaxNewTokensForMtp) {
+    auto generate_input                                    = std::make_shared<GenerateInput>();
+    generate_input->generate_config                        = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->max_new_tokens        = 4;
+    generate_input->generate_config->in_think_mode         = true;
+    generate_input->generate_config->max_thinking_tokens   = -1;
+    generate_input->generate_config->begin_think_token_ids = {7};
+    generate_input->generate_config->end_think_token_ids   = {8, 9};
+    generate_input->input_ids                              = torch::tensor({1, 2}, torch::kInt32);
+
+    auto processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1);
+    ASSERT_NE(processor, nullptr);
+    EXPECT_EQ(generate_input->generate_config->max_thinking_tokens, -1);
+
+    const int            propose_step = 3;
+    const size_t         words        = SpecLogitsProcessor::bitmaskWordCount(16);
+    std::vector<int32_t> draft_tokens = {10, 8, 9};
+    std::vector<int32_t> bitmask((propose_step + 1) * words, SpecLogitsProcessor::kBitmaskAllowAll);
+
+    SpecLogitsProcessorRequest request;
+    request.draft_tokens       = draft_tokens.data();
+    request.propose_step       = propose_step;
+    request.bitmask_cpu_out    = bitmask.data();
+    request.bitmask_size_int32 = words;
+    request.vocab_size         = 16;
+
+    EXPECT_TRUE(processor->isSpecVerifyEligible());
+    EXPECT_EQ(processor->tryAcceptAndFillBitmask(request), propose_step);
+
+    processor->updateStatus(torch::tensor({{10, 8, 9}}, torch::kInt32), 3);
+    EXPECT_EQ(processor->finishedThinkOutputLen(), 3);
 }
 
 TEST_F(SamplerTest, testThinkingMasksThinkBoundaryTokensAfterThinkEnd) {
