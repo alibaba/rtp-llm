@@ -92,6 +92,15 @@ class Qwen3NextMetadata(object):
         return self.cp_restore_indices is not None
 
 
+def _use_qwen35_flydsl_moe_phase_hint(config: ModelConfig) -> bool:
+    return (
+        getattr(config, "moe_style", None) == 2
+        and getattr(config, "expert_num", None) == 512
+        and getattr(config, "moe_k", None) == 10
+        and getattr(config, "hidden_size", None) == 4096
+    )
+
+
 class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
     def __init__(
         self,
@@ -978,6 +987,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSResNorm(
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
+        self._use_flydsl_moe_phase_hint = _use_qwen35_flydsl_moe_phase_hint(config)
 
     def forward(
         self,
@@ -1000,7 +1010,16 @@ class Qwen3NextDecoderLayer(nn.Module):
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
-        hidden_states = self.mlp(hidden_states)
+        if (
+            self._use_flydsl_moe_phase_hint
+            and isinstance(self.mlp, GenericMoeLayer)
+            and attention_inputs is not None
+        ):
+            hidden_states = self.mlp(
+                hidden_states, is_prefill=attention_inputs.is_prefill
+            )
+        else:
+            hidden_states = self.mlp(hidden_states)
 
         return hidden_states, residual
 

@@ -117,7 +117,9 @@ class GenericMoeLayer(nn.Module):
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, hidden_states: torch.Tensor, is_prefill: Optional[bool] = None
+    ) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
         router_logits_fp32 = router_logits.float()
@@ -173,6 +175,9 @@ class GenericMoeLayer(nn.Module):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
+            extra_expert_args=(
+                {"is_prefill": is_prefill} if is_prefill is not None else None
+            ),
         )
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(
