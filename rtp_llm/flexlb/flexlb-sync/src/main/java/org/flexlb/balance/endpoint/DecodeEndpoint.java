@@ -116,7 +116,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                         inflightKvReservedTotal.addAndGet(-removed.kvTokens());
                         inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
                     } else if (!isCancelError(task)) {
-                        logger.warn("Decode calibrate: finished failed request reqId={} not in inflight, error={}",
+                        logger.debug("Decode calibrate: finished failed request reqId={} not in inflight, error={}",
                                 task.getRequestId(), task.getErrorMessage());
                     }
                 }
@@ -193,6 +193,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         reporter.reportInflightRequestCount(RoleType.DECODE.name(), getIp(), ipPort(), getInflightCount());
         reporter.reportDecodeTotalLoad(getIp(), ipPort(), getTotalLoad());
         reporter.reportDecodeInflightKvReserved(getIp(), ipPort(), inflightKvReserved());
+        reporter.reportDecodeInflightHardKvReserved(getIp(), ipPort(), inflightHardKvReserved());
+        reporter.reportInflightMaxAgeMs(RoleType.DECODE.name(), getIp(), ipPort(),
+                InflightEvictor.maxAgeMs(inflightRequests, System.currentTimeMillis()));
     }
 
     /**

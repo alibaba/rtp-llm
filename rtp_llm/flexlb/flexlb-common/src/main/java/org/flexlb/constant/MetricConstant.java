@@ -87,6 +87,18 @@ public class MetricConstant {
     public static final String DECODE_INFLIGHT_KV_RESERVED_TOKENS = "app.flexlb.decode.inflight.kv.reserved.tokens";
 
     /**
+     * FlexLB scheduler inflight hard KV cache reserved tokens per decode worker (hard reservation that cannot be reclaimed)
+     */
+    public static final String DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS =
+            "app.flexlb.decode.inflight.hard.kv.reserved.tokens";
+
+    /**
+     * FlexLB scheduler inflight max age (ms) — age of the oldest inflight entry, tagged by role and engineIp.
+     */
+    public static final String INFLIGHT_MAX_AGE_MS =
+            "app.flexlb.inflight.max.age.ms";
+
+    /**
      * Batch predicted execution time (formula estimate) in milliseconds
      */
     public static final String BATCH_PREDICTED_TIME_MS = "app.flexlb.batch.predicted.time.ms";
