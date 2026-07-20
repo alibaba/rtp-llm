@@ -13,8 +13,13 @@ that computes zigzag positions from first principles.
 """
 
 import unittest
+from types import SimpleNamespace
 from typing import List, Set, Tuple
+from unittest.mock import patch
 
+import torch
+
+from rtp_llm.models_py.modules.factory.attention import common as attention_common
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     generate_full_causal_kv_indices,
     generate_half_kv_indices,
@@ -22,6 +27,40 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
     generate_nonlocal_causal_kv_indices,
     generate_q_indices,
 )
+
+
+class CacheStoreInputLengthTest(unittest.TestCase):
+    def test_writer_uses_full_lengths_captured_before_cp_sharding(self):
+        local_lengths = torch.tensor([1384], dtype=torch.int32)
+        full_lengths = torch.tensor([2768], dtype=torch.int32)
+        prefix_lengths = torch.tensor([0], dtype=torch.int32)
+        block_ids = torch.tensor([[1, 2, 3, 4, 5, 6]], dtype=torch.int32)
+        cache_store_inputs = object()
+        attn_inputs = SimpleNamespace(
+            is_prefill=True,
+            cache_store_inputs=cache_store_inputs,
+            input_lengths=local_lengths,
+            prefix_lengths=prefix_lengths,
+            kv_cache_block_id=block_ids,
+            context_parallel_info=SimpleNamespace(
+                prefill_actual_input_lengths_cpu=full_lengths
+            ),
+        )
+
+        writer = object()
+        with patch.object(
+            attention_common, "WriteCacheStoreOp", return_value=writer
+        ) as constructor:
+            self.assertIs(
+                attention_common.create_write_cache_store_impl(attn_inputs), writer
+            )
+
+        args = constructor.call_args.args
+        self.assertIs(args[0], full_lengths)
+        self.assertIs(args[1], prefix_lengths)
+        self.assertIs(args[2], block_ids)
+        self.assertIs(args[3], cache_store_inputs)
+
 
 # ---------------------------------------------------------------------------
 # Reference helpers (independent of the code under test)

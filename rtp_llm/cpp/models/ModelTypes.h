@@ -49,6 +49,7 @@ struct GptModelInitParams {
     size_t                                       tokens_per_block        = 0;
     size_t                                       kernel_tokens_per_block = 0;
     std::shared_ptr<KVCacheManager>              cache_manager;
+    int64_t                                      hc_mult = 1;
 };
 
 enum GptModelInputIndex : size_t {
@@ -74,6 +75,7 @@ enum GptModelInputIndex : size_t {
     mmHasExtraInput,    // number of extra-input tensors (model-specific, e.g. deepstack)
     mmExtraInputDtype,  // dtype of extra-input elements
     needAllLogits,
+    needAllHiddenStates,
     mtpHiddenStates,
     mtpHiddenStatesDtype,
     skipRun,
