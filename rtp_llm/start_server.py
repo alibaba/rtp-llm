@@ -5,10 +5,8 @@ import sys
 import time
 import traceback
 
-import requests
 import torch
 
-from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.utils.time_util import timer_wrapper
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +40,8 @@ def _install_hot_hook_runtime(role: str) -> None:
 
 def check_server_health(server_port):
     try:
+        import requests
+
         response = requests.get(f"http://localhost:{server_port}/health", timeout=60)
         health_ok = False
         if response.status_code == 200:

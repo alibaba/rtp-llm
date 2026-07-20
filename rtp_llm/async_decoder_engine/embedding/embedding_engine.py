@@ -21,6 +21,11 @@ class EmbeddingCppEngine(BaseEngine):
         logging.info("creating cpp embedding engine")
         self.model = model
         self.engine_config = engine_config
+        from rtp_llm.ops import ensure_engine_ops_loaded
+
+        ensure_engine_ops_loaded()
+        from rtp_llm.ops import RtpEmbeddingOp
+
         self.cpp_engine = RtpEmbeddingOp()
         # Owned here: created in _start (local VIT), torn down in _stop. None until
         # started, so _stop before _start is safe.

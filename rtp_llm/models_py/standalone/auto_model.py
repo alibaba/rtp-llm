@@ -8,7 +8,6 @@ from typing import Optional
 import torch
 from transformers import AutoTokenizer
 
-import rtp_llm.models
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.model_factory import ModelFactory

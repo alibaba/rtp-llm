@@ -9,8 +9,6 @@ import torch
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
-from rtp_llm.async_decoder_engine.base_engine import BaseEngine
-from rtp_llm.async_decoder_engine.engine_creator import create_engine
 from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
@@ -24,8 +22,8 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
-from rtp_llm.model_factory_register import _model_factory
-from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType
+from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
+from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, VitSeparation
 from rtp_llm.utils.util import check_with_info
 
 
@@ -45,12 +43,16 @@ class ModelFactory:
     @staticmethod
     def get_weight_cls(model_type: str):
         global _model_factory
+        if not ensure_model_registered(model_type):
+            raise KeyError(f"model type [{model_type}] is not registered")
         model_cls = _model_factory[model_type]
         return model_cls.get_weight_cls()
 
     @staticmethod
     def get_model_cls(model_type: str):
         global _model_factory
+        if not ensure_model_registered(model_type):
+            raise KeyError(f"model type [{model_type}] is not registered")
         model_cls = _model_factory[model_type]
         return model_cls
 

@@ -9,14 +9,11 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Dict, List, Mapping, Optional, Tuple
 
-import requests
 from pydantic import BaseModel, Field
 
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
-from rtp_llm.vipserver import get_host_list_by_domain, get_host_list_by_domain_now
-from rtp_llm.vipserver.host import Host
 
 route_logger = logging.getLogger("route_logger")
 
@@ -25,6 +22,15 @@ class HostHealthStatus(Enum):
     HEALTHY = "healthy"
     UNHEALTHY = "unhealthy"
     UNKNOWN = "unknown"
+
+
+@dataclass
+class Host:
+    ip: str
+    port: str
+
+    def __str__(self):
+        return f"ip:{self.ip},port:{self.port}"
 
 
 @dataclass
@@ -101,13 +107,25 @@ class VipServerWrapper:
                 hosts.append(Host(ip, port))
             self.hosts = hosts
         else:
+            from rtp_llm.vipserver import get_host_list_by_domain
+
             self.hosts = get_host_list_by_domain(self.domain)
 
     def get_host(self, refresh: bool = False) -> Optional[Host]:
         if not self.domain:
             return None
-        get_hosts = get_host_list_by_domain_now if refresh else get_host_list_by_domain
-        hosts = self.hosts if self.use_local else get_hosts(self.domain)
+        if self.use_local:
+            hosts = self.hosts
+        else:
+            from rtp_llm.vipserver import (
+                get_host_list_by_domain,
+                get_host_list_by_domain_now,
+            )
+
+            get_hosts = (
+                get_host_list_by_domain_now if refresh else get_host_list_by_domain
+            )
+            hosts = get_hosts(self.domain)
         if not hosts:
             return None
         cur_idx = self.cnt % len(hosts)
@@ -117,8 +135,18 @@ class VipServerWrapper:
     def get_hosts(self, refresh: bool = False) -> List[Host]:
         if not self.domain:
             return []
-        get_hosts = get_host_list_by_domain_now if refresh else get_host_list_by_domain
-        hosts = self.hosts if self.use_local else get_hosts(self.domain)
+        if self.use_local:
+            hosts = self.hosts
+        else:
+            from rtp_llm.vipserver import (
+                get_host_list_by_domain,
+                get_host_list_by_domain_now,
+            )
+
+            get_hosts = (
+                get_host_list_by_domain_now if refresh else get_host_list_by_domain
+            )
+            hosts = get_hosts(self.domain)
         return hosts if hosts else []
 
 
@@ -308,6 +336,8 @@ class MasterService:
         request_url = f"http://{master_addr}/rtp_llm/master/info"
 
         try:
+            import requests
+
             response = requests.post(request_url, headers=headers, json={}, timeout=0.5)
             if response.status_code == 200:
                 result = response.json()
@@ -464,13 +494,9 @@ class MasterService:
             1,
             tags={"master_host": snapshot.master_addr},
         )
-        kmonitor.report(
-            GaugeMetrics.MASTER_QUEUE_LENGTH_METRIC, snapshot.queue_length
-        )
+        kmonitor.report(GaugeMetrics.MASTER_QUEUE_LENGTH_METRIC, snapshot.queue_length)
 
-    def _cleanup_unhealthy_nodes(
-        self, host_health_map: Dict[str, FlexlbHeartbeatInfo]
-    ):
+    def _cleanup_unhealthy_nodes(self, host_health_map: Dict[str, FlexlbHeartbeatInfo]):
         current_time = time.time()
         nodes_to_remove = []
 
