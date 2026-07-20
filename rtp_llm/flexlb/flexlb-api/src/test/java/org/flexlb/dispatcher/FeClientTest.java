@@ -100,10 +100,11 @@ class FeClientTest {
         // JSON, so an inbound accept-encoding (a gzipped FE body would break the parse) must be
         // dropped and an inbound content-type must not describe the re-serialized entity.
         //
-        // Only accept-encoding can be pinned on the outbound request: FeClient sets the
+        // Only accept-encoding's drop can be pinned on the outbound request: FeClient sets the
         // content-type explicitly after copying the headers, so the wire value is application/json
         // whether or not FANOUT_SKIP drops it. The content-type drop is therefore pinned where it
-        // is actually decided, on the copy itself.
+        // is actually decided, on the copy itself, and the wire value is pinned separately as the
+        // property it is in its own right — FE must receive JSON no matter what the caller sent.
         server.enqueue(new MockResponse()
                 .setHeader("Content-Type", "application/json")
                 .setBody("{\"response_batch\":[]}"));
@@ -124,6 +125,11 @@ class FeClientTest {
         Assertions.assertNotNull(rec, "FE never received the chunk request within 5s");
         Assertions.assertNull(rec.getHeader("Accept-Encoding"),
                 "accept-encoding must not be relayed — the fanout parses the FE body as plain bytes");
+        String contentType = rec.getHeader("Content-Type");
+        Assertions.assertNotNull(contentType);
+        Assertions.assertTrue(contentType.startsWith("application/json"),
+                "FeClient sets the content-type itself, so a chunk reaches FE as JSON whatever the "
+                        + "caller sent: " + contentType);
 
         HttpHeaders copied = new HttpHeaders();
         DispatcherHeaders.copyEndToEnd(inbound, copied, DispatcherHeaders.FANOUT_SKIP);

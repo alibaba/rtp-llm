@@ -73,14 +73,25 @@ public class HttpNettyChannelContext<T> {
 
     /**
      * {@code sink} is installed by the thread that issues the request while the Netty threads may
-     * already be ending the exchange, so both fields are confined to this monitor. Termination is
-     * a single claim split over {@link #installSink} and {@link #claimTermination}: whichever side
-     * runs first, exactly one of them comes away owning the sink's terminal signal.
+     * already be ending the exchange, so both fields are confined to this monitor — which also
+     * supplies the happens-before that plain fields never had between the installing thread and
+     * the Netty ones.
+     *
+     * <p>The monitor carries a claim, {@link #installSink} plus {@link #claimTermination}, over
+     * the paths that end an exchange <em>early</em>: whichever of them runs first, exactly one
+     * comes away owning the sink's terminal signal. The claim does not reach the ordinary
+     * completion path, which emits onto the sink directly and only then marks {@link #setFinish}
+     * (see {@code NettyUtils#finish}). That path is safe for a reason outside this monitor: it
+     * runs on the inbound executor and marks the exchange finished before the close it issues can
+     * deliver a channelInactive, so every later claimant finds the claim already taken. Move
+     * either side off the thread it runs on today and it is that argument, not the monitor, that
+     * gives way.
      */
     public synchronized FluxSink<T> getSink() {
         return sink;
     }
 
+    /** Unused today; kept so {@code @Data} cannot put an unsynchronized setter back in its place. */
     public synchronized void setSink(FluxSink<T> sink) {
         this.sink = sink;
     }
