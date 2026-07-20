@@ -66,6 +66,12 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                    params.parallelism_config.dp_rank * params.parallelism_config.tp_size
                        + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
+    if (propose_params_) {
+        reserve_step_ = propose_params_->gen_num_per_circle + 1;
+    } else {
+        reserve_step_ = 0;
+    }
+    RTP_LLM_LOG_INFO("normal engine speculative reserve_step is %d", reserve_step_);
 #if !USING_CUDA
     // On ROCm, this constructor runs on a gRPC handler thread that defaults to
     // GPU 0. Set the correct device so all GPU allocations (KV cache, etc.) go
@@ -101,11 +107,6 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     RTP_LLM_LOG_INFO("create cache manager done");
 
     initExecutor(params, propose_params_);
-    if (propose_params_) {
-        reserve_step_ = propose_params_->gen_num_per_circle + 1;
-    } else {
-        reserve_step_ = 0;
-    }
 
     RTP_LLM_LOG_INFO("create normal executor done");
 
@@ -181,13 +182,13 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
                                                          nullptr,
                                                          0,
                                                          mode == preRunMode::prefill_warm_up);
+    stream->setReserveStep(reserve_step_);
     if (mode == preRunMode::decode_warm_up) {
         stream->setIsContextStream(false);
         size_t seq_size_per_block = model_config_.attn_config.tokens_per_block;
         size_t reserved_blocks    = (stream->seqLength() + seq_size_per_block - 1) / seq_size_per_block + reserve_step_;
         stream->fakeInitKVBlock(reserved_blocks);
     } else if (mode == preRunMode::build_system_prompt) {
-        stream->setReserveStep(reserve_step_);
         THROW_IF_STATUS_ERROR(stream->initKVBlock());
     };
     std::list<GenerateStreamPtr> streams{stream};
@@ -236,12 +237,32 @@ std::shared_ptr<GenerateInput> NormalEngine::makeFakeInput(size_t seq_len) {
     return fake_input;
 }
 
+size_t NormalEngine::getWarmUpInputLength() const {
+    const auto max_seq_len  = static_cast<size_t>(model_config_.max_seq_len);
+    const auto reserve_step = reserve_step_ > 0 ? static_cast<size_t>(reserve_step_) : 0;
+    if (reserve_step > 0) {
+        RTP_LLM_CHECK_WITH_INFO(max_seq_len > reserve_step,
+                                "max_seq_len [%zu] should be greater than speculative reserve_step [%zu]",
+                                max_seq_len,
+                                reserve_step);
+        const auto input_len = max_seq_len - reserve_step;
+        RTP_LLM_LOG_INFO("framework warm up input len adjusted by speculative reserve_step, "
+                         "max_seq_len=%zu, reserve_step=%zu, input_len=%zu",
+                         max_seq_len,
+                         reserve_step,
+                         input_len);
+        return input_len;
+    }
+    RTP_LLM_CHECK_WITH_INFO(max_seq_len > 1, "max_seq_len [%zu] should be greater than 1", max_seq_len);
+    return max_seq_len - 1;
+}
+
 WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 #if !USING_CUDA
     RTP_LLM_FAIL("prefillWarmUp is not supported on non-CUDA platforms");
     return {};
 #else
-    auto fake_input                                   = makeFakeInput((size_t)model_config_.max_seq_len - 1);
+    auto fake_input                                   = makeFakeInput(getWarmUpInputLength());
     fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
@@ -262,7 +283,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     RTP_LLM_FAIL("decodeWarmUp is not supported on non-CUDA platforms");
     return {};
 #else
-    auto fake_input                                   = makeFakeInput((size_t)model_config_.max_seq_len - 1);
+    auto fake_input                                   = makeFakeInput(getWarmUpInputLength());
     fake_input->generate_config->num_return_sequences = runtime_config.max_generate_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);

@@ -37,6 +37,9 @@ private:
     void accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool waitPredicate() override;
     void onRunningStream(const GenerateStreamPtr& stream) override;
+    // Context-parallel prefill can opt into single-request admission until
+    // the model-side path supports per-request layouts.
+    const bool cp_force_single_prefill_ = false;
 
     // TODO @wangyin support different beams run togather
 };

@@ -1,7 +1,9 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOSchedulerBase.h"
 
+#include <algorithm>
 #include <chrono>
 #include <mutex>
+#include <unordered_set>
 
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -23,6 +25,8 @@ FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runt
     max_seq_len_(model_config.max_seq_len),
     max_batch_tokens_size_(runtime_config.fifo_scheduler_config.max_batch_tokens_size),
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
+    max_inited_kv_cache_streams_(
+        std::max<int64_t>(runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams, 0)),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
     metrics_reporter_(metrics_reporter) {}
 
@@ -58,6 +62,20 @@ int64_t FIFOSchedulerBase::lastScheduleTime() {
 }
 
 bool FIFOSchedulerBase::checkInputLength(const GenerateStreamPtr& stream) {
+    const auto input_length = static_cast<size_t>(stream->inputLength());
+    const auto reserve_step = stream->reserveStep();
+    if (reserve_step > 0 && !(input_length <= max_seq_len_ && reserve_step <= max_seq_len_ - input_length)) {
+        const auto allowed_input_length = reserve_step <= max_seq_len_ ? max_seq_len_ - reserve_step : 0;
+        auto       error_info           = autil::StringUtil::formatString(
+            "input len %zu with speculative reserve_step %zu exceeds max seq len %zu, "
+            "allowed max input len for speculative decoding is %zu",
+            input_length,
+            reserve_step,
+            max_seq_len_,
+            allowed_input_length);
+        stream->reportError(ErrorCode::LONG_PROMPT_ERROR, error_info);
+        return false;
+    }
     if (stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
         stream->reportError(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
                             autil::StringUtil::formatString("input len " + std::to_string(stream->inputLength())
@@ -97,7 +115,7 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOSchedulerBase::batchEnqueue(con
         schedule_trigger_ = true;
     }
     cond_.notify_all();
-    return streams;
+    return stream_enqueued;
 }
 
 size_t FIFOSchedulerBase::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams) {
@@ -119,7 +137,10 @@ size_t FIFOSchedulerBase::evaluateAndUpdateStreams(list<GenerateStreamPtr>& stre
 
 void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_streams) {
     RTP_LLM_PROFILE_FUNCTION();
-    list<GenerateStreamPtr> new_streams;
+    list<GenerateStreamPtr>             admitted_streams;
+    std::unordered_set<GenerateStream*> admitted_stream_ptrs;
+    const size_t inited_kv_streams = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
+    size_t       admitted_new_init_streams = 0;
 
     struct GroupInfo {
         int64_t first_arrival_time = 0;
@@ -154,7 +175,7 @@ void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_
             }
         }
 
-        if (!new_streams.empty()) {
+        if (!admitted_streams.empty()) {
             if (force_batch_group_id != -1) {
                 if (!force_batch || stream->batchGroupId() != force_batch_group_id) {
                     it++;
@@ -166,16 +187,59 @@ void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_
             }
         }
 
-        if (!stream->hasError() && !stream->hasEvent(StreamEvents::CanRun)
-            && evaluateRunningMemory(new_streams, stream)) {
-            stream->reportEvent(StreamEvents::CanRun);
-            new_streams.push_back(stream);
-            if (new_streams.size() == 1 && force_batch && stream->batchGroupId() != -1) {
+        const bool already_inited_kv = stream->curBlocksNum() > 0;
+        if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv
+            && inited_kv_streams + admitted_new_init_streams >= max_inited_kv_cache_streams_) {
+            ++it;
+            continue;
+        }
+
+        // PD decode streams may already carry CanRun before FIFO admission.
+        // Capacity checks must still run for the current scheduling round.
+        if (!stream->hasError() && evaluateRunningMemory(admitted_streams, stream)) {
+            if (!stream->hasEvent(StreamEvents::CanRun)) {
+                stream->reportEvent(StreamEvents::CanRun);
+            }
+            admitted_streams.push_back(stream);
+            admitted_stream_ptrs.insert(stream.get());
+            if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv) {
+                ++admitted_new_init_streams;
+            }
+            if (admitted_streams.size() == 1 && force_batch && stream->batchGroupId() != -1) {
                 force_batch_group_id = stream->batchGroupId();
             }
         }
         it++;
     }
+
+    for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
+        auto& stream = *it;
+        if (!stream->hasError() && admitted_stream_ptrs.find(stream.get()) == admitted_stream_ptrs.end()) {
+            ++it;
+            continue;
+        }
+        const auto state     = stream->getStatus();
+        const auto new_state = stream->moveToNext();
+        if (new_state != state) {
+            addStreamToNewState(stream, new_state);
+            it = waiting_streams.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+size_t FIFOSchedulerBase::countInitedKVCacheStreams() const {
+    const auto count_inited = [](const list<GenerateStreamPtr>& streams) {
+        size_t count = 0;
+        for (const auto& stream : streams) {
+            if (stream && stream->curBlocksNum() > 0) {
+                ++count;
+            }
+        }
+        return count;
+    };
+    return count_inited(waiting_streams_) + count_inited(loading_cache_streams_) + count_inited(running_streams_);
 }
 
 void FIFOSchedulerBase::addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state) {

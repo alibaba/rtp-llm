@@ -380,7 +380,9 @@ std::string FIFOSchedulerConfig::to_string() const {
     oss << "max_context_batch_size: " << max_context_batch_size << "\n"
         << "max_batch_tokens_size: " << max_batch_tokens_size << "\n"
         << "pdfusion_scheduler_mode: " << pdfusion_scheduler_mode << "\n"
-        << "decode_prefill_ratio: " << decode_prefill_ratio;
+        << "decode_prefill_ratio: " << decode_prefill_ratio << "\n"
+        << "cp_force_single_prefill: " << cp_force_single_prefill << "\n"
+        << "max_inited_kv_cache_streams: " << max_inited_kv_cache_streams;
     return oss.str();
 }
 

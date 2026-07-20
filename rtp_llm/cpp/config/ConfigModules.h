@@ -367,6 +367,8 @@ struct FIFOSchedulerConfig {
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".
     std::string decode_prefill_ratio = "1";
+    bool        cp_force_single_prefill     = true;
+    int64_t     max_inited_kv_cache_streams = 0;
     std::string to_string() const;
 };
 

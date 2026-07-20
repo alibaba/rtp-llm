@@ -251,6 +251,9 @@ public:
     std::string  stopReason();
 
     void        setReserveStep(size_t reserve_step);
+    size_t      reserveStep() const {
+        return reserve_step_;
+    }
     StreamState moveToNext();
 
     virtual StreamState getStatus() const;
