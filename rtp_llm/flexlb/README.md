@@ -241,19 +241,6 @@ FlexLB supports various configuration options through environment variables and 
 - **Load Balancing Strategy**: Configure through `FLEXLB_CONFIG`
 - **Backend Services**: Configure through `MODEL_SERVICE_CONFIG`
 - **ZooKeeper Settings**: Configure through `FLEXLB_SYNC_CONSISTENCY_CONFIG`
-- **Monitor Provider**: Configure through `FLEXLB_MONITOR_PROVIDER`. Supported providers are
-  `prometheus` and `kmonitor`; missing or unsupported values fall back to the NoOp monitor.
-
-## Monitoring
-
-FlexLB provides comprehensive monitoring through:
-
-- Prometheus metrics endpoint: `http://localhost:7002/prometheus`
-- Health checks: `http://localhost:7002/health`
-- Application info: `http://localhost:7002/info`
-
-`FlexMonitor` metrics exported by the Prometheus provider use the `flexlb_` prefix.
-
 ## Contributing
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details on how to contribute to this project.

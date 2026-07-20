@@ -67,28 +67,28 @@ public class CacheMetricsReporter {
      */
     private void registerCacheMetrics() {
         // Engine local cache metrics
-        monitor.register(CACHE_ENGINE_LOCAL_COUNT, FlexMetricType.GAUGE, FlexMetricTags.of("engineIp", "", "role", ""));
-        monitor.register(CACHE_ENGINE_LOCAL_BYTES, FlexMetricType.GAUGE, FlexMetricTags.of("engineIp", "", "role", ""));
+        monitor.register(CACHE_ENGINE_LOCAL_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_ENGINE_LOCAL_BYTES, FlexMetricType.GAUGE);
 
         // Global cache metrics
-        monitor.register(CACHE_GLOBAL_TOTAL_COUNT, FlexMetricType.GAUGE, FlexMetricTags.of());
-        monitor.register(CACHE_GLOBAL_BYTES, FlexMetricType.GAUGE, FlexMetricTags.of());
+        monitor.register(CACHE_GLOBAL_TOTAL_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_GLOBAL_BYTES, FlexMetricType.GAUGE);
 
         // Cache hit rate metrics
-        monitor.register(CACHE_HIT_COUNT, FlexMetricType.GAUGE, FlexMetricTags.of("role", "", "engineIp", ""));
-        monitor.register(CACHE_HIT_RATIO, FlexMetricType.GAUGE, FlexMetricTags.of("role", "", "engineIp", ""));
-        monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS, FlexMetricTags.of("role", "", "engineIp", ""));
+        monitor.register(CACHE_HIT_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_HIT_RATIO, FlexMetricType.GAUGE);
+        monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS);
 
         // Cache service response time metrics
-        monitor.register(CACHE_FIND_MATCHING_ENGINES_RT, FlexMetricType.GAUGE, FlexMetricTags.of("role", "", "success", ""));
-        monitor.register(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT, FlexMetricType.GAUGE, FlexMetricTags.of("engineIpPort", "", "role", "", "success", ""));
+        monitor.register(CACHE_FIND_MATCHING_ENGINES_RT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT, FlexMetricType.GAUGE);
 
         // Cache diff related metrics
-        monitor.register(CACHE_DIFF_ADDED_BLOCKS_SIZE, FlexMetricType.GAUGE, FlexMetricTags.of("engineIp", "", "role", ""));
-        monitor.register(CACHE_DIFF_REMOVED_BLOCKS_SIZE, FlexMetricType.GAUGE, FlexMetricTags.of("engineIp", "", "role", ""));
+        monitor.register(CACHE_DIFF_ADDED_BLOCKS_SIZE, FlexMetricType.GAUGE);
+        monitor.register(CACHE_DIFF_REMOVED_BLOCKS_SIZE, FlexMetricType.GAUGE);
 
         // Engine view map size metrics
-        monitor.register(CACHE_ENGINE_VIEWS_MAP_SIZE, FlexMetricType.GAUGE, FlexMetricTags.of());
+        monitor.register(CACHE_ENGINE_VIEWS_MAP_SIZE, FlexMetricType.GAUGE);
     }
 
     /**

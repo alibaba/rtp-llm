@@ -38,7 +38,7 @@ public class ExpirationCleaner {
 
     @PostConstruct
     public void init() {
-        this.monitor.register(TASK_REMOVED, FlexMetricType.QPS, FlexPriorityType.PRECISE, FlexMetricTags.of("role", "", "ip", "", "type", ""));
+        this.monitor.register(TASK_REMOVED, FlexMetricType.QPS, FlexPriorityType.PRECISE);
     }
 
     @Scheduled(fixedRate = 3000)

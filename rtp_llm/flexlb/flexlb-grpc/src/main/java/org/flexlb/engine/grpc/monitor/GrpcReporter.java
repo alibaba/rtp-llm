@@ -30,11 +30,11 @@ public class GrpcReporter {
 
     @PostConstruct
     public void init() {
-        this.monitor.register(GRPC_CHANNEL_POOL_SIZE, FlexMetricType.GAUGE, FlexMetricTags.of("type", ""));
-        this.monitor.register(GRPC_CALL_DURATION, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, FlexMetricTags.of("ip", "", "service", "", "retry", ""));
-        this.monitor.register(GRPC_RESPONSE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, FlexMetricTags.of("ip", "", "service", "", "retry", ""));
-        this.monitor.register(GRPC_CALL_COUNT, FlexMetricType.QPS, FlexMetricTags.of("ip", "", "service", "", "retry", ""));
-        this.monitor.register(GRPC_CONNECTION_DURATION, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, FlexMetricTags.of("ip", "", "service", ""));
+        this.monitor.register(GRPC_CHANNEL_POOL_SIZE, FlexMetricType.GAUGE);
+        this.monitor.register(GRPC_CALL_DURATION, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(GRPC_RESPONSE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(GRPC_CALL_COUNT, FlexMetricType.QPS);
+        this.monitor.register(GRPC_CONNECTION_DURATION, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
     }
 
     /**

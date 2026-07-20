@@ -11,22 +11,22 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class GracefulLifecycleReporterTest {
 
     @Test
-    void processOkUsesTheLifecycleRegistrationTagSchema() {
+    void processOkRegistersLifecycleMetricAndReportsTags() {
         CapturingFlexMonitor monitor = new CapturingFlexMonitor();
         GracefulLifecycleReporter reporter = new GracefulLifecycleReporter(monitor);
 
         reporter.reportProcessOk();
 
-        assertEquals(
-                FlexMetricTags.of("type", "", "duration_ms", ""),
-                monitor.registeredTags);
+        assertEquals(FlexMetricType.GAUGE, monitor.registeredMetricType);
+        assertEquals(FlexPriorityType.PRECISE, monitor.registeredPriorityType);
         assertEquals(
                 FlexMetricTags.of("type", "process_ok", "duration_ms", "0"),
                 monitor.reportedTags);
     }
 
     private static final class CapturingFlexMonitor implements FlexMonitor {
-        private FlexMetricTags registeredTags;
+        private FlexMetricType registeredMetricType;
+        private FlexPriorityType registeredPriorityType;
         private FlexMetricTags reportedTags;
 
         @Override
@@ -35,19 +35,12 @@ class GracefulLifecycleReporterTest {
 
         @Override
         public void register(String metricName, FlexMetricType metricType, FlexPriorityType priorityType) {
+            registeredMetricType = metricType;
+            registeredPriorityType = priorityType;
         }
 
         @Override
         public void register(String metricName, FlexMetricType metricType, int statisticsType) {
-        }
-
-        @Override
-        public void register(
-                String metricName,
-                FlexMetricType metricType,
-                FlexPriorityType priorityType,
-                FlexMetricTags metricsTags) {
-            registeredTags = metricsTags;
         }
 
         @Override

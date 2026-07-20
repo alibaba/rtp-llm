@@ -15,13 +15,11 @@ public class GracefulLifecycleReporter {
 
     private static final String TYPE_TAG = "type";
     private static final String DURATION_MS_TAG = "duration_ms";
-    private static final FlexMetricTags LIFECYCLE_TAGS = FlexMetricTags.of(TYPE_TAG, "", DURATION_MS_TAG, "");
-
     private final FlexMonitor monitor;
 
     public GracefulLifecycleReporter(FlexMonitor monitor) {
         this.monitor = monitor;
-        monitor.register(LIFECYCLE_EVENT_METRIC, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, LIFECYCLE_TAGS);
+        monitor.register(LIFECYCLE_EVENT_METRIC, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
     }
 
     public void reportHealthCheckOffline(long durationMs) {

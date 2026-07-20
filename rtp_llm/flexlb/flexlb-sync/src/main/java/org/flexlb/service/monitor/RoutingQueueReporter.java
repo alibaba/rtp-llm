@@ -44,18 +44,18 @@ public class RoutingQueueReporter {
      */
     @PostConstruct
     public void init() {
-        monitor.register(ROUTING_QUEUE_LENGTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, FlexMetricTags.of("type", ""));
-        monitor.register(ROUTING_QUEUE_ENTRY_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE, tags);
-        monitor.register(ROUTING_QUEUE_TIMEOUT_QPS, FlexMetricType.QPS, tags);
-        monitor.register(ROUTING_QUEUE_REJECTED_QPS, FlexMetricType.QPS, tags);
-        monitor.register(ROUTING_QUEUE_CANCELLED_QPS, FlexMetricType.QPS, tags);
-        monitor.register(ROUTING_QUEUE_WAIT_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, tags);
-        monitor.register(ROUTING_ROUTE_EXECUTION_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE, tags);
+        monitor.register(ROUTING_QUEUE_LENGTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(ROUTING_QUEUE_ENTRY_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(ROUTING_QUEUE_TIMEOUT_QPS, FlexMetricType.QPS);
+        monitor.register(ROUTING_QUEUE_REJECTED_QPS, FlexMetricType.QPS);
+        monitor.register(ROUTING_QUEUE_CANCELLED_QPS, FlexMetricType.QPS);
+        monitor.register(ROUTING_QUEUE_WAIT_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(ROUTING_ROUTE_EXECUTION_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         // Routing status monitoring metrics
-        monitor.register(ROUTING_SUCCESS_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE, tags);
-        monitor.register(ROUTING_FAILURE_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE, FlexMetricTags.of("code", ""));
-        monitor.register(ROUTING_RETRY_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE, tags);
+        monitor.register(ROUTING_SUCCESS_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(ROUTING_FAILURE_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(ROUTING_RETRY_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
         log.info("RoutingQueueReporter initialized and registered with KMonitor");
     }
