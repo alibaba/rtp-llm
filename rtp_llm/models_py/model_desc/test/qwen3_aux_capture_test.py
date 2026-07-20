@@ -7,9 +7,10 @@ Runs a tiny random-weight Qwen3Model and checks:
      layer i, for the configured 0-based layer ids).
 
 Layer-id semantics note: the ids here are 0-based "output of layer i".  The
-draft ckpt's aux_hidden_state_layer_ids are 1-based (id j = output of 1-based
-layer j); conversion ids = [j - 1 for j in aux_ids] happens where the draft
-ckpt is read (see ModelConfig.capture_aux_hidden_layer_ids).
+draft ckpt's aux_hidden_state_layer_ids use the speculators convention where
+id j = output of 0-based decoder layer j-1 (embedding is the implicit layer 0);
+conversion ids = [j - 1 for j in aux_ids] happens where the draft ckpt is read
+(see the vLLM-equivalence note at that -1 in model_factory.py).
 """
 
 import unittest

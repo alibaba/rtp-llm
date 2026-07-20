@@ -157,6 +157,13 @@ class DSparkModelGoldenTest(unittest.TestCase):
     """Runs the full draft round once, then compares stage by stage."""
 
     @classmethod
+    def _model_class(cls):
+        """Draft model under test; DFlash subclass overrides this."""
+        from rtp_llm.models_py.model_desc.qwen3_dspark import Qwen3DSparkModel
+
+        return Qwen3DSparkModel
+
+    @classmethod
     def setUpClass(cls):
         if not torch.cuda.is_available():
             raise unittest.SkipTest("CUDA not available")
@@ -170,7 +177,6 @@ class DSparkModelGoldenTest(unittest.TestCase):
         from safetensors import safe_open
 
         from rtp_llm.models.qwen_3_dspark import Qwen3DSpark
-        from rtp_llm.models_py.model_desc.qwen3_dspark import Qwen3DSparkModel
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
             PyFlashinferPagedPrefillImpl,
         )
@@ -198,7 +204,7 @@ class DSparkModelGoldenTest(unittest.TestCase):
         weights = _build_model_weights(raw, config.num_layers, "cuda")
 
         parallelism_config = ParallelismConfig()
-        model = Qwen3DSparkModel(
+        model = cls._model_class()(
             config, parallelism_config, weights, max_generate_batch_size=4
         )
         # The block-forward path needs the rope + cache-write stages enabled.
@@ -562,8 +568,6 @@ class DSparkWeightInfoMappingTest(unittest.TestCase):
             kv_cache_config=KVCacheConfig(),
         )
         weight_info._process_meta([{}], list(inventory))
-        self.assertTrue(weight_info.has_markov_head)
-
         model_weight_info = weight_info._get_weight_info()
 
         def collect_names(module) -> List[str]:
@@ -591,11 +595,113 @@ class DSparkWeightInfoMappingTest(unittest.TestCase):
         missing = [name for name in declared if name not in inventory]
         self.assertFalse(missing, f"declared ckpt names missing: {missing}")
 
+        # DSpark declares the Markov head unconditionally (class identity now,
+        # not a ckpt probe).
+        self.assertIn("markov_head.markov_w1.weight", declared)
+        self.assertIn("markov_head.markov_w2.weight", declared)
+
         # Confidence head must stay unmapped (phase-1 No Goal).
         mapped = set(declared)
         confidence = [n for n in inventory if n.startswith("confidence_head.")]
         self.assertTrue(confidence, "expected confidence_head.* in the test ckpt")
         self.assertFalse(mapped & set(confidence))
+
+
+class DFlashModelGoldenTest(DSparkModelGoldenTest):
+    """DFlash (markov_rank=0 path) over the same converted ckpt + golden.
+
+    Stages A/B/C are the identical backbone, so the DSpark golden is reused as
+    is; only stage D differs — DFlash has no Markov head, so the draft tokens
+    are greedy argmax over base_logits and corrected_logits == base_logits.
+    Running the DSpark ckpt through Qwen3DFlashModel (which ignores the markov
+    weights) exercises the DFlash code path end to end — the coverage the
+    single-class implementation never had.
+    """
+
+    @classmethod
+    def _model_class(cls):
+        from rtp_llm.models_py.model_desc.qwen3_dflash import Qwen3DFlashModel
+
+        return Qwen3DFlashModel
+
+    def test_stage_d_draft_tokens_exact(self):
+        want = (
+            self.proposal.base_logits.squeeze(0).float().argmax(dim=-1).cpu().tolist()
+        )
+        got = self.proposal.draft_tokens.squeeze(0).cpu().tolist()
+        self.assertEqual(got, want, "DFlash draft tokens must be argmax(base_logits)")
+
+    def test_stage_d_corrected_logits(self):
+        # DFlash applies no transition bias: corrected == base_logits (fp32).
+        got = self.proposal.corrected_logits.squeeze(0).float().cpu()
+        want = self.proposal.base_logits.squeeze(0).float().cpu()
+        self.assertTrue(
+            torch.equal(got, want),
+            "DFlash corrected_logits must equal base_logits (no Markov bias)",
+        )
+
+    def test_forward_fills_draft_proposal_outputs(self):
+        """DFlash forward() surfaces the proposal's draft_tokens (argmax over
+        base_logits, not the DSpark markov golden) / draft_probs."""
+        with torch.no_grad():
+            outputs = self.model.forward(self.inputs, fmha_impl=self.fmha_impl)
+        k = self.config.dspark_config.speculative_tokens
+        vocab = self.config.vocab_size
+        self.assertEqual(tuple(outputs.draft_tokens.shape), (1, k))
+        self.assertEqual(
+            outputs.draft_tokens.squeeze(0).cpu().tolist(),
+            self.proposal.draft_tokens.squeeze(0).cpu().tolist(),
+        )
+        self.assertEqual(tuple(outputs.draft_probs.shape), (1, k, vocab))
+        sums = outputs.draft_probs.sum(dim=-1)
+        torch.testing.assert_close(
+            sums, torch.ones_like(sums), atol=1e-4, rtol=0,
+            msg="draft_probs rows must be a probability distribution",
+        )
+
+
+class DFlashWeightInfoMappingTest(unittest.TestCase):
+    """Qwen3DFlashWeight declares the shared backbone but NO Markov head."""
+
+    def test_dflash_declares_no_markov_head(self):
+        ckpt_dir = _ckpt_dir()
+        if not os.path.isdir(ckpt_dir):
+            raise unittest.SkipTest(f"dspark ckpt not available: {ckpt_dir}")
+
+        from safetensors import safe_open
+
+        from rtp_llm.models.qwen_3_dspark import Qwen3DFlash
+        from rtp_llm.ops import HWKernelConfig, KVCacheConfig, ParallelismConfig
+
+        with safe_open(
+            os.path.join(ckpt_dir, "model.safetensors"), framework="pt", device="cpu"
+        ) as f:
+            inventory = set(f.keys())
+
+        config = Qwen3DFlash._create_config(ckpt_dir)
+        weight_info = Qwen3DFlash.get_weight_cls()(
+            model_config=config,
+            parallelism_config=ParallelismConfig(),
+            hw_kernel_config=HWKernelConfig(),
+            kv_cache_config=KVCacheConfig(),
+        )
+        weight_info._process_meta([{}], list(inventory))
+        model_weight_info = weight_info._get_weight_info()
+
+        declared: List[str] = []
+        for module in model_weight_info.weights:
+            declared.extend(
+                info.name for info in getattr(module, "weights", []) or []
+            )
+
+        # Shared backbone extras present, Markov head absent.
+        self.assertIn("fc.weight", declared)
+        self.assertIn("model.hidden_norm.weight", declared)
+        self.assertNotIn("markov_head.markov_w1.weight", declared)
+        self.assertNotIn("markov_head.markov_w2.weight", declared)
+        # Everything DFlash declares must still exist in the (superset) ckpt.
+        missing = [name for name in declared if name not in inventory]
+        self.assertFalse(missing, f"DFlash declared names missing: {missing}")
 
 
 if __name__ == "__main__":
