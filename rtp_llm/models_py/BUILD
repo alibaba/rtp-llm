@@ -84,6 +84,11 @@ py_library(
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
         "//conditions:default": [],
+    }) + select({
+        # FA4 (Blackwell paged fp8) — cuda13 x86 only; used by the CP ALL_GATHER
+        # prefill path (allgather_cp_impl.py). Empty elsewhere via _CUDA13_X86_ONLY.
+        "@//:using_cuda13_x86": flashattn4,
+        "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
 )
