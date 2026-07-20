@@ -49,7 +49,7 @@ public class LearningPredictor implements PrefillTimePredictor {
     private final double beta2 = 0.95;
     private final double epsilon = 1e-20;
     private final double stable_alpha2 = 1;
-    private double alpha = 0.22;
+    private double alpha = 0.022;
     private double coff1 = 0.005;
     private double coff2 = 0.02;
     private double coff3 = 320;
