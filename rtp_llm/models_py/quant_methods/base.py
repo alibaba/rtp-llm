@@ -37,7 +37,58 @@ class QuantizeMethodBase(ABC):
         raise NotImplementedError
 
 
+class FusedMoEMethodBase(QuantizeMethodBase):
+    """Quantization contract for stacked expert weights.
+
+    MoE execution is owned by ``BaseMoEExperts`` and ``FusedMoeFactory``;
+    quant methods own allocation, streamed auxiliary tensors, and post-load
+    layout conversion.
+    """
+
+    @abstractmethod
+    def create_weights(
+        self,
+        layer,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size: int,
+        params_dtype: torch.dtype,
+        **kwargs,
+    ) -> None:
+        raise NotImplementedError
+
+    def apply(self, layer, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        raise RuntimeError("MoE forward must be executed by BaseMoEExperts")
+
+    def dispatch_scale(
+        self,
+        layer,
+        local_id: int,
+        projection: str,
+        parameter_name: str,
+        tensor: torch.Tensor,
+    ) -> bool:
+        return False
+
+    def dispatch_weight(
+        self,
+        layer,
+        local_id: int,
+        projection: str,
+        parameter_name: str,
+        tensor: torch.Tensor,
+    ) -> bool:
+        return False
+
+    def required_aux_parameters(self) -> Iterable[str]:
+        return ()
+
+    def add_weight_tensors(self, layer, weights: Dict[str, Any]) -> None:
+        return None
+
+
 _LINEAR_METHOD_REGISTRY: Dict[str, Type[QuantizeMethodBase]] = {}
+_MOE_METHOD_REGISTRY: Dict[str, Type[FusedMoEMethodBase]] = {}
 
 _FP8_METHOD_KEYS = frozenset(
     {
@@ -55,6 +106,13 @@ _FP8_METHOD_KEYS = frozenset(
     }
 )
 
+_W4A8_MOE_METHOD_KEYS = frozenset(
+    {
+        "W4A8_INT4_PER_CHANNEL",
+        "W4A8_INT4_PER_CHANNEL_COMPRESSED",
+    }
+)
+
 
 def register_quant_method(*keys: str):
     def decorator(cls: Type[QuantizeMethodBase]) -> Type[QuantizeMethodBase]:
@@ -66,6 +124,23 @@ def register_quant_method(*keys: str):
                     f"{existing.__name__}"
                 )
             _LINEAR_METHOD_REGISTRY[key] = cls
+        return cls
+
+    return decorator
+
+
+def register_moe_quant_method(*keys: str):
+    def decorator(cls: Type[FusedMoEMethodBase]) -> Type[FusedMoEMethodBase]:
+        if not issubclass(cls, FusedMoEMethodBase):
+            raise TypeError("MoE quant methods must inherit FusedMoEMethodBase")
+        for key in keys:
+            existing = _MOE_METHOD_REGISTRY.get(key)
+            if existing is not None and existing is not cls:
+                raise ValueError(
+                    f"MoE quant method {key!r} is already registered to "
+                    f"{existing.__name__}"
+                )
+            _MOE_METHOD_REGISTRY[key] = cls
         return cls
 
     return decorator
@@ -127,6 +202,7 @@ class QuantizationConfig:
             "ignored_layers",
             "ignore",
             "exclude_modules",
+            "modules_to_not_convert",
         ):
             value = getattr(source_config, name, None)
             if callable(value):
@@ -246,6 +322,13 @@ class QuantizationConfig:
                 "all fused projections must use the same quantization layout"
             )
 
+        if self.quant_type in _W4A8_MOE_METHOD_KEYS:
+            from rtp_llm.models_py.quant_methods.unquantized import (
+                UnquantizedLinearMethod,
+            )
+
+            return UnquantizedLinearMethod(self)
+
         if self.quant_type not in _LINEAR_METHOD_REGISTRY:
             if self.quant_type == "none":
                 from rtp_llm.models_py.quant_methods import unquantized  # noqa: F401
@@ -257,5 +340,49 @@ class QuantizationConfig:
             raise ValueError(
                 f"Quantization {self.quant_type!r} is not supported by the "
                 "Qwen dense newloader path"
+            )
+        return method_cls(self)
+
+    def is_moe_layer_ignored(self, layer, prefix: str) -> bool:
+        if not prefix:
+            raise ValueError("MoE quantization requires a stable module prefix")
+        projection_prefixes = [
+            f"{prefix}.{projection}" for projection in layer.PROJ_NAMES
+        ]
+        root_ignored = self.is_layer_ignored(prefix)
+        projection_ignored = [
+            self.is_layer_ignored(candidate) for candidate in projection_prefixes
+        ]
+        if root_ignored or all(projection_ignored):
+            return True
+        if any(projection_ignored):
+            raise ValueError(
+                f"Quantization exclusions partially match fused MoE layer "
+                f"{prefix!r}; all expert projections must use the same "
+                "quantization layout"
+            )
+        return False
+
+    def get_moe_quant_method(self, layer, prefix: str) -> FusedMoEMethodBase:
+        if self.is_moe_layer_ignored(layer, prefix):
+            from rtp_llm.models_py.quant_methods.unquantized import (
+                UnquantizedFusedMoEMethod,
+            )
+
+            return UnquantizedFusedMoEMethod(self)
+
+        if self.quant_type not in _MOE_METHOD_REGISTRY:
+            if self.quant_type == "none":
+                from rtp_llm.models_py.quant_methods import unquantized  # noqa: F401
+            elif self.quant_type in _FP8_METHOD_KEYS:
+                from rtp_llm.models_py.quant_methods import fp8_moe  # noqa: F401
+            elif self.quant_type in _W4A8_MOE_METHOD_KEYS:
+                from rtp_llm.models_py.quant_methods import w4a8_moe  # noqa: F401
+
+        method_cls = _MOE_METHOD_REGISTRY.get(self.quant_type)
+        if method_cls is None:
+            raise ValueError(
+                f"Quantization {self.quant_type!r} is not supported by the "
+                "Qwen3 MoE newloader path"
             )
         return method_cls(self)
