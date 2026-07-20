@@ -399,10 +399,10 @@ class BatchEnqueueRoutingTest(TestCase):
 
 
 class SchedulePayloadSeqLenTest(TestCase):
-    """The aggregate-weight fix is only worth anything at its last hop: the seq_len that
-    actually reaches the master in the /schedule payload. Everything upstream of this
-    (batch_enqueue -> route_ips -> get_master_route_addrs -> get_backend_role_addrs) is
-    plumbing that a refactor can silently drop while every other test stays green.
+    """The last hop of the aggregate-weight fix: the seq_len that actually reaches the master
+    in the /schedule payload. BatchEnqueueRoutingTest pins the first hop (batch_enqueue
+    aggregating the batch), RouteIpsSeqLenHintTest pins the two in between, and this class
+    pins where the hint finally beats input.prompt_length.
     """
 
     @staticmethod
@@ -472,6 +472,73 @@ class SchedulePayloadSeqLenTest(TestCase):
         )
 
         self.assertEqual(0, sent["payload"]["seq_len"])
+
+
+class RouteIpsSeqLenHintTest(TestCase):
+    """The stretch between the two ends of the chain. BatchEnqueueRoutingTest stubs route_ips
+    out and SchedulePayloadSeqLenTest starts below it, so route_ips ->
+    get_master_route_addrs -> get_backend_role_addrs is exactly where dropping the argument
+    leaves both of them green while the master silently goes back to being told one request's
+    weight for a whole batch.
+    """
+
+    @staticmethod
+    def _visitor():
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.master_config = None
+        visitor.seq_size_per_block = 8
+        visitor.backend_role_list = [RoleType.PDFUSION]
+        visitor.host_service = SimpleNamespace(get_master_addr=lambda: "10.0.0.1:8090")
+        seen = {}
+
+        async def fake_get_backend_role_addrs(
+            block_cache_keys, input, request_id, seq_len_hint=None
+        ):
+            seen["seq_len_hint"] = seq_len_hint
+            return SimpleNamespace(
+                is_ok=True,
+                role_addrs=[
+                    SimpleNamespace(
+                        role=RoleType.PDFUSION,
+                        ip="10.0.0.9",
+                        http_port=8088,
+                        grpc_port=8089,
+                    )
+                ],
+                connection_failed=False,
+                error_code=None,
+                error_message=None,
+            )
+
+        visitor.master_client = SimpleNamespace(
+            get_backend_role_addrs=fake_get_backend_role_addrs
+        )
+        return visitor, seen
+
+    @staticmethod
+    def _input():
+        return SimpleNamespace(
+            request_id=1,
+            prompt_length=8,
+            token_ids=torch.tensor([1, 2, 3, 4]),
+            generate_config=SimpleNamespace(role_addrs=[], max_new_tokens=16),
+        )
+
+    def test_the_hint_survives_route_ips_down_to_the_master_client(self):
+        visitor, seen = self._visitor()
+
+        asyncio.run(visitor.route_ips(self._input(), seq_len_hint=210))
+
+        self.assertEqual(210, seen["seq_len_hint"])
+
+    def test_no_hint_is_passed_through_as_absent_rather_than_invented(self):
+        # The fallback to input.prompt_length belongs to master_client alone; a visitor that
+        # substituted a value here would make the zero-hint guard below it unreachable.
+        visitor, seen = self._visitor()
+
+        asyncio.run(visitor.route_ips(self._input()))
+
+        self.assertIsNone(seen["seq_len_hint"])
 
 
 if __name__ == "__main__":
