@@ -3,7 +3,7 @@ import json
 import ntpath
 import os
 import re
-from typing import Dict, Iterator, List, Mapping, Optional, Tuple
+from typing import Callable, Dict, Iterator, List, Mapping, Optional, Tuple
 
 import torch
 
@@ -92,31 +92,47 @@ def _unwrap_pytorch_state_dict(payload: object) -> Mapping[str, object]:
     return payload
 
 
-def _load_safetensors(path: str, device: str) -> Iterator[Tuple[str, torch.Tensor]]:
+def _load_safetensors(
+    path: str,
+    device: str,
+    name_filter: Optional[Callable[[str], bool]] = None,
+) -> Iterator[Tuple[str, torch.Tensor]]:
     from safetensors import safe_open
 
     with safe_open(path, framework="pt", device=device) as handle:
         for name in handle.keys():
+            if name_filter is not None and not name_filter(name):
+                continue
             yield name, handle.get_tensor(name)
 
 
-def _load_pytorch(path: str, device: str) -> Iterator[Tuple[str, torch.Tensor]]:
+def _load_pytorch(
+    path: str,
+    device: str,
+    name_filter: Optional[Callable[[str], bool]] = None,
+) -> Iterator[Tuple[str, torch.Tensor]]:
     payload = torch.load(path, map_location=device, weights_only=True)
     state_dict = _unwrap_pytorch_state_dict(payload)
     for name, tensor in state_dict.items():
-        if isinstance(name, str) and isinstance(tensor, torch.Tensor):
+        if (
+            isinstance(name, str)
+            and isinstance(tensor, torch.Tensor)
+            and (name_filter is None or name_filter(name))
+        ):
             yield name, tensor
 
 
 def get_all_weights(
-    ckpt_paths: List[str], device: str = "cpu"
+    ckpt_paths: List[str],
+    device: str = "cpu",
+    name_filter: Optional[Callable[[str], bool]] = None,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     seen = set()
     for path in ckpt_paths:
         if path.endswith(".safetensors"):
-            weights = _load_safetensors(path, device)
+            weights = _load_safetensors(path, device, name_filter)
         elif path.endswith((".bin", ".pt", ".pth")):
-            weights = _load_pytorch(path, device)
+            weights = _load_pytorch(path, device, name_filter)
         else:
             raise ValueError(f"Unsupported checkpoint format: {path}")
         for name, tensor in weights:
