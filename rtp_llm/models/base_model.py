@@ -186,7 +186,27 @@ class BaseModel(object):
         3. 临时的LoRA缓存
 
         这可以显著减少host内存占用，为KV cache等运行时内存需求腾出空间。
+
+        例外：level-2 sleep（丢弃权重）在 wake 时需要由 model loader 从原始
+        checkpoint 原地重载权重（WeightManager.reload_weights_from_loader ->
+        ModelLoader.prepare_weights_fastsafetensor 优先，不可用时回退
+        prepare_weights，两者均经 _load_config.database 重读）。若此处清理
+        database（关闭 safetensor 句柄并清空 tensor 索引），wake 重载会以
+        "ts is empty" 失败。因此 level-2 保留 database；其余模式照旧释放。保留的
+        只是 tensor 索引 + safetensor header 元数据（KB~MB 级）与 mmap 句柄，
+        权重本体仍按需分页，不常驻 host。
         """
+        from rtp_llm.model_loader.weight_memory_saver import (
+            is_enabled,
+            sleep_mode_level,
+        )
+
+        if is_enabled() and sleep_mode_level() == 2:
+            logging.info(
+                "sleep level-2: keeping loader database alive for wake-time "
+                "in-place weight reload (skipping cleanup_database)"
+            )
+            return
         self.model_weights_loader.cleanup_database()
 
     @classmethod

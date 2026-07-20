@@ -13,6 +13,7 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelWeightInfo,
 )
 from rtp_llm.model_loader.multimodal_mixin_loader import MultimodalMixinLoader
+from rtp_llm.model_loader.weight_memory_saver import weights_region
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
@@ -96,26 +97,33 @@ class BaseMultiModalMixin:
         self.load_method = load_method
         self.ckpt_path = ckpt_path
 
-        with torch.device(device):
-            torch_default_dtype = torch.get_default_dtype()
-            torch.set_default_dtype(compute_dtype)
-            try:
-                self._init_multimodal()
-            finally:
-                # Always restore: leaking compute_dtype as the process-wide
-                # default poisons every subsequent tensor allocation.
-                torch.set_default_dtype(torch_default_dtype)
+        # ViT module construction allocates parameters directly on `device`;
+        # register them as pausable weight memory (no-op unless sleep mode is enabled).
+        with weights_region():
+            with torch.device(device):
+                torch_default_dtype = torch.get_default_dtype()
+                torch.set_default_dtype(compute_dtype)
+                try:
+                    self._init_multimodal()
+                finally:
+                    # Always restore: leaking compute_dtype as the process-wide
+                    # default poisons every subsequent tensor allocation.
+                    torch.set_default_dtype(torch_default_dtype)
 
         if self.mm_related_params.vit_weights is None:
             return
 
         self.mm_mixin_loader = self.create_mm_mixin_loader()
-        self.weights = self.mm_mixin_loader.load_weights(device=device)
 
-        self.load_mm_weight(
-            ctype=compute_dtype,
-            device=device,
-        )
+        # ViT (mm_part) checkpoint weights land on `device` here; keep them
+        # inside the pausable weights region too.
+        with weights_region():
+            self.weights = self.mm_mixin_loader.load_weights(device=device)
+
+            self.load_mm_weight(
+                ctype=compute_dtype,
+                device=device,
+            )
 
         self.mm_mixin_loader.force_clean_cuda_memory()
 

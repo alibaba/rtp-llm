@@ -4,11 +4,54 @@
 #include <cstring>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 using namespace torch_ext;
 namespace rtp_llm {
+
+namespace {
+
+constexpr const char* kCudaGraphVmmTag = "cuda_graph";
+
+class CudaGraphVmmRegionGuard {
+public:
+    CudaGraphVmmRegionGuard() {
+        if (!vmm_backend_.isAvailable()) {
+            return;
+        }
+        // Only allocations made while CUDA stream capture is active may carry
+        // this tag. Tagging warmup/default-pool allocations makes empty_cache()
+        // try to release ranges that VMM pause has already unmapped.
+        active_ = vmm_backend_.beginAllocationRegion(kCudaGraphVmmTag, true);
+        if (active_) {
+            RTP_LLM_LOG_INFO("CUDA graph allocations are tagged under VMM tag '%s'", kCudaGraphVmmTag);
+        }
+    }
+
+    ~CudaGraphVmmRegionGuard() {
+        if (active_) {
+            vmm_backend_.endAllocationRegion();
+        }
+    }
+
+    CudaGraphVmmRegionGuard(const CudaGraphVmmRegionGuard&)            = delete;
+    CudaGraphVmmRegionGuard& operator=(const CudaGraphVmmRegionGuard&) = delete;
+
+private:
+    VmmBackend vmm_backend_;
+    bool       active_{false};
+};
+
+void prepareCudaGraphVmmCapture() {
+    VmmBackend vmm_backend;
+    if (vmm_backend.isAvailable()) {
+        cuda_graph::graphEmptyCache();
+    }
+}
+
+}  // namespace
 
 // clang-format off
 // CUDA Graph Mode Configuration Table:
@@ -623,6 +666,7 @@ void CudaGraphRunner::initCapture() {
     c10::InferenceMode inference_guard(true);
 
     if (enable_cuda_graph_) {
+        prepareCudaGraphVmmCapture();
         RTP_LLM_LOG_INFO("CUDA graph capture is enabled");
         shared_graph_pool_ = cuda_graph::graphPoolHandle();
         if (is_prefill_cuda_graph_mode_) {
@@ -715,14 +759,17 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             cuda_graph::graphCaptureBegin(graph, shared_graph_pool_);
             cuda_graph::GraphNcclCaptureContext capture_ctx;
             CudaGraphCaptureGuard               capture_guard(&capture_ctx);
-            try {
-                auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
-                outputs             = py_outputs_obj.cast<PyModelOutputs>();
-            } catch (const py::error_already_set& e) {
-                RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
-                throw;
+            {
+                CudaGraphVmmRegionGuard vmm_region_guard;
+                try {
+                    auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
+                    outputs             = py_outputs_obj.cast<PyModelOutputs>();
+                } catch (const py::error_already_set& e) {
+                    RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
+                    throw;
+                }
+                graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
             }
-            graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
             graph.capture_end();
         }
 

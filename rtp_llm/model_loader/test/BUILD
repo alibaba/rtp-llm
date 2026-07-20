@@ -29,6 +29,22 @@ py_test(
 )
 
 py_test(
+    name = "weight_memory_saver_test",
+    srcs = ["weight_memory_saver_test.py"],
+    deps = py_test_deps,
+)
+
+py_test(
+    name = "weight_memory_saver_gpu_test",
+    srcs = ["weight_memory_saver_gpu_test.py"],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+
+py_test(
     name = "test_model_weight_info",
     srcs = ["test_model_weight_info.py"],
     deps = py_test_deps,
