@@ -12,8 +12,16 @@ import org.flexlb.metric.FlexStatisticsType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.*;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.DoubleAdder;
 
 /**
  * {@link FlexMonitor} implementation backed by a Prometheus {@link CollectorRegistry}.
@@ -21,7 +29,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>Callers must register a metric with its complete tag-key schema before reporting values. Registration
  * normalizes the metric name with a {@code flexlb_} prefix, sorts the tag keys, and creates the corresponding
  * Prometheus collector exactly once. Statistics registrations create a {@link Summary}; non-statistics
- * {@link FlexMetricType#GAUGE gauges} create a {@link Gauge}; all other metric types create a {@link Counter}.
+ * {@link FlexMetricType#GAUGE gauges} create a {@link Gauge}; {@link FlexMetricType#QPS QPS} metrics create a
+ * windowed {@link Gauge}; and counters create a {@link Counter}.
  *
  * <p>A report is accepted only when the metric has been registered and its tag keys exactly match the schema
  * captured at registration. Tag values are then supplied in the same sorted-key order used to create the
@@ -36,9 +45,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>See <a href="https://prometheus.io/docs/instrumenting/exposition_formats/">Prometheus exposition
  * formats</a> for the metric and label constraints.
  */
-public class PrometheusFlexMonitor implements FlexMonitor {
+public class PrometheusFlexMonitor implements FlexMonitor, AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(PrometheusFlexMonitor.class);
+    private static final FlexPriorityType DEFAULT_QPS_PRIORITY = FlexPriorityType.NORMAL;
     private static final List<QuantileConfiguration> QUANTILE_CONFIGURATIONS = List.of(
             new QuantileConfiguration(FlexStatisticsType.MIN, 0.0, 0.0),
             new QuantileConfiguration(FlexStatisticsType.MAX, 1.0, 0.0),
@@ -48,6 +58,8 @@ public class PrometheusFlexMonitor implements FlexMonitor {
 
     private final CollectorRegistry registry;
     private final Map<String, MetricState> metrics = new ConcurrentHashMap<>();
+    private final AtomicLong qpsSnapshotTicks = new AtomicLong();
+    private final ScheduledExecutorService qpsSnapshotExecutor;
 
     /**
      * Creates a monitor that registers collectors in {@code registry}.
@@ -56,6 +68,12 @@ public class PrometheusFlexMonitor implements FlexMonitor {
      */
     public PrometheusFlexMonitor(CollectorRegistry registry) {
         this.registry = Objects.requireNonNull(registry, "registry");
+        qpsSnapshotExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "flexlb-prometheus-qps-snapshot");
+            thread.setDaemon(true);
+            return thread;
+        });
+        qpsSnapshotExecutor.scheduleAtFixedRate(this::snapshotQpsMetrics, 1, 1, TimeUnit.SECONDS);
     }
 
     /**
@@ -76,14 +94,14 @@ public class PrometheusFlexMonitor implements FlexMonitor {
      */
     @Override
     public void register(String metricName, FlexMetricType metricType, FlexMetricTags metricsTags) {
-        register(metricName, metricType, 0, false, metricsTags);
+        register(metricName, metricType, DEFAULT_QPS_PRIORITY, 0, false, metricsTags);
     }
 
     /**
      * {@inheritDoc}
      *
-     * <p>Prometheus-specific behavior: {@link FlexPriorityType} has no Prometheus collector equivalent and is
-     * ignored; the metric is registered with an empty label schema.
+     * <p>Prometheus-specific behavior: {@link FlexPriorityType} defines the aggregation window for
+     * {@link FlexMetricType#QPS QPS} metrics and is ignored by all other metric types.
      */
     @Override
     public void register(String metricName, FlexMetricType metricType, FlexPriorityType priorityType) {
@@ -93,8 +111,8 @@ public class PrometheusFlexMonitor implements FlexMonitor {
     /**
      * {@inheritDoc}
      *
-     * <p>Prometheus-specific behavior: {@code priorityType} is ignored while {@code metricsTags} defines the
-     * immutable collector label schema.
+     * <p>Prometheus-specific behavior: {@code priorityType} defines the QPS aggregation window while
+     * {@code metricsTags} defines the immutable collector label schema.
      */
     @Override
     public void register(
@@ -102,7 +120,7 @@ public class PrometheusFlexMonitor implements FlexMonitor {
             FlexMetricType metricType,
             FlexPriorityType priorityType,
             FlexMetricTags metricsTags) {
-        register(metricName, metricType, metricsTags);
+        register(metricName, metricType, priorityType, 0, false, metricsTags);
     }
 
     /**
@@ -127,7 +145,7 @@ public class PrometheusFlexMonitor implements FlexMonitor {
             FlexMetricType metricType,
             int statisticsType,
             FlexMetricTags metricsTags) {
-        register(metricName, metricType, statisticsType, true, metricsTags);
+        register(metricName, metricType, DEFAULT_QPS_PRIORITY, statisticsType, true, metricsTags);
     }
 
     /**
@@ -178,12 +196,13 @@ public class PrometheusFlexMonitor implements FlexMonitor {
     private void register(
             String metricName,
             FlexMetricType metricType,
+            FlexPriorityType priorityType,
             int statistics,
             boolean statisticsEnabled,
             FlexMetricTags metricsTags) {
         List<String> labelNames = sortedTags(metricsTags).stream().map(Map.Entry::getKey).toList();
         metrics.computeIfAbsent(metricName, ignored -> createMetricState(
-                metricName, metricType, statistics, statisticsEnabled, labelNames));
+                metricName, metricType, priorityType, statistics, statisticsEnabled, labelNames));
     }
 
     /**
@@ -193,13 +212,14 @@ public class PrometheusFlexMonitor implements FlexMonitor {
     private MetricState createMetricState(
             String metricName,
             FlexMetricType metricType,
+            FlexPriorityType priorityType,
             int statistics,
             boolean statisticsEnabled,
             List<String> labelNames) {
         try {
-            return new MetricState(
-                    labelNames,
-                    createBinding(metricName, labelNames, metricType, statistics, statisticsEnabled));
+            Binding binding = createBinding(
+                    metricName, labelNames, metricType, priorityType, statistics, statisticsEnabled);
+            return new MetricState(labelNames, binding);
         } catch (RuntimeException error) {
             log.warn("Disabling Prometheus metric after registration failure: {}: {}", metricName, error.getMessage());
             return new MetricState(labelNames, null);
@@ -209,13 +229,14 @@ public class PrometheusFlexMonitor implements FlexMonitor {
     /**
      * Creates the Prometheus collector and returns its pre-bound update operation.
      *
-     * <p>Statistics registrations use a summary; otherwise gauges use {@link Gauge} and all remaining metric
-     * types use {@link Counter}.
+     * <p>Statistics registrations use a summary; otherwise gauges use {@link Gauge}, QPS uses a windowed gauge,
+     * and counters use {@link Counter}.
      */
     private Binding createBinding(
             String metricName,
             List<String> labelNames,
             FlexMetricType metricType,
+            FlexPriorityType priorityType,
             int statistics,
             boolean statisticsEnabled) {
         String[] labels = labelNames.toArray(String[]::new);
@@ -225,14 +246,39 @@ public class PrometheusFlexMonitor implements FlexMonitor {
             Summary.Builder builder = Summary.build().name(name).help(help).labelNames(labels);
             addQuantiles(builder, statistics);
             Summary summary = builder.register(registry);
-            return new Binding((values, value) -> summary.labels(values).observe(value));
+            return (values, value) -> summary.labels(values).observe(value);
         }
         if (metricType == FlexMetricType.GAUGE) {
             Gauge gauge = Gauge.build().name(name).help(help).labelNames(labels).register(registry);
-            return new Binding((values, value) -> gauge.labels(values).set(value));
+            return (values, value) -> gauge.labels(values).set(value);
+        }
+        if (metricType == FlexMetricType.QPS) {
+            Gauge gauge = Gauge.build().name(name).help(help).labelNames(labels).register(registry);
+            return new QpsBinding(gauge, priorityType.getWindowSeconds(), labels.length == 0);
         }
         Counter counter = Counter.build().name(name).help(help).labelNames(labels).register(registry);
-        return new Binding((values, value) -> counter.labels(values).inc(value));
+        return (values, value) -> counter.labels(values).inc(value);
+    }
+
+    private void snapshotQpsMetrics() {
+        long tick = qpsSnapshotTicks.incrementAndGet();
+        try {
+            metrics.values().forEach(state -> {
+                if (state.binding != null) {
+                    state.binding.snapshot(tick);
+                }
+            });
+        } catch (RuntimeException error) {
+            log.warn("Unable to publish Prometheus QPS snapshot: {}", error.getMessage());
+        }
+    }
+
+    /**
+     * Stops the QPS snapshot thread when the monitor is destroyed by Spring.
+     */
+    @Override
+    public void close() {
+        qpsSnapshotExecutor.shutdownNow();
     }
 
     /**
@@ -276,33 +322,59 @@ public class PrometheusFlexMonitor implements FlexMonitor {
     private record QuantileConfiguration(int statisticsFlag, double quantile, double error) {
     }
 
-    /**
-     * Immutable association between a registered label schema and the corresponding collector update operation.
-     */
-    private record Binding(Updater updater) {
-
-        /**
-         * Applies one sample using label values in the sorted label-key order captured during registration.
-         */
-        private void update(String[] labelValues, double value) {
-            updater.update(labelValues, value);
-        }
-    }
-
     @FunctionalInterface
-    private interface Updater {
+    private interface Binding {
 
         /**
          * Updates a collector that was fully bound during metric registration.
          *
          * <p>{@code labelValues} must have the same cardinality and sorted-key order as the registered label schema.
-         * Implementations apply the metric-type-specific Prometheus operation: set for gauges, increment for counters,
-         * or observe for summaries.
+         * Implementations apply the metric-type-specific Prometheus operation: set for gauges, accumulate for QPS,
+         * increment for counters, or observe for summaries.
          *
          * @param labelValues ordered label values for one Prometheus sample
          * @param value metric value to apply
          */
         void update(String[] labelValues, double value);
+
+        /**
+         * Publishes an eligible QPS window. Non-QPS bindings do nothing.
+         */
+        default void snapshot(long tick) {
+        }
+    }
+
+    /**
+     * Holds one QPS accumulator per label-value series and publishes a KMonitor-compatible window average.
+     */
+    private static final class QpsBinding implements Binding {
+
+        private final Gauge gauge;
+        private final int windowSeconds;
+        private final Map<List<String>, DoubleAdder> valuesByLabelSeries = new ConcurrentHashMap<>();
+
+        private QpsBinding(Gauge gauge, int windowSeconds, boolean unlabelled) {
+            this.gauge = gauge;
+            this.windowSeconds = windowSeconds;
+            if (unlabelled) {
+                gauge.labels().set(0.0);
+            }
+        }
+
+        @Override
+        public void update(String[] labelValues, double value) {
+            List<String> labelSeries = List.copyOf(Arrays.asList(labelValues.clone()));
+            valuesByLabelSeries.computeIfAbsent(labelSeries, ignored -> new DoubleAdder()).add(value);
+        }
+
+        @Override
+        public void snapshot(long tick) {
+            if (tick % windowSeconds != 0) {
+                return;
+            }
+            valuesByLabelSeries.forEach((labelSeries, value) -> gauge.labels(labelSeries.toArray(String[]::new))
+                    .set(value.sumThenReset() / windowSeconds));
+        }
     }
 
 }
