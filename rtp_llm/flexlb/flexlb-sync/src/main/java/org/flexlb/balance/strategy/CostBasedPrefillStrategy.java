@@ -95,16 +95,24 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
         int selectedIndex = -1;
         if (minScore != Long.MAX_VALUE) {
-            long tieThreshold = 0;
             if (config.isScoreTieRandomEnabled()) {
-                tieThreshold = Math.max((long) (minScore * config.getScoreTieThresholdPct()), config.getScoreTieThresholdMs());
-            }
-            long scoreCutoff = minScore + tieThreshold;
-            int tiedCount = 0;
-            for (int i = 0; i < survivors.size(); i++) {
-                if (survivors.score(i) <= scoreCutoff
-                        && ThreadLocalRandom.current().nextInt(++tiedCount) == 0) {
-                    selectedIndex = i;
+                // Enabled: reservoir sampling among candidates within threshold
+                long tieThreshold = Math.max((long) (minScore * config.getScoreTieThresholdPct()), config.getScoreTieThresholdMs());
+                long scoreCutoff = minScore + tieThreshold;
+                int tiedCount = 0;
+                for (int i = 0; i < survivors.size(); i++) {
+                    if (survivors.score(i) <= scoreCutoff
+                            && ThreadLocalRandom.current().nextInt(++tiedCount) == 0) {
+                        selectedIndex = i;
+                    }
+                }
+            } else {
+                // Disabled: deterministically select the first minimum-score candidate
+                for (int i = 0; i < survivors.size(); i++) {
+                    if (survivors.score(i) == minScore) {
+                        selectedIndex = i;
+                        break;
+                    }
                 }
             }
         }

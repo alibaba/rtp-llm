@@ -415,12 +415,13 @@ public class FlexlbConfig {
 
     /**
      * Whether to enable score-tie randomization among near-equal prefill candidates.
-     * When enabled (default), endpoints within a threshold of the minimum score are
-     * randomly selected to avoid deterministic routing bias.
-     * When disabled, only endpoints with exactly the minimum score are considered.
+     * When enabled, endpoints within a threshold of the minimum score are
+     * randomly selected (via reservoir sampling) to avoid deterministic routing bias.
+     * When disabled (default), the first endpoint with the exact minimum score is
+     * deterministically selected without any randomization.
      * Environment variable: SCORE_TIE_RANDOM_ENABLED.
      */
-    private boolean scoreTieRandomEnabled = true;
+    private boolean scoreTieRandomEnabled = false;
 
     /**
      * Percentage threshold for score-tie randomization.
