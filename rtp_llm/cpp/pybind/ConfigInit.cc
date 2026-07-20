@@ -265,6 +265,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(pybind11::init<>())  // Default constructor
         .def(pybind11::init<const std::string&>(),
              pybind11::arg("json_str"))  // JSON string constructor
+        .def_readwrite("max_server_pollers", &GrpcConfig::max_server_pollers)
         .def("to_string", &GrpcConfig::to_string)
         .def("from_json", &GrpcConfig::from_json, "Initialize from JSON string")
         .def("get_client_config", &GrpcConfig::get_client_config)
@@ -282,15 +283,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 for (const auto& pair : server_config) {
                     server_dict[py::str(pair.first)] = pair.second;
                 }
-                return py::make_tuple(client_dict, server_dict);
+                return py::make_tuple(client_dict, server_dict, self.max_server_pollers);
             },
             [](py::tuple t) {
-                if (t.size() != 2)
+                if (t.size() != 2 && t.size() != 3)
                     throw std::runtime_error("Invalid state!");
                 GrpcConfig c;
                 try {
                     py::dict client_dict = t[0].cast<py::dict>();
                     py::dict server_dict = t[1].cast<py::dict>();
+                    int      max_pollers = (t.size() == 3) ? t[2].cast<int>() : 0;
 
                     // Convert Python dicts to JSON string
                     std::ostringstream oss;
@@ -310,7 +312,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         first = false;
                         oss << "\"" << py::str(item.first).cast<std::string>() << "\": " << py::cast<int>(item.second);
                     }
-                    oss << "}}";
+                    oss << "}";
+                    if (max_pollers > 0) {
+                        oss << ", \"max_server_pollers\": " << max_pollers;
+                    }
+                    oss << "}";
                     c.from_json(oss.str());
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("GrpcConfig unpickle error: ") + e.what());

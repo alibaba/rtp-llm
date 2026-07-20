@@ -17,7 +17,6 @@
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/LockFreeThreadPool.h"
-#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
 using namespace std;
 using namespace autil::legacy;
@@ -152,6 +151,7 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
     auto input                        = QueryConverter::transQuery(&decode_context.allocate_request.input());
+    decode_context.request_info       = input->request_info;
     auto generate_stream              = engine_->makeStream(input);
     decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
 
@@ -207,13 +207,15 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     load_response.mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     GRPC_RET_IF_ERROR(
         decode_context, grpc_stream->Write(load_response), grpc::StatusCode::INTERNAL, "send load response failed");
+    if (!error_info.ok()) {
+        decode_context.error_info = error_info;
+    }
     GRPC_RET_IF_ERROR(decode_context, error_info.ok(), grpc::StatusCode::INTERNAL, error_info.ToString().c_str());
     RTP_LLM_LOG_DEBUG("request [%s] load cache from prefill done", decode_context.request_key.c_str());
 }
 
 void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
-    cuda_graph::setDevice(static_cast<int>(maga_init_params_.parallelism_config.local_rank));
     RTP_LLM_LOG_DEBUG("request [%s] start to local generate", decode_context.request_key.c_str());
     auto&             grpc_stream     = decode_context.rpc_context.grpc_stream;
     auto&             generate_stream = decode_context.getStream();
@@ -244,20 +246,15 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                              torch::Tensor(),
                              torch::Tensor(),
                              torch::Tensor()});
-    {
-        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-        generate_stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
-            .epoch                 = 0,
-            .last_sample_token_gpu = new_tokens.reshape({1}).to(cuda_i32),
-            .next_seq_len_gpu      = torch::full({1}, static_cast<int64_t>(generate_stream->seqLength()), cuda_i32),
-        });
-    }
     if (generate_request.position_ids_size() > 0) {
         auto context_position_ids = torch::from_blob(const_cast<int32_t*>(generate_request.position_ids().data()),
                                                      {(int64_t)generate_request.position_ids_size()},
                                                      torch::kInt32)
                                         .clone();
         generate_stream->setContextPositionIds(context_position_ids);
+    }
+    if (!propose_maga_init_params_) {
+        generate_stream->markGrpcNormalDeviceStatePending();
     }
     if (propose_maga_init_params_) {
         const size_t propose_step = propose_maga_init_params_->gen_num_per_circle;
@@ -456,10 +453,17 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
     auto load_cache_timeout_ms = maga_init_params_.pd_sep_config.load_cache_timeout_ms;
     load_cache_timeout_ms      = load_cache_timeout_ms > 0 ? load_cache_timeout_ms : LOAD_TIMEOUT_MS;
     auto max_rpc_timeout_ms    = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
-    auto rpc_timeout           = max_rpc_timeout_ms > 0 ? max_rpc_timeout_ms : MAX_GRPC_TIMEOUT_MS;
-    auto min_timeout_ms        = std::min(load_cache_timeout_ms, rpc_timeout);
     auto request_timeout_ms    = decode_context.request_timeout_ms;
-    min_timeout_ms             = request_timeout_ms > 0 ? std::min(request_timeout_ms, min_timeout_ms) : min_timeout_ms;
+    // load_cache_timeout_ms is the KV-cache loading deadline and always applies;
+    // max_rpc_timeout_ms / request_timeout_ms only participate in min when > 0
+    // (<= 0 means unlimited for that knob).
+    int64_t min_timeout_ms = load_cache_timeout_ms;
+    if (max_rpc_timeout_ms > 0) {
+        min_timeout_ms = std::min(min_timeout_ms, max_rpc_timeout_ms);
+    }
+    if (request_timeout_ms > 0) {
+        min_timeout_ms = std::min(min_timeout_ms, request_timeout_ms);
+    }
 
     LoadKVCacheContext load_context{decode_context.request_id,
                                     decode_context.request_key,

@@ -169,6 +169,7 @@ public:
     std::vector<int>                 textTokensMask() const;
     bool                             isStreaming() const;
     int64_t                          streamId() const;
+    std::string                      streamLogTag() const;
     std::string                      adapterName() const;
     rtp_llm::SpecialTokens           specialTokens() const;
 
@@ -278,6 +279,10 @@ public:
         reportEventWithoutLock(StreamEvents::Error, error_code, std::forward<T>(error_msg));
     }
 
+    // Caller must already hold mutex_. Use this only on state-machine paths entered through moveToNext().
+    void reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg) {
+        reportEventWithoutLock(StreamEvents::Error, error_code, error_msg);
+    }
     bool         hasEvent(StreamEvents::EventType event) const;
     virtual bool hasError() const;
     ErrorInfo    statusInfo();
@@ -639,6 +644,15 @@ public:
     const NormalAsyncDeviceState& getNormalAsyncDeviceState() const {
         return normal_async_state_;
     }
+    void markGrpcNormalDeviceStatePending() {
+        grpc_normal_device_state_pending_->store(true, std::memory_order_release);
+    }
+    bool hasGrpcNormalDeviceStatePending() const {
+        return grpc_normal_device_state_pending_->load(std::memory_order_acquire);
+    }
+    bool consumeGrpcNormalDeviceStatePending() {
+        return grpc_normal_device_state_pending_->exchange(false, std::memory_order_acq_rel);
+    }
 
     GenerateStreamPtr getProposeStream() {
         return propose_stream_;
@@ -826,6 +840,7 @@ protected:
     uint64_t               mtp_async_epoch_counter_ = 0;
     NormalAsyncDeviceState normal_async_state_;
     uint64_t               normal_async_epoch_counter_ = 0;
+    std::shared_ptr<std::atomic<bool>> grpc_normal_device_state_pending_ = std::make_shared<std::atomic<bool>>(false);
 
     bool return_all_hidden_states_ = false;
 
