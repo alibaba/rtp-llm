@@ -20,6 +20,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.trtllm_gen import (
     _prepare_cg_prefill_kernel,
     _prepare_cg_spec_decode_kernel,
 )
+from rtp_llm.models_py.utils.arch import is_sm10x
 from rtp_llm.test.utils.numeric_util import assert_close_with_mismatch_tolerance
 
 device = torch.device("cuda")
@@ -111,8 +112,7 @@ class FlashInferPythonMHATest(TestCase):
             use_prefill_op: if True, use FlashInferTRTLLMPrefillOp;
                             if False, use FlashInferTRTLLMDecodeOp.
         """
-        is_sm_100 = torch.cuda.get_device_capability()[0] in [10]
-        if not is_sm_100:
+        if not is_sm10x():
             raise SkipTest("FlashInferTRTLLM requires SM_100 (compute capability 10.0)")
 
         config = self._create_config(dtype)

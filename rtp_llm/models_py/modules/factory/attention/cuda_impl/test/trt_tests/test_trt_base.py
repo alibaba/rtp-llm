@@ -4,7 +4,6 @@ import math
 from typing import List, Tuple
 
 import torch
-import torch.nn.functional as F
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.model_config import ModelConfig
@@ -17,75 +16,13 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_t
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.trt_test_utils import (
     compute_pytorch_prefill_reference,
     print_attn_inputs_detail,
-    print_expected_attention_output,
-    print_kv_cache_modifications,
-    print_kv_cache_readback,
-    print_original_kv_tensors,
-    print_per_token_per_head_comparison,
-    print_q_tensor_final_layout,
-    print_q_tensor_info,
 )
-from rtp_llm.ops import AttentionConfigs, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType
 from rtp_llm.ops.compute_ops import PyAttentionInputs, get_typemeta, init_exec_ctx
+from rtp_llm.test.utils.numeric_util import assert_close_with_mismatch_tolerance
 
 
-def compute_attention_per_head(
-    q_tensor: torch.Tensor,  # [num_tokens, num_q_heads, head_dim]
-    k_tensor: torch.Tensor,  # [total_kv_len, num_kv_heads, head_dim]
-    v_tensor: torch.Tensor,  # [total_kv_len, num_kv_heads, head_dim]
-    num_q_heads: int,
-    num_kv_heads: int,
-    head_dim: int,
-):
-    """
-    手动计算每个head的attention结果
-
-    公式：Attention(Q, K, V) = softmax(Q @ K^T / sqrt(d_k)) @ V
-    对于GQA: 每 group_size 个Q heads共享一个KV head
-    """
-    num_tokens = q_tensor.shape[0]
-    total_kv_len = k_tensor.shape[0]
-    group_size = num_q_heads // num_kv_heads
-    scale = 1.0 / (head_dim**0.5)
-
-    attention_outputs = []
-
-    for token_idx in range(num_tokens):
-        token_outputs = []
-
-        for q_head_idx in range(num_q_heads):
-            # GQA mapping
-            kv_head_idx = q_head_idx // group_size
-
-            # 获取Q, K, V
-            q = q_tensor[token_idx, q_head_idx, :]  # [head_dim]
-            k = k_tensor[:, kv_head_idx, :]  # [total_kv_len, head_dim]
-            v = v_tensor[:, kv_head_idx, :]  # [total_kv_len, head_dim]
-
-            # 计算 attention scores
-            scores = torch.matmul(k, q) * scale
-
-            # Apply causal mask
-            causal_mask = torch.zeros_like(scores, dtype=torch.bool)
-            causal_mask[token_idx + 1 :] = True
-            scores = scores.masked_fill(causal_mask, float("-inf"))
-
-            # Softmax and weighted sum
-            attn_weights = F.softmax(scores, dim=0)
-            output = torch.matmul(attn_weights, v)
-
-            token_outputs.append(output)
-
-        token_outputs = torch.stack(token_outputs, dim=0)  # [num_q_heads, head_dim]
-        attention_outputs.append(token_outputs)
-
-    attention_outputs = torch.stack(
-        attention_outputs, dim=0
-    )  # [num_tokens, num_q_heads, head_dim]
-    return attention_outputs
-
-
-class TRTAttnTestBase(BaseAttentionTest):
+class TRTLLMFMHAv2TestBase(BaseAttentionTest):
     """Base test class for TRT attention operations
 
     Provides shared utilities for:
@@ -141,6 +78,7 @@ class TRTAttnTestBase(BaseAttentionTest):
         attn_configs.tokens_per_block = seq_size_per_block
         attn_configs.kernel_tokens_per_block = seq_size_per_block
         attn_configs.use_mla = False
+        attn_configs.kv_cache_dtype = KvCacheDataType.BASE
 
         dtype_map = {
             "fp16": torch.float16,
@@ -195,6 +133,16 @@ class TRTAttnTestBase(BaseAttentionTest):
             cu_kv_seqlens, dtype=torch.int32, device=self.device
         )
 
+        max_seq_len = max(input_lengths)
+        padding_offsets = []
+        cumulative_padding = 0
+        for seq_len in input_lengths:
+            padding_offsets.extend([cumulative_padding] * seq_len)
+            cumulative_padding += max_seq_len - seq_len
+        attn_inputs.padding_offset = torch.tensor(
+            padding_offsets, dtype=torch.int32, device=self.device
+        )
+
         attn_inputs.total_tokens = cu_seqlens[-1]
         attn_inputs.context_total_kv_length = cu_kv_seqlens[-1]
 
@@ -236,6 +184,14 @@ class TRTAttnTestBase(BaseAttentionTest):
                 block_offset, block_offset + num_blocks, dtype=torch.int32
             )
             block_offset += num_blocks
+
+        # Use a non-identity physical-page mapping so paged correctness tests
+        # fail if the kernel ignores block_tables and reads contiguous pages.
+        for i, total_kv in enumerate(total_kvs):
+            num_blocks = math.ceil(total_kv / seq_size_per_block)
+            kv_cache_block_id[i, :num_blocks] = (
+                block_offset - 1 - kv_cache_block_id[i, :num_blocks]
+            )
 
         print(
             f"[Non-padded] total_kvs={total_kvs}, max_blocks_per_seq={max_blocks_per_seq}, total_blocks={block_offset}",
@@ -365,7 +321,7 @@ class TRTAttnTestBase(BaseAttentionTest):
 
         batch_size = len(prefix_lengths)
         offset = 0
-        block_offset = 0
+        block_ids = attn_inputs.kv_cache_kernel_block_id
         for i in range(batch_size):
             # Write ALL KV (prefix + new tokens), not just prefix
             seq_len = total_kv_lengths[i]
@@ -394,9 +350,6 @@ class TRTAttnTestBase(BaseAttentionTest):
                 :, head_num + num_kv_heads : head_num + 2 * num_kv_heads, :
             ]
 
-            # Print ORIGINAL K/V tensors
-            # print_original_kv_tensors(k_tensor, v_tensor, seq_len, num_kv_heads, max_tokens_to_print=2)
-
             # Transpose to [num_kv_heads, seq_len, head_dim] for block-wise writing
             k_tensor_t = k_tensor.transpose(0, 1)  # [num_kv_heads, seq_len, head_dim]
             v_tensor_t = v_tensor.transpose(0, 1)  # [num_kv_heads, seq_len, head_dim]
@@ -407,53 +360,24 @@ class TRTAttnTestBase(BaseAttentionTest):
                 block_start = b * seq_size_per_block
                 block_end = min((b + 1) * seq_size_per_block, seq_len)
                 block_len = block_end - block_start
+                physical_block_id = int(block_ids[i, b].item())
 
                 print(
-                    f"  [DEBUG] Block {b}: writing tokens [{block_start}:{block_end}), block_len={block_len}",
+                    f"  [DEBUG] Logical block {b} -> physical block {physical_block_id}: "
+                    f"writing tokens [{block_start}:{block_end}), block_len={block_len}",
                     flush=True,
                 )
 
                 # Write K: block_cache[b, 0, :, 0:block_len, :] = k_tensor_t[:, block_start:block_end, :]
-                kv_cache_tensor[block_offset + b, 0, :, 0:block_len, :] = k_tensor_t[
+                kv_cache_tensor[physical_block_id, 0, :, 0:block_len, :] = k_tensor_t[
                     :, block_start:block_end, :
                 ]
                 # Write V: block_cache[b, 1, :, 0:block_len, :] = v_tensor_t[:, block_start:block_end, :]
-                kv_cache_tensor[block_offset + b, 1, :, 0:block_len, :] = v_tensor_t[
+                kv_cache_tensor[physical_block_id, 1, :, 0:block_len, :] = v_tensor_t[
                     :, block_start:block_end, :
                 ]
 
-            block_offset += allocate_blocks
             print(f"  write cache for batch {i} successfully\n", flush=True)
-
-        # Make same KV head's different tokens have identical K/V
-        # For each KV head: Token0's K/V = Token1's K/V = ...
-        # This simplifies attention: weights become uniform, output = average of V values
-        print(
-            f"\n[DEBUG] Making each KV head's tokens have identical K/V for testing...",
-            flush=True,
-        )
-        num_kv_heads = kv_cache_tensor.shape[2]
-        seq_size_per_block = kv_cache_tensor.shape[3]
-
-        print(f"  Each KV head's tokens now have identical K and V values", flush=True)
-        print(f"  (But different KV heads still have different values)", flush=True)
-
-        # Swap token0 and token1 for KV_Head 0 to test if kernel accesses wrong token
-        print(f"\n[DEBUG] Swapping token0 and token1 for KV_Head0...", flush=True)
-
-        # Manual attention calculation for debugging
-        # print_kv_cache_modifications(kv_cache_tensor, num_kv_heads, max_heads_to_print=2)
-
-        # Extract Q tensor once (avoid duplicate views)
-        # qkv_full: [total_tokens, (head_num + 2*num_kv_heads) * head_dim]
-        # Q is the first head_num * head_dim elements
-        # Layout: Q (first head_num) | K (next num_kv_heads) | V (last num_kv_heads)
-        q_tensor = qkv_full.view(total_tokens, head_num + 2 * num_kv_heads, head_dim)[
-            :, :head_num, :
-        ]
-
-        # Diagnose Q tensor reading bug: calculate attention for ALL Q heads with KV_Head0
-        # print_expected_attention_output(q_tensor, kv_cache_tensor, head_dim, head_num, max_q_heads_to_print=4)
 
     def run_correctness_test(
         self,
@@ -469,6 +393,10 @@ class TRTAttnTestBase(BaseAttentionTest):
         attn_inputs: PyAttentionInputs,
         prefix_lengths: List[int] = None,
         use_padded: bool = False,
+        rtol: float = 5e-3,
+        atol: float = 5e-3,
+        max_mismatch_rate: float = 0.0,
+        use_packed_kv_cache: bool = False,
     ):
         """Run correctness test for an attention operator
 
@@ -485,6 +413,10 @@ class TRTAttnTestBase(BaseAttentionTest):
             attn_inputs: Pre-created attention inputs
             prefix_lengths: Already cached KV lengths (optional)
             use_padded: Whether using padded mode
+            rtol: Relative tolerance for the reference comparison
+            atol: Absolute tolerance for the reference comparison
+            max_mismatch_rate: Maximum fraction of elements allowed outside tolerance
+            use_packed_kv_cache: Whether to expose KV cache as a packed 2D buffer
         """
         # For paged attention with prefix: create full QKV (prefix + new) for writing cache
         # For non-prefix cases: create QKV only with input_lengths
@@ -543,7 +475,7 @@ class TRTAttnTestBase(BaseAttentionTest):
 
         attn_inputs.dtype = get_typemeta(qkv)
 
-        is_supported = attn_op.support(attn_inputs)
+        is_supported = attn_op.support(attn_configs, attn_inputs)
         print(f"{op_name} support check: {is_supported}", flush=True)
 
         if not is_supported:
@@ -565,12 +497,17 @@ class TRTAttnTestBase(BaseAttentionTest):
                 [math.ceil(kv_len / seq_size_per_block) for kv_len in total_kv_lengths]
             )
 
+        cache_dtype = (
+            torch.float8_e4m3fn
+            if attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+            else attn_configs.dtype
+        )
         kv_cache, _, _ = self._create_kv_cache(
             total_blocks,
             seq_size_per_block,
             head_num_kv,
             size_per_head,
-            dtype=torch.float16,
+            dtype=cache_dtype,
         )
 
         try:
@@ -579,8 +516,10 @@ class TRTAttnTestBase(BaseAttentionTest):
             if prefix_lengths is not None:
                 # Write ALL KV (prefix + new) to cache
                 self._write_kv_cache(qkv, attn_inputs, total_kv_lengths, kv_cache)
+                if use_packed_kv_cache:
+                    kv_cache.kv_cache_base = kv_cache.kv_cache_base.flatten(1)
 
-                # For PAGED_TRT_V2: extract Q from ONLY new tokens part and transpose
+                # For paged FlashInfer TRT-LLM FMHA v2, extract Q from new tokens only.
                 # Need to skip prefix part in QKV
                 qkv_new_only = []
                 offset = 0
@@ -603,19 +542,6 @@ class TRTAttnTestBase(BaseAttentionTest):
                     :, :head_num, :
                 ]  # [sum(input_lengths), head_num, size_per_head]
 
-                # Print Q tensor before transpose
-                # print_q_tensor_info(q, head_num, max_tokens_to_print=2, max_heads_to_print=4, max_dims_to_print=4)
-
-                # FIX: TRT kernel expects Q in [token, head, dim] layout, NOT [head, token, dim]
-                # Keep Q as [token, head, dim] without transpose
-                print(
-                    f"\n[FIX] Keeping Q in [token, head, dim] layout as expected by TRT kernel",
-                    flush=True,
-                )
-
-                # Print Q tensor final layout (no transpose, keep as [token, head, dim])
-                # print_q_tensor_final_layout(q_transposed, head_num, max_tokens_to_print=2, max_heads_to_print=4, max_dims_to_print=4)
-
                 attn_input = (
                     q.contiguous()
                 )  # [sum(input_lengths), local_head_num, size_per_head]
@@ -630,45 +556,7 @@ class TRTAttnTestBase(BaseAttentionTest):
             # Forward pass: TRT attention reads KV from cache
             output = attn_op.forward(attn_input, kv_cache, params)
             expected_output_dim = head_num * size_per_head
-
-            # Print TRT actual output for comparison
-            if prefix_lengths is not None and sum(input_lengths) >= 2:
-                output_reshaped = output.view(
-                    sum(input_lengths), head_num, size_per_head
-                )
-                trt_t1_h0 = output_reshaped[1, 0, :]  # Token 1, Q Head 0
-
-                print(f"\n[TRT ACTUAL OUTPUT] Token1 Q_Head0:", flush=True)
-                print(f"  Actual output[:4] = {trt_t1_h0[:4].tolist()}", flush=True)
-                print(f"  Actual output (full) = {trt_t1_h0.tolist()}", flush=True)
-
-                if head_num > 1:
-                    trt_t1_h1 = output_reshaped[1, 1, :]  # Token 1, Q Head 1
-                    print(f"\n[TRT ACTUAL OUTPUT] Token1 Q_Head1:", flush=True)
-                    print(f"  Actual output[:4] = {trt_t1_h1[:4].tolist()}", flush=True)
-
-            # Print TRT output for token1 head0 and head2 for comparison with manual calculation
-            # if prefix_lengths is not None and sum(input_lengths) >= 2 and head_num_kv >= 2:
-            #     # Output shape: [sum(input_lengths), head_num * size_per_head]
-            #     # Reshape to [sum(input_lengths), head_num, size_per_head]
-            #     output_reshaped = output.view(sum(input_lengths), head_num, size_per_head)
-
-            #     trt_token1_head0 = output_reshaped[1, 0, :]  # Token 1, Q Head 0 (should use KV Head 0)
-            #     trt_token1_head2 = output_reshaped[1, 2, :]  # Token 1, Q Head 2 (should use KV Head 1)
-
-            #     print(f"\n[TRT OUTPUT] Token1 Q_Head0 (should use KV_Head0):", flush=True)
-            #     print(f"  TRT output: {trt_token1_head0.tolist()}", flush=True)
-            #     print(f"  Expected (from manual calc above): weighted sum of KV_Head0's V values", flush=True)
-
-            #     print(f"\n[TRT OUTPUT] Token1 Q_Head2 (should use KV_Head1):", flush=True)
-            #     print(f"  TRT output: {trt_token1_head2.tolist()}", flush=True)
-            #     print(f"  Expected (from manual calc above): weighted sum of KV_Head1's V values", flush=True)
-
-            #     print(f"\n  ========== DIAGNOSIS ==========", flush=True)
-            #     print(f"  If Q_Head0 output matches manual calc using KV_Head0: ✓ CORRECT", flush=True)
-            #     print(f"  If Q_Head0 output matches manual calc using KV_Head1: ✗ BUG (diagonal pattern)", flush=True)
-            #     print(f"  If Q_Head2 output matches manual calc using KV_Head1: ✓ CORRECT", flush=True)
-            #     print(f"  If Q_Head2 output matches manual calc using KV_Head0: ✗ BUG", flush=True)
+            self.assertEqual(output.dtype, qkv.dtype)
 
             # Check output shape
             if use_padded:
@@ -724,6 +612,9 @@ class TRTAttnTestBase(BaseAttentionTest):
                 qkv_for_ref = qkv
                 output_for_compare = output
 
+            if attn_configs.kv_cache_dtype == KvCacheDataType.FP8:
+                qkv_for_ref = qkv_for_ref.to(torch.float8_e4m3fn).to(attn_configs.dtype)
+
             print(f"Computing PyTorch reference for {op_name}...", flush=True)
 
             # For paged attention with prefix: compute reference with full QKV (prefix + new)
@@ -741,6 +632,7 @@ class TRTAttnTestBase(BaseAttentionTest):
                     head_num,
                     head_num_kv,
                     size_per_head,
+                    is_causal=attn_configs.is_causal,
                 )
                 # Extract only new tokens (input_lengths) from reference output
                 # For each request: skip prefix part, only keep the new tokens part
@@ -771,6 +663,7 @@ class TRTAttnTestBase(BaseAttentionTest):
                     head_num,
                     head_num_kv,
                     size_per_head,
+                    is_causal=attn_configs.is_causal,
                 )
 
             print(f"Comparing {op_name} output with PyTorch reference...", flush=True)
@@ -779,36 +672,22 @@ class TRTAttnTestBase(BaseAttentionTest):
                 flush=True,
             )
 
-            # Detailed per-token comparison for debugging
-            output_reshaped = output_for_compare.view(
-                sum(input_lengths), head_num, size_per_head
-            )
-            ref_reshaped = ref_output.view(sum(input_lengths), head_num, size_per_head)
-
-            # Add analysis: Why does 1 token work but multi-token shows diagonal pattern?
-            # Hypothesis: TRT kernel uses token_idx instead of kv_head_idx somewhere
-            print(f"\n[ANALYSIS] Testing configuration:", flush=True)
-            print(f"  head_num (Q heads): {head_num}", flush=True)
-            print(f"  head_num_kv (KV heads): {head_num_kv}", flush=True)
-            print(f"  GQA group_size: {head_num // head_num_kv}", flush=True)
-            print(f"  num_tokens: {sum(input_lengths)}", flush=True)
-
-            # Print detailed per-token per-head comparison
-            # print_per_token_per_head_comparison(
-            #     output_for_compare, ref_output, head_num, size_per_head,
-            #     max_tokens_to_print=4, max_heads_to_print=4, max_dims_to_print=4,
-            #     rtol=5e-3, atol=5e-3
-            # )
-
-            print(f"\noutput_for_compare: {output_for_compare}")
-            print(f"ref_output: {ref_output}")
-            compare_tensors(
-                output_for_compare,
-                ref_output,
-                rtol=5e-3,
-                atol=5e-3,
-                name=f"{op_name} output (batch={batch_size}, input_lengths={input_lengths}{', padded' if use_padded else ''})",
-            )
+            if max_mismatch_rate > 0:
+                assert_close_with_mismatch_tolerance(
+                    output_for_compare,
+                    ref_output,
+                    rtol=rtol,
+                    atol=atol,
+                    max_mismatched_elements=int(max_mismatch_rate * ref_output.numel()),
+                )
+            else:
+                compare_tensors(
+                    output_for_compare,
+                    ref_output,
+                    rtol=rtol,
+                    atol=atol,
+                    name=f"{op_name} output (batch={batch_size}, input_lengths={input_lengths}{', padded' if use_padded else ''})",
+                )
 
             print(f"✓ {op_name} correctness check passed!", flush=True)
 

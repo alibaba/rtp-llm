@@ -18,10 +18,10 @@
             "result": {
                 "response_batch": [
                     {
-                        "response": " In Python's Flask framework, Django North and its"
+                        "response": " In Python we create a virtual database system in D"
                     },
                     {
-                        "response": " In Python's Flask framework, Django North and its"
+                        "response": " In Python we create a virtual database system in D"
                     }
                 ]
             }
@@ -39,7 +39,7 @@
             },
             "result": {
                 "response": [
-                    " In Flask, I have a view called `default",
+                    " In Flask, consider the `request`, `session",
                     " Flask has its own syntax, but Flask-Django"
                 ],
                 "iter_count": 10,

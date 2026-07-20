@@ -133,9 +133,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("NONE", FMHAType::NONE)
         .value("OPEN_SOURCE", FMHAType::OPEN_SOURCE)
         .value("PAGED_OPEN_SOURCE", FMHAType::PAGED_OPEN_SOURCE)
-        .value("PAGED_TRT_V2", FMHAType::PAGED_TRT_V2)
-        .value("TRT_V1", FMHAType::TRT_V1)
-        .value("TRT_V2", FMHAType::TRT_V2)
+        .value("PAGED_FLASHINFER_TRT_FMHA_V2", FMHAType::PAGED_FLASHINFER_TRT_FMHA_V2)
+        .value("FLASHINFER_TRT_FMHA_V2", FMHAType::FLASHINFER_TRT_FMHA_V2)
         .value("XQA", FMHAType::XQA)
         .value("AITER_PREFILL", FMHAType::AITER_PREFILL)
         .value("AITER_ASM_PREFILL", FMHAType::AITER_ASM_PREFILL)
@@ -305,12 +304,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<FMHAConfig>(m, "FMHAConfig")
         .def(py::init<>())
         .def_readwrite("enable_fmha", &FMHAConfig::enable_fmha)
-        .def_readwrite("enable_trt_fmha", &FMHAConfig::enable_trt_fmha)
-        .def_readwrite("enable_paged_trt_fmha", &FMHAConfig::enable_paged_trt_fmha)
+        .def_readwrite("enable_flashinfer_trtllm_gen", &FMHAConfig::enable_flashinfer_trtllm_gen)
+        .def_readwrite("enable_flashinfer_trt_fmha_v2", &FMHAConfig::enable_flashinfer_trt_fmha_v2)
+        .def_readwrite("enable_paged_flashinfer_trt_fmha_v2", &FMHAConfig::enable_paged_flashinfer_trt_fmha_v2)
         .def_readwrite("enable_open_source_fmha", &FMHAConfig::enable_open_source_fmha)
         .def_readwrite("enable_paged_open_source_fmha", &FMHAConfig::enable_paged_open_source_fmha)
-        .def_readwrite("enable_trtv1_fmha", &FMHAConfig::enable_trtv1_fmha)
-        .def_readwrite("disable_flash_infer", &FMHAConfig::disable_flash_infer)
+        .def_readwrite("disable_flashinfer_native", &FMHAConfig::disable_flashinfer_native)
         .def_readwrite("enable_xqa", &FMHAConfig::enable_xqa)
         .def_readwrite("use_aiter_pa", &FMHAConfig::use_aiter_pa)
         .def_readwrite("use_asm_pa", &FMHAConfig::use_asm_pa)
@@ -320,35 +319,35 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const FMHAConfig& self) {
                 return py::make_tuple(self.enable_fmha,
-                                      self.enable_trt_fmha,
-                                      self.enable_paged_trt_fmha,
+                                      self.enable_flashinfer_trt_fmha_v2,
+                                      self.enable_paged_flashinfer_trt_fmha_v2,
                                       self.enable_open_source_fmha,
                                       self.enable_paged_open_source_fmha,
-                                      self.enable_trtv1_fmha,
-                                      self.disable_flash_infer,
+                                      self.disable_flashinfer_native,
                                       self.enable_xqa,
                                       self.use_aiter_pa,
                                       self.use_asm_pa,
                                       self.use_triton_pa,
-                                      self.absorb_opt_len);
+                                      self.absorb_opt_len,
+                                      self.enable_flashinfer_trtllm_gen);
             },
             [](py::tuple t) {
                 if (t.size() != 12)
                     throw std::runtime_error("Invalid state!");
                 FMHAConfig c;
                 try {
-                    c.enable_fmha                   = t[0].cast<bool>();
-                    c.enable_trt_fmha               = t[1].cast<bool>();
-                    c.enable_paged_trt_fmha         = t[2].cast<bool>();
-                    c.enable_open_source_fmha       = t[3].cast<bool>();
-                    c.enable_paged_open_source_fmha = t[4].cast<bool>();
-                    c.enable_trtv1_fmha             = t[5].cast<bool>();
-                    c.disable_flash_infer           = t[6].cast<bool>();
-                    c.enable_xqa                    = t[7].cast<bool>();
-                    c.use_aiter_pa                  = t[8].cast<bool>();
-                    c.use_asm_pa                    = t[9].cast<bool>();
-                    c.use_triton_pa                 = t[10].cast<bool>();
-                    c.absorb_opt_len                = t[11].cast<int64_t>();
+                    c.enable_fmha                         = t[0].cast<bool>();
+                    c.enable_flashinfer_trt_fmha_v2       = t[1].cast<bool>();
+                    c.enable_paged_flashinfer_trt_fmha_v2 = t[2].cast<bool>();
+                    c.enable_open_source_fmha             = t[3].cast<bool>();
+                    c.enable_paged_open_source_fmha       = t[4].cast<bool>();
+                    c.disable_flashinfer_native           = t[5].cast<bool>();
+                    c.enable_xqa                          = t[6].cast<bool>();
+                    c.use_aiter_pa                        = t[7].cast<bool>();
+                    c.use_asm_pa                          = t[8].cast<bool>();
+                    c.use_triton_pa                       = t[9].cast<bool>();
+                    c.absorb_opt_len                      = t[10].cast<int64_t>();
+                    c.enable_flashinfer_trtllm_gen        = t[11].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FMHAConfig unpickle error: ") + e.what());
                 }

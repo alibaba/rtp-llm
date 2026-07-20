@@ -210,31 +210,31 @@ def h20_oss_suites():
             smoke_test(
                 name="dense_fp8kv_cudagraph",
                 task_info="data/model/qwen25/q_r_new_model_py_fp8_kv_cache_cudagraph.json",
-                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 1  --disable_flash_infer 1",
+                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 1  --disable_flashinfer_native 1",
                 gpu_type=["H20"],
             ),
             smoke_test(
                 name="dense_fp8kv_flashinfer_prefill",
                 task_info="data/model/qwen25/q_r_new_model_py_fp8_kv_cache_flashinfer_prefill.json",
-                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 0 --disable_flash_infer 0 --frontend_server_count 1",
+                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 0 --disable_flashinfer_native 0 --frontend_server_count 1",
                 gpu_type=["H20"],
             ),
             smoke_test(
                 name="dense_fp8_prequant_tp2",
                 task_info="data/model/qwen3/q_r_block_fp8.json",
-                smoke_args="--disable_flash_infer 1 --act_type BF16 --reserver_runtime_mem_mb 8192 --tp_size 2 --warm_up 0",
+                smoke_args="--disable_flashinfer_native 1 --act_type BF16 --reserver_runtime_mem_mb 8192 --tp_size 2 --warm_up 0",
                 gpu_type=["H20"],
             ),
             smoke_test(
                 name="dense_fp8pb_dynamic",
                 task_info="data/model/qwen3/q_r_h20.json",
-                smoke_args="--disable_flash_infer 1 --quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0",
+                smoke_args="--disable_flashinfer_native 1 --quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0",
                 gpu_type=["H20"],
             ),
             smoke_test(
                 name="dense_fp8pt_dynamic",
                 task_info="data/model/qwen3/q_r_h20_per_tensor_w13.json",
-                smoke_args="--disable_flash_infer 1 --quantization FP8_DYNAMIC_PER_TENSOR --act_type BF16",
+                smoke_args="--disable_flashinfer_native 1 --quantization FP8_DYNAMIC_PER_TENSOR --act_type BF16",
                 gpu_type=["H20"],
             ),
             smoke_test(
@@ -246,7 +246,7 @@ def h20_oss_suites():
             smoke_test(
                 name="dense_pdfusion_ratio_prompt_batch_alternation",
                 task_info="data/model/qwen25/q_r_pdfusion_ratio_prompt_batch.json",
-                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --disable_flash_infer 1 --tp_size 1 --dp_size 2 --world_size 2 --pdfusion_scheduler_mode ratio --decode_prefill_ratio 3",
+                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --disable_flashinfer_native 1 --tp_size 1 --dp_size 2 --world_size 2 --pdfusion_scheduler_mode ratio --decode_prefill_ratio 3",
                 gpu_type=["H20"],
                 concurrency_test=True,
             ),

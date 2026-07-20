@@ -84,12 +84,12 @@ std::string ConcurrencyConfig::to_string() const {
 std::string FMHAConfig::to_string() const {
     std::ostringstream oss;
     oss << "enable_fmha: " << enable_fmha << "\n"
-        << "enable_trt_fmha: " << enable_trt_fmha << "\n"
-        << "enable_paged_trt_fmha: " << enable_paged_trt_fmha << "\n"
+        << "enable_flashinfer_trtllm_gen: " << enable_flashinfer_trtllm_gen << "\n"
+        << "enable_flashinfer_trt_fmha_v2: " << enable_flashinfer_trt_fmha_v2 << "\n"
+        << "enable_paged_flashinfer_trt_fmha_v2: " << enable_paged_flashinfer_trt_fmha_v2 << "\n"
         << "enable_open_source_fmha: " << enable_open_source_fmha << "\n"
         << "enable_paged_open_source_fmha: " << enable_paged_open_source_fmha << "\n"
-        << "enable_trtv1_fmha: " << enable_trtv1_fmha << "\n"
-        << "disable_flash_infer: " << disable_flash_infer << "\n"
+        << "disable_flashinfer_native: " << disable_flashinfer_native << "\n"
         << "enable_xqa: " << enable_xqa << "\n"
         << "use_aiter_pa: " << use_aiter_pa << "\n"
         << "use_asm_pa: " << use_asm_pa << "\n"
