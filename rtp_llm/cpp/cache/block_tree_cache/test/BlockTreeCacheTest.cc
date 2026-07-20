@@ -1221,7 +1221,7 @@ TEST_F(BlockTreeCacheTest, LoadBackGroupMappingUsesLocalPoolIndexOrderAndLeavesT
     EXPECT_EQ(host_pool->freeBlocksNum(), free_before);
 }
 
-TEST_F(BlockTreeCacheTest, LoadBackGroupMappingValidatorRejectsOutOfRangeDuplicateAndHoleMetadata) {
+TEST_F(BlockTreeCacheTest, LoadBackGroupMappingInitRejectsOutOfRangeDuplicateAndHoleMetadata) {
     const auto make_uninitialized = [](std::vector<BlockTreeCache::PerTagMapping> mapping, size_t pool_count) {
         return makeMappingValidationCache(std::move(mapping), pool_count, nullptr, /*initialize=*/false);
     };
@@ -1230,53 +1230,19 @@ TEST_F(BlockTreeCacheTest, LoadBackGroupMappingValidatorRejectsOutOfRangeDuplica
         {{/*component_group_id=*/0, /*local_pool_index=*/0}, {/*component_group_id=*/0, /*local_pool_index=*/2}},
         /*pool_count=*/2);
     ASSERT_NE(out_of_range, nullptr);
-    EXPECT_FALSE(out_of_range->validateDeviceGroupIdsForComponentGroup(/*component_group_id=*/0, {0, 1}));
+    EXPECT_FALSE(out_of_range->init());
 
     std::unique_ptr<BlockTreeCache> duplicate = make_uninitialized(
         {{/*component_group_id=*/0, /*local_pool_index=*/0}, {/*component_group_id=*/0, /*local_pool_index=*/0}},
         /*pool_count=*/2);
     ASSERT_NE(duplicate, nullptr);
-    EXPECT_FALSE(duplicate->validateDeviceGroupIdsForComponentGroup(/*component_group_id=*/0, {0, 1}));
+    EXPECT_FALSE(duplicate->init());
 
     std::unique_ptr<BlockTreeCache> hole = make_uninitialized(
         {{/*component_group_id=*/0, /*local_pool_index=*/0}, {/*component_group_id=*/0, /*local_pool_index=*/2}},
         /*pool_count=*/3);
     ASSERT_NE(hole, nullptr);
-    EXPECT_FALSE(hole->validateDeviceGroupIdsForComponentGroup(/*component_group_id=*/0, {0, 1}));
-}
-
-TEST_F(BlockTreeCacheTest, InvalidProducerMappingCreatesNoPendingItemOrSourceProtection) {
-    std::shared_ptr<HostBlockPool> host_pool = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/2);
-    ASSERT_NE(host_pool, nullptr);
-
-    std::unique_ptr<BlockTreeCache> cache = makeMappingValidationCache(
-        {{/*component_group_id=*/0, /*local_pool_index=*/0}, {/*component_group_id=*/0, /*local_pool_index=*/0}},
-        /*device_pool_count=*/2,
-        host_pool,
-        /*initialize=*/true);
-    ASSERT_NE(cache, nullptr);
-    auto copy_engine = std::make_shared<ScriptedCopyEngine>(cache->componentGroups(), cache->components());
-    BlockTreeCacheTestPeer::setCopyEngineForTest(*cache, copy_engine);
-
-    const ComponentGroupPtr& group        = cache->componentGroups().front();
-    const BlockIdxType       source_block = group->allocateSingleBlock(Tier::HOST);
-    ASSERT_NE(source_block, NULL_BLOCK_IDX);
-    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
-    slots[0][0].host_block = source_block;
-    ASSERT_NE(cache->tree()->insertNode(nullptr, {100}, slots).leaf, nullptr);
-
-    const size_t         source_ref_before = host_pool->refCount(source_block);
-    BlockTreeMatchResult result            = cache->match({100});
-
-    EXPECT_EQ(result.matched_blocks, 0u);
-    EXPECT_EQ(result.matched_node, nullptr);
-    EXPECT_TRUE(result.group_block_indices.empty());
-    EXPECT_TRUE(result.matched_block_sets.empty());
-    EXPECT_EQ(result.load_back_blocks, 0u);
-    EXPECT_TRUE(result.load_back_ticket == nullptr || result.load_back_ticket->empty());
-    EXPECT_EQ(host_pool->refCount(source_block), source_ref_before);
-    EXPECT_EQ(copy_engine->submitCount(), 0u);
-    EXPECT_EQ(cache->tree()->findNode({100}).matched_node->group_slots[0].transfer_state, SlotTransferState::IDLE);
+    EXPECT_FALSE(hole->init());
 }
 
 TEST_F(BlockTreeCacheTest, LoadBackWholeBatchMappingPreflightIsAtomicForLaterInvalidItem) {

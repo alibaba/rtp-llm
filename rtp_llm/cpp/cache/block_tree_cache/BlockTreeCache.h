@@ -235,6 +235,7 @@ public:
     }
 
 private:
+    bool initDeviceGroupIds();
     void taskStarted();
     void taskFinished();
     void drainTreeHolds();
@@ -258,24 +259,23 @@ private:
         std::vector<BlockIdxType> source_blocks;
         std::vector<BlockIdxType> target_device_blocks;
     };
-    bool deviceGroupIdsForComponentGroup(int               component_group_id,
-                                         std::vector<int>& device_group_ids,
-                                         const char*       validation_boundary) const;
-    void prepareMatchedBlocks(const std::vector<TreeNode*>&     matched_path,
-                              const std::vector<bool>&          candidate_logically_valid,
-                              BlockTreeMatchResult&             result,
-                              std::vector<PendingLoadBackItem>& pending_load_back_items);
-    void prepareMatchedLoadBackItem(TreeNode*                         path_node,
-                                    const ComponentGroupPtr&          component_group,
-                                    const GroupSlot&                  group_slot,
-                                    size_t                            path_index,
-                                    const std::vector<int>&           device_group_ids,
-                                    BlockTreeMatchResult&             result,
-                                    std::vector<PendingLoadBackItem>& pending_load_back_items);
+    void   prepareMatchedBlocks(const std::vector<TreeNode*>&     matched_path,
+                                const std::vector<bool>&          candidate_logically_valid,
+                                BlockTreeMatchResult&             result,
+                                std::vector<PendingLoadBackItem>& pending_load_back_items);
+    size_t computeReadyMatchedBlockCount(const std::vector<TreeNode*>& matched_path,
+                                         const std::vector<bool>&      candidate_logically_valid) const;
+    void   prepareMatchedLoadBackItem(TreeNode*                         path_node,
+                                      const ComponentGroupPtr&          component_group,
+                                      const GroupSlot&                  group_slot,
+                                      size_t                            path_index,
+                                      const std::vector<int>&           device_group_ids,
+                                      BlockTreeMatchResult&             result,
+                                      std::vector<PendingLoadBackItem>& pending_load_back_items);
 
     std::shared_ptr<AsyncContext> commitLoadBack(const std::vector<PendingLoadBackItem>& items);
     void                          abortLoadBack(const std::vector<PendingLoadBackItem>& items);
-    void                          abortLoadBackUnsafe(const std::vector<PendingLoadBackItem>& items);
+    void abortLoadBackUnsafe(const std::vector<PendingLoadBackItem>& items, size_t prepared_item_count);
     bool executeLoadBackTransferBatch(const std::vector<TransferDescriptor>& descriptors, int timeout_ms);
     void performLoadBack(std::vector<LoadBackItem> items, std::shared_ptr<AsyncContext> ctx);
 
@@ -294,7 +294,9 @@ private:
     // Per-tag gid -> DeviceKVCacheGroup (covers NON_REUSABLE tags too).
     std::vector<DeviceKVCacheGroupPtr> per_tag_device_groups_;
     // Per-tag gid -> (component_group_id, local_pool_index).
-    std::vector<PerTagMapping>                 per_tag_mapping_;
+    std::vector<PerTagMapping> per_tag_mapping_;
+    // component_group_id -> local_pool_index -> allocator-facing per-tag gid.
+    std::vector<std::vector<int>>              device_group_ids_;
     std::shared_ptr<LoadBackTicketRegistry>    load_back_ticket_registry_;
     CopyEnginePtr                              copy_engine_;
     std::shared_ptr<StorageBackend>            storage_backend_;
