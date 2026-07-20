@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -27,6 +28,7 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.models_py.modules.factory.linear.fixed_m_linear import fixed_m_linear
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
@@ -77,6 +79,41 @@ class GenericMoeLayer(nn.Module):
         self.ffn_dim = config.inter_size
         self.num_experts = config.eplb_config.phy_exp_num(config.expert_num)
         self.top_k = config.moe_k
+
+        # GLM5 CP prefill changes the rank-local token count when a reused long
+        # request is mixed with short requests (666 -> 697 rows in the
+        # reproducer).  NVJet's BF16 GEMM changes its K-reduction at that M
+        # boundary, and one-ULP router-logit drift can flip the last top-k
+        # expert.  Decode does not use this padding path.
+        is_decode_role = False
+        try:
+            from rtp_llm.ops import RoleType
+
+            is_decode_role = (
+                getattr(parallelism_config, "role_type", None) == RoleType.DECODE
+            )
+        except Exception:
+            pass
+        cp_prefill_enabled = False
+        cp_config = getattr(parallelism_config, "prefill_cp_config", None)
+        if not is_decode_role and cp_config is not None:
+            try:
+                cp_prefill_enabled = bool(cp_config.is_enabled())
+            except Exception:
+                pass
+        default_gate_chunk_rows = (
+            8192
+            if getattr(config, "model_type", "") == "glm_5" and cp_prefill_enabled
+            else 0
+        )
+        self.gate_chunk_rows = int(
+            os.environ.get("GLM5_MOE_GATE_CHUNK_ROWS", str(default_gate_chunk_rows))
+        )
+        if self.gate_chunk_rows < 0:
+            raise ValueError(
+                "GLM5_MOE_GATE_CHUNK_ROWS must be non-negative, got "
+                f"{self.gate_chunk_rows}"
+            )
 
         # Get quant_config from model_config
         quant_config = config.quant_config
@@ -199,6 +236,7 @@ class GenericMoeLayer(nn.Module):
         clone.ffn_dim = self.ffn_dim
         clone.num_experts = self.num_experts
         clone.top_k = self.top_k
+        clone.gate_chunk_rows = self.gate_chunk_rows
         clone.gate = self.gate
         clone.select_topk = self.select_topk
         clone.fake_balance_expert = self.fake_balance_expert
@@ -226,9 +264,14 @@ class GenericMoeLayer(nn.Module):
         x_scale: "Optional[torch.Tensor]" = None,
     ) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
-        router_logits = self.gate(
-            hidden_states
-        )  # fuse kernel: nvjet_tst_64x8_64x16_2x4_h_bz_NNT (bf16 nn.Linear router, every layer)
+        if self.gate_chunk_rows > 0 and num_tokens > 0:
+            router_logits = fixed_m_linear(
+                self.gate, hidden_states, self.gate_chunk_rows
+            )
+        else:
+            router_logits = self.gate(
+                hidden_states
+            )  # fuse kernel: nvjet_tst_64x8_64x16_2x4_h_bz_NNT (bf16 nn.Linear router, every layer)
         router_logits_fp32 = (
             router_logits.float()
         )  # fuse kernel: at::native::unrolled_elementwise_kernel<direct_copy_kernel_cuda> (bf16 -> fp32 cast)
