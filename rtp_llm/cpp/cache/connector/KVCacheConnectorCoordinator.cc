@@ -72,6 +72,11 @@ bool KVCacheConnectorCoordinator::hasP2PConnector() const {
     return p2p_connector_ != nullptr;
 }
 
+size_t KVCacheConnectorCoordinator::inflightTransferCount() const {
+    std::lock_guard<std::mutex> lock(update_mutex_);
+    return fused_async_read_context_list_.size() + fused_async_write_context_list_.size();
+}
+
 bool KVCacheConnectorCoordinator::init() {
     RTP_LLM_LOG_INFO("connector coordinator init, cache config: [%s], kv cache config: [%s], runtime config: [%s]",
                      cache_config_.debugString().c_str(),
@@ -368,6 +373,20 @@ std::vector<CacheKeyType> KVCacheConnectorCoordinator::memoryCacheKeys() const {
         return {};
     }
     return memory_connector_->cacheKeys();
+}
+
+bool KVCacheConnectorCoordinator::releaseMemoryCacheBacking() {
+    if (!memory_connector_) {
+        return true;
+    }
+    return memory_connector_->releaseMemoryCacheBacking();
+}
+
+bool KVCacheConnectorCoordinator::restoreMemoryCacheBacking() {
+    if (!memory_connector_) {
+        return true;
+    }
+    return memory_connector_->restoreMemoryCacheBacking();
 }
 
 }  // namespace rtp_llm

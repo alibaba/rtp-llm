@@ -80,7 +80,7 @@ bool FIFOScheduler::waitPredicate() {
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
-    if (need_fill_fake_stream_) {
+    if (need_fill_fake_stream_ || force_poll_.load(std::memory_order_relaxed)) {
         cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
     } else {
         cond_.wait(lock, [this] { return waitPredicate(); });

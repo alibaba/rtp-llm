@@ -145,6 +145,25 @@ class ServerArgsSetTest(TestCase):
         self.assertFalse(py_env_configs.fmha_config.enable_paged_flashinfer_trt_fmha_v2)
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_native)
 
+    def test_enable_sleep_mode_arg_configures_runtime_and_weight_saver(self):
+        """Sleep mode CLI flag should enable both C++ runtime config and Python weight tagging."""
+        sys.argv = [
+            "prog",
+            "--enable-sleep-mode",
+            "1",
+        ]
+
+        import rtp_llm.server.server_args.server_args
+        from rtp_llm.model_loader import weight_memory_saver as wms
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        wms._reset_for_testing()
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        if hasattr(py_env_configs.runtime_config, "enable_sleep_mode"):
+            self.assertEqual(py_env_configs.runtime_config.enable_sleep_mode, True)
+        self.assertTrue(wms.is_enabled())
+
     def test_cmd_args_override_env_vars(self):
         """Test that command line arguments override environment variables."""
         # Set environment variables

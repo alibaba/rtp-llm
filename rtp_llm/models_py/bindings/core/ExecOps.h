@@ -92,8 +92,19 @@ void             execRejectionSampling(const RejectionSamplingParams& params);
 void            execBroadcast(const BroadcastParams& params);
 AllReduceOutput execAllReduce(const AllReduceParams& params);
 void            execAllGather(const AllGatherParams& params);
-void            execSyncCommunication(bool timeout = true);
-void            execSyncCommunication(ParallelMode mode, bool timeout = true);
+
+// Async all-reduce: enqueues the collective (async_op=True) on the group selected by
+// params.mode and returns an opaque non-zero handle. The reduction runs in-place on
+// params.buffer (dest is ignored). Poll the handle with pollAsyncComm(); the buffer
+// contents are only valid to read once that returns true. Returns 0 if no async comm
+// callback is registered (caller should treat as "feature unavailable").
+uint64_t execAllReduceAsync(const AllReduceParams& params);
+// Returns true once the async collective identified by handle has completed (and has
+// been waited on so its output buffer is safe to read). A handle of 0, an unknown
+// handle, or a missing callback all return true (nothing to wait for).
+bool pollAsyncComm(uint64_t handle);
+void execSyncCommunication(bool timeout = true);
+void execSyncCommunication(ParallelMode mode, bool timeout = true);
 
 // ===================================================================
 // MOE / EPLB

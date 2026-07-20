@@ -98,6 +98,17 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         slice_begin = min(tp_token_size * tp_rank, token_num)
         slice_size = min(token_num - slice_begin, tp_token_size)
 
+        # ACCL-EP dispatch treats a null topk_idx pointer as a "no-topk" mode switch
+        # that every TP peer in the NVLink group must agree on. A 0-token TP slice
+        # (happens when token_num < tp_size, e.g. a single-token warmup/decode forward)
+        # yields empty tensors whose data_ptr() is null, so this rank would signal
+        # "no-topk" while its peers signal "topk" -> trips intranode.cu:188. Dispatch one
+        # duplicate real token instead; finalize()'s all-gather slices [:original_num_tokens],
+        # so the duplicate is discarded and the result is unchanged.
+        if slice_size == 0 and token_num > 0:
+            slice_begin = token_num - 1
+            slice_size = 1
+
         # Apply quantization
         use_fp8 = (
             self.quant_config.is_quantized

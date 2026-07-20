@@ -23,6 +23,11 @@ enum class ParallelMode {
     FFN_TP    = 3,
     EP        = 4,
     EPLB      = 5,
+    // Dedicated communicator carrying ONLY the sleep-quiesce consensus all-reduce.
+    // It spans the same rank set as DP_AND_TP but is a separate NCCL comm, so the
+    // async arm-on-demand quiesce (NormalEngine::maybeReachCollectiveSleepQuiesce)
+    // never interleaves with forward / EPLB traffic on DP_AND_TP.
+    SLEEP_QUIESCE = 6,
 };
 
 // A batch includes two parts: context batch and decoder batch.

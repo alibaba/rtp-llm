@@ -124,6 +124,10 @@ DecodeRpcServer::~DecodeRpcServer() {
     }
 }
 
+size_t DecodeRpcServer::activeCacheTransferCount() {
+    return RemoteRpcServer::activeCacheTransferCount() + onflight_load_cache_requests_.load(std::memory_order_relaxed);
+}
+
 void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     decode_context.time_info.updateRequestBegineTime();
@@ -281,27 +285,88 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", decode_context.request_key.c_str());
 }
 
-BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
-    const LoadKVCacheContext& load_context, int index, const std::vector<std::string>& peer_addrs) const {
+DecodeRpcServer::RemoteLoadPlan DecodeRpcServer::buildRemoteLoadPlan(int                             index,
+                                                                     const std::vector<std::string>& peer_addrs,
+                                                                     bool use_full_kv_peer) const {
+    const int worker_count = static_cast<int>(resource_.workers.size());
+    const int peer_count   = static_cast<int>(peer_addrs.size());
+    RTP_LLM_CHECK_WITH_INFO(worker_count > 0, "worker size must be positive");
+    RTP_LLM_CHECK_WITH_INFO(peer_count > 0, "peer_addrs is empty");
+    RTP_LLM_CHECK_WITH_INFO(
+        index >= 0 && index < worker_count, "worker index out of range: index=%d worker_count=%d", index, worker_count);
+
+    RemoteLoadPlan plan;
+    auto           select_full_kv_peer = [&]() {
+        if (worker_count % peer_count == 0) {
+            const int part_cnt = worker_count / peer_count;
+            plan.peer_addrs.push_back(peer_addrs[index / part_cnt]);
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(peer_count % worker_count == 0,
+                                    "peer size[%d] and worker size[%d] are not divisible",
+                                    peer_count,
+                                    worker_count);
+            const int group_num = peer_count / worker_count;
+            plan.peer_addrs.push_back(peer_addrs[index * group_num]);
+        }
+    };
+
+    if (use_full_kv_peer) {
+        select_full_kv_peer();
+        return plan;
+    }
+
+    const auto& prefill_cp_config = maga_init_params_.parallelism_config.prefill_cp_config;
+    if (prefill_cp_config.is_prefill_enabled()) {
+        plan.partition_count = worker_count;
+        plan.partition_id    = index % worker_count;
+        plan.peer_addrs.push_back(peer_addrs[index % peer_count]);
+        return plan;
+    }
+
+    if (prefill_cp_config.is_enabled()) {
+        select_full_kv_peer();
+        return plan;
+    }
+
+    if (worker_count % peer_count == 0) {
+        // D >= P: each decode worker loads one partition from a prefill worker.
+        const int part_cnt   = worker_count / peer_count;
+        plan.partition_count = part_cnt;
+        plan.partition_id    = index % part_cnt;
+        plan.peer_addrs.push_back(peer_addrs[index / part_cnt]);
+    } else {
+        // P >= D: each decode worker merges full blocks from multiple prefill workers.
+        RTP_LLM_CHECK_WITH_INFO(peer_count % worker_count == 0,
+                                "peer size[%d] and worker size[%d] are not divisible",
+                                peer_count,
+                                worker_count);
+        const int group_num = peer_count / worker_count;
+        for (int i = 0; i < group_num; i++) {
+            plan.peer_addrs.push_back(peer_addrs[index * group_num + i]);
+        }
+    }
+    return plan;
+}
+
+BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
+                                                                   int                             index,
+                                                                   const std::vector<std::string>& peer_addrs) const {
+    auto plan = buildRemoteLoadPlan(index, peer_addrs, false);
+
     BroadcastLoadRequestPB request;
     request.set_request_id(load_context.request_id);
     request.set_request_key(load_context.request_key);
     request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
-    request.set_partition_count(1);
-    request.set_partition_id(0);
-
-    // D >= P
-    if (resource_.workers.size() % peer_addrs.size() == 0) {
-        int part_cnt = resource_.workers.size() / peer_addrs.size();
-        request.add_peer_addrs(peer_addrs[index / part_cnt]);
-    } else {
-        // P >= D, load multi block of prefill
-        int group_num = peer_addrs.size() / resource_.workers.size();
-        request.add_peer_addrs(peer_addrs[index * group_num]);
+    request.set_partition_count(plan.partition_count);
+    request.set_partition_id(plan.partition_id);
+    for (const auto& peer_addr : plan.peer_addrs) {
+        request.add_peer_addrs(peer_addr);
     }
+
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
     }
+    // Prefer per-group block ids if available (hybrid KV cache).
     if (!load_context.block_ids_by_group.empty()) {
         for (const auto& group_block : load_context.block_ids_by_group) {
             auto* row = request.add_group_block_ids();
@@ -315,42 +380,22 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     return request;
 }
 
-BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
-                                                                   int                             index,
-                                                                   const std::vector<std::string>& peer_addrs) const {
+BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
+    const LoadKVCacheContext& load_context, int index, const std::vector<std::string>& peer_addrs) const {
+    auto plan = buildRemoteLoadPlan(index, peer_addrs, true);
+
     BroadcastLoadRequestPB request;
     request.set_request_id(load_context.request_id);
     request.set_request_key(load_context.request_key);
     request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
-    // prefill worker has full kv cache each rank
-    if (maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
-        int part_cnt = resource_.workers.size();
-        int peer_cnt = peer_addrs.size();
-        request.set_partition_count(part_cnt);
-        request.set_partition_id(index % part_cnt);
-        request.add_peer_addrs(peer_addrs[index % peer_cnt]);
-    } else {
-        if (resource_.workers.size() % peer_addrs.size() == 0) {
-            // D >= P, load part block of prefill
-            int part_cnt = resource_.workers.size() / peer_addrs.size();
-            request.set_partition_count(part_cnt);
-            request.set_partition_id(index % part_cnt);
-            request.add_peer_addrs(peer_addrs[index / part_cnt]);
-        } else {
-            // P >= D, load multi block of prefill
-            request.set_partition_count(1);
-            request.set_partition_id(0);
-            int group_num = peer_addrs.size() / resource_.workers.size();
-            for (int i = 0; i < group_num; i++) {
-                request.add_peer_addrs(peer_addrs[index * group_num + i]);
-            }
-        }
+    request.set_partition_count(plan.partition_count);
+    request.set_partition_id(plan.partition_id);
+    for (const auto& peer_addr : plan.peer_addrs) {
+        request.add_peer_addrs(peer_addr);
     }
-
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
     }
-    // Prefer per-group block ids if available (hybrid KV cache).
     if (!load_context.block_ids_by_group.empty()) {
         for (const auto& group_block : load_context.block_ids_by_group) {
             auto* row = request.add_group_block_ids();
@@ -923,6 +968,11 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                          const BroadcastLoadRequestPB* request,
                                          BroadcastLoadResponsePB*      response) {
     RTP_LLM_PROFILE_FUNCTION();
+    auto admission = acquireAdmission();
+    if (!admission.detail.admitted) {
+        return AdmissionGate::toGrpcStatus(admission.detail);
+    }
+    auto admission_lease = std::move(admission.lease);
     if (request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
         RTP_LLM_LOG_WARNING("only load when in dp group, skip load for dp rank %d", request->dp_rank());
         return grpc::Status::OK;
@@ -965,6 +1015,11 @@ grpc::Status DecodeRpcServer::allocateResourceFunc(DecodeGenerateContext& decode
 
 grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context, ServerStream* grpc_stream) {
     RTP_LLM_PROFILE_FUNCTION();
+    auto admission = acquireAdmission();
+    if (!admission.detail.admitted) {
+        return AdmissionGate::toGrpcStatus(admission.detail);
+    }
+    auto               admission_lease = std::move(admission.lease);
     c10::InferenceMode inference_guard(true);
     AtomicGuard        request_guard(onflight_requests_);
     DecodeRpcContext   rpc_context{grpc_stream};

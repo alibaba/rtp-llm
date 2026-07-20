@@ -75,6 +75,7 @@ public:
     }
 
     void                    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
+    void                    deregUserMr();
     int64_t                 getMrCostTimeMs() const;
     size_t                  freeBlocksNum() const;
     size_t                  availableBlocksNum() const;

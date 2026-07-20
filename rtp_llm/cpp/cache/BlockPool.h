@@ -61,6 +61,26 @@ public:
     void   connectorReference(BlockIdxType block_idx);
     void   connectorReference(const BlockIndicesType& block_indices);
 
+    // Sleep/wake_up: reset all block metadata to the fresh-pool state after the physical
+    // KV memory has been resumed (content discarded). Rebuilds free_block_ids_ to the full set
+    // and re-inits every BlockRefCounter, exactly like initFreeBlocks() on a new pool.
+    // Does NOT touch block_cache_ (callers clear it separately via BlockCache::clear()) and
+    // does NOT recreate the underlying buffer (VA must stay stable).
+    // Caller must guarantee no in-flight users of the pool (engine drained).
+    void resetMetadata();
+
+    // Sleep/wake_up: host memory-cache tier discard / reallocate.
+    // Only valid for AllocationType::HOST pools (the pinned host KV offload tier).
+    // releaseHostBuffer() drops the pinned host buffer (torch::empty(...).pin_memory())
+    // and all tensors that view into it, returning the ~memory_cache_size_mb of pinned
+    // RAM to the OS on sleep; it also empties free_block_ids_ so malloc() cannot hand
+    // out blocks while released. reallocateHostBuffer() re-allocates the buffer and
+    // resets all block metadata to a fresh pool on wake.
+    // Caller must guarantee the pool is drained/quiesced (no in-flight copies) and must
+    // clear any external cache-key->block LRU that indexes into the freed buffer.
+    void releaseHostBuffer();
+    void reallocateHostBuffer();
+
     void    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
     void    deregUserMr();
     int64_t getMrCostTimeMs() const {
@@ -143,6 +163,7 @@ private:
 
     torch::Tensor               cache_aligned_buffer_;
     void*                       cache_base_ptr_  = nullptr;
+    bool                        host_released_   = false;  // HOST pool: buffer freed for sleep
     bool                        kvcache_reg_mr_  = false;
     int64_t                     mr_cost_time_ms_ = 0;
     std::shared_ptr<CacheStore> cache_store_;

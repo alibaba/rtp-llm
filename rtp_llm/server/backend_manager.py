@@ -11,10 +11,16 @@ from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.engine_config import EngineConfig, update_worker_addrs
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.sleep_mode_compatibility import (
+    Level2SleepCompatibility,
+    reject_embedding_sleep,
+    validate_level2_sleep_compatibility,
+)
 from rtp_llm.distribute.distributed_server import DistributedServer, get_world_info
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
+from rtp_llm.ops import TaskType, VitSeparation
 from rtp_llm.utils.concurrency_controller import get_global_controller
 from rtp_llm.utils.fuser import _nfs_manager
 
@@ -49,6 +55,41 @@ class BackendManager(object):
             self.py_env_configs,
             nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
         )
+        # Build main model_config
+        model_config = ModelFactory.create_model_config(
+            model_args=self.py_env_configs.model_args,
+            lora_config=self.py_env_configs.lora_config,
+            kv_cache_config=engine_config.kv_cache_config,
+            profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
+            generate_env_config=self.py_env_configs.generate_env_config,
+            embedding_config=self.py_env_configs.embedding_config,
+            quantization_config=self.py_env_configs.quantization_config,
+            render_config=self.py_env_configs.render_config,
+            eplb_config=self.py_env_configs.eplb_config,
+            vit_config=self.py_env_configs.vit_config,
+        )
+        validate_level2_sleep_compatibility(
+            enable_sleep_mode=engine_config.runtime_config.enable_sleep_mode,
+            sleep_mode_level=engine_config.runtime_config.sleep_mode_level,
+            compatibility=Level2SleepCompatibility(
+                lora_adapter_count=len(model_config.lora_infos),
+                merge_lora=self.py_env_configs.lora_config.merge_lora,
+                local_multimodal_vit=(
+                    model_config.mm_model_config.is_multimodal
+                    and self.py_env_configs.vit_config.vit_separation
+                    == VitSeparation.VIT_SEPARATION_LOCAL
+                ),
+                checkpoint_backed_propose_model=bool(
+                    engine_config.sp_config.checkpoint_path
+                ),
+                eplb_enabled=self.py_env_configs.eplb_config.enable_eplb(),
+                redundant_expert=self.py_env_configs.eplb_config.redundant_expert,
+            ),
+        )
+        reject_embedding_sleep(
+            enable_sleep_mode=engine_config.runtime_config.enable_sleep_mode,
+            is_embedding=model_config.task_type != TaskType.LANGUAGE_MODEL,
+        )
 
         if engine_config.parallelism_config.world_size > 1:
             init_distributed_environment(
@@ -68,19 +109,6 @@ class BackendManager(object):
             engine_config.runtime_config,
             engine_config.parallelism_config,
             world_info,
-        )
-        # Build main model_config
-        model_config = ModelFactory.create_model_config(
-            model_args=self.py_env_configs.model_args,
-            lora_config=self.py_env_configs.lora_config,
-            kv_cache_config=engine_config.kv_cache_config,
-            profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
-            generate_env_config=self.py_env_configs.generate_env_config,
-            embedding_config=self.py_env_configs.embedding_config,
-            quantization_config=self.py_env_configs.quantization_config,
-            render_config=self.py_env_configs.render_config,
-            eplb_config=self.py_env_configs.eplb_config,
-            vit_config=self.py_env_configs.vit_config,
         )
         # Let engine_config finalize based on model_config (e.g. scheduler config)
         ModelFactory.update_engine_config_from_model_config(

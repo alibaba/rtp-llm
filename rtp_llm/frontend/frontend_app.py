@@ -23,10 +23,20 @@ from uvicorn.loops.auto import auto_loop_setup
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
-from rtp_llm.distribute.distributed_server import get_world_info
+from rtp_llm.distribute.distributed_server import (
+    get_global_tcp_store,
+    get_global_world_info_from_store,
+    get_world_info,
+)
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
-from rtp_llm.frontend.frontend_worker import get_dp_addrs_from_world_info
+from rtp_llm.frontend.sleep_routes import register_sleep_routes
+from rtp_llm.frontend.worker_address_utils import (
+    get_control_addrs_from_env,
+    get_control_addrs_from_world_info,
+    get_dp_addrs_from_world_info,
+    infer_control_addrs_from_gang_metadata,
+)
 from rtp_llm.openai.api_datatype import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
@@ -71,7 +81,8 @@ class FrontendApp(object):
         )
         self.separated_frontend = separated_frontend
 
-        # Compute all DP addresses for broadcast operations (e.g. update_scheduler_info)
+        # DP addresses are serving route targets; lifecycle control must fan out
+        # to every backend rank because sleep/wake_up is process-local.
         engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
         world_info = get_world_info(
             server_config=py_env_configs.server_config,
@@ -82,8 +93,54 @@ class FrontendApp(object):
             world_info=world_info,
             parallelism_config=engine_config.parallelism_config,
         )
+
+        def resolve_global_control_addresses() -> List[str]:
+            env_control_addresses = get_control_addrs_from_env()
+            if env_control_addresses:
+                return env_control_addresses
+            global_world_info = get_global_world_info_from_store(
+                server_config=py_env_configs.server_config,
+                distribute_config=py_env_configs.distribute_config,
+                parallelism_config=engine_config.parallelism_config,
+            )
+            if global_world_info is not None:
+                return get_control_addrs_from_world_info(global_world_info)
+            return infer_control_addrs_from_gang_metadata(
+                server_config=py_env_configs.server_config,
+                distribute_config=py_env_configs.distribute_config,
+                parallelism_config=engine_config.parallelism_config,
+            )
+
+        local_control_addresses = get_control_addrs_from_world_info(world_info)
+        control_addresses = resolve_global_control_addresses()
+        if not control_addresses:
+            control_addresses = local_control_addresses
+        expected_control_address_count = engine_config.parallelism_config.world_size
+        require_instance_lease = (
+            self.server_config.frontend_server_count > 1
+            or engine_config.parallelism_config.world_size > 1
+        )
+
+        def connect_lifecycle_store():
+            return get_global_tcp_store(
+                server_config=py_env_configs.server_config,
+                distribute_config=py_env_configs.distribute_config,
+                parallelism_config=engine_config.parallelism_config,
+            )
+
         self.grpc_client = GrpcClientWrapper(
-            self.server_config.rpc_server_port, dp_addresses=dp_addresses
+            self.server_config.rpc_server_port,
+            dp_addresses=dp_addresses,
+            control_addresses=control_addresses,
+            expected_control_address_count=expected_control_address_count,
+            control_address_resolver=resolve_global_control_addresses,
+            lifecycle_store_factory=connect_lifecycle_store,
+            require_instance_lease=require_instance_lease,
+        )
+        logging.info(
+            "sleep coordinator control_addresses=%s, expected_control_address_count=%s",
+            control_addresses,
+            expected_control_address_count,
         )
 
         logging.info(
@@ -155,7 +212,7 @@ class FrontendApp(object):
         try:
             server = GracefulShutdownServer(config)
             server.set_server(self.frontend_server)
-            # freeze all current tracked objects to reduce gc cost
+            # Move current tracked objects into GC's permanent generation to reduce collection cost.
             gc.collect()
             gc.freeze()
             server.run()
@@ -286,6 +343,13 @@ class FrontendApp(object):
         async def set_log_level(req: Union[str, Dict[Any, Any]]):
             result = await self.grpc_client.post_request("set_log_level", req)
             return result
+
+        # Embedding deployments run EmbeddingRpcService (ARPC) with no
+        # SleepLifecycleController, so /sleep, /wake_up cannot be served. Sleep
+        # mode is also rejected for them at config time (reject_embedding_sleep);
+        # only register the lifecycle routes for language-model deployments.
+        if not self.frontend_server.is_embedding:
+            register_sleep_routes(app, self.grpc_client)
 
         # request format: '{"trace_name":"normal_profiler", "start_step": 0, "num_steps": 3, "enable_all_rank": false}'
         @app.post("/rtp_llm/start_profile")

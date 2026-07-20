@@ -4,7 +4,10 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/test/CacheStoreTestBase.h"
 #include "autil/NetUtil.h"
 #include "autil/EnvUtil.h"
+#include "ATen/cuda/CUDAContext.h"
+#include "c10/cuda/CUDAGuard.h"
 #include <cuda_runtime.h>
+#include <atomic>
 
 #include <atomic>
 #include <future>
@@ -135,6 +138,47 @@ TEST_F(NormalCacheStoreTest, testStore_emptyCache) {
     cache_store1_->store(store_cache, store_callback);
     mutex.lock();
     mutex.unlock();
+}
+
+TEST_F(NormalCacheStoreTest, testMarkRequestEndClearsPendingStoreTransferCount) {
+    ASSERT_TRUE(initCacheStores());
+
+    cudaEvent_t gate;
+    ASSERT_EQ(cudaSuccess, cudaEventCreateWithFlags(&gate, cudaEventDisableTiming));
+    auto stream = at::cuda::getStreamFromPool();
+    ASSERT_EQ(cudaSuccess, cudaStreamWaitEvent(stream.stream(), gate, 0));
+
+    const std::string requestid  = "test-pending-store-request-id";
+    const uint32_t    block_size = 16;
+    auto              event      = std::make_shared<torch::Event>(torch::kCUDA);
+    {
+        c10::cuda::CUDAStreamGuard guard(stream);
+        event->record(stream);
+    }
+
+    auto store_cache = std::make_shared<RequestBlockBuffer>(requestid, event);
+    store_cache->addBlock(block_buffer_util_->makeBlockBuffer("a", block_size, '0', true));
+
+    std::atomic<bool> callback_called{false};
+    cache_store1_->store(store_cache, [&callback_called](bool ok, CacheStoreErrorCode ec) {
+        callback_called.store(true, std::memory_order_release);
+        // The pending store never ran (its event is gated), so ending the request must report
+        // failure with the cancel code -- not a false success.
+        ASSERT_FALSE(ok);
+        ASSERT_EQ(CacheStoreErrorCode::StoreCancelled, ec);
+    });
+
+    ASSERT_EQ(cache_store1_->activeTransferCount(), 1);
+    cache_store1_->markRequestEnd(requestid);
+
+    EXPECT_TRUE(callback_called.load(std::memory_order_acquire));
+    EXPECT_EQ(cache_store1_->activeTransferCount(), 0);
+    // markRequestEnd must also drop the request's buffers from the local store.
+    EXPECT_TRUE(cache_store1_->getRequestBlockBufferStore()->getRequestBlockBuffer(requestid) == nullptr);
+
+    ASSERT_EQ(cudaSuccess, cudaEventRecord(gate, 0));
+    ASSERT_EQ(cudaSuccess, cudaEventSynchronize(gate));
+    ASSERT_EQ(cudaSuccess, cudaEventDestroy(gate));
 }
 
 TEST_F(NormalCacheStoreTest, testStore_invalidParams) {

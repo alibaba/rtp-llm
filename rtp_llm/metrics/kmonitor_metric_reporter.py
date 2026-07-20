@@ -58,6 +58,10 @@ class GaugeMetrics(Enum):
     # worker_status
     WORKER_STATUS_QPS_LANTENCY_METRIC = "py_rtp_worker_status_rt"
     CACHE_STATUS_QPS_LATENCY_METRIC = "py_rtp_cache_status_rt"
+    SLEEP_ACTIVE_REQUEST_COUNT_METRIC = "py_rtp_sleep_active_request_count"
+    SLEEP_ACTIVE_CACHE_TRANSFER_COUNT_METRIC = (
+        "py_rtp_sleep_active_cache_transfer_count"
+    )
 
     # route:
     ROUTE_RT_METRIC = "py_rtp_route_rt"
@@ -107,6 +111,16 @@ class MetricReporter(object):
         self._kmon = kmonitor
         self._matic_map: Dict[str, Any] = {}
         self._inited = False
+
+    @property
+    def is_inited(self) -> bool:
+        """Whether init() has registered the metric map.
+
+        Callers gate reporting on this: a report() issued before init() would
+        find an empty metric map and warn on every call, so early reporters
+        (e.g. the sleep status poller during startup) skip cleanly instead.
+        """
+        return self._inited
 
     def report(
         self,

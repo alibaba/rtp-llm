@@ -32,6 +32,9 @@ public:
     grpc::Status health(grpc::ServerContext* context, const EmbeddingHealthRequestPB* request, EmptyPB* writer);
 
 private:
+    // EmbeddingEngine has no sleep lifecycle: sleep mode is rejected for embedding
+    // deployments at config time (see reject_embedding_sleep) and the frontend does
+    // not register lifecycle routes for them, so there is no admission gate here.
     std::shared_ptr<EmbeddingEngine>     embedding_engine_ = nullptr;
     pybind11::object                     pyRenderer_;
     pybind11::object                     pyHandler_;

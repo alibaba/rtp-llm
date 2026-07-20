@@ -2,8 +2,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -34,6 +36,12 @@ public:
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
+    void                              pause() override;
+    void                              restart() override;
+    absl::Status                      pauseAndWaitQuiesced(int64_t timeout_ms) override;
+    // Arm the collective sleep-quiesce consensus at the DRAINING transition (before drain),
+    // symmetrically on every rank (DP/EP and pure TP). No-op for single-rank. See definition.
+    void armCollectiveSleepQuiesce() override;
 
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();
@@ -60,6 +68,12 @@ private:
     absl::Status                    initSystemPrompt();
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
     void                            mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
+    absl::Status                    runExecutorProcess(const std::list<GenerateStreamPtr>& streams);
+    absl::Status                    releasePendingTpCollectiveForPause(uint64_t pause_epoch);
+    bool                            collectiveSleepQuiesceEnabled() const;
+    absl::Status                    maybeReachCollectiveSleepQuiesce();
+    void                            enterPausedState();
+    void                            markPauseQuiesced(uint64_t pause_epoch);
 
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
 
@@ -67,8 +81,29 @@ private:
     bool isEagle() override;
 
 private:
-    autil::ThreadPtr                              loop_thread_;
-    std::atomic<bool>                             running_{false};
+    autil::ThreadPtr  loop_thread_;
+    std::atomic<bool> running_{false};
+    std::mutex        process_mutex_;
+    std::mutex        collective_quiesce_state_mutex_;
+    torch::Tensor     collective_quiesce_state_;
+    // Async arm-on-demand sleep-quiesce consensus state (see maybeReachCollectiveSleepQuiesce).
+    // engaged_: latched true once this rank observes pause_, cleared on a terminal verdict
+    //           (consensus reached, or globally cancelled). Steady serving keeps it false so
+    //           the step loop issues ZERO consensus collectives.
+    // handle_:  opaque non-zero id of the in-flight async all-reduce (0 = none in flight). A
+    //           rank issues round k+1 only after round k completes, so per-rank round counts
+    //           stay matched across the group.
+    bool                    collective_quiesce_engaged_ = false;
+    uint64_t                collective_quiesce_handle_  = 0;
+    std::mutex              pause_mutex_;
+    std::condition_variable pause_cv_;
+    // Monotonic quiesce acknowledgement: the highest pause epoch a quiesce has
+    // completed for. pauseAndWaitQuiesced() waits for this to reach the epoch it
+    // captured. Monotonic-and-epoch-stamped so a fresh pause() (which only bumps
+    // pause_epoch_) can never race-erase a quiesce already recorded for that epoch.
+    uint64_t                                      quiesced_pause_epoch_{0};
+    std::atomic<uint64_t>                         pause_epoch_{0};
+    std::atomic<uint64_t>                         processed_pause_epoch_{0};
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     ParallelismConfig                             parallelism_config;

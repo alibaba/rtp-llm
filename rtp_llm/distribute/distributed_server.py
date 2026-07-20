@@ -21,7 +21,6 @@ from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 
-
 @dataclass
 class WorldInfo:
     members: List[WorkerInfo]
@@ -84,6 +83,157 @@ def get_world_info(
         distribute_config,
         parallelism_config,
     )
+
+
+def get_global_world_info_from_store(
+    server_config: ServerConfig,
+    distribute_config: DistributeConfig,
+    parallelism_config: ParallelismConfig,
+    timeout_seconds: int = 3,
+) -> Optional[WorldInfo]:
+    """Read global backend rank membership from the distributed bootstrap store.
+
+    This is used by instance-level coordinators such as the frontend sleep
+    coordinator. The coordinator must not register itself as a backend rank; it
+    only connects as a TCPStore client and reads the rank addresses published by
+    backend ``DistributedServer.bootstrap``.
+    """
+    if parallelism_config.world_size == 1:
+        return get_world_info(server_config, distribute_config, parallelism_config)
+
+    try:
+        master_ip, master_server_port = get_master(
+            distribute_config, parallelism_config
+        )
+    except Exception as e:
+        logging.warning("failed to resolve master for global world_info store: %s", e)
+        return None
+    if not master_ip:
+        logging.warning("failed to resolve master ip for global world_info store")
+        return None
+    if master_server_port == "":
+        master_server_port = server_config.start_port
+    try:
+        store_port = int(master_server_port) - 1
+    except (TypeError, ValueError):
+        logging.warning(
+            "invalid master port for global world_info store: %s", master_server_port
+        )
+        return None
+
+    try:
+        store = TCPStore(
+            host_name=master_ip,
+            port=store_port,
+            world_size=None,
+            is_master=False,
+            timeout=timedelta(seconds=timeout_seconds),
+            wait_for_workers=False,
+        )
+    except Exception as e:
+        logging.warning(
+            "failed to connect distributed store for global world_info: %s:%s, error: %s",
+            master_ip,
+            store_port,
+            e,
+        )
+        return None
+
+    keys = [
+        DistributedServer.REGISTRY_RANK_ADDRESS_KEY + str(rank)
+        for rank in range(parallelism_config.world_size)
+    ]
+    try:
+        store.wait(keys)
+    except Exception as e:
+        logging.warning(
+            "failed to wait backend rank addresses from distributed store, keys=%s, error=%s",
+            keys,
+            e,
+        )
+        return None
+
+    members: List[WorkerInfo] = []
+    master: Optional[WorkerInfo] = None
+    for rank, key in enumerate(keys):
+        try:
+            address_bytes = store.get(key)
+            address = address_bytes.decode("utf-8")
+        except Exception as e:
+            logging.warning(
+                "failed to read backend rank address from distributed store, key=%s, error=%s",
+                key,
+                e,
+            )
+            return None
+        ip, server_port = split_ip_port(address)
+        if ip == "":
+            logging.warning(
+                "invalid backend rank address from distributed store: %s", address
+            )
+            return None
+        local_rank = rank % parallelism_config.local_world_size
+        member = WorkerInfo(
+            ip=ip,
+            local_rank=local_rank,
+            world_rank=rank,
+            name=f"{distribute_config.zone_name}_rank_{rank}_{local_rank}",
+            server_port=server_port,
+            worker_info_port_num=0,
+            remote_server_port=distribute_config.remote_server_port,
+        )
+        members.append(member)
+        if rank == 0:
+            master = member
+
+    world_info = WorldInfo(
+        members=members,
+        self=None,
+        master=master,
+        num_nodes=(
+            parallelism_config.world_size + parallelism_config.local_world_size - 1
+        )
+        // parallelism_config.local_world_size,
+        initialized=True,
+    )
+    logging.info(
+        "loaded global world_info from distributed store: %s",
+        [f"{member.ip}:{member.rpc_server_port}" for member in members],
+    )
+    return world_info
+
+
+def get_global_tcp_store(
+    server_config: ServerConfig,
+    distribute_config: DistributeConfig,
+    parallelism_config: ParallelismConfig,
+    timeout_seconds: int = 3,
+) -> Optional[Any]:
+    """Connect to the instance TCPStore without registering as a backend rank."""
+    try:
+        if parallelism_config.world_size == 1:
+            master_ip = server_config.ip or socket.gethostbyname(socket.gethostname())
+            master_server_port = server_config.start_port
+        else:
+            master_ip, master_server_port = get_master(
+                distribute_config, parallelism_config
+            )
+            if master_server_port == "":
+                master_server_port = server_config.start_port
+        if not master_ip:
+            raise ValueError("master ip is empty")
+        store_port = int(master_server_port) - 1
+        return TCPStore(
+            host_name=master_ip,
+            port=store_port,
+            world_size=None,
+            is_master=False,
+            timeout=timedelta(seconds=timeout_seconds),
+            wait_for_workers=False,
+        )
+    except Exception as e:
+        logging.warning("failed to connect instance TCPStore: %s", e)
+        return None
 
 
 def get_local_world_info(
@@ -177,23 +327,40 @@ class DistributedServer(object):
             ),
             initialized=False,
         )
+        self.py_env_configs = py_env_configs
+        self.rank = pc.world_rank if rank == -1 else rank
+        self.world_size = pc.world_size if world_size == -1 else world_size
+        self._initialized = True
 
         if pc.world_size == 1:
-            logging.info("world_size == 1, do not start distributed_server")
             self.master_server_port = server_config.start_port
             self._nccl_comm_config = _build_nccl_comm_config(
                 self.worker_info.ip, server_config.start_port, pc.dp_rank
             )
+            # The single-rank TCPStore exists only to back the sleep/wake control plane's
+            # instance coordination (safe_store_get/set). A single-rank server without sleep
+            # never touches it, so binding it unconditionally would regress those deployments
+            # by occupying an extra port (start_port - 1). Bind it only when sleep is enabled.
+            sleep_enabled = getattr(
+                py_env_configs.runtime_config, "enable_sleep_mode", False
+            )
+            if sleep_enabled:
+                logging.info(
+                    "world_size == 1, sleep enabled: start TCPStore for instance coordination"
+                )
+                self.store = TCPStore(
+                    host_name=self.worker_info.ip,
+                    port=self.master_server_port - 1,
+                    world_size=None,
+                    is_master=True,
+                    wait_for_workers=False,
+                    timeout=timedelta(
+                        seconds=distribute_config.dist_comm_timeout or 300
+                    ),
+                )
+            else:
+                self.store = None
             return
-
-        if rank == -1:
-            rank = pc.world_rank
-        if world_size == -1:
-            world_size = pc.world_size
-        self._initialized = True
-        self.py_env_configs = py_env_configs
-        self.rank = rank
-        self.world_size = world_size
 
         self.master_ip, master_server_port = get_master(
             self.py_env_configs.distribute_config,
@@ -218,8 +385,8 @@ class DistributedServer(object):
         store = TCPStore(
             host_name=self._nccl_comm_config.nccl_ip,
             port=self.master_server_port - 1,
-            world_size=world_size,
-            is_master=(rank == 0),
+            world_size=self.world_size,
+            is_master=(self.rank == 0),
             wait_for_workers=wait_for_workers,
             timeout=init_process_timeout,
         )
@@ -252,6 +419,11 @@ class DistributedServer(object):
         return self.master_server_port - 11
 
     def safe_store_set(self, key: str, value: str) -> None:
+        if self.store is None:
+            raise RuntimeError(
+                "TCPStore is not initialized (sleep mode disabled or world_size==1 without sleep); "
+                "safe_store_set is only valid on the sleep/wake control plane"
+            )
         if not isinstance(value, str):
             raise TypeError("Value must be a string for safe serialization")
 
@@ -266,6 +438,11 @@ class DistributedServer(object):
             raise
 
     def safe_store_get(self, key: str, encoding: str = "utf-8") -> str:
+        if self.store is None:
+            raise RuntimeError(
+                "TCPStore is not initialized (sleep mode disabled or world_size==1 without sleep); "
+                "safe_store_get is only valid on the sleep/wake control plane"
+            )
         try:
             value_bytes = self.store.get(key)  # 阻塞直到 key 出现或超时
             try:

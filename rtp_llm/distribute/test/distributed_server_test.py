@@ -166,6 +166,56 @@ class DistributedServerTest(unittest.TestCase):
         self.maxDiff = None
         super().__init__(*args, **kwargs)
 
+    @patch.dict(
+        "os.environ",
+        {
+            "TP_SIZE": "1",
+            "PP_SIZE": "1",
+            "WORLD_SIZE": "1",
+            "WORLD_RANK": "0",
+            "LOCAL_WORLD_SIZE": "1",
+            "WORKER_INFO_PORT_NUM": "7",
+            "START_PORT": "21000",
+            "MODEL_TYPE": "fake_model",
+        },
+        clear=True,
+    )
+    def test_world_size_one_tcpstore_gated_by_sleep(self):
+        # The single-rank TCPStore backs only the sleep/wake control plane. It must be bound
+        # when sleep is enabled and NOT bound otherwise (binding start_port-1 unconditionally
+        # regressed single-rank non-sleep deployments). TCPStore is mocked so the assertion is
+        # on the gating decision, not on real port binding.
+        for sleep_enabled in (False, True):
+            with self.subTest(sleep_enabled=sleep_enabled):
+                py_env_configs: PyEnvConfigs = setup_args()
+                setup_and_configure_server(py_env_configs)
+                py_env_configs.server_config.ip = socket.gethostbyname(
+                    socket.gethostname()
+                )
+                set_parallelism_config(
+                    py_env_configs.parallelism_config,
+                    0,
+                    py_env_configs.ffn_disaggregate_config,
+                )
+                py_env_configs.runtime_config.enable_sleep_mode = sleep_enabled
+                with patch.object(ds, "TCPStore") as mock_store:
+                    server = ds.DistributedServer(py_env_configs, rank=0, world_size=1)
+                    if sleep_enabled:
+                        mock_store.assert_called_once()
+                        self.assertIsNotNone(server.store)
+                        # Coordination store is bound at start_port - 1.
+                        _, kwargs = mock_store.call_args
+                        self.assertEqual(kwargs["port"], server.master_server_port - 1)
+                    else:
+                        mock_store.assert_not_called()
+                        self.assertIsNone(server.store)
+                        # Store accessors must fail cleanly rather than AttributeError.
+                        with self.assertRaises(RuntimeError):
+                            server.safe_store_get("foo")
+                        with self.assertRaises(RuntimeError):
+                            server.safe_store_set("foo", "bar")
+
+    def _unused_nested_tests(self):
         def test_get_master_from_json(self):
             gang_info_json: Dict[str, Any] = {
                 "worker_part0": {"ip": "10.0.0.1"},

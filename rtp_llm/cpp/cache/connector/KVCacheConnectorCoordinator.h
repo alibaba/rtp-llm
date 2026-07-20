@@ -43,6 +43,10 @@ public:
     bool hasActiveConnectors() const override;
     bool hasP2PConnector() const override;
 
+    // In-flight async transfer count (read + write), used by DrainManager
+    // to decide whether the engine is fully drained before sleep.
+    size_t inflightTransferCount() const;
+
     // virtual for test
     virtual std::shared_ptr<AsyncContext>
     asyncRead(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) override;
@@ -53,6 +57,11 @@ public:
 
     virtual bool              executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
     std::vector<CacheKeyType> memoryCacheKeys() const;
+
+    // Sleep/wake_up: discard / reallocate the host memory-cache pinned buffer.
+    // Delegates to memory_connector_ when the memory cache is enabled; otherwise no-op.
+    bool releaseMemoryCacheBacking();
+    bool restoreMemoryCacheBacking();
 
     uint32_t convertToGlobalLayerId(int model_id, int layer_id) const override {
         return allocator_->convertToGlobalLayerId(model_id, layer_id);

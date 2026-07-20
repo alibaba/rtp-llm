@@ -9,10 +9,21 @@ import rtp_llm.models
 from rtp_llm.cpp.cuda_graph.tests.cuda_graph_test_utils import (
     CudaGraphTestModelBuilder,
     ModelBuildConfig,
+    use_synthetic_cuda_graph_model,
 )
 from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import CudaGraphRunner
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs, get_typemeta
+
+
+def _resolve_model_path() -> str:
+    return os.environ.get(
+        "RTP_LLM_CUDA_GRAPH_DECODE_MODEL_PATH",
+        os.environ.get(
+            "RTP_LLM_CUDA_GRAPH_TEST_MODEL_PATH",
+            "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+        ),
+    )
 
 
 class TestCudaGraphDecodePadding(unittest.TestCase):
@@ -34,10 +45,20 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
             if bs not in excluded_batch_sizes
         ]
 
-        # Build model using shared model builder
+        # Build model using shared model builder. The default path is an
+        # integration-test convention; local/Bazel runs can override it.
+        model_path = _resolve_model_path()
+        if not use_synthetic_cuda_graph_model() and not os.path.isdir(model_path):
+            raise unittest.SkipTest(
+                f"CUDA graph decode test model path does not exist: {model_path}; "
+                "set RTP_LLM_CUDA_GRAPH_DECODE_MODEL_PATH or "
+                "RTP_LLM_CUDA_GRAPH_TEST_MODEL_PATH, or set "
+                "RTP_LLM_CUDA_GRAPH_USE_SYNTHETIC_MODEL=1 for local "
+                "CudaGraphRunner coverage"
+            )
         self.model_builder = CudaGraphTestModelBuilder(
             ModelBuildConfig(
-                model_path="/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+                model_path=model_path,
                 tokens_per_block=self.tokens_per_block,
                 device=self.device,
             )

@@ -108,6 +108,8 @@ grpc::Status EmbeddingRpcServiceImpl::health(grpc::ServerContext*            con
                                              const EmbeddingHealthRequestPB* request,
                                              EmptyPB*                        writer) {
     RTP_LLM_LOG_DEBUG("Received embedding health check request");
+    // EmbeddingEngine has no sleep lifecycle (sleep mode is rejected for embedding
+    // deployments at config time), so it is always ready once serving.
     return grpc::Status::OK;
 }
 }  // namespace rtp_llm

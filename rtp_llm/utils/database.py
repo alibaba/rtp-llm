@@ -3,8 +3,9 @@ import logging
 import os
 import re
 import time
+from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Callable, ContextManager, Dict, Generator, List, Optional
 
 import torch
 from tqdm.auto import tqdm
@@ -265,7 +266,15 @@ class CkptDatabase(BaseDatabase):
         device: str,
         use_tqdm_on_load: bool,
         stacked_key_config: Optional[Dict[str, str]] = None,
+        allocation_context: Optional[Callable[[], ContextManager[Any]]] = None,
+        nogds: bool = False,
+        use_shm: bool = True,
     ):
+        # nogds / use_shm forward to the fastsafetensors ParallelLoader. Defaults
+        # (GDS on, shm on) reproduce the prior hardcoded behavior for cold load,
+        # which does not pass them; the level-2 wake reload overrides them so an
+        # operator can disable GDS and/or shm on hardware where the
+        # torch_memory_saver VMM remap invalidates those pinned/registered buffers.
         from fastsafetensors import ParallelLoader, SingleGroup
 
         from rtp_llm.model_loader.per_expert_parallel_loader import (
@@ -291,14 +300,21 @@ class CkptDatabase(BaseDatabase):
                 use_tqdm_on_load=use_tqdm_on_load,
                 device=device,
                 bbuf_size_kb=1024 * 1024 * 2,
-                use_shm=True,
+                use_shm=use_shm,
+                nogds=nogds,
             )
             if stacked_key_config:
                 loader = PerExpertParallelLoader(stacked_key_config, **loader_kwargs)
             else:
                 loader = ParallelLoader(**loader_kwargs)
             try:
-                yield from loader.iterate_weights()
+                context = (
+                    allocation_context
+                    if allocation_context is not None
+                    else nullcontext
+                )
+                with context():
+                    yield from loader.iterate_weights()
             finally:
                 loader.loader.close()
 

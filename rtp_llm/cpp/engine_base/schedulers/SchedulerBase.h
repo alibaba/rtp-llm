@@ -19,9 +19,16 @@ public:
     virtual std::vector<GenerateStreamPtr> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) = 0;
     virtual absl::StatusOr<std::list<GenerateStreamPtr>> schedule()                                    = 0;
     virtual absl::Status                                 stop()                                        = 0;
-    virtual bool                                         empty()                                       = 0;
-    virtual int64_t                                      lastScheduleTime()                            = 0;
-    virtual int64_t                                      onflightStreams()                             = 0;
+    virtual void                                         wake() {}
+    // When enabled, schedule() must NOT block indefinitely on an empty queue: it polls with a
+    // short timeout so the engine loop keeps cycling even with no work. Needed only while the
+    // collective sleep-quiesce consensus is armed on a TP>1 rank whose local work has fully
+    // drained -- tp0 must keep issuing empty co-steps (tpSyncModelInputs) so its workers advance
+    // the async SLEEP_QUIESCE rounds to the terminal verdict. No-op by default.
+    virtual void    setForcePoll(bool /*enable*/) {}
+    virtual bool    empty()            = 0;
+    virtual int64_t lastScheduleTime() = 0;
+    virtual int64_t onflightStreams()  = 0;
 
     virtual std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList() {
         return {};
