@@ -1,12 +1,21 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreDevicePin.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/Interface.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 #include "autil/LockFreeThreadPool.h"
 
 #include <cstring>
+#include <vector>
 
 namespace rtp_llm {
+
+namespace {
+
+constexpr size_t kMaxDevicePinFailuresBeforeDrain = 3;
+constexpr int    kDevicePinRetryBackoffMs         = 1000;
+
+}  // namespace
 
 NormalCacheStore::~NormalCacheStore() {
     if (thread_pool_) {
@@ -30,7 +39,8 @@ std::shared_ptr<NormalCacheStore> NormalCacheStore::createNormalCacheStore(const
 }
 
 bool NormalCacheStore::init(const CacheStoreInitParams& params) {
-    params_ = params;
+    params_    = params;
+    device_id_ = params.device_id;
 
     if (params_.memory_util != nullptr) {
         memory_util_ = params.memory_util;
@@ -53,6 +63,7 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     messager_init_params.rdma_worker_thread_count     = params.rdma_worker_thread_count;
     messager_init_params.io_thread_count              = params.messager_io_thread_count;
     messager_init_params.worker_thread_count          = params.messager_worker_thread_count;
+    messager_init_params.device_id                    = params.device_id;
 
     if (!messager_->init(messager_init_params)) {
         RTP_LLM_LOG_ERROR("normal cache store init failed : init messager failed");
@@ -67,8 +78,41 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     }
 
     auto check_task_readiness = [this]() {
+        bool   device_pinned       = false;
+        size_t device_pin_failures = 0;
         while (!thread_pool_close_) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            if (!device_pinned) {
+                device_pinned = tryPinThreadDevice(this->device_id_, "normal cache store check task");
+                if (!device_pinned) {
+                    ++device_pin_failures;
+                    if (device_pin_failures < kMaxDevicePinFailuresBeforeDrain) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(kDevicePinRetryBackoffMs));
+                        continue;
+                    }
+
+                    std::vector<CacheStoreStoreDoneCallback> failed_callbacks;
+                    {
+                        std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
+                        failed_callbacks.reserve(store_tasks_.size());
+                        for (auto& store_task : this->store_tasks_) {
+                            failed_callbacks.push_back(store_task.second.first);
+                        }
+                        store_tasks_.clear();
+                    }
+                    if (!failed_callbacks.empty()) {
+                        RTP_LLM_LOG_WARNING(
+                            "normal cache store drop %zu queued store tasks after %zu device pin failures",
+                            failed_callbacks.size(),
+                            device_pin_failures);
+                    }
+                    for (auto& callback : failed_callbacks) {
+                        callback(false, CacheStoreErrorCode::StoreFailed);
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(kDevicePinRetryBackoffMs));
+                    continue;
+                }
+            }
             std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
             for (auto it = this->store_tasks_.begin(); it != this->store_tasks_.end();) {
                 auto& [buffer, item]   = *it;
@@ -112,13 +156,24 @@ void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_
 
     auto collector = std::make_shared<CacheStoreStoreMetricsCollector>(
         metrics_reporter_, request_block_buffer->getBlocksCount(), request_block_buffer->getBlocksSize());
+    auto queue_failure_callback = [callback, collector](bool success, CacheStoreErrorCode ec) {
+        if (!success) {
+            collector->markEnd(false);
+        }
+        callback(success, ec);
+    };
     // task 只在threadpool中运行, threadpool退出前会清理所有running task, 用this是安全的
     auto task = [this, request_block_buffer, callback, collector]() {
+        if (!tryPinThreadDevice(this->device_id_, "normal cache store store task")) {
+            collector->markEnd(false);
+            callback(false, CacheStoreErrorCode::StoreFailed);
+            return;
+        }
         this->runStoreTask(request_block_buffer, callback, collector);
     };
 
     std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
-    store_tasks_[request_block_buffer] = {callback, task};
+    store_tasks_[request_block_buffer] = {queue_failure_callback, task};
 }
 
 std::shared_ptr<StoreContext>
@@ -192,6 +247,11 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
                  collector,
                  partition_count,
                  partition_id]() {
+        if (!tryPinThreadDevice(this->device_id_, "normal cache store load task")) {
+            collector->markEnd(false);
+            callback(false, CacheStoreErrorCode::LoadErrorUnknown);
+            return;
+        }
         this->runLoadTask(
             request_block_buffer, callback, ip, port, rdma_port, timeout_ms, collector, partition_count, partition_id);
     };

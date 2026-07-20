@@ -8,36 +8,21 @@
 
 namespace rtp_llm {
 
-namespace {
-
-at::cuda::CUDAStream& getNoBlockCopyStream() {
-    static thread_local auto stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false);
-    return stream;
-}
-
-}  // namespace
-
 void execNoBlockCopy(const MultiCopyParams& params) {
     RTP_LLM_CHECK_WITH_INFO(params.multi_src.size() == params.multi_dst.size(),
                             "multi_src.size(%zu) != multi_dst.size(%zu)",
                             params.multi_src.size(),
                             params.multi_dst.size());
 
-    int copy_device = -1;
-    if (!params.multi_dst.empty()) {
-        if (params.multi_dst[0].is_cuda()) {
-            copy_device = static_cast<int>(params.multi_dst[0].get_device());
-        } else if (params.multi_src[0].is_cuda()) {
-            copy_device = static_cast<int>(params.multi_src[0].get_device());
-        }
-        if (copy_device >= 0) {
-            check_cuda_value(cudaSetDevice(copy_device));
-        }
-    }
+    const bool has_cuda_tensor =
+        !params.multi_dst.empty() && (params.multi_dst[0].is_cuda() || params.multi_src[0].is_cuda());
+    const int copy_device =
+        params.multi_dst.empty() ? getCopyDevice(-1, -1) : getCopyDevice(params.multi_dst[0], params.multi_src[0]);
+    c10::cuda::CUDAGuard device_guard(copy_device);
 
-    auto stream = getNoBlockCopyStream().stream();
+    auto stream = getNoBlockCopyStream(copy_device).stream();
 
-    if (params.split_kv_layer_num > 0 && copy_device >= 0) {
+    if (params.split_kv_layer_num > 0 && has_cuda_tensor) {
         if (splitKvMultiCopy(params.multi_src,
                              params.multi_dst,
                              params.split_kv_layer_num,
