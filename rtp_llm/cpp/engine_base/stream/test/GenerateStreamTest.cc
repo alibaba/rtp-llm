@@ -137,6 +137,21 @@ TEST_F(GenerateStreamTest, testMaxTokenNumExcludesThinkingTokens) {
     ASSERT_EQ(stream->maxTokenNum(), 5);
 }
 
+TEST_F(GenerateStreamTest, testNegativeMaxThinkingTokensKeepsInclusiveMaxNewTokensBudget) {
+    autil::EnvGuard guard("RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING", "true");
+    auto            builder       = GenerateStreamBuilder();
+    auto            config        = std::make_shared<GenerateConfig>();
+    config->max_new_tokens        = 4;
+    config->in_think_mode         = true;
+    config->max_thinking_tokens   = -1;
+    config->begin_think_token_ids = {7};
+    config->end_think_token_ids   = {8, 9};
+    auto stream                   = builder.createContextStream({1, 2}, config);
+
+    ASSERT_EQ(config->max_thinking_tokens, -1);
+    ASSERT_EQ(stream->maxTokenNum(), 6);
+}
+
 TEST_F(GenerateStreamTest, testThinkEndTrimsMtpBatchToOneContentToken) {
     autil::EnvGuard guard("RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING", "true");
     auto            builder       = GenerateStreamBuilder();
@@ -174,6 +189,25 @@ TEST_F(GenerateStreamTest, testThinkEndTrimsMtpBatchToOneContentToken) {
     ASSERT_TRUE(output.value().generate_outputs[0].finished);
     ASSERT_EQ(output.value().generate_outputs[0].output_ids.numel(), 4);
     ASSERT_EQ(output.value().generate_outputs[0].output_ids.data_ptr<int32_t>()[3], 11);
+}
+
+TEST_F(GenerateStreamTest, testThinkEndScanSkippedWhenMaxNewTokensCoversMtpBatch) {
+    autil::EnvGuard guard("RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING", "true");
+    auto            builder       = GenerateStreamBuilder();
+    auto            config        = std::make_shared<GenerateConfig>();
+    config->max_new_tokens        = 5;
+    config->in_think_mode         = true;
+    config->max_thinking_tokens   = 100;
+    config->begin_think_token_ids = {7};
+    config->end_think_token_ids   = {8, 9};
+    auto stream                   = builder.createContextStream({1, 2}, config);
+
+    auto new_tokens = torch::tensor({{10, 8, 9, 11, 12}}, torch::kInt32);
+    stream->update({new_tokens, 5});
+
+    ASSERT_FALSE(stream->hasError());
+    ASSERT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
+    ASSERT_EQ(stream->completeTokenIdsVec(), std::vector<int>({1, 2, 10, 8, 9, 11, 12}));
 }
 
 // clearMtpAsyncDeviceState rejects stale epochs. A worker that

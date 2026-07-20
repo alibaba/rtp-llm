@@ -722,11 +722,11 @@ size_t GenerateStream::maxTokenNum() const {
     return std::min<size_t>(physical_token_cap, logical_token_cap > 0 ? static_cast<size_t>(logical_token_cap) : 0);
 }
 
-bool GenerateStream::needFinish() {
-    return needFinishBySPTokens() || seqLength() >= maxTokenNum();
+bool GenerateStream::needFinish(int num_new_tokens) {
+    return needFinishBySPTokens(num_new_tokens) || seqLength() >= maxTokenNum();
 }
 
-bool GenerateStream::needFinishBySPTokens() {
+bool GenerateStream::needFinishBySPTokens(int num_new_tokens) {
     if (hasNumBeams()) {
         // update sub_generate_status to RUNNING for beam search,
         // as the same batch_id may refers to different beams between steps
@@ -737,7 +737,9 @@ bool GenerateStream::needFinishBySPTokens() {
         matchEosToken();
         matchStopWordsList();
     }
-    matchThinkEndToken();
+    if (generate_input_->generate_config->max_new_tokens < num_new_tokens) {
+        matchThinkEndToken();
+    }
 
     // check if all batch finished
     return std::all_of(sub_generate_status_.begin(), sub_generate_status_.end(), [](StreamState state) {

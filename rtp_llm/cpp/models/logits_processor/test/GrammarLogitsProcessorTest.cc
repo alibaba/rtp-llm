@@ -584,8 +584,9 @@ TEST(LogitsProcessorFactoryTest, GrammarThinkingCreatesReasoningGrammarAndSkipsT
     auto generate_input                                    = std::make_shared<GenerateInput>();
     generate_input->generate_config                        = std::make_shared<GenerateConfig>();
     generate_input->generate_config->response_format       = R"({"type":"json_object"})";
+    generate_input->generate_config->max_new_tokens        = 4;
     generate_input->generate_config->in_think_mode         = true;
-    generate_input->generate_config->max_thinking_tokens   = 32;
+    generate_input->generate_config->max_thinking_tokens   = -1;
     generate_input->generate_config->begin_think_token_ids = {static_cast<int>('<')};
     generate_input->generate_config->end_think_token_ids   = {static_cast<int>('x'), static_cast<int>('y')};
     generate_input->input_ids                              = torch::tensor({1, 2}, torch::kInt32);
@@ -594,9 +595,29 @@ TEST(LogitsProcessorFactoryTest, GrammarThinkingCreatesReasoningGrammarAndSkipsT
         generate_input, /*init_batch_size=*/1, /*max_batch_size=*/1, /*eos_token_id=*/0);
 
     ASSERT_EQ(processors.size(), 1);
-    EXPECT_NE(std::dynamic_pointer_cast<ReasoningGrammarLogitsProcessor>(processors[0]), nullptr);
+    EXPECT_EQ(generate_input->generate_config->max_thinking_tokens, -1);
+    auto reasoning_processor = std::dynamic_pointer_cast<ReasoningGrammarLogitsProcessor>(processors[0]);
+    ASSERT_NE(reasoning_processor, nullptr);
     EXPECT_EQ(std::dynamic_pointer_cast<GrammarLogitsProcessor>(processors[0]), nullptr);
     EXPECT_EQ(std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processors[0]), nullptr);
+
+    const int            propose_step = 3;
+    const size_t         words        = SpecLogitsProcessor::bitmaskWordCount(128);
+    std::vector<int32_t> draft_tokens = {
+        static_cast<int32_t>('a'), static_cast<int32_t>('x'), static_cast<int32_t>('y')};
+    std::vector<int32_t> bitmask((propose_step + 1) * words, SpecLogitsProcessor::kBitmaskAllowAll);
+
+    SpecLogitsProcessorRequest request;
+    request.draft_tokens       = draft_tokens.data();
+    request.propose_step       = propose_step;
+    request.bitmask_cpu_out    = bitmask.data();
+    request.bitmask_size_int32 = words;
+    request.vocab_size         = 128;
+
+    EXPECT_EQ(reasoning_processor->tryAcceptAndFillBitmask(request), propose_step);
+    reasoning_processor->updateStatus(torch::tensor(draft_tokens, torch::kInt32).reshape({1, propose_step}),
+                                      propose_step);
+    EXPECT_EQ(reasoning_processor->finishedThinkOutputLen(), propose_step);
 }
 
 TEST(LogitsProcessorFactoryTest, GrammarThinkingWithoutEndIdsReportsInvalidParams) {

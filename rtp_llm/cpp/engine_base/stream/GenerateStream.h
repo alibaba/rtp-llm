@@ -278,8 +278,8 @@ public:
     BatchKVCacheResourcePtr     kvCachePtr();
     size_t                      curBlocksNum() const;
 
-    bool needFinish();
-    bool needFinishBySPTokens();
+    bool needFinish(int num_new_tokens = 1);
+    bool needFinishBySPTokens(int num_new_tokens = 1);
     void matchEosToken();
     void matchEosToken(int batch_id);
     void matchStopWordsList();
