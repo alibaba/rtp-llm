@@ -1,0 +1,21 @@
+{
+    "model_type": "qwen_2_moe",
+    "model_path": "/mnt/nas1/hf/Qwen1.5-MoE-A2.7B-Chat",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s1",
+                "generate_config": {
+                    "max_new_tokens": 5,
+                    "temperature": 0.0,
+                    "top_p": 0,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "response": " The CAP Theorem is",
+                "finished": true
+            }
+        }
+    ]
+}

@@ -200,6 +200,13 @@ def h20_oss_suites():
                 gpu_type=["H20"],
             ),
             smoke_test(
+                name="moe_newloader_qwen2_bf16_tp2",
+                task_info="data/model/qwen2_moe/q_r_bf16_tp2.json",
+                smoke_args="--warm_up 0 --act_type BF16 --tp_size 2 --world_size 2 --ep_size 1 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 64",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                gpu_type=["H20"],
+            ),
+            smoke_test(
                 name="moe_deepep_continuous_dp2",
                 task_info="data/model/qwen3_moe/q_r_30b_py.json",
                 smoke_args="--warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 0 --dp_size 2",
@@ -261,6 +268,7 @@ def h20_oss_suites():
                 name="dense_fp8kv_cudagraph",
                 task_info="data/model/qwen25/q_r_new_model_py_fp8_kv_cache_cudagraph.json",
                 smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 1  --disable_flash_infer 1",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
                 gpu_type=["H20"],
             ),
             smoke_test(
