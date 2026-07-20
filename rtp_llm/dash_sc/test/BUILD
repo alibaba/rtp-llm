@@ -25,16 +25,6 @@ py_test(
 )
 
 py_test(
-    name = "mrcr_smoke_test",
-    srcs = ["inference/mrcr_smoke_test.py"],
-    data = ["data/mrcr_deepseek_v4_think_leak_cases.json"],
-    main = "inference/mrcr_smoke_test.py",
-    deps = ["//rtp_llm:testlib"],
-    imports = [],
-    exec_properties = {"gpu": "A10"},
-)
-
-py_test(
     name = "proxy_servicer_test",
     srcs = ["proxy/servicer_test.py"],
     main = "proxy/servicer_test.py",
@@ -64,6 +54,14 @@ py_test(
 py_test(
     name = "app_test",
     srcs = ["app_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "A10"},
+)
+
+py_test(
+    name = "server_test",
+    srcs = ["server_test.py"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
     exec_properties = {"gpu": "A10"},

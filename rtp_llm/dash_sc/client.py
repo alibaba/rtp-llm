@@ -80,6 +80,16 @@ def append_sampling_params_to_model_infer_request(
     sampling: SamplingParams,
 ) -> None:
     """Append sampling tensors (names / dtypes aligned with ``parse_sampling_params``)."""
+    # Model stop words are assembled once by the DashSc server from model,
+    # renderer, and environment configuration. The request tensor protocol has
+    # no lossless representation for ragged token groups, so the client must not
+    # pretend that request-level stop words are supported.
+    if sampling.stop_words_list:
+        raise ValueError(
+            "request-level stop_words_list is unsupported by the DashSc client; "
+            "configure stop words on the server"
+        )
+
     _append_int32_scalar(request, "max_new_tokens", sampling.max_new_tokens)
     _append_int32_scalar(request, "num_return_sequences", sampling.num_return_sequences)
     _append_fp32_scalar(request, "top_p", sampling.top_p)
@@ -115,26 +125,6 @@ def append_sampling_params_to_model_infer_request(
                 structural_tag, ensure_ascii=False, separators=(",", ":")
             )
         request.parameters["tool_call_structural_tag"].string_param = structural_tag
-
-    groups = sampling.stop_words_list
-    if not groups:
-        return
-    cols = len(groups[0])
-    if not all(len(g) == cols for g in groups):
-        flat = [t for g in groups for t in g]
-        inp = request.inputs.add()
-        inp.name = "stop_words_list"
-        inp.datatype = "INT32"
-        inp.shape.append(len(flat))
-        request.raw_input_contents.append(struct.pack("<%di" % len(flat), *flat))
-        return
-    rows = len(groups)
-    flat = [t for g in groups for t in g]
-    inp = request.inputs.add()
-    inp.name = "stop_words_list"
-    inp.datatype = "INT32"
-    inp.shape.extend([rows, cols])
-    request.raw_input_contents.append(struct.pack("<%di" % len(flat), *flat))
 
 
 def append_return_input_ids_to_model_infer_request(
@@ -300,14 +290,6 @@ def print_model_stream_infer_response(
             print(f"[client]   prompt_cached_token_num: {prompt_cached_token_num}")
 
 
-def _parse_stop_token_ids_csv(s: str | None) -> tuple[tuple[int, ...], ...]:
-    """Comma-separated token ids -> one stop group (``stop_words_list`` input)."""
-    if not s or not s.strip():
-        return tuple()
-    ids = [int(x.strip()) for x in s.split(",") if x.strip()]
-    return (tuple(ids),) if ids else tuple()
-
-
 def _parse_optional_bool_arg(s: str | None) -> bool | None:
     if s is None:
         return None
@@ -432,12 +414,6 @@ def build_dash_sc_grpc_client_argparser() -> argparse.ArgumentParser:
         help="presence_penalty (FP32)",
     )
     parser.add_argument(
-        "--stop_token_ids",
-        type=str,
-        default="",
-        help="Comma-separated stop token ids -> stop_words_list INT32 tensor (single group)",
-    )
-    parser.add_argument(
         "--return_input_ids",
         action="store_true",
         help="Send return_input_ids INT32 tensor (1) so server echoes prompt in prompt_token_ids",
@@ -446,12 +422,12 @@ def build_dash_sc_grpc_client_argparser() -> argparse.ArgumentParser:
         "--response_format",
         type=str,
         default="",
-        help='Optional JSON response_format, e.g. \'{"type":"json_object"}\'.',
+        help="Compatibility-only; DashSc currently rejects structured output.",
     )
     parser.add_argument(
         "--json_format",
         action="store_true",
-        help="Set request.parameters['json_format']=true.",
+        help="Compatibility-only; DashSc currently rejects structured output.",
     )
     parser.add_argument(
         "--tool_call_structural_tag",
@@ -459,7 +435,7 @@ def build_dash_sc_grpc_client_argparser() -> argparse.ArgumentParser:
         dest="structural_tag",
         type=str,
         default="",
-        help="Optional tool-call structural_tag JSON sent as request.parameters['tool_call_structural_tag'].",
+        help="Compatibility-only; DashSc currently rejects structured output.",
     )
     parser.add_argument(
         "--enable_thinking",
@@ -471,7 +447,7 @@ def build_dash_sc_grpc_client_argparser() -> argparse.ArgumentParser:
         "--dash_sc_grpc_config_json",
         type=str,
         default="",
-        help="Optional DashScGrpcConfig JSON (client_config / server_config / max_server_workers).",
+        help="Optional DashScGrpcConfig JSON (client_config / server_config).",
     )
     return parser
 
@@ -486,10 +462,7 @@ def main():
         tokenizer_path,
         args.model_type,
     )
-    input_ids = tokenizer.encode(args.prompt)
-    if hasattr(input_ids, "tolist"):
-        input_ids = input_ids.tolist()
-    input_ids = [int(x) for x in input_ids]
+    input_ids = [int(x) for x in tokenizer.encode(args.prompt)]
     print(f"[client] prompt: {args.prompt!r}")
     print(f"[client] input_ids ({len(input_ids)}): {input_ids}")
 
@@ -504,7 +477,6 @@ def main():
         repetition_penalty=args.repetition_penalty,
         frequency_penalty=args.frequency_penalty,
         presence_penalty=args.presence_penalty,
-        stop_words_list=_parse_stop_token_ids_csv(args.stop_token_ids or None),
         response_format=args.response_format.strip() or None,
         json_format=bool(args.json_format),
         structural_tag=args.structural_tag.strip() or None,

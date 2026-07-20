@@ -170,6 +170,9 @@ class OpenaiEndpoint(object):
     ) -> GenerateConfig:
         # TODO(wangyin): implement this
         config = request.extra_configs or GenerateConfig()
+        if request.response_format is not None:
+            config.response_format = request.response_format
+        config.validate_supported_features()
         if request.trace_id != None:
             config.trace_id = request.trace_id
         if request.stream == True:

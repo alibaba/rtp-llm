@@ -68,29 +68,6 @@
                 "prompt_token_num": 10,
                 "prompt_cached_token_num": 0
             }
-        },
-        {
-            "endpoint": "dash://ModelStreamInfer",
-            "query": {
-                "prompt": "Return one JSON object with keys status and path. Use status ok and path dash_sc.",
-                "generate_config": {
-                    "max_new_tokens": 32,
-                    "max_new_think_tokens": 0,
-                    "top_k": 1,
-                    "temperature": 1.0,
-                    "response_format": {
-                        "type": "json_object"
-                    }
-                },
-                "enable_thinking": false,
-                "request_id": "smoke_dash_json_object"
-            },
-            "result": {
-                "response": "\n\n<think>\n\n</think>\n\n{\n  \"status\": \"ok\",\n  \"path\": \"dash_sc\"\n}<|endoftext|><|im_start|><|im_start|>assistant\n<think>\n\n",
-                "finish_reason": 1,
-                "prompt_token_num": 18,
-                "prompt_cached_token_num": 0
-            }
         }
     ]
 }

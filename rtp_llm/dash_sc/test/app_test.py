@@ -24,57 +24,18 @@ from rtp_llm.dash_sc.app import (
 from rtp_llm.dash_sc.server import DashScGrpcDrainAioInterceptor
 
 
-class _EnvCfg:
-    def __init__(self, think_mode: int = 1, think_start_tag: str = "<think>\n"):
-        self.think_mode = think_mode
-        self.think_start_tag = think_start_tag
-
-
-class _FakeTokenizer:
-    def __init__(self, *, ids=None, id_map=None, raise_exc: bool = False):
-        self._ids = ids or []
-        self._id_map = id_map or {}
-        self._raise = raise_exc
-        self.encode_calls: list[tuple[str, bool]] = []
-
-    def encode(self, text, add_special_tokens=True):
-        if self._raise:
-            raise RuntimeError("tokenizer.encode failed")
-        self.encode_calls.append((text, add_special_tokens))
-        if text in self._id_map:
-            return list(self._id_map[text])
-        return list(self._ids)
-
-
-class _BaseTok:
-    def __init__(self, tok):
-        self.tokenizer = tok
-
-
 class DeriveEchoPrefixIdsTest(TestCase):
-    def test_encodes_think_start_tag(self) -> None:
-        tok = _FakeTokenizer(ids=[154841])
-        ids = _derive_echo_prefix_ids(_EnvCfg(), _BaseTok(tok))
-        self.assertEqual(ids, [154841])
-        # Must encode without special tokens so only the tag bytes become ids.
-        self.assertEqual(tok.encode_calls, [("<think>\n", False)])
+    def test_reuses_runtime_bos_tokens(self) -> None:
+        runtime = SimpleNamespace(bos_tokens=(154841, 198))
 
-    def test_disabled_when_think_mode_off(self) -> None:
-        tok = _FakeTokenizer(ids=[154841])
-        ids = _derive_echo_prefix_ids(_EnvCfg(think_mode=0), _BaseTok(tok))
-        self.assertEqual(ids, [])
-        self.assertEqual(tok.encode_calls, [])
+        ids = _derive_echo_prefix_ids(runtime)
 
-    def test_disabled_when_tag_empty(self) -> None:
-        tok = _FakeTokenizer(ids=[154841])
-        ids = _derive_echo_prefix_ids(_EnvCfg(think_start_tag=""), _BaseTok(tok))
-        self.assertEqual(ids, [])
-        self.assertEqual(tok.encode_calls, [])
+        self.assertEqual(ids, [154841, 198])
+        self.assertEqual(runtime.bos_tokens, (154841, 198))
 
-    def test_fail_open_on_tokenizer_error(self) -> None:
-        ids = _derive_echo_prefix_ids(
-            _EnvCfg(), _BaseTok(_FakeTokenizer(raise_exc=True))
-        )
+    def test_empty_runtime_bos_tokens(self) -> None:
+        ids = _derive_echo_prefix_ids(SimpleNamespace(bos_tokens=()))
+
         self.assertEqual(ids, [])
 
 
@@ -82,10 +43,18 @@ class CreateProxyServicerOnLoopTest(TestCase):
     def test_constructs_inside_running_loop(self) -> None:
         created_loops = []
         sentinel = object()
+        dash_sc_grpc_config = object()
 
         def fake_servicer(**kwargs):
             created_loops.append(asyncio.get_running_loop())
-            self.assertEqual(kwargs, {"rank_id": 7, "server_id": "42"})
+            self.assertEqual(
+                kwargs,
+                {
+                    "rank_id": 7,
+                    "server_id": "42",
+                    "dash_sc_grpc_config": dash_sc_grpc_config,
+                },
+            )
             return sentinel
 
         async def run():
@@ -94,6 +63,7 @@ class CreateProxyServicerOnLoopTest(TestCase):
                 servicer = await _create_proxy_servicer_on_loop(
                     rank_id=7,
                     server_id="42",
+                    dash_sc_grpc_config=dash_sc_grpc_config,
                 )
             return loop, servicer
 

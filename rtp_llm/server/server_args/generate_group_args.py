@@ -1,6 +1,37 @@
 from rtp_llm.server.server_args.util import str2bool
 
 
+_THINK_TAG_ESCAPES = {
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "\\": "\\",
+}
+
+
+def normalize_think_tag(value: str) -> str:
+    """Decode one ``\\n``/``\\r``/``\\t``/``\\\\`` layer without touching Unicode.
+
+    This is the only think-tag escape boundary. Downstream consumers receive
+    canonical strings and must not decode them again.
+    """
+    text = str(value)
+    normalized = []
+    index = 0
+    while index < len(text):
+        if (
+            text[index] == "\\"
+            and index + 1 < len(text)
+            and text[index + 1] in _THINK_TAG_ESCAPES
+        ):
+            normalized.append(_THINK_TAG_ESCAPES[text[index + 1]])
+            index += 2
+        else:
+            normalized.append(text[index])
+            index += 1
+    return "".join(normalized)
+
+
 def init_generate_group_args(parser, generate_env_config):
     ##############################################################################################################
     # Generate Configuration
@@ -10,9 +41,9 @@ def init_generate_group_args(parser, generate_env_config):
         "--think_end_tag",
         env_name="THINK_END_TAG",
         bind_to=(generate_env_config, 'think_end_tag'),
-        type=str,
+        type=normalize_think_tag,
         default="</think>\n\n",
-        help="深度思考模式的结束标签",
+        help="深度思考模式的结束标签；支持单层 \\n/\\r/\\t/\\\\ 转义",
     )
     generate_group.add_argument(
         "--think_end_token_id",
@@ -58,9 +89,9 @@ def init_generate_group_args(parser, generate_env_config):
         "--think_start_tag",
         env_name="THINK_START_TAG",
         bind_to=(generate_env_config, 'think_start_tag'),
-        type=str,
-        default="<think>\\n",
-        help="深度思考模式的起始标签",
+        type=normalize_think_tag,
+        default="<think>\n",
+        help="深度思考模式的起始标签；支持单层 \\n/\\r/\\t/\\\\ 转义",
     )
     generate_group.add_argument(
         "--think_terminate_token_id",

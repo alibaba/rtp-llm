@@ -8,7 +8,7 @@ or async generator so the whole proxy path stays on a single asyncio event loop.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Optional, Protocol, runtime_checkable
 
 import grpc
 
@@ -35,7 +35,35 @@ _FORWARD_CHANNEL_OPTS: list[tuple[str, int]] = [
     ("grpc.keepalive_permit_without_calls", 0),
     ("grpc.http2.max_pings_without_data", 0),
 ]
+
+
+@runtime_checkable
+class _CancelableStream(Protocol):
+    def cancel(self) -> bool: ...
+
+
+@runtime_checkable
+class _AsyncClosableStream(Protocol):
+    async def aclose(self) -> None: ...
+
+
 _CHANNEL_CLEANUP_INTERVAL_S = 60
+
+
+def _merge_forward_channel_options(dash_sc_grpc_config) -> list[tuple[str, int]]:
+    """Merge proxy defaults with explicit client config.
+
+    ``DashScGrpcConfig.client_config`` is the operator-facing contract for
+    outbound channel options, so explicitly configured values take precedence.
+    Proxy keepalive values only fill keys the operator did not configure.
+    """
+    merged = dict(_FORWARD_CHANNEL_OPTS)
+    if dash_sc_grpc_config is not None:
+        merged.update(
+            (str(key), int(value))
+            for key, value in dash_sc_grpc_config.get_client_config().items()
+        )
+    return sorted(merged.items())
 
 
 def _is_stream_done(resp: predict_v2_pb2.ModelStreamInferResponse) -> bool:
@@ -54,7 +82,7 @@ def _invalid_max_new_tokens_message(request) -> str | None:
     if max_new_tokens > 0:
         return None
     param_name = "max_completion_tokens" if from_completion_alias else "max_new_tokens"
-    return f"invalid {param_name}: {max_new_tokens}; " "must be greater than 0"
+    return f"invalid {param_name}: {max_new_tokens}; must be greater than 0"
 
 
 async def _close_request_iterator_quietly(request_iter) -> None:
@@ -72,6 +100,8 @@ async def _abort_with_downstream_grpc_error(context, exc: grpc.aio.AioRpcError) 
     await context.abort(code, details)
 
 
+# TODO: Implement ServerLive, ServerReady, and ModelReady after the DashSc
+# health-check contract is defined. The generated base returns UNIMPLEMENTED.
 class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
     """Pure transparent proxy (grpc.aio) across discovered downstream addrs."""
 
@@ -80,9 +110,10 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         *,
         rank_id: Optional[int] = None,
         server_id: str = "",
+        dash_sc_grpc_config=None,
     ):
         self._channel_pool = GrpcHostChannelPool(
-            options=_FORWARD_CHANNEL_OPTS,
+            options=_merge_forward_channel_options(dash_sc_grpc_config),
             cleanup_interval=_CHANNEL_CLEANUP_INTERVAL_S,
         )
         self._discovery = create_service_discovery_from_env()
@@ -100,8 +131,8 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         logging.info("[DashScGrpc] DashScProxyServicer configured")
 
     async def open(self) -> None:
-        """Keep the proxy lifecycle hook explicit; channels are opened lazily."""
-        return
+        """Warm dynamic discovery; outbound channels are still opened lazily."""
+        await self._discovery.prewarm()
 
     async def close(self) -> None:
         """Drain and close channel-cache resources. Safe to call multiple times.
@@ -109,7 +140,10 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         Called after ``server.stop(grace)`` has let in-flight RPCs finish, so
         the cache's force-close of any residue cannot interrupt a live RPC.
         """
-        await self._channel_pool.close()
+        try:
+            await self._discovery.close()
+        finally:
+            await self._channel_pool.close()
 
     def _record_and_report_chunk(self, record: GrpcAccessRecord, resp) -> None:
         """Capture the frame and fan out per-chunk metrics (records, no log)."""
@@ -179,7 +213,7 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 finally:
                     record.mark_request_done(status)
 
-            route_addr = self._discovery.resolve()
+            route_addr = await self._discovery.resolve_async()
             if route_addr is None:
                 record.mark_request_done("eof")
                 msg = "forward backend unavailable"
@@ -373,26 +407,20 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         # Close any wrapping async generator first (e.g. counting wrapper).
         if downstream_iter is not upstream_iter:
             try:
-                aclose = getattr(downstream_iter, "aclose", None)
-                if aclose is not None:
-                    await aclose()
+                await downstream_iter.aclose()
             except Exception:
                 pass
-        # Cancel the underlying grpc.aio.Call. Sync, idempotent.
-        try:
-            cancel = getattr(upstream_iter, "cancel", None)
-            if cancel is not None:
-                cancel()
-        except Exception:
-            pass
-        # Tests / non-grpc fakes expose ``aclose`` on the upstream iterator
-        # (real grpc.aio calls don't); cover that path too.
-        try:
-            aclose = getattr(upstream_iter, "aclose", None)
-            if aclose is not None:
-                await aclose()
-        except Exception:
-            pass
+        # Production grpc.aio calls are cancelable. Local stream adapters can
+        # implement the explicit async-close contract instead.
+        if isinstance(upstream_iter, _CancelableStream):
+            upstream_iter.cancel()
+        elif isinstance(upstream_iter, _AsyncClosableStream):
+            await upstream_iter.aclose()
+        else:
+            logging.warning(
+                "[DashScGrpc] downstream stream has no supported close contract: %s",
+                type(upstream_iter).__name__,
+            )
 
     @staticmethod
     async def _buffered_iter(downstream_iter, access_record=None):
@@ -437,6 +465,11 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             try:
                 buffered = await it.__anext__()
             except StopAsyncIteration:
+                return
+            if _is_stream_done(buffered):
+                yield buffered
+                buffered = None
+                _set_stage("flushed_terminal_first")
                 return
             _set_stage("waiting_second")
             try:

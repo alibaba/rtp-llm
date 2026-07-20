@@ -22,7 +22,6 @@ py_library(
         "client.py",
         "codec.py",
         "grpc_metrics.py",
-        "json_format_e2e_smoke.py",
         "inference/__init__.py",
         "inference/__main__.py",
         "inference/servicer.py",
@@ -50,11 +49,4 @@ py_library(
         "//rtp_llm/metrics:metrics",
         "//rtp_llm:utils",
     ],
-)
-
-py_binary(
-    name = "json_format_e2e_smoke",
-    srcs = ["json_format_e2e_smoke.py"],
-    main = "json_format_e2e_smoke.py",
-    visibility = ["//visibility:public"],
 )

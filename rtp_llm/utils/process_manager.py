@@ -40,9 +40,9 @@ class ProcessManager:
         monitor_interval: int = 1,
         allow_defer_first_sigterm: bool = False,
     ):
-        if shutdown_timeout <= 0:
+        if shutdown_timeout != -1 and shutdown_timeout <= 0:
             logging.warning(
-                f"shutdown_timeout={shutdown_timeout} is non-positive; "
+                f"shutdown_timeout={shutdown_timeout} is invalid; "
                 "coercing to 600s so the parent cannot hang on a "
                 "non-draining child."
             )
@@ -97,6 +97,12 @@ class ProcessManager:
 
         self._deferred_sigterm_seen = True
         delay_s = self._deferred_sigterm_delay_seconds()
+        if delay_s is None:
+            logging.info(
+                "Process manager deferring first SIGTERM indefinitely; waiting for "
+                "parent-staged backend shutdown"
+            )
+            return True
         logging.info(
             "Process manager deferring first SIGTERM for %.3fs; waiting for "
             "parent-staged backend shutdown",
@@ -108,12 +114,14 @@ class ProcessManager:
         timer.start()
         return True
 
-    def _deferred_sigterm_delay_seconds(self) -> float:
+    def _deferred_sigterm_delay_seconds(self) -> Optional[float]:
         raw = os.environ.get(DEFER_FIRST_SIGTERM_SECONDS_ENV, "")
         try:
             delay_s = float(raw) if raw else float(self.shutdown_timeout)
         except ValueError:
             delay_s = float(self.shutdown_timeout)
+        if delay_s == -1:
+            return None
         if delay_s <= 0:
             delay_s = 600.0
         return delay_s
@@ -191,12 +199,9 @@ class ProcessManager:
                 logging.info(f"proc.name [{proc.name}] pid[{proc.pid}] is not alived")
 
     def _signal_process(self, proc: Process, signum: signal.Signals):
-        if signum == signal.SIGTERM:
-            proc.terminate()
-            return
         if signum == self._pre_stop_signal():
             try:
-                if getattr(proc, "pid", None) is not None:
+                if proc.pid is not None:
                     os.kill(proc.pid, signum)
             except (OSError, ProcessLookupError):
                 pass
@@ -205,7 +210,7 @@ class ProcessManager:
             # multiprocessing.Process has no portable send_signal() helper before
             # Python 3.14.  Only use os.kill for real started child processes;
             # tests often use lightweight fakes with synthetic pids.
-            if getattr(proc, "_popen", None) is not None:
+            if proc._popen is not None:
                 os.kill(proc.pid, signum)
             else:
                 proc.terminate()
@@ -323,7 +328,11 @@ class ProcessManager:
           Phase 2 — SIGTERM deferred groups (backend), then wait for remaining
                     managed processes before the monitor's last-resort SIGKILL.
 
-        Non-staged mode (post-crash all-stop): SIGTERM everyone at once.
+        Non-staged mode (post-crash all-stop): SIGTERM ordinary children at
+        once, but SIGINT deferred groups.  A backend manager intentionally
+        defers its first SIGTERM to tolerate cgroup-wide shutdown noise; using
+        SIGINT here is the explicit parent-to-backend shutdown handoff so it
+        can begin reaping its rank children before the outer manager escalates.
         """
         logging.info(f"Sending SIGTERM (drain_timeout={drain_timeout}s)")
         self._used_pre_stop_drain_signal = False
@@ -349,9 +358,19 @@ class ProcessManager:
                     "managed",
                 )
         else:
-            self._terminate_process_list(
-                self.processes, "managed", force_immediate=self._defer_first_sigterm
-            )
+            for group_name in self.shutdown_group_order:
+                self._terminate_process_list(
+                    self.process_groups.get(group_name, []),
+                    group_name,
+                    force_immediate=(
+                        self._defer_first_sigterm and group_name == "default"
+                    ),
+                    signum=(
+                        signal.SIGINT
+                        if group_name in self.DEFERRED_GROUPS
+                        else signal.SIGTERM
+                    ),
+                )
             self._wait_process_list_exit(
                 self.processes,
                 self._remaining_timeout(drain_deadline),
@@ -398,6 +417,8 @@ class ProcessManager:
             timeout = int(shutdown_timeout)
         except (TypeError, ValueError):
             timeout = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS
+        if timeout == -1:
+            return -1
         if timeout <= 0:
             timeout = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS
         return timeout
@@ -521,7 +542,9 @@ class ProcessManager:
 
     @staticmethod
     def _pre_stop_signal() -> Optional[signal.Signals]:
-        return getattr(signal, "SIGUSR1", None)
+        if os.name != "posix":
+            return None
+        return signal.SIGUSR1
 
     def _send_pre_stop_drain_signal(self, processes: List[Process], group_name: str):
         pre_stop_signal = self._pre_stop_signal()
@@ -740,14 +763,15 @@ class ProcessManager:
             # iterations). Inspect final exitcodes to surface silent crashes
             # the monitor missed.
             if not self.shutdown_requested and not self.failure_detected:
-                crashed = [
+                unexpected_exits = [
                     (p.name, p.exitcode)
                     for p in self.processes
-                    if p.exitcode is not None and p.exitcode != 0
+                    if p.exitcode is not None
                 ]
-                if crashed:
+                if unexpected_exits:
                     logging.error(
-                        f"Children exited non-zero without shutdown request: {crashed}"
+                        "Children exited without shutdown request: "
+                        f"{unexpected_exits}"
                     )
                     self.failure_detected = True
         else:

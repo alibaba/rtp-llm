@@ -38,7 +38,11 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateOutputsPB,
     TensorPB,
 )
-from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import (
+    GenerateInput,
+    GenerateOutputs,
+    RequestInfo,
+)
 
 
 class FakeStub:
@@ -116,6 +120,47 @@ class ModelRpcClientTest(TestCase):
         async for res in client.enqueue(input):
             responses.extend(res.generate_outputs)
         return responses
+
+    def test_trans_input_serializes_typed_request_info(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([1, 2]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+            headers={"x-trace-id": "header-trace"},
+            request_info=RequestInfo(
+                frontend_ip="frontend-ip",
+                dash_ip="dash-ip",
+                trace_id="request-trace",
+                request_id="request-id",
+                source_role="frontend",
+            ),
+        )
+
+        request_info_pb = trans_input(input_py).request_info
+
+        self.assertEqual(request_info_pb.frontend_ip, "frontend-ip")
+        self.assertEqual(request_info_pb.dash_ip, "dash-ip")
+        self.assertEqual(request_info_pb.trace_id, "request-trace")
+        self.assertEqual(request_info_pb.request_id, "request-id")
+        self.assertEqual(request_info_pb.source_role, "frontend")
+
+    def test_trans_input_fills_request_info_from_typed_headers(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([1, 2]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+            headers={
+                "x-trace-id": "header-trace",
+                "x-request-id": "header-request-id",
+            },
+        )
+
+        request_info_pb = trans_input(input_py).request_info
+
+        self.assertEqual(request_info_pb.trace_id, "header-trace")
+        self.assertEqual(request_info_pb.request_id, "header-request-id")
 
     @unittest.skip("need fix")
     def test_generate_stream(self):

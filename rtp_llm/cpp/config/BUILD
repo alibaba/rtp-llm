@@ -26,6 +26,7 @@ cc_library(
         ":role_types",
         ":eplb_config",
         "//rtp_llm/models_py/bindings/core:types",
+        "@rapidjson//:rapidjson",
     ],
     copts = copts(),
 )

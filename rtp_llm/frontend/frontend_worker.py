@@ -114,6 +114,9 @@ class FrontendWorker:
 
         logging.info("frontend worker start done.")
 
+    async def close(self) -> None:
+        await self.pipeline.close()
+
     def tokenizer_offset_mapping(self, prompt: str) -> Any:
         return self.pipeline.tokenizer(
             prompt, return_offsets_mapping=True, return_attention_mask=False

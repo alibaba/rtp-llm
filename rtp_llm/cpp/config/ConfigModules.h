@@ -557,10 +557,8 @@ struct GrpcConfig: GrpcMapsConfig {
     void        from_json(const std::string& json_str);
 };
 
-/// DashSc gRPC (predict_v2.proto) Python client/server channel options + executor workers.
+/// DashSc gRPC (predict_v2.proto) Python client/server channel options.
 struct DashScGrpcConfig: GrpcMapsConfig {
-    /// ``ThreadPoolExecutor(max_workers=...)`` for ``grpc.server``; must be >= 1 when used.
-    int max_server_workers = 4;
     DashScGrpcConfig() {};
     DashScGrpcConfig(const std::string& json_str);
     std::string to_string() const;

@@ -17,7 +17,6 @@ fields:
 """
 from __future__ import annotations
 
-import json
 import struct
 from typing import Any, Dict, List, Optional
 
@@ -73,39 +72,33 @@ def _int32_values(out: Any, raw: bytes) -> List[int]:
     return list(struct.unpack("<%di" % count, raw[: count * 4]))
 
 
-def _response_format_type(generate_config: Dict[str, Any]) -> Optional[str]:
-    response_format = generate_config.get("response_format")
-    if isinstance(response_format, str):
-        try:
-            response_format = json.loads(response_format)
-        except json.JSONDecodeError:
-            return None
-    if isinstance(response_format, list) and response_format:
-        response_format = response_format[0]
-    if not isinstance(response_format, dict):
-        return None
-    return response_format.get("type")
-
-
-def _has_json_object(text: str) -> bool:
-    decoder = json.JSONDecoder()
-    for index, char in enumerate(text):
-        if char != "{":
-            continue
-        try:
-            parsed, _ = decoder.raw_decode(text[index:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            return True
-    return False
-
-
 def _build_sampling_params(gc: Dict[str, Any]) -> SamplingParams:
     """Map smoke ``generate_config`` dict onto SamplingParams. Unspecified
     fields fall through to ``SamplingParams`` defaults so the comparer follows
     the dash codec's own defaulting rules.
     """
+    unsupported = [
+        name
+        for name in (
+            "response_format",
+            "guided_json",
+            "json_schema",
+            "regex",
+            "ebnf",
+            "structural_tag",
+            "tool_call_structural_tag",
+        )
+        if gc.get(name) is not None
+    ]
+    if gc.get("json_format"):
+        unsupported.append("json_format")
+    if unsupported:
+        raise SmokeException(
+            QueryStatus.VALID_FAILED,
+            "structured output is not supported yet by DashSc smoke: "
+            + ", ".join(unsupported),
+        )
+
     kwargs: Dict[str, Any] = {}
     for k in (
         "max_new_tokens",
@@ -295,12 +288,6 @@ class DashGrpcComparer(BaseComparer):
                 QueryStatus.COMPARE_FAILED,
                 f"dash prompt_token_num mismatch: expect={len(input_ids)} actual={actual.prompt_token_num}",
             )
-        if _response_format_type(query_info.generate_config) == "json_object" and not _has_json_object(actual.response):
-            raise SmokeException(
-                QueryStatus.COMPARE_FAILED,
-                f"dash response_format=json_object did not produce a JSON object: {actual.response!r}",
-            )
-
         expect: DashSmokeResponse = self.format_result(self.qr_info["result"])
         self.tracer.expect_result = expect
         self._dump_actual_to_artifact(actual)

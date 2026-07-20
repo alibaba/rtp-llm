@@ -67,7 +67,8 @@ def _backend_deferred_sigterm_seconds(py_env_configs: PyEnvConfigs) -> str:
     timeout = ProcessManager.normalize_shutdown_timeout_seconds(
         py_env_configs.server_config.shutdown_timeout
     )
-    return str(ProcessManager.deferred_group_shutdown_timeout_seconds(timeout))
+    deferred_timeout = ProcessManager.deferred_group_shutdown_timeout_seconds(timeout)
+    return "-1" if deferred_timeout is None else str(deferred_timeout)
 
 
 def _sync_server_shutdown_timeout(py_env_configs: PyEnvConfigs):
@@ -506,6 +507,14 @@ def start_server(py_env_configs: PyEnvConfigs):
         )
         py_env_configs.role_config.role_type = RoleType.VIT
 
+    # Architecture invariant: DashSc is a mandatory companion of every non-VIT
+    # frontend. It intentionally shares the frontend lifecycle and has no
+    # feature flag; startup must fail if either protocol endpoint cannot start.
+    dash_sc_enabled = py_env_configs.role_config.role_type != RoleType.VIT
+    py_env_configs.server_config.validate_port_layout(
+        dash_sc_enabled=dash_sc_enabled
+    )
+
     # Initialize backend_process to None in case role_type is FRONTEND
     backend_process = None
     try:
@@ -530,6 +539,9 @@ def start_server(py_env_configs: PyEnvConfigs):
             )
             process_manager.add_processes(frontend_process, shutdown_group="frontend")
 
+            # Keep DashSc and HTTP frontend in the same mandatory availability
+            # unit: both are started for non-VIT roles and either startup
+            # failure fails the deployment instead of silently degrading.
             dash_sc_processes = start_dash_sc_server_impl(
                 global_controller, py_env_configs, process_manager
             )

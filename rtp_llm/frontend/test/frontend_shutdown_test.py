@@ -4,18 +4,20 @@ import signal
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, create_autospec, patch
 
 from fastapi.responses import ORJSONResponse, StreamingResponse
 from fastapi.testclient import TestClient
-from uvicorn import Config
+from uvicorn import Config, Server
 
 from rtp_llm.frontend.frontend_app import (
     FrontendApp,
     GracefulShutdownServer,
     _pre_stop_drain_seconds,
 )
+from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
+from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
 
 
 class FakeController:
@@ -69,6 +71,26 @@ class FrontendShutdownManagerTest(unittest.TestCase):
                 return True
             time.sleep(0.01)
         return predicate()
+
+    def test_root_health_response_is_ok_in_both_deployment_modes(self):
+        for separated_frontend in (True, False):
+            with self.subTest(separated_frontend=separated_frontend):
+                app_owner = FrontendApp.__new__(FrontendApp)
+                app_owner.frontend_server = FakeFrontendServer()
+                app_owner.shutdown_manager = FrontendShutdownManager()
+                app_owner.separated_frontend = separated_frontend
+                app_owner.server_config = SimpleNamespace(http_port=0)
+                app_owner.grpc_client = None if separated_frontend else FakeGrpcClient()
+
+                response = TestClient(app_owner.create_app()).get("/")
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json(), "ok")
+                if not separated_frontend:
+                    self.assertEqual(
+                        app_owner.grpc_client.calls,
+                        [("health_check", {})],
+                    )
 
     def test_draining_rejects_new_business_and_marks_health_unavailable(self):
         app_owner = FrontendApp.__new__(FrontendApp)
@@ -228,6 +250,43 @@ class FrontendShutdownManagerTest(unittest.TestCase):
 
         self.assertTrue(manager.is_draining())
         self.assertTrue(server.should_exit)
+
+    def test_uvicorn_shutdown_closes_production_frontend_and_grpc_contracts(self):
+        manager = FrontendShutdownManager()
+        server = GracefulShutdownServer(Config(lambda scope: None))
+        frontend_server = create_autospec(
+            FrontendServer, instance=True, spec_set=True
+        )
+        grpc_client = create_autospec(
+            GrpcClientWrapper, instance=True, spec_set=True
+        )
+        server.set_server(frontend_server, manager, grpc_client)
+
+        with patch.object(Server, "shutdown", new_callable=AsyncMock):
+            asyncio.run(server.shutdown())
+
+        frontend_server.close.assert_awaited_once_with()
+        grpc_client.close.assert_awaited_once_with()
+
+    def test_frontend_close_failure_does_not_block_grpc_cleanup(self):
+        manager = FrontendShutdownManager()
+        server = GracefulShutdownServer(Config(lambda scope: None))
+        frontend_server = create_autospec(
+            FrontendServer, instance=True, spec_set=True
+        )
+        frontend_server.close.side_effect = RuntimeError("frontend close failed")
+        grpc_client = create_autospec(
+            GrpcClientWrapper, instance=True, spec_set=True
+        )
+        server.set_server(frontend_server, manager, grpc_client)
+
+        with patch.object(Server, "shutdown", new_callable=AsyncMock):
+            with self.assertLogs(level="WARNING") as logs:
+                asyncio.run(server.shutdown())
+
+        frontend_server.close.assert_awaited_once_with()
+        grpc_client.close.assert_awaited_once_with()
+        self.assertIn("Failed to close frontend server", "\n".join(logs.output))
 
     def test_pre_stop_signal_marks_unavailable_without_uvicorn_shutdown(self):
         manager = FrontendShutdownManager()

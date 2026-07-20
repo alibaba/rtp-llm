@@ -8,9 +8,11 @@ propagation, and the per-addr channel cache.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterable
 import json
 import os
 import struct
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -27,6 +29,12 @@ from rtp_llm.dash_sc.proxy.service_route_config import (
 )
 from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
+from rtp_llm.vipserver.host_reactor import HostReactor
+from rtp_llm.vipserver.vipserver_proxy import (
+    VIPServerProxy,
+    _ADDRESS_SERVER_HTTP_TIMEOUT_S,
+    _VIPSERVER_API_HTTP_TIMEOUT_S,
+)
 
 
 def _make_request(
@@ -92,6 +100,9 @@ class _AsyncIter:
         self._i += 1
         return x
 
+    def cancel(self) -> bool:
+        return False
+
 
 class _FakeChannel:
     def __init__(self, addr: str = ""):
@@ -107,6 +118,14 @@ class _FakeChannel:
 
 async def _drain(aiter):
     return [x async for x in aiter]
+
+
+async def _wait_for_thread_event(event: threading.Event, timeout: float = 1.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not event.is_set():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError("worker thread did not reach the expected state")
+        await asyncio.sleep(0.001)
 
 
 async def _request_gen(*reqs):
@@ -125,7 +144,7 @@ def _install_mock_stub(servicer, mock_stub) -> None:
 
 
 def _stop_mock_stub(servicer) -> None:
-    patcher = getattr(servicer, "_test_stub_patcher", None)
+    patcher = servicer._test_stub_patcher
     if patcher is not None:
         patcher.stop()
         servicer._test_stub_patcher = None
@@ -137,6 +156,7 @@ def _servicer_pool(servicer):
 
 def _make_servicer(
     forward_addrs: list[str],
+    dash_sc_grpc_config=None,
 ) -> DashScProxyServicer:
     address = ";".join(forward_addrs)
     saved_route = os.environ.get(SERVICE_ROUTE_ENV_KEY)
@@ -144,7 +164,7 @@ def _make_servicer(
         os.environ[SERVICE_ROUTE_ENV_KEY] = json.dumps(
             {"type": "ip_port_list", "address": address}
         )
-        return DashScProxyServicer()
+        return DashScProxyServicer(dash_sc_grpc_config=dash_sc_grpc_config)
     finally:
         if saved_route is None:
             os.environ.pop(SERVICE_ROUTE_ENV_KEY, None)
@@ -169,7 +189,7 @@ class ServiceRouteConfigTest(unittest.TestCase):
 
     def test_parse_supported_route_types(self) -> None:
         cfg = parse_service_route_config(
-            '{"type": "ip_port_list", "address": ' '"10.0.0.1:8096;10.0.0.2:8096"}'
+            '{"type": "ip_port_list", "address": "10.0.0.1:8096;10.0.0.2:8096"}'
         )
         self.assertEqual(
             (cfg.type, cfg.address),
@@ -257,7 +277,7 @@ class ServiceRouteConfigTest(unittest.TestCase):
 
     def test_servicer_reads_service_route_env(self) -> None:
         os.environ[SERVICE_ROUTE_ENV_KEY] = (
-            '{"type": "ip_port_list", "address": ' '"10.0.0.1:8096;10.0.0.2:8096"}'
+            '{"type": "ip_port_list", "address": "10.0.0.1:8096;10.0.0.2:8096"}'
         )
         servicer = DashScProxyServicer()
         self.assertEqual(
@@ -268,6 +288,337 @@ class ServiceRouteConfigTest(unittest.TestCase):
             [addr.grpc_target for addr in servicer._discovery._addrs],
             ["10.0.0.1:8104", "10.0.0.2:8104"],
         )
+
+
+class VipServerProxySafetyTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.proxy = VIPServerProxy()
+        with self.proxy.srv_update_lock:
+            self.proxy.srv_hosts = []
+
+    def tearDown(self) -> None:
+        with self.proxy.srv_update_lock:
+            self.proxy.srv_hosts = []
+
+    def test_address_server_request_has_connect_and_read_timeout(self) -> None:
+        response = MagicMock(text="10.0.0.1\n")
+        with patch(
+            "rtp_llm.vipserver.vipserver_proxy.requests.get",
+            return_value=response,
+        ) as mock_get:
+            self.proxy.refresh_srv_lst()
+
+        self.assertEqual(
+            mock_get.call_args.kwargs["timeout"],
+            _ADDRESS_SERVER_HTTP_TIMEOUT_S,
+        )
+        self.assertEqual(self.proxy.srv_hosts, ["10.0.0.1"])
+
+    def test_api_request_releases_lock_retries_and_has_timeout(self) -> None:
+        with self.proxy.srv_update_lock:
+            self.proxy.srv_hosts = ["10.0.0.1", "10.0.0.2"]
+
+        response = MagicMock()
+        response.json.return_value = {"hosts": []}
+        lock_was_free = []
+
+        def request(_url, **_kwargs):
+            acquired = self.proxy.srv_update_lock.acquire(blocking=False)
+            lock_was_free.append(acquired)
+            if acquired:
+                self.proxy.srv_update_lock.release()
+            if len(lock_was_free) == 1:
+                raise RuntimeError("first vipserver unavailable")
+            return response
+
+        with patch(
+            "rtp_llm.vipserver.vipserver_proxy.requests.get",
+            side_effect=request,
+        ) as mock_get:
+            result = self.proxy.req_api("srvIPXT", {"dom": "com.example.svc"})
+
+        self.assertEqual(result, {"hosts": []})
+        self.assertEqual(lock_was_free, [True, True])
+        self.assertEqual(mock_get.call_count, 2)
+        self.assertTrue(
+            all(
+                call.kwargs["timeout"] == _VIPSERVER_API_HTTP_TIMEOUT_S
+                for call in mock_get.call_args_list
+            )
+        )
+
+    def test_cold_failure_is_registered_for_background_refresh(self) -> None:
+        proxy = MagicMock()
+        proxy.req_api.return_value = None
+        reactor = HostReactor(proxy)
+
+        with patch(
+            "rtp_llm.vipserver.host_reactor.NetUtils.get_ip_addr",
+            return_value="127.0.0.1",
+        ):
+            self.assertIsNone(reactor.get_host_list_by_domain("com.example.svc"))
+            reactor.refresh_cache_domain_srv_lst()
+
+        self.assertEqual(proxy.req_api.call_count, 2)
+        self.assertIn("com.example.svc", reactor.domain_failed_cnt)
+
+
+class VipDiscoveryAsyncTest(unittest.IsolatedAsyncioTestCase):
+    async def test_open_prewarms_vip_off_the_event_loop(self) -> None:
+        loop_thread_id = threading.get_ident()
+        resolver_thread_ids = []
+
+        def resolver(_domain: str):
+            resolver_thread_ids.append(threading.get_ident())
+            return MagicMock(ip="10.0.0.1", port=8096)
+
+        servicer = _make_servicer(["10.0.0.1:8096"])
+        servicer._discovery = VipServerServiceDiscovery(
+            "com.example.svc", resolver=resolver
+        )
+        try:
+            await servicer.open()
+        finally:
+            await servicer.close()
+
+        self.assertEqual(len(resolver_thread_ids), 1)
+        self.assertNotEqual(resolver_thread_ids[0], loop_thread_id)
+
+    async def test_failure_result_is_cached(self) -> None:
+        now = [100.0]
+        resolver = MagicMock(side_effect=[None, MagicMock(ip="10.0.0.1", port=8096)])
+        discovery = VipServerServiceDiscovery(
+            "com.example.svc",
+            resolver=resolver,
+            failure_cache_ttl_s=1,
+            clock=lambda: now[0],
+        )
+        try:
+            self.assertIsNone(await discovery.resolve_async())
+            self.assertIsNone(await discovery.resolve_async())
+            resolver.assert_called_once_with("com.example.svc")
+
+            now[0] += 1.1
+            addr = await discovery.resolve_async()
+            self.assertIsNotNone(addr)
+        finally:
+            await discovery.close()
+
+        self.assertEqual(resolver.call_count, 2)
+
+    async def test_prewarm_timeout_does_not_cancel_shared_worker(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        def resolver(_domain: str):
+            started.set()
+            release.wait(timeout=3.0)
+            return MagicMock(ip="10.0.0.1", port=8096)
+
+        discovery = VipServerServiceDiscovery(
+            "com.example.svc",
+            resolver=resolver,
+            prewarm_timeout_s=0.01,
+        )
+        try:
+            await discovery.prewarm()
+            await _wait_for_thread_event(started)
+            self.assertIsNotNone(discovery._resolve_task)
+            self.assertFalse(discovery._resolve_task.done())
+
+            release.set()
+            addr = await asyncio.wait_for(discovery.resolve_async(), timeout=2.0)
+            self.assertIsNotNone(addr)
+        finally:
+            release.set()
+            await discovery.close()
+
+    async def test_warm_concurrent_resolves_keep_per_request_selection(self) -> None:
+        warm_barrier = threading.Barrier(2)
+        resolver_lock = threading.Lock()
+        resolver_calls = 0
+
+        def resolver(_domain: str):
+            nonlocal resolver_calls
+            with resolver_lock:
+                resolver_calls += 1
+                call_index = resolver_calls
+            if call_index > 1:
+                warm_barrier.wait(timeout=3.0)
+            return MagicMock(ip=f"10.0.0.{call_index}", port=8096)
+
+        discovery = VipServerServiceDiscovery("com.example.svc", resolver=resolver)
+        try:
+            first = await discovery.resolve_async()
+            self.assertEqual(first.ip, "10.0.0.1")
+
+            second, third = await asyncio.gather(
+                discovery.resolve_async(),
+                discovery.resolve_async(),
+            )
+            self.assertEqual({second.ip, third.ip}, {"10.0.0.2", "10.0.0.3"})
+        finally:
+            await discovery.close()
+
+        self.assertEqual(resolver_calls, 3)
+
+    async def test_warm_path_uses_memory_only_cached_resolver(self) -> None:
+        loop_thread_id = threading.get_ident()
+        cached_thread_ids = []
+        resolver = MagicMock(return_value=MagicMock(ip="10.0.0.1", port=8096))
+
+        def cached_resolver(_domain: str):
+            cached_thread_ids.append(threading.get_ident())
+            return MagicMock(ip="10.0.0.2", port=8096)
+
+        discovery = VipServerServiceDiscovery(
+            "com.example.svc",
+            resolver=resolver,
+            cached_resolver=cached_resolver,
+        )
+        try:
+            await discovery.prewarm()
+            addr = await discovery.resolve_async()
+        finally:
+            await discovery.close()
+
+        self.assertEqual(addr.ip, "10.0.0.2")
+        resolver.assert_called_once_with("com.example.svc")
+        self.assertEqual(cached_thread_ids, [loop_thread_id])
+
+    async def test_cached_miss_falls_back_to_shared_full_resolve(self) -> None:
+        full_started = threading.Event()
+        release_full = threading.Event()
+        resolver_lock = threading.Lock()
+        resolver_calls = 0
+
+        def resolver(_domain: str):
+            nonlocal resolver_calls
+            with resolver_lock:
+                resolver_calls += 1
+                call_index = resolver_calls
+            if call_index == 1:
+                return MagicMock(ip="10.0.0.1", port=8096)
+            full_started.set()
+            release_full.wait(timeout=3.0)
+            return MagicMock(ip="10.0.0.2", port=8096)
+
+        cached_resolver = MagicMock(return_value=None)
+        discovery = VipServerServiceDiscovery(
+            "com.example.svc",
+            resolver=resolver,
+            cached_resolver=cached_resolver,
+        )
+        first = None
+        second = None
+        try:
+            await discovery.prewarm()
+            first = asyncio.create_task(discovery.resolve_async())
+            await _wait_for_thread_event(full_started)
+            second = asyncio.create_task(discovery.resolve_async())
+            await asyncio.sleep(0)
+
+            self.assertEqual(resolver_calls, 2)
+            release_full.set()
+            first_addr, second_addr = await asyncio.wait_for(
+                asyncio.gather(first, second), timeout=2.0
+            )
+        finally:
+            release_full.set()
+            pending = [
+                task for task in (first, second) if task is not None and not task.done()
+            ]
+            if pending:
+                await asyncio.wait_for(asyncio.gather(*pending), timeout=2.0)
+            await discovery.close()
+
+        self.assertEqual(first_addr.ip, "10.0.0.2")
+        self.assertEqual(second_addr.ip, "10.0.0.2")
+        self.assertEqual(resolver_calls, 2)
+        cached_resolver.assert_called_once_with("com.example.svc")
+
+    async def test_cancelled_waiter_does_not_cancel_shared_resolve(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        resolver_calls = 0
+
+        def resolver(_domain: str):
+            nonlocal resolver_calls
+            resolver_calls += 1
+            started.set()
+            release.wait(timeout=3.0)
+            return MagicMock(ip="10.0.0.1", port=8096)
+
+        discovery = VipServerServiceDiscovery("com.example.svc", resolver=resolver)
+        first = asyncio.create_task(discovery.resolve_async())
+        second = None
+        try:
+            await _wait_for_thread_event(started)
+            second = asyncio.create_task(discovery.resolve_async())
+            await asyncio.sleep(0)
+
+            first.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+            self.assertEqual(resolver_calls, 1)
+
+            release.set()
+            addr = await asyncio.wait_for(second, timeout=2.0)
+            self.assertIsNotNone(addr)
+            self.assertEqual(resolver_calls, 1)
+        finally:
+            release.set()
+            if second is not None and not second.done():
+                await asyncio.wait_for(second, timeout=2.0)
+            await discovery.close()
+
+    async def test_slow_resolve_does_not_block_another_rpc(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        resolver_timed_out = threading.Event()
+
+        def resolver(_domain: str):
+            started.set()
+            if not release.wait(timeout=3.0):
+                resolver_timed_out.set()
+            return None
+
+        servicer = _make_servicer(["10.0.0.1:8096"])
+        servicer._discovery = VipServerServiceDiscovery(
+            "com.example.svc", resolver=resolver
+        )
+        slow_task = asyncio.create_task(
+            _drain(
+                servicer.ModelStreamInfer(
+                    _request_gen(_make_request("slow")), MagicMock()
+                )
+            )
+        )
+        try:
+            await _wait_for_thread_event(started)
+            self.assertFalse(
+                resolver_timed_out.is_set(),
+                "VIP resolve blocked the aio loop until the worker timed out",
+            )
+
+            invalid_request = _make_request("fast")
+            invalid_request.parameters["max_new_tokens"].int64_param = 0
+            responses = await asyncio.wait_for(
+                _drain(
+                    servicer.ModelStreamInfer(
+                        _request_gen(invalid_request), MagicMock()
+                    )
+                ),
+                timeout=1.0,
+            )
+            error_no, payload = _dash_error_payload(responses[0])
+            self.assertEqual(error_no, 8)
+            self.assertEqual(payload["status_code"], 400)
+            self.assertFalse(resolver_timed_out.is_set())
+        finally:
+            release.set()
+            await asyncio.wait_for(slow_task, timeout=2.0)
+            await servicer.close()
 
 
 class IteratorBehaviorTest(unittest.IsolatedAsyncioTestCase):
@@ -305,7 +656,7 @@ class IteratorBehaviorTest(unittest.IsolatedAsyncioTestCase):
 
         call_arg = self.mock_stub.ModelStreamInfer.call_args[0][0]
         self.assertTrue(
-            hasattr(call_arg, "__aiter__"),
+            isinstance(call_arg, AsyncIterable),
             "Must be async iterable",
         )
         self.assertEqual(len(responses), 2)
@@ -659,6 +1010,21 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.buffered_stage, "flushed_first")
         self.assertEqual(record.backend_resp_count, 1)
 
+    async def test_terminal_first_chunk_is_not_held_for_a_second_chunk(self) -> None:
+        record = GrpcAccessRecord.create(
+            MagicMock(), "test", "bidi_stream", raw_mode=True
+        )
+        terminal = _make_finished_response()
+
+        async def terminal_only():
+            yield terminal
+            self.fail("proxy requested a second frame after terminal response")
+
+        chunks = await _drain(self.servicer._buffered_iter(terminal_only(), record))
+
+        self.assertEqual(chunks, [terminal])
+        self.assertEqual(record.buffered_stage, "flushed_terminal_first")
+
     async def test_stage_flushed_both_on_happy_path(self) -> None:
         self._patch_addr(0)
         self.mock_stub.ModelStreamInfer.return_value = _AsyncIter(
@@ -826,6 +1192,35 @@ class ChannelLoopAffinityTest(unittest.TestCase):
 
 class ChannelPoolTest(unittest.IsolatedAsyncioTestCase):
     """Dash SC reuses the shared lazy per-address gRPC channel cache."""
+
+    async def test_client_config_reaches_insecure_channel_and_overrides_defaults(
+        self,
+    ) -> None:
+        config = MagicMock()
+        config.get_client_config.return_value = {
+            "grpc.keepalive_time_ms": 45000,
+            "grpc.max_receive_message_length": 123456,
+        }
+        with patch(
+            "rtp_llm.utils.grpc_host_channel_pool.aio.insecure_channel",
+            side_effect=lambda addr, **_kwargs: _FakeChannel(addr),
+        ) as mock_ch:
+            servicer = _make_servicer(["10.0.0.1:8096"], dash_sc_grpc_config=config)
+            try:
+                await _servicer_pool(servicer).get("10.0.0.1:8104")
+            finally:
+                await servicer.close()
+
+        self.assertEqual(mock_ch.call_args.args[0], "10.0.0.1:8104")
+        option_pairs = mock_ch.call_args.kwargs["options"]
+        options = dict(option_pairs)
+        self.assertEqual(len(option_pairs), len(options))
+        self.assertEqual(options["grpc.keepalive_time_ms"], 45000)
+        self.assertEqual(options["grpc.keepalive_timeout_ms"], 10000)
+        self.assertEqual(options["grpc.keepalive_permit_without_calls"], 0)
+        self.assertEqual(options["grpc.http2.max_pings_without_data"], 0)
+        self.assertEqual(options["grpc.max_receive_message_length"], 123456)
+        config.get_client_config.assert_called_once_with()
 
     async def test_open_does_not_prewarm_configured_addrs(self) -> None:
         with patch(

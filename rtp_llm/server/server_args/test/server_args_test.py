@@ -1,4 +1,6 @@
+import argparse
 import importlib
+import json
 import os
 import sys
 from unittest import TestCase, main
@@ -365,6 +367,124 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(cfg.tool_call_loop_threshold, 7)
         self.assertEqual(cfg.tool_call_loop_begin_marker, "<tool_call>")
         self.assertEqual(cfg.tool_call_loop_end_marker, "</tool_call>")
+
+    def test_think_tag_normalizer_decodes_one_unicode_safe_layer(self):
+        from rtp_llm.server.server_args.generate_group_args import normalize_think_tag
+
+        cases = (
+            ("<think>\n", "<think>\n"),
+            ("<think>\\n", "<think>\n"),
+            ("<think>\\\\n", "<think>\\n"),
+            ("<思考>\\n", "<思考>\n"),
+        )
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(normalize_think_tag(raw), expected)
+
+    def test_think_tag_server_arg_defaults_are_canonical(self):
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        generate_config = (
+            rtp_llm.server.server_args.server_args.setup_args().generate_env_config
+        )
+
+        self.assertEqual(generate_config.think_start_tag, "<think>\n")
+        self.assertEqual(generate_config.think_end_tag, "</think>\n\n")
+
+    def test_literal_env_think_tags_are_normalized_without_unicode_loss(self):
+        os.environ["THINK_START_TAG"] = "<思考>\\n"
+        os.environ["THINK_END_TAG"] = "</思考>\\n\\n"
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        generate_config = (
+            rtp_llm.server.server_args.server_args.setup_args().generate_env_config
+        )
+
+        self.assertEqual(generate_config.think_start_tag, "<思考>\n")
+        self.assertEqual(generate_config.think_end_tag, "</思考>\n\n")
+
+    def test_literal_cli_think_tags_are_normalized_without_unicode_loss(self):
+        sys.argv = [
+            "prog",
+            "--think_start_tag",
+            "<分析>\\n",
+            "--think_end_tag",
+            "</分析>\\n\\n",
+        ]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        generate_config = (
+            rtp_llm.server.server_args.server_args.setup_args().generate_env_config
+        )
+
+        self.assertEqual(generate_config.think_start_tag, "<分析>\n")
+        self.assertEqual(generate_config.think_end_tag, "</分析>\n\n")
+
+    def test_dash_sc_default_allows_large_requests_on_both_ends(self):
+        from rtp_llm.server.server_args.grpc_group_args import (
+            default_dash_sc_grpc_config_json,
+        )
+
+        config = json.loads(default_dash_sc_grpc_config_json())
+        expected = 1024 * 1024 * 1024
+        self.assertEqual(
+            config["client_config"]["grpc.max_receive_message_length"], expected
+        )
+        self.assertEqual(
+            config["server_config"]["grpc.max_receive_message_length"],
+            64 * 1024 * 1024,
+        )
+
+    def test_invalid_grpc_json_is_rejected_without_clearing_defaults(self):
+        from rtp_llm.config.py_config_modules import GrpcConfig
+        from rtp_llm.server.server_args.grpc_group_args import (
+            _grpc_config_from_json,
+            default_model_grpc_config_json,
+        )
+
+        config = GrpcConfig()
+        config.from_json(default_model_grpc_config_json())
+        expected_client = config.get_client_config()
+        expected_server = config.get_server_config()
+        converter = _grpc_config_from_json(config)
+
+        invalid_configs = (
+            "not-json",
+            "[]",
+            "{}",
+            '{"client_config":[]}',
+            '{"client_config":{"grpc.max_metadata_size":"large"}}',
+            '{"client_config":{},"server_confg":{}}',
+        )
+        for invalid_config in invalid_configs:
+            with self.subTest(invalid_config=invalid_config):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    converter(invalid_config)
+                self.assertEqual(config.get_client_config(), expected_client)
+                self.assertEqual(config.get_server_config(), expected_server)
+
+    def test_grpc_json_accepts_integer_options(self):
+        from rtp_llm.config.py_config_modules import GrpcConfig
+
+        config = GrpcConfig()
+        config.from_json(
+            '{"client_config":{"grpc.keepalive_time_ms":30000},'
+            '"server_config":{"grpc.max_receive_message_length":-1}}'
+        )
+        self.assertEqual(
+            config.get_client_config(), {"grpc.keepalive_time_ms": 30000}
+        )
+        self.assertEqual(
+            config.get_server_config(), {"grpc.max_receive_message_length": -1}
+        )
 
 
 if __name__ == "__main__":

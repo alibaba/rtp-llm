@@ -1,11 +1,13 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "autil/EnvUtil.h"
+#include "rapidjson/document.h"
+#include "rapidjson/error/en.h"
 #include <map>
 #include <sstream>
 #include <algorithm>
 #include <string>
 #include <cctype>
-#include <regex>
+#include <stdexcept>
 
 namespace rtp_llm {
 
@@ -423,51 +425,53 @@ std::string ArpcConfig::to_string() const {
     return oss.str();
 }
 
-static int parse_optional_root_int_json(const std::string& json_str, const char* key, int default_value) {
-    try {
-        std::string pat = std::string("\"") + key + "\"\\s*:\\s*(\\d+)";
-        std::regex  re(pat);
-        std::smatch m;
-        if (std::regex_search(json_str, m, re) && m.size() > 1) {
-            return std::stoi(m[1].str());
-        }
-    } catch (...) {}
-    return default_value;
-}
-
 static void parse_grpc_client_server_maps_json(const std::string&          json_str,
                                                std::map<std::string, int>& client_config,
                                                std::map<std::string, int>& server_config) {
-    std::regex  client_section_pattern("\"client_config\"\\s*:\\s*\\{([^}]+)\\}");
-    std::smatch client_match;
-    if (std::regex_search(json_str, client_match, client_section_pattern)) {
-        std::string          client_section = client_match[1].str();
-        std::regex           key_value_pattern("\"([^\"]+)\"\\s*:\\s*(\\d+)");
-        std::sregex_iterator iter(client_section.begin(), client_section.end(), key_value_pattern);
-        std::sregex_iterator end;
-
-        while (iter != end) {
-            std::string key    = (*iter)[1].str();
-            int         value  = std::stoi((*iter)[2].str());
-            client_config[key] = value;
-            ++iter;
-        }
+    rapidjson::Document document;
+    document.Parse(json_str.data(), json_str.size());
+    if (document.HasParseError()) {
+        throw std::invalid_argument("invalid gRPC config JSON at offset "
+                                    + std::to_string(document.GetErrorOffset()) + ": "
+                                    + rapidjson::GetParseError_En(document.GetParseError()));
+    }
+    if (!document.IsObject()) {
+        throw std::invalid_argument("gRPC config JSON root must be an object");
     }
 
-    std::regex  server_section_pattern("\"server_config\"\\s*:\\s*\\{([^}]+)\\}");
-    std::smatch server_match;
-    if (std::regex_search(json_str, server_match, server_section_pattern)) {
-        std::string          server_section = server_match[1].str();
-        std::regex           key_value_pattern("\"([^\"]+)\"\\s*:\\s*(\\d+)");
-        std::sregex_iterator iter(server_section.begin(), server_section.end(), key_value_pattern);
-        std::sregex_iterator end;
-
-        while (iter != end) {
-            std::string key    = (*iter)[1].str();
-            int         value  = std::stoi((*iter)[2].str());
-            server_config[key] = value;
-            ++iter;
+    bool client_config_found = false;
+    bool server_config_found = false;
+    for (auto section = document.MemberBegin(); section != document.MemberEnd(); ++section) {
+        const std::string section_name(section->name.GetString(), section->name.GetStringLength());
+        std::map<std::string, int>* config = nullptr;
+        bool*                       found  = nullptr;
+        if (section_name == "client_config") {
+            config = &client_config;
+            found  = &client_config_found;
+        } else if (section_name == "server_config") {
+            config = &server_config;
+            found  = &server_config_found;
+        } else {
+            throw std::invalid_argument("unknown gRPC config section: " + section_name);
         }
+        if (*found) {
+            throw std::invalid_argument("duplicate gRPC config section: " + section_name);
+        }
+        *found = true;
+        if (!section->value.IsObject()) {
+            throw std::invalid_argument("gRPC config section must be an object: " + section_name);
+        }
+        for (auto option = section->value.MemberBegin(); option != section->value.MemberEnd(); ++option) {
+            const std::string option_name(option->name.GetString(), option->name.GetStringLength());
+            if (!option->value.IsInt()) {
+                throw std::invalid_argument("gRPC config option must be an int: " + section_name + "."
+                                            + option_name);
+            }
+            (*config)[option_name] = option->value.GetInt();
+        }
+    }
+    if (!client_config_found && !server_config_found) {
+        throw std::invalid_argument("gRPC config JSON must contain client_config or server_config");
     }
 }
 
@@ -497,10 +501,11 @@ void GrpcConfig::from_json(const std::string& json_str) {
         return;
     }
 
-    client_config.clear();
-    server_config.clear();
-
-    parse_grpc_client_server_maps_json(json_str, client_config, server_config);
+    std::map<std::string, int> new_client_config;
+    std::map<std::string, int> new_server_config;
+    parse_grpc_client_server_maps_json(json_str, new_client_config, new_server_config);
+    client_config = std::move(new_client_config);
+    server_config = std::move(new_server_config);
 }
 
 DashScGrpcConfig::DashScGrpcConfig(const std::string& json_str) {
@@ -510,7 +515,6 @@ DashScGrpcConfig::DashScGrpcConfig(const std::string& json_str) {
 std::string DashScGrpcConfig::to_string() const {
     std::ostringstream oss;
     append_grpc_maps_to_stream(oss, *this);
-    oss << "max_server_workers: " << max_server_workers << "\n";
     return oss.str();
 }
 
@@ -518,12 +522,11 @@ void DashScGrpcConfig::from_json(const std::string& json_str) {
     if (json_str.empty()) {
         return;
     }
-    client_config.clear();
-    server_config.clear();
-    max_server_workers = 4;
-    parse_grpc_client_server_maps_json(json_str, client_config, server_config);
-    int mw             = parse_optional_root_int_json(json_str, "max_server_workers", 4);
-    max_server_workers = mw > 0 ? mw : 4;
+    std::map<std::string, int> new_client_config;
+    std::map<std::string, int> new_server_config;
+    parse_grpc_client_server_maps_json(json_str, new_client_config, new_server_config);
+    client_config = std::move(new_client_config);
+    server_config = std::move(new_server_config);
 }
 
 // FfnDisAggregateConfig

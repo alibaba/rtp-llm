@@ -4,6 +4,7 @@ from unittest import TestCase, main
 
 from transformers import AutoTokenizer
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
@@ -196,6 +197,29 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(generate_config.in_think_mode, True)
         self.assertEqual(generate_config.end_think_token_ids, [102])
 
+    def test_add_thinking_params_consumes_canonical_unicode_tag(self):
+        class RecordingTokenizer:
+            def __init__(self):
+                self.encode_calls = []
+
+            def encode(self, text, add_special_tokens=True):
+                self.encode_calls.append((text, add_special_tokens))
+                return [17, 18]
+
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = -1
+        generate_env_config.think_end_tag = "</思考>\n\n"
+        tokenizer = RecordingTokenizer()
+        generate_config = GenerateConfig.create_generate_config(
+            self._create_generate_config()
+        )
+
+        generate_config.add_thinking_params(tokenizer, generate_env_config)
+
+        self.assertEqual(generate_config.end_think_token_ids, [17, 18])
+        self.assertEqual(tokenizer.encode_calls, [("</思考>\n\n", False)])
+
     def test_add_thinking_params_with_think_token(self):
         generate_env_config = GenerateEnvConfig()
         generate_env_config.think_mode = 1
@@ -260,6 +284,7 @@ class OpenaiGenerateConfigTest(TestCase):
         req_stop: Optional[List[str]] = None,
         req_config_stop_word_str: Optional[List[str]] = None,
         req_config_stop_word_list: Optional[List[List[int]]] = None,
+        response_format: Optional[dict] = None,
     ):
         special_tokens = SpecialTokens()
         if model_stop_word_str is not None:
@@ -292,6 +317,7 @@ class OpenaiGenerateConfigTest(TestCase):
         )
 
         request = ChatCompletionRequest(messages=[])
+        request.response_format = response_format
         if req_stop is not None:
             request.stop = req_stop
         if req_config_stop_word_str is not None:
@@ -304,6 +330,16 @@ class OpenaiGenerateConfigTest(TestCase):
             request.extra_configs.stop_words_list = req_config_stop_word_list
 
         return openai_endpoint._extract_generation_config(request)
+
+    def test_response_format_is_rejected_before_generation(self):
+        with self.assertRaises(FtRuntimeException) as raised:
+            self._generate_config_with_stop_word(
+                response_format={"type": "json_object"}
+            )
+        self.assertEqual(
+            raised.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION
+        )
+        self.assertIn("response_format", raised.exception.message)
 
     def assert_config_stop_word(
         self,

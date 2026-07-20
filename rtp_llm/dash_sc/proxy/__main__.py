@@ -40,7 +40,7 @@ def main() -> None:
         dash_sc_cfg.from_json(args.dash_sc_grpc_config_json.strip())
 
     async def _run() -> None:
-        servicer = DashScProxyServicer()
+        servicer = DashScProxyServicer(dash_sc_grpc_config=dash_sc_cfg)
         grpc_server = DashScGrpcServer(dash_sc_grpc_config=dash_sc_cfg)
         server = await grpc_server.start(args.port, servicer=servicer)
         await server.wait_for_termination()

@@ -1,5 +1,7 @@
 #!/bin/sh
 # DashSc / RTP-LLM: fix HIPPO workdir and resolve real model path under a resource root.
+# This is an internal deployment asset. Its /home/admin and /usr/bin absolute paths
+# are intentional platform contracts, not portable defaults for general environments.
 # Typical layout: CHECKPOINT_PATH=/home/admin/resource/model
 #   -> actual weights: .../model/<id>/Qwen3-0.6B/Qwen3-0.6B
 #

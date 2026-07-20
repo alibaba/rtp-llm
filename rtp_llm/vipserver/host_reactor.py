@@ -1,6 +1,5 @@
 import logging
 import threading
-import traceback
 
 from rtp_llm.vipserver.host import Host
 from rtp_llm.vipserver.netutil import NetUtils
@@ -48,24 +47,33 @@ class HostReactor:
             self.proxy.close()
 
     def update_domain_map(self, new_map: dict[str, list[Host]]):
-        self.domain_update_lock.acquire()
-        for k, v in new_map.items():
-            if v:
-                self.domain_map[k] = v
-                self.domain_failed_cnt[k] = 0
-            else:
-                self.domain_failed_cnt[k] = self.domain_failed_cnt.get(k, 0) + 1
-                logging.warning(
-                    f"{k} failed to refresh vipserver domain server list: empyt host list - {self.domain_failed_cnt[k]} times"
-                )
-                if self.domain_failed_cnt[k] >= DOMAIN_FAILED_CNT_THRESHOLD:
-                    logging.warning(
-                        f"{k} has failed {self.domain_failed_cnt[k]} times, set server list to empty."
-                    )
-                    self.domain_map[k] = []
+        with self.domain_update_lock:
+            for k, v in new_map.items():
+                if v:
+                    self.domain_map[k] = v
                     self.domain_failed_cnt[k] = 0
-
-        self.domain_update_lock.release()
+                else:
+                    failed_count = self.domain_failed_cnt.get(k, 0) + 1
+                    self.domain_failed_cnt[k] = failed_count
+                    logging.warning(
+                        "%s failed to refresh vipserver domain server list: "
+                        "empty host list - %s times",
+                        k,
+                        failed_count,
+                    )
+                    # Keep a stale healthy snapshot while refreshes fail. Cold
+                    # failures remain absent from domain_map so the discovery
+                    # layer's short negative-cache TTL can trigger a foreground
+                    # retry. domain_failed_cnt still registers the domain for
+                    # background refresh below.
+                    if failed_count >= DOMAIN_FAILED_CNT_THRESHOLD:
+                        logging.warning(
+                            "%s has failed %s times, set server list to empty",
+                            k,
+                            failed_count,
+                        )
+                        self.domain_map[k] = []
+                        self.domain_failed_cnt[k] = 0
 
     def refresh_domain_srv_lst(self, domain: str):
         """
@@ -91,19 +99,21 @@ class HostReactor:
             else:
                 self.update_domain_map({domain: []})
 
-        except Exception as e:
-            logging.error(f"{domain} failed to refresh vipserver domain server list", e)
-            stack_summary = traceback.format_exception(type(e), e, e.__traceback__)
-            stack_str = "\n".join(stack_summary)
-            logging.error(f"error stack: {stack_str}")
+        except Exception:
+            logging.exception(
+                "%s failed to refresh vipserver domain server list", domain
+            )
+            self.update_domain_map({domain: []})
 
     def refresh_cache_domain_srv_lst(self):
         """
         refresh host list for each domain right now
         :return:
         """
-        for k, v in self.domain_map.items():
-            self.refresh_domain_srv_lst(k)
+        with self.domain_update_lock:
+            domains = tuple(self.domain_map.keys() | self.domain_failed_cnt.keys())
+        for domain in domains:
+            self.refresh_domain_srv_lst(domain)
 
     def get_host_list_by_domain_now(self, domain: str):
         """
@@ -112,7 +122,8 @@ class HostReactor:
         :return: host list
         """
         self.refresh_domain_srv_lst(domain)
-        return self.domain_map.get(domain)
+        with self.domain_update_lock:
+            return self.domain_map.get(domain)
 
     def get_host_list_by_domain(self, domain: str):
         """
@@ -120,7 +131,15 @@ class HostReactor:
         :param domain: vipserver domain
         :return: host list
         """
-        hosts = self.domain_map.get(domain)
-        if hosts is None:
+        hosts = self.get_host_list_by_domain_cached(domain)
+        if not hosts:
             return self.get_host_list_by_domain_now(domain)
         return hosts
+
+    def get_host_list_by_domain_cached(self, domain: str):
+        """Return the current snapshot without triggering network I/O."""
+        # Writers replace whole list objects under ``domain_update_lock`` and
+        # never mutate a published list. A CPython dict get therefore yields a
+        # safe snapshot reference without making the grpc.aio hot path wait on
+        # a background refresh thread's lock or logging.
+        return self.domain_map.get(domain)

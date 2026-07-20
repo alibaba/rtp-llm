@@ -161,6 +161,13 @@ def emit_access_log(
         )
     logger = logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME)
     try:
+        # Full token-id arrays are retained intentionally for exact replay and
+        # production diagnosis. On the production inference path their size is
+        # bounded by the model's max_seq_len validation before payload capture.
+        # JSON serialization stays synchronous so the async handler receives an
+        # immutable snapshot; only the potentially blocking file I/O is queued
+        # to its worker thread. Revisit the token-capture contract instead if
+        # supported context lengths make serialization cost unacceptable.
         # orjson emits bytes — decode once for the logging framework.
         logger.info(orjson.dumps(payload).decode("utf-8"))
     except Exception as e:

@@ -13,12 +13,13 @@ import json
 import logging
 import struct
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr
+from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
 from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.codec import (
@@ -43,6 +44,8 @@ from rtp_llm.dash_sc.inference.servicer import (
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.ops import RoleType
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.master_client import MasterClient
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
 
 
@@ -131,6 +134,11 @@ class DashErrorSpecForFtExceptionTest(unittest.TestCase):
             (ExceptionType.GENERATE_TIMEOUT, DASH_ERROR_TIMEOUT),
             (ExceptionType.OUT_OF_VOCAB_RANGE, DASH_ERROR_INVALID_OUTPUT),
             (ExceptionType.CANCELLED_ERROR, DASH_ERROR_ABORT),
+            (
+                ExceptionType.P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED,
+                DASH_ERROR_ABORT,
+            ),
+            (ExceptionType.P2P_CONNECTOR_WORKER_READ_CANCELLED, DASH_ERROR_ABORT),
         )
         for exception_type, expected in cases:
             with self.subTest(exception_type=exception_type):
@@ -158,6 +166,9 @@ class _FakeTokenizer:
         self._mapping = mapping
         self.encode_calls: list[tuple[str, bool]] = []
 
+    def __len__(self) -> int:
+        return self.vocab_size
+
     def encode(self, text, add_special_tokens=True):
         self.encode_calls.append((text, add_special_tokens))
         return list(self._mapping[text])
@@ -181,6 +192,34 @@ def _dsv4_tokenizer() -> _FakeTokenizer:
     )
 
 
+class BuildThinkRuntimeTest(unittest.TestCase):
+    def test_consumes_normalized_unicode_tags_verbatim(self) -> None:
+        generate_env_config = _GenerateEnvCfg()
+        generate_env_config.think_start_tag = "<思考>\n"
+        generate_env_config.think_end_tag = "</思考>\n\n"
+        tokenizer = _FakeTokenizer(
+            {
+                "<思考>\n": [11, 12],
+                "</思考>\n\n": [13, 14],
+                "<思考>\n\n</思考>\n\n": [11, 15, 13, 14],
+            }
+        )
+
+        runtime = build_think_runtime(tokenizer, generate_env_config, "deepseek_v4")
+
+        self.assertEqual(runtime.bos_tokens, (11, 12))
+        self.assertEqual(runtime.eos_tokens, (13, 14))
+        self.assertEqual(runtime.empty_tokens, (11, 15, 13, 14))
+        self.assertEqual(
+            tokenizer.encode_calls,
+            [
+                ("<思考>\n", False),
+                ("</思考>\n\n", False),
+                ("<思考>\n\n</思考>\n\n", False),
+            ],
+        )
+
+
 async def _drain(aiter):
     return [x async for x in aiter]
 
@@ -202,6 +241,14 @@ def _finish_reason(chunk) -> int | None:
     for i, out in enumerate(infer.outputs):
         if out.name == "finish_reason":
             return int(struct.unpack("<q", infer.raw_output_contents[i])[0])
+    return None
+
+
+def _finished(chunk) -> bool | None:
+    infer = chunk.infer_response
+    for i, out in enumerate(infer.outputs):
+        if out.name == "finished":
+            return infer.raw_output_contents[i] != b"\x00"
     return None
 
 
@@ -230,6 +277,20 @@ def _assert_parameter_error_response(
     testcase.assertEqual(_gen_ids(resp), [])
 
 
+def _assert_unsupported_error_response(
+    testcase, resp, expected_message_part: str
+) -> None:
+    testcase.assertFalse(resp.error_message)
+    infer = resp.infer_response
+    testcase.assertEqual(infer.parameters["error_no"].int64_param, 8)
+    payload = json.loads(infer.parameters["error_msg"].string_param)
+    testcase.assertEqual(payload["status_code"], 422)
+    testcase.assertEqual(payload["status_name"], "InvalidParameter")
+    testcase.assertIn(expected_message_part, payload["status_message"])
+    testcase.assertEqual(_finish_reason(resp), LLMFinishReason.STOP_ENGINE_PARAM)
+    testcase.assertEqual(_gen_ids(resp), [])
+
+
 class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
     def _minimal_request(self) -> predict_v2_pb2.ModelInferRequest:
         req = predict_v2_pb2.ModelInferRequest()
@@ -237,6 +298,37 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         req.model_name = "default"
         _add_input_tensor(req, "input_ids", "INT32", [2], struct.pack("<2i", 1, 2))
         return req
+
+    async def _run_dsv4_phase2(self, phase2_chunks, tokenizer=None):
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream(phase2_chunks)]
+        )
+        tok = tokenizer or _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        return await _drain(
+            iter_real_model_stream_infer(
+                self._minimal_request(),
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
 
     async def test_yields_one_chunk_from_mock_enqueue(self) -> None:
         req = self._minimal_request()
@@ -650,9 +742,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             iter_real_model_stream_infer(
                 req,
                 [7, 8, 128821],
-                SamplingParams(
-                    response_format=json.dumps({"type": "json_object"}),
-                ),
+                SamplingParams(),
                 OtherParams(enable_thinking=True),
                 visitor,
                 rtp_llm_request_id=100,
@@ -687,14 +777,6 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
         phase2_input_ids = visitor.generate_inputs[1].token_ids.cpu().int().tolist()
         self.assertEqual(phase2_input_ids, [7, 8, 128821, 271, 128822, 271])
-        self.assertEqual(
-            json.loads(visitor.generate_inputs[0].generate_config.response_format),
-            {"type": "json_object"},
-        )
-        self.assertEqual(
-            json.loads(visitor.generate_inputs[1].generate_config.response_format),
-            {"type": "json_object"},
-        )
         self.assertFalse(visitor.generate_inputs[1].generate_config.in_think_mode)
         self.assertEqual(len(visitor.generate_inputs[0].generate_config.role_addrs), 1)
         self.assertEqual(visitor.generate_inputs[1].generate_config.role_addrs, [])
@@ -899,6 +981,105 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(visitor.enqueue_called, 2)
         self.assertTrue(phase1_stream.aclose_called)
+
+    async def test_phase2_empty_stream_yields_terminal_internal_error(self) -> None:
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2_stream = _FakeAsyncStream([])
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1]), phase2_stream])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        error = chunks[-1]
+        error_no, payload = _dash_error_payload(error)
+        self.assertTrue(phase2_stream.aclose_called)
+        self.assertEqual(error.infer_response.id, "trace-real-2")
+        self.assertEqual(error_no, DASH_ERROR_INTERNAL.error_no)
+        self.assertIn("empty outputs_list from phase-2", payload["status_message"])
+        self.assertTrue(_finished(error))
+        self.assertEqual(_finish_reason(error), LLMFinishReason.INNER_ENGINE_ERROR)
+
+    async def test_phase2_non_terminal_chunk_then_eof_yields_internal_error(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([128822, 271, 20, 21], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2_stream = _FakeAsyncStream([phase2])
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1]), phase2_stream])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        phase2_chunks = [
+            chunk for chunk in chunks if chunk.infer_response.id == "trace-real-2"
+        ]
+        self.assertEqual(len(phase2_chunks), 2)
+        self.assertEqual(_gen_ids(phase2_chunks[0]), [20, 21])
+        self.assertFalse(_finished(phase2_chunks[0]))
+
+        error = phase2_chunks[-1]
+        error_no, payload = _dash_error_payload(error)
+        self.assertTrue(phase2_stream.aclose_called)
+        self.assertEqual(error_no, DASH_ERROR_INTERNAL.error_no)
+        self.assertIn("before finished frame", payload["status_message"])
+        self.assertTrue(_finished(error))
+        self.assertEqual(_finish_reason(error), LLMFinishReason.INNER_ENGINE_ERROR)
 
     async def test_request_disable_thinking_prevents_token1_phase2(self) -> None:
         req = self._minimal_request()
@@ -1411,6 +1592,97 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         # Trailing [128822, 271] is stripped; only the real answer ids survive.
         self.assertEqual(_gen_ids(phase2_chunks[0]), [30, 31, 32])
 
+    async def test_phase2_strips_close_marker_split_across_chunks(self) -> None:
+        chunks = await self._run_dsv4_phase2(
+            [
+                GenerateOutputs(
+                    generate_outputs=[
+                        GenerateOutput(
+                            output_ids=torch.tensor(
+                                [55, 56, 128822], dtype=torch.int32
+                            ),
+                            finished=False,
+                            aux_info=AuxInfo(input_len=4, reuse_len=0),
+                        )
+                    ]
+                ),
+                GenerateOutputs(
+                    generate_outputs=[
+                        GenerateOutput(
+                            output_ids=torch.tensor([271, 20, 21], dtype=torch.int32),
+                            finished=True,
+                            aux_info=AuxInfo(input_len=4, reuse_len=0),
+                        )
+                    ]
+                ),
+            ]
+        )
+
+        phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
+        self.assertEqual([_gen_ids(c) for c in phase2_chunks], [[20, 21]])
+        self.assertTrue(_finished(phase2_chunks[-1]))
+
+    async def test_phase2_preserves_answer_before_split_trailing_marker(self) -> None:
+        chunks = await self._run_dsv4_phase2(
+            [
+                GenerateOutputs(
+                    generate_outputs=[
+                        GenerateOutput(
+                            output_ids=torch.tensor(
+                                [30, 31, 32, 128822], dtype=torch.int32
+                            ),
+                            finished=False,
+                            aux_info=AuxInfo(input_len=4, reuse_len=0),
+                        )
+                    ]
+                ),
+                GenerateOutputs(
+                    generate_outputs=[
+                        GenerateOutput(
+                            output_ids=torch.tensor([271], dtype=torch.int32),
+                            finished=True,
+                            aux_info=AuxInfo(input_len=4, reuse_len=0),
+                        )
+                    ]
+                ),
+            ]
+        )
+
+        phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
+        generated_ids = [tid for chunk in phase2_chunks for tid in _gen_ids(chunk)]
+        self.assertEqual(generated_ids, [30, 31, 32])
+        self.assertTrue(_finished(phase2_chunks[-1]))
+
+    async def test_phase2_keeps_partial_close_suffix_at_eof(self) -> None:
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271, 272],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271, 272],
+                "</think>": [128822],
+            }
+        )
+        chunks = await self._run_dsv4_phase2(
+            [
+                GenerateOutputs(
+                    generate_outputs=[
+                        GenerateOutput(
+                            output_ids=torch.tensor(
+                                [55, 128822, 271], dtype=torch.int32
+                            ),
+                            finished=True,
+                            aux_info=AuxInfo(input_len=4, reuse_len=0),
+                        )
+                    ]
+                )
+            ],
+            tokenizer=tok,
+        )
+
+        phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
+        self.assertEqual([_gen_ids(c) for c in phase2_chunks], [[271]])
+        self.assertTrue(_finished(phase2_chunks[-1]))
+
 
 class IterRealModelStreamInferEchoTest(unittest.IsolatedAsyncioTestCase):
     """Echo-prefill integration for ``iter_real_model_stream_infer``."""
@@ -1601,6 +1873,30 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         _add_input_tensor(req, "input_ids", "INT32", [1], struct.pack("<i", 42))
         return req
 
+    async def test_close_releases_owned_backend_rpc_resources_once(self) -> None:
+        channel_pool = MagicMock()
+        channel_pool.close = AsyncMock()
+        model_rpc_client = ModelRpcClient.__new__(ModelRpcClient)
+        model_rpc_client._channel_pool = channel_pool
+
+        session = MagicMock()
+        session.closed = False
+        session.close = AsyncMock()
+        master_client = MasterClient.__new__(MasterClient)
+        master_client._session = session
+
+        backend_visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        backend_visitor.model_rpc_client = model_rpc_client
+        backend_visitor.master_client = master_client
+        servicer = DashScInferenceServicer(backend_visitor=backend_visitor)
+
+        await servicer.close()
+        await servicer.close()
+
+        channel_pool.close.assert_awaited_once_with()
+        session.close.assert_awaited_once_with()
+        self.assertIsNone(servicer._backend_visitor)
+
     async def test_fake_mode_returns_incremented_ids(self) -> None:
         servicer = DashScInferenceServicer(backend_visitor=None)
         req = self._valid_infer_request()
@@ -1614,6 +1910,43 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             for i in range(len(infer.outputs))
         }
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [142])
+
+    async def test_successful_single_request_ends_without_reading_another(self) -> None:
+        servicer = DashScInferenceServicer(backend_visitor=None)
+        first = self._valid_infer_request()
+
+        async def one_request():
+            yield first
+            self.fail("server requested a second frame after terminal response")
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(one_request(), MagicMock())
+        )
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(responses[0].infer_response.id, "srv-1")
+
+    async def test_multiple_return_sequences_are_rejected_before_enqueue(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        _add_input_tensor(
+            req,
+            "num_return_sequences",
+            "INT32",
+            [1],
+            struct.pack("<i", 2),
+        )
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_parameter_error_response(self, responses[0], "only one return sequence")
 
     async def test_access_log_records_input_and_generated_ids(self) -> None:
         # Frontend struct path: the emitted access line carries the real token
@@ -1819,6 +2152,32 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.enqueue_called, 0)
         self.assertEqual(len(responses), 1)
         _assert_parameter_error_response(self, responses[0], "max_new_tokens")
+
+    async def test_omitted_max_new_tokens_with_remaining_context_is_admitted(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor, max_seq_len=4)
+
+        await _drain(
+            servicer.ModelStreamInfer(
+                _areq_iter([self._valid_infer_request()]), MagicMock()
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+
+    async def test_explicit_max_new_tokens_over_remaining_context_is_admitted(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor, max_seq_len=4)
+        req = self._valid_infer_request()
+        req.parameters["max_new_tokens"].int64_param = 10
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
 
     async def test_bad_structural_tag_shape_returns_parameter_error(
         self,
@@ -2034,7 +2393,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(generate_config.in_think_mode)
         self.assertEqual(generate_config.max_thinking_tokens, 32000)
 
-    async def test_dash_generation_json_object_with_enable_thinking_keeps_both_constraints(
+    async def test_dash_generation_response_format_is_rejected_as_unsupported(
         self,
     ) -> None:
         visitor = _FakeVisitor(_FakeAsyncStream([]))
@@ -2052,17 +2411,30 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             {"type": "json_object"}
         )
 
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_unsupported_error_response(self, responses[0], "response_format")
+
+    async def test_dash_generation_plain_text_response_format_is_accepted(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["response_format"].string_param = json.dumps(
+            {"type": "text"}
+        )
+
         await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
 
         self.assertEqual(visitor.enqueue_called, 1)
-        generate_config = visitor.last_generate_input.generate_config
-        self.assertTrue(generate_config.in_think_mode)
-        self.assertEqual(generate_config.end_think_token_ids, [128822, 271])
-        self.assertEqual(
-            json.loads(generate_config.response_format), {"type": "json_object"}
-        )
+        self.assertIsNone(visitor.last_generate_input.generate_config.response_format)
 
-    async def test_dash_generation_guided_json_with_enable_thinking_sets_response_format(
+    async def test_dash_generation_guided_json_is_rejected_as_unsupported(
         self,
     ) -> None:
         schema = {
@@ -2085,19 +2457,31 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             [schema], ensure_ascii=False
         )
 
-        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
-
-        self.assertEqual(visitor.enqueue_called, 1)
-        generate_config = visitor.last_generate_input.generate_config
-        self.assertTrue(generate_config.in_think_mode)
-        self.assertEqual(generate_config.end_think_token_ids, [128822, 271])
-        self.assertEqual(
-            json.loads(generate_config.response_format),
-            {"type": "json_schema", "json_schema": {"schema": schema}},
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
         )
-        self.assertIsNone(generate_config.json_schema)
 
-    async def test_dash_generation_tool_call_structural_tag_reaches_generate_config(
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_unsupported_error_response(self, responses[0], "guided_json")
+
+    async def test_dash_generation_json_format_is_rejected_as_unsupported(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["json_format"].bool_param = True
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_unsupported_error_response(self, responses[0], "json_format")
+
+    async def test_dash_generation_structural_tag_is_rejected_as_unsupported(
         self,
     ) -> None:
         tag = {
@@ -2124,13 +2508,15 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             tag, ensure_ascii=False
         )
 
-        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
 
-        self.assertEqual(visitor.enqueue_called, 1)
-        generate_config = visitor.last_generate_input.generate_config
-        self.assertEqual(json.loads(generate_config.structural_tag), tag)
-        self.assertIsNone(generate_config.response_format)
-        self.assertFalse(generate_config.json_format)
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_unsupported_error_response(
+            self, responses[0], "tool_call_structural_tag"
+        )
 
     async def test_dash_generation_budget_aliases_without_enable_thinking_keep_thinking(
         self,
@@ -2265,6 +2651,20 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             visitor.last_generate_input.headers,
             {"user_id": "u1", "x-dashscope-apikeyid": "ak1"},
         )
+
+    async def test_short_upstream_timeout_keeps_engine_deadline_shorter(self) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        request = self._valid_infer_request()
+        request.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"x-dashscope-inner-timeout": 1}
+        )
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([request]), MagicMock()))
+
+        generate_config = visitor.last_generate_input.generate_config
+        self.assertEqual(generate_config.timeout_ms, 850)
+        self.assertEqual(generate_config.ttft_timeout_ms, 850)
 
 
 if __name__ == "__main__":

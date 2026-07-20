@@ -2548,27 +2548,16 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             f"completion_tokens_details mismatch\nFull response.usage: {response.usage}",
         )
 
-    async def test_escape(self):
-        think_start_tag = "<think>\n"
+    async def test_think_config_uses_canonical_unicode_tags(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_start_tag = "<思考>\n"
+        generate_env_config.think_end_tag = "</思考>\n\n"
+
         self.assertEqual(
-            think_start_tag, think_start_tag.encode("utf-8").decode("unicode_escape")
+            custom_renderer._get_think_config(generate_env_config),
+            (1, "<思考>\n", "</思考>\n\n"),
         )
-        think_end_tag = "</think>\n\n"
-        self.assertEqual(
-            think_end_tag, think_end_tag.encode("utf-8").decode("unicode_escape")
-        )
-        think_start_tag_from_env = "<think>\\n"
-        self.assertEqual(
-            think_start_tag,
-            think_start_tag_from_env.encode("utf-8").decode("unicode_escape"),
-        )
-        self.assertNotEqual(think_start_tag, think_start_tag_from_env)
-        think_end_tag_from_env = "</think>\\n\\n"
-        self.assertEqual(
-            think_end_tag,
-            think_end_tag_from_env.encode("utf-8").decode("unicode_escape"),
-        )
-        self.assertNotEqual(think_end_tag, think_end_tag_from_env)
 
     class ExtraOutputsTestSuite(QwenToolTestSuite):
         def __init__(

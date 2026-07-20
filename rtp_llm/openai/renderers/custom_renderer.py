@@ -82,12 +82,8 @@ def _get_think_config(generate_env_config):
         Tuple of (think_mode, think_start_tag, think_end_tag)
     """
     think_mode = generate_env_config.think_mode
-    think_start_tag = generate_env_config.think_start_tag.encode("utf-8").decode(
-        "unicode_escape"
-    )
-    think_end_tag = generate_env_config.think_end_tag.encode("utf-8").decode(
-        "unicode_escape"
-    )
+    think_start_tag = generate_env_config.think_start_tag
+    think_end_tag = generate_env_config.think_end_tag
     return think_mode, think_start_tag, think_end_tag
 
 
