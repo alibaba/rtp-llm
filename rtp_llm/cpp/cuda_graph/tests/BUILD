@@ -59,6 +59,30 @@ py_test(
 )
 
 py_test(
+    name = "cuda_graph_target_verify_padding",
+    srcs = [
+        "cuda_graph_target_verify_padding.py",
+    ],
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        ":cuda_graph_test_utils",
+        "//rtp_llm/test/model_test/test_util:test_util",
+    ],
+    env = {
+        "LOAD_METHOD": "scratch",
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "TEST_USING_DEVICE": "CUDA",
+        "HACK_LAYER_NUM": "1",
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
+    },
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+py_test(
     name = "cuda_graph_prefill",
     srcs = [
         "cuda_graph_prefill.py",

@@ -114,10 +114,21 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("prefill_qkv_padding_mask", &PyContextParallelParams::prefill_qkv_padding_mask)
         .def_readwrite("prefill_actual_input_lengths_cpu", &PyContextParallelParams::prefill_actual_input_lengths_cpu);
 
+    pybind11::class_<PyCudaGraphMetadata>(m, "PyCudaGraphMetadata")
+        .def(pybind11::init<>())
+        .def_readwrite("requires_full_token_metadata", &PyCudaGraphMetadata::requires_full_token_metadata)
+        .def_readwrite("graph_batch_size", &PyCudaGraphMetadata::graph_batch_size)
+        .def_readwrite("active_batch_size", &PyCudaGraphMetadata::active_batch_size)
+        .def_readwrite("tokens_per_batch", &PyCudaGraphMetadata::tokens_per_batch)
+        .def_readwrite("actual_token_num", &PyCudaGraphMetadata::actual_token_num)
+        .def_readwrite("token_capacity", &PyCudaGraphMetadata::token_capacity)
+        .def_readwrite("dummy_kv_block_id", &PyCudaGraphMetadata::dummy_kv_block_id);
+
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
         .def(pybind11::init<>())
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
         .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)
+        .def_readwrite("cuda_graph_metadata", &PyAttentionInputs::cuda_graph_metadata)
         .def_readwrite("is_target_verify", &PyAttentionInputs::is_target_verify)
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
         .def_readwrite("sequence_lengths", &PyAttentionInputs::sequence_lengths)

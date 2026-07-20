@@ -287,6 +287,31 @@ struct PyContextParallelParams {
     torch::Tensor prefill_actual_input_lengths_cpu;
 };
 
+// Runtime layout contract for a captured CUDA Graph. The runner owns these
+// values; attention backends only materialize their backend-specific metadata
+// from this description and must not infer graph capacity from tensor buffers.
+struct PyCudaGraphMetadata {
+    bool requires_full_token_metadata{false};
+    int  graph_batch_size{0};
+    int  active_batch_size{0};
+    int  tokens_per_batch{0};
+    int  actual_token_num{0};
+    int  token_capacity{0};
+    int  dummy_kv_block_id{0};
+
+    bool needsTokenPadding() const {
+        return requires_full_token_metadata && token_capacity > actual_token_num;
+    }
+
+    int paddingBatchBegin() const {
+        return active_batch_size;
+    }
+
+    int paddingTokenNum() const {
+        return token_capacity - actual_token_num;
+    }
+};
+
 // Naming convention: the host (pinned CPU) tensor uses the bare name; its device (CUDA)
 // counterpart carries a _device suffix.
 struct PyAttentionInputs {
@@ -333,6 +358,8 @@ struct PyAttentionInputs {
 
     // CUDA Graph mode flags
     bool is_cuda_graph = false;  // True when running in CUDA graph mode (capture or replay)
+
+    PyCudaGraphMetadata cuda_graph_metadata;
 
     std::optional<PyContextParallelParams> context_parallel_info;
 
