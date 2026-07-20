@@ -71,12 +71,20 @@ public:
     // Rebuild KV block ownership for beam/multiple-return sequences.
     // This records copy mappings; caller must execute them via
     // getKVBlockUpdateMapping/KVCacheManager::blockBatchCopy before reuse.
-    bool updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block, int valid_tail_tokens = 0);
+    bool updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block);
 
     // clear block copy mapping
     void clearKVBlockUpdateMapping() {
         block_update_mapping_.clear();
     }
+
+    void setKVBlockUpdateMapping(const std::vector<TaggedBlockIdPair>& block_update_mapping) {
+        block_update_mapping_ = block_update_mapping;
+    }
+
+    // Reference externally-owned physical blocks into this stream's empty block table.
+    // Single KVCacheResource group only.
+    void referenceRequestBlocks(const BlockIndicesType& src_block_ids);
 
     // get block copy mapping of last kv cache update
     const std::vector<TaggedBlockIdPair>& getKVBlockUpdateMapping() const {
