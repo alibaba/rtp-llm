@@ -84,6 +84,9 @@ private:
     bool isEagle() override;
     bool isDSpark() override;
 
+    absl::Status runAccuracyCheckWithTemporaryCache(const EngineInitParams&            params,
+                                                    const std::optional<WarmUpResult>& warm_up_result);
+
 private:
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};

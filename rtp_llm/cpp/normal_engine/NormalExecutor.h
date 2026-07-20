@@ -47,6 +47,10 @@ public:
         model_ = std::move(model);
     }
 
+    ModelBase* getModel() {
+        return model_.get();
+    }
+
     // Test hook: if set, used to create model when py_model is None
     using ModelFactory = std::function<std::unique_ptr<ModelBase>(const GptModelInitParams&)>;
     static ModelFactory test_model_factory;

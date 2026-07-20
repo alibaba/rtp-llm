@@ -78,6 +78,14 @@ public:
         block_update_mapping_.clear();
     }
 
+    void setKVBlockUpdateMapping(const std::vector<TaggedBlockIdPair>& block_update_mapping) {
+        block_update_mapping_ = block_update_mapping;
+    }
+
+    // Reference externally-owned physical blocks into this stream's empty block table.
+    // Single KVCacheResource group only.
+    void referenceRequestBlocks(const BlockIndicesType& src_block_ids);
+
     // get block copy mapping of last kv cache update
     const std::vector<TaggedBlockIdPair>& getKVBlockUpdateMapping() const {
         return block_update_mapping_;

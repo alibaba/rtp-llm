@@ -93,7 +93,12 @@ public:
                        const std::vector<int>&         block_src_batch,
                        bool                            copy_last_block,
                        std::vector<TaggedBlockIdPair>& block_update_mapping);
-
+    // Append externally-owned physical blocks into the batch_kv_cache_resource[batch_id][group_id] block table
+    // with a request-family reference.
+    bool referenceRequestBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                int                            batch_id,
+                                int                            group_id,
+                                const BlockIndicesType&        src_block_ids);
     // 地址转换和缓冲区访问
     BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id) const;
     std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;

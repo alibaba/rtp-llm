@@ -571,6 +571,18 @@ bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cach
     return updated;
 }
 
+bool KVCacheManager::referenceRequestBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                            int                            batch_id,
+                                            int                            group_id,
+                                            const BlockIndicesType&        src_block_ids) {
+    auto single_type_allocator = std::dynamic_pointer_cast<SingleTypeKVCacheAllocator>(allocator_);
+    if (!single_type_allocator) {
+        RTP_LLM_LOG_WARNING("referenceRequestBlocks requires SingleTypeKVCacheAllocator");
+        return false;
+    }
+    return single_type_allocator->referenceRequestBlocks(batch_kv_cache_resource, batch_id, group_id, src_block_ids);
+}
+
 // 地址转换和缓冲区访问
 
 BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id) const {
