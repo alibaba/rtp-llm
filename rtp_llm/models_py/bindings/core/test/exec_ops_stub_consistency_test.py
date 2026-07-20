@@ -29,7 +29,7 @@ class ExecOpsStubConsistencyTest(unittest.TestCase):
             "librtp_compute_ops module functions missing from __init__.pyi",
         )
 
-    def test_cpu_tp_broadcaster_signatures(self) -> None:
+    def test_comm_and_cpu_tp_broadcaster_signatures(self) -> None:
         functions = {
             node.name: node
             for node in self._stub.body
@@ -41,6 +41,11 @@ class ExecOpsStubConsistencyTest(unittest.TestCase):
                 ["int", "int", "str"],
             ),
             "destroy_cpu_tp_broadcaster": ([], []),
+            "register_comm_ops": (
+                ["broadcast_fn", "allreduce_fn", "allgather_fn"],
+                ["typing.Callable", "typing.Callable", "typing.Callable"],
+            ),
+            "clear_comm_ops": ([], []),
         }
         all_node = next(
             node

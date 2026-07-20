@@ -24,6 +24,7 @@ __all__: list[str] = [
     "PyMultimodalInputs",
     "PyPrefillCudaGaphCopyParams",
     "TypeMeta",
+    "clear_comm_ops",
     "destroy_cpu_tp_broadcaster",
     "get_device_id",
     "preprocess_gemm_weight_by_key",
@@ -32,6 +33,7 @@ __all__: list[str] = [
     "get_typemeta",
     "init_cpu_tp_broadcaster",
     "init_exec_ctx",
+    "register_comm_ops",
     "rtp_llm_ops",
 ]
 class BertEmbeddingInputs:
