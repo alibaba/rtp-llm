@@ -4,10 +4,6 @@ import logging
 import os
 from typing import Any, Dict, List, Optional, Union
 
-import transformers
-from packaging import version
-from transformers import AutoTokenizer
-
 
 class BaseTokenizer:
     def __init__(
@@ -18,6 +14,8 @@ class BaseTokenizer:
         self.init_tokenizer(tokenizer_path, self.config_json)
 
     def init_tokenizer(self, tokenizer_path: str, config_json: Dict[str, Any]):
+        from transformers import AutoTokenizer
+
         tokenizer_json_path = os.path.join(tokenizer_path, "tokenizer.json")
         tokenizer_obj = None
         if os.path.exists(tokenizer_json_path):
@@ -119,6 +117,9 @@ class BaseTokenizer:
            update_post_processor() to re-inject BOS/EOS via transformers' standard
            mechanism. This rebuilds a TemplateProcessing that includes the special tokens.
         """
+        import transformers
+        from packaging import version
+
         if version.parse(transformers.__version__).major < 5:
             return
         if tokenizer_obj is None:

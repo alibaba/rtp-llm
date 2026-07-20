@@ -3,7 +3,7 @@ import logging
 from librtp_compute_ops import *
 from librtp_compute_ops.rtp_llm_ops import *
 
-from rtp_llm.models_py.utils.arch import is_cuda
+from rtp_llm.device.device_type import is_cuda
 
 if is_cuda():
     logging.info("Use rtp_kernel FusedRopeKVCacheOp on CUDA device.")

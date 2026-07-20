@@ -16,12 +16,10 @@ from rtp_llm.config.model_config import (
     update_stop_words_from_env,
     update_tokenizer_special_tokens,
 )
-from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import SpecialTokens, TaskType
