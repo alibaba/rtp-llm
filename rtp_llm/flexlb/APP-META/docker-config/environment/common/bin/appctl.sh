@@ -363,6 +363,23 @@ stop_xagent() {
   echo "stop xagent finished..."
 }
 
+prepare_kmonitor_prometheus_config() {
+    if [[ "${FLEXLB_MONITOR_PROVIDER:-}" != "kmonitor-prometheus" ]]; then
+        return 0
+    fi
+
+    local classpath_dir="${APP_HOME}/target/${APP_NAME}/BOOT-INF/classes"
+    local template_file="${classpath_dir}/kmonitor-prometheus.properties.example"
+    local config_file="${classpath_dir}/kmonitor.properties"
+    if [[ ! -f "${template_file}" ]]; then
+        echo "ERROR: KMonitor Prometheus template is missing: ${template_file}"
+        return 1
+    fi
+
+    cp "${template_file}" "${config_file}" || return 1
+    echo "INFO: enabled KMonitor Prometheus exporter configuration: ${config_file}"
+}
+
 start() {
     echo "INFO: ${APP_NAME} try to start..."
     echo "APP_TGZ_FILE=${APP_TGZ_FILE}, APP_NAME=${APP_NAME}"
@@ -372,6 +389,7 @@ start() {
     HOME="$(getent passwd "$UID" | awk -F":" '{print $6}')" # fix "$HOME" by "$UID"
     echo "[start 1] start to unzip app tgz file..."
     update_target "${APP_TGZ_FILE}" "${APP_NAME}" || exit1
+    prepare_kmonitor_prometheus_config || exit1
 
     beforeStartApp
     echo "[start 2] try to start spring boot..."
