@@ -192,8 +192,10 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
     auto fake_stream =
         makeFakeStream(max_new_tokens, 1 + max_new_tokens, model_config, runtime_config, resource_context);
 
-    auto sp_buffer = makeFakeSPOutputBuffer(
-        model_config.data_type, model_config.hidden_size, model_config.vocab_size, max_new_tokens);
+    auto sp_buffer = makeFakeSPOutputBuffer(model_config.data_type,
+                                            model_config.hidden_size * model_config.hc_mult,
+                                            model_config.vocab_size,
+                                            max_new_tokens);
 
     auto new_tokens = torch::zeros({1, 1}, torch::kInt32);
 
@@ -232,7 +234,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                             "unset TREE_DECODE_CONFIG or disable MTP");
 
     data_type_          = params.model_config_.data_type;
-    hidden_size_        = params.model_config_.hidden_size;
+    hidden_size_        = params.model_config_.hidden_size * params.model_config_.hc_mult;
     propose_step_       = propose_params->gen_num_per_circle;
     vocab_size_         = params.model_config_.vocab_size;
     propose_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
@@ -305,7 +307,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          params.model_config_.attn_config.tokens_per_block,
          params.model_config_.attn_config.kernel_tokens_per_block,
          cache_manager,
-         std::nullopt});
+         std::nullopt,
+         params.model_config_.hc_mult});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
@@ -351,7 +354,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mtp_params->model_config_.attn_config.tokens_per_block,
                                 mtp_params->model_config_.attn_config.kernel_tokens_per_block,
                                 cache_manager,
-                                std::make_optional(0)});
+                                std::make_optional(0),
+                                mtp_params->model_config_.hc_mult});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
             draft_model_.reset(new PyWrappedModel(model_params, params.py_sp_model, false, false));
