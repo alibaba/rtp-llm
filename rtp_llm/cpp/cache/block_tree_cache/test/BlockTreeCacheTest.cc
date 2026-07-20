@@ -1361,7 +1361,7 @@ TEST_F(BlockTreeCacheTest, LoadBackGroupMappingUsesLocalPoolIndexOrderAndLeavesT
     EXPECT_EQ(host_pool->freeBlocksNum(), free_before);
 }
 
-TEST_F(BlockTreeCacheTest, LoadBackGroupMappingValidatorRejectsOutOfRangeDuplicateAndHoleMetadata) {
+TEST_F(BlockTreeCacheTest, LoadBackGroupMappingInitRejectsOutOfRangeDuplicateAndHoleMetadata) {
     const auto make_uninitialized = [](std::vector<BlockTreeCache::PerTagMapping> mapping, size_t pool_count) {
         return makeMappingValidationCache(std::move(mapping), pool_count, nullptr, /*initialize=*/false);
     };
@@ -1370,20 +1370,19 @@ TEST_F(BlockTreeCacheTest, LoadBackGroupMappingValidatorRejectsOutOfRangeDuplica
         {{/*component_group_id=*/0, /*local_pool_index=*/0}, {/*component_group_id=*/0, /*local_pool_index=*/2}},
         /*pool_count=*/2);
     ASSERT_NE(out_of_range, nullptr);
-    EXPECT_FALSE(out_of_range->validateDeviceGroupTagsForComponentGroup(/*component_group_id=*/0, {"tag_0", "tag_1"}));
+    EXPECT_FALSE(out_of_range->init());
 
     std::unique_ptr<BlockTreeCache> duplicate = make_uninitialized(
         {{/*component_group_id=*/0, /*local_pool_index=*/0}, {/*component_group_id=*/0, /*local_pool_index=*/0}},
         /*pool_count=*/2);
     ASSERT_NE(duplicate, nullptr);
-    EXPECT_FALSE(duplicate->validateDeviceGroupTagsForComponentGroup(
-        /*component_group_id=*/0, {"tag_0", "tag_1"}));
+    EXPECT_FALSE(duplicate->init());
 
     std::unique_ptr<BlockTreeCache> hole = make_uninitialized(
         {{/*component_group_id=*/0, /*local_pool_index=*/0}, {/*component_group_id=*/0, /*local_pool_index=*/2}},
         /*pool_count=*/3);
     ASSERT_NE(hole, nullptr);
-    EXPECT_FALSE(hole->validateDeviceGroupTagsForComponentGroup(/*component_group_id=*/0, {"tag_0", "tag_1"}));
+    EXPECT_FALSE(hole->init());
 }
 
 TEST_F(BlockTreeCacheTest, InvalidProducerMappingFailsInitializationWithoutSourceProtection) {
@@ -1471,6 +1470,131 @@ TEST_F(BlockTreeCacheTest, LoadBackWholeBatchMappingPreflightIsAtomicForLaterInv
     EXPECT_EQ(host_pool->refCount(second_source), 1u) << "committed ticket cleanup must execute exactly once";
     cache->waitForPendingTasks();
     device_pool->backingPool()->requestFree(request_targets);
+}
+
+TEST_F(BlockTreeCacheTest, LoadBackPreparedPrefixFailureRollsBackAllSourceAndTargetHolders) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    DeviceBlockPoolPtr first_device_pool  = makeDevicePool({{1, 0}}, 1, "load_back_prepared_prefix_first");
+    DeviceBlockPoolPtr second_device_pool = makeDevicePool({{1, 0}}, 1, "load_back_prepared_prefix_second");
+    ASSERT_NE(first_device_pool, nullptr);
+    ASSERT_NE(second_device_pool, nullptr);
+
+    std::shared_ptr<HostBlockPool> first_host_pool  = makeHostPool(1, 2);
+    std::shared_ptr<HostBlockPool> second_host_pool = makeHostPool(1, 2);
+    ASSERT_NE(first_host_pool, nullptr);
+    ASSERT_NE(second_host_pool, nullptr);
+
+    auto first_group                = std::make_shared<FullComponentGroup>();
+    first_group->component_group_id = 0;
+    first_group->setDevicePools({first_device_pool}, makeTestTags(1));
+    first_group->setHostPool(first_host_pool);
+    auto second_group                = std::make_shared<FullComponentGroup>();
+    second_group->component_group_id = 1;
+    second_group->setDevicePools({second_device_pool}, makeTestTags(1, 1));
+    second_group->setHostPool(second_host_pool);
+
+    BlockTreeCacheConfig config;
+    config.enable_memory_cache                       = true;
+    config.enable_load_back                          = true;
+    std::vector<ComponentGroupPtr>  component_groups = {first_group, second_group};
+    std::unique_ptr<BlockTreeCache> cache            = BlockTreeCacheTestUtil::makeBlockTreeCache(
+        std::make_unique<BlockTree>(2), std::move(component_groups), std::vector<Component>{}, std::move(config));
+    ASSERT_NE(cache, nullptr);
+
+    auto copy_engine = std::make_shared<ScriptedCopyEngine>(cache->componentGroups(), cache->components());
+    BlockTreeCacheTestPeer::setCopyEngineForTest(*cache, copy_engine);
+
+    const BlockIdxType first_source  = first_group->allocateSingleBlock(Tier::HOST);
+    const BlockIdxType second_source = second_group->allocateSingleBlock(Tier::HOST);
+    ASSERT_NE(first_source, NULL_BLOCK_IDX);
+    ASSERT_NE(second_source, NULL_BLOCK_IDX);
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(2));
+    slots[0][0].host_block = first_source;
+    slots[0][1].host_block = second_source;
+    ASSERT_NE(cache->tree()->insertNode(nullptr, {100}, slots).leaf, nullptr);
+
+    BlockTreeMatchResult result = cache->match({100});
+    ASSERT_NE(result.load_back_ticket, nullptr);
+    std::vector<PendingLoadBackItem>& items = result.load_back_ticket->items();
+    ASSERT_EQ(items.size(), 2u);
+    ASSERT_EQ(items[0].group_id, 0);
+    ASSERT_EQ(items[1].group_id, 1);
+    EXPECT_EQ(first_host_pool->refCount(first_source), 2u);
+    EXPECT_EQ(second_host_pool->refCount(second_source), 2u);
+
+    // Duplicate the first item immediately after itself. The complete batch passes
+    // preflight while both slots are IDLE. Preparation then claims the first item
+    // and takes its target holder; beginLoadBack for the duplicate observes the
+    // same slot already LOADING_BACK and fails with one prepared item and one
+    // untouched trailing item. Add the matching source planning hold explicitly
+    // so every item in the synthetic ticket owns exactly one source hold.
+    PendingLoadBackItem duplicate_first_item = items.front();
+    items.insert(items.begin() + 1, std::move(duplicate_first_item));
+    first_group->referenceBlocks(GroupBlockSet{0, Tier::HOST, {{first_source}}});
+    ASSERT_EQ(items.size(), 3u);
+    EXPECT_EQ(first_host_pool->refCount(first_source), 3u);
+    EXPECT_EQ(second_host_pool->refCount(second_source), 2u);
+
+    const BlockIdList first_request_targets  = first_device_pool->backingPool()->malloc(1);
+    const BlockIdList second_request_targets = second_device_pool->backingPool()->malloc(1);
+    ASSERT_EQ(first_request_targets.size(), 1u);
+    ASSERT_EQ(second_request_targets.size(), 1u);
+    const BlockIdxType first_target  = first_request_targets.front();
+    const BlockIdxType second_target = second_request_targets.front();
+    items[0].target_device_blocks    = {first_target};
+    items[1].target_device_blocks    = {first_target};
+    items[2].target_device_blocks    = {second_target};
+
+    const BlockHolderRefCounts first_holders_before =
+        first_device_pool->backingPool()->blockHolderRefCounts(first_target);
+    const BlockHolderRefCounts second_holders_before =
+        second_device_pool->backingPool()->blockHolderRefCounts(second_target);
+    ASSERT_EQ(first_holders_before.request_connector, 1);
+    ASSERT_EQ(first_holders_before.block_cache, 0);
+    ASSERT_EQ(second_holders_before.request_connector, 1);
+    ASSERT_EQ(second_holders_before.block_cache, 0);
+    ASSERT_FALSE(first_device_pool->isAllocated(first_target));
+    ASSERT_FALSE(second_device_pool->isAllocated(second_target));
+
+    EXPECT_EQ(result.load_back_ticket->commit(), nullptr);
+    EXPECT_EQ(copy_engine->submitCount(), 0u);
+
+    // The first item's acquired target holder and both of its source planning
+    // holds are gone; the unprepared trailing item's source hold is also gone.
+    // Request ownership remains untouched for both target blocks.
+    EXPECT_EQ(first_host_pool->refCount(first_source), 1u);
+    EXPECT_EQ(second_host_pool->refCount(second_source), 1u);
+    EXPECT_FALSE(first_device_pool->isAllocated(first_target));
+    EXPECT_FALSE(second_device_pool->isAllocated(second_target));
+    EXPECT_TRUE(first_device_pool->hasRequestHold(first_target));
+    EXPECT_TRUE(second_device_pool->hasRequestHold(second_target));
+    const BlockHolderRefCounts first_holders_after =
+        first_device_pool->backingPool()->blockHolderRefCounts(first_target);
+    const BlockHolderRefCounts second_holders_after =
+        second_device_pool->backingPool()->blockHolderRefCounts(second_target);
+    EXPECT_EQ(first_holders_after.request_connector, first_holders_before.request_connector);
+    EXPECT_EQ(first_holders_after.block_cache, first_holders_before.block_cache);
+    EXPECT_EQ(second_holders_after.request_connector, second_holders_before.request_connector);
+    EXPECT_EQ(second_holders_after.block_cache, second_holders_before.block_cache);
+
+    BlockTreeFindResult find = cache->tree()->findNode({100});
+    ASSERT_NE(find.matched_node, nullptr);
+    ASSERT_EQ(find.matched_node->group_slots.size(), 2u);
+    EXPECT_EQ(find.matched_node->group_slots[0].host_block, first_source);
+    EXPECT_EQ(find.matched_node->group_slots[1].host_block, second_source);
+    EXPECT_TRUE(find.matched_node->group_slots[0].device_blocks.empty());
+    EXPECT_TRUE(find.matched_node->group_slots[1].device_blocks.empty());
+    EXPECT_EQ(find.matched_node->group_slots[0].transfer_state, SlotTransferState::IDLE);
+    EXPECT_EQ(find.matched_node->group_slots[1].transfer_state, SlotTransferState::IDLE);
+
+    result.load_back_ticket.reset();
+    EXPECT_EQ(first_host_pool->refCount(first_source), 1u) << "committed ticket must not release source twice";
+    EXPECT_EQ(second_host_pool->refCount(second_source), 1u) << "committed ticket must not release source twice";
+    first_device_pool->backingPool()->requestFree(first_request_targets);
+    second_device_pool->backingPool()->requestFree(second_request_targets);
 }
 
 TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackCoreHoldersAndRetainsRequestTarget) {

@@ -243,6 +243,7 @@ public:
 private:
     friend class HybridKVCacheAllocator;
 
+    bool initDeviceGroupTags();
     void
     insertSparse(TreeNode* parent, const CacheKeysType& cache_keys, const std::vector<std::vector<GroupSlot>>& slots);
     void insertImpl(TreeNode*                                  parent,
@@ -276,24 +277,28 @@ private:
         std::vector<BlockIdxType> source_blocks;
         std::vector<BlockIdxType> target_device_blocks;
     };
-    bool deviceGroupTagsForComponentGroup(int                       component_group_id,
-                                          std::vector<std::string>& tags,
-                                          const char*               validation_boundary) const;
-    void prepareMatchedBlocks(const std::vector<TreeNode*>&     matched_path,
-                              const std::vector<bool>&          candidate_logically_valid,
-                              BlockTreeMatchResult&             result,
-                              std::vector<PendingLoadBackItem>& pending_load_back_items);
-    void prepareMatchedLoadBackItem(TreeNode*                         path_node,
-                                    const ComponentGroupPtr&          component_group,
-                                    const GroupSlot&                  group_slot,
-                                    size_t                            path_index,
-                                    const std::vector<std::string>&   device_group_tags,
-                                    BlockTreeMatchResult&             result,
-                                    std::vector<PendingLoadBackItem>& pending_load_back_items);
+    void   prepareMatchedBlocks(const std::vector<TreeNode*>&     matched_path,
+                                const std::vector<bool>&          candidate_logically_valid,
+                                BlockTreeMatchResult&             result,
+                                std::vector<PendingLoadBackItem>& pending_load_back_items);
+    size_t computeReadyMatchedBlockCount(const std::vector<TreeNode*>& matched_path,
+                                         const std::vector<bool>&      candidate_logically_valid) const;
+    void   prepareMatchedLoadBackItem(TreeNode*                         path_node,
+                                      const ComponentGroupPtr&          component_group,
+                                      const GroupSlot&                  group_slot,
+                                      size_t                            path_index,
+                                      const std::vector<std::string>&   device_group_tags,
+                                      BlockTreeMatchResult&             result,
+                                      std::vector<PendingLoadBackItem>& pending_load_back_items);
 
     std::shared_ptr<AsyncContext> commitLoadBack(const std::vector<PendingLoadBackItem>& items);
     void                          abortLoadBack(const std::vector<PendingLoadBackItem>& items);
-    void                          abortLoadBackUnsafe(const std::vector<PendingLoadBackItem>& items);
+    // The partial flags describe the item exactly at prepared_item_count while
+    // an exception is unwinding between beginLoadBack and full preparation.
+    void abortLoadBackUnsafe(const std::vector<PendingLoadBackItem>& items,
+                             size_t                                  prepared_item_count,
+                             bool                                    partial_item_claimed        = false,
+                             bool                                    partial_target_holder_added = false);
     bool executeLoadBackTransferBatch(const std::vector<TransferDescriptor>& descriptors, int timeout_ms);
     void performLoadBack(std::vector<LoadBackItem> items, std::shared_ptr<AsyncContext> ctx);
 
@@ -305,7 +310,9 @@ private:
     const std::vector<std::string>     per_tag_tags_;
     std::vector<DeviceKVCacheGroupPtr> per_tag_device_groups_;
     // Per-tag gid -> (component_group_id, local_pool_index).
-    std::vector<PerTagMapping>                 per_tag_mapping_;
+    std::vector<PerTagMapping> per_tag_mapping_;
+    // component_group_id -> local_pool_index -> stable declarative tag.
+    std::vector<std::vector<std::string>>      device_group_tags_;
     std::shared_ptr<LoadBackTicketRegistry>    load_back_ticket_registry_;
     CopyEnginePtr                              copy_engine_;
     std::shared_ptr<StorageBackend>            storage_backend_;
