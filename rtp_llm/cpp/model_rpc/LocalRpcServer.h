@@ -126,9 +126,10 @@ protected:
         return admission_gate_ ? admission_gate_->acquire() : AdmissionAcquireResult{};
     }
 
-    // Wire the sleep/wake_up SleepHooks (M3 drain counters, M5 KV memory,
-    // M6 weights, engine quiesce) into engine_->sleepController().
-    void installSleepHooks();
+    // Wire the sleep/wake_up SleepHooks (drain counters, KV memory,
+    // weights, engine quiesce) into engine_->sleepController().
+    void        installSleepHooks();
+    static bool validateKvMemoryControllerForWake(const KVCachePhysicalMemoryControllerPtr& controller);
 
     grpc::Status serializeErrorMsg(const std::string& request_key, ErrorInfo error_info);
     grpc::Status pollStreamOutput(grpc::ServerContext*             context,

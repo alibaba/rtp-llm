@@ -344,7 +344,12 @@ class FrontendApp(object):
             result = await self.grpc_client.post_request("set_log_level", req)
             return result
 
-        register_sleep_routes(app, self.grpc_client)
+        # Embedding deployments run EmbeddingRpcService (ARPC) with no
+        # SleepLifecycleController, so /sleep, /wake_up cannot be served. Sleep
+        # mode is also rejected for them at config time (reject_embedding_sleep);
+        # only register the lifecycle routes for language-model deployments.
+        if not self.frontend_server.is_embedding:
+            register_sleep_routes(app, self.grpc_client)
 
         # request format: '{"trace_name":"normal_profiler", "start_step": 0, "num_steps": 3, "enable_all_rank": false}'
         @app.post("/rtp_llm/start_profile")

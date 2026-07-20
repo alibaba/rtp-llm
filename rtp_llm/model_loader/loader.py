@@ -2,6 +2,7 @@ import gc
 import logging
 import os
 from collections import OrderedDict
+from contextlib import closing
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import safetensors
@@ -389,15 +390,26 @@ class ModelLoader:
         # load we materialize new GPU storage via set_*_weight. The yield
         # boundary does not change tensor ref lifetimes vs the previous inline
         # body, so cold-load memory behavior is unchanged.
-        for layer_id, name, tensor in self.prepare_weights_fastsafetensor(device):
-            if layer_id is not None:
-                model_weights.set_layer_weight(layer_id, name, tensor)
-            else:
-                model_weights.set_global_weight(name, tensor)
+        #
+        # closing(): if set_*_weight raises mid-load, close the generator so the
+        # fastsafetensors ParallelLoader's GDS/shm bounce buffer is released
+        # promptly instead of lingering until the frame is GC'd. No success-path
+        # change -- the loop exhausts the generator (loader already closed at
+        # StopIteration) so close() is a no-op there.
+        with closing(self.prepare_weights_fastsafetensor(device)) as fast_source:
+            for layer_id, name, tensor in fast_source:
+                if layer_id is not None:
+                    model_weights.set_layer_weight(layer_id, name, tensor)
+                else:
+                    model_weights.set_global_weight(name, tensor)
         return model_weights
 
     def prepare_weights_fastsafetensor(
-        self, device: str, in_weights_region: bool = True
+        self,
+        device: str,
+        in_weights_region: bool = True,
+        nogds: bool = False,
+        use_shm: bool = True,
     ):
         """Bulk fastsafetensors weight generator: yields ``(layer_id, name, tensor)``.
 
@@ -429,6 +441,12 @@ class ModelLoader:
           scales. Fully draining that last residual would need per-reload segment
           isolation (a private ``MemPool``), which aborts under
           torch_memory_saver — see ``mempool-destroy-crashes-under-tms``.
+
+        ``nogds`` / ``use_shm`` forward to the fastsafetensors ``ParallelLoader``.
+        Defaults reproduce the cold-load behavior (GDS on, shm on); the level-2
+        wake reload overrides them (env-driven) so an operator can disable GDS
+        and/or shm on hardware where the torch_memory_saver VMM remap invalidates
+        those pinned/registered buffers and faults the wake HtoD copy.
         """
         logging.info(f"load weight by device: {device}")
         tensor_to_weight_map, weight_info_list = self._generate_weight_info()
@@ -456,6 +474,8 @@ class ModelLoader:
             True,
             stacked_key_config=stacked_key_config,
             allocation_context=weights_region if in_weights_region else None,
+            nogds=nogds,
+            use_shm=use_shm,
         )
 
         _inline_count = 0
@@ -796,6 +816,55 @@ class ModelLoader:
             weights.update(res)
         return weights
 
+    def _derive_lm_head_tensor(self, raw: torch.Tensor) -> torch.Tensor:
+        """Apply the cold-load lm_head post-transform to a raw lm_head tensor.
+
+        Mirrors exactly what cold load does to the raw checkpoint (or embedding-
+        fallback) tensor before it becomes the resident lm_head weight:
+        L2-normalize the rows when ``normalize_lm_head_weight`` is set, then scale
+        by ``logit_scale`` when it is not 1.0. Shared by cold load
+        (:meth:`_load_dynamic_weights`) and the level-2 wake reload
+        (:meth:`prepare_computed_weights`) so the reloaded lm_head is bit-identical
+        to the cold-loaded one -- the checkpoint stream alone would restore the
+        untransformed raw tensor and silently produce wrong logits.
+        """
+        if self._weights_info.model_config.normalize_lm_head_weight:
+            raw = F.normalize(raw)
+        logit_scale = self._weights_info.model_config.logit_scale
+        if logit_scale != 1.0:
+            raw = logit_scale * raw
+        return raw
+
+    def _derive_positional_tensor(self, raw: torch.Tensor, device: str) -> torch.Tensor:
+        """Apply the cold-load positional-embedding slice to a raw tensor.
+
+        Cold load slices the learned positional table to ``max_seq_len``; the
+        checkpoint stream restores the full table, whose leading dimension no
+        longer matches the resident (sliced) weight. Shared so the wake reload
+        slices identically instead of tripping the shape check in the reload copy
+        loop. Raises when the checkpoint table is shorter than ``max_seq_len``,
+        matching cold load.
+        """
+        max_seq_len = self._weights_info.model_config.max_seq_len
+        if raw.shape[0] < max_seq_len:
+            raise Exception(
+                f"positon_weight has shape: {raw.shape}, but max_seq_len is: {max_seq_len} > {raw.shape[0]}"
+            )
+        return raw[:max_seq_len].to(device)
+
+    def _find_global_weight_module(self, name: str):
+        """Return the global :class:`WeightModule` whose ``name`` matches, else None.
+
+        Used by the wake reload to re-load a specific derived weight (lm_head /
+        positional) straight from the checkpoint via the same ``WeightModule.load``
+        call shape :meth:`prepare_weights` uses, without materializing the full
+        cold-load ``ModelWeights``.
+        """
+        for weight in self._model_weights_info.weights:
+            if getattr(weight, "name", None) == name:
+                return weight
+        return None
+
     def _load_dynamic_weights(self, weight: ModelWeights, device: str):
         assert weight is not None, "weight is None"
 
@@ -810,11 +879,7 @@ class ModelLoader:
             lm_head_w = weight.steal_global_weight(W.lm_head)
             if lm_head_w == None:
                 lm_head_w = weight.global_weights[W.embedding]
-            if self._weights_info.model_config.normalize_lm_head_weight:
-                lm_head_w = F.normalize(lm_head_w)
-            logit_scale = self._weights_info.model_config.logit_scale
-            if logit_scale != 1.0:
-                lm_head_w = logit_scale * lm_head_w
+            lm_head_w = self._derive_lm_head_tensor(lm_head_w)
             weight.set_global_weight(W.lm_head, lm_head_w)
         else:
             # Some LLM can be used for other tasks, e.g. classification, in which case lm_head is not needed
@@ -822,12 +887,7 @@ class ModelLoader:
 
         pos_weight = weight.global_weights.get(W.positional_embedding, None)
         if pos_weight != None:
-            max_seq_len = self._weights_info.model_config.max_seq_len
-            if pos_weight.shape[0] < max_seq_len:
-                raise Exception(
-                    f"positon_weight has shape: {pos_weight.shape}, but max_seq_len is: {max_seq_len} > {pos_weight.shape[0]}"
-                )
-            pos_weight = pos_weight[:max_seq_len].to(device)
+            pos_weight = self._derive_positional_tensor(pos_weight, device)
             weight.set_global_weight(W.positional_embedding, pos_weight)
 
         dynamic_weights = self._weights_info.create_dynamic_weights()
@@ -881,7 +941,16 @@ class ModelLoader:
             )
         return py_eplb, phy2log
 
-    def _init_eplb_weight(self, weight: ModelWeights, device: str):
+    def _iter_eplb_weights(self, device: str):
+        """Yield ``(layer_id, name, tensor)`` for the computed EPLB placement buffers.
+
+        The per-layer ``logic_expert_cnt`` / ``log2phy`` buffers are derived from
+        the static ``phy2log`` expert map, not read from the checkpoint. Yields
+        nothing when the model has no experts and neither dynamic EPLB nor
+        redundant experts are configured. Shared by cold load
+        (:meth:`_init_eplb_weight`) and the level-2 wake reload
+        (:meth:`prepare_computed_weights`) so both agree on the exact buffer set.
+        """
         expert_num = self._load_config.expert_num
         redundant_expert = self._load_config.phy_exp_num - expert_num
         layer_num = self._load_config.num_layers
@@ -890,10 +959,8 @@ class ModelLoader:
         if expert_num == 0 or (
             not self._weights_info.enable_eplb_ and redundant_expert == 0
         ):
-            logging.info("don't need to init eplb weight, skip...")
             return
 
-        # init logic_expert_cnt and log2phy
         for layer_id in range(layer_num):
             logic_expert_cnt = torch.zeros((expert_num,), dtype=torch.int32)
             log2phy = torch.empty(
@@ -906,10 +973,104 @@ class ModelLoader:
                 log2phy[expert_id, cnt] = phy_exp_id
                 logic_expert_cnt[expert_id] += 1
 
-            weight.weights[layer_id][
-                W.logic_expert_cnt
-            ] = logic_expert_cnt.contiguous().to(device)
-            weight.weights[layer_id][W.log2phy] = log2phy.contiguous().to(device)
+            yield (
+                layer_id,
+                W.logic_expert_cnt,
+                logic_expert_cnt.contiguous().to(device),
+            )
+            yield (layer_id, W.log2phy, log2phy.contiguous().to(device))
+
+    def _init_eplb_weight(self, weight: ModelWeights, device: str):
+        for layer_id, name, tensor in self._iter_eplb_weights(device):
+            weight.weights[layer_id][name] = tensor
+
+    def prepare_computed_weights(self, device: str):
+        """Yield ``(layer_id, name, tensor)`` for live weights computed after the
+        checkpoint pipeline.
+
+        Cold load (:meth:`load_weights`) runs the checkpoint pipeline
+        (:meth:`prepare_weights` / :meth:`prepare_weights_fastsafetensor`) and then
+        derives additional resident weights. Two kinds are NOT backed by any
+        checkpoint tensor -- the rope cos/sin cache (via ``create_dynamic_weights``)
+        and the EPLB placement buffers -- so the checkpoint generators never emit
+        them. Two more (lm_head, positional embedding) ARE backed by a checkpoint
+        tensor but the checkpoint stream emits the *raw* tensor, whereas cold load
+        stores a transformed one: lm_head gets an optional normalize/logit-scale,
+        positional gets sliced to ``max_seq_len`` (and lm_head may fall back to the
+        embedding tensor when the checkpoint has no lm_head). This generator is the
+        authoritative source for all of them in the level-2 wake reload; the reload
+        runs it first and skips the raw checkpoint tensor for any key it covers, so
+        every live weight is restored bit-identically to cold load -- neither the
+        full-coverage assertion spuriously fails (rope / EPLB / lm_head-fallback),
+        nor is the resident weight silently left raw (lm_head transform) or crashed
+        on a shape mismatch (positional slice). Recomputed the same way as cold
+        load, so moving where they come from changes only when they are produced,
+        not their contents.
+        """
+        for dynamic_weight in self._weights_info.create_dynamic_weights():
+            loaded = dynamic_weight.load(
+                DatabaseTensorSource(self._load_config.database),
+                None,
+                device,
+                self._load_config,
+            )
+            tensor = loaded.get(dynamic_weight.name)
+            if tensor is not None:
+                yield (None, dynamic_weight.name, tensor)
+        yield from self._iter_lm_head_weight(device)
+        yield from self._iter_positional_weight(device)
+        yield from self._iter_eplb_weights(device)
+
+    def _iter_lm_head_weight(self, device: str):
+        """Yield the derived lm_head weight for the wake reload, mirroring cold load.
+
+        Only language models have an lm_head; other task types drop it (see
+        :meth:`_load_dynamic_weights`). Loads the raw tensor from the lm_head
+        checkpoint module when present, else falls back to the embedding module
+        (matching the cold-load ``steal_global_weight`` fallback), applies the
+        shared post-transform, and yields it. Yields nothing when neither module
+        exists.
+        """
+        if self._task_type != TaskType.LANGUAGE_MODEL:
+            return
+        module = self._find_global_weight_module(W.lm_head)
+        if module is None:
+            module = self._find_global_weight_module(W.embedding)
+        if module is None:
+            return
+        loaded = module.load(
+            DatabaseTensorSource(self._load_config.database),
+            None,
+            device,
+            self._load_config,
+        )
+        raw = loaded.get(module.name)
+        if raw is not None:
+            yield (None, W.lm_head, self._derive_lm_head_tensor(raw))
+
+    def _iter_positional_weight(self, device: str):
+        """Yield the derived positional embedding for the wake reload.
+
+        Loads the raw learned positional table from its checkpoint module and
+        slices it to ``max_seq_len`` exactly as cold load does. Yields nothing for
+        models without a positional embedding module (rope-based models).
+        """
+        module = self._find_global_weight_module(W.positional_embedding)
+        if module is None:
+            return
+        loaded = module.load(
+            DatabaseTensorSource(self._load_config.database),
+            None,
+            device,
+            self._load_config,
+        )
+        raw = loaded.get(module.name)
+        if raw is not None:
+            yield (
+                None,
+                W.positional_embedding,
+                self._derive_positional_tensor(raw, device),
+            )
 
 
 def get_model_loader(

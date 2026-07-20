@@ -46,7 +46,7 @@ void releaseHostMemoryCache() {
 }
 
 std::vector<int32_t> flattenLayerToGroup(const CacheConfig& cache_config) {
-    auto layer_to_group_ids = cache_config.layerGroupIdsSnapshot();
+    auto                 layer_to_group_ids = cache_config.layerGroupIdsSnapshot();
     std::vector<int32_t> layer_to_group;
     layer_to_group.reserve(layer_to_group_ids.size());
     for (size_t layer = 0; layer < layer_to_group_ids.size(); ++layer) {
@@ -286,7 +286,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
 
-    auto cache_config               = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, 0);
+    auto cache_config = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, 0);
     cache_config.seq_size_per_block = model_config_.attn_config.tokens_per_block;
     cache_config.block_num          = 5;
     ParallelismConfig temp_parallelism_config;
@@ -296,7 +296,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
-    const auto& temp_cache_config = cache_manager->cacheConfig();
+    const auto& temp_cache_config   = cache_manager->cacheConfig();
     auto        temp_layer_to_group = flattenLayerToGroup(temp_cache_config);
     executor_.reset(new NormalExecutor(params,
                                        cache_manager,
@@ -521,8 +521,16 @@ bool NormalEngine::collectiveSleepQuiesceEnabled() const {
     // A rank without VMM support still participates in the quiesce collective (safe,
     // it just no-ops the local memory release); a sleep request there fails cleanly
     // with DISABLED and the coordinator aborts, rather than hanging the fleet.
-    return sleep_controller_.enabled() && parallelism_config.world_size > 1
-           && (parallelism_config.dp_size > 1 || parallelism_config.ep_size > 1);
+    //
+    // Gated on world_size > 1 only -- NOT additionally on (dp_size > 1 || ep_size > 1).
+    // Pure TP (dp=1, ep=1, tp=world) MUST use this symmetric consensus too: its quiesce
+    // is otherwise driven by releasePendingTpCollectiveForPause(), which is tp_rank==0
+    // only, so after tp0 parks the worker ranks' next tpSyncModelInputs has no peer and
+    // deadlocks (worker socket close + admission-counter leak). Routing pure TP through
+    // the consensus makes every rank arm its own pause_ (from its own control-plane RPC),
+    // co-step matched tpSync each step, and reach the terminal round together, so all
+    // ranks park in lockstep with no tp0-only driver.
+    return sleep_controller_.enabled() && parallelism_config.world_size > 1;
 }
 
 // Why the sleep-quiesce consensus needs a collective at all, and why it now costs the steady
@@ -557,9 +565,9 @@ bool NormalEngine::collectiveSleepQuiesceEnabled() const {
 // ranks run the same 1..K rounds. The verdict is derived from the shared summed result, so
 // every rank reaches the same terminal round K simultaneously (all armed + all drained ->
 // REACHED; or, after a cancel/wake, the pending count returns to zero -> CANCELLED) and stops
-// issuing together -- no rank is ever left with an unmatched collective. (The single-rank /
-// pure-TP deployment escapes all of this -- see releasePendingTpCollectiveForPause() /
-// enterPausedState(), which need no collective.)
+// issuing together -- no rank is ever left with an unmatched collective. (Only the
+// single-rank deployment escapes all of this -- see enterPausedState(), which needs no
+// collective. Pure TP now takes this consensus path too; see collectiveSleepQuiesceEnabled.)
 absl::Status NormalEngine::maybeReachCollectiveSleepQuiesce() {
     if (!collectiveSleepQuiesceEnabled()) {
         return absl::OkStatus();
@@ -636,6 +644,9 @@ absl::Status NormalEngine::maybeReachCollectiveSleepQuiesce() {
             // Every rank has left the pause window (sleep cancelled / woken before quiesce):
             // disengage together on this shared verdict and resume normal serving at zero cost.
             collective_quiesce_engaged_ = false;
+            if (scheduler_) {
+                scheduler_->setForcePoll(false);  // stop the arm-time poll; back to blocking schedule()
+            }
             RTP_LLM_LOG_INFO("normal engine collective sleep quiesce cancelled before reaching, world_size=%ld",
                              parallelism_config.world_size);
         }
@@ -646,7 +657,10 @@ absl::Status NormalEngine::maybeReachCollectiveSleepQuiesce() {
     if (reached) {
         // Disengage before parking so a subsequent wake resumes at the steady zero-cost path.
         collective_quiesce_engaged_ = false;
-        const auto pause_epoch      = pause_epoch_.load(std::memory_order_acquire);
+        if (scheduler_) {
+            scheduler_->setForcePoll(false);  // consensus done; the loop parks next in enterPausedState
+        }
+        const auto pause_epoch = pause_epoch_.load(std::memory_order_acquire);
         processed_pause_epoch_.store(pause_epoch, std::memory_order_release);
         RTP_LLM_LOG_INFO("normal engine collective sleep quiesce reached, epoch=%lu, world_size=%ld",
                          pause_epoch,
@@ -726,6 +740,52 @@ absl::Status NormalEngine::pauseAndWaitQuiesced(int64_t timeout_ms) {
                                 + " ms");
     }
     return absl::OkStatus();
+}
+
+void NormalEngine::armCollectiveSleepQuiesce() {
+    // DP/EP: the sleep-quiesce consensus (maybeReachCollectiveSleepQuiesce) must be armed on
+    // EVERY rank when it enters DRAINING -- i.e. BEFORE the per-rank drain wait, not after it
+    // (as the quiesceEngine hook / pauseAndWaitQuiesced does). Drain is rank-asymmetric: only
+    // the rank holding the in-flight request blocks in DrainManager.waitDrained, so if arming
+    // waited for local drain the busy rank would keep pause_=false and never arm, while its
+    // idle peers (already drained, pause_=true) would issue unmatched SLEEP_QUIESCE all-reduce
+    // rounds. Those never-matched collective rounds pin GPU collective resources indefinitely
+    // and desync the EP all-to-all until the busy rank's real forward hits a DeepEP CPU recv
+    // timeout -- the request errors, drain never completes, and the worker rank dies.
+    //
+    // Arming here calls pause() (single CAS: sets pause_ + bumps pause_epoch_), so the busy
+    // rank co-steps the consensus while it drains and data[1]=onflightStreams carries its drain
+    // progress into the shared verdict; all ranks reach REACHED together once the global
+    // on-flight count is zero. The drain-time quiesceEngine hook's pause() then becomes a no-op
+    // CAS (epoch unchanged) and simply waits for the consensus to record that epoch. This covers
+    // pure TP as well (collectiveSleepQuiesceEnabled is world_size>1): tp0 drains while its
+    // workers co-step, and all park together on the consensus.
+    //
+    // No-op only for single-rank: there pause() belongs AFTER drain (inside
+    // pauseAndWaitQuiesced), because setting pause_ early would park the loop (step())
+    // before the in-flight request completes, stranding graceful drain.
+    if (collectiveSleepQuiesceEnabled()) {
+        pause();
+        // Keep the tp0 scheduler polling (not blocking on an empty queue) for the duration of the
+        // consensus. The async SLEEP_QUIESCE rounds only advance when the engine loop cycles; once
+        // tp0's own work has drained, schedule() would otherwise block indefinitely (pure TP has no
+        // fake-stream 10ms poll: need_fill_fake_stream_ is dp_size>1 only), stalling the empty
+        // co-steps its workers need to reach the terminal round. Cleared at the consensus verdict in
+        // maybeReachCollectiveSleepQuiesce (REACHED or CANCELLED), not in restart(), so a cancel
+        // still converges before polling stops. Harmless on worker ranks (they never call schedule).
+        //
+        // Intentionally NO restart()-side fallback clear: during a cancel, restart() runs WHILE the
+        // consensus is still converging to CANCELLED, so clearing the flag there would stop the very
+        // polling that carries the cancel to its shared verdict and strand peers. The only path that
+        // never clears the flag is a fatal one -- a peer died and the SLEEP_QUIESCE all-reduce can no
+        // longer complete on any round -- and that is already bounded externally: the coordinator's
+        // wall-clock commit deadline (grpc_client_wrapper _converge_commit) fails the sleep and the
+        // recovery is an instance restart, at which point the flag is moot. Do not "fix" the flag
+        // here by clearing it on restart(); it would regress the multi-rank cancel path.
+        if (scheduler_) {
+            scheduler_->setForcePoll(true);
+        }
+    }
 }
 
 void NormalEngine::loop() {

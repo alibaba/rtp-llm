@@ -98,7 +98,7 @@ private:
     const std::shared_ptr<RequestBlockBufferStore>& getRequestBlockBufferStore() const;
 
 private:
-    bool                                                                             thread_pool_close_{false};
+    std::atomic<bool>                                                                thread_pool_close_{false};
     int                                                                              device_id_{-1};
     CacheStoreInitParams                                                             params_;
     std::shared_ptr<MemoryUtil>                                                      memory_util_;

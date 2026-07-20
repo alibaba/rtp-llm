@@ -162,8 +162,10 @@ TEST_F(NormalCacheStoreTest, testMarkRequestEndClearsPendingStoreTransferCount) 
     std::atomic<bool> callback_called{false};
     cache_store1_->store(store_cache, [&callback_called](bool ok, CacheStoreErrorCode ec) {
         callback_called.store(true, std::memory_order_release);
-        ASSERT_TRUE(ok);
-        ASSERT_EQ(CacheStoreErrorCode::None, ec);
+        // The pending store never ran (its event is gated), so ending the request must report
+        // failure with the cancel code -- not a false success.
+        ASSERT_FALSE(ok);
+        ASSERT_EQ(CacheStoreErrorCode::StoreCancelled, ec);
     });
 
     ASSERT_EQ(cache_store1_->activeTransferCount(), 1);
@@ -171,6 +173,8 @@ TEST_F(NormalCacheStoreTest, testMarkRequestEndClearsPendingStoreTransferCount) 
 
     EXPECT_TRUE(callback_called.load(std::memory_order_acquire));
     EXPECT_EQ(cache_store1_->activeTransferCount(), 0);
+    // markRequestEnd must also drop the request's buffers from the local store.
+    EXPECT_TRUE(cache_store1_->getRequestBlockBufferStore()->getRequestBlockBuffer(requestid) == nullptr);
 
     ASSERT_EQ(cudaSuccess, cudaEventRecord(gate, 0));
     ASSERT_EQ(cudaSuccess, cudaEventSynchronize(gate));

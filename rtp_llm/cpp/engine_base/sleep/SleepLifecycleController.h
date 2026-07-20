@@ -147,6 +147,12 @@ struct SleepResult {
 // restorable GPU memory, MR/engine quiesce). Hooks left empty are treated as
 // no-op success so the core state machine remains unit-testable.
 struct SleepHooks {
+    // Arm the engine's collective sleep-quiesce consensus at the DRAINING transition,
+    // BEFORE drain, symmetrically on every rank. Needed for any multi-rank deployment
+    // (DP/EP and pure TP) where drain is rank-asymmetric: a rank that armed only after
+    // its local drain would leave the busy rank unarmed and desync the forward/EP
+    // collective. No-op for single-rank.
+    std::function<bool(const SleepOptions&)> armEngineQuiesce;
     // Block until drained (or timeout). Return true when drained.
     std::function<bool(const SleepOptions&)> drain;
     // Stop scheduler loop at a collective-safe point. No memory/MR release here.
@@ -201,7 +207,8 @@ public:
     // Startup-selected sleep level for this process (see RuntimeConfig
     // sleep_mode_level). Must be called before sleep()/wakeUp(). level==2 is the
     // discard-weights mode: the weights VMM region was opened without host
-    // cpu_backup, so sleep frees GPU+host and wake reloads from a disk backup.
+    // cpu_backup, so sleep frees GPU+host and wake reloads in place from the
+    // original checkpoint through the model loader.
     // This is fixed at model-load time by torch_memory_saver and cannot change
     // per request, so a /sleep request's level must match it. Any value other
     // than 2 is normalized to level 1 (host backup).
@@ -258,8 +265,13 @@ private:
     // illegal transition.
     bool transitionLocked(SleepState expected_from, SleepState to);
 
-    void        releaseAdmission();
-    void        setLastError(const std::string& msg);
+    void releaseAdmission();
+    void setLastError(const std::string& msg);
+    // Read last_error_ under status_mutex_ only. Error paths use this instead of
+    // status().last_error so they do not fire the activeRequestCount /
+    // activeCacheTransferCount engine hooks as a side effect (those may reach
+    // into engine internals and could throw while transition_mutex_ is held).
+    std::string lastError() const;
     std::string disabledReason() const;
 
     std::atomic<SleepState> state_{SleepState::RUNNING};
@@ -282,6 +294,14 @@ private:
     std::atomic<KvMemoryState> kv_memory_state_{KvMemoryState::ACTIVE};
     std::atomic<bool>          device_kv_cache_valid_{true};
     std::atomic<bool>          engine_quiesced_{false};
+    // Idempotency latch for the WAKING_UP restore block (restoreRestorableGpuMemory
+    // + restoreKvMemoryBackingAndResetMetadata + registerMr). Reset to false on a
+    // fresh SLEEPING->WAKING_UP transition; set true once the restore block fully
+    // succeeds. A prepare_only wake leaves the rank in WAKING_UP with restores
+    // already done; a following flagless/commit wake must not re-run them (a second
+    // VMM resume / level-2 reload could fail into ERROR). KV restore has its own
+    // isPaused() guard downstream; this covers the GPU-restore side symmetrically.
+    std::atomic<bool> memory_restored_{false};
 
     mutable std::mutex status_mutex_;  // guards last_error_ and runtime_disabled_reason_
     std::string        last_error_;

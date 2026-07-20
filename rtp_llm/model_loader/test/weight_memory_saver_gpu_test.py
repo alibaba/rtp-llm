@@ -9,19 +9,23 @@ depends on:
     from the default caching-allocator pool) is NOT discarded by
     ``pause("weights")`` / blanked by ``resume("weights")``.
 
-This is the invariant a code reviewer flagged as unproven: level-2 discards the
-whole "weights" tag without a backup, so if a live non-weight tensor ever shared
-a weights-tagged physical segment it would silently become garbage after wake
-(the reload only restores ``ModelWeights``). torch_memory_saver routes every
+Why this invariant matters: level-2 discards the whole "weights" tag without a
+backup, so if a live non-weight tensor ever shared a weights-tagged physical
+segment it would silently become garbage after wake (the reload only restores
+``ModelWeights``). torch_memory_saver routes every
 region allocation into its own ``MemPool`` while default-pool allocations stay
 out of it, and :func:`loader.ModelLoader.load_weights` additionally runs a gated
 ``empty_cache()`` after the load so freed weight-load intermediates cannot be
 reused out-of-tag. This test locks that behavior down empirically.
 
 It uses ``hook_mode="torch"`` (CUDAPluggableAllocator) so it runs in-process
-without the LD_PRELOAD shim, then drives the *real* RTP-LLM wrapper
-(``weights_region`` / ``pause_weights`` / ``resume_weights``) at level 2.
-Skips cleanly when CUDA or torch_memory_saver is unavailable.
+without the LD_PRELOAD shim. Allocations are scoped through the *real* RTP-LLM
+``weights_region`` (level 2), and pause/resume are driven directly on the
+TorchMemorySaver object -- production drives the equivalent
+``tms_pause``/``tms_resume`` from the C++ ``VmmBackend`` (there is no Python
+pause/resume API), and the torch-hook mode used here cannot reach the C++ dlsym
+path, so the test calls the saver it owns. Skips cleanly when CUDA or
+torch_memory_saver is unavailable.
 """
 
 import os
@@ -82,11 +86,17 @@ class Level2WeightsRegionIsolationTest(unittest.TestCase):
         wms._tms = type(self)._saver
         wms._import_attempted = True
 
+    def _pause_weights(self) -> None:
+        type(self)._saver.pause(wms.WEIGHTS_TAG)
+
+    def _resume_weights(self) -> None:
+        type(self)._saver.resume(wms.WEIGHTS_TAG)
+
     def tearDown(self) -> None:
         # Never leave the region paused for the next test; do NOT empty_cache or
         # destroy the pool here (that is what triggers the teardown segfault).
         try:
-            wms.resume_weights()
+            self._resume_weights()
         except Exception:
             pass
         wms._reset_for_testing()
@@ -123,13 +133,11 @@ class Level2WeightsRegionIsolationTest(unittest.TestCase):
         sentinel_sum_before = float(sentinel.sum().item())
 
         # level-2 sleep: discard the weights tag (no cpu backup).
-        self.assertTrue(wms.pause_weights())
-        self.assertTrue(wms.is_paused())
+        self._pause_weights()
         # level-2 wake: remap blank physical pages at the SAME VA. The real reload
         # would copy_ weights back from the checkpoint here; we only assert the
         # memory-plumbing invariants.
-        self.assertTrue(wms.resume_weights())
-        self.assertFalse(wms.is_paused())
+        self._resume_weights()
         torch.cuda.synchronize()
 
         # 1) Weight VA is preserved (C++ aliases / captured CUDA graphs stay valid).
@@ -153,8 +161,8 @@ class Level2WeightsRegionIsolationTest(unittest.TestCase):
             weight = torch.zeros(512, 512, device="cuda", dtype=torch.float32)
         weight_ptr = weight.data_ptr()
 
-        self.assertTrue(wms.pause_weights())
-        self.assertTrue(wms.resume_weights())
+        self._pause_weights()
+        self._resume_weights()
         torch.cuda.synchronize()
 
         self.assertEqual(weight.data_ptr(), weight_ptr)

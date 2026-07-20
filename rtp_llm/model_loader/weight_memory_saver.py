@@ -1,13 +1,18 @@
-"""WeightMemorySaver: weight GPU memory pause/resume with CPU backup.
+"""WeightMemorySaver: register model-weight GPU allocations as pausable memory.
 
 Wraps ``torch_memory_saver`` so that every CUDA allocation that holds model
-weights is registered under the ``tag="weights"`` region with
-``enable_cpu_backup=True``. On engine sleep, :func:`pause_weights` backs the
-weight pages up to host (pinned) memory and releases the physical GPU pages
-while keeping the virtual addresses stable (data_ptr must not change because
-CUDA graphs and the C++ ``weights_`` aliases bake pointers in). On wake_up,
-:func:`resume_weights` remaps physical pages at the same VA and copies the
-content back so weight values are preserved.
+weights is registered under the ``tag="weights"`` region (via
+:func:`weights_region`) with ``enable_cpu_backup`` selected by the startup sleep
+level. Registering the region keeps the virtual addresses stable across a later
+pause/resume (data_ptr must not change because CUDA graphs and the C++
+``weights_`` aliases bake pointers in).
+
+The actual pause (back weights up / release physical GPU pages) and resume
+(remap physical pages at the same VA) are driven from the C++ sleep controller
+through ``VmmBackend::pause/resume("weights")`` (see
+KVCachePhysicalMemoryController.cc), NOT from this module. This module's job is
+purely to *scope* the allocations at load time; there is intentionally no Python
+pause/resume entry point.
 
 Activation
 ----------
@@ -69,7 +74,6 @@ WEIGHTS_TAG: str = "weights"
 _lock = threading.RLock()
 _tms: Optional[Any] = None
 _import_attempted: bool = False
-_paused: bool = False
 _enabled_override: Optional[bool] = None
 _level_override: Optional[int] = None
 _region_depth = threading.local()
@@ -90,7 +94,7 @@ def configure_from_runtime(
     frozen at allocation time by torch_memory_saver, so it cannot change per
     /sleep request.
     """
-    global _enabled_override, _level_override, _tms, _import_attempted, _paused
+    global _enabled_override, _level_override, _tms, _import_attempted
     with _lock:
         _enabled_override = bool(enable_sleep_mode)
         if sleep_mode_level is not None:
@@ -98,7 +102,6 @@ def configure_from_runtime(
         if not _enabled_override:
             _tms = None
             _import_attempted = False
-            _paused = False
 
 
 def is_enabled() -> bool:
@@ -199,11 +202,6 @@ def start_configured_process(process: Any) -> None:
         process.start()
 
 
-def is_paused() -> bool:
-    """Whether the weights region is currently paused (physical pages released)."""
-    return _paused
-
-
 @contextmanager
 def weights_region() -> Iterator[None]:
     """Context manager registering CUDA allocations as pausable weight memory.
@@ -246,9 +244,9 @@ def weights_region() -> Iterator[None]:
 
     # Level 1 backs weights up to pinned host on pause (fast wake, holds host
     # RAM). Level 2 opens the region without host backup: pause frees GPU without
-    # a host copy and resume remaps blank pages at the same VA; the sleep hooks
-    # dump/reload the weights via a local-disk raw backup. tms freezes this
-    # choice at allocation time, hence it is a startup-level knob.
+    # a host copy and resume remaps blank pages at the same VA; the model loader
+    # then reloads the original checkpoint into those live tensors in place.
+    # tms freezes this choice at allocation time, hence it is a startup-level knob.
     enable_cpu_backup = sleep_mode_level() != 2
     _region_depth.value = 1
     try:
@@ -283,64 +281,15 @@ def suppress_weights_region() -> Iterator[None]:
         _region_suppressed.value = prev
 
 
-def pause_weights() -> bool:
-    """Backup weights to host and release physical GPU pages (VA preserved).
-
-    Returns True if the weights are paused after the call. No-op (warning,
-    returns False) when the saver is unavailable; idempotent when already
-    paused. Intended to be called from the sleep sequence *after* the KV
-    cache pause.
-    """
-    global _paused
-    tms = _get_tms()
-    if tms is None:
-        logging.warning(
-            "WeightMemorySaver.pause_weights: saver unavailable "
-            f"(enabled={is_enabled()}), skip pausing weight memory"
-        )
-        return False
-    with _lock:
-        if _paused:
-            logging.info("WeightMemorySaver.pause_weights: already paused, skip")
-            return True
-        tms.pause(WEIGHTS_TAG)
-        _paused = True
-        logging.info("WeightMemorySaver: weights paused (cpu backup, VA preserved)")
-        return True
-
-
-def resume_weights() -> bool:
-    """Remap physical pages at the same VA and copy weight content back.
-
-    Returns True if the weights are resumed (not paused) after the call.
-    No-op (warning, returns False) when the saver is unavailable; idempotent
-    when not paused. Intended to be called from the wake_up sequence *after*
-    the KV cache physical memory is remapped.
-    """
-    global _paused
-    tms = _get_tms()
-    if tms is None:
-        logging.warning(
-            "WeightMemorySaver.resume_weights: saver unavailable "
-            f"(enabled={is_enabled()}), skip resuming weight memory"
-        )
-        return False
-    with _lock:
-        if not _paused:
-            logging.info("WeightMemorySaver.resume_weights: not paused, skip")
-            return True
-        tms.resume(WEIGHTS_TAG)
-        _paused = False
-        logging.info("WeightMemorySaver: weights resumed (content restored)")
-        return True
-
-
 def _reset_for_testing() -> None:
     """Reset module-level caches/state. Test-only helper."""
-    global _tms, _import_attempted, _paused, _enabled_override
+    global _tms, _import_attempted, _enabled_override, _level_override
     with _lock:
         _tms = None
         _import_attempted = False
-        _paused = False
         _enabled_override = None
+        # Reset the startup level override too: it is a process-level singleton, so
+        # leaving it set would leak level-2 into a following test's weights_region().
+        _level_override = None
     _region_depth.value = 0
+    _region_suppressed.value = False

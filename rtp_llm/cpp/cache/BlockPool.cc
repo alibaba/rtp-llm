@@ -1,5 +1,3 @@
-#include <ATen/cuda/CachingHostAllocator.h>
-
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -24,6 +22,12 @@
 
 #if USING_CUDA
 #include <cuda_runtime.h>
+#endif
+
+#if USING_CUDA || USING_ROCM
+#include <torch/version.h>
+#include <ATen/cuda/CachingHostAllocator.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 #endif
 
 namespace rtp_llm {
@@ -192,8 +196,31 @@ void BlockPool::initializeCacheBuffer() {
         // preload shim (when present) tracks it under "kv_cache" and can later
         // pause/resume its physical pages. Without the shim this is a no-op.
         VmmBackend vmm_backend;
-        const bool tagged = vmm_backend.isAvailable()
-                            && vmm_backend.beginAllocationRegion(KVCachePhysicalMemoryController::kDefaultTag);
+        const bool shim_available = vmm_backend.isAvailable();
+        // The preload shim is only injected when sleep/wake_up is intended. If it can pause/resume
+        // but cannot scope allocations (missing tms_set_current_tag/tms_set_interesting_region, e.g.
+        // an outdated torch_memory_saver), the KV buffer below would be allocated untagged: a later
+        // pause() would silently fail to release its pages and level-2 sleep would leak the entire
+        // KV cache with no error surfaced. Fail fast at startup instead of shipping that regression.
+        RTP_LLM_CHECK_WITH_INFO(
+            !shim_available || vmm_backend.supportsAllocationTagging(),
+            "torch_memory_saver preload shim is present but lacks allocation-tagging symbols "
+            "(tms_set_current_tag/tms_set_interesting_region); upgrade torch_memory_saver to >= 0.0.9. "
+            "The KV cache cannot be paused/resumed for sleep without them.");
+#if USING_CUDA || USING_ROCM
+        // Drop the caching allocator's free blocks before opening the tagged region.
+        // Otherwise torch::empty(kCUDA) below may be satisfied from a cached block
+        // carved out BEFORE the region was armed -- that memory is not tracked under
+        // the "kv_cache" tag, so a later pause() would not release the KV buffer's
+        // backing (and could release unrelated memory). Reclaiming first forces a
+        // fresh cudaMalloc inside the armed region. Mirrors the Python weights path
+        // (weight_memory_saver.weights_region calls torch.cuda.empty_cache()).
+        if (shim_available) {
+            c10::cuda::CUDACachingAllocator::emptyCache();
+        }
+#endif
+        const bool tagged =
+            shim_available && vmm_backend.beginAllocationRegion(KVCachePhysicalMemoryController::kDefaultTag);
         // RAII: the shim's "interesting region" flag is process-global and thread-local.
         // If torch::empty(kCUDA) throws (e.g. OOM), we MUST still leave the region, or every
         // subsequent cudaMalloc process-wide gets mis-tagged as "kv_cache" and a later pause
@@ -218,8 +245,8 @@ void BlockPool::initializeCacheBuffer() {
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
-    const bool is_cuda   = cache_aligned_buffer_.is_cuda();
-    const bool is_pinned = !is_cuda && cache_aligned_buffer_.is_pinned();
+    const bool              is_cuda     = cache_aligned_buffer_.is_cuda();
+    const bool              is_pinned   = !is_cuda && cache_aligned_buffer_.is_pinned();
     static constexpr double kBytesPerMB = 1024.0 * 1024.0;
     RTP_LLM_LOG_INFO("BlockPool backing selected: pool_name=%s allocation_type=%s requested_backing=%s "
                      "actual_backing=%s is_cuda=%d is_pinned=%d ptr=%p total_size=%zu bytes total_size_mb=%.2f "
@@ -500,7 +527,17 @@ void BlockPool::releaseHostBuffer() {
     // the tensor only returns the block to torch's pinned-memory *cache*, NOT to the OS.
     // Flush that cache so the pinned pages are actually cudaHostFree'd and RAM is reclaimed
     // (the whole point of discarding the memory cache on sleep). Only frees unused blocks.
+    // The flush API changed across torch versions: torch >= 2.8 exposes the pluggable
+    // getHostAllocator(kCUDA)->empty_cache(); earlier torch (2.6, the cuda12/cuda12_6 pin)
+    // only has the free function at::cuda::CachingHostAllocator_emptyCache(). Non-CUDA/ROCm
+    // builds have no pinned host cache to flush.
+#if USING_CUDA || USING_ROCM
+#if (TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 8)
     at::getHostAllocator(at::kCUDA)->empty_cache();
+#else
+    at::cuda::CachingHostAllocator_emptyCache();
+#endif
+#endif
     host_released_ = true;
     RTP_LLM_LOG_INFO("BlockPool host buffer released for sleep (%zu bytes freed)", config_.total_size_bytes);
 }

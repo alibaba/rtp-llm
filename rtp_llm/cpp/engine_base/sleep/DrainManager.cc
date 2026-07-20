@@ -97,6 +97,11 @@ bool DrainManager::waitDrained(int64_t timeout_ms) {
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
         const auto wait_span =
             std::min<std::chrono::milliseconds>(remaining, std::chrono::milliseconds(poll_interval_ms));
+        // Correctness is by polling, not by the condvar: the drain counters live in
+        // external atomics that are decremented off this mutex, so notifyDrainProgress()
+        // is a best-effort early wakeup, not a lossless signal. A missed notify only
+        // delays observation until this bounded wait_for elapses and the loop re-reads
+        // drained() -- so wait_for MUST stay bounded by poll_interval_ms.
         std::unique_lock<std::mutex> lock(wait_mutex_);
         wait_cv_.wait_for(lock, wait_span);
     }
@@ -154,6 +159,9 @@ void DrainManager::installHooks(SleepHooks& hooks) {
 }
 
 void DrainManager::notifyDrainProgress() {
+    // Best-effort early wakeup only. The counters this unblocks are not guarded by
+    // wait_mutex_, so this notify carries no lossless-wakeup guarantee; waitDrained()
+    // guarantees progress by re-polling drained() after each bounded wait_for.
     wait_cv_.notify_all();
 }
 

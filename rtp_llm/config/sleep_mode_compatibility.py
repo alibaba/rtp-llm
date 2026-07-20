@@ -52,6 +52,22 @@ def validate_level2_sleep_compatibility(
         )
 
 
+def reject_embedding_sleep(*, enable_sleep_mode: bool, is_embedding: bool) -> None:
+    """Reject sleep mode on embedding deployments.
+
+    Sleep/wake_up lifecycle is implemented only for the generate engine
+    (EngineBase + SleepLifecycleController). EmbeddingEngine has no lifecycle
+    controller, and its backend serves EmbeddingRpcService (ARPC) rather than the
+    RpcService stub the lifecycle routes call, so enabling sleep would only expose
+    non-functional /sleep, /wake_up endpoints. Reject at config time.
+    """
+    if enable_sleep_mode and is_embedding:
+        raise ValueError(
+            "sleep mode is not supported for embedding deployments; "
+            "disable enable_sleep_mode for this model."
+        )
+
+
 def reject_dynamic_lora_mutation(
     *, enable_sleep_mode: bool, sleep_mode_level: int
 ) -> None:

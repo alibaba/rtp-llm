@@ -267,7 +267,14 @@ class CkptDatabase(BaseDatabase):
         use_tqdm_on_load: bool,
         stacked_key_config: Optional[Dict[str, str]] = None,
         allocation_context: Optional[Callable[[], ContextManager[Any]]] = None,
+        nogds: bool = False,
+        use_shm: bool = True,
     ):
+        # nogds / use_shm forward to the fastsafetensors ParallelLoader. Defaults
+        # (GDS on, shm on) reproduce the prior hardcoded behavior for cold load,
+        # which does not pass them; the level-2 wake reload overrides them so an
+        # operator can disable GDS and/or shm on hardware where the
+        # torch_memory_saver VMM remap invalidates those pinned/registered buffers.
         from fastsafetensors import ParallelLoader, SingleGroup
 
         from rtp_llm.model_loader.per_expert_parallel_loader import (
@@ -293,7 +300,8 @@ class CkptDatabase(BaseDatabase):
                 use_tqdm_on_load=use_tqdm_on_load,
                 device=device,
                 bbuf_size_kb=1024 * 1024 * 2,
-                use_shm=True,
+                use_shm=use_shm,
+                nogds=nogds,
             )
             if stacked_key_config:
                 loader = PerExpertParallelLoader(stacked_key_config, **loader_kwargs)

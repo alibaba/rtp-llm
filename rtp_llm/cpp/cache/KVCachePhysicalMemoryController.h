@@ -50,6 +50,12 @@ public:
     bool        isAvailable() const override;
     std::string name() const override;
 
+    // Whether the shim can scope allocations under a tag (tms_set_current_tag +
+    // tms_set_interesting_region). pause/resume alone (isAvailable()) do not make a freshly
+    // allocated buffer pause/resume-able: it must first be allocated inside a tagged region.
+    // Callers that need pause/resume-able buffers must gate on this, not just isAvailable().
+    bool supportsAllocationTagging() const;
+
     bool pause(const std::string& tag) override;
     bool resume(const std::string& tag) override;
 

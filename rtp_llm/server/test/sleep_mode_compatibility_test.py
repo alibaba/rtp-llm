@@ -6,6 +6,7 @@ from rtp_llm.config.sleep_mode_compatibility import (
     Level2SleepCompatibility,
     reject_dynamic_lora_mutation,
     reject_dynamic_weight_update,
+    reject_embedding_sleep,
     validate_level2_sleep_compatibility,
 )
 
@@ -89,6 +90,15 @@ class Level2SleepCompatibilityTest(unittest.TestCase):
         reject_dynamic_weight_update(enable_sleep_mode=True, sleep_mode_level=1)
         with self.assertRaisesRegex(ValueError, "runtime weight update"):
             reject_dynamic_weight_update(enable_sleep_mode=True, sleep_mode_level=2)
+
+    def test_embedding_sleep_rejected_only_when_both(self):
+        # Allowed: generate deployment with sleep, embedding without sleep.
+        reject_embedding_sleep(enable_sleep_mode=True, is_embedding=False)
+        reject_embedding_sleep(enable_sleep_mode=False, is_embedding=True)
+        reject_embedding_sleep(enable_sleep_mode=False, is_embedding=False)
+        # Rejected: embedding deployment with sleep enabled (no lifecycle controller).
+        with self.assertRaisesRegex(ValueError, "embedding deployments"):
+            reject_embedding_sleep(enable_sleep_mode=True, is_embedding=True)
 
 
 class BackendValidationOrderingTest(unittest.TestCase):

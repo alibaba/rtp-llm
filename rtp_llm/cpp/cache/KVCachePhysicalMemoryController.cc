@@ -31,7 +31,7 @@ VmmBackend::VmmBackend() {
     if (isAvailable()) {
         RTP_LLM_LOG_INFO("VmmBackend: torch_memory_saver VMM preload shim detected "
                          "(tms_pause/tms_resume resolved, region scoping %s)",
-                         (set_current_tag_fn_ && set_interesting_region_fn_) ? "available" : "unavailable");
+                         supportsAllocationTagging() ? "available" : "unavailable");
     } else {
         RTP_LLM_LOG_INFO("VmmBackend: torch_memory_saver VMM preload shim not detected, backend unavailable");
     }
@@ -41,10 +41,19 @@ bool VmmBackend::isAvailable() const {
     return pause_fn_ != nullptr && resume_fn_ != nullptr;
 }
 
+bool VmmBackend::supportsAllocationTagging() const {
+    return set_current_tag_fn_ != nullptr && set_interesting_region_fn_ != nullptr;
+}
+
 std::string VmmBackend::name() const {
     return "vmm";
 }
 
+// The torch_memory_saver shim's C ABI is `void tms_pause(const char*)` /
+// `void tms_resume(const char*)`: it reports no status, so a real failure inside
+// the shim (cuMemUnmap / cuMemCreate / cuMemMap error) is invisible here. The only
+// failure that can be detected and surfaced is dlsym-miss (shim not preloaded),
+// hence pause()/resume() return false only in that case and true otherwise.
 bool VmmBackend::pause(const std::string& tag) {
     if (!isAvailable()) {
         RTP_LLM_LOG_ERROR("VmmBackend::pause(tag=%s) failed: shim not available", tag.c_str());

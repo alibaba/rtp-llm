@@ -37,7 +37,7 @@ namespace rtp_llm {
 
 namespace {
 
-// Best-effort instance identity for the M4 admission error body: scheduler
+// Best-effort instance identity for the admission error body: scheduler
 // role when deployed (hippo), hostname otherwise.
 std::string resolveInstanceId() {
     std::string instance_id = autil::EnvUtil::getEnv("HIPPO_ROLE", "");
@@ -223,6 +223,21 @@ void fillSleepStatusPb(const SleepStatus& status, SleepStatusResponsePB* respons
 
 }  // namespace
 
+bool LocalRpcServer::validateKvMemoryControllerForWake(const KVCachePhysicalMemoryControllerPtr& controller) {
+    if (!controller) {
+        return true;
+    }
+    if (controller->isPaused()) {
+        RTP_LLM_LOG_ERROR("sleep warmup/self-check failed: kv memory controller is still paused");
+        return false;
+    }
+    if (controller->basePtr() == nullptr || controller->totalSizeBytes() == 0) {
+        RTP_LLM_LOG_ERROR("sleep warmup/self-check failed: kv memory controller has no attached buffer");
+        return false;
+    }
+    return true;
+}
+
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
                                   std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                                   py::object                                    mm_process_engine) {
@@ -265,7 +280,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
 }
 
 void LocalRpcServer::installSleepHooks() {
-    // --- M3: drain counters. ---
+    // --- drain counters. ---
     drain_manager_ = std::make_shared<DrainManager>();
     drain_manager_->registerCounter(
         "admission_leases",
@@ -312,7 +327,14 @@ void LocalRpcServer::installSleepHooks() {
     drain_manager_->installHooks(hooks);  // drain + activeRequestCount + activeCacheTransferCount
     const auto local_rank  = maga_init_params_.parallelism_config.local_rank;
     auto       vmm_backend = vmm_backend_;
-    hooks.quiesceEngine    = [engine, local_rank](const SleepOptions& opt) {
+    hooks.armEngineQuiesce = [engine, local_rank](const SleepOptions&) {
+        OptionalSleepDeviceGuard device_guard(local_rank);
+        // Arm the collective sleep-quiesce consensus at DRAINING, before the rank-asymmetric
+        // drain, symmetrically on every rank. DP/EP and pure TP only; single-rank no-op.
+        engine->armCollectiveSleepQuiesce();
+        return true;
+    };
+    hooks.quiesceEngine = [engine, local_rank](const SleepOptions& opt) {
         OptionalSleepDeviceGuard device_guard(local_rank);
         // Stall the engine at a TP/DP/EP-safe point before any rank drops GPU memory.
         auto pause_status = engine->pauseAndWaitQuiesced(opt.timeout_ms);
@@ -364,7 +386,7 @@ void LocalRpcServer::installSleepHooks() {
         logSleepMemorySnapshot("sleep/after_kv_release", local_rank);
         return success;
     };
-    // M6: weights are tagged by rtp_llm/model_loader/weight_memory_saver.py under
+    // Weights are tagged by rtp_llm/model_loader/weight_memory_saver.py under
     // "weights" with cpu backup. CUDA graph runtime buffers are tagged under
     // "cuda_graph" during graph capture with cpu backup too: after VMM pause
     // the physical pages can be recycled by other processes, so graph-owned
@@ -509,14 +531,8 @@ void LocalRpcServer::installSleepHooks() {
             return false;
         }
         if (auto cache_manager = engine->getCacheManager()) {
-            if (auto controller = cache_manager->kvMemoryController()) {
-                if (controller->isPaused()) {
-                    RTP_LLM_LOG_ERROR("sleep warmup/self-check failed: kv memory controller is still paused");
-                    return false;
-                }
-                if (controller->basePtr() == nullptr || controller->totalSizeBytes() == 0) {
-                    RTP_LLM_LOG_WARNING("sleep warmup/self-check: kv memory controller has no attached buffer");
-                }
+            if (!validateKvMemoryControllerForWake(cache_manager->kvMemoryController())) {
+                return false;
             }
         }
         if (!synchronizeSleepDevice("after_warmup_health_check")) {
@@ -1125,6 +1141,18 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         RTP_LLM_LOG_WARNING("execute function failed, request is cancelled");
         return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
     }
+
+    // Admission must gate GPU/KV access before anything else: executeFunction
+    // issues P2P KV D2H/H2D copies that touch cache backing. Without a lease a
+    // copy could start after sleep closed the gate and released the KV VA ->
+    // use-after-unmap. Hold the lease for the full RPC; the async transfer tail
+    // is tracked by the connector_inflight drain counter.
+    auto admission = acquireAdmission();
+    if (!admission.detail.admitted) {
+        return AdmissionGate::toGrpcStatus(admission.detail);
+    }
+    auto admission_lease = std::move(admission.lease);
+
     if (!engine_) {
         RTP_LLM_LOG_WARNING("execute function failed, engine is null");
         return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
@@ -1145,6 +1173,14 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
 
 grpc::Status LocalRpcServer::SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
+    // The legacy RL pause/restart path toggles the engine loop directly, bypassing the sleep
+    // lifecycle mutex, controller state, and admission gate. When sleep mode is enabled the two
+    // control planes would race and corrupt the sleep state machine, so reject it and steer the
+    // caller to the sleep/wake control plane (which closes admission correctly).
+    if (engine_->sleepController().enabled()) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                            "SetPause is disabled while sleep mode is enabled; use the sleep/wake control plane");
+    }
     OptionalSleepDeviceGuard device_guard(maga_init_params_.parallelism_config.local_rank);
     auto                     status = engine_->pauseAndWaitQuiesced(60000);
     if (!status.ok()) {
@@ -1155,6 +1191,12 @@ grpc::Status LocalRpcServer::SetPause(grpc::ServerContext* context, const EmptyP
 
 grpc::Status LocalRpcServer::SetRestart(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s,", context->peer().c_str());
+    // See SetPause: the legacy restart bypasses the sleep control plane and would corrupt the
+    // sleep state machine (for example clearing pause_ while SLEEPING/WAKING_UP).
+    if (engine_->sleepController().enabled()) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                            "SetRestart is disabled while sleep mode is enabled; use the sleep/wake control plane");
+    }
     engine_->restart();
     return grpc::Status::OK;
 }
@@ -1227,6 +1269,15 @@ LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsR
         if (request->name().empty() || request->desc().empty() || request->method().empty()) {
             throw std::runtime_error("Missing required field(s) in request");
         }
+        // Weight mutation must not race sleep's weight pause/discard: hold an
+        // admission lease so a RUNNING update blocks sleep drain until it
+        // completes, and an update arriving after the gate closed is rejected
+        // with a retryable status instead of writing to released weight VA.
+        auto admission = acquireAdmission();
+        if (!admission.detail.admitted) {
+            return AdmissionGate::toGrpcStatus(admission.detail);
+        }
+        auto admission_lease = std::move(admission.lease);
         {
             py::gil_scoped_acquire acquire;
             py::dict               req;

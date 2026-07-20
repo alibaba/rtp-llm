@@ -220,14 +220,16 @@ def _create_process_groups(
 def _sleep_quiesce_group_needed(parallelism_config: ParallelismConfig) -> bool:
     """Whether to build the dedicated sleep-quiesce communicator.
 
-    Mirrors C++ NormalEngine::collectiveSleepQuiesceEnabled(): sleep mode enabled AND a
-    multi-rank DP/EP deployment. Plain single-rank or pure-TP deployments quiesce without
-    a per-step collective (releasePendingTpCollectiveForPause), so they need no extra comm.
+    Mirrors C++ NormalEngine::collectiveSleepQuiesceEnabled(): sleep mode enabled AND any
+    multi-rank deployment (world_size > 1), including pure TP. Pure TP must use the
+    symmetric consensus too -- its old tp_rank==0-only quiesce path
+    (releasePendingTpCollectiveForPause) deadlocks the worker ranks: a worker arms its own
+    pause_ from its own control-plane RPC and parks while tp0 is still draining in-flight,
+    stranding tp0's next forward tpSync. Only a plain single-rank deployment quiesces
+    without a per-step collective, so it needs no extra comm.
     """
     world_size = parallelism_config.world_size
-    dp_size = parallelism_config.dp_size
-    ep_size = getattr(parallelism_config, "ep_size", 1) or 1
-    if world_size <= 1 or not (dp_size > 1 or ep_size > 1):
+    if world_size <= 1:
         return False
     try:
         from rtp_llm.model_loader.weight_memory_saver import (

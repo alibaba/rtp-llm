@@ -138,7 +138,7 @@ TEST_F(AdmissionGateTest, ErrorBodyFieldsComplete) {
     ASSERT_TRUE(controller_.sleep(SleepOptions{}).ok);
     ASSERT_EQ(controller_.state(), SleepState::SLEEPING);
 
-    // Structured detail carries the full M4 error body.
+    // Structured detail carries the full error body.
     const auto detail = gate_.checkDetail();
     EXPECT_EQ(detail.error_code, kEngineUnavailable);
     EXPECT_EQ(detail.error_code, static_cast<int64_t>(ErrorCode::ENGINE_UNAVAILABLE));

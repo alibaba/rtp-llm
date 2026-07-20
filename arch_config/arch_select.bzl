@@ -59,7 +59,6 @@ def whl_deps():
     return select({
         "@rtp_llm//:using_cuda12_9_x86": ["torch==2.8.0+cu129", "torch_memory_saver==0.0.9.post1"],
         "@rtp_llm//:cuda_pre_12_9": ["torch==2.6.0+cu126", "torch_memory_saver==0.0.9.post1"],
-        "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],
         "@rtp_llm//:using_rocm": [
             "pyrsmi==0.2.0",
             "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar",

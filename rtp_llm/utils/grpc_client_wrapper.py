@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional
@@ -41,8 +42,53 @@ def _error_details(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return details
 
 
+# grpc_status values that map to a deterministic client error (HTTP 4xx / 501):
+# retrying will not change the outcome. When control ranks fail with different
+# statuses we prefer to report one of these over a transient server-side status
+# (UNAVAILABLE, DEADLINE_EXCEEDED, ...) that a client would otherwise retry forever.
+_DETERMINISTIC_GRPC_STATUSES = (
+    "INVALID_ARGUMENT",
+    "FAILED_PRECONDITION",
+    "UNIMPLEMENTED",
+    "NOT_FOUND",
+    "PERMISSION_DENIED",
+    "OUT_OF_RANGE",
+    "ALREADY_EXISTS",
+)
+
+
+def _representative_failure(failures: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Pick the failure whose grpc_status best represents the aggregate outcome.
+
+    When ranks fail with different statuses, a deterministic client error (e.g.
+    INVALID_ARGUMENT from one rank) is more actionable than a transient server
+    error (e.g. UNAVAILABLE from another): the former tells the client to fix the
+    request (HTTP 4xx), the latter invites an infinite retry (HTTP 5xx). Prefer
+    the first deterministic failure; fall back to the first failure otherwise.
+    """
+    for failure in failures:
+        if failure.get("grpc_status") in _DETERMINISTIC_GRPC_STATUSES:
+            return failure
+    return failures[0]
+
+
+def _configured_sleep_level() -> int:
+    """The single non-zero sleep level this process was started with.
+
+    Reads SLEEP_MODE_LEVEL, which --sleep-mode-level is mirrored into for every
+    process in the instance at startup (see server_args). Kept as a local env
+    read so the frontend coordinator does not pull in the model_loader package
+    just to learn a startup scalar; the backend controller stays the runtime
+    authority and rejects a level mismatch on the actual sleep request.
+    """
+    try:
+        return int(os.environ.get("SLEEP_MODE_LEVEL", "1"))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _report_metric_if_ready(metric: Any, value: float) -> None:
-    if not bool(getattr(kmonitor, "_inited", False)):
+    if not kmonitor.is_inited:
         return
     kmonitor.report(metric, value)
 
@@ -395,9 +441,23 @@ class GrpcClientWrapper:
             # lifecycle operations until the instance (and its TCPStore) restarts.
             logging.error("failed to release instance lifecycle lease: %s", e)
 
-    async def _raw_sleep_statuses(self) -> List[Dict[str, Any]]:
+    @staticmethod
+    def _status_probe_timeout(operation_timeout_s: float) -> float:
+        """Derive the GetSleepStatus probe timeout from the operation it verifies.
+
+        A fixed 3s probe is tighter than the commit it confirms (whose timeout can
+        reach hundreds of seconds for a level-2 checkpoint reload), so a merely slow
+        rank was being misjudged as failed. Scale the probe with the operation but
+        keep it bounded: a status probe is cheap, so [10s, 30s] is ample headroom
+        while never being shorter than a quick operation.
+        """
+        return max(10.0, min(operation_timeout_s, 30.0))
+
+    async def _raw_sleep_statuses(
+        self, timeout_s: float = 10.0
+    ) -> List[Dict[str, Any]]:
         return await self._broadcast_control_rpc(
-            "GetSleepStatus", pb2.EmptyPB(), timeout_s=3
+            "GetSleepStatus", pb2.EmptyPB(), timeout_s=timeout_s
         )
 
     async def _initial_lifecycle_status(self, operation: str) -> Dict[str, Any]:
@@ -441,7 +501,11 @@ class GrpcClientWrapper:
         return status
 
     def _recovery_required(
-        self, operation: str, reason: str, statuses: List[Dict[str, Any]]
+        self,
+        operation: str,
+        reason: str,
+        statuses: List[Dict[str, Any]],
+        extra_details: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         details = []
         for status in statuses:
@@ -453,6 +517,12 @@ class GrpcClientWrapper:
             else:
                 detail["state"] = status.get("state", "")
             details.append(detail)
+        # Commit-RPC-level failures (tagged source="commit_rpc") are folded in so
+        # the response carries the real commit error, not just the derived states.
+        for extra in extra_details or []:
+            tagged = dict(extra)
+            tagged["source"] = "commit_rpc"
+            details.append(tagged)
         return {
             "error": f"RECOVERY_REQUIRED: {operation} {reason}",
             "grpc_status": "FAILED_PRECONDITION",
@@ -469,26 +539,56 @@ class GrpcClientWrapper:
         transitional_state: str,
         final_state: str,
     ) -> Dict[str, Any]:
+        probe_timeout_s = self._status_probe_timeout(timeout_s)
+        # Single wall-clock bound over all commit attempts. Each attempt costs at
+        # most one commit broadcast (timeout_s) plus one status probe
+        # (probe_timeout_s); budgeting that across the allowed attempts gives one
+        # explicit upper bound so a run of slow-but-not-timed-out attempts cannot
+        # stack unbounded. time.monotonic() is immune to wall-clock adjustments.
+        deadline = (
+            time.monotonic() + (timeout_s + probe_timeout_s) * self.COMMIT_MAX_ATTEMPTS
+        )
         pending = list(self.control_addresses)
         last_statuses: List[Dict[str, Any]] = []
+        last_commit_failures: List[Dict[str, Any]] = []
         for _ in range(self.COMMIT_MAX_ATTEMPTS):
-            await self._broadcast_control_rpc_to(
+            if time.monotonic() >= deadline:
+                return self._recovery_required(
+                    operation,
+                    "commit did not converge before its wall-clock deadline",
+                    last_statuses,
+                    extra_details=_error_details(last_commit_failures),
+                )
+            # Capture the commit broadcast's own per-rank errors and fold them into
+            # any recovery response below, so the real commit grpc_status is carried
+            # out rather than inferred solely from the later status probe.
+            commit_results = await self._broadcast_control_rpc_to(
                 pending, rpc_name, commit_request, timeout_s
             )
-            last_statuses = await self._raw_sleep_statuses()
+            last_commit_failures = [r for r in commit_results if "error" in r]
+            last_statuses = await self._raw_sleep_statuses(probe_timeout_s)
             if len(last_statuses) != len(self.control_addresses):
                 return self._recovery_required(
-                    operation, "status coverage is incomplete", last_statuses
+                    operation,
+                    "status coverage is incomplete",
+                    last_statuses,
+                    extra_details=_error_details(last_commit_failures),
                 )
             if any("error" in status for status in last_statuses):
                 return self._recovery_required(
-                    operation, "status probe failed", last_statuses
+                    operation,
+                    "status probe failed",
+                    last_statuses,
+                    extra_details=_error_details(last_commit_failures),
                 )
             states = [str(status.get("state", "")) for status in last_statuses]
             allowed_states = {transitional_state, final_state}
             if any(state not in allowed_states for state in states):
                 return self._recovery_required(
-                    operation, "observed an unrecoverable rank state", last_statuses
+                    operation,
+                    "observed an unrecoverable rank state",
+                    last_statuses,
+                    extra_details=_error_details(last_commit_failures),
                 )
             pending = [
                 status["address"]
@@ -501,6 +601,7 @@ class GrpcClientWrapper:
             operation,
             f"did not converge after {self.COMMIT_MAX_ATTEMPTS} commit attempts",
             last_statuses,
+            extra_details=_error_details(last_commit_failures),
         )
 
     def _aggregate_sleep_status(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -510,7 +611,7 @@ class GrpcClientWrapper:
             return {
                 "error": "Failed to get sleep status from all control ranks",
                 "grpc_status": (
-                    failures[0].get("grpc_status", "UNAVAILABLE")
+                    _representative_failure(failures).get("grpc_status", "UNAVAILABLE")
                     if failures
                     else "UNAVAILABLE"
                 ),
@@ -519,7 +620,9 @@ class GrpcClientWrapper:
         if failures:
             return {
                 "error": "Failed to get sleep status from some control ranks",
-                "grpc_status": failures[0].get("grpc_status", "UNAVAILABLE"),
+                "grpc_status": _representative_failure(failures).get(
+                    "grpc_status", "UNAVAILABLE"
+                ),
                 "details": _error_details(results),
             }
 
@@ -625,10 +728,18 @@ class GrpcClientWrapper:
                     "grpc_status": "INVALID_ARGUMENT",
                 }
             if level == 0:
+                # level 0 (state-preserving sleep) is defined in the API but not
+                # implemented. Advertise the single non-zero level this process was
+                # started with (SLEEP_MODE_LEVEL, mirrored into the environment for
+                # both frontend and backend at startup) so a level-2 deployment
+                # reports [2] rather than a hardcoded [1] that would misdirect the
+                # client toward an unsupported level. Derived locally so this stays
+                # a cheap frontend rejection with no backend status probe. Drain
+                # modes (wait/abort) are a fixed, level-independent capability.
                 return {
                     "error": "sleep level=0 state-preserving sleep is defined but not implemented",
                     "grpc_status": "UNIMPLEMENTED",
-                    "supported_levels": [1],
+                    "supported_levels": [_configured_sleep_level()],
                     "supported_modes": ["wait", "abort"],
                 }
             # level 1 (host backup) and level 2 (discard weights) are both valid
@@ -717,14 +828,15 @@ class GrpcClientWrapper:
                     }
                 return {
                     "error": "Failed to prepare sleep on some control ranks (rolled back)",
-                    "grpc_status": failures[0].get("grpc_status", "UNKNOWN"),
+                    "grpc_status": _representative_failure(failures).get(
+                        "grpc_status", "UNKNOWN"
+                    ),
                     "details": _error_details(prepare_results),
                 }
 
-            # commit runs the GPU-release hooks; for level-2 that includes dumping
-            # the ~weights-sized raw backup to disk, which can take far longer than
-            # a level-1 tms pause. Reuse the drain-derived headroom so a slow dump
-            # does not spuriously trip the commit deadline.
+            # commit runs the GPU-release hooks. Reuse the drain-derived headroom
+            # so a slow device synchronization or allocator reclaim does not
+            # spuriously trip the commit deadline.
             return await self._converge_commit(
                 operation="commit sleep",
                 rpc_name="SleepServing",
@@ -804,14 +916,16 @@ class GrpcClientWrapper:
             if failures:
                 return {
                     "error": "Failed to prepare wake_up on some control ranks",
-                    "grpc_status": failures[0].get("grpc_status", "UNKNOWN"),
+                    "grpc_status": _representative_failure(failures).get(
+                        "grpc_status", "UNKNOWN"
+                    ),
                     "details": _error_details(prepare_results),
                 }
 
             # commit runs the GPU-restore hooks; for level-2 that includes reloading
-            # the ~weights-sized raw backup from disk (read + H2D copy), which can
-            # take far longer than a level-1 tms resume. Give it the same headroom
-            # as wake prepare so a slow restore does not trip the commit deadline.
+            # the original checkpoint through the model loader (read + H2D copy),
+            # which can take far longer than a level-1 tms resume. Give it the same
+            # headroom as wake prepare so a slow restore does not trip the deadline.
             return await self._converge_commit(
                 operation="commit wake_up",
                 rpc_name="WakeUpServing",

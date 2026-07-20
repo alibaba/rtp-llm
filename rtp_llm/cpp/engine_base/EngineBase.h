@@ -58,6 +58,11 @@ public:
         return absl::OkStatus();
     }
 
+    // Arm the collective sleep-quiesce consensus at the DRAINING transition (before the
+    // rank-asymmetric drain), symmetrically on every rank. Overridden by NormalEngine; no-op in
+    // the base so engines without a collective quiesce path (and single-rank) do nothing.
+    virtual void armCollectiveSleepQuiesce() {}
+
     virtual std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) = 0;
 
     virtual void enqueue(std::shared_ptr<GenerateStream>& stream) = 0;

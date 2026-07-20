@@ -63,14 +63,15 @@ public:
     };
     EvictResult selectAndEvict(size_t min_blocks);
 
-    // Drop all entries and bump the cache generation. After a KV physical-memory pause/resume
-    // cycle every cached block's content is invalid, so all prefix-cache entries are discarded.
-    // Clearing empties the cache and increments generation_ so readers can detect stale
-    // snapshots or cache keys captured before the reset.
+    // Drop all cached entries. After a KV physical-memory pause/resume cycle every cached
+    // block's content is invalid, so all prefix-cache entries must be discarded; emptying the
+    // map is itself what guarantees no stale block is ever matched again. Also bumps
+    // generation() for observability (see below).
     void clear();
 
-    // Monotonically increasing generation, bumped on every clear(). Entries put before a
-    // clear() belong to an older generation and can never be matched again.
+    // Monotonically increasing count of clear() calls. Purely observational -- it is logged on
+    // the level-2 wake KV-reset path so repeated sleep/wake cycles are visible. Correctness of
+    // stale-block avoidance comes from clear() emptying the map, NOT from any generation compare.
     uint64_t generation() const;
 
     bool empty() const;
@@ -80,7 +81,6 @@ public:
     CacheSnapshot cacheSnapshot(int64_t latest_version) const;
 
 private:
-    size_t       seq_size_per_block_;
     LRUCacheType lru_cache_;
     uint64_t     generation_ = 0;
     // NOTE: BlockCache/LRUCache is accessed from multiple RPC/engine threads.

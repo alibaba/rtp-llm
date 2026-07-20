@@ -112,6 +112,16 @@ class MetricReporter(object):
         self._matic_map: Dict[str, Any] = {}
         self._inited = False
 
+    @property
+    def is_inited(self) -> bool:
+        """Whether init() has registered the metric map.
+
+        Callers gate reporting on this: a report() issued before init() would
+        find an empty metric map and warn on every call, so early reporters
+        (e.g. the sleep status poller during startup) skip cleanly instead.
+        """
+        return self._inited
+
     def report(
         self,
         metric: Union[AccMetrics, GaugeMetrics],

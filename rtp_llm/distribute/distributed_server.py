@@ -333,19 +333,33 @@ class DistributedServer(object):
         self._initialized = True
 
         if pc.world_size == 1:
-            logging.info("world_size == 1, start TCPStore for instance coordination")
             self.master_server_port = server_config.start_port
             self._nccl_comm_config = _build_nccl_comm_config(
                 self.worker_info.ip, server_config.start_port, pc.dp_rank
             )
-            self.store = TCPStore(
-                host_name=self.worker_info.ip,
-                port=self.master_server_port - 1,
-                world_size=None,
-                is_master=True,
-                wait_for_workers=False,
-                timeout=timedelta(seconds=distribute_config.dist_comm_timeout or 300),
+            # The single-rank TCPStore exists only to back the sleep/wake control plane's
+            # instance coordination (safe_store_get/set). A single-rank server without sleep
+            # never touches it, so binding it unconditionally would regress those deployments
+            # by occupying an extra port (start_port - 1). Bind it only when sleep is enabled.
+            sleep_enabled = getattr(
+                py_env_configs.runtime_config, "enable_sleep_mode", False
             )
+            if sleep_enabled:
+                logging.info(
+                    "world_size == 1, sleep enabled: start TCPStore for instance coordination"
+                )
+                self.store = TCPStore(
+                    host_name=self.worker_info.ip,
+                    port=self.master_server_port - 1,
+                    world_size=None,
+                    is_master=True,
+                    wait_for_workers=False,
+                    timeout=timedelta(
+                        seconds=distribute_config.dist_comm_timeout or 300
+                    ),
+                )
+            else:
+                self.store = None
             return
 
         self.master_ip, master_server_port = get_master(
@@ -405,6 +419,11 @@ class DistributedServer(object):
         return self.master_server_port - 11
 
     def safe_store_set(self, key: str, value: str) -> None:
+        if self.store is None:
+            raise RuntimeError(
+                "TCPStore is not initialized (sleep mode disabled or world_size==1 without sleep); "
+                "safe_store_set is only valid on the sleep/wake control plane"
+            )
         if not isinstance(value, str):
             raise TypeError("Value must be a string for safe serialization")
 
@@ -419,6 +438,11 @@ class DistributedServer(object):
             raise
 
     def safe_store_get(self, key: str, encoding: str = "utf-8") -> str:
+        if self.store is None:
+            raise RuntimeError(
+                "TCPStore is not initialized (sleep mode disabled or world_size==1 without sleep); "
+                "safe_store_get is only valid on the sleep/wake control plane"
+            )
         try:
             value_bytes = self.store.get(key)  # 阻塞直到 key 出现或超时
             try:

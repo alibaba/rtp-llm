@@ -222,7 +222,7 @@ message GenerateOutputsPB {
 message ErrorDetailsPB {
     int64 error_code = 1;
     string error_message = 2;
-    // M4 AdmissionGate (ENGINE_UNAVAILABLE) context: lets the frontend retry-route
+    // AdmissionGate (ENGINE_UNAVAILABLE) context: lets the frontend retry-route
     // away from a sleeping or transitioning instance.
     string error_code_str = 3;
     string instance_id = 4;
@@ -630,7 +630,7 @@ message BatchGenerateOutputsPB {
 
 // Engine sleep/wake_up (distinct from SetPause/SetRestart semantics).
 message SleepRequestPB {
-    int32 level = 1;              // level=0 defined but unimplemented; 1=host backup, 2=discard weights + disk restore (fixed at startup by sleep_mode_level).
+    int32 level = 1;              // level=0 defined but unimplemented; 1=host backup, 2=discard weights + in-place checkpoint reload (fixed at startup by sleep_mode_level).
     string mode = 2;              // "wait" (default) | "abort"; "keep" is unsupported.
     int64 timeout_ms = 3;
     string reason = 4;

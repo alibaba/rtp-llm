@@ -650,4 +650,130 @@ TEST(SleepLifecycleControllerTest, ConcurrentSleepWakeUpIsSerializedAndConsisten
     EXPECT_EQ(controller.sleepEpoch(), 1);
 }
 
+// The collective sleep-quiesce consensus MUST be armed BEFORE the (rank-asymmetric)
+// drain, not after it: only the rank holding an in-flight request blocks in drain, so
+// arming after drain would leave the busy rank unarmed while idle peers issue unmatched
+// consensus rounds. This locks the ordering the multi-rank drain fix depends on.
+TEST(SleepLifecycleControllerTest, ArmEngineQuiesceRunsBeforeDrain) {
+    SleepLifecycleController controller(true);
+    std::mutex               order_mu;
+    std::vector<std::string> order;
+    SleepHooks               hooks;
+    hooks.armEngineQuiesce = [&](const SleepOptions&) {
+        std::lock_guard<std::mutex> l(order_mu);
+        order.push_back("arm");
+        return true;
+    };
+    hooks.drain = [&](const SleepOptions&) {
+        std::lock_guard<std::mutex> l(order_mu);
+        order.push_back("drain");
+        return true;
+    };
+    controller.setHooks(hooks);
+
+    ASSERT_TRUE(controller.sleep(gracefulOptions()).ok);
+    ASSERT_EQ(order.size(), 2u);
+    EXPECT_EQ(order[0], "arm");
+    EXPECT_EQ(order[1], "drain");
+}
+
+// commit_only is the second phase of the two-phase sleep; the consensus was already
+// armed during prepare. Re-arming on commit would double-issue and is gated out.
+TEST(SleepLifecycleControllerTest, ArmEngineQuiesceNotCalledOnCommitOnly) {
+    SleepLifecycleController controller(true);
+    std::atomic<int>         arm_called{0};
+    SleepHooks               hooks;
+    hooks.armEngineQuiesce = [&arm_called](const SleepOptions&) {
+        arm_called++;
+        return true;
+    };
+    controller.setHooks(hooks);
+
+    SleepOptions prepare = gracefulOptions();
+    prepare.prepare_only = true;
+    ASSERT_TRUE(controller.sleep(prepare).ok);
+    EXPECT_EQ(arm_called.load(), 1);  // armed during prepare
+
+    SleepOptions commit = gracefulOptions();
+    commit.commit_only  = true;
+    ASSERT_TRUE(controller.sleep(commit).ok);
+    EXPECT_EQ(arm_called.load(), 1);  // commit_only must NOT re-arm
+    EXPECT_EQ(controller.state(), SleepState::SLEEPING);
+}
+
+// The restore hooks run at most once per wake cycle: a prepare_only wake applies them and
+// stays in WAKING_UP, so a following FLAGLESS wake (neither prepare_only nor commit_only)
+// must finish to RUNNING WITHOUT re-running the restores -- a second VMM resume / level-2
+// reload could fail into ERROR. This is the prepare->flagless path the commit_only-based
+// test cannot cover.
+TEST(SleepLifecycleControllerTest, WakeUpPrepareThenFlaglessDoesNotReRestore) {
+    SleepLifecycleController controller(true);
+    std::atomic<int>         restore_kv{0};
+    std::atomic<int>         restore_weights{0};
+    std::atomic<int>         register_mr{0};
+    std::atomic<int>         restart_called{0};
+    SleepHooks               hooks;
+    hooks.restoreKvMemoryBackingAndResetMetadata = [&restore_kv]() {
+        restore_kv++;
+        return true;
+    };
+    hooks.restoreRestorableGpuMemory = [&restore_weights]() {
+        restore_weights++;
+        return true;
+    };
+    hooks.registerMr = [&register_mr]() {
+        register_mr++;
+        return true;
+    };
+    hooks.restartEngine = [&restart_called]() {
+        restart_called++;
+        return true;
+    };
+    controller.setHooks(hooks);
+
+    ASSERT_TRUE(controller.sleep(gracefulOptions()).ok);
+    ASSERT_EQ(controller.state(), SleepState::SLEEPING);
+
+    WakeUpOptions prepare;
+    prepare.prepare_only = true;
+    ASSERT_TRUE(controller.wakeUp(prepare).ok);
+    EXPECT_EQ(controller.state(), SleepState::WAKING_UP);
+    EXPECT_EQ(restore_kv.load(), 1);
+    EXPECT_EQ(restore_weights.load(), 1);
+    EXPECT_EQ(register_mr.load(), 1);
+    EXPECT_EQ(restart_called.load(), 0);
+
+    // Flagless wake: completes the cycle without re-restoring.
+    const auto flagless = controller.wakeUp();
+    EXPECT_TRUE(flagless.ok) << flagless.message;
+    EXPECT_EQ(controller.state(), SleepState::RUNNING);
+    EXPECT_EQ(restore_kv.load(), 1);       // NOT re-run
+    EXPECT_EQ(restore_weights.load(), 1);  // NOT re-run
+    EXPECT_EQ(register_mr.load(), 1);      // NOT re-run
+    EXPECT_EQ(restart_called.load(), 1);   // final restart ran once
+}
+
+// The latch is per wake cycle: a fresh SLEEPING->WAKING_UP transition clears it, so a
+// new sleep/wake cycle re-runs the restores (they were released by the intervening sleep).
+TEST(SleepLifecycleControllerTest, WakeUpRestoreRerunsOnFreshCycle) {
+    SleepLifecycleController controller(true);
+    std::atomic<int>         restore_weights{0};
+    SleepHooks               hooks;
+    hooks.restoreRestorableGpuMemory = [&restore_weights]() {
+        restore_weights++;
+        return true;
+    };
+    controller.setHooks(hooks);
+
+    ASSERT_TRUE(controller.sleep(gracefulOptions()).ok);
+    ASSERT_TRUE(controller.wakeUp().ok);  // cycle 1: restore #1
+    EXPECT_EQ(controller.state(), SleepState::RUNNING);
+    EXPECT_EQ(restore_weights.load(), 1);
+
+    ASSERT_TRUE(controller.sleep(gracefulOptions()).ok);
+    ASSERT_TRUE(controller.wakeUp().ok);  // cycle 2: fresh latch -> restore #2
+    EXPECT_EQ(controller.state(), SleepState::RUNNING);
+    EXPECT_EQ(restore_weights.load(), 2);
+}
+
 }  // namespace rtp_llm

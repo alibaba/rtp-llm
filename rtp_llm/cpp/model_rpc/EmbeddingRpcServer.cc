@@ -8,9 +8,6 @@ namespace rtp_llm {
 grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
                                                 const EmbeddingInputPB* request,
                                                 EmbeddingOutputPB*      response) {
-    if (auto admission = checkAdmission(); !admission.ok()) {
-        return admission;
-    }
     int64_t                          request_id = 0;
     std::vector<int32_t>             token_ids;
     std::vector<int32_t>             token_type_ids;
@@ -111,7 +108,8 @@ grpc::Status EmbeddingRpcServiceImpl::health(grpc::ServerContext*            con
                                              const EmbeddingHealthRequestPB* request,
                                              EmptyPB*                        writer) {
     RTP_LLM_LOG_DEBUG("Received embedding health check request");
-    // Report not-ready while sleeping or transitioning so LB drops the instance.
-    return checkAdmission();
+    // EmbeddingEngine has no sleep lifecycle (sleep mode is rejected for embedding
+    // deployments at config time), so it is always ready once serving.
+    return grpc::Status::OK;
 }
 }  // namespace rtp_llm

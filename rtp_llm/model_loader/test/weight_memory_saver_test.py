@@ -5,8 +5,11 @@ to be un-importable with a None sys.modules entry), so the tests validate:
   - default-off behavior (env switch unset -> everything is a no-op)
   - graceful degradation when torch_memory_saver is unavailable
   - region(tag="weights", enable_cpu_backup=True) call forwarding
-  - pause/resume forwarding + is_paused state machine (idempotency)
   - region re-entrancy (nested regions enter the real region once)
+
+Weight pause/resume itself is driven from the C++ sleep controller
+(VmmBackend::pause/resume("weights")), not from this module, so there is no
+Python pause/resume API to test here.
 """
 
 import contextlib
@@ -22,14 +25,12 @@ _TMS_MODULE = "torch_memory_saver"
 
 
 class _FakeTms:
-    """Records region/pause/resume calls like the torch_memory_saver singleton."""
+    """Records region calls like the torch_memory_saver singleton."""
 
     def __init__(self) -> None:
         self.region_calls: List[Dict[str, Any]] = []
         self.region_depth: int = 0
         self.max_region_depth: int = 0
-        self.pause_calls: List[Optional[str]] = []
-        self.resume_calls: List[Optional[str]] = []
 
     @contextlib.contextmanager
     def region(
@@ -42,12 +43,6 @@ class _FakeTms:
             yield
         finally:
             self.region_depth -= 1
-
-    def pause(self, tag: Optional[str] = None) -> None:
-        self.pause_calls.append(tag)
-
-    def resume(self, tag: Optional[str] = None) -> None:
-        self.resume_calls.append(tag)
 
 
 class _FakeTorchMemorySaverModule(types.ModuleType):
@@ -133,7 +128,6 @@ class DefaultDisabledTest(WeightMemorySaverTestBase):
     def test_disabled_flags(self) -> None:
         self.assertFalse(wms.is_enabled())
         self.assertFalse(wms.is_available())
-        self.assertFalse(wms.is_paused())
 
     def test_region_is_noop_and_tms_untouched(self) -> None:
         fake = self._inject_fake_tms()
@@ -142,15 +136,6 @@ class DefaultDisabledTest(WeightMemorySaverTestBase):
             executed = True
         self.assertTrue(executed)
         self.assertEqual(fake.region_calls, [])
-
-    def test_pause_resume_noop(self) -> None:
-        fake = self._inject_fake_tms()
-        self.assertFalse(wms.pause_weights())
-        self.assertFalse(wms.is_paused())
-        self.assertFalse(wms.resume_weights())
-        self.assertFalse(wms.is_paused())
-        self.assertEqual(fake.pause_calls, [])
-        self.assertEqual(fake.resume_calls, [])
 
     def test_configure_subprocess_disabled_is_noop(self) -> None:
         self._inject_fake_tms()
@@ -195,14 +180,6 @@ class UnavailableTest(WeightMemorySaverTestBase):
         with wms.weights_region():
             executed = True
         self.assertTrue(executed)
-
-    def test_pause_resume_warn_but_do_not_raise(self) -> None:
-        with self.assertLogs(level="WARNING") as logs:
-            self.assertFalse(wms.pause_weights())
-            self.assertFalse(wms.resume_weights())
-        self.assertFalse(wms.is_paused())
-        self.assertTrue(any("pause_weights" in m for m in logs.output))
-        self.assertTrue(any("resume_weights" in m for m in logs.output))
 
     def test_import_failure_is_cached(self) -> None:
         with self.assertLogs(level="WARNING"):
@@ -286,41 +263,6 @@ class FakeTmsForwardingTest(WeightMemorySaverTestBase):
         with wms.weights_region():
             pass
         self.assertEqual(len(self.fake.region_calls), 2)
-
-    def test_pause_resume_forwarding_and_state_machine(self) -> None:
-        self.assertFalse(wms.is_paused())
-
-        self.assertTrue(wms.pause_weights())
-        self.assertTrue(wms.is_paused())
-        self.assertEqual(self.fake.pause_calls, [wms.WEIGHTS_TAG])
-
-        # Idempotent: second pause does not call tms.pause again.
-        self.assertTrue(wms.pause_weights())
-        self.assertTrue(wms.is_paused())
-        self.assertEqual(self.fake.pause_calls, [wms.WEIGHTS_TAG])
-
-        self.assertTrue(wms.resume_weights())
-        self.assertFalse(wms.is_paused())
-        self.assertEqual(self.fake.resume_calls, [wms.WEIGHTS_TAG])
-
-        # Idempotent: second resume does not call tms.resume again.
-        self.assertTrue(wms.resume_weights())
-        self.assertFalse(wms.is_paused())
-        self.assertEqual(self.fake.resume_calls, [wms.WEIGHTS_TAG])
-
-    def test_resume_without_pause_is_noop(self) -> None:
-        self.assertTrue(wms.resume_weights())
-        self.assertFalse(wms.is_paused())
-        self.assertEqual(self.fake.resume_calls, [])
-
-    def test_pause_resume_cycle_twice(self) -> None:
-        for _ in range(2):
-            self.assertTrue(wms.pause_weights())
-            self.assertTrue(wms.is_paused())
-            self.assertTrue(wms.resume_weights())
-            self.assertFalse(wms.is_paused())
-        self.assertEqual(self.fake.pause_calls, [wms.WEIGHTS_TAG] * 2)
-        self.assertEqual(self.fake.resume_calls, [wms.WEIGHTS_TAG] * 2)
 
 
 class LegacyEnvForwardingTest(WeightMemorySaverTestBase):

@@ -39,6 +39,9 @@ public:
     void                              pause() override;
     void                              restart() override;
     absl::Status                      pauseAndWaitQuiesced(int64_t timeout_ms) override;
+    // Arm the collective sleep-quiesce consensus at the DRAINING transition (before drain),
+    // symmetrically on every rank (DP/EP and pure TP). No-op for single-rank. See definition.
+    void armCollectiveSleepQuiesce() override;
 
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();

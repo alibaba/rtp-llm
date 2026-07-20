@@ -34,9 +34,12 @@ public:
     std::vector<std::shared_ptr<GenerateStream>> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override;
     absl::Status                                 stop() override;
     void                                         wake() override;
-    bool                                         empty() override;
-    int64_t                                      lastScheduleTime() override;
-    int64_t                                      onflightStreams() override;
+    void                                         setForcePoll(bool enable) override {
+        force_poll_.store(enable, std::memory_order_relaxed);
+    }
+    bool    empty() override;
+    int64_t lastScheduleTime() override;
+    int64_t onflightStreams() override;
 
     std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList() override;
     std::vector<EngineScheduleInfo::TaskInfo> runningTaskList() override;
@@ -81,11 +84,15 @@ protected:
     size_t                          max_batch_tokens_size_   = 0;
     size_t                          max_generate_batch_size_ = 1;
     bool                            need_fill_fake_stream_   = false;
-    std::atomic<bool>               stop_                    = false;
-    bool                            schedule_trigger_        = false;
-    std::mutex                      lock_;
-    std::condition_variable         cond_;
-    kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;
+    // Set by the engine only while the collective sleep-quiesce consensus is armed (see
+    // setForcePoll). Makes schedule() poll with a short timeout instead of blocking on an empty
+    // queue, so a drained TP>1 rank keeps co-stepping until the consensus reaches its verdict.
+    std::atomic<bool>            force_poll_       = false;
+    std::atomic<bool>            stop_             = false;
+    bool                         schedule_trigger_ = false;
+    std::mutex                   lock_;
+    std::condition_variable      cond_;
+    kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
 
     std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo> running_task_list_;

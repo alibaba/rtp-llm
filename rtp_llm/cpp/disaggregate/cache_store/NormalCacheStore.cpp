@@ -19,7 +19,7 @@ constexpr int    kDevicePinRetryBackoffMs         = 1000;
 
 NormalCacheStore::~NormalCacheStore() {
     if (thread_pool_) {
-        thread_pool_close_ = true;
+        thread_pool_close_.store(true, std::memory_order_release);
         thread_pool_->stop();
         thread_pool_.reset();
     }
@@ -80,7 +80,7 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     auto check_task_readiness = [this]() {
         bool   device_pinned       = false;
         size_t device_pin_failures = 0;
-        while (!thread_pool_close_) {
+        while (!thread_pool_close_.load(std::memory_order_acquire)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             if (!device_pinned) {
                 device_pinned = tryPinThreadDevice(this->device_id_, "normal cache store check task");
@@ -380,7 +380,7 @@ NormalCacheStore::submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest
 
 void NormalCacheStore::releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task) {
     std::unique_lock<std::shared_mutex> lock(remote_store_tasks_mutex_);
-    auto                                iter  = remote_store_tasks_.find(task->getRequestId());
+    auto                                iter = remote_store_tasks_.find(task->getRequestId());
     if (iter == remote_store_tasks_.end()) {
         return;
     }
@@ -405,9 +405,13 @@ void NormalCacheStore::markRequestEnd(const std::string& requestid) {
             }
         }
     }
+    // These tasks are still waiting on their buffer event and never ran, so the blocks were
+    // never actually stored. The request is ending (cancelled or finished), so report failure
+    // rather than a false success. The callback is the counted wrapper, so invoking it also
+    // releases the pending transfer count.
     for (auto& callback : pending_store_callbacks) {
         if (callback) {
-            callback(true, CacheStoreErrorCode::None);
+            callback(false, CacheStoreErrorCode::StoreCancelled);
         }
     }
     request_block_buffer_store_->delRequestBlockBuffer(requestid);

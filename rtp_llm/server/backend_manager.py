@@ -13,13 +13,14 @@ from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.sleep_mode_compatibility import (
     Level2SleepCompatibility,
+    reject_embedding_sleep,
     validate_level2_sleep_compatibility,
 )
 from rtp_llm.distribute.distributed_server import DistributedServer, get_world_info
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
-from rtp_llm.ops import VitSeparation
+from rtp_llm.ops import TaskType, VitSeparation
 from rtp_llm.utils.concurrency_controller import get_global_controller
 from rtp_llm.utils.fuser import _nfs_manager
 
@@ -84,6 +85,10 @@ class BackendManager(object):
                 eplb_enabled=self.py_env_configs.eplb_config.enable_eplb(),
                 redundant_expert=self.py_env_configs.eplb_config.redundant_expert,
             ),
+        )
+        reject_embedding_sleep(
+            enable_sleep_mode=engine_config.runtime_config.enable_sleep_mode,
+            is_embedding=model_config.task_type != TaskType.LANGUAGE_MODEL,
         )
 
         if engine_config.parallelism_config.world_size > 1:

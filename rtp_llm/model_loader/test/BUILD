@@ -35,6 +35,12 @@ py_test(
 )
 
 py_test(
+    name = "test_reload_computed_weights",
+    srcs = ["test_reload_computed_weights.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "weight_memory_saver_gpu_test",
     srcs = ["weight_memory_saver_gpu_test.py"],
     deps = py_test_deps,

@@ -141,6 +141,11 @@ void SleepLifecycleController::setLastError(const std::string& msg) {
     }
 }
 
+std::string SleepLifecycleController::lastError() const {
+    std::lock_guard<std::mutex> lock(status_mutex_);
+    return last_error_;
+}
+
 void SleepLifecycleController::setEnabled(bool enabled) {
     enabled_.store(enabled, std::memory_order_release);
 }
@@ -254,8 +259,20 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
         // whether to reload discarded weights (level 2) or not (level 1).
         active_sleep_level_.store(opt.level, std::memory_order_release);
         if (!transitionLocked(SleepState::RUNNING, SleepState::DRAINING)) {
-            return SleepResult::failedPrecondition(status().last_error);
+            return SleepResult::failedPrecondition(lastError());
         }
+    }
+
+    // Arm the collective sleep-quiesce consensus BEFORE the (rank-asymmetric) drain, on
+    // every rank symmetrically. Only the rank holding an in-flight request blocks in the
+    // drain hook below; if arming waited until after that block, the busy rank would never
+    // arm while its idle peers issue unmatched consensus rounds -> forward/EP desync ->
+    // DeepEP timeout / worker death. best-effort: a failure here does not abort the sleep
+    // (drain + quiesceEngine still run and arm as a fallback). No-op for single-rank.
+    // Placed before the drain block so it also runs on an idempotent DRAINING retry (where
+    // the underlying pause() is a no-op CAS).
+    if (!opt.commit_only && hooks_.armEngineQuiesce) {
+        invokeHookNoThrow("armEngineQuiesce", hooks_.armEngineQuiesce, opt);
     }
 
     // --- DRAINING: wait for in-flight requests and cache transfers. ---
@@ -277,7 +294,7 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
         if (hooks_.quiesceEngine) {
             if (!invokeHookNoThrow("quiesceEngine", hooks_.quiesceEngine, opt)) {
                 setLastError("quiesceEngine failed, staying in DRAINING");
-                return SleepResult::failedPrecondition(status().last_error);
+                return SleepResult::failedPrecondition(lastError());
             }
         }
         engine_quiesced_.store(true, std::memory_order_release);
@@ -290,11 +307,11 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
 
     if (!engine_quiesced_.load(std::memory_order_acquire)) {
         setLastError("sleep commit rejected: engine is not quiesced");
-        return SleepResult::failedPrecondition(status().last_error);
+        return SleepResult::failedPrecondition(lastError());
     }
 
     if (!transitionLocked(SleepState::DRAINING, SleepState::SUSPENDING)) {
-        return SleepResult::failedPrecondition(status().last_error);
+        return SleepResult::failedPrecondition(lastError());
     }
 
     // --- SUSPENDING: dereg MR, release memory backing. ---
@@ -327,11 +344,11 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
 
     if (!ok) {
         transitionLocked(SleepState::SUSPENDING, SleepState::ERROR);
-        return SleepResult::failedPrecondition(status().last_error);
+        return SleepResult::failedPrecondition(lastError());
     }
 
     if (!transitionLocked(SleepState::SUSPENDING, SleepState::SLEEPING)) {
-        return SleepResult::failedPrecondition(status().last_error);
+        return SleepResult::failedPrecondition(lastError());
     }
     return SleepResult::success();
 }
@@ -359,18 +376,18 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
             if (!invokeHookNoThrow("cancelQuiesceAndRestartEngine", hooks_.cancelQuiesceAndRestartEngine)) {
                 setLastError("cancelQuiesceAndRestartEngine failed");
                 transitionLocked(SleepState::DRAINING, SleepState::ERROR);
-                return SleepResult::failedPrecondition(status().last_error);
+                return SleepResult::failedPrecondition(lastError());
             }
         } else if (hooks_.restartEngine) {
             if (!invokeHookNoThrow("restartEngine", hooks_.restartEngine)) {
                 setLastError("restartEngine failed");
                 transitionLocked(SleepState::DRAINING, SleepState::ERROR);
-                return SleepResult::failedPrecondition(status().last_error);
+                return SleepResult::failedPrecondition(lastError());
             }
         }
         engine_quiesced_.store(false, std::memory_order_release);
         if (!transitionLocked(SleepState::DRAINING, SleepState::RUNNING)) {
-            return SleepResult::failedPrecondition(status().last_error);
+            return SleepResult::failedPrecondition(lastError());
         }
         return SleepResult::success();
     }
@@ -385,12 +402,23 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
     }
 
     setLastError("");
-    if (current != SleepState::WAKING_UP && !transitionLocked(current, SleepState::WAKING_UP)) {
-        return SleepResult::failedPrecondition(status().last_error);
+    if (current != SleepState::WAKING_UP) {
+        // Fresh SLEEPING->WAKING_UP: a new wake cycle begins, so the restore block
+        // must run again. Clear the idempotency latch before transitioning.
+        memory_restored_.store(false, std::memory_order_release);
+        if (!transitionLocked(current, SleepState::WAKING_UP)) {
+            return SleepResult::failedPrecondition(lastError());
+        }
     }
 
     // --- WAKING_UP: restore memory backing, reset metadata, reg MR, warmup. ---
-    bool ok = true;
+    // The restore hooks run at most once per wake cycle. A prepare_only wake leaves
+    // the rank in WAKING_UP with restores already applied, so a following flagless
+    // or commit_only wake must skip them: a second VMM resume / level-2 reload could
+    // fail into ERROR. memory_restored_ was cleared on the fresh SLEEPING->WAKING_UP
+    // transition above and is latched true once the whole block succeeds.
+    const bool need_restore = !opt.commit_only && !memory_restored_.load(std::memory_order_acquire);
+    bool       ok           = true;
     // Restore weights (level-2 streams them back in place from the model loader)
     // BEFORE re-backing the KV cache. The KV cache is sized to consume nearly all
     // GPU memory left free after weights at cold start, so remapping the KV
@@ -400,34 +428,39 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
     // (weights load, then KV is sized from what remains). The two hooks are
     // independent: the reload only copies into the weight tensors and cuda_graph
     // resume only remaps graph-private pages; neither touches KV content.
-    if (!opt.commit_only && ok && hooks_.restoreRestorableGpuMemory) {
+    if (need_restore && ok && hooks_.restoreRestorableGpuMemory) {
         ok = invokeHookNoThrow("restoreRestorableGpuMemory", hooks_.restoreRestorableGpuMemory);
         if (!ok) {
             setLastError("restoreRestorableGpuMemory failed");
         }
     }
-    if (!opt.commit_only && ok && hooks_.restoreKvMemoryBackingAndResetMetadata) {
+    if (need_restore && ok && hooks_.restoreKvMemoryBackingAndResetMetadata) {
         kv_memory_state_.store(KvMemoryState::WAKING_UP, std::memory_order_release);
         ok = invokeHookNoThrow("restoreKvMemoryBackingAndResetMetadata", hooks_.restoreKvMemoryBackingAndResetMetadata);
         if (!ok) {
             setLastError("restoreKvMemoryBackingAndResetMetadata failed");
         }
     }
-    if (!opt.commit_only && ok) {
+    if (need_restore && ok) {
         kv_memory_state_.store(KvMemoryState::ACTIVE, std::memory_order_release);
     }
-    if (!opt.commit_only && ok && hooks_.registerMr) {
+    if (need_restore && ok && hooks_.registerMr) {
         ok = invokeHookNoThrow("registerMr", hooks_.registerMr);
         if (!ok) {
             setLastError("registerMr failed");
         }
+    }
+    if (need_restore && ok) {
+        // Whole restore block succeeded: latch so a subsequent flagless/commit wake
+        // in this same WAKING_UP cycle does not re-run the restores.
+        memory_restored_.store(true, std::memory_order_release);
     }
 
     if (!ok) {
         // Admission remains closed in ERROR. Control plane only observes wake_up
         // failure; recovery is an explicit retry or operator action.
         transitionLocked(SleepState::WAKING_UP, SleepState::ERROR);
-        return SleepResult::failedPrecondition(status().last_error);
+        return SleepResult::failedPrecondition(lastError());
     }
 
     if (opt.prepare_only) {
@@ -447,18 +480,27 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
             setLastError("warmupAndHealthCheck failed");
         }
     }
-
+    // No cross-rank barrier is inserted before the RUNNING flip below. The coordinator fans the
+    // wake commit out to each rank independently, so there is a brief skew where an early rank
+    // reopens admission while a peer's engine loop is still restarting; a request landing in that
+    // window blocks on its forward collective until the peer's loop restarts (bounded by commit
+    // delivery skew, typically milliseconds). This becomes permanent only under a partial commit
+    // failure -- and that case is already terminal: the coordinator's convergence returns
+    // RECOVERY_REQUIRED and the instance is restarted, which drops the stuck requests. An engine
+    // NCCL rendezvous here was considered and rejected: it duplicates the coordinator's own
+    // all-ranks convergence as a second consensus layer, and its fixed timeout can turn a slow-
+    // but-healthy peer into an ERROR that the coordinator's laggard budget would have tolerated.
     if (!ok) {
         // Admission remains closed in ERROR. Control plane only observes wake_up
         // failure; recovery is an explicit retry or operator action.
         transitionLocked(SleepState::WAKING_UP, SleepState::ERROR);
-        return SleepResult::failedPrecondition(status().last_error);
+        return SleepResult::failedPrecondition(lastError());
     }
 
     device_kv_cache_valid_.store(true, std::memory_order_release);
     engine_quiesced_.store(false, std::memory_order_release);
     if (!transitionLocked(SleepState::WAKING_UP, SleepState::RUNNING)) {
-        return SleepResult::failedPrecondition(status().last_error);
+        return SleepResult::failedPrecondition(lastError());
     }
     return SleepResult::success();
 }

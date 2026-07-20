@@ -1041,7 +1041,7 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
               toVec<int>(model_input.combo_position_ids));
 }
 
-// M2: a speculative (MTP) executor must carry the sleep pause marker through its
+// A speculative (MTP) executor must carry the sleep pause marker through its
 // empty skip-run step, exactly like NormalExecutor, so a TP-only sleep quiesce
 // wave releases worker ranks AND makes the engine loop self-pause. Before the fix
 // MtpExecutor inherited Executor::processForPause() (empty step, no marker) and

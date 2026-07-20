@@ -823,7 +823,6 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
             "active_cache_transfer_count",
             "gpu_resource_state",
             "last_error",
-            "process_id",
         }
         self.assertEqual(expected_keys, set(result.keys()))
         self.assertEqual(result["state"], "RUNNING")
@@ -930,6 +929,22 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["grpc_status"], "UNIMPLEMENTED")
         self.assertIn("level=0", result["error"])
         self.assertEqual(result["supported_levels"], [1])
+        wrapper._dp_stubs[address].GetSleepStatus.assert_not_awaited()
+
+    async def test_sleep_serving_level_zero_advertises_configured_nonzero_level(self):
+        # A process started at SLEEP_MODE_LEVEL=2 must advertise [2] in the
+        # level-0 UNIMPLEMENTED response, not a hardcoded [1] that would
+        # misdirect the client toward an unsupported level -- still without a
+        # backend status probe.
+        wrapper, pb2 = self._build_wrapper()
+        address = wrapper.control_addresses[0]
+        wrapper._dp_stubs[address].GetSleepStatus = AsyncMock()
+
+        with patch.dict("os.environ", {"SLEEP_MODE_LEVEL": "2"}):
+            result = await wrapper.sleep_serving({"level": 0})
+
+        self.assertEqual(result["grpc_status"], "UNIMPLEMENTED")
+        self.assertEqual(result["supported_levels"], [2])
         wrapper._dp_stubs[address].GetSleepStatus.assert_not_awaited()
 
     async def test_sleep_serving_invalid_tag_element_rejected_before_status_probe(self):

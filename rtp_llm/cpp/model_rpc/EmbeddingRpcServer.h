@@ -4,7 +4,6 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingEngine.h"
-#include "rtp_llm/cpp/engine_base/sleep/AdmissionGate.h"
 #include "rtp_llm/cpp/multimodal_processor/LocalMultimodalProcessor.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
@@ -33,14 +32,9 @@ public:
     grpc::Status health(grpc::ServerContext* context, const EmbeddingHealthRequestPB* request, EmptyPB* writer);
 
 private:
-    // EmbeddingEngine does not inherit EngineBase, so it has no admission gate wired in.
-    // An unset gate admits every request.
-    grpc::Status checkAdmission() const {
-        return admission_gate_ ? admission_gate_->check() : grpc::Status::OK;
-    }
-
-private:
-    std::shared_ptr<AdmissionGate>       admission_gate_   = nullptr;
+    // EmbeddingEngine has no sleep lifecycle: sleep mode is rejected for embedding
+    // deployments at config time (see reject_embedding_sleep) and the frontend does
+    // not register lifecycle routes for them, so there is no admission gate here.
     std::shared_ptr<EmbeddingEngine>     embedding_engine_ = nullptr;
     pybind11::object                     pyRenderer_;
     pybind11::object                     pyHandler_;

@@ -197,6 +197,9 @@ TEST(VmmBackendTest, UnavailableWithoutPreloadShim) {
     VmmBackend backend;
     EXPECT_FALSE(backend.isAvailable());
     EXPECT_EQ(backend.name(), "vmm");
+    // Allocation tagging is a strictly stronger capability than pause/resume; with no shim at all
+    // it must also report unavailable, and beginAllocationRegion must refuse rather than pretend.
+    EXPECT_FALSE(backend.supportsAllocationTagging());
     EXPECT_FALSE(backend.pause("kv_cache"));
     EXPECT_FALSE(backend.resume("kv_cache"));
     EXPECT_FALSE(backend.beginAllocationRegion("kv_cache"));
