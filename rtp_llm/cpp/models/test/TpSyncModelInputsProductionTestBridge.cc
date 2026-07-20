@@ -68,7 +68,10 @@ torch::Tensor boolTensor(const std::vector<uint8_t>& values) {
     return torch::tensor(values, torch::TensorOptions(torch::kBool).device(torch::kCPU));
 }
 
-py::dict runProductionTpSyncModelInputs(const std::string& transformer_path, int tp_rank, bool include_gpu) {
+py::dict runProductionTpSyncModelInputs(const std::string& transformer_path,
+                                        int                tp_rank,
+                                        bool               include_gpu,
+                                        bool               root_combo_tokens_on_gpu) {
     ParallelismConfig config;
     config.tp_size          = 2;
     config.tp_rank          = tp_rank;
@@ -89,6 +92,9 @@ py::dict runProductionTpSyncModelInputs(const std::string& transformer_path, int
         inputs.lm_output_lengths     = int32Tensor({7, 8});
         inputs.combo_position_ids    = int32Tensor({0, 1, 2});
         inputs.text_tokens_mask      = int32Tensor({1, 1, 0});
+        if (root_combo_tokens_on_gpu) {
+            inputs.combo_tokens = inputs.combo_tokens.to(torch::Device(torch::kCUDA, tp_rank));
+        }
         if (include_gpu) {
             inputs.last_hidden_states = torch::tensor(std::vector<float>{1.25f, 2.5f, 3.75f, 4.5f, 5.25f, 6.5f},
                                                       torch::TensorOptions(torch::kFloat32).device(torch::kCPU))
@@ -124,6 +130,7 @@ PYBIND11_MODULE(libtp_sync_model_inputs_production_test_bridge, m) {
           py::arg("transformer_path"),
           py::arg("tp_rank"),
           py::arg("include_gpu"),
+          py::arg("root_combo_tokens_on_gpu") = false,
           "Call the exported tpSyncModelInputs from the shipped libth_transformer.so.");
 }
 

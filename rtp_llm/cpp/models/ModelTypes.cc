@@ -3,12 +3,65 @@
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
+#include <limits>
+
 namespace rtp_llm {
+namespace {
+
+std::vector<torch::Tensor*> collectModelInputTensors(GptModelInputs& inputs) {
+    std::vector<torch::Tensor*> tensor_ptrs;
+    auto                        collect = [&](torch::Tensor& tensor) {
+        if (tensor.defined() && tensor.numel() > 0) {
+            tensor_ptrs.push_back(&tensor);
+        }
+    };
+
+    collect(inputs.combo_tokens);
+    collect(inputs.input_lengths);
+    collect(inputs.sequence_lengths);
+    collect(inputs.prefix_lengths);
+    const bool has_kernel_blocks =
+        inputs.kv_cache_kernel_block_id.defined() && inputs.kv_cache_kernel_block_id.size(2) > 0;
+    const bool has_blocks = inputs.kv_cache_block_id.defined() && inputs.kv_cache_block_id.size(2) > 0;
+    if (has_kernel_blocks || has_blocks) {
+        collect(inputs.kv_cache_kernel_block_id);
+        collect(inputs.kv_cache_block_id);
+        collect(inputs.kv_cache_layer_to_group);
+        collect(inputs.kv_cache_group_types);
+        if (inputs.pd_separation) {
+            collect(inputs.cache_keys);
+        }
+        collect(inputs.kv_cache_update_mapping);
+    }
+    collect(inputs.request_id);
+    collect(inputs.request_pd_separation);
+    collect(inputs.lm_output_indexes);
+    collect(inputs.lm_output_lengths);
+    collect(inputs.combo_position_ids);
+    collect(inputs.text_tokens_mask);
+    collect(inputs.mm_features_locs);
+    if (inputs.multimodal_features.has_value()) {
+        for (auto& feature : inputs.multimodal_features.value()) {
+            collect(feature);
+        }
+    }
+    if (inputs.mm_extra_input.has_value()) {
+        for (auto& extra_input : inputs.mm_extra_input.value()) {
+            collect(extra_input);
+        }
+    }
+    collect(inputs.last_hidden_states);
+    return tensor_ptrs;
+}
+
+}  // namespace
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config) {
     if (parallelism_config.tp_size <= 1) {
         return;
     }
+    const bool   is_root          = parallelism_config.tp_rank == 0;
+    auto         root_tensor_ptrs = is_root ? collectModelInputTensors(inputs) : std::vector<torch::Tensor*>{};
     const size_t shape_hints_size = GptModelInputIndex::gptModelInputLength;
     auto         shape_hints_t    = torch::empty({(int64_t)shape_hints_size}, torch::kInt32).pin_memory();
     auto         shape_hints_ptr  = shape_hints_t.data_ptr<int32_t>();
@@ -66,6 +119,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+    RTP_LLM_CHECK_WITH_INFO(root_tensor_ptrs.size() <= static_cast<size_t>(std::numeric_limits<int32_t>::max()),
+                            "tpSyncModelInputs has too many tensors to encode: %zu",
+                            root_tensor_ptrs.size());
+    shape_hints_ptr[GptModelInputIndex::packedTensorCount] = static_cast<int32_t>(root_tensor_ptrs.size());
     execBroadcastCpu({{shape_hints_t}, 0});
 
     // multimodal features shape broadcast
@@ -212,58 +269,34 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
     }
 
-    // Collect all tensors that participate in broadcast.
-    // The collect order must be deterministic and identical across all ranks.
-    std::vector<torch::Tensor*> tensor_ptrs;
-    auto                        collect = [&](torch::Tensor& t) {
-        if (t.defined() && t.numel() > 0) {
-            tensor_ptrs.push_back(&t);
-        }
-    };
-
-    collect(inputs.combo_tokens);
-    collect(inputs.input_lengths);
-    collect(inputs.sequence_lengths);
-    collect(inputs.prefix_lengths);
-    if (max_kernel_blocks || max_blocks) {
-        collect(inputs.kv_cache_kernel_block_id);
-        collect(inputs.kv_cache_block_id);
-        if (layer_to_group_len) {
-            collect(inputs.kv_cache_layer_to_group);
-        }
-        if (group_types_len) {
-            collect(inputs.kv_cache_group_types);
-        }
-        if (inputs.pd_separation) {
-            collect(inputs.cache_keys);
-        }
-        collect(inputs.kv_cache_update_mapping);
-    }
-    collect(inputs.request_id);
-    collect(inputs.request_pd_separation);
-    collect(inputs.lm_output_indexes);
-    collect(inputs.lm_output_lengths);
-    if (combo_position_ids_size) {
-        collect(inputs.combo_position_ids);
-    }
-    if (text_tokens_mask_size) {
-        collect(inputs.text_tokens_mask);
-    }
-    if (mm_features_locs_size) {
-        collect(inputs.mm_features_locs);
-    }
-    if (mm_features_num) {
-        for (auto& f : inputs.multimodal_features.value()) {
-            collect(f);
+    // Reuse one collector before and after non-root allocation so the logical
+    // tensor order cannot drift between root metadata and payload packing.
+    // The exact root layout is sent before packing; a mismatched rank throws
+    // before joining the CPU payload/barrier below.
+    auto         tensor_ptrs       = is_root ? std::move(root_tensor_ptrs) : collectModelInputTensors(inputs);
+    const size_t root_tensor_count = shape_hints_ptr[GptModelInputIndex::packedTensorCount];
+    auto root_device_types     = torch::empty({static_cast<int64_t>(root_tensor_count)}, torch::kUInt8).pin_memory();
+    auto root_device_types_ptr = root_device_types.data_ptr<uint8_t>();
+    if (is_root) {
+        for (size_t i = 0; i < root_tensor_count; ++i) {
+            root_device_types_ptr[i] = tensor_ptrs[i]->is_cuda() ? 1 : 0;
         }
     }
-    if (mm_extra_input_num) {
-        for (auto& e : inputs.mm_extra_input.value()) {
-            collect(e);
-        }
-    }
-    if (hidden_states_size) {
-        collect(inputs.last_hidden_states);
+    execBroadcastCpu({{root_device_types}, 0});
+    RTP_LLM_CHECK_WITH_INFO(tensor_ptrs.size() == root_tensor_count,
+                            "tpSyncModelInputs tensor count mismatch: root=%zu, rank %d=%zu",
+                            root_tensor_count,
+                            parallelism_config.tp_rank,
+                            tensor_ptrs.size());
+    for (size_t i = 0; i < root_tensor_count; ++i) {
+        const bool root_is_cuda  = root_device_types_ptr[i] != 0;
+        const bool local_is_cuda = tensor_ptrs[i]->is_cuda();
+        RTP_LLM_CHECK_WITH_INFO(root_is_cuda == local_is_cuda,
+                                "tpSyncModelInputs tensor %zu device mismatch: root=%s, rank %d=%s",
+                                i,
+                                root_is_cuda ? "CUDA" : "CPU",
+                                parallelism_config.tp_rank,
+                                local_is_cuda ? "CUDA" : "CPU");
     }
 
     // Classify tensors by device type (runtime check) and calculate packed sizes.
@@ -293,8 +326,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
     }
 
-    bool is_root = parallelism_config.tp_rank == 0;
-
     // Allocate one packed buffer per device type.
     // CPU buffer stays on the host and is sent through execBroadcastCpu.
     torch::Tensor cpu_packed, gpu_packed;
@@ -308,6 +339,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                 std::memcpy(base + e.offset, contig.data_ptr(), e.nbytes);
             }
         }
+    } else {
+        // Even an all-GPU payload needs this one-byte UDS barrier. It makes a
+        // peer's device-layout rejection visible to root before root enters
+        // NCCL, preserving all-rank fail-fast semantics.
+        cpu_packed = torch::zeros({1}, torch::kUInt8).pin_memory();
     }
 
     if (gpu_total_bytes > 0) {
@@ -322,11 +358,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
     }
 
-    // Broadcast CPU buffers through execBroadcastCpu. Keep GPU buffers on the
-    // existing NCCL path.
-    if (cpu_packed.defined()) {
-        execBroadcastCpu({{cpu_packed}, 0});
-    }
+    // Mixed-channel invariant: every rank validates the root device layout,
+    // then commits the packed CPU payload (or one-byte barrier) through UDS,
+    // and only then enters the packed GPU NCCL broadcast. A runtime UDS failure
+    // is terminal and throws on every rank, so no rank may continue into NCCL
+    // or locally fall back.
+    execBroadcastCpu({{cpu_packed}, 0});
     if (gpu_packed.defined()) {
         // execBroadcast guarantees stream-ordered GPU consumption and propagates
         // c10d errors. Avoid cudaSyncAndCheck here: device-wide sync serializes

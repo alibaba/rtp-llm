@@ -177,6 +177,29 @@ def _production_boundary_worker(rank: int, nccl_port: int, uds_dir: str) -> None
             )
         _run_real_tp_sync(rank, "stale-singleton-reset")
         torch.distributed.barrier()
+
+        # 4. Deliberately put a tensor on CUDA at root while non-root allocates
+        # that logical tensor on CPU. Device-layout metadata must reject the
+        # split before either packed payload can be consumed. Rank 1 reports
+        # the explicit mismatch; root observes the peer abort as a terminal UDS
+        # error instead of silently continuing into NCCL.
+        try:
+            production_bridge.run_tp_sync_model_inputs(
+                libth_transformer.__file__,
+                rank,
+                False,
+                root_combo_tokens_on_gpu=True,
+            )
+        except RuntimeError as error:
+            expected_error = "device mismatch" if rank == 1 else "CpuBroadcaster"
+            if expected_error not in str(error):
+                raise AssertionError(
+                    f"rank {rank}: unexpected device mismatch error: {error}"
+                ) from error
+        else:
+            raise AssertionError(
+                f"rank {rank}: mismatched tensor devices did not fail fast"
+            )
     except Exception:
         traceback.print_exc()
         raise
