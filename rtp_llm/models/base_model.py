@@ -14,7 +14,6 @@ from typing import (
 )
 
 import torch
-
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.grammar_tokenizer_info import build_grammar_tokenizer_info_json
 from rtp_llm.config.kv_cache_config import KVCacheConfig
@@ -499,7 +498,7 @@ class BaseModel(object):
         if not isinstance(runtime_method, str) or not runtime_method.strip():
             raise ValueError(
                 f"Quantization config {type(quant_config).__name__} is not "
-                "supported by the Qwen dense newloader path"
+                "supported by the registered newloader model"
             )
         return runtime_method.strip()
 
@@ -513,13 +512,12 @@ class BaseModel(object):
 
         if self.force_cpu_load_weights:
             raise ValueError(
-                "force_cpu_load_weights is not supported by the Qwen dense "
-                "newloader slice"
+                "force_cpu_load_weights is not supported by this newloader slice"
             )
         device_resource_config = getattr(self, "device_resource_config", None)
         if getattr(device_resource_config, "enable_layer_micro_batch", 0) != 0:
             raise ValueError(
-                "layer micro-batch is not supported by the Qwen dense newloader slice"
+                "layer micro-batch is not supported by this newloader slice"
             )
         if getattr(self.model_config, "ptuning_path", None):
             raise ValueError("p-tuning is not supported by this newloader slice")
@@ -546,17 +544,17 @@ class BaseModel(object):
                     break
         if cp_enabled or attn_tp != physical_tp:
             raise ValueError(
-                "Context parallelism is not supported by the Qwen dense newloader slice"
+                "Context parallelism is not supported by this newloader slice"
             )
         if ffn_tp != attn_tp:
             raise ValueError(
                 "Independent FFN TP/sequence parallelism is not supported by the "
-                "Qwen dense newloader slice"
+                "registered newloader path"
             )
         ffn_disaggregate = getattr(parallelism, "ffn_disaggregate_config", None)
         if bool(getattr(ffn_disaggregate, "enable_ffn_disaggregate", False)):
             raise ValueError(
-                "FFN disaggregation is not supported by the Qwen dense newloader slice"
+                "FFN disaggregation is not supported by the registered newloader path"
             )
 
         self.custom_module = self._init_custom_module()
@@ -588,6 +586,7 @@ class BaseModel(object):
                 hw_kernel_config=self.hw_kernel_config,
             ),
             parallelism_config=self.parallelism_config,
+            moe_config=getattr(self, "moe_config", None),
             fmha_config=self.fmha_config,
             device_resource_config=self.device_resource_config,
         )
@@ -603,7 +602,7 @@ class BaseModel(object):
         self.model_weights_loader = loader
         self.weight_manager = None
         self.py_eplb = None
-        logging.info("NewModelLoader: Qwen dense model loaded successfully")
+        logging.info("NewModelLoader: model loaded successfully")
 
     def _build_new_loader_weight_view(self, module: torch.nn.Module) -> ModelWeights:
         export = getattr(module, "runtime_weight_view", None)

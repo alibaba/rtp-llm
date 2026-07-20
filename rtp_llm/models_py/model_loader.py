@@ -1,6 +1,7 @@
 import inspect
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -13,6 +14,51 @@ from rtp_llm.models_py.module_base import RtpModule, collect_loaded_tensor_ids
 from rtp_llm.models_py.registry import get_model_class, list_models
 
 logger = logging.getLogger(__name__)
+
+_EXPERT_ID_RE = re.compile(r"(?:^|\.)experts\.(\d+)(?:\.|$)")
+_STACKED_EXPERT_RE = re.compile(r"(?:^|\.)experts\.(?:gate_up_proj|down_proj)(?:\.|$)")
+
+
+class _ExpertRangeFilter:
+    """Select only this EP rank's per-expert checkpoint tensors."""
+
+    def __init__(self, num_experts: int, ep_size: int, ep_rank: int):
+        for name, value in (
+            ("num_experts", num_experts),
+            ("ep_size", ep_size),
+            ("ep_rank", ep_rank),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an integer, got {value!r}")
+        if ep_size <= 0 or not 0 <= ep_rank < ep_size:
+            raise ValueError(f"Invalid EP partition: rank={ep_rank}, size={ep_size}")
+        if num_experts <= 0 or num_experts % ep_size != 0:
+            raise ValueError(
+                f"num_experts={num_experts} must be positive and divisible by "
+                f"ep_size={ep_size}"
+            )
+        experts_per_rank = num_experts // ep_size
+        self.start_expert = ep_rank * experts_per_rank
+        self.end_expert = self.start_expert + experts_per_rank
+        self.ep_size = ep_size
+        self.num_experts = num_experts
+
+    def should_load(self, name: str) -> bool:
+        match = _EXPERT_ID_RE.search(name)
+        if match is not None:
+            expert_id = int(match.group(1))
+            if not 0 <= expert_id < self.num_experts:
+                raise ValueError(
+                    f"Checkpoint tensor {name!r} has expert id {expert_id} outside "
+                    f"[0, {self.num_experts})"
+                )
+            return self.start_expert <= expert_id < self.end_expert
+        if self.ep_size > 1 and _STACKED_EXPERT_RE.search(name):
+            raise ValueError(
+                "EP loading requires per-expert checkpoint keys; stacked all-expert "
+                f"tensor {name!r} would materialize non-local experts"
+            )
+        return True
 
 
 def _validate_runtime_device(device: str, label: str) -> None:
@@ -45,6 +91,7 @@ class NewLoaderConfig:
     load_method: NewLoaderLoadMethod = NewLoaderLoadMethod.AUTO
     quant_config: Any = None
     parallelism_config: Any = None
+    moe_config: Any = None
     fmha_config: Any = None
     device_resource_config: Any = None
     attn_tp_size: Optional[int] = None
@@ -239,6 +286,45 @@ class NewModelLoader:
                 )
         return self._ckpt_files
 
+    def _expert_name_filter(self):
+        if self.load_config.ep_size == 1:
+            return None
+        num_experts = (
+            self.model_config.get("num_experts", 0)
+            if isinstance(self.model_config, dict)
+            else getattr(
+                self.model_config,
+                "expert_num",
+                getattr(self.model_config, "num_experts", 0),
+            )
+        )
+        if isinstance(num_experts, bool) or not isinstance(num_experts, int):
+            raise TypeError(
+                f"model_config num_experts must be an integer, got {num_experts!r}"
+            )
+        if num_experts <= 0:
+            raise ValueError("EP loading requires model_config.num_experts")
+        return _ExpertRangeFilter(
+            num_experts,
+            self.load_config.ep_size,
+            self.load_config.ep_rank,
+        ).should_load
+
+    def _validate_ep_checkpoint_format(self, checkpoint_files) -> None:
+        if self.load_config.ep_size == 1:
+            return
+        unsupported = [
+            path
+            for path in checkpoint_files
+            if not os.fspath(path).lower().endswith(".safetensors")
+        ]
+        if unsupported:
+            raise ValueError(
+                "EP streaming requires safetensors checkpoints with per-expert "
+                "keys; PyTorch checkpoints are deserialized as a whole before "
+                f"name filtering and would materialize non-local experts: {unsupported}"
+            )
+
     def _create_model(self) -> nn.Module:
         model_type = self._model_type()
         try:
@@ -356,6 +442,7 @@ class NewModelLoader:
         if method != NewLoaderLoadMethod.SCRATCH:
             raise RuntimeError(f"Resolved unsupported load method: {method}")
         checkpoint_files = self._checkpoint_files()
+        self._validate_ep_checkpoint_format(checkpoint_files)
         model = self._create_model()
         if weight_mapper.is_rank_local_checkpoint(checkpoint_files) and not bool(
             getattr(model, "supports_rank_local_checkpoint", False)
@@ -366,7 +453,11 @@ class NewModelLoader:
             )
         started = time.time()
         model.load_weights(
-            weight_mapper.get_all_weights(checkpoint_files, device="cpu")
+            weight_mapper.get_all_weights(
+                checkpoint_files,
+                device="cpu",
+                name_filter=self._expert_name_filter(),
+            )
         )
         self._validate_loaded_weights(model)
         logger.info("Streamed checkpoint tensors in %.2fs", time.time() - started)
