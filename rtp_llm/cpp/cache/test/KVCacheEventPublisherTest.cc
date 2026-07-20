@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/KVCacheEventPublisher.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <gtest/gtest.h>
 #include <mutex>
@@ -72,6 +73,58 @@ private:
     std::string             fail_next_body_;
 };
 
+class BlockingReporter final: public KVCacheEventReporter {
+public:
+    bool post(const std::string&, const std::string& request, std::string& response) noexcept override {
+        std::unique_lock<std::mutex> lock(mu_);
+        requests_.push_back(request);
+        cv_.notify_all();
+        if (block_next_mutation_ && request.find("EVENT_BLOCK_ADD") != std::string::npos) {
+            block_next_mutation_ = false;
+            mutation_blocked_    = true;
+            cv_.notify_all();
+            cv_.wait(lock, [this] { return release_mutation_; });
+        }
+        response = R"({"header":{"status":{"code":"OK"}}})";
+        return true;
+    }
+
+    bool waitForBodyCount(const std::string& text, size_t expected_count, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mu_);
+        return cv_.wait_for(lock, timeout, [&] {
+            size_t count = 0;
+            for (const auto& request : requests_) {
+                count += request.find(text) != std::string::npos;
+            }
+            return count >= expected_count;
+        });
+    }
+
+    void blockNextMutation() {
+        std::lock_guard<std::mutex> lock(mu_);
+        block_next_mutation_ = true;
+    }
+
+    bool waitUntilMutationBlocked(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mu_);
+        return cv_.wait_for(lock, timeout, [this] { return mutation_blocked_; });
+    }
+
+    void releaseMutation() {
+        std::lock_guard<std::mutex> lock(mu_);
+        release_mutation_ = true;
+        cv_.notify_all();
+    }
+
+private:
+    std::mutex               mu_;
+    std::condition_variable  cv_;
+    std::vector<std::string> requests_;
+    bool                     block_next_mutation_ = false;
+    bool                     mutation_blocked_    = false;
+    bool                     release_mutation_    = false;
+};
+
 KVCacheEventPublisherContext makeContext() {
     KVCacheEventPublisherContext context;
     context.instance_group    = "test_group";
@@ -95,6 +148,20 @@ TEST(KVCacheEventPublisherTest, NullPublisherHasNoRuntimeResources) {
     EXPECT_EQ(PublishResult::DISABLED, publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 1, 0}));
     EXPECT_EQ(PublisherState::DISABLED, publisher.status().state);
     publisher.stop();
+}
+
+TEST(KVCacheEventPublisherTest, KVCMPublisherRejectsIncompleteIdentity) {
+    KVCacheEventPublisherConfig config;
+    config.type = "kvcm";
+    auto context = makeContext();
+    context.instance_id.clear();
+    auto reporter = std::make_shared<RecordingReporter>();
+    KVCMPublisher publisher(config, context, [] { return KVCacheSnapshot{}; }, reporter);
+
+    EXPECT_FALSE(publisher.start());
+    EXPECT_EQ(PublisherState::DEGRADED, publisher.status().state);
+    EXPECT_EQ(PublishResult::NOT_RUNNING, publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 1, 0}));
+    EXPECT_TRUE(reporter->requests().empty());
 }
 
 TEST(KVCacheEventPublisherTest, LogPublisherAcceptsEventsAsynchronously) {
@@ -165,6 +232,51 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherRegistersSnapshotsAndReportsDeltas)
     EXPECT_TRUE(saw_add);
     EXPECT_TRUE(saw_delete);
     EXPECT_EQ(3, publisher->status().accepted_count);
+}
+
+TEST(KVCacheEventPublisherTest, KVCMPublisherRecoversFromQueueOverflowWithSnapshot) {
+    KVCacheEventPublisherConfig config;
+    config.type                  = "kvcm";
+    config.queue_capacity        = 1;
+    config.report_batch_size     = 1;
+    config.flush_interval_ms     = 1;
+    config.heartbeat_interval_ms = 60000;
+    config.snapshot_interval_ms  = 60000;
+    config.retry_interval_ms     = 1;
+
+    std::atomic<int64_t> snapshot_version{1};
+    auto                 reporter = std::make_shared<BlockingReporter>();
+    KVCMPublisher publisher(
+        config,
+        makeContext(),
+        [&snapshot_version] {
+            return KVCacheSnapshot{snapshot_version.load(std::memory_order_relaxed), {10, 20, 30, 31}};
+        },
+        reporter);
+
+    ASSERT_TRUE(publisher.start());
+    ASSERT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_SNAPSHOT", 1, std::chrono::seconds(2)));
+
+    reporter->blockNextMutation();
+    ASSERT_EQ(PublishResult::ACCEPTED, publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 30, 0}));
+    if (!reporter->waitUntilMutationBlocked(std::chrono::seconds(2))) {
+        reporter->releaseMutation();
+        publisher.stop();
+        FAIL() << "mutation request did not reach the blocking reporter";
+    }
+
+    ASSERT_EQ(PublishResult::ACCEPTED, publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 31, 0}));
+    const auto overflow_start = std::chrono::steady_clock::now();
+    EXPECT_EQ(PublishResult::QUEUE_FULL, publisher.tryPublish({KVCacheEventType::BLOCK_DELETE, 10, 0}));
+    const auto overflow_cost = std::chrono::steady_clock::now() - overflow_start;
+    EXPECT_LT(overflow_cost, std::chrono::milliseconds(50));
+    EXPECT_EQ(1, publisher.status().dropped_count);
+
+    snapshot_version.store(2, std::memory_order_relaxed);
+    reporter->releaseMutation();
+    ASSERT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_SNAPSHOT", 2, std::chrono::seconds(2)));
+    publisher.stop();
+    EXPECT_EQ(PublisherState::STOPPED, publisher.status().state);
 }
 
 }  // namespace
