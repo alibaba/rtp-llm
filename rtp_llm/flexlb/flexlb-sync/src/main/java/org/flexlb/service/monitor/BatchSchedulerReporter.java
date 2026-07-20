@@ -23,12 +23,14 @@ import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
+import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS;
 import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_KV_RESERVED_TOKENS;
 import static org.flexlb.constant.MetricConstant.DECODE_TOTAL_LOAD;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_TOTAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATCH_REASON;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_BATCH_COUNT;
+import static org.flexlb.constant.MetricConstant.INFLIGHT_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
@@ -88,6 +90,8 @@ public class BatchSchedulerReporter {
         // Decode total load and inflight KV reserved — per decode worker (FlexLB scheduler view)
         monitor.register(DECODE_TOTAL_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(DECODE_INFLIGHT_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(INFLIGHT_MAX_AGE_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         // Prediction accuracy — predicted vs actual engine execution time (timer for distribution)
         monitor.register(BATCH_PREDICTED_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
@@ -103,7 +107,7 @@ public class BatchSchedulerReporter {
         // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
         monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (17 metrics)");
+        log.info("BatchSchedulerReporter initialized (19 metrics)");
     }
 
     // ==================== Queue metrics ====================
@@ -236,6 +240,16 @@ public class BatchSchedulerReporter {
         monitor.report(INFLIGHT_REQUEST_COUNT, tags, count);
     }
 
+    /**
+     * Report the age (ms) of the oldest inflight entry per worker
+     * via {@code flexlb.inflight.max.age.ms}.
+     */
+    public void reportInflightMaxAgeMs(String role, String engineIp, String engineIpPort, long ageMs) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+                "role", role);
+        monitor.report(INFLIGHT_MAX_AGE_MS, tags, ageMs);
+    }
+
     // ==================== Decode inflight metrics ====================
 
     /**
@@ -256,6 +270,16 @@ public class BatchSchedulerReporter {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
                 "role", RoleType.DECODE.name());
         monitor.report(DECODE_INFLIGHT_KV_RESERVED_TOKENS, tags, kvReservedTokens);
+    }
+
+    /**
+     * Report per-decode-worker hard KV cache reserved tokens (hard reservation that cannot be reclaimed)
+     * via {@code flexlb.decode.inflight.hard.kv.reserved.tokens}.
+     */
+    public void reportDecodeInflightHardKvReserved(String engineIp, String engineIpPort, long kvReservedTokens) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+                "role", RoleType.DECODE.name());
+        monitor.report(DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS, tags, kvReservedTokens);
     }
 
     // ==================== Prediction accuracy metrics ====================

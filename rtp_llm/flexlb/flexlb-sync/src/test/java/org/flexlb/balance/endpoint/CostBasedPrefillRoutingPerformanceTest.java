@@ -117,6 +117,12 @@ class CostBasedPrefillRoutingPerformanceTest {
         config.setFlexlbBatchEnabled(true);
         config.setCostSloMs(50_000L);
         config.setPrefillQueueSizeThreshold(1_000_000L);
+        // Explicitly enable score-tie randomization so that requests are
+        // distributed across all 750 identical engines via reservoir sampling.
+        // Without this the default (false) would deterministically route every
+        // request to the same engine, degrading the test into a single-engine
+        // hot path and losing coverage of the distributed-routing code path.
+        config.setScoreTieRandomEnabled(true);
 
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(config);
@@ -220,6 +226,10 @@ class CostBasedPrefillRoutingPerformanceTest {
         FlexlbConfig config = new FlexlbConfig();
         config.setFlexlbBatchEnabled(true);
         config.setCostSloMs(50_000L);
+        // The strategy reads scoreTieRandomEnabled from BalanceContext.config.
+        // Enable it here so select() performs reservoir sampling across the
+        // 750 identical engines instead of deterministically hitting one.
+        config.setScoreTieRandomEnabled(true);
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(1_024L);

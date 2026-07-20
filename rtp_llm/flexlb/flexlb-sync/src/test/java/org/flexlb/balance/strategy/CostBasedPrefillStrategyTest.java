@@ -26,8 +26,10 @@ import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -107,7 +109,7 @@ class CostBasedPrefillStrategyTest {
     }
 
     @Test
-    void scoreTieRandomDisabledWithExactTieStillSelects() {
+    void scoreTieRandomDisabledWithExactTieSelectsDeterministically() {
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
@@ -117,9 +119,55 @@ class CostBasedPrefillStrategyTest {
         config.setCostSloRiskMarginMs(50L);
         config.setScoreTieRandomEnabled(false);
 
-        ServerStatus result = strategy.select(buildContext(1000, 12L, config), RoleType.PREFILL, null);
+        // With randomization disabled, exact-tie candidates are deterministically
+        // selected (first minimum-score candidate). Repeated calls must return
+        // the same worker rather than randomly alternating.
+        ServerStatus first = strategy.select(buildContext(1000, 12L, config), RoleType.PREFILL, null);
+        assertTrue(first.isSuccess());
+        String selectedIp = first.getServerIp();
+        assertTrue(selectedIp.equals("10.0.0.1") || selectedIp.equals("10.0.0.2"),
+                "selected worker should be one of the tied candidates");
 
-        assertTrue(result.isSuccess());
+        for (long rid = 13; rid <= 22; rid++) {
+            ServerStatus result = strategy.select(buildContext(1000, rid, config), RoleType.PREFILL, null);
+            assertTrue(result.isSuccess());
+            assertEquals(selectedIp, result.getServerIp(),
+                    "deterministic selection must return the same worker on repeated calls");
+        }
+    }
+
+    @Test
+    void scoreTieRandomDisabledByDefault() {
+        FlexlbConfig config = new FlexlbConfig();
+        assertFalse(config.isScoreTieRandomEnabled());
+    }
+
+    @Test
+    void scoreTieRandomEnabledDistributesAcrossThresholdCandidates() {
+        Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 50));
+        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 55));
+        prefillMap.put("10.0.0.3:8080", createWorker("10.0.0.3", 60));
+
+        FlexlbConfig config = new FlexlbConfig();
+        config.setCostSloMs(50000L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setScoreTieRandomEnabled(true);
+
+        // With randomization enabled, near-tie candidates within the threshold
+        // (default max(minScore * 0.1, 20ms) = 20ms) are randomly selected via
+        // reservoir sampling. The 10ms score spread (50/55/60) is well within
+        // the 20ms absolute threshold, so all three workers are eligible.
+        // Repeated calls should distribute across more than one worker rather
+        // than deterministically selecting the single lowest-score worker.
+        Set<String> selectedIps = new HashSet<>();
+        for (long rid = 100L; rid < 200L; rid++) {
+            ServerStatus result = strategy.select(buildContext(1000, rid, config), RoleType.PREFILL, null);
+            assertTrue(result.isSuccess());
+            selectedIps.add(result.getServerIp());
+        }
+        assertTrue(selectedIps.size() >= 2,
+                "reservoir sampling should distribute across multiple candidates, got: " + selectedIps);
     }
 
     @Test

@@ -60,4 +60,15 @@ public class InflightEvictor<K, V extends InflightEvictor.TtlTracked> {
         }
         return count;
     }
+
+    /**
+     * Compute the age (ms) of the oldest entry in the map, or 0 if empty.
+     */
+    public static <K, V extends TtlTracked> long maxAgeMs(Map<K, V> map, long nowMs) {
+        long oldest = Long.MAX_VALUE;
+        for (V v : map.values()) {
+            oldest = Math.min(oldest, v.createdAtMs());
+        }
+        return oldest == Long.MAX_VALUE ? 0 : Math.max(0, nowMs - oldest);
+    }
 }

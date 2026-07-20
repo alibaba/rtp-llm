@@ -273,7 +273,7 @@ public class MicrometerFlexMonitor implements FlexMonitor {
                     if (timer == null) {
                         timer = Timer.builder(key.name())
                                 .tags(resolveTags(key.metricsTags()))
-                                .publishPercentileHistogram(true)
+                                .publishPercentileHistogram(false)
                                 .publishPercentiles(0.5, 0.9, 0.95, 0.99)
                                 .register(meterRegistry);
                         timerCache.put(key, timer);

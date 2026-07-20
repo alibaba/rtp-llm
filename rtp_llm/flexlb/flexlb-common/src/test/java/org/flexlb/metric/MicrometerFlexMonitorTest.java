@@ -250,6 +250,35 @@ class MicrometerFlexMonitorTest {
         }
     }
 
+    @Test
+    void timerDoesNotPublishHistogramBuckets() {
+        // Histogram buckets are hardcoded to false; only quantile gauges should be published.
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        MicrometerFlexMonitor monitor = new MicrometerFlexMonitor(registry);
+        try {
+            monitor.register("test.timer", FlexMetricType.TIMER);
+            monitor.report("test.timer", null, 5.0);
+
+            // Timer is registered and records the value
+            Timer timer = registry.find("flexlb.test.timer").timer();
+            assertNotNull(timer, "Timer should be registered");
+            assertEquals(1L, timer.count());
+
+            // Quantile gauges should still be present
+            assertNotNull(registry.find("flexlb.test.timer.percentile").tag("phi", "0.5").gauge(),
+                    "P50 percentile gauge should exist");
+            assertNotNull(registry.find("flexlb.test.timer.percentile").tag("phi", "0.99").gauge(),
+                    "P99 percentile gauge should exist");
+
+            // Histogram bucket gauges should NOT be present
+            assertNull(registry.find("flexlb.test.timer.histogram").gauge(),
+                    "Histogram bucket gauges should not exist");
+        } finally {
+            monitor.close();
+            registry.close();
+        }
+    }
+
     private static FlexMetricTags endpointTags(String ipPort) {
         return FlexMetricTags.ofEngine("127.0.0.1", ipPort, "role", "PREFILL");
     }

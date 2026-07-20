@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
+import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
@@ -136,6 +137,7 @@ public final class JavaMockEngineCluster {
                     .bossEventLoopGroup(bossGroup)
                     .workerEventLoopGroup(workerGroup)
                     .channelType(NioServerSocketChannel.class)
+                    .withChildOption(ChannelOption.SO_REUSEADDR, true)
                     .directExecutor()
                     .maxInboundMessageSize(16 * 1024 * 1024)
                     .addService(service)

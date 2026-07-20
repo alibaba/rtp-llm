@@ -119,6 +119,9 @@ export NETTY_WORKER_THREAD_MULTIPLIER="${NETTY_WORKER_THREAD_MULTIPLIER:-1}"
 export FLEXLB_GRPC_EXECUTOR_CORE_SIZE="${FLEXLB_GRPC_EXECUTOR_CORE_SIZE:-128}"
 export FLEXLB_GRPC_EXECUTOR_MAX_SIZE="${FLEXLB_GRPC_EXECUTOR_MAX_SIZE:-128}"
 export FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE="${FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE:-50000}"
+export FORWARDER_EXECUTOR_CORE_SIZE="${FORWARDER_EXECUTOR_CORE_SIZE:-16}"
+export FORWARDER_EXECUTOR_MAX_SIZE="${FORWARDER_EXECUTOR_MAX_SIZE:-16}"
+export FORWARDER_EXECUTOR_QUEUE_SIZE="${FORWARDER_EXECUTOR_QUEUE_SIZE:-2000}"
 export SCHEDULE_WORKER_SIZE="${SCHEDULE_WORKER_SIZE:-16}"
 
 MOCK_PID=""
@@ -234,6 +237,7 @@ try:
     for raw_port in sys.argv[1:]:
         port = int(raw_port)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind(("0.0.0.0", port))
         except OSError as exc:
@@ -504,6 +508,9 @@ OVERRIDE_ENV_KEYS=(
   FLEXLB_JVM_HEAP_SIZE
   FLEXLB_MONITOR_ENABLED
   FLEXLB_MONITOR_MODE
+  FORWARDER_EXECUTOR_CORE_SIZE
+  FORWARDER_EXECUTOR_MAX_SIZE
+  FORWARDER_EXECUTOR_QUEUE_SIZE
   GRADIENT
   GRADIENT_MAX_SPEED
   GRADIENT_START_SPEED
@@ -704,20 +711,9 @@ shards = [
 ]
 server = json.loads((output_dir / "server_latency.json").read_text())
 
-rpc_start_ms = []
-send_due_ms = []
-pacing_lag_ms = []
-for index in range(worker_count):
-    request_path = output_dir / f"shard_{index}" / "per_request.jsonl"
-    with request_path.open("r", encoding="utf-8") as stream:
-        for line in stream:
-            record = json.loads(line)
-            start_ms = float(record.get("send_start_epoch_ms", 0.0) or 0.0)
-            if start_ms <= 0:
-                continue
-            rpc_start_ms.append(start_ms)
-            send_due_ms.append(float(record.get("send_due_epoch_ms", 0.0) or 0.0))
-            pacing_lag_ms.append(float(record.get("pacing_lag_ms", 0.0) or 0.0))
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
 
 def percentile(values, quantile):
     if not values:
@@ -748,12 +744,268 @@ def peak_qps(values, window_ms):
     buckets = collections.Counter(int(value // window_ms) for value in values)
     return round(max(buckets.values(), default=0) * 1000.0 / window_ms, 3)
 
+def merge_dict_sum(dicts):
+    """Merge a list of dicts by summing integer/float values."""
+    result = {}
+    for d in dicts:
+        if not isinstance(d, dict):
+            continue
+        for key, value in d.items():
+            if isinstance(value, (int, float)):
+                result[key] = result.get(key, 0) + value
+            else:
+                result[key] = value
+    return result
+
+def count_by(values):
+    """Count occurrences of each value in a list."""
+    counts = {}
+    for v in values:
+        key = str(v) if v is not None else ""
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+def load_balance_summary(assignments):
+    """Compute load-balance stats (counts, stddev, max_over_avg) from addresses."""
+    counts = collections.Counter(x for x in assignments if x)
+    if not counts:
+        return {"counts": {}, "stddev": 0.0, "max_over_avg": 0.0}
+    vals = list(counts.values())
+    avg = sum(vals) / len(vals)
+    stddev_val = round(
+        math.sqrt(sum((x - avg) ** 2 for x in vals) / len(vals)), 3
+    )
+    return {
+        "counts": dict(counts),
+        "stddev": stddev_val,
+        "max_over_avg": round(max(vals) / avg, 3) if avg else 0.0,
+    }
+
+def _balance_from_counts(counts_dict):
+    """Build a load_balance_summary from a pre-merged counts dict."""
+    if not counts_dict:
+        return {"counts": {}, "stddev": 0.0, "max_over_avg": 0.0}
+    vals = list(counts_dict.values())
+    avg = sum(vals) / len(vals)
+    stddev_val = round(
+        math.sqrt(sum((x - avg) ** 2 for x in vals) / len(vals)), 3
+    )
+    return {
+        "counts": dict(counts_dict),
+        "stddev": stddev_val,
+        "max_over_avg": round(max(vals) / avg, 3) if avg else 0.0,
+    }
+
+def merge_percentile_fallback(shard_list, field_name):
+    """Approximate merged percentile object from shard summaries.
+
+    Uses count-weighted average for mean/p50/p90/p95 and max for p99/max
+    (conservative).  Only called when per_request.jsonl is unavailable.
+    """
+    parts = []
+    for shard in shard_list:
+        d = shard.get(field_name, {})
+        if isinstance(d, dict) and d.get("count", 0):
+            parts.append(d)
+    if not parts:
+        return {"count": 0, "mean": 0.0, "p50": 0.0, "p90": 0.0,
+                "p95": 0.0, "p99": 0.0, "max": 0.0}
+    total = sum(p["count"] for p in parts)
+    if total == 0:
+        return {"count": 0, "mean": 0.0, "p50": 0.0, "p90": 0.0,
+                "p95": 0.0, "p99": 0.0, "max": 0.0}
+    return {
+        "count": total,
+        "mean": round(sum(p["mean"] * p["count"] for p in parts) / total, 3),
+        "p50": round(sum(p["p50"] * p["count"] for p in parts) / total, 3),
+        "p90": round(sum(p["p90"] * p["count"] for p in parts) / total, 3),
+        "p95": round(sum(p["p95"] * p["count"] for p in parts) / total, 3),
+        "p99": round(max(p["p99"] for p in parts), 3),
+        "max": round(max(p["max"] for p in parts), 3),
+    }
+
+# ---------------------------------------------------------------------------
+# Collect per-request data from all shards (preferred method for latencies)
+# ---------------------------------------------------------------------------
+
+has_per_request = all(
+    (output_dir / f"shard_{index}" / "per_request.jsonl").exists()
+    for index in range(worker_count)
+)
+
+rpc_start_ms = []
+send_due_ms = []
+pacing_lag_ms = []
+ttft_values = []
+total_values = []
+all_total_values = []
+error_total_values = []
+schedule_values = []
+error_schedule_values = []
+prefill_addrs = []
+decode_addrs = []
+status_list = []
+route_path_list = []
+error_type_list = []
+
+if has_per_request:
+    for index in range(worker_count):
+        request_path = output_dir / f"shard_{index}" / "per_request.jsonl"
+        with request_path.open("r", encoding="utf-8") as stream:
+            for line in stream:
+                record = json.loads(line)
+                start_ms = float(record.get("send_start_epoch_ms", 0.0) or 0.0)
+                if start_ms > 0:
+                    rpc_start_ms.append(start_ms)
+                    send_due_ms.append(
+                        float(record.get("send_due_epoch_ms", 0.0) or 0.0)
+                    )
+                    pacing_lag_ms.append(
+                        float(record.get("pacing_lag_ms", 0.0) or 0.0)
+                    )
+
+                status = record.get("status", "unknown")
+                status_list.append(status)
+                route_path_list.append(record.get("route_path", ""))
+
+                ttft = float(record.get("ttft_ms", 0.0) or 0.0)
+                total = float(record.get("total_ms", 0.0) or 0.0)
+                sched = float(record.get("schedule_ms", 0.0) or 0.0)
+                is_error = status not in ("ok", "scheduled")
+
+                if status == "ok":
+                    if ttft > 0:
+                        ttft_values.append(ttft)
+                    if total > 0:
+                        total_values.append(total)
+
+                if total > 0:
+                    all_total_values.append(total)
+                    if is_error:
+                        error_total_values.append(total)
+
+                if sched > 0:
+                    schedule_values.append(sched)
+                    if is_error:
+                        error_schedule_values.append(sched)
+
+                p = record.get("prefill", "")
+                if p:
+                    prefill_addrs.append(p)
+                d = record.get("decode", "")
+                if d:
+                    decode_addrs.append(d)
+
+                if is_error:
+                    et = record.get("error_type", "")
+                    if not et:
+                        et = record.get("error", "")
+                    if et:
+                        error_type_list.append(str(et))
+
+# ---------------------------------------------------------------------------
+# Aggregate counts from shard summaries
+# ---------------------------------------------------------------------------
+
 actual_rpc_start_count = sum(item.get("actual_sent_count", 0) for item in shards)
-recorded_result_count = sum(item.get("recorded_result_count", item.get("total_requests", 0)) for item in shards)
+recorded_result_count = sum(
+    item.get("recorded_result_count", item.get("total_requests", 0))
+    for item in shards
+)
 sent_task_count = sum(item.get("sent_count", 0) for item in shards)
-pacing = distribution(pacing_lag_ms)
 success_count = sum(item.get("success_count", 0) for item in shards)
 error_count = sum(item.get("error_count", 0) for item in shards)
+cancelled_count = sum(item.get("cancelled_count", 0) for item in shards)
+sla_violations = sum(item.get("sla_violations", 0) for item in shards)
+send_duration_s = max(
+    (item.get("send_duration_s", 0.0) or 0.0) for item in shards
+) if shards else 0.0
+elapsed_s = max(
+    (item.get("elapsed_s", 0.0) or 0.0) for item in shards
+) if shards else 0.0
+
+# QPS fields: sum across shards (they run in parallel)
+send_qps = sum(item.get("send_qps", 0.0) or 0.0 for item in shards)
+offered_qps = sum(item.get("offered_qps", 0.0) or 0.0 for item in shards)
+success_qps = sum(item.get("success_qps", 0.0) or 0.0 for item in shards)
+completed_qps = sum(item.get("completed_qps", 0.0) or 0.0 for item in shards)
+error_qps = sum(item.get("error_qps", 0.0) or 0.0 for item in shards)
+client_recv_qps = sum(item.get("client_recv_qps", 0.0) or 0.0 for item in shards)
+client_success_qps = sum(
+    item.get("client_success_qps", 0.0) or 0.0 for item in shards
+)
+
+# Latency distributions
+pacing = distribution(pacing_lag_ms)
+
+if has_per_request:
+    ttft_dist = distribution(ttft_values)
+    total_dist = distribution(total_values)
+    all_latency_dist = distribution(all_total_values)
+    error_latency_dist = distribution(error_total_values)
+    error_schedule_dist = distribution(error_schedule_values)
+    client_schedule_dist = distribution(schedule_values)
+    status_counts = count_by(status_list)
+    route_path_counts = count_by(route_path_list)
+    error_type_counts = count_by(error_type_list)
+    prefill_balance = load_balance_summary(prefill_addrs)
+    decode_balance = load_balance_summary(decode_addrs)
+    scheduled_count = (
+        status_counts.get("ok", 0) + status_counts.get("scheduled", 0)
+    )
+    completed_count = status_counts.get("ok", 0)
+else:
+    # Fallback: approximate from shard summaries
+    ttft_dist = merge_percentile_fallback(shards, "ttft_ms")
+    total_dist = merge_percentile_fallback(shards, "total_ms")
+    all_latency_dist = merge_percentile_fallback(shards, "all_latency_ms")
+    error_latency_dist = merge_percentile_fallback(shards, "error_latency_ms")
+    error_schedule_dist = merge_percentile_fallback(
+        shards, "error_schedule_latency_ms"
+    )
+    client_schedule_dist = merge_percentile_fallback(
+        shards, "client_schedule_latency_ms"
+    )
+    status_counts = merge_dict_sum(
+        item.get("status_counts", {}) for item in shards
+    )
+    route_path_counts = merge_dict_sum(
+        item.get("route_path_counts", {}) for item in shards
+    )
+    error_type_counts = merge_dict_sum(
+        item.get("error_type_counts", {}) for item in shards
+    )
+    prefill_counts = merge_dict_sum(
+        item.get("prefill_balance", {}).get("counts", {}) for item in shards
+    )
+    decode_counts = merge_dict_sum(
+        item.get("decode_balance", {}).get("counts", {}) for item in shards
+    )
+    prefill_balance = _balance_from_counts(prefill_counts)
+    decode_balance = _balance_from_counts(decode_counts)
+    scheduled_count = sum(item.get("scheduled", 0) for item in shards)
+    completed_count = sum(item.get("completed", 0) for item in shards)
+
+errors_count = recorded_result_count - scheduled_count
+
+# SLA
+sla_ttft_ms = shards[0].get("sla_ttft_ms", 500.0) if shards else 500.0
+sla_violation_rate = (
+    round(sla_violations / recorded_result_count, 6)
+    if recorded_result_count else 0.0
+)
+
+# Server latency
+server_schedule_summary = server.get("server_total_ms", {})
+
+# Config fields from first shard (all shards share the same config)
+trace_file = shards[0].get("trace", "") if shards else ""
+max_concurrency_total = sum(
+    item.get("max_concurrency", 0) for item in shards
+)
+n_channels = shards[0].get("n_channels", 0) if shards else 0
+
+# Validity checks (unchanged logic)
 validity_checks = {
     "zero_errors": error_count == 0,
     "all_scheduled_tasks_started": sent_task_count == actual_rpc_start_count,
@@ -762,33 +1014,88 @@ validity_checks = {
     "master_completion_matches_success": server.get("completion_count", 0) == success_count,
     "client_pacing_p99_within_limit": pacing["p99"] <= pacing_limit_ms,
 }
+
+peak_qps_rpc = {
+    f"{window_ms}ms": peak_qps(rpc_start_ms, window_ms)
+    for window_ms in (1, 10, 100, 1000)
+}
+peak_qps_due = {
+    f"{window_ms}ms": peak_qps(send_due_ms, window_ms)
+    for window_ms in (1, 10, 100, 1000)
+}
+
 summary = {
+    # Multi-worker specific
     "load_client_workers": worker_count,
+    "shard_summaries": [
+        f"shard_{index}/summary.json" for index in range(worker_count)
+    ],
+    # Config (same as single-worker)
+    "trace": trace_file,
+    "max_concurrency": max_concurrency_total,
+    "n_channels": n_channels,
+    "sla_ttft_ms": sla_ttft_ms,
+    "elapsed_s": round(elapsed_s, 3),
+    # Count fields (matching single-worker names + keeping legacy names)
+    "sent_count": sent_task_count,
+    "actual_sent_count": actual_rpc_start_count,
     "sent_task_count": sent_task_count,
     "actual_rpc_start_count": actual_rpc_start_count,
     "recorded_result_count": recorded_result_count,
     "total_requests": recorded_result_count,
     "success_count": success_count,
     "error_count": error_count,
+    "cancelled_count": cancelled_count,
+    "scheduled": scheduled_count,
+    "completed": completed_count,
+    "errors": errors_count,
+    # Duration
+    "send_duration_s": round(send_duration_s, 3),
+    # QPS fields (summed across shards)
+    "send_qps": round(send_qps, 3),
+    "offered_qps": round(offered_qps, 3),
+    "success_qps": round(success_qps, 3),
+    "completed_qps": round(completed_qps, 3),
+    "error_qps": round(error_qps, 3),
+    "client_recv_qps": round(client_recv_qps, 3),
+    "client_success_qps": round(client_success_qps, 3),
     "actual_send_qps": rate(rpc_start_ms),
+    # Pacing (single-worker name + legacy multi-worker name)
+    "pacing_lag_ms": pacing,
     "client_pacing_lag_ms": pacing,
-    "client_send_peak_qps": {
-        f"{window_ms}ms": peak_qps(rpc_start_ms, window_ms)
-        for window_ms in (1, 10, 100, 1000)
-    },
-    "trace_due_peak_qps": {
-        f"{window_ms}ms": peak_qps(send_due_ms, window_ms)
-        for window_ms in (1, 10, 100, 1000)
-    },
+    # Peak QPS (single-worker name + legacy multi-worker name)
+    "send_peak_qps": peak_qps_rpc,
+    "client_send_peak_qps": peak_qps_rpc,
+    "trace_due_peak_qps": peak_qps_due,
+    # Server metrics
     "server_arrival_qps": server.get("arrival_qps", 0.0),
     "server_completion_qps": server.get("completion_qps", 0.0),
+    # SLA
+    "sla_violations": sla_violations,
+    "sla_violation_rate": sla_violation_rate,
+    # Latency distributions
     "schedule_latency_source": "server",
     "schedule_latency_ms": server.get("server_total_ms", {}),
+    "server_schedule_latency_ms": server_schedule_summary,
     "server_stage_latency_ms": {
         key: server.get(key, {})
-        for key in ("grpc_queue_ms", "route_submit_ms", "batch_wait_ms", "dispatch_ack_ms", "ack_response_ms")
+        for key in ("grpc_queue_ms", "route_submit_ms", "batch_wait_ms",
+                     "dispatch_ack_ms", "ack_response_ms")
     },
-    "shard_summaries": [f"shard_{index}/summary.json" for index in range(worker_count)],
+    "client_schedule_latency_ms": client_schedule_dist,
+    "ttft_ms": ttft_dist,
+    "total_ms": total_dist,
+    "all_latency_ms": all_latency_dist,
+    "error_latency_ms": error_latency_dist,
+    "error_schedule_latency_ms": error_schedule_dist,
+    # Load balance
+    "prefill_balance": prefill_balance,
+    "decode_balance": decode_balance,
+    # Count dicts
+    "status_counts": status_counts,
+    "route_path_counts": route_path_counts,
+    "error_type_counts": error_type_counts,
+    # Validity
     "validity_checks": validity_checks,
     "test_valid": all(validity_checks.values()),
 }
@@ -799,14 +1106,25 @@ summary["error_rate"] = round(
 (output_dir / "report.md").write_text(
     "# FlexLB multi-client performance\n\n"
     f"- Load client workers: {worker_count}\n"
+    f"- Send QPS: {summary['send_qps']}\n"
+    f"- Offered QPS: {summary['offered_qps']}\n"
+    f"- Success QPS: {summary['success_qps']}\n"
+    f"- Error QPS: {summary['error_qps']}\n"
     f"- Actual send QPS: {summary['actual_send_qps']}\n"
     f"- Client pacing P99 (ms): {summary['client_pacing_lag_ms']['p99']}\n"
     f"- Server arrival QPS: {summary['server_arrival_qps']}\n"
     f"- Server completion QPS: {summary['server_completion_qps']}\n"
     f"- Total requests: {summary['total_requests']}\n"
+    f"- Success count: {summary['success_count']}\n"
     f"- Error count: {summary['error_count']}\n"
+    f"- Cancelled count: {summary['cancelled_count']}\n"
     f"- Error rate: {summary['error_rate']}\n"
-    f"- Test valid: {summary['test_valid']} ({json.dumps(summary['validity_checks'])})\n"
+    f"- SLA violations: {summary['sla_violations']} "
+    f"(rate: {summary['sla_violation_rate']})\n"
+    f"- TTFT (ms): {json.dumps(summary['ttft_ms'])}\n"
+    f"- Total latency (ms): {json.dumps(summary['total_ms'])}\n"
+    f"- Test valid: {summary['test_valid']} "
+    f"({json.dumps(summary['validity_checks'])})\n"
     f"- Server latency: {json.dumps(summary['schedule_latency_ms'])}\n"
 )
 print(json.dumps(summary, indent=2))

@@ -415,12 +415,13 @@ public class FlexlbConfig {
 
     /**
      * Whether to enable score-tie randomization among near-equal prefill candidates.
-     * When enabled (default), endpoints within a threshold of the minimum score are
-     * randomly selected to avoid deterministic routing bias.
-     * When disabled, only endpoints with exactly the minimum score are considered.
+     * When enabled, endpoints within a threshold of the minimum score are
+     * randomly selected (via reservoir sampling) to avoid deterministic routing bias.
+     * When disabled (default), the first endpoint with the exact minimum score is
+     * deterministically selected without any randomization.
      * Environment variable: SCORE_TIE_RANDOM_ENABLED.
      */
-    private boolean scoreTieRandomEnabled = true;
+    private boolean scoreTieRandomEnabled = false;
 
     /**
      * Percentage threshold for score-tie randomization.
@@ -547,6 +548,46 @@ public class FlexlbConfig {
     // ========== gRPC Configuration ==========
 
     private long prefillLbTimeoutMs = 5000;
+
+    // ========== gRPC Server Executor Configuration ==========
+
+    /**
+     * gRPC server executor core pool size.
+     * Environment variable: FLEXLB_GRPC_EXECUTOR_CORE_SIZE
+     */
+    private int flexlbGrpcExecutorCoreSize = 1000;
+
+    /**
+     * gRPC server executor max pool size.
+     * Environment variable: FLEXLB_GRPC_EXECUTOR_MAX_SIZE
+     */
+    private int flexlbGrpcExecutorMaxSize = 1000;
+
+    /**
+     * gRPC server executor queue size.
+     * Environment variable: FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE
+     */
+    private int flexlbGrpcExecutorQueueSize = 10000;
+
+    // ========== Forwarder Channel Executor Configuration ==========
+
+    /**
+     * Forwarder channel executor core pool size (for FlexlbGrpcForwarder).
+     * Environment variable: FORWARDER_EXECUTOR_CORE_SIZE
+     */
+    private int forwarderExecutorCoreSize = 16;
+
+    /**
+     * Forwarder channel executor max pool size.
+     * Environment variable: FORWARDER_EXECUTOR_MAX_SIZE
+     */
+    private int forwarderExecutorMaxSize = 16;
+
+    /**
+     * Forwarder channel executor queue size.
+     * Environment variable: FORWARDER_EXECUTOR_QUEUE_SIZE
+     */
+    private int forwarderExecutorQueueSize = 2000;
 
     // ========== Decode Load Balance Hard Filter Configuration ==========
 
