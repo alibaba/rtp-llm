@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 import torch
 import torch.nn as nn
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.layers.embedding import ParallelLMHead, VocabParallelEmbedding
 from rtp_llm.models_py.layers.linear import ColumnParallelLinear
 from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
@@ -43,7 +44,7 @@ class Qwen3MoeBlock(RtpModule):
         ffn_tp_rank: int,
         ep_size: int,
         ep_rank: int,
-        model_config: Any,
+        model_config: ModelConfig,
         parallelism_config: Any,
         moe_config: Any,
         quant_config: Optional[QuantizationConfig],
@@ -62,6 +63,12 @@ class Qwen3MoeBlock(RtpModule):
             bias=False,
             params_dtype=params_dtype,
         )
+        if model_config.expert_num != num_experts or model_config.moe_k != top_k:
+            raise ValueError(
+                "Qwen3 MoE router dimensions disagree with ModelConfig: "
+                f"experts={model_config.expert_num}/{num_experts}, "
+                f"top_k={model_config.moe_k}/{top_k}"
+            )
         self.select_topk = SelectTopk(config=model_config)
         fake_balance_expert = getattr(moe_config, "fake_balance_expert", False)
         if not isinstance(fake_balance_expert, bool):
@@ -138,7 +145,7 @@ class Qwen3MoeDecoderLayer(RtpModule):
         ffn_tp_rank: int,
         ep_size: int,
         ep_rank: int,
-        model_config: Any,
+        model_config: ModelConfig,
         parallelism_config: Any,
         moe_config: Any,
         quant_config: Optional[QuantizationConfig],
@@ -202,20 +209,13 @@ def _model_value(model_config: Any, *names: str):
     return required_config_value(model_config, *names)
 
 
-def _extract_moe_config_values(model_config: Any, load_config: Any):
+def _extract_moe_config_values(model_config: ModelConfig, load_config: Any):
     values = _extract_config_values(
         model_config, load_config, validate_intermediate_size=False
     )
-    if isinstance(model_config, dict):
-        num_experts = _model_value(model_config, "num_experts")
-        top_k = _model_value(model_config, "num_experts_per_tok")
-        moe_intermediate_size = _model_value(model_config, "moe_intermediate_size")
-    else:
-        num_experts = _model_value(model_config, "expert_num", "num_experts")
-        top_k = _model_value(model_config, "moe_k", "num_experts_per_tok")
-        moe_intermediate_size = _model_value(
-            model_config, "moe_inter_size", "moe_intermediate_size"
-        )
+    num_experts = _model_value(model_config, "expert_num")
+    top_k = _model_value(model_config, "moe_k")
+    moe_intermediate_size = _model_value(model_config, "moe_inter_size")
     num_experts = _positive_int(num_experts, "num_experts")
     top_k = _positive_int(top_k, "top_k")
     moe_intermediate_size = _positive_int(
@@ -247,16 +247,8 @@ def _extract_moe_config_values(model_config: Any, load_config: Any):
         or not 0 <= dp_rank < dp_size
     ):
         raise ValueError(f"Invalid DP partition: rank={dp_rank}, size={dp_size}")
-    eplb_config = (
-        model_config.get("eplb_config")
-        if isinstance(model_config, dict)
-        else getattr(model_config, "eplb_config", None)
-    )
-    enable_eplb = (
-        eplb_config.get("enable_eplb", False)
-        if isinstance(eplb_config, dict)
-        else getattr(eplb_config, "enable_eplb", False)
-    )
+    eplb_config = getattr(model_config, "eplb_config", None)
+    enable_eplb = getattr(eplb_config, "enable_eplb", False)
     if callable(enable_eplb):
         enable_eplb = enable_eplb()
     if not isinstance(enable_eplb, bool):
@@ -308,7 +300,12 @@ class Qwen3MoeForCausalLM(GptModelBase):
                 self.lm_head.weight.copy_(processed)
         self._lm_head_postprocessed = True
 
-    def __init__(self, model_config: Any, load_config: Any):
+    def __init__(self, model_config: ModelConfig, load_config: Any):
+        if not isinstance(model_config, ModelConfig):
+            raise TypeError(
+                "Qwen3 MoE newloader requires a typed ModelConfig; normalize "
+                "raw Hugging Face config.json data at the BaseModel boundary"
+            )
         parallelism_config = required_config_value(load_config, "parallelism_config")
         _validate_supported_parallelism(parallelism_config)
         super().__init__(
@@ -320,26 +317,14 @@ class Qwen3MoeForCausalLM(GptModelBase):
             device_resource_config=getattr(load_config, "device_resource_config", None),
         )
         cfg = _extract_moe_config_values(model_config, load_config)
-        tie_word_embeddings = (
-            model_config.get("tie_word_embeddings", False)
-            if isinstance(model_config, dict)
-            else getattr(model_config, "tie_word_embeddings", False)
-        )
+        tie_word_embeddings = getattr(model_config, "tie_word_embeddings", False)
         if not isinstance(tie_word_embeddings, bool):
             raise TypeError("tie_word_embeddings must be a bool")
         self.tie_word_embeddings = tie_word_embeddings
-        normalize = (
-            model_config.get("normalize_lm_head_weight", False)
-            if isinstance(model_config, dict)
-            else getattr(model_config, "normalize_lm_head_weight", False)
-        )
+        normalize = getattr(model_config, "normalize_lm_head_weight", False)
         if not isinstance(normalize, bool):
             raise TypeError("normalize_lm_head_weight must be a bool")
-        raw_scale = (
-            model_config.get("logit_scale", 1.0)
-            if isinstance(model_config, dict)
-            else getattr(model_config, "logit_scale", 1.0)
-        )
+        raw_scale = getattr(model_config, "logit_scale", 1.0)
         if isinstance(raw_scale, bool) or not isinstance(raw_scale, Real):
             raise TypeError("logit_scale must be a finite real number")
         self.logit_scale = float(raw_scale)

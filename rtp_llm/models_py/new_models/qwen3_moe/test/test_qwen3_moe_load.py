@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 import torch
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import QuantizationConfig as SourceQuantizationConfig
 from rtp_llm.models_py import weight_mapper
 from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
@@ -23,6 +24,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 )
 from rtp_llm.models_py.new_models.qwen3_moe.language import Qwen3MoeForCausalLM
 from rtp_llm.models_py.quant_methods import QuantizationConfig
+from rtp_llm.ops import EplbMode
 
 _MODEL_QUANT_UNSET = object()
 
@@ -792,39 +794,27 @@ class MoeRuntimeConfigTest(unittest.TestCase):
 
 
 class Qwen3MoeModelTest(unittest.TestCase):
-    def setUp(self):
-        super().setUp()
-        select_topk = mock.patch(
-            "rtp_llm.models_py.new_models.qwen3_moe.language.SelectTopk",
-            return_value=torch.nn.Identity(),
-        )
-        select_topk.start()
-        self.addCleanup(select_topk.stop)
-
     def _config(self, tie_word_embeddings=True):
-        return types.SimpleNamespace(
-            model_type="qwen_3_moe",
-            num_layers=1,
-            vocab_size=8,
-            hidden_size=4,
-            inter_size=4,
-            expert_num=2,
-            moe_inter_size=4,
-            moe_k=1,
-            moe_topk_group=1,
-            attn_config=types.SimpleNamespace(
-                head_num=2,
-                kv_head_num=1,
-                size_per_head=2,
-            ),
-            layernorm_eps=1e-6,
-            enable_fp32_lm_head=False,
-            tie_word_embeddings=tie_word_embeddings,
-            data_type="fp32",
-            quant_config=None,
-            activation_type="SiGLU",
-            exported_device=None,
-        )
+        config = ModelConfig()
+        config.model_type = "qwen_3_moe"
+        config.num_layers = 1
+        config.vocab_size = 8
+        config.hidden_size = 4
+        config.inter_size = 4
+        config.expert_num = 2
+        config.moe_inter_size = 4
+        config.moe_k = 1
+        config.moe_topk_group = 1
+        config.attn_config.head_num = 2
+        config.attn_config.kv_head_num = 1
+        config.attn_config.size_per_head = 2
+        config.layernorm_eps = 1e-6
+        config.enable_fp32_lm_head = False
+        config.tie_word_embeddings = tie_word_embeddings
+        config.data_type = "fp32"
+        config.quant_config = None
+        config.activation_type = "SiGLU"
+        return config
 
     def _load_config(self, tp_size=1, tp_rank=0, ep_size=1, ep_rank=0):
         parallelism = _parallelism(tp_size, tp_rank, ep_size, ep_rank)
@@ -872,6 +862,39 @@ class Qwen3MoeModelTest(unittest.TestCase):
             {"embedding", "final_layernorm.gamma", "lm_head"},
         )
 
+    def test_hf_dict_is_rejected_before_router_construction(self):
+        config = {
+            "model_type": "qwen_3_moe",
+            "num_hidden_layers": 1,
+            "vocab_size": 8,
+            "hidden_size": 4,
+            "intermediate_size": 0,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 2,
+            "rms_norm_eps": 1e-6,
+            "num_experts": 2,
+            "num_experts_per_tok": 1,
+            "moe_intermediate_size": 4,
+            "norm_topk_prob": True,
+            "tie_word_embeddings": True,
+        }
+
+        with self.assertRaisesRegex(TypeError, "requires a typed ModelConfig"):
+            Qwen3MoeForCausalLM(config, self._load_config())
+
+    def test_real_select_topk_receives_runtime_model_config(self):
+        config = self._config()
+
+        model = Qwen3MoeForCausalLM(config, self._load_config())
+
+        self.assertIs(model.layers[0].mlp.select_topk.config, config)
+
+    def test_router_config_rejects_invalid_normalization_flag(self):
+        config = self._config()
+        with self.assertRaises(TypeError):
+            config.has_moe_norm = "true"
+
     def test_zero_dense_intermediate_size_uses_moe_intermediate_size(self):
         config = self._config()
         config.inter_size = 0
@@ -882,16 +905,9 @@ class Qwen3MoeModelTest(unittest.TestCase):
 
     def test_eplb_attribute_is_rejected_before_model_load(self):
         config = self._config()
-        config.eplb_config = types.SimpleNamespace(enable_eplb=True)
+        config.eplb_config.eplb_mode = EplbMode.EPLB
 
         with self.assertRaisesRegex(ValueError, "EPLB is not supported"):
-            Qwen3MoeForCausalLM(config, self._load_config())
-
-    def test_invalid_eplb_flag_type_is_rejected(self):
-        config = self._config()
-        config.eplb_config = types.SimpleNamespace(enable_eplb="true")
-
-        with self.assertRaisesRegex(TypeError, "enable_eplb must be a bool"):
             Qwen3MoeForCausalLM(config, self._load_config())
 
     def test_invalid_adapter_cuda_graph_flag_is_rejected(self):
