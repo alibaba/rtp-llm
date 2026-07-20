@@ -1947,6 +1947,13 @@ TEST(CpuBroadcasterTest, BroadcastTimeoutRequiresResetBeforeReuse) {
     } catch (const std::exception& e) {
         retry_error = e.what();
     }
+    std::string zero_byte_retry_error;
+    try {
+        int value = 1;
+        bcast.broadcast(&value, 0, 0);
+    } catch (const std::exception& e) {
+        zero_byte_retry_error = e.what();
+    }
 
     release_peer.store(true, std::memory_order_release);
     peer_thread.join();
@@ -1958,6 +1965,8 @@ TEST(CpuBroadcasterTest, BroadcastTimeoutRequiresResetBeforeReuse) {
     // silently select its pre-initialization c10d/NCCL fallback.
     EXPECT_TRUE(bcast.isInitialized());
     EXPECT_NE(retry_error.find("reset and reinitialize before reuse"), std::string::npos) << retry_error;
+    EXPECT_NE(zero_byte_retry_error.find("reset and reinitialize before reuse"), std::string::npos)
+        << zero_byte_retry_error;
     const auto log_content = log_capture.content();
     EXPECT_NE(log_content.find("rank 0 generation 1 entered a terminal failed state"), std::string::npos)
         << log_content;

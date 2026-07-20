@@ -9,6 +9,7 @@ redefined here or in the bridge.
 import multiprocessing as mp
 import os
 import tempfile
+import threading
 import time
 import traceback
 import unittest
@@ -75,6 +76,30 @@ def _run_real_tp_sync(rank: int, phase: str, include_gpu: bool = True) -> None:
     _assert_synced(result, phase, rank, include_gpu)
 
 
+def _run_real_tp_sync_with_gil_progress(rank: int) -> None:
+    """Delay rank 1 and verify rank 0's blocked UDS call releases the GIL."""
+    if rank == 1:
+        time.sleep(0.5)
+        _run_real_tp_sync(rank, "uds-gil-release", include_gpu=False)
+        return
+
+    helper_progress_times = []
+
+    def record_helper_progress() -> None:
+        time.sleep(0.1)
+        helper_progress_times.append(time.monotonic())
+
+    helper = threading.Thread(target=record_helper_progress, name="gil-progress")
+    helper.start()
+    _run_real_tp_sync(rank, "uds-gil-release", include_gpu=False)
+    broadcast_completed_at = time.monotonic()
+    helper.join(timeout=5)
+    if not helper_progress_times:
+        raise AssertionError("Python helper thread did not run during UDS broadcast")
+    if helper_progress_times[0] >= broadcast_completed_at:
+        raise AssertionError("blocked UDS broadcast retained the Python GIL")
+
+
 def _production_boundary_worker(rank: int, nccl_port: int, uds_dir: str) -> None:
     initialized = False
     try:
@@ -102,6 +127,9 @@ def _production_boundary_worker(rank: int, nccl_port: int, uds_dir: str) -> None
         # tpSyncModelInputs then crosses libth_transformer -> librtp_compute_ops.
         if ct._cpu_tp_broadcaster_base_path is None:
             raise AssertionError(f"rank {rank}: production UDS bootstrap was skipped")
+        torch.distributed.barrier()
+        _run_real_tp_sync_with_gil_progress(rank)
+        torch.distributed.barrier()
         # Exercise the default mixed path first: packed CPU metadata uses UDS
         # while the GPU payload remains on the registered c10d/NCCL callback.
         _run_real_tp_sync(rank, "uds-with-gpu")

@@ -750,12 +750,15 @@ void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
         std::lock_guard<std::mutex> lock(mu_);
         RTP_LLM_CHECK_WITH_INFO(initialized_.load(std::memory_order_acquire),
                                 "CpuBroadcaster::broadcast called before initialize");
-        if (world_size_ <= 1 || nbytes == 0) {
+        if (world_size_ <= 1) {
             return;
         }
         RTP_LLM_CHECK_WITH_INFO(!failed_,
                                 "CpuBroadcaster::broadcast called after a failed broadcast; "
                                 "reset and reinitialize before reuse");
+        if (nbytes == 0) {
+            return;
+        }
         RTP_LLM_CHECK_WITH_INFO(root == 0, "CpuBroadcaster supports only root=0 (star topology); got %d", root);
         RTP_LLM_CHECK_WITH_INFO(!broadcast_in_progress_,
                                 "CpuBroadcaster::broadcast does not support concurrent or re-entrant "

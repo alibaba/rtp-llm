@@ -10,6 +10,8 @@ namespace rtp_llm {
 // CpuBroadcaster instance: this function fails fast instead of falling back to
 // c10d/NCCL, because switching collectives independently could diverge TP
 // ranks. Recovery requires a group-wide destroy/re-init or process restart.
+// The blocking UDS call conditionally releases the Python GIL when invoked
+// from a Python-owned thread; native engine threads do not hold the GIL.
 // All ranks must call with identical tensor counts and byte sizes.
 void execBroadcastCpu(const BroadcastParams& params, bool allow_fallback = true);
 
