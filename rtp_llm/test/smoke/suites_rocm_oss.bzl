@@ -90,6 +90,20 @@ def rocm_oss_suites():
                 smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_asm_pa 1 --act_type BF16 --reserver_runtime_mem_mb 51200 --tp_size 2 --world_size 2 --ep_size 1",
                 gpu_type=["MI308X-ROCM7"],
             ),
+            smoke_test(
+                name="rocm_moe_qwen3_30b_newloader_basic",
+                task_info="data/model/qwen3_moe/q_r_30b_amd_py.json",
+                smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_asm_pa 1 --act_type BF16 --reserver_runtime_mem_mb 51200 --tp_size 1 --world_size 1 --ep_size 1",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                gpu_type=["MI308X-ROCM7"],
+            ),
+            smoke_test(
+                name="rocm_moe_qwen3_30b_newloader_tp2",
+                task_info="data/model/qwen3_moe/q_r_30b_amd_py_tp2.json",
+                smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_asm_pa 1 --act_type BF16 --reserver_runtime_mem_mb 51200 --tp_size 2 --world_size 2 --ep_size 1",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                gpu_type=["MI308X-ROCM7"],
+            ),
         ],
     )
 

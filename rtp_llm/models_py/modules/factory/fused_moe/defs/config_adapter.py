@@ -6,8 +6,9 @@ This allows Router and Executor classes to work with specific config objects.
 from typing import Optional
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.ops import MoeConfig, ParallelismConfig
+
+_UNSET_QUANT_CONFIG = object()
 
 
 class MoEConfigAdapter:
@@ -21,13 +22,19 @@ class MoEConfigAdapter:
         model_config: ModelConfig,
         parallelism_config: ParallelismConfig,
         moe_config: Optional[MoeConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config=_UNSET_QUANT_CONFIG,
         enable_cuda_graph: bool = False,
     ):
+        if not isinstance(enable_cuda_graph, bool):
+            raise TypeError("enable_cuda_graph must be a bool")
         self.model_config = model_config
         self.parallelism_config = parallelism_config
-        self.moe_config = moe_config or MoeConfig()
-        self.quant_config = quant_config
+        self.moe_config = moe_config if moe_config is not None else MoeConfig()
+        self.quant_config = (
+            getattr(model_config, "quant_config", None)
+            if quant_config is _UNSET_QUANT_CONFIG
+            else quant_config
+        )
 
         # Provide shortcut access to commonly used attributes
         self.ep_size = parallelism_config.ep_size
@@ -51,11 +58,11 @@ class MoEConfigAdapter:
         self.hidden_size = model_config.hidden_size
         self.data_type = model_config.data_type
         self.head_num = model_config.attn_config.head_num
-        self.ll_num_max_token = moe_config.ll_num_max_token
-        self.masked_max_token_num = moe_config.masked_max_token_num
-        self.moe_strategy = moe_config.moe_strategy
-        self.use_mori_ep = moe_config.use_mori_ep
-        self.use_deepep_moe = moe_config.use_deepep_moe
+        self.ll_num_max_token = self.moe_config.ll_num_max_token
+        self.masked_max_token_num = self.moe_config.masked_max_token_num
+        self.moe_strategy = self.moe_config.moe_strategy
+        self.use_mori_ep = self.moe_config.use_mori_ep
+        self.use_deepep_moe = self.moe_config.use_deepep_moe
         self.enable_cuda_graph = enable_cuda_graph
 
     @property
