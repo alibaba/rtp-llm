@@ -216,11 +216,6 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         int feasibleCount = 0;
         for (int i = 0; i < eligibleSize; i++) {
             PrefillEndpoint ep = eligible.endpoint(i);
-            PrefillTimePredictor predictor = ep.getPredictor();
-            if (predictor == null) {
-                rejections.merge("PREDICTOR_MISSING", 1, Integer::sum);
-                continue;
-            }
 
             long cacheHit = calculateCacheHit(ep, cacheMatchResults, seqLen);
             long prefillMs = ep.estimateBatchPrefillMs(seqLen, cacheHit);

@@ -181,7 +181,6 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
      * Calculate TTFT scores for all eligible endpoints.
      *
      * <p>TTFT = predicted prefill time + estimated queue wait time.
-     * Endpoints without a predictor are skipped.
      *
      * @param endpoints eligible endpoint list
      * @param cacheMatchResults cache match results from {@link CacheAwareService}
@@ -194,10 +193,6 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         List<ScoredEndpoint> result = new ArrayList<>(endpoints.size());
         for (PrefillEndpoint ep : endpoints) {
             PrefillTimePredictor predictor = ep.getPredictor();
-            if (predictor == null) {
-                Logger.debug("ShortestTTFT: skipping endpoint without predictor, ip={}", ep.getIp());
-                continue;
-            }
             long cacheHit = calculateCacheHit(ep, cacheMatchResults, seqLen);
             long prefillMs = predictor.estimateMs(seqLen, cacheHit);
             long queueMs = ep.realWaitTimeMs();
