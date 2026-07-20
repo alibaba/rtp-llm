@@ -244,7 +244,9 @@ class FrontendServer(object):
                 self.server_id,
                 sequence,
             )
-            request_headers = extract_request_headers(raw_request.headers)
+            request_headers = extract_request_headers(
+                getattr(raw_request, "headers", None)
+            )
         except Exception as e:
             return self._handle_exception(req, e)
 

@@ -9,7 +9,7 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     pd_separation_group.add_argument(
         "--prefill_retry_times",
         env_name="PREFILL_RETRY_TIMES",
-        bind_to=(pd_separation_config, 'prefill_retry_times'),
+        bind_to=(pd_separation_config, "prefill_retry_times"),
         type=int,
         default=0,
         help="prefill部分流程的重试次数，0 表示禁用重试",
@@ -18,7 +18,7 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     pd_separation_group.add_argument(
         "--prefill_retry_timeout_ms",
         env_name="PREFILL_RETRY_TIMEOUT_MS",
-        bind_to=(pd_separation_config, 'prefill_retry_timeout_ms'),
+        bind_to=(pd_separation_config, "prefill_retry_timeout_ms"),
         type=int,
         default=0,
         help="prefill重试的总超时时间（毫秒）",
@@ -27,7 +27,7 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     pd_separation_group.add_argument(
         "--prefill_max_wait_timeout_ms",
         env_name="PREFILL_MAX_WAIT_TIMEOUT_MS",
-        bind_to=(pd_separation_config, 'prefill_max_wait_timeout_ms'),
+        bind_to=(pd_separation_config, "prefill_max_wait_timeout_ms"),
         type=int,
         default=600 * 1000,
         help="prefill的最大等待运行超时时间（毫秒）",
@@ -36,16 +36,27 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     pd_separation_group.add_argument(
         "--load_cache_timeout_ms",
         env_name="LOAD_CACHE_TIMEOUT_MS",
-        bind_to=(pd_separation_config, 'load_cache_timeout_ms'),
+        bind_to=(pd_separation_config, "load_cache_timeout_ms"),
         type=int,
         default=5000,
         help="KVCache远端加载超时时间（毫秒）",
     )
 
     pd_separation_group.add_argument(
+        "--max_rpc_timeout_ms",
+        env_name="MAX_RPC_TIMEOUT_MS",
+        bind_to=(pd_separation_config, "max_rpc_timeout_ms"),
+        type=int,
+        default=2 * 3600 * 1000,  # 2h
+        help="RPC 调用最大超时（毫秒），用作 per-request 未传 timeout 时的默认值；"
+        "<=0 表示不设 deadline（链路不超时）；"
+        "per-request generate_config.timeout_ms 优先级更高",
+    )
+
+    pd_separation_group.add_argument(
         "--decode_retry_times",
         env_name="DECODE_RETRY_TIMES",
-        bind_to=(pd_separation_config, 'decode_retry_times'),
+        bind_to=(pd_separation_config, "decode_retry_times"),
         type=int,
         default=100,
         help="Decode部分流程重试次数，0 表示禁用重试",
@@ -54,7 +65,7 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     pd_separation_group.add_argument(
         "--decode_retry_timeout_ms",
         env_name="DECODE_RETRY_TIMEOUT_MS",
-        bind_to=(pd_separation_config, 'decode_retry_timeout_ms'),
+        bind_to=(pd_separation_config, "decode_retry_timeout_ms"),
         type=int,
         default=100,
         help="Decode流程重试的总超时时间（毫秒）",
@@ -63,7 +74,7 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     pd_separation_group.add_argument(
         "--decode_retry_interval_ms",
         env_name="DECODE_RETRY_INTERVAL_MS",
-        bind_to=(pd_separation_config, 'decode_retry_interval_ms'),
+        bind_to=(pd_separation_config, "decode_retry_interval_ms"),
         type=int,
         default=1,
         help="Decode流程重试的区间间隔（毫秒）",
@@ -72,7 +83,7 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     pd_separation_group.add_argument(
         "--rdma_connect_retry_times",
         env_name="RDMA_CONNECT_RETRY_TIMES",
-        bind_to=(pd_separation_config, 'rdma_connect_retry_times'),
+        bind_to=(pd_separation_config, "rdma_connect_retry_times"),
         type=int,
         default=0,
         help="RDMA 连接建立的重试次数",
@@ -81,7 +92,7 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     pd_separation_group.add_argument(
         "--decode_polling_kv_cache_step_ms",
         env_name="DECODE_POLLING_KV_CACHE_STEP_MS",
-        bind_to=(pd_separation_config, 'decode_polling_kv_cache_step_ms'),
+        bind_to=(pd_separation_config, "decode_polling_kv_cache_step_ms"),
         type=int,
         default=30,
         help="轮询 KV 加载状态的间隔时间（毫秒）",
@@ -90,7 +101,7 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     pd_separation_group.add_argument(
         "--decode_entrance",
         env_name="DECODE_ENTRANCE",
-        bind_to=(pd_separation_config, 'decode_entrance'),
+        bind_to=(pd_separation_config, "decode_entrance"),
         type=str2bool,
         default=False,
         help="Decode 是否作为流量的入口点",

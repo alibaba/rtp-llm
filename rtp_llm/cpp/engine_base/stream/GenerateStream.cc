@@ -238,6 +238,25 @@ bool GenerateStream::isStreaming() const {
 int64_t GenerateStream::streamId() const {
     return generate_input_->request_id;
 }
+
+std::string GenerateStream::streamLogTag() const {
+    const auto& request_info = generate_input_->request_info;
+    std::string tag = std::string("request_id=") + std::to_string(streamId()) + " trace_id=" + traceId();
+    if (!request_info.request_id.empty()) {
+        tag += " source_request_id=" + request_info.request_id;
+    }
+    if (!request_info.frontend_ip.empty()) {
+        tag += " frontend_ip=" + request_info.frontend_ip;
+    }
+    if (!request_info.dash_ip.empty()) {
+        tag += " dash_ip=" + request_info.dash_ip;
+    }
+    if (!request_info.source_role.empty()) {
+        tag += " source_role=" + request_info.source_role;
+    }
+    return tag;
+}
+
 std::string GenerateStream::adapterName() const {
     return generate_input_->generate_config->adapter_name;
 }
@@ -1200,6 +1219,8 @@ StreamCacheResource& GenerateStream::streamCacheResource() {
 void GenerateStream::CopyOnWrite(const GenerateStream& other_stream, bool copy_loss, bool share) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("GenerateStream::CopyOnWrite(copy_loss=%d, share=%d)", copy_loss, share);
     complete_token_ids_ = make_shared<CompleteTokenIds>(*other_stream.complete_token_ids_, share);
+    grpc_normal_device_state_pending_ =
+        std::make_shared<std::atomic<bool>>(other_stream.hasGrpcNormalDeviceStatePending());
     cum_log_probs_      = other_stream.cum_log_probs_.clone();
     if (other_stream.calculateLoss() && copy_loss) {
         loss_ = other_stream.loss_.clone();

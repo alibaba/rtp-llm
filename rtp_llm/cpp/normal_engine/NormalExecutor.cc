@@ -490,6 +490,13 @@ bool NormalExecutor::gatherCanUseDeviceState(const StreamGroups& stream_groups) 
 }
 
 void NormalExecutor::prepareGrpcNormalDeviceState(const StreamGroups& stream_groups) {
+    // publishNormalDeviceState (the per-step refresher) is gated on
+    // useDeviceInput(); without the same gate here the published snapshot goes
+    // stale and GenerateStateMachine overrides incrKVBlock with an old seq_len,
+    // skipping block-boundary allocation on PD decode.
+    if (!useDeviceInput()) {
+        return;
+    }
     if (role_type_ != RoleType::DECODE || stream_groups.totalContextBatchSize() != 0
         || stream_groups.totalDecodeBatchSize() == 0) {
         return;
