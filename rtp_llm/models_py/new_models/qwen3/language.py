@@ -5,7 +5,6 @@ from typing import Any, Optional
 
 import torch
 import torch.nn as nn
-
 from rtp_llm.models_py.layers.activation import silu_and_mul
 from rtp_llm.models_py.layers.embedding import ParallelLMHead, VocabParallelEmbedding
 from rtp_llm.models_py.layers.linear import (
@@ -293,7 +292,12 @@ def _resolve_head_dim(hidden_size: Any, num_heads: Any, configured: Any) -> int:
     return hidden_size // num_heads
 
 
-def _extract_config_values(model_config: Any, load_config: Any):
+def _extract_config_values(
+    model_config: Any,
+    load_config: Any,
+    *,
+    validate_intermediate_size: bool = True,
+):
     if isinstance(model_config, dict):
         hidden_size = required_config_value(model_config, "hidden_size")
         num_heads = required_config_value(model_config, "num_attention_heads")
@@ -357,11 +361,12 @@ def _extract_config_values(model_config: Any, load_config: Any):
         "hidden_size": hidden_size,
         "num_heads": num_heads,
         "num_kv_heads": num_kv_heads,
-        "intermediate_size": intermediate_size,
         "num_layers": num_layers,
         "vocab_size": vocab_size,
         "head_dim": head_dim,
     }
+    if validate_intermediate_size:
+        dimensions["intermediate_size"] = intermediate_size
     for name, value in dimensions.items():
         _positive_int(value, name)
     for name, size, rank in (
