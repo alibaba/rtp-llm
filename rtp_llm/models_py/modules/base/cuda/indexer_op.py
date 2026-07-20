@@ -53,13 +53,9 @@ def _fp8_mqa_logits_chunk_rows() -> int:
     )
 
 
-def _halve_chunk_rows(chunk_rows: int) -> int:
-    next_rows = max(1, chunk_rows // 2)
-    if next_rows >= 1024:
-        return max(1024, (next_rows // 1024) * 1024)
-    if next_rows >= 128:
-        return max(128, (next_rows // 128) * 128)
-    return next_rows
+def _fp8_prefill_topk_force_radix_sort() -> bool:
+    """Keep shared indexer prefill TopK aligned with the DSV4 implementation."""
+    return os.environ.get("DSV4_PREFILL_TOPK_FORCE_RADIX", "1") != "0"
 
 
 def _pd_debug_enabled() -> bool:
@@ -888,30 +884,14 @@ class IndexerOp(nn.Module):
         row_start = 0
         while row_start < num_rows:
             row_end = min(row_start + chunk_rows, num_rows)
-            try:
-                logits = deep_gemm.fp8_mqa_logits(
-                    q_fp8[row_start:row_end],
-                    kv_fp8,
-                    weights[row_start:row_end],
-                    fmha_params.ks[row_start:row_end],
-                    fmha_params.ke[row_start:row_end],
-                    clean_logits=False,
-                )
-            except torch.OutOfMemoryError:
-                next_chunk_rows = _halve_chunk_rows(chunk_rows)
-                if next_chunk_rows == chunk_rows:
-                    raise
-                logging.warning(
-                    "[INDEXER_FP8_MQA_CHUNK] OOM with chunk_rows=%s, "
-                    "retrying with chunk_rows=%s for num_rows=%s total_kv_tokens=%s",
-                    chunk_rows,
-                    next_chunk_rows,
-                    num_rows,
-                    total_kv_tokens,
-                )
-                torch.cuda.empty_cache()
-                chunk_rows = next_chunk_rows
-                continue
+            logits = deep_gemm.fp8_mqa_logits(
+                q_fp8[row_start:row_end],
+                kv_fp8,
+                weights[row_start:row_end],
+                fmha_params.ks[row_start:row_end],
+                fmha_params.ke[row_start:row_end],
+                clean_logits=False,
+            )
             topk_part = logits.new_empty(
                 (logits.shape[0], self.index_topk), dtype=torch.int32
             )
@@ -924,6 +904,7 @@ class IndexerOp(nn.Module):
                 logits.stride(0),
                 logits.stride(1),
                 self.index_topk,
+                _fp8_prefill_topk_force_radix_sort(),
             )
             topk_result[row_start:row_end] = torch.where(
                 topk_part >= 0,
@@ -1125,30 +1106,14 @@ class IndexerOp(nn.Module):
             row_start = 0
             while row_start < nr:
                 row_end = min(row_start + chunk_rows, nr)
-                try:
-                    logits_p = deep_gemm.fp8_mqa_logits(
-                        q_part[row_start:row_end],
-                        kv_fp8_full,
-                        weights_part[row_start:row_end],
-                        ks[row_start:row_end],
-                        ke[row_start:row_end],
-                        clean_logits=False,
-                    )
-                except torch.OutOfMemoryError:
-                    next_chunk_rows = _halve_chunk_rows(chunk_rows)
-                    if next_chunk_rows == chunk_rows:
-                        raise
-                    logging.warning(
-                        "[INDEXER_FP8_MQA_CHUNK] OOM with chunk_rows=%s, "
-                        "retrying with chunk_rows=%s for nr=%s total_kv_tokens=%s",
-                        chunk_rows,
-                        next_chunk_rows,
-                        nr,
-                        total_kv_tokens,
-                    )
-                    torch.cuda.empty_cache()
-                    chunk_rows = next_chunk_rows
-                    continue
+                logits_p = deep_gemm.fp8_mqa_logits(
+                    q_part[row_start:row_end],
+                    kv_fp8_full,
+                    weights_part[row_start:row_end],
+                    ks[row_start:row_end],
+                    ke[row_start:row_end],
+                    clean_logits=False,
+                )
                 topk_part = logits_p.new_empty(
                     (logits_p.shape[0], self.index_topk), dtype=torch.int32
                 )
@@ -1161,6 +1126,7 @@ class IndexerOp(nn.Module):
                     logits_p.stride(0),
                     logits_p.stride(1),
                     self.index_topk,
+                    _fp8_prefill_topk_force_radix_sort(),
                 )
                 topk_result[row_start:row_end] = torch.where(
                     topk_part >= 0,
