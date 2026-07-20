@@ -192,7 +192,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             std::vector<torch::Tensor> mm_features;
             auto                       mm_dtype =
                 dataTypeToTorchType((rtp_llm::DataType)shape_hints_ptr[GptModelInputIndex::mmFeaturesDtype]);
-            for (auto mm_index = 0; mm_index < mm_features_num; ++mm_index) {
+            for (size_t mm_index = 0; mm_index < mm_features_num; ++mm_index) {
                 mm_features.emplace_back(torch::empty({(int64_t)mm_features_shape_ptr[mm_index],
                                                        (int64_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesSize]},
                                                       torch::TensorOptions().dtype(mm_dtype).device(torch::kCUDA)));
