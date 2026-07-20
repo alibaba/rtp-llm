@@ -43,6 +43,20 @@ public:
     insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident)    = 0;
     virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
+    // Estimate peak additional blocks needed when generating remaining_tokens more tokens.
+    virtual int estimatePeakNeedBlocks(int                     seq_len,
+                                       const BlockIndicesType& current_block_indices,
+                                       int                     remaining_tokens,
+                                       int                     reserve_step,
+                                       bool                    enable_reuse_cache) const = 0;
+    // Estimate the physical-block peak of a fresh batch by following initMalloc's real order:
+    // allocate the common prefix once, reference it from every sequence, then allocate each private suffix.
+    virtual int estimateInitialBatchPeakNeedBlocks(int  seq_len,
+                                                   int  common_seq_len,
+                                                   int  remaining_tokens,
+                                                   int  reserve_step,
+                                                   bool enable_reuse_cache,
+                                                   int  target_batch_size) const = 0;
     virtual NeedBlocksInfo getNeedBlocks(
         int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled = false) const = 0;
     virtual void reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices)                         = 0;
