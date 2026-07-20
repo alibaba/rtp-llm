@@ -39,6 +39,111 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="控制是否启用Remote Cache的机制。设置为 True 启用 , False 关闭",
     )
     kv_cache_group.add_argument(
+        "--kv_cache_event_publisher_type",
+        env_name="KV_CACHE_EVENT_PUBLISHER_TYPE",
+        bind_to=(kv_cache_config, "kv_cache_event_publisher_type"),
+        type=str,
+        choices=["none", "log", "kvcm"],
+        default="none",
+        help="HBM KV cache 事件输出：none 关闭，log 输出验证日志，kvcm 直连 KVCM。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_manager_endpoint",
+        env_name="KV_CACHE_EVENT_MANAGER_ENDPOINT",
+        bind_to=(kv_cache_config, "kv_cache_event_manager_endpoint"),
+        type=str,
+        default="",
+        help="KVCM Meta HTTP endpoint，例如 http://127.0.0.1:56020。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_instance_group",
+        env_name="KV_CACHE_EVENT_INSTANCE_GROUP",
+        bind_to=(kv_cache_config, "kv_cache_event_instance_group"),
+        type=str,
+        default="",
+        help="KVCM instance group；为空时复用 reco_instance_group。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_instance_id",
+        env_name="KV_CACHE_EVENT_INSTANCE_ID",
+        bind_to=(kv_cache_config, "kv_cache_event_instance_id"),
+        type=str,
+        default="",
+        help="稳定的 KVCM instance id，不能使用进程 PID。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_host_ip_port",
+        env_name="KV_CACHE_EVENT_HOST_IP_PORT",
+        bind_to=(kv_cache_config, "kv_cache_event_host_ip_port"),
+        type=str,
+        default="",
+        help="当前 DP replica 的 tp_rank=0 Cache 协调端点。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_queue_capacity",
+        env_name="KV_CACHE_EVENT_QUEUE_CAPACITY",
+        bind_to=(kv_cache_config, "kv_cache_event_queue_capacity"),
+        type=int,
+        default=100000,
+        help="Publisher 非阻塞有界队列容量。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_report_batch_size",
+        env_name="KV_CACHE_EVENT_REPORT_BATCH_SIZE",
+        bind_to=(kv_cache_config, "kv_cache_event_report_batch_size"),
+        type=int,
+        default=1000,
+        help="单次 ReportEvent 的最大增量事件数。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_flush_interval_ms",
+        env_name="KV_CACHE_EVENT_FLUSH_INTERVAL_MS",
+        bind_to=(kv_cache_config, "kv_cache_event_flush_interval_ms"),
+        type=int,
+        default=20,
+        help="增量 batch 最长等待时间。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_heartbeat_interval_ms",
+        env_name="KV_CACHE_EVENT_HEARTBEAT_INTERVAL_MS",
+        bind_to=(kv_cache_config, "kv_cache_event_heartbeat_interval_ms"),
+        type=int,
+        default=1000,
+        help="KVCM 节点心跳周期。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_request_timeout_ms",
+        env_name="KV_CACHE_EVENT_REQUEST_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "kv_cache_event_request_timeout_ms"),
+        type=int,
+        default=1500,
+        help="KVCM HTTP 请求超时。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_retry_interval_ms",
+        env_name="KV_CACHE_EVENT_RETRY_INTERVAL_MS",
+        bind_to=(kv_cache_config, "kv_cache_event_retry_interval_ms"),
+        type=int,
+        default=500,
+        help="注册或发送失败后的重试间隔。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_snapshot_interval_ms",
+        env_name="KV_CACHE_EVENT_SNAPSHOT_INTERVAL_MS",
+        bind_to=(kv_cache_config, "kv_cache_event_snapshot_interval_ms"),
+        type=int,
+        default=300000,
+        help="HBM 全量 snapshot 周期；异常恢复也会立即触发 snapshot。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_log_max_keys",
+        env_name="KV_CACHE_EVENT_LOG_MAX_KEYS",
+        bind_to=(kv_cache_config, "kv_cache_event_log_max_keys"),
+        type=int,
+        default=8,
+        help="LogPublisher 每个 batch 最多输出的 key 样本数。",
+    )
+    kv_cache_group.add_argument(
         "--multi_task_prompt",
         env_name="MULTI_TASK_PROMPT",
         bind_to=(kv_cache_config, "multi_task_prompt"),

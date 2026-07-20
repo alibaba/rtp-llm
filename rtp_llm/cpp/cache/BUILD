@@ -78,6 +78,23 @@ cc_library(
 )
 
 cc_library(
+    name = "kv_cache_event_publisher",
+    srcs = [
+        "KVCacheEventPublisher.cc",
+    ],
+    hdrs = [
+        "KVCacheEventPublisher.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+        "@curl//:curl",
+        "@rapidjson//:rapidjson",
+    ],
+)
+
+cc_library(
     name = "block_pool",
     srcs = [
         "BlockCache.cc",
@@ -97,6 +114,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_types",
+        ":kv_cache_event_publisher",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
@@ -250,6 +268,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_core",
+        ":kv_cache_event_publisher",
         "//rtp_llm/cpp/cache/connector",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
