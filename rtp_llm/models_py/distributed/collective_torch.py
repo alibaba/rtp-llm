@@ -462,18 +462,27 @@ def _init_cpu_tp_broadcaster_if_needed(librtp_compute_ops) -> None:
 
     _cpu_tp_broadcaster_base_path = None
     if _parallelism_config is None:
-        librtp_compute_ops.destroy_cpu_tp_broadcaster()
+        _reset_cpu_tp_broadcaster_or_raise(
+            librtp_compute_ops, "clear state without a parallelism configuration"
+        )
         return
     if not _should_init_cpu_tp_broadcaster_for_group(_parallelism_config):
-        librtp_compute_ops.destroy_cpu_tp_broadcaster()
+        _reset_cpu_tp_broadcaster_or_raise(
+            librtp_compute_ops, "disable the ineligible CPU TP path"
+        )
         return
 
     base_path = None
     try:
-        librtp_compute_ops.destroy_cpu_tp_broadcaster()
+        _reset_cpu_tp_broadcaster_or_raise(
+            librtp_compute_ops, "reset stale state before initialization"
+        )
         local_error = None
-    except Exception as e:
-        local_error = f"failed to reset old CpuTpBroadcaster state: {e}"
+    except RuntimeError as e:
+        # Defer this local error through the fixed group preflight rounds so
+        # peers do not proceed alone. The cleanup below retries reset and
+        # raises if stale/in-flight C++ state still cannot be cleared.
+        local_error = str(e)
     actual_initialized = False
     if _cpu_tp_broadcaster_nccl_init_port is None:
         port_error = "nccl_init_port is unknown"
@@ -492,7 +501,9 @@ def _init_cpu_tp_broadcaster_if_needed(librtp_compute_ops) -> None:
     if not _cpu_tp_broadcaster_preflight_for_group(base_path, local_error):
         # This helper is also used for retries.  A failed preflight must not
         # leave an older C++ singleton active while Python falls back to NCCL.
-        librtp_compute_ops.destroy_cpu_tp_broadcaster()
+        _reset_cpu_tp_broadcaster_or_raise(
+            librtp_compute_ops, "discard state after failed TP preflight"
+        )
         return
     assert base_path is not None
 
@@ -510,13 +521,25 @@ def _init_cpu_tp_broadcaster_if_needed(librtp_compute_ops) -> None:
         )
     # Runtime broadcasts must be all UDS or all NCCL across the TP group.
     if not _cpu_tp_broadcaster_initialized_for_group(actual_initialized):
-        librtp_compute_ops.destroy_cpu_tp_broadcaster()
+        _reset_cpu_tp_broadcaster_or_raise(
+            librtp_compute_ops, "discard inconsistent TP initialization"
+        )
         return
     _cpu_tp_broadcaster_base_path = base_path
     logging.info(
         f"Initialized CpuTpBroadcaster (tp_rank={_parallelism_config.tp_rank}, "
         f"tp_size={_parallelism_config.tp_size}, base_path={base_path})"
     )
+
+
+def _reset_cpu_tp_broadcaster_or_raise(librtp_compute_ops, context: str) -> None:
+    try:
+        librtp_compute_ops.destroy_cpu_tp_broadcaster()
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to {context}: {e}; refusing to continue because "
+            "CpuTpBroadcaster state may still be active or in-flight"
+        ) from e
 
 
 def init_distributed_environment(

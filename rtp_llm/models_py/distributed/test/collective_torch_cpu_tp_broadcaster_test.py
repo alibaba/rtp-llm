@@ -11,10 +11,11 @@ from rtp_llm.ops import ParallelismConfig
 
 
 class _FakeLibrtpComputeOps:
-    def __init__(self, init_error=None):
+    def __init__(self, init_error=None, destroy_error=None):
         self.init_calls = []
         self.destroy_calls = 0
         self.init_error = init_error
+        self.destroy_error = destroy_error
 
     def init_cpu_tp_broadcaster(self, tp_rank, tp_size, base_path):
         if self.init_error is not None:
@@ -23,6 +24,8 @@ class _FakeLibrtpComputeOps:
 
     def destroy_cpu_tp_broadcaster(self):
         self.destroy_calls += 1
+        if self.destroy_error is not None:
+            raise self.destroy_error
 
 
 class _FakeIncompleteDestroyLibrtpComputeOps:
@@ -124,6 +127,20 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
 
         self.assertIsNone(ct._cpu_tp_broadcaster_base_path)
         self.assertEqual(fake_ops.init_calls, [])
+        self.assertEqual(fake_ops.destroy_calls, 1)
+
+    def test_reset_failure_is_explicit_and_terminal(self):
+        fake_ops = _FakeLibrtpComputeOps(
+            destroy_error=RuntimeError("broadcast in progress")
+        )
+        ct._parallelism_config = None
+
+        with self.assertRaisesRegex(
+            RuntimeError, "state may still be active or in-flight"
+        ):
+            ct._init_cpu_tp_broadcaster_if_needed(fake_ops)
+
+        self.assertIsNone(ct._cpu_tp_broadcaster_base_path)
         self.assertEqual(fake_ops.destroy_calls, 1)
 
     def test_missing_nccl_port_resets_old_cpp_singleton(self):
