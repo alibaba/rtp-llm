@@ -92,9 +92,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * start a fresh batch (empty queue or remaining == 0).
      */
     public long estimateBatchPrefillMs(long seqLen, long cacheHit) {
-        if (predictor == null) {
-            return 0;
-        }
         List<BatchItem> batchItems = batcher.peekBatchItems();
         return (long) predictor.predictBatchMs(batchItems, seqLen, cacheHit);
     }
@@ -183,7 +180,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 if (batchId < 0) {
                     BatchInflight removed = inflightBatches.remove(task.getRequestId());
                     if (removed == null) {
-                        logger.warn("Prefill calibrate: finished non-batch request reqId={} not in inflight", task.getRequestId());
+                        logger.debug("Prefill calibrate: finished non-batch request reqId={} not in inflight", task.getRequestId());
                     } else {
                         inflightRequestCount.addAndGet(-removed.requests().size());
                         cachedWaitTimeExpireAtMs = 0;
@@ -310,7 +307,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     continue;
                 }
                 if (!inflightBatches.containsKey(batchId)) {
-                    logger.warn("Prefill calibrate: running request reqId={} batchId={} not in inflight",
+                    logger.debug("Prefill calibrate: running request reqId={} batchId={} not in inflight",
                             task.getRequestId(), batchId);
                 }
             }
@@ -373,6 +370,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         reporter.reportBatcherQueueSize(RoleType.PREFILL.name(), getIp(), ipPort(), queueSize);
         reporter.reportInflightBatchCount(RoleType.PREFILL.name(), getIp(), ipPort(), getInflightBatchCount());
         reporter.reportInflightRequestCount(RoleType.PREFILL.name(), getIp(), ipPort(), inflightRequestCount.get());
+        reporter.reportInflightMaxAgeMs(RoleType.PREFILL.name(), getIp(), ipPort(),
+                InflightEvictor.maxAgeMs(inflightBatches, System.currentTimeMillis()));
     }
 
     /**
