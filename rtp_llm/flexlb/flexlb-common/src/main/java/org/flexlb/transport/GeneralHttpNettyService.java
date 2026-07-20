@@ -186,7 +186,9 @@ public class GeneralHttpNettyService {
                     + "error " + "happened, exception: ", e));
         }
         // Closing is this method's own duty and must happen whether or not the sink was ours to
-        // fail; the resulting channelInactive covers a sink installed after the claim was taken.
+        // fail. A sink installed after the claim was taken is not covered by the channelInactive
+        // this close triggers — that one finds the claim gone and does nothing. It is installSink
+        // reporting the exchange already finished that hands termination to the installing thread.
         nettyCtx.getChannel().close();
     }
 

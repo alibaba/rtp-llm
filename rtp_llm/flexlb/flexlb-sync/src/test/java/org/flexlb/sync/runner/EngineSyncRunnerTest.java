@@ -436,10 +436,13 @@ class EngineSyncRunnerTest {
         // beyond-grace round from a within-grace one: the sibling test pins 4 submits over two
         // rounds, this one pins that round 2 contributes none.
         verify(statusCheckExecutor, org.mockito.Mockito.times(2)).submit(any(Runnable.class));
+        // The submit count above is what separates beyond-grace from within-grace. This clock is a
+        // corollary, not a second proof: the LLM path never writes it — only probe success does —
+        // so pinning it untouched says the round left nothing behind that could keep the worker
+        // alive, and ExpirationCleaner is free to evict one a broken discovery can no longer
+        // confirm.
         assertEquals(1L, alive.getStatusLastUpdateTime().get(),
-                "once a discovery outage outlasts the grace window the staleness clock must stop being "
-                        + "refreshed, so ExpirationCleaner can eventually evict workers a broken discovery "
-                        + "can no longer confirm");
+                "no probe ran, so nothing can have refreshed the staleness clock");
     }
 
     @Test
