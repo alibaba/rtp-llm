@@ -269,19 +269,30 @@ py_library(
         "//rtp_llm/models_py:models",
         ":multimodal",
     ] + select({
+        "@//:using_cuda13_x86": ["deep_gemm"],
+        "@//:using_cuda13_arm": ["deep_gemm"],
         "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
+        # cuda13 locks currently ship flash-mla (+tilelang on arm); flashinfer /
+        # fast-hadamard rebuilds for torch 2.11+cu130 are tracked separately.
+        "@//:using_cuda13_x86": ["flash-mla"],
+        "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
         "@//:cuda_pre_12_9": flashinfer,
         "//conditions:default": []
     }) + select({
+        "@//:using_cuda13_x86": rtp_kernel,
+        "@//:using_cuda13_arm": rtp_kernel,
         "@//:using_cuda12_9_x86": rtp_kernel,
         "@//:using_cuda12_arm": rtp_kernel,
         "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + select({
+        # flash_attn / flash_attn_3 not yet rebuilt for torch 2.11 → cuda13 empty.
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
         "@//:cuda_pre_12_9": [],

@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000011 Mon Sep 17 00:00:00 2001
+From: rtp-llm <noreply@alibaba-inc.com>
+Date: Sat, 26 Apr 2026 00:00:00 +0800
+Subject: [PATCH] cuda13 compat: restore cub::Max / cub::Min shim
+
+CUDA 13's CUB dropped the stateless cub::Max / cub::Min functors (only
+SimdMax / SimdMin / ArgMax / ArgMin remain).  Restore them as minimal
+stateless functors on CUDA >= 13 so the BlockReduce call sites in
+sampling.cuh compile unchanged on both toolchains.
+
+Not a local invention — this mirrors upstream flashinfer's own fix (the
+`#if CUDA_VERSION >= 12090 → cuda::maximum<>` guard first seen in commit
+9a79b78, which landed on upstream main via PR #2086).  Applied here as a
+narrow patch rather than picking up the full upstream commit because the
+latter pulls in flashinfer's JIT refactor and would require rewriting the
+aot_build_utils-driven bazel BUILD file in this repo.
+
+This patch is ONLY applied to the @flashinfer_cpp_cu13 variant; the
+default @flashinfer_cpp target (used for CUDA 12 builds) is untouched.
+
+--- include/flashinfer/sampling.cuh
++++ include/flashinfer/sampling.cuh
+@@ -26,6 +26,27 @@
+ #include "utils.cuh"
+ #include "vec_dtypes.cuh"
+
++// CUDA 13 dropped cub::Max / cub::Min (only SimdMax / SimdMin / ArgMax remain).
++// Provide replacements on CUDA >= 13 that match the stateless functor shape
++// the BlockReduce call sites below expect.  This mirrors upstream flashinfer's
++// own fix (swap to cuda::maximum / cuda::minimum on new CCCL).
++#if defined(__CUDACC_VER_MAJOR__) && (__CUDACC_VER_MAJOR__ >= 13)
++namespace cub {
++struct Max {
++  template <typename T>
++  __host__ __device__ __forceinline__ T operator()(const T& a, const T& b) const {
++    return (a < b) ? b : a;
++  }
++};
++struct Min {
++  template <typename T>
++  __host__ __device__ __forceinline__ T operator()(const T& a, const T& b) const {
++    return (b < a) ? b : a;
++  }
++};
++}  // namespace cub
++#endif
++
+ namespace flashinfer {
+
+ namespace sampling {
