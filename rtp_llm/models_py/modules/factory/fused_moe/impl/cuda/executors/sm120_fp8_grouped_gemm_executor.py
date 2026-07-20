@@ -11,7 +11,6 @@ Execution sequence (6 kernel launches):
   5.     ep_gather         - weighted-sum reduce → [M, K] bf16
 """
 
-import math
 from typing import Any, Dict, Optional
 
 import torch
@@ -33,15 +32,13 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
 )
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import ep_gather, ep_scatter_v2
 from rtp_llm.models_py.triton_kernels.moe.fp8_grouped_gemm import (
+    GEMM_ROLE_DOWN,
+    GEMM_ROLE_GATE_UP,
     invoke_sm120_fp8_grouped_gemm,
 )
 from rtp_llm.models_py.utils.arch import is_sm12x
 from rtp_llm.models_py.utils.math import align, ceil_div
 from rtp_llm.utils.model_weight import W
-
-
-def _align_up(n: int, alignment: int) -> int:
-    return int(math.ceil(n / alignment)) * alignment
 
 
 class Sm120Fp8GroupedGemmExecutor(FusedMoeExpertExecutor):
@@ -132,6 +129,7 @@ class Sm120Fp8GroupedGemmExecutor(FusedMoeExpertExecutor):
         )
         alignment = align(token_num, self.EXPERT_ALIGNMENT)
         expected_m = min(alignment, token_num_mean_per_expert)
+        tuning_token_count = min(alignment, token_num)
 
         E = self.num_experts_per_partition
 
@@ -163,7 +161,6 @@ class Sm120Fp8GroupedGemmExecutor(FusedMoeExpertExecutor):
         input_packed_3d = input_packed.view(E, alignment, self.K)
 
         # Step 2: Gate+Up GEMM: [E, alignment, K] × [E, N, K]^T → [E, alignment, N] bf16
-        # w13_weight: [E, N, K], stored as [E, N, K], transposed B in GEMM notation
         upgate_output = torch.empty(
             (E, alignment, self.N),
             device=device,
@@ -176,6 +173,8 @@ class Sm120Fp8GroupedGemmExecutor(FusedMoeExpertExecutor):
             B_sf=self.w13_scale,
             expert_num_tokens=num_recv_tokens_per_expert,
             C=upgate_output,
+            gemm_role=GEMM_ROLE_GATE_UP,
+            tuning_token_count=tuning_token_count,
         )
         del input_packed, input_packed_3d, input_sf_packed
 
@@ -186,7 +185,7 @@ class Sm120Fp8GroupedGemmExecutor(FusedMoeExpertExecutor):
             dtype=torch.float8_e4m3fn,
         )
         down_input_scale = torch.empty(
-            (E, alignment, self.inter_size // self.BLOCK_SIZE),
+            (E, alignment, ceil_div(self.inter_size, self.BLOCK_SIZE)),
             device=device,
             dtype=torch.float32,
         )
@@ -215,6 +214,8 @@ class Sm120Fp8GroupedGemmExecutor(FusedMoeExpertExecutor):
             B_sf=self.w2_scale,
             expert_num_tokens=num_recv_tokens_per_expert,
             C=down_output,
+            gemm_role=GEMM_ROLE_DOWN,
+            tuning_token_count=tuning_token_count,
         )
         del down_input, down_input_scale
 

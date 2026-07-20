@@ -6,6 +6,7 @@ Run with:
 Set RUN_SM120_MOE_BENCHMARK=1 to run the optional large-shape benchmark.
 """
 
+import math
 import os
 import time
 
@@ -19,24 +20,41 @@ def _skip_if_not_sm120():
     return False
 
 
+def _ceil_div(a, b):
+    return math.ceil(a / b)
+
+
 def _make_fp8_weights(E, N, K, device="cuda"):
     w13_fp8 = (torch.rand(E, N, K, device=device, dtype=torch.float32) * 2 - 1).to(
         torch.float8_e4m3fn
     )
     w13_scale = (
-        torch.ones(E, N // 128, K // 128, device=device, dtype=torch.float32) * 0.1
+        torch.ones(
+            E,
+            _ceil_div(N, 128),
+            _ceil_div(K, 128),
+            device=device,
+            dtype=torch.float32,
+        )
+        * 0.1
     )
     w2_fp8 = (torch.rand(E, K, N // 2, device=device, dtype=torch.float32) * 2 - 1).to(
         torch.float8_e4m3fn
     )
     w2_scale = (
-        torch.ones(E, K // 128, (N // 2) // 128, device=device, dtype=torch.float32)
+        torch.ones(
+            E,
+            _ceil_div(K, 128),
+            _ceil_div(N // 2, 128),
+            device=device,
+            dtype=torch.float32,
+        )
         * 0.1
     )
     return w13_fp8, w13_scale, w2_fp8, w2_scale
 
 
-def _run_grouped_gemm_executor(E, K, N, M, top_k, device="cuda"):
+def _make_grouped_gemm_executor_case(E, K, N, M, top_k, device="cuda"):
     from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
         ExpertForwardPayload,
         ExpertTokensMetadata,
@@ -89,6 +107,10 @@ def _run_grouped_gemm_executor(E, K, N, M, top_k, device="cuda"):
             expected_m=max(1, M * top_k // E),
         ),
     )
+    return executor, payload
+
+
+def _execute_grouped_gemm_executor(executor, payload):
     return executor.execute(
         payload,
         activation="silu",
@@ -97,6 +119,93 @@ def _run_grouped_gemm_executor(E, K, N, M, top_k, device="cuda"):
         apply_router_weight_on_input=False,
         extra_expert_args=None,
     )
+
+
+def _run_grouped_gemm_executor(E, K, N, M, top_k, device="cuda"):
+    executor, payload = _make_grouped_gemm_executor_case(E, K, N, M, top_k, device)
+    return _execute_grouped_gemm_executor(executor, payload)
+
+
+def test_grouped_gemm_config_selector():
+    from rtp_llm.models_py.triton_kernels.moe.fp8_grouped_gemm import (
+        GEMM_ROLE_DOWN,
+        GEMM_ROLE_GATE_UP,
+        Sm120Fp8GroupedGemmConfig,
+        _select_sm120_fp8_grouped_gemm_config,
+    )
+
+    cases = [
+        (
+            128,
+            6144,
+            GEMM_ROLE_GATE_UP,
+            None,
+            Sm120Fp8GroupedGemmConfig(16, 128, 128, 4, 3),
+        ),
+        (
+            128,
+            2048,
+            GEMM_ROLE_DOWN,
+            768,
+            Sm120Fp8GroupedGemmConfig(16, 128, 128, 4, 3),
+        ),
+        (
+            1024,
+            2048,
+            GEMM_ROLE_DOWN,
+            768,
+            Sm120Fp8GroupedGemmConfig(16, 128, 128, 4, 3),
+        ),
+        (
+            2020,
+            2048,
+            GEMM_ROLE_DOWN,
+            768,
+            Sm120Fp8GroupedGemmConfig(64, 128, 128, 8, 3),
+        ),
+        (
+            512,
+            2048,
+            GEMM_ROLE_DOWN,
+            1600,
+            Sm120Fp8GroupedGemmConfig(64, 128, 128, 8, 3),
+        ),
+        (
+            512,
+            6144,
+            GEMM_ROLE_GATE_UP,
+            None,
+            Sm120Fp8GroupedGemmConfig(64, 128, 128, 8, 3),
+        ),
+        (
+            1024,
+            6144,
+            GEMM_ROLE_GATE_UP,
+            None,
+            Sm120Fp8GroupedGemmConfig(64, 128, 128, 8, 3),
+        ),
+        (
+            1024,
+            4096,
+            GEMM_ROLE_DOWN,
+            2048,
+            Sm120Fp8GroupedGemmConfig(64, 128, 128, 8, 3),
+        ),
+    ]
+    for tuning_token_count, n, role, k, expected in cases:
+        config = _select_sm120_fp8_grouped_gemm_config(tuning_token_count, n, role, k)
+        assert config == expected
+        assert config.block_n == 128
+        assert config.block_k == 128
+
+    try:
+        _select_sm120_fp8_grouped_gemm_config(128, 6144, "invalid")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid GEMM role should raise ValueError")
+
+    print("  test_grouped_gemm_config_selector PASS")
 
 
 def test_invoke_grouped_gemm_basic():
@@ -163,6 +272,34 @@ def test_grouped_gemm_empty_expert():
     print("  test_grouped_gemm_empty_expert PASS")
 
 
+def test_grouped_gemm_raw_tail_n():
+    from rtp_llm.models_py.triton_kernels.moe.fp8_grouped_gemm import (
+        invoke_sm120_fp8_grouped_gemm,
+    )
+
+    E, max_T, K, N = 4, 128, 256, 3120
+    A = torch.randn(E, max_T, K, device="cuda").to(torch.float8_e4m3fn)
+    A_sf = torch.ones(E, max_T, _ceil_div(K, 128), device="cuda", dtype=torch.float32)
+    B = torch.randn(E, N, K, device="cuda").to(torch.float8_e4m3fn)
+    B_sf = torch.ones(
+        E,
+        _ceil_div(N, 128),
+        _ceil_div(K, 128),
+        device="cuda",
+        dtype=torch.float32,
+    )
+    expert_num_tokens = torch.tensor([16, 32, 8, 64], device="cuda", dtype=torch.int32)
+    C = torch.empty(E, max_T, N, device="cuda", dtype=torch.bfloat16)
+
+    invoke_sm120_fp8_grouped_gemm(A, A_sf, B, B_sf, expert_num_tokens, C)
+
+    for e in range(E):
+        n_tok = expert_num_tokens[e].item()
+        assert not C[e, :n_tok].isnan().any(), f"Expert {e}: output contains NaN"
+        assert not C[e, :n_tok].isinf().any(), f"Expert {e}: output contains Inf"
+    print("  test_grouped_gemm_raw_tail_n PASS")
+
+
 def test_executor_output_finite(M, E, K, N, top_k):
     result = _run_grouped_gemm_executor(E, K, N, M, top_k)
     out = result.fused_expert_output
@@ -172,28 +309,36 @@ def test_executor_output_finite(M, E, K, N, top_k):
     print(f"  test_executor_output_finite M={M} E={E} K={K} N={N} top_k={top_k} PASS")
 
 
-def test_benchmark(E=128, K=2048, N=6144, top_k=8):
+def test_benchmark():
     WARMUP, RUNS = 5, 20
-    print(f"\n  Benchmark: E={E} K={K} N={N} top_k={top_k}")
-    print(f"  {'M':>6}  {'grouped_ms':>12}  {'note'}")
-    for label, M in [
-        ("decode_1", 1),
-        ("decode_4", 4),
-        ("decode_8", 8),
-        ("decode_16", 16),
-        ("decode_32", 32),
-        ("prefill_64", 64),
-        ("prefill_128", 128),
-    ]:
-        for _ in range(WARMUP):
-            _run_grouped_gemm_executor(E, K, N, M, top_k)
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        for _ in range(RUNS):
-            _run_grouped_gemm_executor(E, K, N, M, top_k)
-        torch.cuda.synchronize()
-        ms = (time.perf_counter() - t0) / RUNS * 1000
-        print(f"  {M:>6}  {ms:>12.3f}ms  ({label})")
+    benchmark_shapes = [
+        ("qwen3_30b_a3b", 128, 2048, 1536, 8),
+        ("tbstars_moe_raw_tail", 96, 2048, 3120, 8),
+        ("tbstars_moe_padded_runtime", 96, 2048, 3200, 8),
+    ]
+    for model_name, E, K, N, top_k in benchmark_shapes:
+        print(f"\n  Benchmark: {model_name} E={E} K={K} N={N} top_k={top_k}")
+        print(f"  {'M':>6}  {'grouped_ms':>12}  {'note'}")
+        for label, M in [
+            ("decode_1", 1),
+            ("decode_4", 4),
+            ("decode_8", 8),
+            ("decode_16", 16),
+            ("decode_32", 32),
+            ("prefill_64", 64),
+            ("prefill_128", 128),
+            ("prefill_2020", 2020),
+        ]:
+            executor, payload = _make_grouped_gemm_executor_case(E, K, N, M, top_k)
+            for _ in range(WARMUP):
+                _execute_grouped_gemm_executor(executor, payload)
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            for _ in range(RUNS):
+                _execute_grouped_gemm_executor(executor, payload)
+            torch.cuda.synchronize()
+            ms = (time.perf_counter() - t0) / RUNS * 1000
+            print(f"  {M:>6}  {ms:>12.3f}ms  ({label})")
 
 
 if __name__ == "__main__":
@@ -204,10 +349,15 @@ if __name__ == "__main__":
         f"GPU: {torch.cuda.get_device_name(0)}, SM: {torch.cuda.get_device_capability()}"
     )
     print()
+    print("=== Config selector tests ===")
+    test_grouped_gemm_config_selector()
+
+    print()
     print("=== Kernel unit tests ===")
     test_invoke_grouped_gemm_basic()
     test_grouped_gemm_zero_input()
     test_grouped_gemm_empty_expert()
+    test_grouped_gemm_raw_tail_n()
 
     print()
     print("=== Executor correctness tests ===")
@@ -222,7 +372,7 @@ if __name__ == "__main__":
 
     if os.environ.get("RUN_SM120_MOE_BENCHMARK") == "1":
         print()
-        print("=== Performance benchmark (Qwen3-30B-A3B dims) ===")
+        print("=== Performance benchmark (Qwen3-MoE + tbstars_moe dims) ===")
         test_benchmark()
 
     print()

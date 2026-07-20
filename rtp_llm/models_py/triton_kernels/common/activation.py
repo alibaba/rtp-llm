@@ -1009,7 +1009,7 @@ def silu_mul_masked_fp8_post_quant_fwd(
     Args:
         input: Input tensor with shape [expert_num, token_num_padded, hidden_dim]
         output: Output tensor with shape [expert_num, token_num_padded, hidden_dim // 2], dtype fp8
-        output_scale: Output scale tensor with shape [expert_num, token_num_padded, hidden_dim // 2 // 128], dtype float32
+        output_scale: Output scale tensor with shape [expert_num, token_num_padded, ceil((hidden_dim // 2) / 128)], dtype float32
         quant_group_size: Quantization group size
         masked_m: Mask tensor with shape [expert_num]
         expected_m: Expected number of tokens
@@ -1024,7 +1024,6 @@ def silu_mul_masked_fp8_post_quant_fwd(
     assert input.shape[-1] % 2 == 0
 
     size_n = input.shape[-1] // 2
-    assert size_n % quant_group_size == 0
 
     expert_num = len(masked_m)
 
