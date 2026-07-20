@@ -5,7 +5,6 @@ Used to parse MOE configuration and extract MOE-related configuration informatio
 from typing import Optional
 
 import torch
-
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -35,7 +34,7 @@ class MoeConfigResolver:
         Returns:
             Whether quantization is enabled
         """
-        return config.model_config.quant_config is not None
+        return config.quant_config is not None
 
     @staticmethod
     def is_bf16(config: MoEConfigAdapter) -> bool:
@@ -59,9 +58,9 @@ class MoeConfigResolver:
         Returns:
             Quantization method name, or None if quantization is not enabled
         """
-        if config.model_config.quant_config is None:
+        if config.quant_config is None:
             return None
-        return config.model_config.quant_config.get_method()
+        return config.quant_config.get_method()
 
     @staticmethod
     def is_ep_enabled(config: MoEConfigAdapter) -> bool:
@@ -127,8 +126,7 @@ class MoeConfigResolver:
         Pure TP mode requires ep_size == 1 and dp_size == 1, meaning each
         rank holds all experts without EP/DP splitting. This covers both
         single-GPU (tp=1) and multi-GPU pure-TP (tp>1) scenarios. This
-        aligns with the weight-splitting condition (moe_pure_tp_mode) in
-        model_weight_info.py.
+        matches the runtime weight layout used by the fused MoE executor.
 
         Args:
             config: MOE configuration adapter
