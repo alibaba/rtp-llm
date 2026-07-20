@@ -786,14 +786,14 @@ flash-attn-3 @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129
 flash-mla @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_mla-1.0.0%2Bca58fed-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:960fecb602f90f0f882b6e460f9ddebaec0c3cedca3b01594330445c90afaa5e
     # via -r deps/requirements_torch_gpu_cuda12_9.txt
-flashinfer-cubin @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260319/flashinfer_cubin-0.6.6-py3-none-any.whl \
-    --hash=sha256:3363511f06b0315b9267fc3976412b7f844750fdfe451c44f3f84076bffac641
+flashinfer-cubin @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260709/flashinfer_cubin-0.6.6%2Bsm120-py3-none-any.whl \
+    --hash=sha256:04df6c418b5558be5fbaad758639fbcedd29560e6a0b036c904ec6d52721306c
     # via -r deps/requirements_torch_gpu_cuda12_9.txt
-flashinfer-jit-cache @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260319/flashinfer_jit_cache-0.6.6-cp39-abi3-manylinux_2_28_x86_64.whl \
-    --hash=sha256:346bb153c2fab3922e017f9f1fb41d5dad679849d787c2dac9d2fc7102a74e64
+flashinfer-jit-cache @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260709/flashinfer_jit_cache-0.6.6%2Bsm120-cp39-abi3-manylinux_2_28_x86_64.whl \
+    --hash=sha256:d9c07da23b8b671e11173ff65e905fcdd44810e52f96d2509998c44ec237eade
     # via -r deps/requirements_torch_gpu_cuda12_9.txt
-flashinfer-python @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260319/flashinfer_python-0.6.6-py3-none-any.whl \
-    --hash=sha256:4ee501a8cc6a4479c6a23e6fb4f0a1ebcce3212d72d6ae15c9bcf9a79571efa5
+flashinfer-python @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260709/flashinfer_python-0.6.6%2Bsm120-py3-none-any.whl \
+    --hash=sha256:982a3c58ba438fa7d4af4462a546e7c14380bb2835f4c31e97c9f201577188a3
     # via
     #   -r deps/requirements_torch_gpu_cuda12_9.txt
     #   rtp-kernel
@@ -3492,8 +3492,8 @@ rouge==1.0.1 \
     --hash=sha256:12b48346ca47d6bcf3c45061f315452b9ccec0620ee895ec85b7efc3d54aae34 \
     --hash=sha256:28d118536e8c774dc47d1d15ec266479b4dd0914c4672ce117d4002789bdc644
     # via auto-gptq
-rtp-kernel @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/rtp_kernel_260423/rtp_kernel-0.1.0%2B125c29e5.20260423102158-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:e3fc27a3ebe834045ce526572742573d7b240655ff723d00b2cce748ebc3dd18
+rtp-kernel @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/rtp_kernel_260612/rtp_kernel-0.1.0%2B125c29e5-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:a74c8d99e7c9026fad5f96397a54f9cf4eedb7086a2fa4448b3e5b64a4cc371f
     # via -r open_source/deps/requirements_torch_gpu_cuda12_9.txt
 safetensors==0.6.2 \
     --hash=sha256:1d2d2b3ce1e2509c68932ca03ab8f20570920cd9754b05063d4368ee52833ecd \
