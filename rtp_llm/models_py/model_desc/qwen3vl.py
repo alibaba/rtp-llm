@@ -5,7 +5,10 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_fmha_params,
+    select_fmha_impl_for_layer,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3 import Qwen3DecoderLayer
 from rtp_llm.models_py.modules import (
@@ -27,7 +30,6 @@ from rtp_llm.utils.model_weight import W
 
 
 class Qwen3VLModel(GptModelBase):
-
     def __init__(
         self,
         config: ModelConfig,
@@ -105,17 +107,17 @@ class Qwen3VLModel(GptModelBase):
             cpu_locs = []
 
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            select_block_map_for_layer(inputs.attention_inputs, i)
+            layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
             hidden_states = decoder_layer(
                 hidden_states,
-                fmha_impl,
+                layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
             hidden_states = self.multimodal_deepstack_injector(
                 hidden_states, mm_deepstack_embeds, cpu_locs, i
             )
         hidden_states = self.norm(hidden_states)
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        return PyModelOutputs(hidden_states, get_fmha_params(fmha_impl))
 
 
 __all__ = [

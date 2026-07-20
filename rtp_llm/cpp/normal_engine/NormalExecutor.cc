@@ -27,9 +27,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                bool                                   warm_up,
                                bool                                   is_propose,
                                int                                    propose_model_index,
-                               MlaOpsType                             mla_ops_type,
-                               int32_t                                kv_cache_group_num,
-                               const std::vector<int32_t>&            kv_cache_layer_to_group):
+                               MlaOpsType                             mla_ops_type):
     Executor(),
     cache_manager_(cache_manager),
     warm_up_(warm_up),
@@ -71,12 +69,18 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         static_cast<size_t>(std::max<int64_t>(1, params.runtime_config.max_generate_batch_size));
     sampler_.reset(new Sampler(SamplerInitParams{initial_sampler_batch_size, false}));
 
+    const size_t runtime_tokens_per_block        = cache_manager ? cache_manager->cacheConfig().seq_size_per_block :
+                                                                   params.model_config_.attn_config.tokens_per_block;
+    const size_t runtime_kernel_tokens_per_block = cache_manager ?
+                                                       cache_manager->cacheConfig().kernel_seq_size_per_block :
+                                                       params.model_config_.attn_config.kernel_tokens_per_block;
+
     GptModelInitParams model_init_params(
         {params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
          cache_manager ?
-             std::make_optional(is_propose_ ? cache_manager->getMTPModuleCacheLayerLayout(propose_model_index_) :
-                                              cache_manager->getMainModelCacheLayerLayout()) :
+             std::make_optional(is_propose_ ? cache_manager->getMTPModuleGroupedCacheLayerLayout(propose_model_index_) :
+                                              cache_manager->getMainModelGroupedCacheLayerLayout()) :
              std::nullopt,
          params.model_id,
          params.parallelism_config,
@@ -89,10 +93,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          mla_ops_type,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
-         params.model_config_.attn_config.tokens_per_block,
-         params.model_config_.attn_config.kernel_tokens_per_block,
-         kv_cache_group_num,
-         kv_cache_layer_to_group,
+         runtime_tokens_per_block,
+         runtime_kernel_tokens_per_block,
          cache_manager});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {

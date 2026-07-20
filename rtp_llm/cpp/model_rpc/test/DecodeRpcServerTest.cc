@@ -5,6 +5,71 @@
 
 namespace rtp_llm {
 
+namespace {
+
+DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&               request_key,
+                                                    const std::vector<std::string>&  peer_addrs,
+                                                    const std::vector<CacheKeyType>& cache_keys,
+                                                    const GroupBlockIds&             block_ids_by_group,
+                                                    int32_t                          prefill_cp_size) {
+    return {/*request_id=*/42,
+            request_key,
+            peer_addrs,
+            cache_keys,
+            block_ids_by_group,
+            /*reuse_block_size=*/0,
+            /*timeout_ms=*/1000,
+            /*partition_count=*/1,
+            /*partition_id=*/0,
+            /*server_context=*/nullptr,
+            prefill_cp_size};
+}
+
+}  // namespace
+
+TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
+    DecodeRpcServer server;
+    server.resource_.workers = {"decode-0", "decode-1"};
+
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101, 102};
+    const GroupBlockIds             block_ids_by_group;
+    const auto load_context = makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2);
+
+    const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs);
+
+    EXPECT_EQ(request.prefill_cp_size(), 2);
+    EXPECT_EQ(request.partition_count(), 1);
+    EXPECT_EQ(request.partition_id(), 0);
+    ASSERT_EQ(request.peer_addrs_size(), 2);
+    EXPECT_EQ(request.peer_addrs(0), "prefill-0");
+    EXPECT_EQ(request.peer_addrs(1), "prefill-1");
+    ASSERT_EQ(request.cache_keys_size(), 2);
+    EXPECT_EQ(request.cache_keys(0), 101);
+    EXPECT_EQ(request.cache_keys(1), 102);
+}
+
+TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
+    DecodeRpcServer server;
+    server.resource_.workers = {"decode-0", "decode-1"};
+
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101};
+    const GroupBlockIds             block_ids_by_group;
+    const auto load_context = makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2);
+
+    const auto request = server.constructRemoteLoadRequestForMla(load_context, /*index=*/1, peer_addrs);
+
+    EXPECT_EQ(request.prefill_cp_size(), 2);
+    EXPECT_EQ(request.partition_count(), 1);
+    EXPECT_EQ(request.partition_id(), 0);
+    ASSERT_EQ(request.peer_addrs_size(), 2);
+    EXPECT_EQ(request.peer_addrs(0), "prefill-0");
+    EXPECT_EQ(request.peer_addrs(1), "prefill-1");
+}
+
 TEST(DecodeRpcServerTest, MtpCacheKeyUsesSharedBaseModelIdForEverySlot) {
     constexpr size_t mtp_base_model_id = 17;
 

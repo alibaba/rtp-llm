@@ -7,6 +7,7 @@
 #include <mutex>
 #include <set>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace rtp_llm {
@@ -31,9 +32,9 @@ public:
     }
 
 private:
-    int64_t                                          request_id_;
-    std::map<int, std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers_;
-    std::atomic<int64_t>                             deadline_ms_;
+    int64_t                                                          request_id_;
+    std::map<std::pair<int, int>, std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers_;
+    std::atomic<int64_t>                                             deadline_ms_;
 
     std::mutex              mutex_;
     std::condition_variable condition_variable_;

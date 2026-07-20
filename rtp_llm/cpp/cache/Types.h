@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <vector>
 #include <cstdint>
 
@@ -8,9 +9,11 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 namespace rtp_llm {
+
+class CompleteTokenIds;
+using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;
 
 typedef int32_t          GroupIdType;
 typedef std::vector<int> LayerIdsType;

@@ -115,6 +115,7 @@ std::vector<GroupBase> buildTaggedGroups(const LayerKVCacheSpecs& runtime_specs,
             groups.begin(), groups.end(), [&](const GroupBase& group) { return group.spec->tag == spec->tag; });
         if (it == groups.end()) {
             GroupBase group;
+            group.tag               = spec->tag;
             group.spec              = spec;
             group.policy            = defaultCacheGroupPolicy(group_type);
             group.local_kv_head_num = localKvHeadNumForSpec(spec->type, model_config, parallelism_config);
@@ -162,7 +163,7 @@ KVCacheSpecPtr representativeSpec(const std::vector<GroupBase>& groups, CacheGro
             continue;
         }
         if (result == nullptr) {
-            result      = group.spec;
+            result      = group.spec->clone();
             fingerprint = layoutFingerprint(*group.spec);
         } else {
             RTP_LLM_CHECK_WITH_INFO(fingerprint == layoutFingerprint(*group.spec),
@@ -170,7 +171,7 @@ KVCacheSpecPtr representativeSpec(const std::vector<GroupBase>& groups, CacheGro
                                     static_cast<int>(group_type));
         }
     }
-    return result == nullptr ? nullptr : result->clone();
+    return result;
 }
 
 int groupLayerNumForGroups(const std::vector<GroupBase>& groups) {
@@ -184,6 +185,9 @@ int groupLayerNumForGroups(const std::vector<GroupBase>& groups) {
 
 void setupTopologyFromGroups(CacheConfig& config, std::vector<GroupBase> groups) {
     std::vector<LayerBase> layers(static_cast<size_t>(config.layer_num));
+    for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id) {
+        layers[layer_id].layer_id = static_cast<int>(layer_id);
+    }
 
     for (size_t gid = 0; gid < groups.size(); ++gid) {
         const auto& group = groups[gid];
@@ -193,8 +197,7 @@ void setupTopologyFromGroups(CacheConfig& config, std::vector<GroupBase> groups)
                                     group.spec->tag.c_str(),
                                     layer_id);
             auto& layer = layers[static_cast<size_t>(layer_id)];
-            layer.group_ids.push_back(static_cast<int>(gid));
-            layer.tag_to_gid[group.spec->tag] = static_cast<int>(gid);
+            layer.group_tags.push_back(group.tag);
         }
     }
     config.setTopology(std::move(groups), std::move(layers));
@@ -326,22 +329,24 @@ void HybridConfigCreator::setupCacheConfigSpecs(CacheConfig&                    
                                                 uint32_t                             full_local_kv_head_num) {
     std::vector<GroupBase> groups;
     std::vector<LayerBase> layers(static_cast<size_t>(config.layer_num));
+    for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id) {
+        layers[layer_id].layer_id = static_cast<int>(layer_id);
+    }
 
     auto append_group = [&](const KVCacheSpecPtr&   spec,
                             CacheGroupType          type,
                             const std::vector<int>& layer_ids,
                             uint32_t                local_kv_head_num) {
         GroupBase group;
+        group.tag               = spec->tag;
         group.spec              = spec;
         group.policy            = defaultCacheGroupPolicy(type);
         group.layer_ids         = layer_ids;
         group.local_kv_head_num = local_kv_head_num;
-        const int gid           = static_cast<int>(groups.size());
         groups.push_back(group);
         for (int layer_id : layer_ids) {
             auto& layer = layers[static_cast<size_t>(layer_id)];
-            layer.group_ids.push_back(gid);
-            layer.tag_to_gid[spec->tag] = gid;
+            layer.group_tags.push_back(spec->tag);
         }
     };
 

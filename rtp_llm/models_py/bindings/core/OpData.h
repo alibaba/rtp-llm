@@ -1,5 +1,6 @@
 #pragma once
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/cpp/model_utils/activation_types.h"
@@ -7,7 +8,9 @@
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include <cstddef>
+#include <map>
 #include <optional>
+#include <string>
 #include <memory>
 #include <torch/extension.h>
 #include <torch/python.h>
@@ -53,7 +56,6 @@ struct GptModelInputs {
     torch::Tensor kv_cache_block_id;
     torch::Tensor kv_cache_kernel_block_id;  // [group, batch, kernel_blocks], int32
 
-    torch::Tensor kv_cache_layer_to_group;  // [layer_num], int32
     torch::Tensor kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
     torch::Tensor kv_cache_update_mapping;  // [block_copy_num, 2] kv cache update mapping
 
@@ -76,6 +78,7 @@ struct GptModelInputs {
     size_t kernel_seq_size_per_block = 0;  // 0 means same as seq_size_per_block
     bool   pd_separation             = false;
     bool   decode_entrance           = false;
+    bool   use_opaque_kv_cache_store = false;
 
     bool need_all_logits = false;
     bool need_moe_gating = false;
@@ -170,12 +173,13 @@ struct KvCacheInfo {
 };
 
 struct CacheStoreInputs {
-    torch::Tensor input_lengths_host;
-    torch::Tensor prefix_lengths_host;
-    torch::Tensor host_kv_cache_offset;
-
-    torch::Tensor kv_cache_layer_to_group_host;
-    torch::Tensor kv_cache_group_types_host;  // 0 -> LINEAR, 1 -> FULL.
+    torch::Tensor                                    input_lengths_host;
+    torch::Tensor                                    prefix_lengths_host;
+    torch::Tensor                                    host_kv_cache_offset;
+    std::map<std::string, rtp_llm::CacheGroupPolicy> kv_cache_group_policies;
+    std::map<std::string, size_t>                    tokens_per_block_by_tag;
+    std::map<std::string, size_t>                    kv_block_stride_bytes_by_tag;
+    std::map<std::string, size_t>                    kv_scale_stride_bytes_by_tag;
 
     size_t context_batch_size = 0;
     size_t decoder_batch_size = 0;
@@ -183,15 +187,25 @@ struct CacheStoreInputs {
     torch::Tensor            request_id;             // [context_batch_size]
     torch::Tensor            request_pd_separation;  // [context_batch_size]
     std::vector<std::string> cache_keys;             // [context_batch_size]
-    size_t                   tokens_per_block;
-    size_t                   kv_block_stride_bytes = 0;
-    size_t                   kv_scale_stride_bytes = 0;
-    bool                     pd_separation         = false;
-    size_t                   model_id              = 0;
-    bool                     decode_entrance       = false;
-    bool                     warmup;
+    size_t                   tokens_per_block          = 0;
+    size_t                   kv_block_stride_bytes     = 0;
+    size_t                   kv_scale_stride_bytes     = 0;
+    bool                     pd_separation             = false;
+    size_t                   model_id                  = 0;
+    bool                     decode_entrance           = false;
+    bool                     warmup                    = false;
+    bool                     use_opaque_kv_cache_store = true;
 
-    int layer_id = 0;
+    int         layer_id = 0;
+    std::string tag;
+
+    // CP-page-RR sharding context. ``cp_size > 1`` means FULL groups have
+    // their kv_cache_offset compacted to ``ceil(total/cp_size)`` per rank;
+    // the writer must re-pair (cache_keys[r + i*cp_size], offset[i]) instead
+    // of the legacy (cache_keys[i], offset[i]). Defaults of (0, 1) preserve
+    // the non-sharded path. See ``buildCacheStorePlan``.
+    int cp_rank = 0;
+    int cp_size = 1;
 
     // Pre-created event from the main thread to avoid cudaEventRecord
     // contention on background threads. nullptr means writeCacheStore will
@@ -206,11 +220,6 @@ struct AttentionCommonInputs {
 
     std::optional<KvCacheInfo>      kv_cache;
     std::optional<CacheStoreInputs> cache_store_inputs;
-
-    // Hybrid cache helper: layer_id -> kv cache group id (host-side).
-    // When kv_cache->kv_cache_block_ids_by_group is non-empty, model will select the right group per layer
-    // and set kv_cache->kv_cache_block_id before calling attention ops.
-    std::vector<int32_t> kv_cache_layer_to_group_id;
 
     torch::Tensor cu_seqlens;
     torch::Tensor cu_kv_seqlens;

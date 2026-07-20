@@ -15,9 +15,17 @@ size_t P2PConnectorAsyncMatchContext::matchedBlockCount() const {
         return 0;
     }
 
-    auto layer_block_ids = resource_->layerBlocks();
-    if (!layer_block_ids.empty() && layer_block_ids.at(0)) {
-        return layer_block_ids.at(0)->blocksNum();
+    for (const auto& group_block_ids : resource_->groupBlocks()) {
+        if (group_block_ids && group_block_ids->blocksNum() > 0) {
+            return group_block_ids->blocksNum();
+        }
+    }
+    for (const auto& layer_groups : resource_->layerGroupBlocks()) {
+        for (const auto& group_block_ids : layer_groups) {
+            if (group_block_ids && group_block_ids->blocksNum() > 0) {
+                return group_block_ids->blocksNum();
+            }
+        }
     }
     return 0;
 }
