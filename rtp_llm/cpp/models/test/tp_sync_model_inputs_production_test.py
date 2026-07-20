@@ -191,7 +191,43 @@ def _production_boundary_worker(rank: int, nccl_port: int, uds_dir: str) -> None
         _run_real_tp_sync(rank, "stale-singleton-reset")
         torch.distributed.barrier()
 
-        # 4. Deliberately put a tensor on CUDA at root while non-root allocates
+        # 4. Non-empty hidden states with zero combo tokens must raise a useful
+        # shape error rather than divide by zero on non-root. Root observes the
+        # peer abort through the next UDS metadata broadcast.
+        try:
+            production_bridge.run_tp_sync_model_inputs(
+                libth_transformer.__file__,
+                rank,
+                True,
+                empty_combo_tokens=True,
+            )
+        except RuntimeError as error:
+            if rank == 1:
+                # This rank rejected the shape before entering root's next UDS
+                # broadcast. Close its idle endpoint so root observes the
+                # terminal peer abort immediately instead of waiting timeout.
+                librtp_compute_ops.destroy_cpu_tp_broadcaster()
+            expected_error = "non-zero combo tokens" if rank == 1 else "CpuBroadcaster"
+            if expected_error not in str(error):
+                raise AssertionError(
+                    f"rank {rank}: unexpected empty-combo error: {error}"
+                ) from error
+        else:
+            raise AssertionError(
+                f"rank {rank}: empty combo tokens did not reject hidden states"
+            )
+
+        # The preceding runtime failure is intentionally terminal. Coordinate
+        # reset/re-init before testing the next independent terminal condition.
+        torch.distributed.barrier()
+        ct._init_cpu_tp_broadcaster_if_needed(librtp_compute_ops)
+        if ct._cpu_tp_broadcaster_base_path is None:
+            raise AssertionError(
+                f"rank {rank}: failed to reset after empty-combo rejection"
+            )
+        torch.distributed.barrier()
+
+        # 5. Deliberately put a tensor on CUDA at root while non-root allocates
         # that logical tensor on CPU. Device-layout metadata must reject the
         # split before either packed payload can be consumed. Rank 1 reports
         # the explicit mismatch; root observes the peer abort as a terminal UDS

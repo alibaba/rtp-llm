@@ -232,8 +232,14 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
         if (shape_hints_ptr[GptModelInputIndex::mtpHiddenStates]) {
             auto hidden_states_dim0 = (size_t)shape_hints_ptr[GptModelInputIndex::comboTokens];
+            RTP_LLM_CHECK_WITH_INFO(hidden_states_dim0 > 0,
+                                    "MTP hidden states require non-zero combo tokens; hidden_states_size=%d",
+                                    hidden_states_size);
+            RTP_LLM_CHECK_WITH_INFO(hidden_states_size % hidden_states_dim0 == 0,
+                                    "MTP hidden states size %d is not divisible by combo token count %zu",
+                                    hidden_states_size,
+                                    hidden_states_dim0);
             auto hidden_states_dim1 = (size_t)hidden_states_size / hidden_states_dim0;
-            RTP_LLM_CHECK(hidden_states_size % hidden_states_dim0 == 0);
             inputs.last_hidden_states =
                 allocBuf((rtp_llm::DataType)shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesDtype],
                          {hidden_states_dim0, hidden_states_dim1},
