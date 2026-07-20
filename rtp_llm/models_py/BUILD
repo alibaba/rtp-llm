@@ -213,6 +213,7 @@ py_library(
         "layers/*.py",
         "new_models/*.py",
         "new_models/qwen3/*.py",
+        "new_models/qwen3_moe/*.py",
         "quant_methods/*.py",
     ]),
     deps = [
@@ -224,6 +225,7 @@ py_library(
         "//rtp_llm:ops",
         "//rtp_llm:safetensors",
         "//rtp_llm:torch",
+        "//rtp_llm:utils",
         "//rtp_llm/models_py/distributed:collective_torch",
     ],
     data = [
