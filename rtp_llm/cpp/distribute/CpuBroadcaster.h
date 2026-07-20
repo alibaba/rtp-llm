@@ -34,8 +34,10 @@ AbortDecision abortOrObserveCommit(uint32_t* decision, uint32_t previous_generat
 // Python initializes this during distributed bootstrap, while the C++ engine
 // thread performs request-time broadcasts. Calls may cross threads, but
 // broadcastCPU is still serialized: no concurrent or re-entrant broadcasts, and
-// reset must not race with an in-flight broadcast. Any transport failure makes
-// the instance unusable until reset() rebuilds the stream state.
+// reset must not race with an in-flight broadcast. Any runtime transport
+// failure makes the instance unusable until a coordinated reset/re-init or
+// process restart rebuilds the stream state. Callers must fail fast; they must
+// not switch ranks independently to another collective implementation.
 class CpuBroadcaster {
 public:
     static CpuBroadcaster& instance();
@@ -66,7 +68,7 @@ private:
     CpuBroadcaster& operator=(const CpuBroadcaster&) = delete;
 
     void cleanupStateLocked();
-    void markBroadcastFailedLocked();
+    void markBroadcastFailedLocked(uint32_t failed_generation);
 
     std::mutex        mu_;
     std::atomic<bool> initialized_{false};

@@ -55,6 +55,7 @@ cc_test(
     srcs = ["test/CpuBroadcasterTest.cc"],
     deps = [
         ":cpu_broadcaster",
+        "//rtp_llm/cpp/testing:test_log_capture",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],

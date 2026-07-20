@@ -500,7 +500,12 @@ void CpuBroadcaster::cleanupStateLocked() {
     initialized_.store(false, std::memory_order_release);
 }
 
-void CpuBroadcaster::markBroadcastFailedLocked() {
+void CpuBroadcaster::markBroadcastFailedLocked(uint32_t failed_generation) {
+    RTP_LLM_LOG_WARNING("CpuBroadcaster rank %d generation %u entered a terminal failed state; "
+                        "automatic c10d/NCCL fallback is disabled to prevent TP rank divergence. "
+                        "A coordinated reset/re-init or process restart is required",
+                        rank_,
+                        failed_generation);
     failed_                = true;
     broadcast_in_progress_ = false;
     for (int& fd : peer_fds_) {
@@ -787,7 +792,7 @@ void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
     auto fail_broadcast = [this, decision_slot, previous_decision, next_generation]() {
         publishDecision(decision_slot, previous_decision, next_generation | kBroadcastFailedMask);
         std::lock_guard<std::mutex> lock(mu_);
-        markBroadcastFailedLocked();
+        markBroadcastFailedLocked(next_generation);
     };
 
     try {

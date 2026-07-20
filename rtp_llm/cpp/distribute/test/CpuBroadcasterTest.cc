@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/distribute/CpuBroadcaster.h"
+#include "rtp_llm/cpp/testing/TestLogCapture.h"
 
 #include "gtest/gtest.h"
 
@@ -1922,6 +1923,7 @@ TEST(CpuBroadcasterTest, BroadcastTimeoutRequiresResetBeforeReuse) {
     auto& bcast = CpuBroadcaster::instance();
     bcast.reset();
     ::setenv("RTP_LLM_CPU_TP_BROADCASTER_BROADCAST_TIMEOUT_MS", "50", 1);
+    test::TestLogCapture log_capture("cpu_broadcast_terminal_failure");
 
     const std::string base = makeTempBase();
     std::atomic<bool> payload_ready{false};
@@ -1952,7 +1954,14 @@ TEST(CpuBroadcasterTest, BroadcastTimeoutRequiresResetBeforeReuse) {
 
     EXPECT_TRUE(peer_error.empty()) << peer_error;
     EXPECT_NE(broadcast_error.find("failed after 50 ms"), std::string::npos) << broadcast_error;
+    // Keep initialized_ set after a runtime failure so execBroadcastCpu cannot
+    // silently select its pre-initialization c10d/NCCL fallback.
+    EXPECT_TRUE(bcast.isInitialized());
     EXPECT_NE(retry_error.find("reset and reinitialize before reuse"), std::string::npos) << retry_error;
+    const auto log_content = log_capture.content();
+    EXPECT_NE(log_content.find("rank 0 generation 1 entered a terminal failed state"), std::string::npos)
+        << log_content;
+    EXPECT_NE(log_content.find("automatic c10d/NCCL fallback is disabled"), std::string::npos) << log_content;
 
     bcast.reset();
     cleanupTempBase(base);
