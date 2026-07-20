@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -24,6 +25,7 @@ class CPSlotMapper;
 class CacheStore;
 class KVCacheConnectorCoordinator;
 class KVCacheConnectorReadWriteContext;
+class BroadcastManager;
 
 class KVCacheManager {
 public:
@@ -48,6 +50,7 @@ public:
     // 显存管理和缓存分配
     MallocResult malloc(const MallocInfo& malloc_info);
     void         free(const FreeInfo& free_info);
+    bool         cancelLoadBack(const std::shared_ptr<AsyncContext>& context);
     void         insertIntoCache(const InsertInfo& insert_info);
 
     int
@@ -135,6 +138,10 @@ public:
     bool hasActiveConnectors() const;
     bool hasP2PConnector() const;
 
+    BlockTreeCachePtr blockTreeCache() const {
+        return block_tree_cache_;
+    }
+
     std::shared_ptr<KVCacheConnectorCoordinator> connectorCoordinator() const {
         return coordinator_;
     }
@@ -164,9 +171,10 @@ public:
     }
 
 private:
-    void initConnectorCoordinator();
-    void allocateAndSync();
-    void reportMetricsLoop();
+    void                              initConnectorCoordinator();
+    void                              allocateAndSync();
+    void                              reportMetricsLoop();
+    std::shared_ptr<BroadcastManager> createBlockTreeBroadcastManager() const;
 
     // 成员变量
     CacheConfig         config_;
@@ -187,6 +195,7 @@ private:
     std::thread       metrics_reporter_thread_;
 
     std::shared_ptr<KVCacheConnectorCoordinator> coordinator_;
+    BlockTreeCachePtr                            block_tree_cache_;
 
     mutable std::mutex          cache_store_mutex_;
     std::shared_ptr<CacheStore> cache_store_;

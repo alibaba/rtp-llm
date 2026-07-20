@@ -8,6 +8,9 @@
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
@@ -45,34 +48,47 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
         return init_result;
     }
 
-    auto incr_result = incrMalloc(malloc_info);
+    auto pending_load_back_ticket = std::move(init_result.load_back_ticket);
+    auto incr_result              = incrMalloc(malloc_info);
     if (!incr_result.success) {
+        pending_load_back_ticket.reset();
         FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
         free(free_info);
         return incr_result;
-    } else {
-        if (metrics_reporter_ && malloc_info.enable_device_cache) {
-            int64_t device_input_length = 0;
-            if (malloc_info.batch_kv_cache_resource) {
-                const auto& cache_keys      = malloc_info.batch_kv_cache_resource->cacheKeys(0);
-                size_t      match_keys_size = cache_keys.size();
-                device_input_length         = static_cast<int64_t>(match_keys_size) * config_.seq_size_per_block;
-            }
-
-            if (device_input_length > 0) {
-                RtpLLMDeviceCacheReuseMetricsCollector collector;
-                collector.match_cost_time_us    = init_result.match_cost_time_us;
-                collector.device_input_length   = device_input_length;
-                collector.device_reuse_length   = init_result.reuse_len;
-                collector.device_cache_hit_rate = static_cast<float>(static_cast<int64_t>(collector.device_reuse_length)
-                                                                     * 100 / collector.device_input_length);
-                kmonitor::MetricsTags tags;
-                metrics_reporter_->report<RtpLLMDeviceCacheReuseMetrics, RtpLLMDeviceCacheReuseMetricsCollector>(
-                    &tags, &collector);
-            }
-        }
-        return init_result;
     }
+
+    if (pending_load_back_ticket && !pending_load_back_ticket->empty()) {
+        init_result.async_context = pending_load_back_ticket->commit();
+        pending_load_back_ticket.reset();
+        if (!init_result.async_context) {
+            FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
+            free(free_info);
+            return {false, 0};
+        }
+    }
+    init_result.load_back_ticket.reset();
+
+    if (metrics_reporter_ && malloc_info.enable_device_cache) {
+        int64_t device_input_length = 0;
+        if (malloc_info.batch_kv_cache_resource) {
+            const auto&  cache_keys      = malloc_info.batch_kv_cache_resource->cacheKeys(0);
+            const size_t match_keys_size = cache_keys.size();
+            device_input_length          = static_cast<int64_t>(match_keys_size) * config_.seq_size_per_block;
+        }
+
+        if (device_input_length > 0) {
+            RtpLLMDeviceCacheReuseMetricsCollector collector;
+            collector.match_cost_time_us    = init_result.match_cost_time_us;
+            collector.device_input_length   = device_input_length;
+            collector.device_reuse_length   = init_result.reuse_len;
+            collector.device_cache_hit_rate = static_cast<float>(static_cast<int64_t>(collector.device_reuse_length)
+                                                                 * 100 / collector.device_input_length);
+            kmonitor::MetricsTags tags;
+            metrics_reporter_->report<RtpLLMDeviceCacheReuseMetrics, RtpLLMDeviceCacheReuseMetricsCollector>(
+                &tags, &collector);
+        }
+    }
+    return init_result;
 }
 
 MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {
@@ -124,6 +140,33 @@ int KVCacheAllocator::estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr&
     const int expanded_sequences = target_width - current_batch_size;
     const int tail_copy_blocks   = expanded_sequences > 0 && seq_len % seqSizePerBlock() != 0 ? expanded_sequences : 0;
     return target_width * per_sequence_growth + tail_copy_blocks;
+}
+
+void KVCacheAllocator::setBlockTreeCache(BlockTreeCache* block_tree_cache) {
+    for (const auto& group : cacheGroups()) {
+        if (group) {
+            group->setEvictCallback({});
+        }
+    }
+    block_tree_cache_ = block_tree_cache;
+    if (block_tree_cache_ == nullptr) {
+        return;
+    }
+    for (const auto& group : cacheGroups()) {
+        if (!group) {
+            continue;
+        }
+        const std::string stable_tag = group->tag();
+        group->setEvictCallback([block_tree_cache, stable_tag](size_t need_blocks) {
+            const int reclaimed = block_tree_cache->evictForTag(stable_tag, need_blocks);
+            block_tree_cache->waitForPendingTasks();
+            return reclaimed > 0 ? static_cast<size_t>(reclaimed) : 0;
+        });
+    }
+}
+
+bool KVCacheAllocator::cancelLoadBack(const std::shared_ptr<AsyncContext>& context) {
+    return block_tree_cache_ != nullptr && block_tree_cache_->cancelLoadBack(context);
 }
 
 uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_layer_id) const {

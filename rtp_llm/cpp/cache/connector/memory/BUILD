@@ -2,6 +2,13 @@ load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
 
 cc_library(
+    name = "cache_block_kind",
+    hdrs = ["CacheBlockKind.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "memory_connector",
     hdrs = glob([
         "*.h",

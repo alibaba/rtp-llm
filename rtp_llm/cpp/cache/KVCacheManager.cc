@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <chrono>
 #include <numeric>
-#include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
@@ -12,9 +11,12 @@
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTransferConverter.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -171,7 +173,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     cache_store_config_(cache_store_config),
     use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool) {
     if (warmup) {
-        config_.finalizeBlockNums(/*global_block_num=*/1, runtime_config_);
+        config_.finalizeBlockNums(/*global_block_num=*/2, runtime_config_);
     } else {
         allocateAndSync();
     }
@@ -201,14 +203,18 @@ KVCacheManager::~KVCacheManager() {
     if (metrics_reporter_thread_.joinable()) {
         metrics_reporter_thread_.join();
     }
+    if (allocator_) {
+        allocator_->setBlockTreeCache(nullptr);
+    }
     allocator_.reset();
+    block_tree_cache_.reset();
     coordinator_.reset();
 }
 
 // 初始化和配置相关
 
 bool KVCacheManager::init() {
-    RTP_LLM_CHECK_WITH_INFO(!allocator_ && !coordinator_ && !metrics_reporter_thread_.joinable(),
+    RTP_LLM_CHECK_WITH_INFO(!allocator_ && !coordinator_ && !block_tree_cache_ && !metrics_reporter_thread_.joinable(),
                             "KVCacheManager::init called more than once");
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache specs must not be empty");
 
@@ -241,8 +247,29 @@ bool KVCacheManager::init() {
     allocator_->setCPSlotMapper(cp_slot_mapper_);
     allocator_->setSharedBlockCache(shared_cache);
     RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
+    if (kv_cache_config_.device_cache_min_free_blocks > 0) {
+        allocator_->setReserveBlockNum(static_cast<size_t>(kv_cache_config_.device_cache_min_free_blocks));
+    }
     shared_cache->setIndependentGroupEviction(enable_independent_group_eviction,
                                               allocator_->independentEvictionGroupIds());
+
+    const bool requires_broadcast_manager = parallelism_config_.tp_size > 1 && parallelism_config_.tp_rank == 0
+                                            && !runtime_config_.worker_grpc_addrs.empty();
+    std::shared_ptr<BroadcastManager> broadcast_manager;
+    if (requires_broadcast_manager) {
+        broadcast_manager = createBlockTreeBroadcastManager();
+        if (!broadcast_manager) {
+            return false;
+        }
+    }
+
+    block_tree_cache_ = createBlockTreeCache(
+        config_, kv_cache_config_, allocator_, parallelism_config_, /*storage_backend=*/nullptr, broadcast_manager);
+    if (!block_tree_cache_) {
+        RTP_LLM_LOG_ERROR("KVCacheManager::init: failed to create BlockTreeCache");
+        return false;
+    }
+    allocator_->setBlockTreeCache(block_tree_cache_.get());
 
     if (metrics_reporter_) {
         stop_.store(false, std::memory_order_relaxed);
@@ -251,6 +278,23 @@ bool KVCacheManager::init() {
 
     initConnectorCoordinator();
     return true;
+}
+
+std::shared_ptr<BroadcastManager> KVCacheManager::createBlockTreeBroadcastManager() const {
+    const size_t expected_worker_count = static_cast<size_t>(parallelism_config_.tp_size);
+    if (runtime_config_.worker_grpc_addrs.size() != expected_worker_count) {
+        RTP_LLM_LOG_ERROR("KVCacheManager: worker grpc address count mismatch, expected=%zu, actual=%zu",
+                          expected_worker_count,
+                          runtime_config_.worker_grpc_addrs.size());
+        return nullptr;
+    }
+
+    auto broadcast_manager = std::make_shared<BroadcastManager>(runtime_config_.worker_grpc_addrs);
+    if (!broadcast_manager->init()) {
+        RTP_LLM_LOG_ERROR("KVCacheManager: failed to initialize BlockTreeCache BroadcastManager");
+        return nullptr;
+    }
+    return broadcast_manager;
 }
 
 const CacheConfig& KVCacheManager::cacheConfig() const {
@@ -287,6 +331,10 @@ void KVCacheManager::free(const FreeInfo& free_info) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK(free_info.batch_kv_cache_resource && free_info.complete_token_ids);
     allocator_->free(free_info);
+}
+
+bool KVCacheManager::cancelLoadBack(const std::shared_ptr<AsyncContext>& context) {
+    return allocator_ != nullptr && allocator_->cancelLoadBack(context);
 }
 
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
@@ -482,23 +530,13 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
         return info;
     }
 
-    if (need_cache_keys) {
-        std::unordered_set<CacheKeyType> all_keys;
-        // device cache keys
-        std::vector<CacheKeyType> device_cache_keys;
-        auto                      shared_cache = allocator_->sharedBlockCache();
-        if (shared_cache) {
-            device_cache_keys = shared_cache->allCacheKeys();
-            all_keys.insert(device_cache_keys.begin(), device_cache_keys.end());
-            info.version = shared_cache->version();
+    if (block_tree_cache_) {
+        constexpr size_t kMaxReportedCacheKeys = 10000;
+        const auto       snapshot = block_tree_cache_->getKeySnapshot(need_cache_keys ? kMaxReportedCacheKeys : 0);
+        info.version              = snapshot.version;
+        if (need_cache_keys && latest_version != snapshot.version) {
+            info.cached_keys = snapshot.keys;
         }
-        // memory cache keys
-        RTP_LLM_CHECK_WITH_INFO(coordinator_ != nullptr,
-                                "getKVCacheInfo called before KVCacheManager coordinator initialized");
-        const auto mem_cache_keys = coordinator_->memoryCacheKeys();
-        all_keys.insert(mem_cache_keys.begin(), mem_cache_keys.end());
-
-        info.cached_keys.assign(all_keys.begin(), all_keys.end());
     }
 
     const size_t block_size_tokens = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
@@ -561,7 +599,56 @@ KVCacheManager::asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteC
 
 bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
     RTP_LLM_CHECK_WITH_INFO(coordinator_ != nullptr, "executeFunction called before KVCacheManager initialized");
-    return coordinator_->executeFunction(request, response);
+    if (!request.has_mem_request()) {
+        return coordinator_->executeFunction(request, response);
+    }
+
+    MemoryOperationResponsePB* memory_response = response.mutable_mem_response();
+    memory_response->set_success(false);
+    const MemoryOperationRequestPB& memory_request = request.mem_request();
+    if (memory_request.copy_items_size() == 0) {
+        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: memory request contains no transfer item");
+        return false;
+    }
+
+    int tagged_items = 0;
+    for (const auto& item : memory_request.copy_items()) {
+        tagged_items += item.component_group_tags_size() > 0 ? 1 : 0;
+    }
+    if (tagged_items != 0 && tagged_items != memory_request.copy_items_size()) {
+        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: mixed block-tree and legacy memory request");
+        return false;
+    }
+
+    if (tagged_items == 0) {
+        if (kv_cache_config_.enable_tiered_memory_cache || !coordinator_->hasMemoryConnector()) {
+            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: legacy memory request has no active owner");
+            return false;
+        }
+        return coordinator_->executeFunction(request, response);
+    }
+
+    if (!kv_cache_config_.enable_tiered_memory_cache || !kv_cache_config_.enable_memory_cache || !block_tree_cache_) {
+        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: tagged transfer has no tiered block-tree owner");
+        return false;
+    }
+    for (int item_index = 0; item_index < memory_request.copy_items_size(); ++item_index) {
+        TransferDescriptor descriptor;
+        if (!BlockTreeTransferConverter::decodeTransfer(
+                memory_request, item_index, block_tree_cache_->componentGroups(), descriptor)) {
+            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid tagged transfer item, index=%d", item_index);
+            return false;
+        }
+        const CopyStatus status = block_tree_cache_->executeTransfer(descriptor);
+        if (status != CopyStatus::OK) {
+            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: tagged transfer failed, index=%d status=%d",
+                                item_index,
+                                static_cast<int>(status));
+            return false;
+        }
+    }
+    memory_response->set_success(true);
+    return true;
 }
 
 void KVCacheManager::initConnectorCoordinator() {

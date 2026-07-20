@@ -19,6 +19,11 @@
 
 namespace rtp_llm {
 
+struct BlockHolderRefCounts {
+    int request_connector{0};
+    int block_cache{0};
+};
+
 class CacheStore;
 
 class BlockPool {
@@ -43,6 +48,8 @@ public:
     size_t                    freeBlocksNum() const;
     size_t                    availableBlocksNum() const;
     size_t                    requestRefBlocksNum() const;
+    int                       requestRefCount(BlockIdxType block_idx) const;
+    BlockHolderRefCounts      blockHolderRefCounts(BlockIdxType block_idx) const;
     size_t                    connectorRefBlocksNum() const;
     size_t                    blockCacheRefBlocksNum() const;
     // Blocks not held by request or block cache (i.e. free + connector-in-flight).

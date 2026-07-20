@@ -42,6 +42,9 @@ public:
 
     bool hasActiveConnectors() const override;
     bool hasP2PConnector() const override;
+    bool hasMemoryConnector() const {
+        return memory_connector_ != nullptr;
+    }
 
     // virtual for test
     virtual std::shared_ptr<AsyncContext>

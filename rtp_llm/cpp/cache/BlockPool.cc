@@ -687,6 +687,16 @@ size_t BlockPool::requestRefBlocksNum() const {
     return request_ref_counter_.busyBlockNum();
 }
 
+int BlockPool::requestRefCount(BlockIdxType block_idx) const {
+    std::lock_guard<std::mutex> lock(ref_mu_);
+    return request_ref_counter_.getRefCounter(block_idx);
+}
+
+BlockHolderRefCounts BlockPool::blockHolderRefCounts(BlockIdxType block_idx) const {
+    std::lock_guard<std::mutex> lock(ref_mu_);
+    return {req_con_ref_counter_.getRefCounter(block_idx), block_cache_ref_counter_.getRefCounter(block_idx)};
+}
+
 size_t BlockPool::connectorRefBlocksNum() const {
     std::lock_guard<std::mutex> lock(ref_mu_);
     return connector_ref_counter_.busyBlockNum();

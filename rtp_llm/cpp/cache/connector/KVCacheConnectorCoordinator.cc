@@ -79,7 +79,8 @@ bool KVCacheConnectorCoordinator::init() {
                      cache_config_.debugString().c_str(),
                      kv_cache_config_.to_string().c_str(),
                      runtime_config_.to_string().c_str());
-    if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache) {
+    if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache
+        && !kv_cache_config_.enable_tiered_memory_cache) {
         memory_connector_ = initMemoryConnector();
         connectors_.emplace_back(memory_connector_);
     }
@@ -359,7 +360,10 @@ void KVCacheConnectorCoordinator::handleRead(const P2PConnectorStartLoadRequestP
 
 bool KVCacheConnectorCoordinator::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
     if (request.has_mem_request()) {
-        RTP_LLM_CHECK(memory_connector_ != nullptr);
+        if (!memory_connector_) {
+            RTP_LLM_LOG_WARNING("executeFunction: mem_request received but memory connector not initialized");
+            return false;
+        }
         return memory_connector_->copyCache(request.mem_request(), *(response.mutable_mem_response()));
     } else if (request.has_remote_request()) {
 #ifdef USE_REMOTE_KV_CACHE

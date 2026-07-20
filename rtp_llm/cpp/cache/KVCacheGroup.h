@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+#include <mutex>
 #include <memory>
 #include <vector>
 #include <cstdint>
@@ -62,7 +64,8 @@ public:
     virtual MatchResult matchPrefix(const CacheKeysType& cache_keys) const;
     virtual MatchResult matchSingleKey(CacheKeyType cache_key) const;
     virtual void
-    insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident);
+         insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident);
+    bool materializePositions(BlockIds& block_ids, const std::vector<size_t>& positions);
     virtual void free(const BlockIndicesType& block_indices)                                                     = 0;
     virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
@@ -92,8 +95,10 @@ public:
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
 
-    size_t                  freeBlocksNum() const;
-    bool                    ensureFreeBlocks(int need_blocks);
+    size_t freeBlocksNum() const;
+    bool   ensureFreeBlocks(int need_blocks);
+    using EvictCallback = std::function<size_t(size_t)>;
+    void                    setEvictCallback(EvictCallback callback);
     int                     seqSizePerBlock() const;
     const std::string&      tag() const;
     const GroupBase&        config() const;
@@ -101,8 +106,11 @@ public:
     const CacheGroupPolicy& policy() const;
     bool                    prefixReuseEnabled() const;
     CacheEvictPolicy        evictPolicy() const;
-    uint32_t                explicitBlockNum() const;
-    size_t                  activeTailBlocks() const;
+    BlockPoolPtr            blockPool() const {
+        return block_pool_;
+    }
+    uint32_t explicitBlockNum() const;
+    size_t   activeTailBlocks() const;
 
     virtual bool                 prefixReusable() const;
     virtual bool                 hasSparseSlots() const;
@@ -131,6 +139,8 @@ protected:
     SharedBlockCache*            shared_cache_     = nullptr;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
     int                          group_id_         = -1;
+    EvictCallback                evict_callback_;
+    mutable std::mutex           evict_callback_mutex_;
 
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_tensors;
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_scale_tensors;

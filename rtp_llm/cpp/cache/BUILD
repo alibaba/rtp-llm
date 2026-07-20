@@ -244,6 +244,7 @@ cc_library(
         ":kv_cache_allocator_hdr",
         ":kv_cache_group",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
     ],
 )
@@ -342,6 +343,7 @@ cc_library(
         ":cache_core",
         ":cp_slot_mapper",
         "//rtp_llm/cpp/cache/connector",
+        "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + torch_deps(),

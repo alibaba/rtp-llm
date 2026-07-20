@@ -32,10 +32,14 @@ public:
                        bool                            copy_last_block,
                        std::vector<TaggedBlockIdPair>& block_update_mapping) override;
 
-    int seqSizePerBlock() const override;
-    int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                              int                            seq_len,
-                              int                            reserve_step) const override;
+    int                          seqSizePerBlock() const override;
+    int                          singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                       int                            seq_len,
+                                                       int                            reserve_step) const override;
+    std::vector<KVCacheGroupPtr> cacheGroups() const override {
+        return full_kv_cache_group_ ? std::vector<KVCacheGroupPtr>{full_kv_cache_group_} :
+                                      std::vector<KVCacheGroupPtr>{};
+    }
 
 protected:
     int estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,

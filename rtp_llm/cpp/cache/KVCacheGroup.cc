@@ -1,4 +1,7 @@
 #include "rtp_llm/cpp/cache/KVCacheGroup.h"
+
+#include <algorithm>
+#include <limits>
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -32,6 +35,11 @@ bool KVCacheGroup::init() {
     return true;
 }
 
+void KVCacheGroup::setEvictCallback(EvictCallback callback) {
+    std::lock_guard<std::mutex> lock(evict_callback_mutex_);
+    evict_callback_ = std::move(callback);
+}
+
 bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
     if (required_blocks <= 0) {
         return true;
@@ -43,13 +51,26 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
             break;
         }
 
+        const size_t need_evict = static_cast<size_t>(required_blocks) - free_blocks;
+        {
+            std::lock_guard<std::mutex> lock(evict_callback_mutex_);
+            if (evict_callback_) {
+                if (evict_callback_(need_evict) == 0) {
+                    RTP_LLM_LOG_WARNING("ensure free blocks failed, BTC reclaimed no blocks for tag=%s need=%zu",
+                                        tag().c_str(),
+                                        need_evict);
+                    return false;
+                }
+                continue;
+            }
+        }
+
         if (!shared_cache_) {
             RTP_LLM_LOG_WARNING(
                 "ensure free blocks failed, no shared cache, free blocks: %zu, need: %d", free_blocks, required_blocks);
             return false;
         }
 
-        const size_t                  need_evict = static_cast<size_t>(required_blocks) - free_blocks;
         SharedBlockCache::EvictResult evict_result;
         size_t                        freed = shared_cache_->evictAndFreeForGroup(group_id_, need_evict, &evict_result);
 
@@ -107,6 +128,44 @@ void KVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         group_block_ids[static_cast<size_t>(group_id_)] = block_indices[i];
         shared_cache_->put(cache_keys[i], group_block_ids, is_resident);
     }
+}
+
+bool KVCacheGroup::materializePositions(BlockIds& block_ids, const std::vector<size_t>& positions) {
+    std::vector<size_t> missing_positions;
+    missing_positions.reserve(positions.size());
+    for (const size_t position : positions) {
+        if (position >= block_ids.blocksNum()) {
+            RTP_LLM_LOG_WARNING("load-back target position out of range: tag=%s position=%zu blocks=%zu",
+                                tag().c_str(),
+                                position,
+                                block_ids.blocksNum());
+            return false;
+        }
+        if (isNullBlockIdx(block_ids.blocks()[position])
+            && std::find(missing_positions.begin(), missing_positions.end(), position) == missing_positions.end()) {
+            missing_positions.push_back(position);
+        }
+    }
+    if (missing_positions.empty()) {
+        return true;
+    }
+    if (missing_positions.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        return false;
+    }
+    if (!ensureFreeBlocks(static_cast<int>(missing_positions.size()))) {
+        return false;
+    }
+    auto allocated = block_pool_->malloc(static_cast<int>(missing_positions.size()));
+    if (allocated.size() != missing_positions.size()) {
+        if (!allocated.empty()) {
+            block_pool_->requestFree(allocated);
+        }
+        return false;
+    }
+    for (size_t i = 0; i < missing_positions.size(); ++i) {
+        block_ids.setAt(missing_positions[i], allocated[i]);
+    }
+    return true;
 }
 
 size_t KVCacheGroup::freeBlocksNum() const {

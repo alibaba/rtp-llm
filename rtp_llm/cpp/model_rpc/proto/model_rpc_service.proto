@@ -511,10 +511,13 @@ message MemoryOperationRequestPB {
             int32 src_disk_slot = 10;
         }
         repeated TaggedBlockPB tagged_gpu_blocks = 11;
+        repeated string component_group_tags = 12;
     }
     enum CopyDirection {
         H2D = 0;
         D2H = 1;
+        H2DISK = 2;
+        DISK2H = 3;
     }
     enum BackingType {
         MEMORY = 0;

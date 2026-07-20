@@ -58,6 +58,9 @@ struct CacheGroupPolicy {
     bool                 validate_tail_blocks   = true;
     CpBlockMappingMode   cp_mapping             = CpBlockMappingMode::NONE;
     CpBlockSliceMode     cp_slice               = CpBlockSliceMode::NONE;
+    // Model-derived SWA attention window in tokens. Zero means no bounded
+    // window is configured and remains the default for non-SWA groups.
+    int sliding_window_size = 0;
 };
 
 // One cache-store registration step: pair a cache key from the full logical

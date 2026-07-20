@@ -7,6 +7,8 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 namespace rtp_llm {
@@ -72,64 +74,170 @@ bool SingleTypeKVCacheAllocator::doInit() {
 
 MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
     auto& kv_resource = malloc_info.batch_kv_cache_resource;
-    int   reuse_len   = 0;
+    auto& block_ids_0 = kv_resource->mutableBlockIds(0, 0);
     int   common_seq_len =
         std::min(malloc_info.complete_token_ids->commonSeqLength(), malloc_info.complete_token_ids->totalSeqLength());
+    if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
+        common_seq_len = cp_slot_mapper_->effectiveSeqLenForAlloc(config_, 0, common_seq_len);
+    }
+    const auto&        cache_keys = kv_resource->cacheKeys(0);
+    const std::string& tag        = config_.tagForGroup(0);
+    RTP_LLM_CHECK_WITH_INFO(block_tree_cache_ != nullptr, "BlockTreeCache must be injected before allocation");
 
-    const auto& cache_keys         = kv_resource->cacheKeys(0);
-    auto&       block_ids_0        = kv_resource->mutableBlockIds(0, 0);
-    int64_t     match_cost_time_us = 0;
+    int64_t                         match_cost_time_us = 0;
+    size_t                          reuse_blocks       = 0;
+    std::shared_ptr<LoadBackTicket> load_back_ticket;
+    std::vector<GroupBlockSet>      matched_block_sets;
+    bool                            matched_blocks_released = false;
+    auto                            release_matched_blocks  = [&]() {
+        if (!matched_blocks_released) {
+            block_tree_cache_->releaseMatchedBlocks(matched_block_sets);
+            matched_blocks_released = true;
+        }
+    };
+    auto rollback = [&]() -> MallocResult {
+        load_back_ticket.reset();
+        release_matched_blocks();
+        BlockIndicesType valid_blocks;
+        for (const auto block : block_ids_0.blocks()) {
+            if (!isNullBlockIdx(block)) {
+                valid_blocks.push_back(block);
+            }
+        }
+        if (!valid_blocks.empty()) {
+            full_kv_cache_group_->free(valid_blocks);
+        }
+        block_ids_0.resize(0);
+        kv_resource->cacheResource(0).setDeviceReuseBlockNum(0);
+        return {false, 0};
+    };
 
-    const size_t reserve_blocks   = reserveBlocksNum();
-    const int    estimated_blocks = (reserve_blocks > 0) ? getNeedBlocks(malloc_info) : 0;
-    int          reuse_blocks     = 0;
-
-    // drop the last cache key of the partial block to avoid reuse it for two reasons:
-    // 1. if the last block is partial, it actually cannot be reused, because only full blocks will be inserted into the
-    // cache.
-    // 2. if the last block is full and matched, the reuse length will be equal to the seq_len, which causes core dump
-    // in computing ops.
     if (malloc_info.enable_device_cache && full_kv_cache_group_->prefixReuseEnabled()) {
-        CacheKeysType match_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
-        auto          match_begin_time_us = currentTimeUs();
-        auto          match_result        = full_kv_cache_group_->match(match_keys);
+        CacheKeysType local_keys = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
+                                       cp_slot_mapper_->localCacheKeys(config_, 0, cache_keys) :
+                                       cache_keys;
+        CacheKeysType match_keys(local_keys.begin(), local_keys.empty() ? local_keys.end() : local_keys.end() - 1);
+        const auto    match_begin_time_us = currentTimeUs();
+        auto          match_result        = block_tree_cache_->match(match_keys);
         match_cost_time_us                = currentTimeUs() - match_begin_time_us;
-        reuse_len                         = static_cast<int>(match_result.reuse_length);
-        reuse_blocks                      = static_cast<int>(match_result.reuse_blocks);
+        load_back_ticket                  = match_result.load_back_ticket;
+        matched_block_sets                = std::move(match_result.matched_block_sets);
+        const size_t ready_blocks         = match_result.matched_blocks;
+        reuse_blocks =
+            load_back_ticket && !load_back_ticket->empty() ? load_back_ticket->logicalMatchedBlocks() : ready_blocks;
+        const auto       group_it = match_result.group_block_indices.find(tag);
+        BlockIndicesType ready_group_blocks =
+            group_it == match_result.group_block_indices.end() ? BlockIndicesType{} : group_it->second;
+        if (ready_group_blocks.size() != ready_blocks || ready_blocks > reuse_blocks) {
+            return rollback();
+        }
+        block_ids_0.assign(BlockIndicesType(reuse_blocks, NULL_BLOCK_IDX));
+        for (size_t i = 0; i < ready_group_blocks.size(); ++i) {
+            if (isNullBlockIdx(ready_group_blocks[i])) {
+                return rollback();
+            }
+            block_ids_0.setAt(i, ready_group_blocks[i]);
+        }
+
+        if (load_back_ticket && !load_back_ticket->empty()) {
+            for (const PendingLoadBackItem& item : load_back_ticket->items()) {
+                if (!block_tree_cache_->validateDeviceGroupTagsForComponentGroup(item.group_id, item.device_group_tags)
+                    || item.device_group_tags.size() != 1 || item.device_group_tags.front() != tag
+                    || item.path_index >= reuse_blocks || item.source_blocks.size() != 1
+                    || isNullBlockIdx(item.source_blocks.front())) {
+                    return rollback();
+                }
+                if (item.source_tier == Tier::DEVICE) {
+                    const auto current = block_ids_0.blocks()[item.path_index];
+                    if (!isNullBlockIdx(current) && current != item.source_blocks.front()) {
+                        return rollback();
+                    }
+                    block_ids_0.setAt(item.path_index, item.source_blocks.front());
+                }
+            }
+        }
+
+        BlockIndicesType resident_blocks;
+        for (const auto block : block_ids_0.blocks()) {
+            if (!isNullBlockIdx(block)) {
+                resident_blocks.push_back(block);
+            }
+        }
+        if (!resident_blocks.empty()) {
+            full_kv_cache_group_->KVCacheGroup::reference(resident_blocks);
+        }
+        release_matched_blocks();
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(reuse_blocks);
-        full_kv_cache_group_->reference(block_ids_0, match_result.block_indices);
+    } else {
+        release_matched_blocks();
     }
 
-    // Check if available blocks are enough for the request.
-    if (reserve_blocks > 0 && estimated_blocks > 0) {
-        const size_t available_blocks = availableBlocksNum();
-        const int    actual_blocks    = std::max(estimated_blocks - reuse_blocks, 0);
-        if (actual_blocks > 0 && available_blocks < static_cast<size_t>(actual_blocks) + reserve_blocks) {
-            if (malloc_info.verbose) {
-                RTP_LLM_LOG_INFO("SingleTypeKVCacheAllocator initMalloc rejected by reserve blocks: request_id=%ld "
-                                 "need_blocks=%d reuse_blocks=%d adjusted_need_blocks=%d available_blocks=%zu "
-                                 "reserve_blocks=%zu",
-                                 malloc_info.request_id,
-                                 estimated_blocks,
-                                 reuse_blocks,
-                                 actual_blocks,
-                                 available_blocks,
-                                 reserve_blocks);
+    std::vector<size_t> materialize_positions;
+    if (load_back_ticket && !load_back_ticket->empty()) {
+        for (const PendingLoadBackItem& item : load_back_ticket->items()) {
+            if (item.source_tier == Tier::DEVICE) {
+                continue;
             }
-            return {false, 0};
+            if (std::find(materialize_positions.begin(), materialize_positions.end(), item.path_index)
+                == materialize_positions.end()) {
+                materialize_positions.push_back(item.path_index);
+            }
+        }
+        for (size_t position = 0; position < reuse_blocks; ++position) {
+            if (isNullBlockIdx(block_ids_0.blocks()[position])
+                && std::find(materialize_positions.begin(), materialize_positions.end(), position)
+                       == materialize_positions.end()) {
+                return rollback();
+            }
         }
     }
 
+    size_t missing_targets = 0;
+    for (const size_t position : materialize_positions) {
+        if (position >= block_ids_0.blocksNum()) {
+            return rollback();
+        }
+        missing_targets += isNullBlockIdx(block_ids_0.blocks()[position]) ? 1 : 0;
+    }
+    const size_t reserve_blocks = reserveBlocksNum();
+    if (reserve_blocks > 0) {
+        const int    need_blocks = getNeedBlocks(malloc_info);
+        const size_t required    = static_cast<size_t>(std::max(need_blocks, 0)) + missing_targets + reserve_blocks;
+        if (availableBlocksNum() < required) {
+            return rollback();
+        }
+    }
+    if (!full_kv_cache_group_->materializePositions(block_ids_0, materialize_positions)) {
+        return rollback();
+    }
     if (!full_kv_cache_group_->malloc(block_ids_0, common_seq_len)) {
-        return {false, 0};
+        return rollback();
     }
 
-    // other batches reference batch 0's blocks
+    if (load_back_ticket && !load_back_ticket->empty()) {
+        for (PendingLoadBackItem& item : load_back_ticket->items()) {
+            if (item.path_index >= block_ids_0.blocksNum() || isNullBlockIdx(block_ids_0.blocks()[item.path_index])) {
+                return rollback();
+            }
+            const auto target = block_ids_0.blocks()[item.path_index];
+            if (item.source_tier == Tier::DEVICE && target != item.source_blocks.front()) {
+                return rollback();
+            }
+            item.target_device_blocks = {target};
+        }
+    }
+
     for (int batch_id = 1; batch_id < kv_resource->batchSize(); ++batch_id) {
         full_kv_cache_group_->reference(kv_resource->mutableBlockIds(batch_id, 0), block_ids_0.blocks());
     }
-
-    return {true, reuse_len, match_cost_time_us};
+    return {true,
+            static_cast<int>(reuse_blocks
+                             * (cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
+                                    cp_slot_mapper_->logicalSeqSizePerBlock(config_, 0) :
+                                    static_cast<size_t>(full_kv_cache_group_->seqSizePerBlock()))),
+            match_cost_time_us,
+            nullptr,
+            load_back_ticket};
 }
 
 MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
@@ -193,32 +301,51 @@ void SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
         full_kv_cache_group_->free(blocks);
     }
     kv_cache_resource->clearBlocks();
+    if (block_tree_cache_) {
+        block_tree_cache_->onBlocksReleased();
+    }
 }
 
 void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
-    if (!full_kv_cache_group_->prefixReuseEnabled()) {
+    if (!full_kv_cache_group_->prefixReuseEnabled() || !block_tree_cache_) {
         return;
     }
 
-    auto& kv_resource = insert_info.batch_kv_cache_resource;
-    int   batch_size  = kv_resource->batchSize();
-
-    // TODO(chanyin): set batch_size to 1 for now
-    batch_size = 1;
-
+    auto&     kv_resource = insert_info.batch_kv_cache_resource;
+    const int batch_size  = std::min(kv_resource->batchSize(), 1);
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-        const auto& cache_keys = kv_resource->cacheKeys(batch_id);
-        const auto& blocks     = kv_resource->blocks(batch_id, 0);
-
-        size_t block_num = std::min(size_t(cache_keys.size()), size_t(blocks.size()));
+        const auto&   full_keys   = kv_resource->cacheKeys(batch_id);
+        CacheKeysType insert_keys = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
+                                        cp_slot_mapper_->localCacheKeys(config_, 0, full_keys) :
+                                        full_keys;
+        const auto&   blocks      = kv_resource->blocks(batch_id, 0);
+        const size_t  block_num   = std::min(insert_keys.size(), blocks.size());
         if (block_num == 0) {
             continue;
         }
-
-        CacheKeysType    put_cache_keys(cache_keys.begin(), cache_keys.begin() + block_num);
-        BlockIndicesType put_block_ids(blocks.begin(), blocks.begin() + block_num);
-
-        full_kv_cache_group_->insertIntoCache(put_cache_keys, put_block_ids, insert_info.is_resident);
+        insert_keys.resize(block_num);
+        const auto& component_groups = block_tree_cache_->componentGroups();
+        if (component_groups.size() != 1 || !component_groups[0] || component_groups[0]->tags().size() != 1
+            || component_groups[0]->tags().front() != config_.tagForGroup(0)
+            || component_groups[0]->devicePoolCount() != 1) {
+            RTP_LLM_LOG_WARNING("SingleType insert rejected inconsistent stable tag/component mapping");
+            continue;
+        }
+        std::vector<std::vector<GroupSlot>> slots(block_num, std::vector<GroupSlot>(1));
+        for (auto& per_key_slots : slots) {
+            per_key_slots[0].device_blocks.assign(1, NULL_BLOCK_IDX);
+        }
+        bool has_valid = false;
+        for (size_t i = 0; i < block_num; ++i) {
+            if (isNullBlockIdx(blocks[i])) {
+                continue;
+            }
+            slots[i][0].device_blocks[0] = blocks[i];
+            has_valid                    = true;
+        }
+        if (has_valid) {
+            block_tree_cache_->insert(nullptr, insert_keys, slots);
+        }
     }
 }
 

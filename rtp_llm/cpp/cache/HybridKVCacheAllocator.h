@@ -10,6 +10,8 @@
 
 namespace rtp_llm {
 
+class LoadBackTicket;
+
 class HybridKVCacheAllocator: public KVCacheAllocator, public std::enable_shared_from_this<HybridKVCacheAllocator> {
 public:
     HybridKVCacheAllocator(const CacheConfig&                 config,
@@ -29,11 +31,14 @@ public:
                        bool                            copy_last_block,
                        std::vector<TaggedBlockIdPair>& block_update_mapping) override;
 
-    int              seqSizePerBlock() const override;
-    int              singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                           int                            seq_len,
-                                           int                            reserve_step) const override;
-    std::vector<int> independentEvictionGroupIds() const override;
+    int                          seqSizePerBlock() const override;
+    int                          singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                       int                            seq_len,
+                                                       int                            reserve_step) const override;
+    std::vector<int>             independentEvictionGroupIds() const override;
+    std::vector<KVCacheGroupPtr> cacheGroups() const override {
+        return kv_cache_groups_;
+    }
 
 protected:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
@@ -53,9 +58,12 @@ protected:
     void         checkCPShardedMallocResult(const MallocInfo& malloc_info) const override;
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
 
-    int reuseCache(const CacheKeysType&                 cache_keys,
-                   BatchKVCacheResource&                kv_resource,
-                   const std::shared_ptr<CPSlotMapper>& cp_mapper);
+    int  reuseCache(const CacheKeysType&                 cache_keys,
+                    BatchKVCacheResource&                kv_resource,
+                    const std::shared_ptr<CPSlotMapper>& cp_mapper,
+                    std::shared_ptr<LoadBackTicket>&     ticket,
+                    std::vector<BlockIndicesType>&       referenced_blocks);
+    bool preflightLoadBackMappings(const std::shared_ptr<LoadBackTicket>& ticket) const;
 
     virtual void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const = 0;
     virtual void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false)            = 0;
