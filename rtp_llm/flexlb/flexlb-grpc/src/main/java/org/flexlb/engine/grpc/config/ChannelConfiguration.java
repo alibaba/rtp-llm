@@ -43,10 +43,10 @@ public class ChannelConfiguration {
     @Bean
     public ThreadPoolExecutor forwarderChannelExecutor() {
         return new ThreadPoolExecutor(
-                16,
-                16,
+                config.getForwarderExecutorCoreSize(),
+                config.getForwarderExecutorMaxSize(),
                 5, TimeUnit.MINUTES,
-                new LinkedBlockingQueue<>(2000),
+                new LinkedBlockingQueue<>(config.getForwarderExecutorQueueSize()),
                 new NamedThreadFactory("flexlb-forwarder-channel-executor"),
                 new ThreadPoolExecutor.AbortPolicy()
         );
