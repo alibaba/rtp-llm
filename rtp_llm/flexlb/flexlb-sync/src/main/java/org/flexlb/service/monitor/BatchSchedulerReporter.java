@@ -12,6 +12,7 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PostConstruct;
 
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
+import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_WAIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_ACTUAL_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICTED_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICT_GAP_MS;
@@ -29,7 +30,6 @@ import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATC
 import static org.flexlb.constant.MetricConstant.INFLIGHT_BATCH_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
-import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
 
 /**
@@ -37,9 +37,10 @@ import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
  *
  * <p>Batch-path metrics use independent metric names to avoid tag schema
  * conflicts with the non-batch path:
- * queue (routing.queue.length + routing.queue.wait.time.ms),
+ * queue wait time (app.flexlb.batcher.queue.wait.time.ms, split from routing.queue.wait.time.ms),
  * dispatch reason (engine.balancing.master.dispatch.reason),
  * inflight (flexlb.scheduler.inflight.size + health.check.running.task.info.size).
+ * Note: routing.queue.length still shares the name with the non-batch path (P2 cleanup pending).
  */
 @Slf4j
 @Component
@@ -58,9 +59,11 @@ public class BatchSchedulerReporter {
 
     @PostConstruct
     public void init() {
-        // Queue — same type as RoutingQueueReporter
+        // Queue length — still shares name with RoutingQueueReporter (both GAUGE); P2 cleanup pending.
         monitor.register(ROUTING_QUEUE_LENGTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(ROUTING_QUEUE_WAIT_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        // Batcher queue wait time — independent name to avoid type conflict with the direct-path
+        // routing queue wait metric (GAUGE + empty tags). Batch path uses TIMER + per-engine tags.
+        monitor.register(BATCHER_QUEUE_WAIT_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
         // Dispatch reason — independent metric for batch path
         monitor.register(ENGINE_BALANCING_MASTER_DISPATCH_REASON, FlexMetricType.QPS, FlexPriorityType.PRECISE);
@@ -127,12 +130,12 @@ public class BatchSchedulerReporter {
     }
 
     /**
-     * Report batch wait time (enqueue to dispatch) via {@code routing.queue.wait.time.ms}.
+     * Report batch wait time (enqueue to dispatch) via {@code app.flexlb.batcher.queue.wait.time.ms}.
      */
     public void reportBatchWaitTimeMs(String role, String engineIp, String engineIpPort, long waitMs) {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
                 "role", role);
-        monitor.report(ROUTING_QUEUE_WAIT_TIME_MS, tags, waitMs);
+        monitor.report(BATCHER_QUEUE_WAIT_TIME_MS, tags, waitMs);
     }
 
     // ==================== Dispatch reason metrics ====================
@@ -306,7 +309,7 @@ public class BatchSchedulerReporter {
         if (RoleType.PREFILL.name().equals(role) || RoleType.PDFUSION.name().equals(role)) {
             monitor.prepare(DISPATCH_ACK_TIME_MS, tags);
             monitor.prepare(ROUTE_SUBMIT_TIME_MS, tags);
-            monitor.prepare(ROUTING_QUEUE_WAIT_TIME_MS, tags);
+            monitor.prepare(BATCHER_QUEUE_WAIT_TIME_MS, tags);
             for (String reason : FIXED_WINDOW_DISPATCH_REASONS) {
                 FlexMetricTags reasonTags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
                         "role", role,

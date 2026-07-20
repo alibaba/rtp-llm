@@ -145,6 +145,13 @@ public class MetricConstant {
     public static final String BATCHER_QUEUE_SIZE = "app.flexlb.batcher.queue.size";
 
     /**
+     * Independent metric name for batcher queue wait time, to avoid tag schema conflict with
+     * {@link #ROUTING_QUEUE_WAIT_TIME_MS} (direct path, GAUGE with empty tags).
+     * Batch path uses TIMER with per-engine tags (role/engineIp/engineIpPort).
+     */
+    public static final String BATCHER_QUEUE_WAIT_TIME_MS = "app.flexlb.batcher.queue.wait.time.ms";
+
+    /**
      * Engine finished task list size
      */
     public static final String ENGINE_FINISHED_TASK_LIST_SIZE = "app.engine.health.check.finished.task.list.size";
