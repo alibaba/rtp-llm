@@ -40,7 +40,10 @@ class Qwen2MtpModel(GptModelBase):
             config, parallelism_config, weights.get_global_weight(W.embedding)
         )
         self.eh_proj = LinearFactory.create_linear_from_weights(
-            weights.weights[0], W.multi_tokens_predict_eh_proj
+            weights.weights[0],
+            W.multi_tokens_predict_eh_proj,
+            quant_config=quant_config,
+            hw_kernel_config=py_hw_kernel_config,
         )
         self.e_norm = RMSNorm(
             weights.weights[0][W.multi_tokens_predict_enorm], eps=config.layernorm_eps
@@ -52,7 +55,12 @@ class Qwen2MtpModel(GptModelBase):
         self.layers = nn.ModuleList(
             [
                 Qwen3DecoderLayer(
-                    config, parallelism_config, idx, weights.weights[idx], quant_config
+                    config,
+                    parallelism_config,
+                    idx,
+                    weights.weights[idx],
+                    quant_config=quant_config,
+                    hw_kernel_config=py_hw_kernel_config,
                 )
                 for idx in range(self.layer_num)
             ]

@@ -17,7 +17,7 @@ namespace rtp_llm {
 // Lifecycle: init() -> submit()* -> waitAllDone() -> init() -> ...
 class CacheStoreAsyncWriter {
 public:
-    CacheStoreAsyncWriter();
+    explicit CacheStoreAsyncWriter(int device_id = -1);
     ~CacheStoreAsyncWriter();
 
     void init();
@@ -25,6 +25,21 @@ public:
     void waitAllDone();
 
 private:
+    class PendingTaskGuard {
+    public:
+        explicit PendingTaskGuard(CacheStoreAsyncWriter& writer);
+        ~PendingTaskGuard();
+
+        PendingTaskGuard(const PendingTaskGuard&)            = delete;
+        PendingTaskGuard& operator=(const PendingTaskGuard&) = delete;
+
+    private:
+        CacheStoreAsyncWriter& writer_;
+    };
+
+    void completePendingTask();
+    void storeCurrentException();
+
     enum class State {
         IDLE,
         RUNNING
@@ -38,6 +53,7 @@ private:
     std::mutex               exception_mutex_;
     std::exception_ptr       stored_exception_;
     State                    state_{State::IDLE};
+    int                      device_id_{-1};
 };
 
 }  // namespace rtp_llm

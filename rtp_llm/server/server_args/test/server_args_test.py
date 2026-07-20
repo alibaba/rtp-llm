@@ -287,6 +287,24 @@ class ServerArgsSetTest(TestCase):
             "1/3",
         )
 
+        sys.argv = [
+            "prog",
+            "--pdfusion_scheduler_mode",
+            "ratio",
+            "--decode_prefill_ratio",
+            "0",
+        ]
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode,
+            "ratio",
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.decode_prefill_ratio,
+            "0",
+        )
+
     def test_pdfusion_scheduler_mode_rejects_unknown_value(self):
         """Test that pdfusion_scheduler_mode only accepts fixed scheduler patterns."""
         sys.argv = ["prog", "--pdfusion_scheduler_mode", "ratioo"]
@@ -296,6 +314,21 @@ class ServerArgsSetTest(TestCase):
         importlib.reload(rtp_llm.server.server_args.server_args)
         with self.assertRaises(SystemExit):
             rtp_llm.server.server_args.server_args.setup_args()
+
+    def test_gpu_batch_vit_args_parse(self):
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.server_args.server_args import (
+            EnvArgumentParser,
+            init_all_group_args,
+        )
+
+        parser = EnvArgumentParser(description="test")
+        cfg = PyEnvConfigs()
+        parser.set_root_config(cfg)
+        init_all_group_args(parser, cfg)
+        parser.parse_args(["--gpu_batch_wait_ms", "500", "--gpu_max_batch_size", "8"])
+        self.assertEqual(cfg.vit_config.gpu_max_batch_size, 8)
+        self.assertEqual(cfg.vit_config.gpu_batch_wait_ms, 500)
 
 
 if __name__ == "__main__":

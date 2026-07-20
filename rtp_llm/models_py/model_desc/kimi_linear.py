@@ -46,6 +46,7 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
     AttentionConfigs,
+    HWKernelConfig,
     HybridAttentionType,
     LinearAttentionConfig,
     ParallelismConfig,
@@ -514,6 +515,7 @@ class KimiLinearKDA(nn.Module):
         weights: Dict[str, torch.Tensor],
         layernorm_eps: float,
         quant_config: Optional[object] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
         self.linear_attn_config = linear_attn_config
@@ -521,24 +523,54 @@ class KimiLinearKDA(nn.Module):
 
         # Projections
         self.in_proj_qkv = LinearFactory.create_linear_from_weights(
-            weights, W.linear_attn_qkv_w, None, None, quant_config
+            weights,
+            W.linear_attn_qkv_w,
+            None,
+            None,
+            quant_config=quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
         self.in_proj_b = LinearFactory.create_linear_from_weights(
-            weights, W.linear_attn_b_w, None, None, quant_config
+            weights,
+            W.linear_attn_b_w,
+            None,
+            None,
+            quant_config=quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
         # LoRA forget gate
         self.f_a_proj = LinearFactory.create_linear_from_weights(
-            weights, W.linear_attn_f_a_w, None, None, quant_config
+            weights,
+            W.linear_attn_f_a_w,
+            None,
+            None,
+            quant_config=quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
         self.f_b_proj = LinearFactory.create_linear_from_weights(
-            weights, W.linear_attn_f_b_w, None, None, quant_config
+            weights,
+            W.linear_attn_f_b_w,
+            None,
+            None,
+            quant_config=quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
         # LoRA output gate
         self.g_a_proj = LinearFactory.create_linear_from_weights(
-            weights, W.linear_attn_g_a_w, None, None, quant_config
+            weights,
+            W.linear_attn_g_a_w,
+            None,
+            None,
+            quant_config=quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
         self.g_b_proj = LinearFactory.create_linear_from_weights(
-            weights, W.linear_attn_g_b_w, None, None, quant_config
+            weights,
+            W.linear_attn_g_b_w,
+            None,
+            None,
+            quant_config=quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
 
         self.head_k_dim = linear_attn_config.linear_key_head_dim
@@ -561,7 +593,12 @@ class KimiLinearKDA(nn.Module):
             activation="sigmoid",
         )
         self.out_proj = LinearFactory.create_linear_from_weights(
-            weights, W.linear_attn_out_w, None, None, quant_config
+            weights,
+            W.linear_attn_out_w,
+            None,
+            None,
+            quant_config=quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
 
     def forward(
@@ -639,6 +676,7 @@ class KimiLinearDecoderLayer(nn.Module):
         moe_config,
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -655,6 +693,7 @@ class KimiLinearDecoderLayer(nn.Module):
                 weights,
                 config.layernorm_eps,
                 quant_config,
+                hw_kernel_config=hw_kernel_config,
             )
         else:
             # Full MLA attention layer
@@ -665,12 +704,17 @@ class KimiLinearDecoderLayer(nn.Module):
                 layer_idx,
                 config.layernorm_eps,
                 quant_config,
+                hw_kernel_config=hw_kernel_config,
             )
 
         # FFN: Dense (layer 0) or MoE (layer 1+)
         if layer_idx not in config.moe_layer_index:
             self.mlp = DenseMLP(
-                config.activation_type, parallelism_config, weights, quant_config
+                config.activation_type,
+                parallelism_config,
+                weights,
+                quant_config,
+                hw_kernel_config=hw_kernel_config,
             )
         else:
             self.mlp = GenericMoeLayer(
@@ -680,6 +724,7 @@ class KimiLinearDecoderLayer(nn.Module):
                 moe_config,
                 max_generate_batch_size,
                 enable_cuda_graph=enable_cuda_graph,
+                hw_kernel_config=hw_kernel_config,
             )
 
         # RMSResNorm: fused residual add + layernorm
@@ -766,6 +811,7 @@ class KimiLinearModel(GptModelBase):
                     moe_config,
                     max_generate_batch_size,
                     enable_cuda_graph,
+                    hw_kernel_config=py_hw_kernel_config,
                 )
                 for idx in range(self.layer_num)
             ]

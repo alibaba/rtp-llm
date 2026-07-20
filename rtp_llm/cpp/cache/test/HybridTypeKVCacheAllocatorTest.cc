@@ -167,6 +167,21 @@ static BatchKVCacheResourcePtr makeBatchResource(int                            
     return res;
 }
 
+static int estimateBatchPeakForSingleSequence(const KVCacheAllocator&          allocator,
+                                              const BatchKVCacheResourcePtr& batch_resource,
+                                              int                            seq_len,
+                                              int                            remaining_tokens,
+                                              int                            reserve_step,
+                                              bool                           enable_reuse_cache) {
+    return allocator.estimateBatchPeakNeedBlocks(batch_resource,
+                                                 seq_len,
+                                                 /*common_seq_len=*/seq_len,
+                                                 remaining_tokens,
+                                                 reserve_step,
+                                                 enable_reuse_cache,
+                                                 /*target_batch_size=*/1);
+}
+
 static std::vector<BlockIdxType> allocateAndCache(BlockPoolPtr         block_pool,
                                                   BlockCachePtr        block_cache,
                                                   int                  group_id,
@@ -1006,6 +1021,273 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DecodeIncrMallocAppliesSparseCleanupOnLin
     for (size_t i = 0; i < full_out.size(); ++i) {
         EXPECT_EQ(full_out[i], full_alloc[i]);
     }
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, EstimatePeakNeedBlocks) {
+    // Config: [0,1]=linear group (gid=0), [2,3]=full group (gid=1). seq_size_per_block=4.
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    const int group_nums = 2;
+    const int blk = config.seq_size_per_block;  // 4
+
+    // New resource (cur_slots=0 for both groups):
+    // reuse disabled: full=ceil(108/4)=27, linear tail peak=3 => total=30.
+    auto new_res = makeBatchResource(1, group_nums, config.layer_num, config.layerGroupIdsSnapshot(), {});
+    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, new_res, 8, 100, 0, /*enable_reuse_cache=*/false),
+              30);
+
+    // reuse enabled: linear keeps 14 blocks after cleanup and transiently holds a fifteenth tail block.
+    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, new_res, 8, 100, 0, /*enable_reuse_cache=*/true),
+              42);
+
+    // With reserve_step=3: full=ceil(111/4)=28. linear: total_slots=29, tail=5,
+    // step-hits before tail=24/2=12 => linear=17. total=45.
+    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, new_res, 8, 100, 3, /*enable_reuse_cache=*/true),
+              45);
+
+    // Allocate blocks to simulate running decode (seqLen=8 → 2 slots per group)
+    auto token_ids = makeCompleteTokenIds(1, /*seq_length=*/8, config.seq_size_per_block);
+    MallocInfo mi{new_res, token_ids};
+    auto result = allocator->malloc(mi);
+    ASSERT_TRUE(result.success);
+
+    const int full_slots   = new_res->blocksNum(0, 1);   // full group slots after malloc
+    const int linear_slots = new_res->blocksNum(0, 0);   // linear group slots after malloc
+
+    // remaining=0: no more slots needed for either group
+    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, new_res, 8, 0, 0, /*enable_reuse_cache=*/false),
+              0);
+
+    // remaining=4: ceil((8+4)/4)=3 per group, minus cur_slots
+    int expect_per_group = (8 + 4 + blk - 1) / blk;
+    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, new_res, 8, 4, 0, /*enable_reuse_cache=*/false),
+              std::max(expect_per_group - full_slots, 0) + std::max(expect_per_group - linear_slots, 0));
+
+    // Large remaining from current_slots=2:
+    // reuse disabled: the initial null slot stops the first cleanup scan. At the second boundary the running
+    // resource therefore holds three physical linear blocks before cleanup, two more than its current tail.
+    int expect_full_large = (8 + 100 + blk - 1) / blk;  // 27
+    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, new_res, 8, 100, 0, /*enable_reuse_cache=*/false),
+              std::max(expect_full_large - full_slots, 0) + 2);
+
+    // reuse enabled: target linear keeps tail 2 + step-hit slots before tail 12;
+    // The fresh seq_len=8 allocation owns one physical linear block. Decode later peaks at 15 physical blocks.
+    int expect_linear_large = 14;
+    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, new_res, 8, 100, 0, /*enable_reuse_cache=*/true),
+              std::max(expect_full_large - full_slots, 0) + expect_linear_large);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, EstimateBatchPeakNeedBlocksAccountsForNonEmptyTargetWidth) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    auto resource = makeBatchResource(/*batch_size=*/2,
+                                      /*group_nums=*/2,
+                                      /*layer_num=*/config.layer_num,
+                                      /*layer_group_ids=*/config.layerGroupIdsSnapshot(),
+                                      /*keys=*/{});
+
+    // common_seq_len=8 means the first two slots are shared. The NULL slot in the linear group consumes no block.
+    resource->setBatchBlocks(/*batch_id=*/0, /*group_id=*/0, {NULL_BLOCK_IDX, 10, 11});
+    resource->setBatchBlocks(/*batch_id=*/1, /*group_id=*/0, {NULL_BLOCK_IDX, 10, 12});
+    resource->setBatchBlocks(/*batch_id=*/0, /*group_id=*/1, {20, 21, 22});
+    resource->setBatchBlocks(/*batch_id=*/1, /*group_id=*/1, {20, 21, 23});
+
+    // No growth is needed at the current batch width.
+    EXPECT_EQ(allocator->estimateBatchPeakNeedBlocks(resource,
+                                                     /*seq_len=*/12,
+                                                     /*common_seq_len=*/8,
+                                                     /*remaining_tokens=*/0,
+                                                     /*reserve_step=*/0,
+                                                     /*enable_reuse_cache=*/false,
+                                                     /*target_batch_size=*/2),
+              0);
+
+    // No future growth is needed, regardless of the target width.
+    EXPECT_EQ(allocator->estimateBatchPeakNeedBlocks(resource,
+                                                     /*seq_len=*/12,
+                                                     /*common_seq_len=*/8,
+                                                     /*remaining_tokens=*/0,
+                                                     /*reserve_step=*/0,
+                                                     /*enable_reuse_cache=*/false,
+                                                     /*target_batch_size=*/3),
+              0);
+
+    // Four more tokens add one block in each group for each current batch.
+    EXPECT_EQ(allocator->estimateBatchPeakNeedBlocks(resource,
+                                                     /*seq_len=*/12,
+                                                     /*common_seq_len=*/8,
+                                                     /*remaining_tokens=*/4,
+                                                     /*reserve_step=*/0,
+                                                     /*enable_reuse_cache=*/false,
+                                                     /*target_batch_size=*/2),
+              4);
+
+    // One future block in each group is charged at the requested target width.
+    EXPECT_EQ(allocator->estimateBatchPeakNeedBlocks(resource,
+                                                     /*seq_len=*/12,
+                                                     /*common_seq_len=*/8,
+                                                     /*remaining_tokens=*/4,
+                                                     /*reserve_step=*/0,
+                                                     /*enable_reuse_cache=*/false,
+                                                     /*target_batch_size=*/3),
+              6);
+
+    resource->setBatchBlocks(/*batch_id=*/0, /*group_id=*/0, {NULL_BLOCK_IDX, 10, 11, NULL_BLOCK_IDX});
+    resource->setBatchBlocks(/*batch_id=*/1, /*group_id=*/0, {NULL_BLOCK_IDX, 10, 12, NULL_BLOCK_IDX});
+    resource->setBatchBlocks(/*batch_id=*/0, /*group_id=*/1, {20, 21, 22, 24});
+    resource->setBatchBlocks(/*batch_id=*/1, /*group_id=*/1, {20, 21, 23, 25});
+
+    // Existing blocks already cover this unaligned sequence length.
+    EXPECT_EQ(allocator->estimateBatchPeakNeedBlocks(resource,
+                                                     /*seq_len=*/13,
+                                                     /*common_seq_len=*/8,
+                                                     /*remaining_tokens=*/0,
+                                                     /*reserve_step=*/0,
+                                                     /*enable_reuse_cache=*/false,
+                                                     /*target_batch_size=*/2),
+              0);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, FreshUnalignedMultiSequencePeakMatchesExactCapacity) {
+    for (const bool reuse_cache : {false, true}) {
+        SCOPED_TRACE(reuse_cache ? "reuse enabled" : "reuse disabled");
+
+        auto config      = makeTinyHybridConfig();
+        config.block_num = 7;  // Six usable blocks: exactly the two-stage initialization peak below.
+        auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+        ASSERT_TRUE(allocator->init());
+
+        auto resource = makeBatchResource(/*batch_size=*/2,
+                                          /*group_nums=*/2,
+                                          /*layer_num=*/config.layer_num,
+                                          /*layer_group_ids=*/config.layerGroupIdsSnapshot(),
+                                          /*keys=*/{});
+
+        // block_size=4, seq_len=5: initMallocForCommonLen shares one Linear and one Full block for the first four
+        // tokens. incrMalloc then allocates one private tail in each group for each sequence: 2 + 2 * 2 = 6.
+        EXPECT_EQ(allocator->estimateBatchPeakNeedBlocks(resource,
+                                                         /*seq_len=*/5,
+                                                         /*common_seq_len=*/4,
+                                                         /*remaining_tokens=*/0,
+                                                         /*reserve_step=*/0,
+                                                         reuse_cache,
+                                                         /*target_batch_size=*/2),
+                  6);
+        EXPECT_EQ(allocator->freeBlocksNum(), 6);
+
+        // At the next block boundary both groups allocate one more private block per sequence. Linear cleanup only
+        // happens after that allocation, so the lifecycle peak is ten blocks.
+        EXPECT_EQ(allocator->estimateBatchPeakNeedBlocks(resource,
+                                                         /*seq_len=*/5,
+                                                         /*common_seq_len=*/4,
+                                                         /*remaining_tokens=*/4,
+                                                         /*reserve_step=*/0,
+                                                         reuse_cache,
+                                                         /*target_batch_size=*/2),
+                  10);
+
+        auto token_ids = makeCompleteTokenIds(
+            /*batch_size=*/2, /*seq_length=*/5, /*seq_size_per_block=*/config.seq_size_per_block);
+        MallocInfo info{resource, token_ids};
+        info.enable_device_cache          = false;
+        info.reuse_cache                  = reuse_cache;
+        info.enable_remove_skipped_blocks = false;
+        ASSERT_TRUE(allocator->malloc(info).success);
+        EXPECT_EQ(allocator->freeBlocksNum(), 0);
+
+        allocator->free(FreeInfo{resource, token_ids});
+        EXPECT_EQ(allocator->freeBlocksNum(), 6);
+    }
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, EstimatedPeakCoversDecodeMallocAndSparseCleanup) {
+    auto config      = makeTinyHybridConfig();
+    config.block_num = 28;  // 27 usable blocks.
+    auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1,
+                                       /*group_nums=*/2,
+                                       /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                       /*layer_group_ids=*/config.layerGroupIdsSnapshot(),
+                                       CacheKeysType{});
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1,
+                                          /*seq_length=*/8,
+                                          /*seq_size_per_block=*/config.seq_size_per_block);
+
+    MallocInfo info{batch_res, token_ids};
+    info.enable_device_cache          = false;
+    info.reuse_cache                  = true;
+    info.enable_remove_skipped_blocks = false;
+    ASSERT_TRUE(allocator->malloc(info).success);
+    ASSERT_EQ(allocator->freeBlocksNum(), 24);
+
+    // From seq_len=8 to 68: full needs 15 more blocks; linear grows from one physical block to a transient peak of 10.
+    ASSERT_EQ(estimateBatchPeakForSingleSequence(*allocator,
+                                                batch_res,
+                                                /*seq_len=*/8,
+                                                /*remaining_tokens=*/60,
+                                                /*reserve_step=*/0,
+                                                /*reuse_cache=*/true),
+              24);
+
+    info.enable_remove_skipped_blocks = true;
+    size_t min_free_blocks            = allocator->freeBlocksNum();
+    for (int seq_len = 9; seq_len <= 68; ++seq_len) {
+        token_ids->setSeqLength(seq_len);
+        ASSERT_TRUE(allocator->malloc(info).success) << "seq_len=" << seq_len;
+        min_free_blocks = std::min(min_free_blocks, allocator->freeBlocksNum());
+    }
+
+    EXPECT_EQ(countValidBlocks(batch_res->blocks(0, /*gid=*/0)), 9);
+    EXPECT_EQ(countValidBlocks(batch_res->blocks(0, /*gid=*/1)), 17);
+    EXPECT_EQ(min_free_blocks, 1);
+    EXPECT_EQ(allocator->freeBlocksNum(), 1);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, FreshReusePeakCoversThreeBoundaryDecodeAtExactCapacity) {
+    auto config    = makeTinyHybridConfig();  // 9 usable blocks, seq_size_per_block=4, linear_step=2.
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1,
+                                       /*group_nums=*/2,
+                                       /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                       /*layer_group_ids=*/config.layerGroupIdsSnapshot(),
+                                       CacheKeysType{});
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1,
+                                          /*seq_length=*/8,
+                                          /*seq_size_per_block=*/config.seq_size_per_block);
+
+    // seq_len 8 -> 17 crosses the slot boundaries at 9, 13 and 17. Full peaks at 5 blocks and linear peaks at 4.
+    ASSERT_EQ(allocator->freeBlocksNum(), 9);
+    ASSERT_EQ(estimateBatchPeakForSingleSequence(*allocator,
+                                                batch_res,
+                                                /*seq_len=*/8,
+                                                /*remaining_tokens=*/9,
+                                                /*reserve_step=*/0,
+                                                /*reuse_cache=*/true),
+              9);
+
+    MallocInfo info{batch_res, token_ids};
+    info.enable_device_cache          = false;
+    info.reuse_cache                  = true;
+    info.enable_remove_skipped_blocks = false;
+    ASSERT_TRUE(allocator->malloc(info).success);
+
+    info.enable_remove_skipped_blocks = true;
+    for (int seq_len = 9; seq_len <= 17; ++seq_len) {
+        token_ids->setSeqLength(seq_len);
+        ASSERT_TRUE(allocator->malloc(info).success) << "seq_len=" << seq_len;
+    }
+
+    EXPECT_EQ(countValidBlocks(batch_res->blocks(0, /*gid=*/0)), 3);
+    EXPECT_EQ(countValidBlocks(batch_res->blocks(0, /*gid=*/1)), 5);
+    EXPECT_EQ(allocator->freeBlocksNum(), 1);
 }
 
 }  // namespace test

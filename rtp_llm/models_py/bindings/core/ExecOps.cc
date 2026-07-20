@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/ErrorCodeUtil.h"
 #include "autil/StackTracer.h"
@@ -25,7 +26,7 @@
 #include <pybind11/functional.h>
 
 #if USING_CUDA
-using DeviceGuard = at::cuda::CUDAGuard;
+using DeviceGuard = c10::cuda::CUDAGuard;
 #elif USING_ROCM
 using DeviceGuard = c10::hip::HIPGuardMasqueradingAsCUDA;
 #endif
@@ -345,13 +346,7 @@ void cudaCheckLastError() {
 }
 
 void cudaPreRun(int device_id) {
-#if USING_CUDA
-    check_cuda_value(cudaSetDevice(device_id));
-    at::cuda::set_device(device_id);
-    at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream(device_id));
-#elif USING_ROCM
-    hipSetDevice(device_id);
-#endif
+    setCurrentThreadDevice(device_id);
 }
 
 // === Profiling ===
@@ -400,21 +395,14 @@ void setTraceMemory(bool trace_memory) {
 
 // === Copy ops ===
 
-namespace {
-#if USING_CUDA
-at::cuda::CUDAStream& getNoBlockCopyStream() {
-    static thread_local auto stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false);
-    return stream;
-}
-#endif
-}  // anonymous namespace
-
 void execNoBlockCopy(const CopyParams& params) {
     params.check();
     const auto& src = params.src;
     const auto& dst = params.dst;
 #if USING_CUDA
-    auto stream = getNoBlockCopyStream().stream();
+    const auto  copy_device = getCopyDevice(dst, src);
+    DeviceGuard device_guard(copy_device);
+    auto        stream = getNoBlockCopyStream(copy_device).stream();
     check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), src.nbytes(), cudaMemcpyDefault, stream));
     check_cuda_value(cudaStreamSynchronize(stream));
     check_cuda_error();

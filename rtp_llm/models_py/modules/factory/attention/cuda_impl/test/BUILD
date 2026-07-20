@@ -151,6 +151,24 @@ py_test(
     },
 )
 
+py_test(
+    name = "test_py_flashinfer_ragged_mha_prefill_sm120",
+    srcs = [
+        "test_flashinfer_prefill/test_py_flashinfer_ragged_mha_prefill_sm120.py",
+        "attention_ref.py",
+        "base_attention_test.py"
+    ],
+    deps = py_test_deps + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:cuda_pre_12_9": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {
+        'gpu': 'RTX_5000_PRO',
+    },
+)
+
 # Test for PyFlashinferPrefillPagedAttnOp paged prefill attention implementation
 py_test(
     name = "test_py_flashinfer_paged_mha_prefill",
@@ -200,4 +218,3 @@ py_test(
         'gpu': 'H20',
     },
 )
-

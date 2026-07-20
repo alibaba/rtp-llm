@@ -165,9 +165,6 @@ void NormalEngine::initScheduler() {
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
     } else if (pdfusion_scheduler_mode == PDFusionSchedulerMode::RATIO
                && pd_sep_config.role_type == RoleType::PDFUSION) {
-        RTP_LLM_CHECK_WITH_INFO(parallelism_config.dp_size <= 1,
-                                "PDFusionRatioScheduler does not support dp_size > 1 yet, dp_size=%ld",
-                                parallelism_config.dp_size);
         scheduler_.reset(new PDFusionRatioScheduler(runtime_config,
                                                     model_config_,
                                                     pd_sep_config,

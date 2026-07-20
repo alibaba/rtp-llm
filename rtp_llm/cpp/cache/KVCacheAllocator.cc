@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <unordered_set>
@@ -85,6 +86,48 @@ MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {
     } else {
         return incrMalloc(malloc_info);
     }
+}
+
+int KVCacheAllocator::estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                  int                            seq_len,
+                                                  int                            common_seq_len,
+                                                  int                            remaining_tokens,
+                                                  int                            reserve_step,
+                                                  bool                           enable_reuse_cache,
+                                                  int                            target_batch_size) const {
+    if (!batch_kv_cache_resource || batch_kv_cache_resource->batchSize() == 0) {
+        return 0;
+    }
+
+    const int current_batch_size = batch_kv_cache_resource->batchSize();
+    const int target_width       = std::max(current_batch_size, target_batch_size);
+    const int clamped_common_len = std::clamp(common_seq_len, 0, seq_len);
+
+    // A fresh resource follows initMalloc's two phases. Each group estimates that exact sequence so Linear groups can
+    // distinguish the shared common tail from every sequence's private suffix tail.
+    if (batch_kv_cache_resource->curBlocksNum() == 0) {
+        return estimateInitialBatchPeakNeedBlocks(seq_len,
+                                                  clamped_common_len,
+                                                  remaining_tokens,
+                                                  reserve_step,
+                                                  enable_reuse_cache,
+                                                  target_width);
+    }
+
+    // Initialized sequences have the same layout, and all subsequent growth is private per sequence.
+    const int per_sequence_growth =
+        estimatePeakNeedBlocks(batch_kv_cache_resource->cacheResource(0),
+                               seq_len,
+                               remaining_tokens,
+                               reserve_step,
+                               enable_reuse_cache);
+
+    // Full blocks remain shared when the batch expands, but every additional sequence needs a physical copy of the
+    // current partial tail before it can diverge.
+    const int expanded_sequences = target_width - current_batch_size;
+    const int tail_copy_blocks =
+        expanded_sequences > 0 && seq_len % seqSizePerBlock() != 0 ? expanded_sequences : 0;
+    return target_width * per_sequence_growth + tail_copy_blocks;
 }
 
 uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_layer_id) const {

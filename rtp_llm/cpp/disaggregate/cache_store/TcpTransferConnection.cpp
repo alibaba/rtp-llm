@@ -3,7 +3,8 @@
 
 namespace rtp_llm {
 
-TcpTransferConnection::TcpTransferConnection(const std::shared_ptr<arpc::RPCChannelBase>& channel): channel_(channel) {}
+TcpTransferConnection::TcpTransferConnection(const std::shared_ptr<arpc::RPCChannelBase>& channel, int device_id):
+    channel_(channel), device_id_(device_id) {}
 
 void TcpTransferConnection::read(const std::vector<std::shared_ptr<BlockBuffer>>&     local_blocks,
                                  const std::vector<std::shared_ptr<BlockBufferInfo>>& remote_blocks,
@@ -18,7 +19,8 @@ void TcpTransferConnection::read(const std::vector<std::shared_ptr<BlockBuffer>>
     auto                     response   = new BlockReadResponse;
     arpc::ANetRPCController* controller = new arpc::ANetRPCController();
     controller->SetExpireTime(timeout_ms);
-    auto closure = new TcpBlockReadClosure(local_blocks, remote_blocks, callback, request, response, controller);
+    auto closure =
+        new TcpBlockReadClosure(local_blocks, remote_blocks, callback, request, response, controller, device_id_);
 
     KvCacheStoreService_Stub stub((::google::protobuf::RpcChannel*)(channel_.get()),
                                   ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);

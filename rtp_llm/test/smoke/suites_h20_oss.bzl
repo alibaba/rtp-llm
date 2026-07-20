@@ -246,8 +246,9 @@ def h20_oss_suites():
             smoke_test(
                 name="dense_pdfusion_ratio_prompt_batch_alternation",
                 task_info="data/model/qwen25/q_r_pdfusion_ratio_prompt_batch.json",
-                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --disable_flash_infer 1 --pdfusion_scheduler_mode ratio --decode_prefill_ratio 3",
+                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --disable_flash_infer 1 --tp_size 1 --dp_size 2 --world_size 2 --pdfusion_scheduler_mode ratio --decode_prefill_ratio 3",
                 gpu_type=["H20"],
+                concurrency_test=True,
             ),
             smoke_test(
                 name="dense_prompt_scoring",
@@ -486,6 +487,17 @@ def h20_oss_suites():
                     "llm": "--act_type BF16 --use_local 1 --tp_size 2 --reuse_cache 1",
                     "vit": "--act_type BF16 --use_local 1 --use_local_preprocess 1"
                 },
+                gpu_type=["H20"],
+                data=native.glob(['data/model/llava/*.jpg']),
+            ),
+            smoke_test(
+                name="qwen3_vl_gpu_batch",
+                task_info="data/model/qwen_vl/q_r_3_gpu_batch.json",
+                smoke_args = {
+                    "llm": "--act_type BF16 --use_local 1 --tp_size 2 --reuse_cache 0",
+                    "vit": "--act_type BF16 --use_local 1 --use_local_preprocess 1 --gpu_batch_wait_ms 500 --gpu_max_batch_size 8 --mm_cache_item_num 0"
+                },
+                concurrency_test=True,
                 gpu_type=["H20"],
                 data=native.glob(['data/model/llava/*.jpg']),
             ),

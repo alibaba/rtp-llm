@@ -1,7 +1,8 @@
 import logging
 import os
+import sys
 import time
-from typing import Optional
+from typing import Dict, Optional
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
@@ -251,6 +252,52 @@ class VitConfig:
         self.disable_access_log: bool = False
         self.use_local_preprocess: bool = False
         self.vit_proxy_load_balance_strategy: str = "round_robin"
+        # Cross-request GPU batching is inferred from gpu_max_batch_size alone:
+        # == 1 -> serial (one request per forward, no wait window); > 1 -> merge
+        # compatible requests within gpu_batch_wait_ms. Default 1 keeps the old
+        # serial behavior (there is no separate on/off switch).
+        self.gpu_batch_wait_ms: int = 10
+        self.gpu_max_batch_size: int = 1
+        self.gpu_max_batch_images: int = 200
+        # Bound on the mm embedding scheduler's waiting queue. Caps memory when a
+        # forward stalls and requests pile up; over capacity, submit fails fast
+        # with an overload error instead of growing unbounded. Scheduler-level
+        # (like mm_timeout_ms): applies to serial and batch alike.
+        self.mm_max_queue_size: int = 1024
+
+    def embedding_scheduler_args(self) -> Dict[str, int]:
+        """Resolved MMScheduler kwargs, inferred from gpu_max_batch_size alone.
+
+        gpu_max_batch_size > 1 -> cross-request GPU batching with the gpu_* limits;
+        gpu_max_batch_images then caps both the batch and (since a request is never
+        split) the single-request image count; gpu_batch_wait_ms is the collect
+        window.
+        gpu_max_batch_size == 1 -> serial: one request per forward, no wait window
+        (effective batch_wait_ms forced to 0 regardless of the configured value),
+        and no image cap (sys.maxsize) — matches the old serial path, which never
+        bounded a single request's image count.
+        max_queue_size bounds the waiting queue in both modes.
+        """
+        if self.gpu_max_batch_size <= 0:
+            raise ValueError(
+                f"gpu_max_batch_size must be > 0, got {self.gpu_max_batch_size}"
+            )
+        if self.gpu_batch_wait_ms < 0:
+            raise ValueError(
+                f"gpu_batch_wait_ms must be >= 0, got {self.gpu_batch_wait_ms}"
+            )
+
+        is_serial = self.gpu_max_batch_size == 1
+        return {
+            # Serial ignores the collect window: a single-request forward never
+            # waits, so the configured gpu_batch_wait_ms has no effect.
+            "batch_wait_ms": 0 if is_serial else self.gpu_batch_wait_ms,
+            "max_batch_size": self.gpu_max_batch_size,
+            "max_batch_images": (
+                sys.maxsize if is_serial else self.gpu_max_batch_images
+            ),
+            "max_queue_size": self.mm_max_queue_size,
+        }
 
     def to_string(self):
         return (
@@ -274,7 +321,11 @@ class VitConfig:
             f"local_extra_data_path: {self.local_extra_data_path}\n"
             f"disable_access_log: {self.disable_access_log}\n"
             f"use_local_preprocess: {self.use_local_preprocess}\n"
-            f"vit_proxy_load_balance_strategy: {self.vit_proxy_load_balance_strategy}"
+            f"vit_proxy_load_balance_strategy: {self.vit_proxy_load_balance_strategy}\n"
+            f"gpu_batch_wait_ms: {self.gpu_batch_wait_ms}\n"
+            f"gpu_max_batch_size: {self.gpu_max_batch_size}\n"
+            f"gpu_max_batch_images: {self.gpu_max_batch_images}\n"
+            f"mm_max_queue_size: {self.mm_max_queue_size}"
         )
 
 

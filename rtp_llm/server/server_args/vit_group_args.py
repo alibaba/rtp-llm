@@ -215,3 +215,35 @@ def init_vit_group_args(parser, vit_config):
         default="round_robin",
         help="VIT代理服务器的负载均衡策略，可选值: 'round_robin' 或 'least_connections'",
     )
+    vit_group.add_argument(
+        "--gpu_batch_wait_ms",
+        env_name="VIT_GPU_BATCH_WAIT_MS",
+        bind_to=(vit_config, "gpu_batch_wait_ms"),
+        type=int,
+        default=10,
+        help="GPU batch调度收集窗口(ms)；仅在 gpu_max_batch_size>1 时生效，串行(=1)时被强制为0",
+    )
+    vit_group.add_argument(
+        "--gpu_max_batch_size",
+        env_name="VIT_GPU_MAX_BATCH_SIZE",
+        bind_to=(vit_config, "gpu_max_batch_size"),
+        type=int,
+        default=1,
+        help="GPU batch调度最大batch大小(请求数)；=1 为串行(每forward一个请求，不合批)，>1 开启跨请求合批",
+    )
+    vit_group.add_argument(
+        "--gpu_max_batch_images",
+        env_name="VIT_GPU_MAX_BATCH_IMAGES",
+        bind_to=(vit_config, "gpu_max_batch_images"),
+        type=int,
+        default=200,
+        help="防止单次forward OOM。单个batch内的最大原始图片/媒体数；同时限制单个请求的最大图片数，",
+    )
+    vit_group.add_argument(
+        "--mm_max_queue_size",
+        env_name="MM_MAX_QUEUE_SIZE",
+        bind_to=(vit_config, "mm_max_queue_size"),
+        type=int,
+        default=1024,
+        help="mm embedding调度器等待队列容量上限；超出时提交快速失败并返回过载错误，防止forward卡住时内存无界增长",
+    )

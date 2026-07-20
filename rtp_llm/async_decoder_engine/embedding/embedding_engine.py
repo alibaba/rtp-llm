@@ -22,10 +22,19 @@ class EmbeddingCppEngine(BaseEngine):
         self.model = model
         self.engine_config = engine_config
         self.cpp_engine = RtpEmbeddingOp()
+        # Owned here: created in _start (local VIT), torn down in _stop. None until
+        # started, so _stop before _start is safe.
+        self.mm_process_engine: Optional[MMProcessEngine] = None
 
     @override
     def _stop(self) -> None:
+        # Stop the C++ engine first so it issues no more embedding calls, then
+        # close the local MMProcessEngine (which stops its MMScheduler thread and
+        # preprocessing executor).
         self.cpp_engine.stop()
+        if self.mm_process_engine is not None:
+            self.mm_process_engine.stop()
+            self.mm_process_engine = None
 
     @override
     def _start(self):

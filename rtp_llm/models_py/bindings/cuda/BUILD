@@ -11,7 +11,7 @@ cc_library(
     hdrs = [
         "cuda_host_utils.h",
     ],
-    deps = [
+    deps = torch_deps() + [
         "//rtp_llm/cpp/utils:core_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
