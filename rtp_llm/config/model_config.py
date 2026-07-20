@@ -524,8 +524,9 @@ class ModelConfig(CppModelConfig):
         self.dspark_config: Optional[Any] = None
         # Target-side aux hidden capture for the dspark/dflash draft: 0-based
         # decoder layer indices whose OUTPUT (post-residual stream) to export.
-        # Conversion from the draft ckpt's 1-based aux_hidden_state_layer_ids
-        # (ids = [j - 1 for j in aux_ids]) happens where the draft ckpt is read.
+        # Converted from the draft ckpt's aux_hidden_state_layer_ids via
+        # ids = [j - 1 for j in aux_ids] where the ckpt is read; see the long
+        # note at that -1 in model_factory.py for the vLLM equivalence.
         self.capture_aux_hidden_layer_ids: Optional[List[int]] = None
         self.normalize_lm_head_weight: bool = False
         self.enable_fp32_lm_head: bool = True

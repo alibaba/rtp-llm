@@ -472,8 +472,19 @@ class ModelFactory:
             )
 
         # Target-side multi-layer feature capture: the ckpt's
-        # aux_hidden_state_layer_ids are 1-based "output of layer j"; the
-        # capture loop consumes 0-based decoder-layer-output indices.
+        # aux_hidden_state_layer_ids follow the speculators convention where
+        # value j means "output of layer j" counting the embedding as an
+        # implicit layer 0 -- i.e. the output of 0-based decoder layer j-1.
+        # Our capture loop (qwen3.py) matches capture_ids against the 0-based
+        # enumerate index and appends the layer's *output*, so we apply the -1
+        # here.  vLLM lands on the identical physical layer: it keeps
+        # aux_hidden_state_layer_ids verbatim but its capture loop tags each
+        # layer output as idx+1 (embedding = index 0), so value j fires at
+        # 0-based layer j-1 too.  These j-1 values equal vLLM's
+        # dflash_config.target_layer_ids ([i-1 for i in aux_ids]); see the
+        # speculators DFlash/DSpark config transforms and vllm-project PR
+        # #40727.  Do NOT drop the -1: it would capture one layer too high and
+        # silently feed the draft the wrong features.
         capture_ids = [j - 1 for j in dspark_params.aux_hidden_state_layer_ids]
         invalid = [j for j in capture_ids if j < 0 or j >= model_config.num_layers]
         if invalid:
