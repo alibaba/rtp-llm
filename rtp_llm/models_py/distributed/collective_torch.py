@@ -88,27 +88,33 @@ def _should_init_cpu_tp_broadcaster_for_group(
     if not torch.distributed.is_initialized() or not _initialized:
         return local_enabled
 
+    return _cpu_tp_broadcaster_group_consensus(
+        local_enabled,
+        "Skip CpuTpBroadcaster init: failed to check TP group consistency: %s",
+        "Skip CpuTpBroadcaster init: inconsistent eligibility across TP group: %s",
+    )
+
+
+def _cpu_tp_broadcaster_group_consensus(
+    local_value: bool,
+    gather_error_message: str,
+    inconsistent_message: str,
+) -> bool:
     try:
         tp_group = _get_group(Group.TP)
         group_size = tp_group.size()
-        group_enabled: List[bool] = [False] * group_size
+        group_values: List[bool] = [False] * group_size
         torch.distributed.all_gather_object(
-            group_enabled, bool(local_enabled), group=tp_group
+            group_values, bool(local_value), group=tp_group
         )
     except Exception as e:
-        logging.warning(
-            "Skip CpuTpBroadcaster init: failed to check TP group consistency: %s",
-            e,
-        )
+        logging.warning(gather_error_message, e)
         return False
 
-    if all(group_enabled):
+    if all(group_values):
         return True
-    if any(group_enabled):
-        logging.warning(
-            "Skip CpuTpBroadcaster init: inconsistent eligibility across TP group: %s",
-            group_enabled,
-        )
+    if any(group_values):
+        logging.warning(inconsistent_message, group_values)
     return False
 
 
@@ -118,28 +124,21 @@ def _cpu_tp_broadcaster_initialized_for_group(actual_initialized: bool) -> bool:
     if not torch.distributed.is_initialized() or not _initialized:
         return actual_initialized
 
-    try:
-        tp_group = _get_group(Group.TP)
-        group_size = tp_group.size()
-        group_initialized: List[bool] = [False] * group_size
-        torch.distributed.all_gather_object(
-            group_initialized, bool(actual_initialized), group=tp_group
-        )
-    except Exception as e:
-        logging.warning(
-            "Skip CpuTpBroadcaster init: failed to confirm TP group init: %s",
-            e,
-        )
-        return False
+    return _cpu_tp_broadcaster_group_consensus(
+        actual_initialized,
+        "Skip CpuTpBroadcaster init: failed to confirm TP group init: %s",
+        "Skip CpuTpBroadcaster init: inconsistent initialized state across TP group: %s",
+    )
 
-    if all(group_initialized):
-        return True
-    if any(group_initialized):
-        logging.warning(
-            "Skip CpuTpBroadcaster init: inconsistent initialized state across TP group: %s",
-            group_initialized,
-        )
-    return False
+
+def _read_cpu_tp_broadcaster_probe(probe_path: str) -> str:
+    probe_flags = os.O_RDONLY
+    probe_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    probe_fd = os.open(probe_path, probe_flags)
+    try:
+        return os.read(probe_fd, 128).decode("ascii")
+    finally:
+        os.close(probe_fd)
 
 
 def _make_cpu_tp_broadcaster_session_id(
@@ -355,8 +354,7 @@ def _cpu_tp_broadcaster_preflight_for_group(
                 local_reason = "root visibility probe metadata is missing"
             else:
                 try:
-                    with open(root_probe_path, "rb") as probe_file:
-                        observed_token = probe_file.read(128).decode("ascii")
+                    observed_token = _read_cpu_tp_broadcaster_probe(root_probe_path)
                     if observed_token != root_probe_token:
                         raise ValueError("root visibility probe token mismatch")
                 except Exception as e:

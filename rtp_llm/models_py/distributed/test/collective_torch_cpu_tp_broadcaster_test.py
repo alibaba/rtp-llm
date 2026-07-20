@@ -291,6 +291,31 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
 
             self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o755)
 
+    def test_read_cpu_tp_broadcaster_probe_uses_safe_open_flags(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            probe_path = os.path.join(tmpdir, "probe")
+            probe_token = "probe-token"
+            with open(probe_path, "w", encoding="ascii") as probe_file:
+                probe_file.write(probe_token)
+
+            with patch(
+                "rtp_llm.models_py.distributed.collective_torch.os.open",
+                wraps=os.open,
+            ) as mock_open:
+                self.assertEqual(
+                    ct._read_cpu_tp_broadcaster_probe(probe_path), probe_token
+                )
+
+            open_flags = mock_open.call_args.args[1]
+            self.assertEqual(
+                open_flags & getattr(os, "O_CLOEXEC", 0),
+                getattr(os, "O_CLOEXEC", 0),
+            )
+            self.assertEqual(
+                open_flags & getattr(os, "O_NOFOLLOW", 0),
+                getattr(os, "O_NOFOLLOW", 0),
+            )
+
     def test_init_cpu_tp_broadcaster_skips_when_tp_group_eligibility_diverges(self):
         fake_ops = _FakeLibrtpComputeOps()
         ct._parallelism_config = self._parallelism_config(tp_size=2, local_world_size=4)
