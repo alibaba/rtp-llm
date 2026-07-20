@@ -25,37 +25,52 @@ public:
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                 const MergedOutput&                          draft_prefill_output) const;
 
-    absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups) const;
+    absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
+                                                          TensorHolder&       host_holder) const;
 
     absl::StatusOr<SamplerInputs> gatherSpecSamplerInput(const StreamGroups&    stream_groups,
                                                          const GptModelInputs&  model_inputs,
                                                          const GptModelOutputs& model_output) const;
 
-    void prepareDecodeDraftModelInput(const StreamGroups& stream_groups, GptModelInputs& model_input);
+    void prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
+                                      GptModelInputs&     model_input,
+                                      TensorHolder&       host_holder);
 
-    void prepareOneStepSpecDecodeModelInput(const StreamGroups& stream_groups, GptModelInputs& model_input);
+    void prepareOneStepSpecDecodeModelInput(const StreamGroups& stream_groups,
+                                            GptModelInputs&     model_input,
+                                            TensorHolder&       host_holder);
+
+    // Device-state target-verify gather. Returns true only when every stream
+    // has CUDA accept_len/tokens/next_seq_len/propose_tokens; otherwise leaves
+    // model_input untouched so the caller can use the legacy mixed path.
+    bool gatherMtpDecodeModelInputFromDeviceState(const StreamGroups& stream_groups,
+                                                  GptModelInputs&     model_input,
+                                                  TensorHolder&       host_holder) const;
 
     void expandTargetVerifyPositionIds(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 
     void updateDecodeDraftModelInput(GptModelInputs&        model_input,
                                      const GptModelOutputs& model_output,
-                                     const torch::Tensor&   draft_token_ids);
+                                     const torch::Tensor&   draft_token_ids,
+                                     TensorHolder&          host_holder);
 
     void updatePrefillPostDraftModelInput(const StreamGroups&    stream_groups,
                                           GptModelInputs&        model_input,
                                           const GptModelOutputs& model_output,
-                                          const SamplerOutput&   sampler_output);
+                                          const SamplerOutput&   sampler_output,
+                                          TensorHolder&          host_holder);
 
     void updateDecodePostDraftModelInput(GptModelInputs&                              model_input,
                                          const GptModelOutputs&                       model_output,
                                          const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
                                          const size_t                                 batch_size,
                                          torch::Tensor&                               hidden_states_d_t,
-                                         size_t&                                      total_accept_len);
+                                         TensorHolder&                                host_holder);
 
     void updateOneStepDraftSamplerOutput(const StreamGroups& stream_groups,
                                          SamplerOutput&      draft_sampler_output,
-                                         torch::Tensor&      draft_token_probs_d_t);
+                                         torch::Tensor&      draft_token_probs_d_t,
+                                         TensorHolder&       host_holder);
 
     void updateMultiStepDraftSamplerOutput(const StreamGroups&         stream_groups,
                                            SamplerOutput&              draft_sampler_output,

@@ -119,14 +119,24 @@ class PyFlashinferPrefillPagedAttnOp(object):
         forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
         """
         check_attention_inputs(attn_inputs)
-        self.fmha_params.fill_params(
-            attn_inputs.prefix_lengths,
-            attn_inputs.sequence_lengths,
-            attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id,
-            self.page_size,
-            forbid_realloc,
-        )
+        if forbid_realloc or attn_inputs.input_lengths.is_cuda:
+            self.fmha_params.fill_params_mha_device(
+                attn_inputs.prefix_lengths_device,
+                attn_inputs.sequence_lengths,
+                attn_inputs.input_lengths_device,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                self.page_size,
+                forbid_realloc,
+            )
+        else:
+            self.fmha_params.fill_params(
+                attn_inputs.prefix_lengths,
+                attn_inputs.sequence_lengths,
+                attn_inputs.input_lengths,
+                attn_inputs.kv_cache_kernel_block_id,
+                self.page_size,
+                forbid_realloc,
+            )
         # Store CUDA graph copy parameters
         # Define qo_indptr early for CUDA graph initialization
         if attn_inputs.prefill_cuda_graph_copy_params is not None:
@@ -722,14 +732,24 @@ class PyFlashinferDecodeAttnOp(object):
 
         forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
         """
-        self.fmha_params.fill_params(
-            attn_inputs.prefix_lengths,
-            attn_inputs.sequence_lengths,
-            attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id,
-            self.seq_size_per_block,
-            forbid_realloc=forbid_realloc,
-        )
+        if attn_inputs.input_lengths.is_cuda:
+            self.fmha_params.fill_params_mha_device(
+                attn_inputs.prefix_lengths_device,
+                attn_inputs.sequence_lengths,
+                attn_inputs.input_lengths_device,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                self.seq_size_per_block,
+                forbid_realloc=forbid_realloc,
+            )
+        else:
+            self.fmha_params.fill_params(
+                attn_inputs.prefix_lengths,
+                attn_inputs.sequence_lengths,
+                attn_inputs.input_lengths,
+                attn_inputs.kv_cache_kernel_block_id,
+                self.seq_size_per_block,
+                forbid_realloc=forbid_realloc,
+            )
 
         if self.enable_cuda_graph and self.decode_wrapper._fixed_batch_size == 0:
             batch_size = attn_inputs.input_lengths.size(0)
@@ -756,16 +776,11 @@ class PyFlashinferDecodeAttnOp(object):
 
     def prepare_for_cuda_graph_replay(self, attn_inputs: PyAttentionInputs) -> None:
         """Refresh FlashInfer runtime buffers before replaying the captured graph."""
-        self.fmha_params.fill_params(
-            attn_inputs.prefix_lengths,
-            attn_inputs.sequence_lengths,
-            attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id,
+        self.fmha_params.fill_decode_cuda_graph_params(
+            attn_inputs.sequence_lengths_plus_1_device,
+            attn_inputs.kv_cache_kernel_block_id_device,
             self.seq_size_per_block,
-            forbid_realloc=True,
         )
-        if self._requires_fa2_cuda_graph_replan():
-            self._plan_decode_wrapper(attn_inputs)
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True

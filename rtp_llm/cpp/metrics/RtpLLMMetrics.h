@@ -669,6 +669,7 @@ public:
     int64_t total_propose_token_num        = 0;
     int64_t total_accepted_token_num       = 0;
     int64_t total_stream_num               = 0;
+    int64_t spec_steps                     = 0;
 };
 
 class RtpLLMSpeculativeEngineMetrics: public kmonitor::MetricsGroup {

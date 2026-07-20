@@ -170,6 +170,14 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                         .loss              = {},
                         .src_batch_indices = {},
                         .all_hidden_states = {}});
+        {
+            const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+            stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+                .epoch                 = 0,
+                .last_sample_token_gpu = new_tokens.reshape({1}).to(cuda_i32),
+                .next_seq_len_gpu      = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32),
+            });
+        }
         RTP_LLM_LOG_DEBUG("applyP2PSideChannel: appended first_token_id=%ld, stream_id=%ld",
                           payload->first_token_id,
                           stream->streamId());
@@ -380,7 +388,7 @@ absl::Status StreamCacheResource::initKVBlock() {
     return absl::OkStatus();
 }
 
-absl::Status StreamCacheResource::incrKVBlock() {
+absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     RTP_LLM_PROFILE_FUNCTION();
     // TODO(xinfei.sxf) add reserver_blocks
     if (fake_inited_) {
@@ -395,6 +403,7 @@ absl::Status StreamCacheResource::incrKVBlock() {
     malloc_info.reuse_cache                  = reuseCache();
     malloc_info.enable_device_cache          = reuseCache() && enableDeviceCache();
     malloc_info.enable_remove_skipped_blocks = true;
+    malloc_info.incr_seq_len_override        = seq_len_override;
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {

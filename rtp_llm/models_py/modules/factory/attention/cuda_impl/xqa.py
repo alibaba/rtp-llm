@@ -111,19 +111,36 @@ class XQAImpl(FMHAImplBase):
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        common.update_attention_params(
-            self.fmha_impl,
-            self.rope_kvcache_impl,
-            self.fmha_params,
-            self.rope_params,
-            attn_inputs,
-        )
-        # update_attention_params only copies kv_cache_offset. XQA also
-        # reads sequence_lengths via the captured data_ptr(), so we must update
-        # the data in-place at the address recorded during CUDA graph capture.
+        update_params = getattr(self.fmha_impl, "update", None)
+        if not callable(update_params):
+            common.update_attention_params(
+                self.fmha_impl,
+                self.rope_kvcache_impl,
+                self.fmha_params,
+                self.rope_params,
+                attn_inputs,
+            )
+        else:
+            update_params(self.fmha_params, attn_inputs)
+            update_offset = getattr(self.fmha_impl, "update_kv_cache_offset", None)
+            if callable(update_offset):
+                update_offset(
+                    self.rope_params.kv_cache_offset,
+                    attn_inputs.kv_cache_kernel_block_id_device,
+                )
+            else:
+                new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+                common.copy_kv_cache_offset(
+                    self.rope_params.kv_cache_offset,
+                    new_rope_params.kv_cache_offset,
+                )
+
+        # CUDA graph replay keeps the sequence-length pointer captured during
+        # initialization, so update that storage rather than replacing it.
         new_seq_lens = attn_inputs.sequence_lengths
         n = min(self._captured_seq_lens.numel(), new_seq_lens.numel())
         self._captured_seq_lens[:n].copy_(new_seq_lens[:n], non_blocking=True)
+        self.rope_params.sequence_lengths = self._captured_seq_lens
 
 
 class XQADecodeImpl(FMHAImplBase):
