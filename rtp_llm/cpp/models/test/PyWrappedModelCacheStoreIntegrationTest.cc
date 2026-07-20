@@ -307,6 +307,10 @@ public:
         return static_cast<size_t>(hidden_states.size(0));
     }
 
+    void handleOutputsLastHidden(torch::Tensor&,
+                                 const GptModelInputs&,
+                                 const torch_ext::PyContextParallelParams&) override {}
+
 protected:
     bool plan(const std::vector<int>& total_input_tokens,
               std::vector<int>&       input_tokens,
