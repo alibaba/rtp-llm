@@ -35,4 +35,5 @@ py_test(
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
+    exec_properties = {"gpu": "A10"},
 )
