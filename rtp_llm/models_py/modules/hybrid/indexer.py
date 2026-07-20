@@ -44,8 +44,6 @@ class Indexer(nn.Module):
         self.blocksize = attn_config.kernel_tokens_per_block  # page size, typically 64
         self.indexer_size = self.index_head_dim / 2 + self.index_head_dim / 128 * 2
         self.is_neox_style = attn_config.rope_config.indexer_is_neox_style
-        self.parallelism_config = parallelism_config
-
         self.wq_b = LinearFactory.create_linear_from_weights(
             weights,
             W.mla_indexer_qb_w,
@@ -92,13 +90,11 @@ class Indexer(nn.Module):
             is_neox_style=self.is_neox_style,
         )
 
-    def _prefill_cp_enabled(self) -> bool:
-        if self.parallelism_config is None:
-            return False
-        return self.parallelism_config.prefill_cp_config.is_enabled()
-
     def _is_sparse_prefill_cp(self, attention_inputs: Any) -> bool:
-        return bool(attention_inputs.is_prefill) and self._prefill_cp_enabled()
+        return (
+            bool(attention_inputs.is_prefill)
+            and attention_inputs.context_parallel_info is not None
+        )
 
     # TODO: fuse kernel here
     def _get_logits_head_gate(
@@ -115,6 +111,7 @@ class Indexer(nn.Module):
         q_lora: torch.Tensor,
         x: torch.Tensor,
         flashmla_params: Any,
+        attention_inputs: Any,
         cp_params: Optional[Any],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         q = self.wq_b(q_lora)
@@ -123,7 +120,7 @@ class Indexer(nn.Module):
         k = self.wk(x)
         k = self.k_norm(k)
 
-        if self._prefill_cp_enabled():
+        if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None
             query, key = self.indexer_op.apply_rope_and_rotate_q_k_cp(
                 q, k, cp_params.full_rope_pos_ids,
@@ -176,7 +173,7 @@ class Indexer(nn.Module):
             return self.indexer_op._get_topk_paged(
                 q_fp8, weights, kv_cache, fmha_params, attention_inputs
             )
-        if self._prefill_cp_enabled():
+        if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None
             return self.indexer_op._get_topk_ragged_cp(
                 q_fp8,
@@ -214,7 +211,9 @@ class Indexer(nn.Module):
         if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None, "cp_params is required for sparse prefill CP"
 
-        query, key = self._get_q_k_bf16(q_lora, hidden_states, fmha_params, cp_params)
+        query, key = self._get_q_k_bf16(
+            q_lora, hidden_states, fmha_params, attention_inputs, cp_params
+        )
         q_fp8, q_scale = self._quantize_q_k(
             query, key, kv_cache, fmha_params, attention_inputs, cp_params
         )

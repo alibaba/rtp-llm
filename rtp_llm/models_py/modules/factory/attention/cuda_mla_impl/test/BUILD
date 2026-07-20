@@ -28,3 +28,11 @@ py_test(
     tags = ["manual"],
     exec_properties = {'gpu': 'H20'},
 )
+
+py_test(
+    name = "attn_factory_cp_routing_test",
+    srcs = ["attn_factory_cp_routing_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)

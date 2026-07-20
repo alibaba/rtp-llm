@@ -466,34 +466,45 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (int(device_props_.enable_layer_micro_batch)) {
             return forwardMicroBatched(inputs);
         }
+        const bool run_prefill_cp = device_props_.enable_prefill_cp && !inputs.is_target_verify
+                                    && inputs.sequence_lengths.size(0) == 0 && inputs.input_lengths.size(0) > 0;
         PyContextParallelParams cp_params;
-        if (device_props_.enable_prefill_cp) {
-            context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
+        GptModelInputs          cp_inputs;
+        const GptModelInputs*   forward_inputs = &inputs;
+        if (run_prefill_cp) {
+            cp_inputs               = inputs;
+            cp_inputs.input_lengths = inputs.input_lengths.clone();
+            if (!cp_inputs.input_lengths.device().is_cuda()) {
+                cp_inputs.input_lengths = cp_inputs.input_lengths.pin_memory();
+            }
+            context_parallel_processor_->handleInputs(cp_inputs, cp_params);
+            forward_inputs = &cp_inputs;
         }
+        const GptModelInputs& model_inputs = *forward_inputs;
 
         torch::Tensor token_ids;
-        token_ids = tensorHoldHostAndToCuda(inputs.combo_tokens);
+        token_ids = tensorHoldHostAndToCuda(model_inputs.combo_tokens);
 
         torch::Tensor input_hiddens =
-            inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
+            model_inputs.last_hidden_states.defined() ? model_inputs.last_hidden_states : torch::empty({0});
 
-        torch::Tensor combo_position_ids = inputs.combo_position_ids.defined() ?
-                                               tensorHoldHostAndToCuda(inputs.combo_position_ids) :
+        torch::Tensor combo_position_ids = model_inputs.combo_position_ids.defined() ?
+                                               tensorHoldHostAndToCuda(model_inputs.combo_position_ids) :
                                                torch::empty({0});
 
-        auto embedding_inputs      = buildPyEmbeddingInputs(inputs);
-        auto multimodal_inputs     = buildPyMultimodalInputs(inputs);
-        auto attention_inputs      = buildPyAttentionInputs(inputs);
-        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
-        if (device_props_.enable_prefill_cp) {
+        auto embedding_inputs      = buildPyEmbeddingInputs(model_inputs);
+        auto multimodal_inputs     = buildPyMultimodalInputs(model_inputs);
+        auto attention_inputs      = buildPyAttentionInputs(model_inputs);
+        auto bert_embedding_inputs = buildBertEmbeddingInputs(model_inputs);
+        if (run_prefill_cp) {
             attention_inputs.context_parallel_info = cp_params;
         }
 
-        if (!inputs.warmup && inputs.pd_separation) {
-            attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
+        if (!model_inputs.warmup && model_inputs.pd_separation) {
+            attention_inputs.cache_store_inputs = prepareWriteCacheParams(model_inputs);
             cache_store_async_writer_->init();
         }
-        setupKVCacheForAttentionInputs(attention_inputs, inputs);
+        setupKVCacheForAttentionInputs(attention_inputs, model_inputs);
 
         calculatePaddingOffset(attention_inputs);
         attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
@@ -540,12 +551,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             hidden_states         = py_model_outputs.hidden_states.clone();
         }
 
-        if (!inputs.warmup && inputs.pd_separation) {
+        if (!model_inputs.warmup && model_inputs.pd_separation) {
             cache_store_async_writer_->waitAllDone();
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-        if (device_props_.enable_prefill_cp) {
+        if (run_prefill_cp) {
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
             return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
         }

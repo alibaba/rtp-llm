@@ -35,6 +35,9 @@ def get_mla_impl(
 ) -> MlaImplBase:
 
     mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
+    prefill_cp_active = bool(
+        attn_inputs.is_prefill and attn_inputs.context_parallel_info is not None
+    )
     for impl in mla_impls:
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
@@ -45,14 +48,10 @@ def get_mla_impl(
         use_fast_path = (
             attn_inputs.is_prefill
             and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
-            and not (
-                parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
-            )
+            and not prefill_cp_active
         )
 
-        if not use_fast_path and not impl.support_parallelism_config(
-            parallelism_config
-        ):
+        if prefill_cp_active and not impl.support_parallelism_config(parallelism_config):
             continue
 
         # Skip sparse MLA if fast path is enabled
