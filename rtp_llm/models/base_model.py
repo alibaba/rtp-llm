@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from typing import Any, Optional, Type, Union
+from typing import Any, Optional, Protocol, Type, Union, cast, runtime_checkable
 
 import torch
 
@@ -16,7 +16,6 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
 from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
-from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import (
@@ -31,6 +30,25 @@ from rtp_llm.ops import (
 )
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.time_util import timer_wrapper
+
+
+@runtime_checkable
+class _MultiModalModel(Protocol):
+    def init_multimodal(
+        self,
+        mm_model_config: Any,
+        vit_config: VitConfig,
+        device: str,
+    ) -> None: ...
+
+    def load_mm_weight(
+        self,
+        model_config: ModelConfig,
+        ctype: str,
+        tp_size: int,
+        tp_rank: int,
+        device: str,
+    ) -> None: ...
 
 
 class BaseModel(object):
@@ -141,6 +159,8 @@ class BaseModel(object):
         self.py_eplb = self.model_weights_loader._py_eplb
         device_str = self._get_device_str()
         self._load(device_str)
+        from rtp_llm.model_loader.weight_manager import WeightManager
+
         self.weight_manager = WeightManager(
             self.device, self.weight, self.model_weights_loader
         )
