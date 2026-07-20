@@ -34,7 +34,7 @@ class DashScGrpcServerChannelOptionsTest(TestCase):
 
         self.assertEqual(
             options["grpc.max_receive_message_length"],
-            64 * 1024 * 1024,
+            1024 * 1024 * 1024,
         )
 
     def test_start_timeout_cancels_submitted_coroutine(self) -> None:

@@ -2153,32 +2153,6 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(responses), 1)
         _assert_parameter_error_response(self, responses[0], "max_new_tokens")
 
-    async def test_omitted_max_new_tokens_with_remaining_context_is_admitted(
-        self,
-    ) -> None:
-        visitor = _FakeVisitor(_FakeAsyncStream([]))
-        servicer = DashScInferenceServicer(backend_visitor=visitor, max_seq_len=4)
-
-        await _drain(
-            servicer.ModelStreamInfer(
-                _areq_iter([self._valid_infer_request()]), MagicMock()
-            )
-        )
-
-        self.assertEqual(visitor.enqueue_called, 1)
-
-    async def test_explicit_max_new_tokens_over_remaining_context_is_admitted(
-        self,
-    ) -> None:
-        visitor = _FakeVisitor(_FakeAsyncStream([]))
-        servicer = DashScInferenceServicer(backend_visitor=visitor, max_seq_len=4)
-        req = self._valid_infer_request()
-        req.parameters["max_new_tokens"].int64_param = 10
-
-        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
-
-        self.assertEqual(visitor.enqueue_called, 1)
-
     async def test_bad_structural_tag_shape_returns_parameter_error(
         self,
     ) -> None:

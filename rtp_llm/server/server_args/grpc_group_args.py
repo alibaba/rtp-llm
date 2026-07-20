@@ -4,7 +4,6 @@ import logging
 
 # Model RPC: receive / metadata limits (C++ GenerateStreamCall path).
 _MODEL_RPC_GRPC_RECV_AND_METADATA_BYTES = 1024 * 1024 * 1024
-_DASH_SC_DEFAULT_SERVER_RECV_BYTES = 64 * 1024 * 1024
 
 
 def _default_model_grpc_config_json() -> str:
@@ -33,11 +32,10 @@ def default_model_grpc_config_json() -> str:
 
 def default_dash_sc_grpc_config_json() -> str:
     config = json.loads(default_model_grpc_config_json())
-    # DashSc input_ids arrive in request messages.  Keep a bounded fallback
-    # for proxy/standalone mode; DashScApp derives a tighter model-specific
-    # cap from max_seq_len for direct inference mode at startup.
+    # DashSc input_ids arrive in request messages, so the server needs the
+    # same 1 GiB receive allowance that its client and Model RPC already use.
     config["server_config"]["grpc.max_receive_message_length"] = (
-        _DASH_SC_DEFAULT_SERVER_RECV_BYTES
+        _MODEL_RPC_GRPC_RECV_AND_METADATA_BYTES
     )
     return json.dumps(config, separators=(",", ":"))
 

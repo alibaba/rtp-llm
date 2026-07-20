@@ -1185,7 +1185,6 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         think_runtime: Optional[_ThinkRuntime] = None,
         rank_id: Optional[int] = None,
         repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
-        max_seq_len: Optional[int] = None,
     ):
         self._backend_visitor = backend_visitor
         self._ip = ip
@@ -1216,7 +1215,6 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         self._rank_id = rank_id
         self._server_id = to_optional_int(server_id)
         self._rep_cfg = repetition_monitor_config or RequestRepetitionMonitorConfig()
-        self._max_seq_len = max_seq_len
 
     def _record_and_report_chunk(
         self,
@@ -1357,29 +1355,6 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         resp,
                         delta_len=0,
                         finished=True,
-                        finish_reason=error_spec.finish_reason,
-                    )
-                    yield resp
-                    return
-                # max_new_tokens is a ceiling; the engine caps total sequence
-                # length at max_seq_len. Reject only when no output slot remains.
-                if (
-                    self._max_seq_len is not None
-                    and sampling.max_new_tokens > 0
-                    and len(input_ids_list) >= self._max_seq_len
-                ):
-                    error_spec = DASH_ERROR_TOO_LONG
-                    resp = build_dash_error_response(
-                        str(request.id),
-                        request.model_name,
-                        error_spec=error_spec,
-                        status_message=(
-                            f"model max tokens is {self._max_seq_len}, request length is "
-                            f"{len(input_ids_list)}, max_new_tokens is {sampling.max_new_tokens}"
-                        ),
-                    )
-                    self._record_and_report_chunk(
-                        record, resp, delta_len=0, finished=True,
                         finish_reason=error_spec.finish_reason,
                     )
                     yield resp

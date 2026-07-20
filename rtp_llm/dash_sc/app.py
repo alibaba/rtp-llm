@@ -45,7 +45,6 @@ _SERVICER_CLOSE_TIMEOUT_S = 10.0
 _PRE_STOP_DRAIN_SECONDS_ENV = "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"
 _PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV = "RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS"
 _DEFAULT_PRE_STOP_DRAIN_SECONDS = 120.0
-_DASH_SC_PROTO_OVERHEAD_BYTES = 1024 * 1024
 
 
 def _pre_stop_drain_seconds() -> float:
@@ -76,20 +75,6 @@ def _pre_stop_drain_headroom_seconds(shutdown_timeout: float) -> float:
 def _is_proxy_mode_enabled() -> bool:
     return os.environ.get(_PROXY_MODE_ENV_KEY, "").strip() == "1" or bool(
         os.environ.get(_FORWARD_ENV_KEY, "").strip()
-    )
-
-
-def _max_receive_message_length_for_model(max_seq_len: int) -> int:
-    """Cap one DashSc request before protobuf deserialization.
-
-    ``input_ids`` accepts INT64, so reserve eight bytes per token plus a small
-    protobuf/auxiliary-tensor allowance.  This is intentionally calculated at
-    the process boundary where ModelConfig is available; handler-level checks
-    run too late to protect gRPC's receive buffer.
-    """
-    return max(
-        _DASH_SC_PROTO_OVERHEAD_BYTES,
-        int(max_seq_len) * 8 + _DASH_SC_PROTO_OVERHEAD_BYTES,
     )
 
 
@@ -465,7 +450,6 @@ class DashScApp:
         try:
             port = self.server_config.dash_sc_grpc_server_port
             is_proxy = _is_proxy_mode_enabled()
-            max_receive_message_length = None
 
             # Proxy mode skips model / weight loading / visitor construction;
             # the servicer is opened below on the owner loop for a consistent
@@ -481,10 +465,6 @@ class DashScApp:
                     quantization_config=self.py_env_configs.quantization_config,
                     render_config=self.py_env_configs.render_config,
                 )
-                max_receive_message_length = _max_receive_message_length_for_model(
-                    model_config.max_seq_len
-                )
-
                 backend_visitor = create_backend_rpc_server_visitor(
                     py_env_configs=self.py_env_configs,
                     model_config=model_config,
@@ -529,7 +509,6 @@ class DashScApp:
                     think_runtime=think_runtime,
                     rank_id=self.server_config.rank_id,
                     repetition_monitor_config=repetition_monitor_config,
-                    max_seq_len=model_config.max_seq_len,
                 )
 
             loop = self._start_enqueue_loop()
@@ -570,7 +549,6 @@ class DashScApp:
                 log_path=get_log_path(),
                 backup_count=self.py_env_configs.profiling_debug_logging_config.log_file_backup_count,
                 rank_id=self.server_config.rank_id,
-                max_receive_message_length=max_receive_message_length,
             )
             logging.info("[DashScApp] gRPC server bound on port %s", port)
         except BaseException as e:
