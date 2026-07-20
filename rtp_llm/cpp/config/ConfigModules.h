@@ -100,9 +100,8 @@ enum class FMHAType {
     NONE,
     OPEN_SOURCE,
     PAGED_OPEN_SOURCE,
-    PAGED_TRT_V2,
-    TRT_V1,
-    TRT_V2,
+    PAGED_FLASHINFER_TRT_FMHA_V2,
+    FLASHINFER_TRT_FMHA_V2,
     XQA,
     AITER_PREFILL,
     AITER_ASM_PREFILL,
@@ -122,16 +121,16 @@ enum class FMHAType {
 };
 
 struct FMHAConfig {
-    bool enable_fmha                   = true;
-    bool enable_trt_fmha               = true;
-    bool enable_paged_trt_fmha         = true;
-    bool enable_open_source_fmha       = true;
-    bool enable_paged_open_source_fmha = true;
-    bool enable_trtv1_fmha             = true;
-    bool disable_flash_infer           = false;
-    bool enable_xqa                    = true;
-    bool use_aiter_pa                  = true;
-    bool use_asm_pa                    = true;
+    bool enable_fmha                         = true;
+    bool enable_flashinfer_trtllm_gen        = true;
+    bool enable_flashinfer_trt_fmha_v2       = true;
+    bool enable_paged_flashinfer_trt_fmha_v2 = true;
+    bool enable_open_source_fmha             = true;
+    bool enable_paged_open_source_fmha       = true;
+    bool disable_flashinfer_native           = false;
+    bool enable_xqa                          = true;
+    bool use_aiter_pa                        = true;
+    bool use_asm_pa                          = true;
     // Default off: Triton PA on ROCm regressed vs ASM PA after the rocm_impl
     // refactor; ASM/NonAsm now own the default decode path. Set to true to opt
     // back into the Triton kernel.
@@ -349,6 +348,7 @@ struct FIFOSchedulerConfig {
     //   "ratio" -> PDFusionRatioScheduler with decode_prefill_ratio
     std::string pdfusion_scheduler_mode = "";
     // PDFusionRatioScheduler cadence knob, as a decode:prefill round ratio string.
+    //   "0"   -> always try PREFILL first when a waiting stream exists.
     //   "N"   -> 1 prefill : N decode (decode-heavy); "1" = strict alternation.
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".

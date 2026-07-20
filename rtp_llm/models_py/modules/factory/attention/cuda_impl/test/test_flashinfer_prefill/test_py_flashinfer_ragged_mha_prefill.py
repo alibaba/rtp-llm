@@ -69,6 +69,7 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
         head_num_kv: int = 8,
         size_per_head: int = 128,
         seq_size_per_block: int = 64,
+        causal: bool = True,
     ):
         """Test prefill correctness by comparing with flashinfer reference implementation"""
 
@@ -78,6 +79,7 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
             size_per_head=size_per_head,
             seq_size_per_block=seq_size_per_block,
         )
+        config.attn_configs.is_causal = causal
 
         attn_inputs = self._create_prefill_attention_inputs(
             batch_size, sequence_lengths, config.seq_size_per_block
@@ -141,7 +143,7 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
 
         # Compute reference outputs using flashinfer's single_prefill_with_kv_cache
         ref_output = compute_flashinfer_prefill_reference(
-            q, k, v, attn_inputs.cu_seqlens_device, causal=True
+            q, k, v, attn_inputs.cu_seqlens_device, causal=causal
         )
 
         # Compare outputs
@@ -167,6 +169,16 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
                 sequence_lengths=[128],
                 size_per_head=head_dim,
             )
+
+    def test_non_causal_prefill(self):
+        self._test_prefill_correctness(
+            batch_size=2,
+            sequence_lengths=[64, 96],
+            head_num=8,
+            head_num_kv=2,
+            size_per_head=64,
+            causal=False,
+        )
 
     def test_multi_batch_prefill(self):
         """Test prefill for multiple batches with varying sequence lengths"""

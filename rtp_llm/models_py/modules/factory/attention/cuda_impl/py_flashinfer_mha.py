@@ -14,11 +14,11 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
 )
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_sm10x
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
     check_attention_inputs,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.models_py.utils.arch import is_sm10x
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAType,
@@ -181,24 +181,6 @@ class PyFlashinferPrefillPagedAttnOp(object):
             )
             self.cu_seq_lens[: attn_inputs.cu_seqlens_device.size(0)] = (
                 attn_inputs.cu_seqlens_device
-            )
-            # Build qo_indptr matching the padded Q layout produced by small2large copy.
-            # Each batch's Q tokens sit at [i*max_seq_len, i*max_seq_len + input_len_i)
-            # in the padded buffer, so qo_indptr[i] = i*max_seq_len, but we set
-            # qo_indptr[i+1] = i*max_seq_len + input_len_i to tell FlashInfer the
-            # exact number of real tokens per batch (avoiding padding token processing
-            # which causes numerical differences).
-            batch_size = attn_inputs.input_lengths.size(0)
-            max_sl = self.prefill_cuda_graph_copy_params.max_seq_len
-            offsets = (
-                torch.arange(
-                    batch_size, device=self.qo_indptr.device, dtype=self.qo_indptr.dtype
-                )
-                * max_sl
-            )
-            self.qo_indptr[0] = 0
-            self.qo_indptr[1 : batch_size + 1] = offsets + attn_inputs.input_lengths.to(
-                self.qo_indptr.device
             )
             qo_indptr = self.qo_indptr
 

@@ -81,7 +81,9 @@ protected:
 
     GenerateStreamPtr createStream(const std::vector<int>& input_tokens        = {1, 2, 3},
                                    bool                    reuse_cache         = false,
-                                   bool                    enable_memory_cache = false) {
+                                   bool                    enable_memory_cache = false,
+                                   int                     max_new_tokens      = 1,
+                                   const std::vector<int>& variable_num_beams  = {}) {
         ResourceContext resource_context;
         resource_context.cache_manager       = cache_manager_;
         resource_context.reuse_cache         = reuse_cache;
@@ -95,6 +97,8 @@ protected:
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
         generate_config->reuse_cache         = reuse_cache;
         generate_config->enable_memory_cache = enable_memory_cache;
+        generate_config->max_new_tokens      = max_new_tokens;
+        generate_config->variable_num_beams  = variable_num_beams;
         query->input_ids                     = torch::tensor(input_tokens, torch::kInt32);
         query->generate_config               = generate_config;
         return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
@@ -240,6 +244,94 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionLoadingCacheLifecyclePromotesToD
     ASSERT_EQ(decode.value().front().get(), stream.get());
     ASSERT_EQ(scheduler->runningStreamsSize(), 1);
     ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 0);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionCompletedAsyncLoadStaysInAdmissionPeak) {
+    cache_config_ = test::makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/3, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
+    cache_manager_ = std::make_shared<KVCacheManager>(cache_config_);
+    ASSERT_TRUE(cache_manager_->init());
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 2);
+
+    setupMockCoordinator();
+    auto done_ctx = createDoneAsyncContext();
+    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(done_ctx)));
+
+    auto scheduler = createPDFusionRatioScheduler();
+    auto loaded    = createStream({1, 2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    loaded->generateConfig()->max_new_tokens = 2;
+    ASSERT_TRUE(scheduler->enqueue(loaded).ok());
+
+    auto loading = scheduler->schedule();
+    ASSERT_TRUE(loading.ok());
+    ASSERT_TRUE(loading.value().empty());
+    ASSERT_EQ(loaded->getStatus(), StreamState::LOADING_CACHE);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 1);
+    ASSERT_EQ(loaded->estimatePeakNeedBlocks(/*remaining_tokens=*/1), 1);
+
+    auto candidate = createStream({3});
+    candidate->generateConfig()->max_new_tokens = 2;
+    ASSERT_EQ(candidate->estimatePeakNeedBlocks(/*remaining_tokens=*/1), 1);
+    ASSERT_TRUE(scheduler->enqueue(candidate).ok());
+
+    // The completed load returns to WAITING after the candidate was enqueued. Their combined
+    // one-block future peaks exceed the one remaining block, so only the pre-admitted load may run.
+    auto prefill = scheduler->schedule();
+    ASSERT_TRUE(prefill.ok());
+    ASSERT_EQ(prefill.value().size(), 1);
+    ASSERT_EQ(prefill.value().front().get(), loaded.get());
+    ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 1);
+    ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
+    ASSERT_EQ(scheduler->waiting_streams_.front().get(), candidate.get());
+    ASSERT_FALSE(candidate->hasEvent(StreamEvents::CanRun));
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionLoadingCacheReservesDelayedBeamTailCopies) {
+    cache_config_ = test::makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/6, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_INT8);
+    cache_manager_ = std::make_shared<KVCacheManager>(cache_config_);
+    ASSERT_TRUE(cache_manager_->init());
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
+
+    setupMockCoordinator();
+    auto done_ctx = createDoneAsyncContext();
+    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(done_ctx)));
+
+    auto scheduler = createPDFusionRatioScheduler();
+    auto loaded    = createStream({1, 2, 3, 4, 5},
+                                  /*reuse_cache=*/true,
+                                  /*enable_memory_cache=*/true,
+                                  /*max_new_tokens=*/3,
+                                  /*variable_num_beams=*/{1, 4});
+    ASSERT_EQ(loaded->currentBatchSize(), 1);
+    ASSERT_EQ(loaded->maxBatchSize(), 4);
+    ASSERT_TRUE(scheduler->enqueue(loaded).ok());
+
+    auto loading = scheduler->schedule();
+    ASSERT_TRUE(loading.ok());
+    ASSERT_TRUE(loading.value().empty());
+    ASSERT_EQ(loaded->getStatus(), StreamState::LOADING_CACHE);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
+    ASSERT_EQ(loaded->estimatePeakNeedBlocks(/*remaining_tokens=*/2), 3);
+
+    auto candidate = createStream({6},
+                                  /*reuse_cache=*/false,
+                                  /*enable_memory_cache=*/false,
+                                  /*max_new_tokens=*/3);
+    ASSERT_EQ(candidate->estimatePeakNeedBlocks(/*remaining_tokens=*/2), 1);
+    ASSERT_TRUE(scheduler->enqueue(candidate).ok());
+
+    // The three free blocks exactly cover the loaded stream's delayed 1-to-4 partial-tail fork. The concurrent
+    // candidate must remain waiting so the later beam expansion cannot fail after admission.
+    auto prefill = scheduler->schedule();
+    ASSERT_TRUE(prefill.ok());
+    ASSERT_EQ(prefill.value().size(), 1);
+    ASSERT_EQ(prefill.value().front().get(), loaded.get());
+    ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 1);
+    ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
+    ASSERT_EQ(scheduler->waiting_streams_.front().get(), candidate.get());
+    ASSERT_FALSE(candidate->hasEvent(StreamEvents::CanRun));
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
 }
 
 // ============================================================================

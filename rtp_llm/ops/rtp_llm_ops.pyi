@@ -13,8 +13,6 @@ from rtp_llm.ops import KVCache, PyCacheStoreInputs
 
 __all__ = [
     "SelectTopkOp",
-    "TRTAttn",
-    "TRTAttnOp",
     "XQAAttnOp",
     "XQAParams",
     "embedding",
@@ -41,22 +39,6 @@ class SelectTopkOp:
         expert_ids: torch.Tensor,
         expert_scales: torch.Tensor,
     ) -> None: ...
-
-class TRTAttn:
-    def __init__(self) -> None: ...
-
-class TRTAttnOp:
-    def __init__(
-        self, attn_configs: typing.Any
-    ) -> None: ...
-    def forward(
-        self,
-        input: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
-        params: TRTAttn,
-    ) -> torch.Tensor: ...
-    def prepare(self, attn_inputs: libth_transformer.PyAttentionInputs) -> TRTAttn: ...
 
 class XQAAttnOp:
     def __init__(

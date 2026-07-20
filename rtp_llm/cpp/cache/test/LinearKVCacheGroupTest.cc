@@ -118,6 +118,94 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesReserveTailBlocksWhenReuseDisabled
     EXPECT_EQ(block_pool->freeBlocksNum(), 7u);
 }
 
+TEST_F(LinearKVCacheGroupTest, EstimatePeakNeedBlocksIncludesTransientTailAllocation) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+
+    auto               spec = makeTestLinearSpec(/*seq_size_per_block=*/4);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    ASSERT_TRUE(group.init());
+
+    const BlockIndicesType current_blocks = {NULL_BLOCK_IDX, 0, 1};
+
+    // Three logical slots currently contain two physical tail blocks.
+    // Decoding across the next block still allocates the new tail before sparse cleanup releases the old one.
+    EXPECT_EQ(group.estimatePeakNeedBlocks(
+                  /*seq_len=*/12, current_blocks, /*remaining_tokens=*/4, /*reserve_step=*/0, false),
+              1);
+}
+
+TEST_F(LinearKVCacheGroupTest, EstimateInitialBatchPeakKeepsSharedAndPrivateTailsDistinct) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+
+    auto               spec = makeTestLinearSpec(/*seq_size_per_block=*/4);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    ASSERT_TRUE(group.init());
+
+    // The aligned common prefix owns one shared tail. The unaligned prompt then owns one private tail per sequence.
+    EXPECT_EQ(group.estimateInitialBatchPeakNeedBlocks(/*seq_len=*/5,
+                                                       /*common_seq_len=*/4,
+                                                       /*remaining_tokens=*/0,
+                                                       /*reserve_step=*/0,
+                                                       /*enable_reuse_cache=*/false,
+                                                       /*target_batch_size=*/2),
+              3);
+
+    // Crossing the next boundary allocates another private tail per sequence before the shared tail is cleaned up.
+    EXPECT_EQ(group.estimateInitialBatchPeakNeedBlocks(/*seq_len=*/5,
+                                                       /*common_seq_len=*/4,
+                                                       /*remaining_tokens=*/4,
+                                                       /*reserve_step=*/0,
+                                                       /*enable_reuse_cache=*/false,
+                                                       /*target_batch_size=*/2),
+              5);
+}
+
+TEST_F(LinearKVCacheGroupTest, EstimatePeakNeedBlocksAddsTransientWhenFreshResourceCrossesTwoBoundaries) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+
+    auto               spec = makeTestLinearSpec(/*seq_size_per_block=*/4);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    ASSERT_TRUE(group.init());
+
+    // From seq_len=8, remaining=4 crosses only the boundary at seq_len=9, so two tail blocks are sufficient.
+    EXPECT_EQ(group.estimatePeakNeedBlocks(
+                  /*seq_len=*/8, {}, /*remaining_tokens=*/4, /*reserve_step=*/0, false),
+              2);
+
+    // remaining=5 also crosses the boundary at seq_len=13. The new tail is allocated before sparse cleanup releases
+    // the oldest tail, so the fresh resource transiently needs three physical blocks.
+    EXPECT_EQ(group.estimatePeakNeedBlocks(
+                  /*seq_len=*/8, {}, /*remaining_tokens=*/5, /*reserve_step=*/0, false),
+              3);
+    EXPECT_EQ(group.estimatePeakNeedBlocks(
+                  /*seq_len=*/8, {}, /*remaining_tokens=*/100, /*reserve_step=*/0, false),
+              3);
+
+    // With reuse enabled and linear_step=2, the third later boundary allocates a non-step tail before cleanup.
+    EXPECT_EQ(group.estimatePeakNeedBlocks(
+                  /*seq_len=*/8, {}, /*remaining_tokens=*/9, /*reserve_step=*/0, true),
+              4);
+}
+
+TEST_F(LinearKVCacheGroupTest, EstimatePeakNeedBlocksIncludesTransientReserveAllocation) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+
+    auto               spec = makeTestLinearSpec(/*seq_size_per_block=*/4);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    ASSERT_TRUE(group.init());
+
+    const BlockIndicesType current_blocks = {NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 0, 1};
+
+    // With reserve_step=2, only the new reserve tail is allocated before cleanup.
+    EXPECT_EQ(group.estimatePeakNeedBlocks(
+                  /*seq_len=*/16, current_blocks, /*remaining_tokens=*/4, /*reserve_step=*/2, false),
+              1);
+}
+
 TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksFreesNonStepBlocksButKeepsLastTwo) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());

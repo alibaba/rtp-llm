@@ -40,11 +40,24 @@ public:
                               int                            seq_len,
                               int                            reserve_step) const override;
 
+protected:
+    int estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
+                               int                    seq_len,
+                               int                    remaining_tokens,
+                               int                    reserve_step,
+                               bool                   enable_reuse_cache) const override;
+
 private:
     bool         doInit() override;
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) override;
     int          getNeedBlocks(const MallocInfo& malloc_info) const override;
+    int          estimateInitialBatchPeakNeedBlocks(int  seq_len,
+                                                    int  common_seq_len,
+                                                    int  remaining_tokens,
+                                                    int  reserve_step,
+                                                    bool enable_reuse_cache,
+                                                    int  target_batch_size) const override;
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
 
     // Joint match across groups. Returns reuse_blocks decided by full groups + linear groups.

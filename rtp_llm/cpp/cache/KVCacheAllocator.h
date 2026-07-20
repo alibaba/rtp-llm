@@ -46,6 +46,14 @@ public:
     virtual int              singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                    int                            seq_len,
                                                    int                            reserve_step) const                 = 0;
+    // Common-prefix growth is charged once; non-common growth is charged once per target sequence.
+    int estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                    int                            seq_len,
+                                    int                            common_seq_len,
+                                    int                            remaining_tokens,
+                                    int                            reserve_step,
+                                    bool                           enable_reuse_cache,
+                                    int                            target_batch_size) const;
 
     MallocResult malloc(const MallocInfo& malloc_info);
     void         blockCopy(int src_block_index, int dest_block_index);
@@ -59,10 +67,10 @@ public:
 
     // Reserve some blocks for already-running streams' future allocations.
     // Only applied to "init malloc" requests where batch_kv_cache_resource has no blocks yet.
-    void setReserveBlockNum(size_t reserve_block_num) {
+    void setReserveBlocksNum(size_t reserve_block_num) {
         reserve_block_num_ = reserve_block_num;
     }
-    size_t reserveBlockNum() const {
+    size_t reserveBlocksNum() const {
         return reserve_block_num_;
     }
 
@@ -88,6 +96,18 @@ protected:
     virtual MallocResult incrMalloc(const MallocInfo& malloc_info)                                          = 0;
     virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info)                              = 0;
     virtual int          getNeedBlocks(const MallocInfo& malloc_info) const                                 = 0;
+    // Estimate peak additional blocks for one sequence resource.
+    virtual int          estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
+                                                int                    seq_len,
+                                                int                    remaining_tokens,
+                                                int                    reserve_step,
+                                                bool                   enable_reuse_cache) const = 0;
+    virtual int          estimateInitialBatchPeakNeedBlocks(int  seq_len,
+                                                            int  common_seq_len,
+                                                            int  remaining_tokens,
+                                                            int  reserve_step,
+                                                            bool enable_reuse_cache,
+                                                            int  target_batch_size) const = 0;
     virtual void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) = 0;
 
     CacheConfig                        config_;

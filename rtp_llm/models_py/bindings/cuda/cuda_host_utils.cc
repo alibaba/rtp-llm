@@ -114,6 +114,27 @@ void syncAndCheckInDebug(const char* const file, int const line) {
     }
 }
 
+#if USING_CUDA
+at::cuda::CUDAStream getNoBlockCopyStream(int device_id) {
+    static thread_local std::unordered_map<int, at::cuda::CUDAStream> streams;
+    auto                                                              stream = streams.find(device_id);
+    if (stream == streams.end()) {
+        stream = streams.emplace(device_id, at::cuda::getStreamFromPool(/*isHighPriority=*/false, device_id)).first;
+    }
+    return stream->second;
+}
+
+int getCopyDevice(int dst_device_id, int src_device_id) {
+    if (dst_device_id >= 0) {
+        return dst_device_id;
+    }
+    if (src_device_id >= 0) {
+        return src_device_id;
+    }
+    return static_cast<int>(at::cuda::current_device());
+}
+#endif
+
 int get_sm() {
     static int sm = []() {
         int device;

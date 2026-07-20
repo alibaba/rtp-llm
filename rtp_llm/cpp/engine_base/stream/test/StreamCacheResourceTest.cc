@@ -146,8 +146,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 //     stream_->enable_fast_gen_ = true;
 
 //     // first chunk: 分块场景下 current_chunk_len 会被设置为 >0
-//     int token_capacity = 4;
-//     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
+//     ASSERT_TRUE(resource.initKVBlock().ok());
 //     ASSERT_EQ(cache_manager_->freeBlocksNum(), 6);
 //     ASSERT_GT(stream_->currentChunkLen(), 0);
 
@@ -165,14 +164,13 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 //     prepareResource();
 //     auto& resource = stream_->streamCacheResource();
 
-//     int token_capacity = 1000;
-//     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
+//     ASSERT_TRUE(resource.initKVBlock().ok());
 //     ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
 //     ASSERT_EQ(resource.maxBlockSize(), 3);
 
 //     stream_->setSeqLength(7);
 //     stream_->setIsContextStream(false);
-//     ASSERT_TRUE(resource.incrKVBlock(token_capacity).ok());
+//     ASSERT_TRUE(resource.incrKVBlock().ok());
 //     ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
 //     ASSERT_EQ(resource.maxBlockSize(), 4);
 
@@ -188,8 +186,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 
 //     // Test with query-level reuse_cache = true
 //     stream_->generate_input_->generate_config->reuse_cache = true;
-//     int token_capacity                                     = 1000;
-//     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
+//     ASSERT_TRUE(resource.initKVBlock().ok());
 //     ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
 //     ASSERT_EQ(resource.maxBlockSize(), 3);
 
@@ -199,7 +196,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 //     resource.init(stream_->currentBatchSize());
 //     size_t baseline_free_blocks                            = cache_manager_->freeBlocksNum();
 //     stream_->generate_input_->generate_config->reuse_cache = false;
-//     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
+//     ASSERT_TRUE(resource.initKVBlock().ok());
 //     ASSERT_EQ(cache_manager_->freeBlocksNum(),
 //               baseline_free_blocks >= 3 ? baseline_free_blocks - 3 : baseline_free_blocks);
 //     ASSERT_EQ(resource.maxBlockSize(), 3);
@@ -214,8 +211,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 
 //     // Test with query-level reuse_cache = true, but should be ignored
 //     stream_->generate_input_->generate_config->reuse_cache = true;
-//     int token_capacity                                     = 1000;
-//     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
+//     ASSERT_TRUE(resource.initKVBlock().ok());
 //     ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
 //     ASSERT_EQ(resource.maxBlockSize(), 3);
 
@@ -224,7 +220,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 //     // Re-initialize batch resource after release
 //     resource.init(stream_->currentBatchSize());
 //     stream_->generate_input_->generate_config->reuse_cache = false;
-//     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
+//     ASSERT_TRUE(resource.initKVBlock().ok());
 //     ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
 //     ASSERT_EQ(resource.maxBlockSize(), 3);
 
@@ -292,7 +288,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
             return std::static_pointer_cast<AsyncContext>(load_ctx);
         }));
 
-    ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_TRUE(resource.initKVBlock().ok());
     ASSERT_TRUE(resource.asyncLoadCache());
     ASSERT_TRUE(resource.loadCacheDone());
     ASSERT_NE(captured_ctx, nullptr);
@@ -360,10 +356,10 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
             return {true, 0};
         }));
 
-    ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_TRUE(resource.initKVBlock().ok());
     resource.asyncLoadCache();
     resource.loadCacheDone();
-    ASSERT_TRUE(resource.incrKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_TRUE(resource.incrKVBlock().ok());
 }
 
 TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TriggersStoreCacheAsync_WhenFinishedAndReuseCache) {
@@ -397,7 +393,7 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TriggersStoreCacheAsync_Wh
             return store_ctx;
         }));
 
-    ASSERT_TRUE(resource.incrKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_TRUE(resource.incrKVBlock().ok());
     ASSERT_GT(resource.curBlocksNum(), 0);
 
     stream_->generate_status_->status = StreamState::FINISHED;
@@ -428,7 +424,7 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_DoesNotStoreCacheAsync_Whe
 
     EXPECT_CALL(*mock_coord, asyncWrite(testing::_)).Times(0);
 
-    ASSERT_TRUE(resource.incrKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_TRUE(resource.incrKVBlock().ok());
     const int blocks = resource.curBlocksNum();
     ASSERT_GT(blocks, 0);
 
@@ -466,7 +462,7 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TieredMemoryCache_EvictsDe
                 return store_ctx;
             }));
 
-    ASSERT_TRUE(resource.incrKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_TRUE(resource.incrKVBlock().ok());
     ASSERT_GT(resource.curBlocksNum(), 0);
 
     stream_->generate_status_->status = StreamState::FINISHED;
@@ -724,7 +720,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
         .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(load_ctx1)));
 
     // First initKVBlock + asyncLoadCache + loadCacheDone: sets reuse lengths
-    ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_TRUE(resource.initKVBlock().ok());
     ASSERT_GT(resource.curBlocksNum(), 0);
     ASSERT_TRUE(resource.asyncLoadCache());
     ASSERT_TRUE(resource.loadCacheDone());
@@ -737,7 +733,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
     // Second initKVBlock + asyncLoadCache + loadCacheDone: load_cache_once_ prevents re-issue.
     // The once-per-lifecycle guard means the second asyncLoadCache() returns false (skipped),
     // which inherently preserves the reuse lengths set by the first load.
-    ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_TRUE(resource.initKVBlock().ok());
     ASSERT_TRUE(resource.asyncLoadCache());
     ASSERT_TRUE(resource.loadCacheDone());
 

@@ -7,6 +7,30 @@ int FullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve
     return std::max((seq_len + reserve_step + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
 }
 
+int FullKVCacheGroup::estimatePeakNeedBlocks(int                     seq_len,
+                                             const BlockIndicesType& current_block_indices,
+                                             int                     remaining_tokens,
+                                             int                     reserve_step,
+                                             bool                    enable_reuse_cache) const {
+    (void)enable_reuse_cache;
+    const int current_blocks = static_cast<int>(current_block_indices.size());
+    return std::max((seq_len + remaining_tokens + reserve_step + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
+}
+
+int FullKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
+                                                         int  common_seq_len,
+                                                         int  remaining_tokens,
+                                                         int  reserve_step,
+                                                         bool enable_reuse_cache,
+                                                         int  target_batch_size) const {
+    (void)enable_reuse_cache;
+    const int batch_size    = std::max(target_batch_size, 1);
+    const int common_blocks = (common_seq_len + seq_size_per_block_ - 1) / seq_size_per_block_;
+    const int peak_blocks =
+        (seq_len + remaining_tokens + reserve_step + seq_size_per_block_ - 1) / seq_size_per_block_;
+    return common_blocks + batch_size * std::max(peak_blocks - common_blocks, 0);
+}
+
 NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
     int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
     (void)reuse_blocks_len;

@@ -67,52 +67,92 @@ py_test(
     },
 )
 
-# TRT attention tests - organized in trt_tests/ subdirectory
+# FlashInfer TRT-LLM FMHA v2 tests
 py_test(
-    name = "test_trt_nonpadded",
+    name = "test_trtllm_fmha_v2_paged_prefill_sm90",
+    main = "test_trtllm_fmha_v2_paged_prefill.py",
     srcs = [
-        "trt_tests/test_trt_nonpadded.py",
+        "test_trtllm_fmha_v2_paged_prefill.py",
         "trt_tests/test_trt_base.py",
         "trt_tests/trt_test_utils.py",
         "attention_ref.py",
-        "base_attention_test.py"
+        "base_attention_test.py",
     ],
-    deps = py_test_deps,
-    tags = ["H20"],
+    deps = py_test_deps + [
+        "//rtp_llm/test/utils:test_util",
+    ] + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    tags = ["H20", "cuda12_9"],
     exec_properties = {
         'gpu': 'H20',
     },
 )
 
 py_test(
-    name = "test_trt_padded",
+    name = "test_trtllm_fmha_v2_paged_prefill_sm12x",
+    main = "test_trtllm_fmha_v2_paged_prefill.py",
     srcs = [
-        "trt_tests/test_trt_padded.py",
+        "test_trtllm_fmha_v2_paged_prefill.py",
         "trt_tests/test_trt_base.py",
         "trt_tests/trt_test_utils.py",
         "attention_ref.py",
-        "base_attention_test.py"
+        "base_attention_test.py",
     ],
-    deps = py_test_deps,
-    tags = ["H20"],
+    deps = py_test_deps + [
+        "//rtp_llm/test/utils:test_util",
+    ] + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {
+        'gpu': 'RTX_5000_PRO',
+    },
+)
+
+py_test(
+    name = "test_trtllm_fmha_v2_prefill_sm90",
+    main = "test_trtllm_fmha_v2_prefill.py",
+    srcs = [
+        "test_trtllm_fmha_v2_prefill.py",
+        "trt_tests/test_trt_base.py",
+        "trt_tests/trt_test_utils.py",
+        "attention_ref.py",
+        "base_attention_test.py",
+    ],
+    deps = py_test_deps + [
+        "//rtp_llm/test/utils:test_util",
+    ] + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    tags = ["H20", "cuda12_9"],
     exec_properties = {
         'gpu': 'H20',
     },
 )
 
 py_test(
-    name = "test_trt_paged_nonpadded",
+    name = "test_trtllm_fmha_v2_prefill_sm12x",
+    main = "test_trtllm_fmha_v2_prefill.py",
     srcs = [
-        "trt_tests/test_trt_paged_nonpadded.py",
+        "test_trtllm_fmha_v2_prefill.py",
         "trt_tests/test_trt_base.py",
         "trt_tests/trt_test_utils.py",
         "attention_ref.py",
-        "base_attention_test.py"
+        "base_attention_test.py",
     ],
-    deps = py_test_deps,
-    tags = ["H20"],
+    deps = py_test_deps + [
+        "//rtp_llm/test/utils:test_util",
+    ] + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    tags = ["RTX_5000_PRO"],
     exec_properties = {
-        'gpu': 'H20',
+        'gpu': 'RTX_5000_PRO',
     },
 )
 

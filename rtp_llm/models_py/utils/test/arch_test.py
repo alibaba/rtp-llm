@@ -26,6 +26,7 @@ class ArchTest(TestCase):
             self.assertEqual(arch.get_sm(), (12, 0))
             self.assertFalse(arch.is_sm10x())
             self.assertTrue(arch.is_sm12x())
+            self.assertFalse(arch.is_sm90())
             self.assertTrue(arch.is_blackwell())
             get_device_capability.assert_called_once_with(1)
 
@@ -50,6 +51,7 @@ class ArchTest(TestCase):
                 self.assertFalse(arch.is_sm12x())
 
             self.assertTrue(arch.is_blackwell(torch.device("cuda:1")))
+            self.assertTrue(arch.is_sm90(2))
             self.assertFalse(arch.is_blackwell(2))
             self.assertEqual(queried_devices, [1, 0, 2])
 

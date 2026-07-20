@@ -91,6 +91,14 @@ class ServerArgsSetTest(TestCase):
             "4",
             "--cache_store_rdma_worker_thread_count",
             "2",
+            "--enable_flashinfer_trtllm_gen",
+            "false",
+            "--enable_flashinfer_trt_fmha_v2",
+            "false",
+            "--enable_paged_flashinfer_trt_fmha_v2",
+            "false",
+            "--disable_flashinfer_native",
+            "true",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -130,6 +138,12 @@ class ServerArgsSetTest(TestCase):
         # Verify cache_store_config
         self.assertEqual(py_env_configs.cache_store_config.rdma_io_thread_count, 4)
         self.assertEqual(py_env_configs.cache_store_config.rdma_worker_thread_count, 2)
+
+        # Verify fmha_config
+        self.assertFalse(py_env_configs.fmha_config.enable_flashinfer_trtllm_gen)
+        self.assertFalse(py_env_configs.fmha_config.enable_flashinfer_trt_fmha_v2)
+        self.assertFalse(py_env_configs.fmha_config.enable_paged_flashinfer_trt_fmha_v2)
+        self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_native)
 
     def test_cmd_args_override_env_vars(self):
         """Test that command line arguments override environment variables."""
@@ -285,6 +299,24 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.decode_prefill_ratio,
             "1/3",
+        )
+
+        sys.argv = [
+            "prog",
+            "--pdfusion_scheduler_mode",
+            "ratio",
+            "--decode_prefill_ratio",
+            "0",
+        ]
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode,
+            "ratio",
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.decode_prefill_ratio,
+            "0",
         )
 
     def test_pdfusion_scheduler_mode_rejects_unknown_value(self):
