@@ -208,7 +208,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 (DefaultRouter) router,
                 mock(QueueManager.class, withSettings().stubOnly()),
                 scheduler,
-                mock(RecentCacheKeyTraceReporter.class, withSettings().stubOnly()));
+                mock(RecentCacheKeyTraceReporter.class, withSettings().stubOnly()),
+                endpointRegistry);
 
         LBStatusConsistencyService consistencyService =
                 mock(LBStatusConsistencyService.class, withSettings().stubOnly());
