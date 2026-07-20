@@ -22,6 +22,9 @@ class KVCacheAllocator;
 class KVCacheMemoryConnector;
 class RemoteConnector;
 class P2PConnector;
+namespace kvs {
+class KVSConnector;
+}
 class KVCacheConnectorReadWriteContext;
 
 class KVCacheConnectorCoordinator: public IKVCacheConnectorCoordinator {
@@ -66,6 +69,7 @@ public:
 private:
     std::shared_ptr<KVCacheMemoryConnector> initMemoryConnector();
     std::shared_ptr<RemoteConnector>        initRemoteConnector();
+    std::shared_ptr<kvs::KVSConnector>      initKVSConnector();
     bool                                    initP2PConnectorInternal();
     // Returns CP size when page-level RR sharding is active; 1 otherwise.
     int  cpSize() const;
@@ -91,6 +95,7 @@ private:
     std::vector<std::shared_ptr<KVCacheConnector>>    connectors_;
     std::shared_ptr<KVCacheMemoryConnector>           memory_connector_;
     std::shared_ptr<RemoteConnector>                  remote_connector_;
+    std::shared_ptr<kvs::KVSConnector>                kvs_connector_;
     std::shared_ptr<P2PConnector>                     p2p_connector_;
     mutable std::mutex                                update_mutex_;
     std::list<std::shared_ptr<FusedAsyncReadContext>> fused_async_read_context_list_;

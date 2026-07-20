@@ -400,6 +400,62 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         default="",
     )
     kv_cache_group.add_argument(
+        "--enable_kvs_cache",
+        env_name="ENABLE_KVS_CACHE",
+        bind_to=(kv_cache_config, "enable_kvs_cache"),
+        type=str2bool,
+        default=False,
+        help="是否启用 KVS KV cache connector。开启后优先使用 KVSConnector。",
+    )
+    kv_cache_group.add_argument(
+        "--kvs_v6d_url",
+        env_name="KVS_V6D_URL",
+        bind_to=(kv_cache_config, "kvs_v6d_url"),
+        type=str,
+        default="http://127.0.0.1:8080",
+        help="KVS 服务 HTTP 地址。",
+    )
+    kv_cache_group.add_argument(
+        "--kvs_v6d_socket_path",
+        env_name="KVS_V6D_SOCKET_PATH",
+        bind_to=(kv_cache_config, "kvs_v6d_socket_path"),
+        type=str,
+        default="",
+        help="KVS 数据面 Unix socket 路径。",
+    )
+    kv_cache_group.add_argument(
+        "--kvs_timeout_ms",
+        env_name="KVS_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "kvs_timeout_ms"),
+        type=int,
+        default=12000,
+        help="KVS 控制面请求超时时间，单位毫秒。",
+    )
+    kv_cache_group.add_argument(
+        "--kvs_lease_term_sec",
+        env_name="KVS_LEASE_TERM_SEC",
+        bind_to=(kv_cache_config, "kvs_lease_term_sec"),
+        type=int,
+        default=60,
+        help="KVS acquire lease TTL，单位秒。",
+    )
+    kv_cache_group.add_argument(
+        "--kvs_object_namespace",
+        env_name="KVS_OBJECT_NAMESPACE",
+        bind_to=(kv_cache_config, "kvs_object_namespace"),
+        type=str,
+        default="rtp_llm",
+        help="KVS object key namespace。",
+    )
+    kv_cache_group.add_argument(
+        "--kvs_cache_key_version",
+        env_name="KVS_CACHE_KEY_VERSION",
+        bind_to=(kv_cache_config, "kvs_cache_key_version"),
+        type=str,
+        default="1",
+        help="KVS object key version，用于 key/layout 规则升级隔离。",
+    )
+    kv_cache_group.add_argument(
         "--enable_tiered_memory_cache",
         env_name="ENABLE_TIERED_MEMORY_CACHE",
         bind_to=(kv_cache_config, "enable_tiered_memory_cache"),
