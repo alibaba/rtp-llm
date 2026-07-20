@@ -31,6 +31,9 @@ public:
         int                          propose_step  = 0;
         size_t                       vocab_size    = 0;
         torch::Tensor                draft_tokens;  // [B,P] or [B,P+1]
+        // Async MTP: recorded on the producer stream after draft_tokens are
+        // final. run() orders its D2H read after this event.
+        std::shared_ptr<torch::Event> draft_tokens_ready_event;
     };
 
     struct LaunchResult {
@@ -42,6 +45,16 @@ public:
         torch::Tensor packed_allow_mask_cpu_lifetime;
         torch::Tensor logits_row_indices_cpu_lifetime;
         torch::Tensor spec_cap_cpu;
+
+        // Async MTP extensions. spec_cap_gpu mirrors spec_cap_cpu on device so
+        // accept-len capping can stay tensorized without a host sync.
+        // ready_event is recorded after the H2D uploads above; consumers must
+        // block their stream on it. consumed_event must be recorded by the
+        // consumer after its last GPU read; run() waits on it before reusing
+        // the pinned scratch buffers (single-flight enforcement).
+        torch::Tensor                 spec_cap_gpu;
+        std::shared_ptr<torch::Event> ready_event;
+        std::shared_ptr<torch::Event> consumed_event;
     };
 
     SpecLogitsVerifyRunner() = default;
@@ -86,6 +99,10 @@ private:
     torch::Tensor logits_row_indices_cpu_;  // [active_rows] pinned int32
     torch::Tensor logits_row_indices_gpu_;  // [active_rows] device int32
     torch::Tensor spec_cap_cpu_;
+#if USING_CUDA
+    torch::Tensor                 spec_cap_gpu_;
+    std::shared_ptr<torch::Event> last_consumed_event_;
+#endif
 };
 
 }  // namespace rtp_llm

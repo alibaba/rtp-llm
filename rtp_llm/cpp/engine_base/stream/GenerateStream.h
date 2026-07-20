@@ -495,6 +495,7 @@ public:
         return logits_processor_list_;
     }
 
+
     at::Generator getGenerator() {
         return generator_;
     }

@@ -30,36 +30,37 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
 
 
 class CacheStoreInputLengthTest(unittest.TestCase):
-    def test_writer_uses_full_lengths_captured_before_cp_sharding(self):
-        local_lengths = torch.tensor([1384], dtype=torch.int32)
-        full_lengths = torch.tensor([2768], dtype=torch.int32)
-        prefix_lengths = torch.tensor([0], dtype=torch.int32)
-        block_ids = torch.tensor([[1, 2, 3, 4, 5, 6]], dtype=torch.int32)
+    # Cache-store planning moved into the C++ CacheStoreWriter (main #1250);
+    # python only forwards the writer + inputs pair. The CP full-length
+    # override now happens in PyWrappedModel::forward before the writer runs.
+    def test_writer_receives_writer_and_inputs_pair(self):
         cache_store_inputs = object()
+        writer = object()
         attn_inputs = SimpleNamespace(
             is_prefill=True,
             cache_store_inputs=cache_store_inputs,
-            input_lengths=local_lengths,
-            prefix_lengths=prefix_lengths,
-            kv_cache_block_id=block_ids,
-            context_parallel_info=SimpleNamespace(
-                prefill_actual_input_lengths_cpu=full_lengths
-            ),
+            cache_store_writer=writer,
         )
 
-        writer = object()
+        op = object()
         with patch.object(
-            attention_common, "WriteCacheStoreOp", return_value=writer
+            attention_common, "WriteCacheStoreOp", return_value=op
         ) as constructor:
             self.assertIs(
-                attention_common.create_write_cache_store_impl(attn_inputs), writer
+                attention_common.create_write_cache_store_impl(attn_inputs), op
             )
 
         args = constructor.call_args.args
-        self.assertIs(args[0], full_lengths)
-        self.assertIs(args[1], prefix_lengths)
-        self.assertIs(args[2], block_ids)
-        self.assertIs(args[3], cache_store_inputs)
+        self.assertIs(args[0], writer)
+        self.assertIs(args[1], cache_store_inputs)
+
+    def test_no_writer_returns_none(self):
+        attn_inputs = SimpleNamespace(
+            is_prefill=True,
+            cache_store_inputs=object(),
+            cache_store_writer=None,
+        )
+        self.assertIsNone(attention_common.create_write_cache_store_impl(attn_inputs))
 
 
 # ---------------------------------------------------------------------------

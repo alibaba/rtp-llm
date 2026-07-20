@@ -1,14 +1,17 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <numeric>
 #include <string>
+#include <vector>
 #include <cstring>
 
 namespace rtp_llm {
@@ -196,6 +199,19 @@ torch::Tensor makeCudaInt32Range(int64_t end) {
     return torch::arange(0, end, cudaInt32Options());
 }
 
+torch::Tensor committedLenToDraftDecodePosition(const torch::Tensor& committed_len, TensorHolder& host_holder) {
+    return toCudaInt32(committed_len, host_holder);
+}
+
+torch::Tensor normalDecodePositionToDraftDecodePosition(const torch::Tensor& normal_decode_position,
+                                                        TensorHolder&        host_holder) {
+    auto position = toCudaInt32(normal_decode_position, host_holder);
+    if (!position.defined() || position.numel() == 0) {
+        return position;
+    }
+    return (position + 1).to(torch::kInt32);
+}
+
 void setVerifyPairInputs(GptModelInputs& model_input,
                          torch::Tensor   combo_tokens,
                          size_t          batch_size,
@@ -365,8 +381,11 @@ absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(c
     return model_input;
 }
 
-absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
-    const StreamGroups& stream_groups, const GptModelInputs& model_inputs, const GptModelOutputs& model_output) const {
+absl::StatusOr<SamplerInputs>
+MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
+                                                const GptModelInputs&                       model_inputs,
+                                                const GptModelOutputs&                      model_output,
+                                                const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result) const {
     RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.gather_spec_sampler_input");
     (void)model_inputs;
     RTP_LLM_CHECK(!stream_groups.empty());
@@ -397,7 +416,8 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
                           tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
     }
 
-    auto vocab_size = (size_t)model_output.logits.size(1);
+    auto vocab_size           = (size_t)model_output.logits.size(1);
+    sampler_inputs.vocab_size = vocab_size;
     if (return_all_probs != ReturnAllProbsMode::NONE) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
@@ -407,6 +427,14 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
     }
 
     sampler_inputs.logits = model_output.logits.clone();
+    if (spec_logits_result.has_active_processor) {
+        // The runner uploads packed masks on its own (worker) stream; order this
+        // stream's mask application after the uploads, then apply on GPU.
+        if (spec_logits_result.ready_event) {
+            spec_logits_result.ready_event->block(cuda_graph::graphGetCurrentStream());
+        }
+        SpecLogitsVerifyRunner::applyMaskToLogits(sampler_inputs.logits, spec_logits_result, sampler_inputs.vocab_size);
+    }
 
     // TODO(async): debug formatting is CPU-only. Keep the .cpu() explicit
     // and do not route this through the model-input fast path.
@@ -503,11 +531,18 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
             auto combo_tokens_gpu         = torch::cat(propose_slices_gpu, 0).to(torch::kInt32);
             model_input.combo_tokens      = std::move(combo_tokens_gpu);
             model_input.lm_output_indexes = makeCudaInt32Range(model_input.combo_tokens.numel());
-            model_input.prefix_lengths    = emptyInt32OnCuda({0});
             if (sequence_lengths_gpu.size() == batch_size) {
-                model_input.sequence_lengths = (torch::cat(sequence_lengths_gpu, 0) - 1).to(torch::kInt32);
-            } else if (model_input.sequence_lengths.defined() && !model_input.sequence_lengths.is_cuda()) {
-                model_input.sequence_lengths = toCudaInt32(model_input.sequence_lengths, host_holder);
+                // next_seq_len includes the target token carried by the stream.
+                // Draft decode consumes the following position, while target
+                // verification must first write that carried token.
+                auto committed_len           = torch::cat(sequence_lengths_gpu, 0);
+                model_input.sequence_lengths = committedLenToDraftDecodePosition(committed_len, host_holder);
+                model_input.prefix_lengths   = (model_input.sequence_lengths - 1).to(torch::kInt32);
+            } else if (model_input.sequence_lengths.defined()) {
+                auto target_prefix_lengths   = toCudaInt32(model_input.sequence_lengths, host_holder);
+                model_input.prefix_lengths   = target_prefix_lengths;
+                model_input.sequence_lengths =
+                    normalDecodePositionToDraftDecodePosition(target_prefix_lengths, host_holder);
             }
             model_input.input_lengths = toCudaInt32(model_input.input_lengths, host_holder);
             return;
@@ -521,8 +556,10 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
         model_input.combo_tokens      = std::move(combo_tokens_gpu);
         model_input.lm_output_indexes = makeCudaInt32Range(model_input.combo_tokens.numel());
         model_input.input_lengths     = toCudaInt32(model_input.input_lengths, host_holder);
-        model_input.sequence_lengths  = toCudaInt32(model_input.sequence_lengths, host_holder);
-        model_input.prefix_lengths    = toCudaInt32(model_input.prefix_lengths, host_holder);
+        auto target_prefix_lengths   = toCudaInt32(model_input.sequence_lengths, host_holder);
+        model_input.prefix_lengths   = target_prefix_lengths;
+        model_input.sequence_lengths =
+            normalDecodePositionToDraftDecodePosition(target_prefix_lengths, host_holder);
         return;
     }
 
@@ -537,8 +574,10 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
 
     model_input.combo_tokens      = toCudaInt32(combo_tokens, host_holder);
     model_input.input_lengths     = toCudaInt32(model_input.input_lengths, host_holder);
-    model_input.sequence_lengths  = toCudaInt32(model_input.sequence_lengths, host_holder);
-    model_input.prefix_lengths    = toCudaInt32(model_input.prefix_lengths, host_holder);
+    auto target_prefix_lengths   = toCudaInt32(model_input.sequence_lengths, host_holder);
+    model_input.prefix_lengths   = target_prefix_lengths;
+    model_input.sequence_lengths =
+        normalDecodePositionToDraftDecodePosition(target_prefix_lengths, host_holder);
     model_input.lm_output_indexes = makeCudaInt32Range(static_cast<int64_t>(batch_size));
 }
 
@@ -1013,10 +1052,20 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
 
         torch::Tensor accept_tokens_tensor =
             accept_tokens.narrow(0, batch_idx_out, next_batch_size).narrow(1, 0, cur_accept_len).contiguous();
-        spec_update_infos.push_back(
-            {accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+        StreamSpecUpdateInfo spec_update_info{
+            accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)};
+        // Per-stream verify errors from SpecLogitsVerifyRunner ride the update
+        // path so grammar/think mask failures reach the stream (main #1006).
+        const size_t stream_idx = spec_update_infos.size();
+        if (stream_idx < spec_decode_output.processor_errors.size()) {
+            spec_update_info.error_info = spec_decode_output.processor_errors[stream_idx];
+        }
+        spec_update_infos.push_back(std::move(spec_update_info));
 
-        token_offset += propose_step_ + 1;
+        // Draft hidden layout differs per mode: the device-state path keeps a
+        // dense (propose_step_+1) rows/stream layout, while the default sync
+        // path compacts draft inputs (and thus hidden rows) to accept_len.
+        token_offset += useMtpDeviceState() ? (propose_step_ + 1) : cur_accept_len;
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
     }

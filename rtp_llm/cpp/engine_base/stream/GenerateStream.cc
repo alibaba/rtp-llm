@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
@@ -815,8 +816,8 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
         const_cast<torch::Tensor&>(new_tokens).zero_();
     }
 
-    auto num_new_tokens = update_info.num_new_tokens;
-    int  cur_cached_len = seqLength() - 1;
+    auto      num_new_tokens = update_info.num_new_tokens;
+    int       cur_cached_len = seqLength() - 1;
 
     int error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,
@@ -899,6 +900,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                   torch::Tensor(),
                   update_info.update_remote_generate,
                   update_info.force_update_info});
+
 }
 
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
@@ -920,7 +922,8 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
 
     const auto& new_tokens     = update_info.new_tokens;
     auto        num_new_tokens = update_info.num_new_tokens;
-    int         error_token_id = 0;
+
+    int error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,
                                      begin_time_us_,
                                      num_new_tokens,
@@ -952,6 +955,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     // checkFinished() 已将本轮 updateOutput 中上报的 GenerateDone/Error 事件应用到状态上，
     // 即使 moveToNext() 还未被调度器轮询，这里也能拿到与事件一致的"已完成"判断。
     bool is_done = generate_status_->checkFinished();
+
 
     if (!is_done || stream_cache_resource_->reuseCache()) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
@@ -1004,6 +1008,8 @@ std::optional<ErrorInfo> GenerateStream::updateLogitProcessorStatus(const torch:
     return validateLogitsProcessorState();
 }
 
+
+
 void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!src_batch_indices.defined() || !hasNumBeams()) {
@@ -1018,6 +1024,8 @@ void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src
         logit_processor_ptr->updateMultiSeqStatus(src_batch_indices_vec);
     }
 }
+
+
 
 std::optional<ErrorInfo> GenerateStream::validateLogitsProcessorState() {
     if (hasErrorWithoutLock()) {
@@ -1038,6 +1046,7 @@ std::optional<ErrorInfo> GenerateStream::validateLogitsProcessorState() {
     }
     return std::nullopt;
 }
+
 
 void GenerateStream::setLoss(const torch::Tensor& loss) {
     RTP_LLM_PROFILE_FUNCTION();

@@ -408,6 +408,28 @@ class FIFOSchedulerConfig:
         ...
     def to_string(self) -> str:
         ...
+
+
+class GrammarConfig:
+    constrained_json_disable_any_whitespace: bool
+    grammar_backend: str
+    num_workers: int
+    override_stop_tokens: list[int]
+    tokenizer_info_json: str
+
+    def __getstate__(self) -> tuple:
+        ...
+
+    def __init__(self) -> None:
+        ...
+
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+
+    def to_string(self) -> str:
+        ...
+
+
 class FMHAConfig:
     absorb_opt_len: int
     disable_flashinfer_native: bool

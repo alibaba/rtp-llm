@@ -69,6 +69,7 @@ protected:
                                      std::shared_ptr<torch::Event> sampler_event);
 
     void publishNormalDeviceState(const StreamGroups& stream_groups, const SamplerOutput& sampler_output);
+    void prepareGrpcNormalDeviceState(const StreamGroups& stream_groups);
 
     // Mirror the use_normal_device_state condition in processDecodeStreams.
     // When false, gather falls back to host accessors still mutated by the
@@ -101,6 +102,7 @@ private:
     int                   propose_model_index_ = 0;
     int                   tp_rank_             = 0;
     ParallelismConfig     parallelism_config_;
+    RoleType              role_type_           = RoleType::PDFUSION;
 
     // Stream-async worker owns a CUDA stream/thread for pinned D2H,
     // per-stream update, and KV release off the main thread.

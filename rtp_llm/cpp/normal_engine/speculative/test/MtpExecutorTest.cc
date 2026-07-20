@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <memory>
 #include <chrono>
 #include "torch/all.h"
@@ -6,6 +7,8 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 
 #define private public
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
@@ -135,6 +138,20 @@ public:
         return forward_count_;
     }
 
+    void prepareAttentionInputs(const GptModelInputs& inputs) override {
+        if (prepare_input_holder.test_data.empty()) {
+            return;
+        }
+        GptModelInputs expected_inputs = prepare_input_holder.get();
+        checkTensorField("prepared input_lengths", inputs.input_lengths, expected_inputs.input_lengths);
+        checkTensorField("prepared sequence_lengths", inputs.sequence_lengths, expected_inputs.sequence_lengths);
+        checkTensorField("prepared prefix_lengths", inputs.prefix_lengths, expected_inputs.prefix_lengths);
+        checkTensorField("prepared sequence_lengths_plus_1",
+                         inputs.sequence_lengths_plus_1,
+                         expected_inputs.sequence_lengths_plus_1);
+        checkTensorField("prepared lm_output_indexes", inputs.lm_output_indexes, expected_inputs.lm_output_indexes);
+    }
+
     void checkTensorField(const char* name, const torch::Tensor& actual, const torch::Tensor& expected) {
         RTP_LLM_LOG_INFO("check %s", name);
         checkTensorEqual(actual, expected);
@@ -159,8 +176,17 @@ public:
         input_holder.push(inputs);
     }
 
+    void setPrepareInputs(const vector<GptModelInputs>& inputs) {
+        prepare_input_holder.push(inputs);
+    }
+
+    bool hasPendingPrepareInputs() const {
+        return !prepare_input_holder.test_data.empty();
+    }
+
 private:
     TestDataHolder<GptModelInputs>  input_holder;
+    TestDataHolder<GptModelInputs>  prepare_input_holder;
     TestDataHolder<GptModelOutputs> output_holder;
     size_t                          forward_count_ = 0;
 };
@@ -233,6 +259,9 @@ public:
     FakeSampler(const SamplerInitParams& params): Sampler(params) {}
 
     SamplerOutput forward(const SamplerInputs& inputs) override {
+        if (inputs.logits_processor_states_ptr) {
+            inputs.logits_processor_states_ptr->batchProcess(inputs);
+        }
         checkInputs(inputs);
         return output_holder.get();
     }
@@ -254,6 +283,55 @@ public:
 private:
     TestDataHolder<SamplerInputs> input_holder;
     TestDataHolder<SamplerOutput> output_holder;
+};
+
+class RejectDraftTokenSpecProcessor: public BaseLogitsProcessor {
+public:
+    explicit RejectDraftTokenSpecProcessor(int32_t rejected_token, int64_t accepted_token_len):
+        rejected_token_(rejected_token), accepted_token_len_(accepted_token_len) {}
+
+    std::optional<ErrorInfo> process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override {
+        inputs.logits.narrow(0, start_idx, finish_idx - start_idx).fill_(BaseLogitsProcessor::neg_inf);
+        return std::nullopt;
+    }
+    void                     updateMultiSeqStatus(const std::vector<int>&) override {}
+    std::optional<ErrorInfo> updateStatus(const torch::Tensor&, int32_t num_new_tokens) override {
+        accepted_token_len_ += num_new_tokens;
+        return std::nullopt;
+    }
+
+    bool isStateful() const override {
+        return true;
+    }
+
+    int64_t acceptedTokenLen() const override {
+        return accepted_token_len_;
+    }
+
+    MtpProcessorCapability mtpCapability() const override {
+        return {MtpProcessorMode::SPEC_VERIFY, {}};
+    }
+
+    ErrorResult<int> prepareSpeculative(const SpecLogitsProcessorRequest& request) override {
+        if (request.propose_step <= 0 || request.bitmask_cpu_out == nullptr) {
+            return ErrorResult<int>(int(request.propose_step));
+        }
+        std::fill_n(request.bitmask_cpu_out,
+                    static_cast<size_t>(request.propose_step + 1) * request.bitmask_size_int32,
+                    SpecLogitsProcessorRequest::kBitmaskAllowAll);
+        if (request.bitmask_size_int32 > 0 && rejected_token_ >= 0
+            && static_cast<size_t>(rejected_token_) < request.vocab_size) {
+            request.bitmask_cpu_out[rejected_token_ / 32] &= ~(1u << (rejected_token_ % 32));
+        }
+        if (request.draft_tokens != nullptr && request.draft_tokens[0] == rejected_token_) {
+            return ErrorResult<int>(0);
+        }
+        return ErrorResult<int>(int(request.propose_step));
+    }
+
+private:
+    int32_t rejected_token_;
+    int64_t accepted_token_len_;
 };
 
 struct MtpExecutorComponents {
@@ -647,19 +725,19 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
 
     draft_input_1.combo_tokens       = torch::tensor({3}, torch::kInt32);
     draft_input_1.input_lengths      = torch::tensor({2}, torch::kInt32);
-    draft_input_1.sequence_lengths   = torch::tensor({2}, torch::kInt32);
+    draft_input_1.sequence_lengths   = torch::tensor({3}, torch::kInt32);
     draft_input_1.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_1.last_hidden_states = stream1_hidden_states;
 
     draft_input_2.combo_tokens       = torch::tensor({2}, torch::kInt32);
     draft_input_2.input_lengths      = torch::tensor({2}, torch::kInt32);
-    draft_input_2.sequence_lengths   = torch::tensor({3}, torch::kInt32);
+    draft_input_2.sequence_lengths   = torch::tensor({4}, torch::kInt32);
     draft_input_2.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_2.last_hidden_states = draft_output_1.all_hidden_states;
 
     draft_input_3.combo_tokens       = torch::tensor({1}, torch::kInt32);
     draft_input_3.input_lengths      = torch::tensor({2}, torch::kInt32);
-    draft_input_3.sequence_lengths   = torch::tensor({4}, torch::kInt32);
+    draft_input_3.sequence_lengths   = torch::tensor({5}, torch::kInt32);
     draft_input_3.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_3.last_hidden_states = draft_output_2.all_hidden_states;
 
@@ -681,6 +759,13 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     target_input.input_lengths     = torch::tensor({5}, torch::kInt32);
     target_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
     target_input.lm_output_indexes = torch::tensor({0, 1, 2, 3, 4}, torch::kInt32);
+
+    auto target_prepare_input                    = GptModelInputs{};
+    target_prepare_input.input_lengths           = torch::tensor({5}, torch::kInt32);
+    target_prepare_input.prefix_lengths          = torch::tensor({2}, torch::kInt32);
+    target_prepare_input.sequence_lengths_plus_1 = torch::tensor({3}, torch::kInt32);
+    target_prepare_input.lm_output_indexes       = torch::tensor({0}, torch::kInt32);
+    components.fake_target_model->setPrepareInputs({target_prepare_input});
 
     target_output.logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 1.1f, 1.2f, 1.3f, 1.4f, 2.1f, 2.2f,
                                           2.3f, 2.4f, 3.1f, 3.2f, 3.3f, 3.4f, 4.1f, 4.2f, 4.3f, 4.4f})
@@ -752,6 +837,7 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     // A single active draft model must execute every proposal step, even
     // though the init plan retains one physical slot per configured module.
     auto* active_draft_model = components.fake_draft_model.get();
+    auto* fake_target_model  = components.fake_target_model.get();
 
     // Replace models with fake models
     setupFakeModels(components.executor.get(),
@@ -765,9 +851,188 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     auto status = components.executor->process({stream1});
     ASSERT_TRUE(status.ok());
     EXPECT_EQ(active_draft_model->forwardCount(), propose_step);
+    if (components.executor->useAsyncPrepare()) {
+        EXPECT_FALSE(fake_target_model->hasPendingPrepareInputs());
+    }
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 2, 0}, {0, 1}, {0.0, 1.0, 0.0, 0.0}, {0.3, 0.33});
+}
+
+TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetToken) {
+    size_t propose_step = 2;
+    size_t vocab_size   = 4;
+
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle   = propose_step;
+    test_config.vocab_size_override = vocab_size;
+    auto components                 = createMtpExecutorComponents(test_config);
+
+    auto stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
+    auto stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
+    auto stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
+    StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
+
+    GenerateStreamPtr stream = createDecodeStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
+    stream->logits_processor_list_.push_back(
+        std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen()));
+
+    auto draft_input_1  = GptModelInputs{};
+    auto draft_output_1 = GptModelOutputs{};
+    draft_input_1.combo_tokens       = torch::tensor({3}, torch::kInt32);
+    draft_input_1.input_lengths      = torch::tensor({2}, torch::kInt32);
+    draft_input_1.sequence_lengths   = torch::tensor({3}, torch::kInt32);
+    draft_input_1.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
+    draft_input_1.last_hidden_states = stream_hidden_states;
+    draft_output_1.logits            = torch::tensor({0.4f, 0.3f, 0.2f, 0.1f}).reshape({1, 4});
+    draft_output_1.all_hidden_states = torch::tensor({0.11f, 0.12f}).reshape({1, 2});
+
+    auto target_input              = GptModelInputs{};
+    auto target_output             = GptModelOutputs{};
+    target_input.combo_tokens      = torch::tensor({2, 3, 0}, torch::kInt32);
+    target_input.input_lengths     = torch::tensor({3}, torch::kInt32);
+    target_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
+    target_input.lm_output_indexes = torch::tensor({0, 1, 2}, torch::kInt32);
+    target_output.logits =
+        torch::tensor({0.1f, 0.9f, 0.2f, 0.3f, 0.2f, 0.1f, 0.8f, 0.4f, 0.7f, 0.2f, 0.1f, 0.0f})
+            .reshape({3, 4})
+            .to(torch::kCUDA);
+    target_output.all_hidden_states = torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f}).reshape({3, 2});
+
+    auto next_draft_input               = GptModelInputs{};
+    auto next_draft_output              = GptModelOutputs{};
+    next_draft_input.combo_tokens       = torch::tensor({1, 0, 0}, torch::kInt32);
+    next_draft_input.input_lengths      = torch::tensor({3}, torch::kInt32);
+    next_draft_input.prefix_lengths     = torch::tensor({2}, torch::kInt32);
+    next_draft_input.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
+    next_draft_input.last_hidden_states = target_output.all_hidden_states;
+    next_draft_output.logits            = torch::tensor({0.2f, 0.1f, 0.8f, 0.0f}).reshape({1, 4});
+    next_draft_output.all_hidden_states = torch::tensor({0.21f, 0.22f, 0.23f, 0.24f, 0.25f, 0.26f}).reshape({3, 2});
+
+    components.fake_draft_model->setInputs({draft_input_1, next_draft_input});
+    components.fake_draft_model->setOutputs({draft_output_1, next_draft_output});
+    components.fake_target_model->setInputs({target_input});
+    components.fake_target_model->setOutputs({target_output});
+
+    auto draft_sampler_output_1 = spec::FastTopKSamplerOutput{
+        torch::tensor({1.0f, 0.0f, 0.0f, 0.0f}).reshape({1, 4}),
+        torch::tensor({0}, torch::kInt32).reshape({1, 1})};
+    auto next_draft_sampler_output = spec::FastTopKSamplerOutput{
+        torch::tensor({0.0f, 0.0f, 1.0f, 0.0f}).reshape({1, 4}),
+        torch::tensor({2}, torch::kInt32).reshape({1, 1})};
+    components.fake_fast_topk_sampler->setInputs({draft_output_1.logits, next_draft_output.logits});
+    components.fake_fast_topk_sampler->setOutputs({draft_sampler_output_1, next_draft_sampler_output});
+
+    auto sampler_input = SamplerInputs{target_output.logits.clone()};
+    sampler_input.logits[0][3] = BaseLogitsProcessor::neg_inf;
+    auto target_sampler_output  = SamplerOutput{torch::tensor({1, 2, 2}, torch::kInt32).reshape({3, 1})};
+    target_sampler_output.all_probs = torch::tensor({0.0f, 1.0f, 0.0f, 0.0f,
+                                                     0.0f, 0.0f, 1.0f, 0.0f,
+                                                     0.0f, 0.0f, 1.0f, 0.0f})
+                                          .reshape({3, 4});
+    components.fake_sampler->setInputs({sampler_input});
+    components.fake_sampler->setOutputs({target_sampler_output});
+
+    auto forced_accept_tokens                           = torch::tensor({{3, 0, 0}}, torch::kInt32);
+    auto speculative_sampler_output                     = spec::SpeculativeSamplerOutput();
+    speculative_sampler_output.accept_tokens_cpu        = forced_accept_tokens;
+    speculative_sampler_output.accept_tokens            = forced_accept_tokens.to(torch::kCUDA);
+    speculative_sampler_output.accept_len_cpu           = torch::tensor({1}, torch::kInt32);
+    speculative_sampler_output.accept_len               = speculative_sampler_output.accept_len_cpu.to(torch::kCUDA);
+    components.fake_speculative_sampler->setOutputs({speculative_sampler_output});
+
+    setupFakeModels(components.executor.get(),
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler));
+
+    auto status = components.executor->process({stream});
+    ASSERT_TRUE(status.ok());
+
+    checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.21, 0.22});
+}
+
+TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTargetToken) {
+    size_t propose_step = 1;
+    size_t vocab_size   = 4;
+
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle   = propose_step;
+    test_config.vocab_size_override = vocab_size;
+    auto components                 = createMtpExecutorComponents(test_config);
+
+    auto stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
+    auto stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
+    auto stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
+    StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
+
+    GenerateStreamPtr stream = createDecodeStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
+    stream->logits_processor_list_.push_back(
+        std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen()));
+
+    auto target_input              = GptModelInputs{};
+    auto target_output             = GptModelOutputs{};
+    target_input.combo_tokens      = torch::tensor({2, 3}, torch::kInt32);
+    target_input.input_lengths     = torch::tensor({2}, torch::kInt32);
+    target_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
+    target_input.lm_output_indexes = torch::tensor({0, 1}, torch::kInt32);
+    target_output.logits           = torch::tensor({0.1f, 0.9f, 0.2f, 0.3f, 0.7f, 0.2f, 0.1f, 0.0f})
+                               .reshape({2, 4})
+                               .to(torch::kCUDA);
+    target_output.all_hidden_states = torch::tensor({0.01f, 0.02f, 0.03f, 0.04f}).reshape({2, 2});
+
+    auto next_draft_input               = GptModelInputs{};
+    auto next_draft_output              = GptModelOutputs{};
+    next_draft_input.combo_tokens       = torch::tensor({1, 2}, torch::kInt32);
+    next_draft_input.input_lengths      = torch::tensor({2}, torch::kInt32);
+    next_draft_input.prefix_lengths     = torch::tensor({2}, torch::kInt32);
+    next_draft_input.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
+    next_draft_input.last_hidden_states = target_output.all_hidden_states;
+    next_draft_output.logits            = torch::tensor({0.2f, 0.1f, 0.8f, 0.0f}).reshape({1, 4});
+    next_draft_output.all_hidden_states = torch::tensor({0.21f, 0.22f, 0.23f, 0.24f}).reshape({2, 2});
+
+    components.fake_target_model->setInputs({target_input});
+    components.fake_target_model->setOutputs({target_output});
+    components.fake_draft_model->setInputs({next_draft_input});
+    components.fake_draft_model->setOutputs({next_draft_output});
+
+    auto next_draft_sampler_output = spec::FastTopKSamplerOutput{
+        torch::tensor({0.0f, 0.0f, 1.0f, 0.0f}).reshape({1, 4}),
+        torch::tensor({2}, torch::kInt32).reshape({1, 1})};
+    components.fake_fast_topk_sampler->setInputs({next_draft_output.logits});
+    components.fake_fast_topk_sampler->setOutputs({next_draft_sampler_output});
+
+    auto sampler_input = SamplerInputs{target_output.logits.clone()};
+    sampler_input.logits[0][3] = BaseLogitsProcessor::neg_inf;
+    auto target_sampler_output = SamplerOutput{torch::tensor({1, 2}, torch::kInt32).reshape({2, 1})};
+    target_sampler_output.all_probs =
+        torch::tensor({0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f}).reshape({2, 4});
+    components.fake_sampler->setInputs({sampler_input});
+    components.fake_sampler->setOutputs({target_sampler_output});
+
+    auto forced_accept_tokens                    = torch::tensor({{3, 2}}, torch::kInt32);
+    auto speculative_sampler_output              = spec::SpeculativeSamplerOutput();
+    speculative_sampler_output.accept_tokens_cpu = forced_accept_tokens;
+    speculative_sampler_output.accept_tokens     = forced_accept_tokens.to(torch::kCUDA);
+    speculative_sampler_output.accept_len_cpu    = torch::tensor({2}, torch::kInt32);
+    speculative_sampler_output.accept_len        = speculative_sampler_output.accept_len_cpu.to(torch::kCUDA);
+    components.fake_speculative_sampler->setOutputs({speculative_sampler_output});
+
+    setupFakeModels(components.executor.get(),
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler));
+
+    auto status = components.executor->process({stream});
+    ASSERT_TRUE(status.ok());
+
+    checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {});
 }
 
 TEST_F(MtpExecutorTest, testMultiBatchDecode) {
@@ -817,19 +1082,19 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
 
     draft_input_1.combo_tokens       = torch::tensor({2, 3}, torch::kInt32);
     draft_input_1.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
-    draft_input_1.sequence_lengths   = torch::tensor({3, 2}, torch::kInt32);
+    draft_input_1.sequence_lengths   = torch::tensor({4, 3}, torch::kInt32);
     draft_input_1.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
     draft_input_1.last_hidden_states = torch::tensor({0.03f, 0.04f, 2.1f, 2.12f}).reshape({2, 2});
 
     draft_input_2.combo_tokens       = torch::tensor({1, 0}, torch::kInt32);
     draft_input_2.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
-    draft_input_2.sequence_lengths   = torch::tensor({4, 3}, torch::kInt32);
+    draft_input_2.sequence_lengths   = torch::tensor({5, 4}, torch::kInt32);
     draft_input_2.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
     draft_input_2.last_hidden_states = draft_output_1.all_hidden_states;
 
     draft_input_3.combo_tokens       = torch::tensor({2, 2}, torch::kInt32);
     draft_input_3.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
-    draft_input_3.sequence_lengths   = torch::tensor({5, 4}, torch::kInt32);
+    draft_input_3.sequence_lengths   = torch::tensor({6, 5}, torch::kInt32);
     draft_input_3.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
     draft_input_3.last_hidden_states = draft_output_2.all_hidden_states;
 

@@ -22,6 +22,9 @@ public:
 
     std::shared_ptr<torch::Event> transfer_done_event;
 
+    // Per-stream verify errors from SpecLogitsVerifyRunner (main #1006 contract).
+    std::vector<std::optional<ErrorInfo>> processor_errors;
+
     SpeculativeSamplerOutput(): transfer_done_event(std::make_shared<torch::Event>(cuda_graph::makeGraphEvent())) {}
 };
 
