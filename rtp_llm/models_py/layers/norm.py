@@ -9,6 +9,19 @@ logger = logging.getLogger(__name__)
 _RMSNORM_FUSED_ENABLED = True
 
 
+def _disable_fused_rmsnorm(exc: ImportError) -> None:
+    global _RMSNORM_FUSED_ENABLED
+
+    _RMSNORM_FUSED_ENABLED = False
+    logger.error(
+        "Fused RMSNorm backend import failed (%s); disabling fused RMSNorm for "
+        "this process and using eager fallback: %s",
+        type(exc).__name__,
+        exc,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+
+
 class RMSNorm(RtpModule):
     def __init__(
         self,
@@ -35,8 +48,6 @@ class RMSNorm(RtpModule):
                 raise RuntimeError("Failed to assign RMSNorm weight")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        global _RMSNORM_FUSED_ENABLED
-
         if x.ndim == 0 or x.shape[-1] != self.hidden_size:
             raise ValueError(
                 f"RMSNorm expected last dimension {self.hidden_size}, "
@@ -47,16 +58,22 @@ class RMSNorm(RtpModule):
         if self.weight.dtype != x.dtype:
             raise TypeError("RMSNorm weight and input must share a dtype")
         if x.is_cuda and _RMSNORM_FUSED_ENABLED:
-            try:
-                original_shape = x.shape
-                input_2d = x.reshape(-1, original_shape[-1]).contiguous()
-                if getattr(torch.version, "hip", None) is not None:
+            original_shape = x.shape
+            input_2d = x.reshape(-1, original_shape[-1]).contiguous()
+            if getattr(torch.version, "hip", None) is not None:
+                try:
                     from aiter import rms_norm
-
-                    output = rms_norm(input_2d, self.weight.data, self.eps)
+                except ImportError as exc:
+                    _disable_fused_rmsnorm(exc)
                 else:
+                    output = rms_norm(input_2d, self.weight.data, self.eps)
+                    return output.reshape(original_shape)
+            else:
+                try:
                     from rtp_llm.ops.compute_ops import rtp_llm_ops
-
+                except ImportError as exc:
+                    _disable_fused_rmsnorm(exc)
+                else:
                     output = torch.empty_like(input_2d)
                     stream_id = torch.cuda.current_stream().cuda_stream
                     rtp_llm_ops.rmsnorm(
@@ -66,16 +83,7 @@ class RMSNorm(RtpModule):
                         self.eps,
                         stream_id,
                     )
-                return output.reshape(original_shape)
-            except Exception as exc:
-                if isinstance(exc, torch.cuda.OutOfMemoryError):
-                    raise
-                _RMSNORM_FUSED_ENABLED = False
-                logger.warning(
-                    "Fused RMSNorm is unavailable; disabling it and using eager "
-                    "fallback: %s",
-                    exc,
-                )
+                    return output.reshape(original_shape)
 
         input_dtype = x.dtype
         fp32 = x.float()
