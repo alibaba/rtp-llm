@@ -37,7 +37,6 @@
         <reactor.version>2024.0.10</reactor.version>
         <netty.version>4.1.127.Final</netty.version>
         <micrometer.version>1.10.13</micrometer.version>
-        <prometheus-client.version>0.16.0</prometheus-client.version>
         <!-- 高版本 Mockito，摆脱 powermock 和 JUnit4 的限制 -->
         <mockito.version>5.20.0</mockito.version>
         <byte-buddy.version>1.17.6</byte-buddy.version>
@@ -50,7 +49,6 @@
         <module>flexlb-api</module>
         <module>flexlb-sync</module>
         <module>flexlb-common</module>
-        <module>flexlb-prometheus-monitor</module>
         <module>flexlb-grpc</module>
         <module>flexlb-cache</module>
     </modules>
@@ -84,13 +82,8 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-actuator</artifactId>
-            <optional>true</optional>
-        </dependency>
-        <dependency>
             <groupId>io.micrometer</groupId>
-            <artifactId>micrometer-registry-prometheus</artifactId>
+            <artifactId>micrometer-core</artifactId>
         </dependency>
     </dependencies>
 
@@ -172,11 +165,6 @@
             </dependency>
             <dependency>
                 <groupId>org.flexlb</groupId>
-                <artifactId>flexlb-prometheus-monitor</artifactId>
-                <version>${project.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.flexlb</groupId>
                 <artifactId>flexlb-cache</artifactId>
                 <version>${project.version}</version>
             </dependency>
@@ -207,12 +195,6 @@
                 <artifactId>dashscope-discovery</artifactId>
                 <version>${project.version}</version>
             </dependency>
-            <dependency>
-                <groupId>org.flexlb</groupId>
-                <artifactId>turbo-prometheus-endpoint</artifactId>
-                <version>${project.version}</version>
-            </dependency>
-
             <!-- util tools 依赖 start -->
             <dependency>
                 <groupId>com.google.guava</groupId>

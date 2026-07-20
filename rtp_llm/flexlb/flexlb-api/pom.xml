@@ -23,10 +23,6 @@
             <artifactId>flexlb-sync</artifactId>
         </dependency>
         <dependency>
-            <groupId>org.flexlb</groupId>
-            <artifactId>flexlb-prometheus-monitor</artifactId>
-        </dependency>
-        <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webflux</artifactId>
         </dependency>
@@ -75,11 +71,6 @@
                 <dependency>
                     <groupId>org.flexlb</groupId>
                     <artifactId>dashscope-discovery</artifactId>
-                </dependency>
-                <!-- Turbo-compatible Prometheus endpoint, available in the internal distribution only -->
-                <dependency>
-                    <groupId>org.flexlb</groupId>
-                    <artifactId>turbo-prometheus-endpoint</artifactId>
                 </dependency>
             </dependencies>
         </profile>
