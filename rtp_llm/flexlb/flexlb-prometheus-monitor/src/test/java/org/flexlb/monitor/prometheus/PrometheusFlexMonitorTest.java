@@ -1,11 +1,11 @@
 package org.flexlb.monitor.prometheus;
 
-import io.prometheus.client.Collector;
-import io.prometheus.client.CollectorRegistry;
-import io.prometheus.client.Gauge;
 import io.micrometer.core.instrument.Clock;
 import io.micrometer.prometheus.PrometheusConfig;
 import io.micrometer.prometheus.PrometheusMeterRegistry;
+import io.prometheus.client.Collector;
+import io.prometheus.client.CollectorRegistry;
+import io.prometheus.client.Gauge;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
@@ -22,28 +22,100 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PrometheusFlexMonitorTest {
 
     @Test
-    void counterNormalizesNamePreservesTagsAndAccumulatesIncrements() {
+    void qpsSchedulerIsInitializedWhenMonitorIsConstructed() {
+        PrometheusFlexMonitor monitor = new PrometheusFlexMonitor(new CollectorRegistry());
+
+        assertNotNull(fieldValue(monitor, "qpsSnapshotExecutor"));
+        monitor.close();
+    }
+
+    @Test
+    void priorityTypesUseKMonitorWindowSeconds() {
+        assertEquals(1, FlexPriorityType.PRECISE.getWindowSeconds());
+        assertEquals(5, FlexPriorityType.CRITICAL.getWindowSeconds());
+        assertEquals(10, FlexPriorityType.MAJOR.getWindowSeconds());
+        assertEquals(20, FlexPriorityType.NORMAL.getWindowSeconds());
+        assertEquals(60, FlexPriorityType.TRIVIAL.getWindowSeconds());
+    }
+
+    @Test
+    void qpsPublishesWindowAverageAsGaugeAndResetsAfterSnapshot() throws InterruptedException {
         CollectorRegistry registry = new CollectorRegistry();
         PrometheusFlexMonitor monitor = new PrometheusFlexMonitor(registry);
         monitor.register(
                 "grpc.call.count",
                 FlexMetricType.QPS,
+                FlexPriorityType.PRECISE,
                 FlexMetricTags.of("method", "", "status", ""));
 
         FlexMetricTags tags = FlexMetricTags.of("method", "chat/completions", "status", "ok");
         monitor.report("grpc.call.count", tags, 2.0);
         monitor.report("grpc.call.count", tags, 3.0);
 
-        assertEquals(5.0, registry.getSampleValue(
+        assertNull(registry.getSampleValue(
                 "flexlb_grpc_call_count_total",
                 new String[]{"method", "status"},
                 new String[]{"chat/completions", "ok"}));
+        awaitSampleValue(
+                registry,
+                "flexlb_grpc_call_count",
+                new String[]{"method", "status"},
+                new String[]{"chat/completions", "ok"},
+                5.0);
+        awaitSampleValue(
+                registry,
+                "flexlb_grpc_call_count",
+                new String[]{"method", "status"},
+                new String[]{"chat/completions", "ok"},
+                0.0);
+    }
+
+    @Test
+    void qpsKeepsWindowAccumulatorsSeparateForEachLabelSeries() throws InterruptedException {
+        CollectorRegistry registry = new CollectorRegistry();
+        PrometheusFlexMonitor monitor = new PrometheusFlexMonitor(registry);
+        monitor.register(
+                "routing.qps",
+                FlexMetricType.QPS,
+                FlexPriorityType.PRECISE,
+                FlexMetricTags.of("result", ""));
+
+        monitor.report("routing.qps", FlexMetricTags.of("result", "selected"), 3.0);
+        monitor.report("routing.qps", FlexMetricTags.of("result", "rejected"), 5.0);
+
+        awaitSampleValue(
+                registry,
+                "flexlb_routing_qps",
+                new String[]{"result"},
+                new String[]{"selected"},
+                3.0);
+        awaitSampleValue(
+                registry,
+                "flexlb_routing_qps",
+                new String[]{"result"},
+                new String[]{"rejected"},
+                5.0);
+    }
+
+    @Test
+    void qpsWithoutPriorityUsesNormalWindow() throws InterruptedException {
+        CollectorRegistry registry = new CollectorRegistry();
+        PrometheusFlexMonitor monitor = new PrometheusFlexMonitor(registry);
+        monitor.register("default.qps", FlexMetricType.QPS, FlexMetricTags.of());
+
+        monitor.report("default.qps", 7.0);
+
+        assertNull(registry.getSampleValue("flexlb_default_qps_total"));
+        assertEquals(0.0, sampleValue(registry, "flexlb_default_qps"));
+        Thread.sleep(1_200L);
+        assertEquals(0.0, sampleValue(registry, "flexlb_default_qps"));
     }
 
     @Test
@@ -247,5 +319,40 @@ class PrometheusFlexMonitorTest {
 
     private static Double quantile(CollectorRegistry registry, String name, String quantile) {
         return registry.getSampleValue(name, new String[]{"quantile"}, new String[]{quantile});
+    }
+
+    private static void awaitSampleValue(
+            CollectorRegistry registry,
+            String metricName,
+            String[] labelNames,
+            String[] labelValues,
+            double expected) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        Double actual = null;
+        while (System.nanoTime() < deadline) {
+            actual = registry.getSampleValue(metricName, labelNames, labelValues);
+            if (actual != null && Math.abs(actual - expected) < 0.000001) {
+                return;
+            }
+            Thread.sleep(20L);
+        }
+        assertNotNull(actual, "Expected Prometheus sample " + metricName + " to be published");
+        assertEquals(expected, actual, 0.000001);
+    }
+
+    private static double sampleValue(CollectorRegistry registry, String metricName) {
+        Double value = registry.getSampleValue(metricName);
+        assertNotNull(value, "Expected Prometheus sample " + metricName + " to be registered");
+        return value;
+    }
+
+    private static Object fieldValue(PrometheusFlexMonitor monitor, String fieldName) {
+        try {
+            var field = PrometheusFlexMonitor.class.getDeclaredField(fieldName);
+            field.setAccessible(true);
+            return field.get(monitor);
+        } catch (ReflectiveOperationException error) {
+            throw new AssertionError("Unable to read field " + fieldName, error);
+        }
     }
 }
