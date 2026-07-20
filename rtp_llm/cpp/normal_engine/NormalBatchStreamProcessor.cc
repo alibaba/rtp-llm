@@ -24,17 +24,12 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.kernel_seq_size_per_block  = cache_config.kernel_seq_size_per_block;
     model_input_gatherer_config_.kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
     model_input_gatherer_config_.kv_cache_group_nums        = cache_config.groupNums();
-    const auto layer_group_ids                              = cache_config.layerGroupIdsSnapshot();
-    model_input_gatherer_config_.layer_to_kv_cache_group_id.reserve(layer_group_ids.size());
-    for (const auto& group_ids : layer_group_ids) {
-        RTP_LLM_CHECK_WITH_INFO(group_ids.size() <= 1,
-                                "NormalBatchStreamProcessor expects at most one cache group per layer, got %zu",
-                                group_ids.size());
-        model_input_gatherer_config_.layer_to_kv_cache_group_id.push_back(group_ids.empty() ? 0 : group_ids.front());
+    model_input_gatherer_config_.use_opaque_kv_cache_store  = cache_config.use_opaque_kv_cache_store;
+    if (model_input_gatherer_config_.kv_cache_group_nums > 0) {
+        model_input_gatherer_config_.kv_cache_group_types = cache_config.groupTypesSnapshot();
     }
-    model_input_gatherer_config_.kv_cache_group_types = cache_config.groupTypesSnapshot();
-    model_input_gatherer_config_.warm_up                    = warm_up;
-    model_input_gatherer_config_.enable_detail_log          = profiling_debug_logging_config.enable_detail_log;
+    model_input_gatherer_config_.warm_up           = warm_up;
+    model_input_gatherer_config_.enable_detail_log = profiling_debug_logging_config.enable_detail_log;
 
     model_input_gatherer_   = std::make_unique<NormalModelInputGatherer>(model_input_gatherer_config_);
     sampler_input_gatherer_ = std::make_unique<NormalSamplerInputGatherer>();

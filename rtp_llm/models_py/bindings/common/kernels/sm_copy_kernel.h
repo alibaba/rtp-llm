@@ -11,8 +11,10 @@
 // COPY FROM tair mempool (pace)，就不改成RTP的namespace了，保留原namespace
 // RTP只需要gather和scatter操作
 //
-// Var-length *_var_nooffset* (gather_copy_var_nooffset_kernel / scatter_copy_var_nooffset_kernel, their
-// launch_* and warmup_sm_copy_var_nooffset_kernels): not referenced by production inference here.
+// DSV4 memory-cache var-length *_var_nooffset* kernels
+// (dsv4_memory_cache_gather_copy_var_nooffset_kernel /
+// dsv4_memory_cache_scatter_copy_var_nooffset_kernel, their launch_* and
+// warmup_sm_copy_var_nooffset_kernels): used by the DSV4 staged memory-cache copy path.
 // Split KV: warmup_sm_copy_split_kernels on first use; launch_*_copy_split from SplitKvCacheCopy (split KV path).
 // Remaining entry points stay in the library for
 // standalone microbenchmarks (e.g. rtp_llm/cpp/devices/cuda_impl/tests/sm_copy_kernel_benchmark.cc via nvcc
@@ -60,9 +62,7 @@ bool warmup_sm_copy_split_kernels(cudaStream_t stream);
 bool warmup_sm_copy_var_nooffset_kernels(cudaStream_t stream);
 
 /**
- * @brief 启动一个 CUDA 内核，执行变长 Gather-Copy（每个源的 GPU 指针已在 Host 端预偏移到数据起点）。
- *
- * @note No in-tree production caller today; see file header for intended use (benchmark / experiments).
+ * @brief 启动 DSV4 memory-cache 变长 Gather-Copy（每个源的 GPU 指针已在 Host 端预偏移到数据起点）。
  *
  * 调用方在 Host 端预先将每条源的 device 指针指到实际数据起点，Kernel 内不再对 src 做 offset 加法，
  * 从而减少参数与地址计算。
@@ -91,20 +91,18 @@ bool warmup_sm_copy_var_nooffset_kernels(cudaStream_t stream);
  *
  * @note 前缀和计算应在 Host 端完成，避免 Kernel 内部的全局同步开销。
  * @note 调用方需在 Host 端预计算偏移后的指针数组，并将偏移后的指针拷贝到 Device。
- * @see launch_scatter_copy_var_nooffset 逆向 Scatter（同源 contiguous / 多 dest 指针预偏移）
+ * @see launch_dsv4_memory_cache_scatter_copy_var_nooffset 逆向 Scatter（同源 contiguous / 多 dest 指针预偏移）
  */
-void launch_gather_copy_var_nooffset(const void**  src_ptrs,
-                                     const size_t* sizes,
-                                     const size_t* dst_offsets,
-                                     void*         dst,
-                                     int           num_srcs,
-                                     int           block_num,
-                                     cudaStream_t  stream);
+void launch_dsv4_memory_cache_gather_copy_var_nooffset(const void**  src_ptrs,
+                                                       const size_t* sizes,
+                                                       const size_t* dst_offsets,
+                                                       void*         dst,
+                                                       int           num_srcs,
+                                                       int           block_num,
+                                                       cudaStream_t  stream);
 
 /**
- * @brief 启动一个 CUDA 内核，执行变长 Scatter-Copy（每个目标的 GPU 指针已在 Host 端预偏移到写入起点）。
- *
- * @note No in-tree production caller today; see file header for intended use (benchmark / experiments).
+ * @brief 启动 DSV4 memory-cache 变长 Scatter-Copy（每个目标的 GPU 指针已在 Host 端预偏移到写入起点）。
  *
  * 源一侧仍通过 src + src_offsets[i] 定位各段；各 dst_ptrs[i] 已指向本段写入起点，Kernel 内不对 dst 做 offset 加法。
  *
@@ -132,15 +130,15 @@ void launch_gather_copy_var_nooffset(const void**  src_ptrs,
  *
  * @note 前缀和计算应在 Host 端完成，避免 Kernel 内部的全局同步开销。
  * @note 调用方需在 Host 端预计算偏移后的指针数组，并将偏移后的指针拷贝到 Device。
- * @note 与 launch_gather_copy_var_nooffset 互为逆操作（在相同参数下）。
- * @see launch_gather_copy_var_nooffset 逆向 Gather（多源指针预偏移 / 同一 contiguous dst）
+ * @note 与 launch_dsv4_memory_cache_gather_copy_var_nooffset 互为逆操作（在相同参数下）。
+ * @see launch_dsv4_memory_cache_gather_copy_var_nooffset 逆向 Gather（多源指针预偏移 / 同一 contiguous dst）
  */
-void launch_scatter_copy_var_nooffset(const void*   src,
-                                      const size_t* src_offsets,
-                                      const size_t* sizes,
-                                      void**        dst_ptrs,
-                                      int           num_dsts,
-                                      int           block_num,
-                                      cudaStream_t  stream);
+void launch_dsv4_memory_cache_scatter_copy_var_nooffset(const void*   src,
+                                                        const size_t* src_offsets,
+                                                        const size_t* sizes,
+                                                        void**        dst_ptrs,
+                                                        int           num_dsts,
+                                                        int           block_num,
+                                                        cudaStream_t  stream);
 
 }  // namespace sDevMPS

@@ -189,8 +189,8 @@ void BlockPool::initializeCacheBuffer() {
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
-    const bool is_cuda   = cache_aligned_buffer_.is_cuda();
-    const bool is_pinned = !is_cuda && cache_aligned_buffer_.is_pinned();
+    const bool              is_cuda     = cache_aligned_buffer_.is_cuda();
+    const bool              is_pinned   = !is_cuda && cache_aligned_buffer_.is_pinned();
     static constexpr double kBytesPerMB = 1024.0 * 1024.0;
     RTP_LLM_LOG_INFO("BlockPool backing selected: pool_name=%s allocation_type=%s requested_backing=%s "
                      "actual_backing=%s is_cuda=%d is_pinned=%d ptr=%p total_size=%zu bytes total_size_mb=%.2f "
@@ -413,10 +413,6 @@ bool BlockPool::init() {
     return true;
 }
 
-BlockCachePtr BlockPool::blockCache() {
-    return block_cache_;
-}
-
 void BlockPool::initFreeBlocks() {
     // block 0 is reserved
     for (BlockIdxType i = 1; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
@@ -427,7 +423,6 @@ void BlockPool::initFreeBlocks() {
     req_con_ref_counter_.init(config_.block_num);
     block_cache_ref_counter_.init(config_.block_num);
     req_cache_ref_counter_.init(config_.block_num);
-    block_cache_ = std::make_shared<BlockCache>();
 }
 
 std::vector<torch::Tensor> BlockPool::allLayerCacheBase() const {

@@ -23,6 +23,14 @@ inline bool isNullBlockIdx(BlockIdxType block_idx) {
 using CacheKeysType    = std::vector<CacheKeyType>;
 using BlockIndicesType = std::vector<BlockIdxType>;
 
+struct BlockDependency {
+    bool         has_parent{false};
+    CacheKeyType parent_key{0};
+    uint32_t     ordinal{0};
+};
+
+using BlockDependenciesType = std::vector<BlockDependency>;
+
 class BlockIds {
 public:
     explicit BlockIds(size_t kernel_blocks_per_kv_block = 1):
@@ -67,7 +75,7 @@ private:
     size_t           kernel_blocks_per_kv_block_ = 1;
 };
 
-using GroupBlockIds     = std::vector<std::shared_ptr<BlockIds>>;
+using GroupBlockIds = std::vector<std::shared_ptr<BlockIds>>;
 // Legacy per-layer view. Valid only when each layer maps to exactly one group.
 using LayerBlockIds     = std::vector<std::shared_ptr<BlockIds>>;
 using LayerAttnBlockIds = std::vector<std::vector<std::shared_ptr<BlockIds>>>;
@@ -76,9 +84,10 @@ class KVCacheResource {
 public:
     void initGroups(int                                  group_num,
                     int                                  layer_num,
-                    const std::vector<std::vector<int>>& layer_to_group_ids         = {},
-                    size_t                               kernel_blocks_per_kv_block = 1,
-                    const std::vector<CacheGroupType>&   group_types                = {});
+                    const std::vector<std::vector<int>>& layer_group_ids                  = {},
+                    size_t                               kernel_blocks_per_kv_block       = 1,
+                    const std::vector<CacheGroupType>&   group_types                      = {},
+                    const std::vector<size_t>&           group_kernel_blocks_per_kv_block = {});
     void resizeBlocks(int reserver_blocks, int value = 0);
 
     int                     blocksNum(int group_id = 0) const;
@@ -100,6 +109,32 @@ public:
 
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
+    void                 setCacheKeys(const CacheKeysType& keys);
+    void                 setCacheKeys(CacheKeysType&& keys);
+    bool                 cacheKeysAreCpCanonical() const;
+    void                 setCacheKeysAreCpCanonical(bool cache_keys_are_cp_canonical);
+
+    BlockDependenciesType&       blockDependencies();
+    const BlockDependenciesType& blockDependencies() const;
+    void                         setBlockDependencies(const BlockDependenciesType& dependencies);
+    void                         setBlockDependencies(BlockDependenciesType&& dependencies);
+    void                         rebuildLinearBlockDependencies();
+    void                         ensureLinearBlockDependencies();
+
+    // Return rank-local cache keys: every cp_size-th key starting from cp_rank.
+    // localCacheKeys(r, s)[i] == cacheKeys()[i * s + r]
+    // Note: when cacheKeys().size() % cp_size != 0 (e.g. 1 real block, cp_size=2),
+    // localCacheKeys may return fewer entries than blocks().size().  This is
+    // intentional — padding blocks carry no real data and must NOT participate in
+    // device cache insert, PD transfer, or connector operations.  Downstream code
+    // (e.g. insertIntoCache) already uses min(keys, blocks) to handle this.
+    CacheKeysType localCacheKeys(int cp_rank, int cp_size) const {
+        CacheKeysType local;
+        for (int i = cp_rank; i < static_cast<int>(cache_keys.size()); i += cp_size) {
+            local.push_back(cache_keys[i]);
+        }
+        return local;
+    }
 
     size_t reuseBlockNum() const;
 
@@ -126,8 +161,10 @@ private:
     // layer_id -> group_id -> block_indices
     LayerAttnBlockIds layer_group_block_ids;
     // group_id -> block_indices
-    GroupBlockIds group_block_ids;
-    CacheKeysType cache_keys;
+    GroupBlockIds         group_block_ids;
+    CacheKeysType         cache_keys;
+    BlockDependenciesType block_dependencies;
+    bool                  cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};

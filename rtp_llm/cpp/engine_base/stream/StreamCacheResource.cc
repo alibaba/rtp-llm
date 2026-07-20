@@ -201,18 +201,24 @@ void StreamCacheResource::init(int batch_size) {
     std::vector<std::vector<int>> layer_to_groups = {};
     std::vector<CacheGroupType>   group_types     = {};
 
-    size_t kernel_blocks_per_kv_block = 1;
+    size_t              kernel_blocks_per_kv_block = 1;
+    std::vector<size_t> group_kernel_blocks_per_kv_block;
     if (resource_context_.cache_manager) {  // cache manager is null when warmup
-        const auto& cache_config   = resource_context_.cache_manager->cacheConfig();
-        group_nums                 = cache_config.groupNums();
-        layer_all_num              = static_cast<int>(cache_config.layer_all_num);
-        layer_to_groups            = cache_config.layerGroupIdsSnapshot();
-        group_types                = cache_config.groupTypesSnapshot();
-        kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
+        const auto& cache_config         = resource_context_.cache_manager->cacheConfig();
+        group_nums                       = cache_config.groupNums();
+        layer_all_num                    = static_cast<int>(cache_config.layer_all_num);
+        layer_to_groups                  = cache_config.layerGroupIdsSnapshot();
+        group_types                      = cache_config.groupTypesSnapshot();
+        kernel_blocks_per_kv_block       = cache_config.kernelBlocksPerKvBlock();
+        group_kernel_blocks_per_kv_block = cache_config.groupKernelBlocksPerKvBlockSnapshot();
     }
 
-    batch_kv_cache_resource_->initGroups(
-        group_nums, layer_all_num, layer_to_groups, kernel_blocks_per_kv_block, group_types);
+    batch_kv_cache_resource_->initGroups(group_nums,
+                                         layer_all_num,
+                                         layer_to_groups,
+                                         kernel_blocks_per_kv_block,
+                                         group_types,
+                                         group_kernel_blocks_per_kv_block);
     resource_released_ = false;
 }
 
@@ -529,22 +535,28 @@ const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
 void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
     fake_inited_ = true;
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
-    int                         group_nums                 = 1;
-    int                         layer_all_num              = 0;
-    size_t                      kernel_blocks_per_kv_block = 1;
-    std::vector<std::vector<int>> layer_to_groups          = {};
-    std::vector<CacheGroupType>   group_types              = {};
+    int                           group_nums                 = 1;
+    int                           layer_all_num              = 0;
+    size_t                        kernel_blocks_per_kv_block = 1;
+    std::vector<size_t>           group_kernel_blocks_per_kv_block;
+    std::vector<std::vector<int>> layer_to_groups = {};
+    std::vector<CacheGroupType>   group_types     = {};
 
     if (resource_context_.cache_manager) {
-        const auto& cache_config   = resource_context_.cache_manager->cacheConfig();
-        group_nums                 = cache_config.groupNums();
-        layer_all_num              = static_cast<int>(cache_config.layer_all_num);
-        layer_to_groups            = cache_config.layerGroupIdsSnapshot();
-        group_types                = cache_config.groupTypesSnapshot();
-        kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
+        const auto& cache_config         = resource_context_.cache_manager->cacheConfig();
+        group_nums                       = cache_config.groupNums();
+        layer_all_num                    = static_cast<int>(cache_config.layer_all_num);
+        layer_to_groups                  = cache_config.layerGroupIdsSnapshot();
+        group_types                      = cache_config.groupTypesSnapshot();
+        kernel_blocks_per_kv_block       = cache_config.kernelBlocksPerKvBlock();
+        group_kernel_blocks_per_kv_block = cache_config.groupKernelBlocksPerKvBlockSnapshot();
     }
-    batch_kv_cache_resource_->initGroups(
-        group_nums, layer_all_num, layer_to_groups, kernel_blocks_per_kv_block, group_types);
+    batch_kv_cache_resource_->initGroups(group_nums,
+                                         layer_all_num,
+                                         layer_to_groups,
+                                         kernel_blocks_per_kv_block,
+                                         group_types,
+                                         group_kernel_blocks_per_kv_block);
 
     reserved_blocks = std::max(1ul, reserved_blocks);
     batch_kv_cache_resource_->resizeBlocks(reserved_blocks, 0);
@@ -628,10 +640,20 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
 }
 
 void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context) {
-    const int total_reuse_len  = read_context->resource()->reuseBlockNum() * seqSizePerBlock();
-    const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * seqSizePerBlock();
-    const int remote_reuse_len = read_context->resource()->remoteReuseBlockNum() * seqSizePerBlock();
-    const int device_reuse_len = read_context->resource()->deviceReuseBlockNum() * seqSizePerBlock();
+    const int block_tokens     = reuseBlockTokens();
+    const int total_reuse_len  = read_context->resource()->reuseBlockNum() * block_tokens;
+    const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * block_tokens;
+    const int remote_reuse_len = read_context->resource()->remoteReuseBlockNum() * block_tokens;
+    const int device_reuse_len = read_context->resource()->deviceReuseBlockNum() * block_tokens;
+    RTP_LLM_LOG_DEBUG("CACHE_REUSE_BLOCK_CONVERSION stream_id=%ld block_tokens=%d total_blocks=%zu device_blocks=%zu "
+                      "memory_blocks=%zu remote_blocks=%zu total_tokens=%d",
+                      stream_->streamId(),
+                      block_tokens,
+                      read_context->resource()->reuseBlockNum(),
+                      read_context->resource()->deviceReuseBlockNum(),
+                      read_context->resource()->memoryReuseBlockNum(),
+                      read_context->resource()->remoteReuseBlockNum(),
+                      total_reuse_len);
     if (total_reuse_len > 0) {
         stream_->setInitialReuseLength(total_reuse_len);
         stream_->setReuseLength(total_reuse_len);

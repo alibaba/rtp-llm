@@ -94,6 +94,7 @@ void P2PBroadcastClient::genBroadcastRequest(
     for (const auto& layer_cache_buffer : layer_cache_buffers) {
         auto layer_block = p2p_request->add_layer_blocks();
         layer_block->set_layer_id(layer_cache_buffer->getLayerId());
+        layer_block->set_group_id(layer_cache_buffer->getGroupId());
         for (const auto& [key, block_id] : layer_cache_buffer->blockIdMap()) {
             layer_block->add_cache_keys(key);
             layer_block->add_block_ids(block_id);

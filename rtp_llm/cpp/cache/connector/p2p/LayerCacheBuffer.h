@@ -12,7 +12,7 @@ namespace rtp_llm {
 
 class LayerCacheBuffer {
 public:
-    LayerCacheBuffer(int layer_id);
+    explicit LayerCacheBuffer(int layer_id, int group_id = 0);
     ~LayerCacheBuffer() = default;
 
 public:
@@ -23,12 +23,16 @@ public:
     int getLayerId() const {
         return layer_id_;
     }
+    int getGroupId() const {
+        return group_id_;
+    }
     const std::map<int64_t, int>& blockIdMap() const {
         return block_id_map_;
     }
 
 private:
     int                    layer_id_;
+    int                    group_id_;
     std::map<int64_t, int> block_id_map_;  // [cache_key, block_id]
 };
 

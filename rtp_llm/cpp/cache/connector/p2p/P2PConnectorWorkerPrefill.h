@@ -72,8 +72,8 @@ private:
                                       int64_t                                          return_deadline_ms,
                                       const std::shared_ptr<std::atomic<bool>>&        cancel_flag,
                                       const std::shared_ptr<SendTransferResult>&       transfer_result,
-                                      std::set<int>&                                   sent_layer_ids,
-                                      int                                              total_transfers);
+                                      std::set<std::pair<int, int>>&                   sent_layer_group_ids,
+                                      int&                                             total_transfers);
 
     int sendLayerToPartitions(const std::shared_ptr<LayerCacheBuffer>&   layer_cache_buffer,
                               const std::vector<AsymmetricTPContext>&    tp_partition_ctxs,

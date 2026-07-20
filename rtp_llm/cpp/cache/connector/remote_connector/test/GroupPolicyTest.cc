@@ -1,8 +1,11 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
 
 using namespace rtp_llm;
@@ -24,6 +27,29 @@ bool operator==(const GroupPolicy::SpecInfo& lhs, const GroupPolicy::SpecInfo& r
 
 namespace test {
 
+namespace {
+
+KVCacheSpecPtr makeFakeSpec(const std::string& tag) {
+    AttentionConfigs attn_config;
+    attn_config.kv_head_num      = 1;
+    attn_config.size_per_head    = 1;
+    attn_config.tokens_per_block = 1;
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+    KVCacheSpecDesc desc;
+    desc.tag        = tag;
+    desc.cache_type = KVCacheSpecType::MultiHeadAttention;
+    desc.dtype      = DataType::TYPE_FP16;
+    SpecBuildContext ctx;
+    ctx.dtype              = DataType::TYPE_FP16;
+    ctx.seq_size_per_block = 1;
+    ctx.attn_config        = &attn_config;
+    ctx.parallelism_config = &parallelism_config;
+    return SpecBuilder::build(desc, ctx);
+}
+
+}  // namespace
+
 class FakeKVCacheAllocator: public KVCacheAllocator {
 public:
     FakeKVCacheAllocator(const CacheConfig&          config,
@@ -31,15 +57,35 @@ public:
                          const std::vector<int32_t>& other_group_ids,
                          size_t                      per_group_layer_num):
         KVCacheAllocator(config) {
+        std::vector<int> layer_group_ids;
         for (int32_t full_group_id : full_group_ids) {
             for (int i = 0; i < per_group_layer_num; i++) {
-                fake_layout_.layer_to_group_ids.push_back({full_group_id});
+                layer_group_ids.push_back(full_group_id);
             }
         }
         for (int32_t other_group_id : other_group_ids) {
             for (int i = 0; i < per_group_layer_num; i++) {
-                fake_layout_.layer_to_group_ids.push_back({other_group_id});
+                layer_group_ids.push_back(other_group_id);
             }
+        }
+        if (!layer_group_ids.empty()) {
+            const auto  max_gid = *std::max_element(layer_group_ids.begin(), layer_group_ids.end());
+            CacheConfig fake_config;
+            fake_config.layer_num     = static_cast<uint32_t>(layer_group_ids.size());
+            fake_config.layer_all_num = fake_config.layer_num;
+            std::vector<KVCacheSpecPtr>   specs;
+            std::vector<std::vector<int>> layers_by_group(static_cast<size_t>(max_gid + 1));
+            std::vector<CacheGroupType>   types(static_cast<size_t>(max_gid + 1), CacheGroupType::FULL);
+            std::vector<std::string>      tags;
+            for (int gid = 0; gid <= max_gid; ++gid) {
+                tags.push_back("group_" + std::to_string(gid));
+                specs.push_back(makeFakeSpec(tags.back()));
+            }
+            for (size_t layer_id = 0; layer_id < layer_group_ids.size(); ++layer_id) {
+                layers_by_group[static_cast<size_t>(layer_group_ids[layer_id])].push_back(static_cast<int>(layer_id));
+            }
+            fake_config.fromGroupedSpecs(specs, layers_by_group, types, tags);
+            topology_ = fake_config.topologyPtr();
         }
     }
     void free(const FreeInfo& free_info) override {
@@ -58,8 +104,13 @@ public:
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override {
         return {};
     }
-    CacheLayerLayout allLayerCacheBase() const override {
-        return fake_layout_;
+    GroupedCacheLayerLayout allLayerCacheBase() const override {
+        RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "fake allocator has no cache topology");
+        GroupedCacheLayerLayout::GroupLayouts groups;
+        for (const auto& group : topology_->groups()) {
+            groups.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>(topology_->layers().size())));
+        }
+        return GroupedCacheLayerLayout(topology_, std::move(groups));
     }
     int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                               int                            seq_len,
@@ -140,7 +191,7 @@ protected:
     }
 
 private:
-    CacheLayerLayout fake_layout_;
+    std::shared_ptr<const CacheTopology> topology_;
 };
 
 MATCHER_P(LocationsEqLocationsView, locations_view, "") {

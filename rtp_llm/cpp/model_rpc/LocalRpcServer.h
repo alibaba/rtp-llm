@@ -39,13 +39,13 @@ public:
     grpc::Status
     GetCacheStatus(grpc::ServerContext* context, const ::CacheVersionPB* request, ::CacheStatusPB* response);
 
-    grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
-                                    const GenerateInputPB*                 request,
-                                    grpc::ServerWriter<GenerateOutputsPB>* writer);
+    virtual grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
+                                            const GenerateInputPB*                 request,
+                                            grpc::ServerWriter<GenerateOutputsPB>* writer);
 
-    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
-                                   const BatchGenerateInputPB* request,
-                                   BatchGenerateOutputsPB*     response);
+    virtual grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
+                                           const BatchGenerateInputPB* request,
+                                           BatchGenerateOutputsPB*     response);
 
     grpc::Status CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response);
 

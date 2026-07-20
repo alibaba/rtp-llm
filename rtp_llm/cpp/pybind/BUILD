@@ -60,6 +60,7 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:block_info",
+        "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/cpp/utils:device_perf_wrapper",

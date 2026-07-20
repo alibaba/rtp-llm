@@ -124,6 +124,7 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     std::vector<int> layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     GroupBase group;
+    group.tag  = spec->tag;
     group.spec = spec;
     const auto group_type =
         spec->type == KVCacheSpecType::LinearAttention ? CacheGroupType::LINEAR : CacheGroupType::FULL;
@@ -133,9 +134,9 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
 
     std::vector<LayerBase> layers(static_cast<size_t>(layer_num));
     for (int64_t layer_id = 0; layer_id < layer_num; ++layer_id) {
-        auto& layer                 = layers[static_cast<size_t>(layer_id)];
-        layer.group_ids             = {0};
-        layer.tag_to_gid[spec->tag] = 0;
+        auto& layer      = layers[static_cast<size_t>(layer_id)];
+        layer.layer_id   = static_cast<int>(layer_id);
+        layer.group_tags = {spec->tag};
     }
     config.setTopology({group}, std::move(layers));
     RTP_LLM_CHECK_WITH_INFO(config.groupNums() == 1, "single config expected one cache group");

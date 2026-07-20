@@ -6,6 +6,7 @@
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 
 namespace rtp_llm {
 
@@ -45,8 +46,9 @@ public:
     int estimatePeakNeedBlocks(
         int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, int target_batch_size) const;
 
-    int curBlocksNum() const;
-    int mallocFailedTimes() const;
+    int  curBlocksNum() const;
+    int  mallocFailedTimes() const;
+    bool isContextStream() const;
 
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
@@ -91,6 +93,16 @@ public:
 
     int seqSizePerBlock() const {
         return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
+    }
+
+    // KVCacheResource reuse counters follow the canonical cache-key namespace.
+    // Under CP sharding one canonical block spans cp_size physical blocks.
+    int reuseBlockTokens() const {
+        const auto& mapper = resource_context_.cache_manager->cpSlotMapper();
+        if (mapper && mapper->isSharded()) {
+            return mapper->virtualBlockSize();
+        }
+        return seqSizePerBlock();
     }
 
     void setNeedReleaseResource(bool need_release_resource) {
