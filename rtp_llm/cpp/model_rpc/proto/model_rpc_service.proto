@@ -131,6 +131,12 @@ message GenerateConfigPB {
     int32 prompt_logits_start = 65;
     int32 prompt_logits_end = 66;
     bool return_target_logprob = 67;
+    repeated int32 begin_think_token_ids = 68;
+    google.protobuf.StringValue json_schema = 69;
+    google.protobuf.StringValue regex = 70;
+    google.protobuf.StringValue ebnf = 71;
+    google.protobuf.StringValue structural_tag = 72;
+    google.protobuf.StringValue response_format = 73;
 }
 
 message MMPreprocessConfigPB {

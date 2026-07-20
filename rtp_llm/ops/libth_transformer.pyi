@@ -1,8 +1,9 @@
 from __future__ import annotations
+
 import libth_transformer_config
 import torch
 import typing
-__all__: list[str] = ['EmbeddingCppOutput', 'RtpEmbeddingOp', 'RtpLLMOp', 'TypedOutput']
+__all__: list[str] = ['EmbeddingCppOutput', 'RtpEmbeddingOp', 'RtpLLMOp', 'TypedOutput', 'build_xgrammar_tokenizer_info_json']
 class EmbeddingCppOutput:
     output: TypedOutput
     def __init__(self) -> None:
@@ -45,3 +46,5 @@ class TypedOutput:
     @t.setter
     def t(self, arg1: torch.Tensor) -> None:
         ...
+def build_xgrammar_tokenizer_info_json(vocab: dict[str, int], backend_tokenizer_str: str, vocab_size: int, stop_token_ids: list[int]) -> str:
+    ...

@@ -109,6 +109,7 @@ cdll.LoadLibrary(sysconfig.get_config_var("LIBDIR") + "/libpython3.10.so")
 
 try:
     from libth_transformer_config import (
+        ActivationType,
         ArpcConfig,
         AttentionConfigs,
         DashScGrpcConfig,
@@ -130,53 +131,51 @@ try:
         KVCacheSpecType,
         OpaqueBlockEntryCountMode,
         ConcurrencyConfig,
+        CPRotateMethod,
+        DataType,
         DeviceResourceConfig,
+        EPLBConfig,
         EplbMode,
         FfnDisAggregateConfig,
         FIFOSchedulerConfig,
         FMHAConfig,
         FMHAType,
+        GrammarConfig,
+        GrpcConfig,
         HWKernelConfig,
+        HybridAttentionConfig,
+        HybridAttentionType,
         KVCacheConfig,
         KVCacheSpecDesc,
+        KvCacheDataType,
+        LinearAttentionConfig,
         MiscellaneousConfig,
         MlaOpsType,
         ModelConfig,
         ModelSpecificConfig,
         MoeConfig,
         NcclCommConfig,
-        PDSepConfig,
         ParallelismConfig,
+        PDSepConfig,
+        PrefillCPConfig,
         ProfilingDebugLoggingConfig,
+        QuantAlgo,
+        RoleType,
         RopeCache,
         RopeConfig,
         RopeStyle,
+        RuntimeConfig,
+        SpecialTokens,
+        SpeculativeExecutionConfig,
+        SpeculativeType,
         TaskType,
         VitConfig,
         VitSeparation,
         check_rope_cache,
         get_rope_cache,
         get_rope_cache_once,
-        CPRotateMethod,
-        PrefillCPConfig,
     )
-    # Alias for backward compatibility
-    from libth_transformer_config import (
-        QuantAlgo,
-        RoleType,
-        RuntimeConfig,
-        SpecialTokens,
-        SpeculativeExecutionConfig,
-        SpeculativeType,
-        EPLBConfig,
-        ActivationType,
-        DataType,
-        KvCacheDataType,
-        ModelConfig,
-        HybridAttentionConfig,
-        HybridAttentionType,
-        LinearAttentionConfig,
-    )
+
     # Alias for backward compatibility
     EplbConfig = EPLBConfig
     from libth_transformer_config import (
@@ -209,24 +208,41 @@ class EmptyClass:
     def __init__(self, **kwargs):
         pass
 
+
 try:
     import librtp_compute_ops
-    from .compute_ops import rtp_llm_ops
+
     # Export LayerKVCache and other types from librtp_compute_ops
-    from librtp_compute_ops import LayerKVCache, KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs, PyModelInitResources, PyCacheStoreInputs
+    from librtp_compute_ops import (
+        KVCache,
+        LayerKVCache,
+        PyAttentionInputs,
+        PyCacheStoreInputs,
+        PyModelInitResources,
+        PyModelInputs,
+        PyModelOutputs,
+    )
+
+    from .compute_ops import rtp_llm_ops
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
     rtp_llm_ops = EmptyClass
-    LayerKVCache = KVCache = PyAttentionInputs = PyModelInputs = PyModelOutputs = PyModelInitResources = PyCacheStoreInputs = EmptyClass
+    LayerKVCache = KVCache = PyAttentionInputs = PyModelInputs = PyModelOutputs = (
+        PyModelInitResources
+    ) = PyCacheStoreInputs = EmptyClass
 
 try:
-
-    from libth_transformer import RtpEmbeddingOp, RtpLLMOp
     from libth_transformer import EmbeddingCppOutput
+    from libth_transformer import (
+        RtpEmbeddingOp,
+        RtpLLMOp,
+        build_xgrammar_tokenizer_info_json,
+    )
 
     libth_transformer_imported = True
 except BaseException as e:
-    EmbeddingCppOutput = RtpEmbeddingOp = RtpLLMOp = EmptyClass
+    EmbeddingCppOutput = build_xgrammar_tokenizer_info_json = EmptyClass
+    RtpEmbeddingOp = RtpLLMOp = EmptyClass
 
     logging.info(
         "libth_transformer not imported, you may under python standalone mode or frontend mode now."

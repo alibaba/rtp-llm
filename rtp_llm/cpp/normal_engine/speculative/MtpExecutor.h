@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/normal_engine/AsyncRunner.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 
 namespace rtp_llm {
@@ -104,17 +105,21 @@ protected:
                                                          const StreamGroups&   stream_groups) const;
     void            broadcastPostRejectionInputs(GptModelInputs& model_input);
     GptModelOutputs runDraftPrefillForward(GptModelInputs& model_input);
-    void            collectDecodeMetrics(const StreamGroups&                          stream_groups,
-                                         torch::Event&                                accept_len_ready_event,
-                                         const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                                         MtpMetricsCollector&                         metrics_collector);
-    absl::Status    dispatchDecodeOutput(const StreamGroups&                          stream_groups,
-                                         const std::list<GenerateStreamPtr>&          streams,
-                                         const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                                         GptModelOutputs                              draft_prefill_model_output,
-                                         SamplerOutput                                draft_prefill_sampler_output,
-                                         std::shared_ptr<torch::Event>                rejection_event,
-                                         std::shared_ptr<torch::Event>                draft_event);
+    SpecLogitsVerifyRunner::LaunchResult
+                 buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
+                                             const torch::Tensor&                draft_tokens,
+                                             std::shared_ptr<torch::Event>       draft_tokens_ready_event);
+    void         collectDecodeMetrics(const StreamGroups&                          stream_groups,
+                                      torch::Event&                                accept_len_ready_event,
+                                      const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
+                                      MtpMetricsCollector&                         metrics_collector);
+    absl::Status dispatchDecodeOutput(const StreamGroups&                          stream_groups,
+                                      const std::list<GenerateStreamPtr>&          streams,
+                                      const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
+                                      GptModelOutputs                              draft_prefill_model_output,
+                                      SamplerOutput                                draft_prefill_sampler_output,
+                                      std::shared_ptr<torch::Event>                rejection_event,
+                                      std::shared_ptr<torch::Event>                draft_event);
 
     void draftModelDecode(GptModelInputs&             model_input,
                           const StreamGroups&         stream_groups,
@@ -207,8 +212,10 @@ private:
     int64_t                       metrics_accept_len_stream_num_        = 0;
     int64_t                       metrics_accept_len_propose_token_num_ = 0;
 
-    AsyncRunner target_verify_prepare_runner_;
-    AsyncRunner draft_prefill_prepare_runner_;
+    AsyncRunner                             target_verify_prepare_runner_;
+    AsyncRunner                             draft_prefill_prepare_runner_;
+    AsyncRunner                             spec_logits_verify_async_runner_;
+    std::unique_ptr<SpecLogitsVerifyRunner> spec_logits_verify_runner_;
 
     // Bookkeeping worker for stream-async decode dispatch. It owns a CUDA
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.

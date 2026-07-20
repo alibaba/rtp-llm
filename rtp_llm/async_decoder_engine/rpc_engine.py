@@ -5,6 +5,7 @@ from typing import Dict, Optional
 from typing_extensions import override
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
+from rtp_llm.async_decoder_engine.xgrammar_bootstrap import bootstrap_grammar_config
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.frontend.token_processor import TokenProcessor
 from rtp_llm.models.base_model import BaseModel
@@ -41,7 +42,6 @@ class LanguageCppEngine(BaseEngine):
         self.token_processor = TokenProcessor(
             self.tokenizer, self.model.model_config.special_tokens
         )
-
         self.mm_process_engine = None
         if (
             self.model.is_multimodal()
@@ -61,6 +61,7 @@ class LanguageCppEngine(BaseEngine):
                     device=f"cuda:{engine_config.parallelism_config.local_rank}",
                 )
             )
+        bootstrap_grammar_config(engine_config, model)
         self.rtp_llm_op_ = RtpLLMOp(
             engine_config,
             model,

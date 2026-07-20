@@ -97,9 +97,17 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(top_p_min);
     TRANS_OPTIONAL(top_p_reset_ids);
     TRANS_OPTIONAL(task_id);
+    TRANS_OPTIONAL(json_schema);
+    TRANS_OPTIONAL(regex);
+    TRANS_OPTIONAL(ebnf);
+    TRANS_OPTIONAL(structural_tag);
+    TRANS_OPTIONAL(response_format);
     TRANS_OPTIONAL(adapter_name);
     generate_config->in_think_mode       = config_proto->in_think_mode();
     generate_config->max_thinking_tokens = config_proto->max_thinking_tokens();
+    for (const auto& token_id : config_proto->begin_think_token_ids()) {
+        generate_config->begin_think_token_ids.push_back(token_id);
+    }
     for (const auto& token_id : config_proto->end_think_token_ids()) {
         generate_config->end_think_token_ids.push_back(token_id);
     }

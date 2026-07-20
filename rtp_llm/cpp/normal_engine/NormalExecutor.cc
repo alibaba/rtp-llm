@@ -153,7 +153,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
-    LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);
+    LogitsProcessorFactory::init(
+        params.model_config_.ckpt_path, params.sp_config.tree_decode_config, params.grammar_config);
     cudaProfilerBegin();
 }
 
@@ -452,6 +453,19 @@ bool NormalExecutor::gatherCanUseDeviceState(const StreamGroups& stream_groups) 
         if (stream->hasNumBeams() || stream->numReturnSequences() > 1) {
             return false;
         }
+        bool has_blocking_stateful_processor = false;
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            if (processor != nullptr && processor->isStateful() && !processor->supportsNormalAsyncDeviceState()) {
+                has_blocking_stateful_processor = true;
+                break;
+            }
+        }
+        // NormalAsyncDeviceState mirrors token ids and sequence length. Stateful
+        // processors that cannot publish their own device-side next-step state
+        // still need the old wait before the next sampler consumes logits.
+        if (has_blocking_stateful_processor && stream->hasPendingAsyncBookkeeping()) {
+            return false;
+        }
         const auto& state = stream->getNormalAsyncDeviceState();
         if (!state.last_sample_token_gpu.defined() || !state.last_sample_token_gpu.is_cuda()
             || !state.next_seq_len_gpu.defined() || !state.next_seq_len_gpu.is_cuda()) {
@@ -528,6 +542,12 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
             cur_seq_len_gpu = prev_next_seq_len;
         } else {
             cur_seq_len_gpu = torch::full({1}, static_cast<int64_t>(cur_real_seq_len), cuda_i32);
+        }
+
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            if (processor != nullptr && processor->supportsNormalAsyncDeviceState()) {
+                processor->prepareNormalAsyncUpdate(last_sample_token_gpu, 1);
+            }
         }
 
         GenerateStream::NormalAsyncDeviceState state;

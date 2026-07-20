@@ -1,14 +1,17 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <numeric>
 #include <string>
+#include <vector>
 #include <cstring>
 
 namespace rtp_llm {
@@ -365,8 +368,11 @@ absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(c
     return model_input;
 }
 
-absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
-    const StreamGroups& stream_groups, const GptModelInputs& model_inputs, const GptModelOutputs& model_output) const {
+absl::StatusOr<SamplerInputs>
+MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
+                                                const GptModelInputs&                       model_inputs,
+                                                const GptModelOutputs&                      model_output,
+                                                const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result) const {
     RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.gather_spec_sampler_input");
     (void)model_inputs;
     RTP_LLM_CHECK(!stream_groups.empty());
@@ -383,6 +389,16 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
     SamplerInputs sampler_inputs =
         allocateSamplerInputs(stream_groups, total_batch_size, total_batch_size, propose_step_);
     fillSamplerCommonInputs(sampler_inputs, all_streams, true, propose_step_);
+    setLogitsProcessorInputs(sampler_inputs, all_streams, true);
+    sampler_inputs.phase = LogitsProcessorPhase::MTP_VERIFY;
+    if (spec_logits_result.has_active_processor) {
+        sampler_inputs.spec_vocab_mask_gpu      = spec_logits_result.spec_vocab_mask_gpu;
+        sampler_inputs.spec_cap_gpu             = spec_logits_result.spec_cap_gpu;
+        sampler_inputs.spec_mask_ready_event    = spec_logits_result.ready_event;
+        sampler_inputs.spec_mask_consumed_event = spec_logits_result.consumed_event;
+        sampler_inputs.spec_applied_processors  = spec_logits_result.applied_processors;
+        sampler_inputs.spec_propose_step        = propose_step_;
+    }
 
     int64_t batch_idx = 0;
     for (auto& stream : all_streams) {
@@ -397,7 +413,8 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
                           tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
     }
 
-    auto vocab_size = (size_t)model_output.logits.size(1);
+    auto vocab_size           = (size_t)model_output.logits.size(1);
+    sampler_inputs.vocab_size = vocab_size;
     if (return_all_probs != ReturnAllProbsMode::NONE) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));

@@ -467,6 +467,9 @@ public:
         return logits_processor_list_;
     }
 
+    bool    hasStatefulLogitsProcessor() const;
+    int64_t processorAcceptedTokenLen() const;
+
     at::Generator getGenerator() {
         return generator_;
     }
@@ -685,6 +688,11 @@ protected:
     int  estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
     void updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
     void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
+    void updateLogitProcessorStatus(const torch::Tensor& new_tokens,
+                                    int32_t              num_new_tokens,
+                                    const torch::Tensor& src_batch_indices,
+                                    bool                 stateful_only = false);
+    void validateStatefulLogitsProcessorState();
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);
 

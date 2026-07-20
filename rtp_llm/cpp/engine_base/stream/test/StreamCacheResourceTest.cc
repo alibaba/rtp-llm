@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
@@ -22,6 +23,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 
 #include <chrono>
 #include <memory>
@@ -352,6 +354,7 @@ TEST_F(StreamCacheResourceTest, testCPShardedConnectorReuseUsesCanonicalBlockWid
 
 TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyForFirstMalloc) {
     prepareHybridResource(/*reuse_cache=*/true, RoleType::DECODE);
+    cache_manager_->config_.disable_decode_first_malloc_device_reuse = true;
     auto& resource = stream_->streamCacheResource();
     ASSERT_GT(cache_manager_->cacheConfig().groupNums(), 1);
 
@@ -726,6 +729,54 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ThenLoadCacheDone_UpdatesReus
     EXPECT_EQ(stream_->initialReuseLength(), total_reuse_len);
     EXPECT_EQ(stream_->reuseLength(), total_reuse_len);
     EXPECT_EQ(stream_->memoryReuseLength(), memory_reuse_len);
+}
+
+TEST_F(StreamCacheResourceTest, testP2PSideChannelRestoresZeroFirstTokenAndMtpState) {
+    prepareResourceWithInputTokens({1, 2, 3}, /*reuse_cache=*/true);
+    stream_->vocab_size_ = 16;
+    auto& resource = stream_->streamCacheResource();
+
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    kv_resource->setDeviceReuseBlockNum(1);
+    kv_resource->setMemoryReuseBlockNum(1);
+
+    auto server_call_result                             = std::make_shared<PrefillLoadCaller::Result>();
+    server_call_result->side_channel_payload.has_data   = true;
+    server_call_result->side_channel_payload.first_token_id = 0;
+    server_call_result->side_channel_payload.total_reuse_len = 2;
+    server_call_result->side_channel_payload.local_reuse_len = 2;
+    server_call_result->side_channel_payload.propose_tokens  = {0, 7};
+    TensorPbConvert::torchToPb(&server_call_result->side_channel_payload.propose_probs,
+                               torch::tensor({{0.1f, 0.2f, 0.7f}}, torch::kFloat32));
+    TensorPbConvert::torchToPb(&server_call_result->side_channel_payload.propose_hidden,
+                               torch::tensor({{0.3f, 0.4f}}, torch::kFloat32));
+
+    auto p2p_ctx = std::make_shared<P2PConnectorAsyncReadContext>(
+        kv_resource,
+        std::shared_ptr<P2PBroadcastClient::Result>(),
+        server_call_result,
+        std::shared_ptr<DecodeSchedulerMetricsCollector>(),
+        /*transfer_not_done_hold_ms=*/0);
+    auto read_context = std::make_shared<FusedAsyncReadContext>(
+        std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{}), kv_resource, nullptr);
+    read_context->setFusedReadContext(
+        std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{
+            std::static_pointer_cast<AsyncContext>(p2p_ctx)}));
+
+    resource.updateReuseLengthsFromContext(read_context);
+
+    EXPECT_EQ(stream_->completeTokenIdsVec(), std::vector<int>({1, 2, 3, 0}));
+    auto sp_output_buffer = stream_->getSPOutputBuffer();
+    ASSERT_TRUE(sp_output_buffer != nullptr);
+    EXPECT_EQ(sp_output_buffer->tokens.cpu()[0][0].item<int32_t>(), 0);
+    EXPECT_EQ(sp_output_buffer->tokens.cpu()[0][1].item<int32_t>(), 7);
+    ASSERT_TRUE(sp_output_buffer->all_probs.defined());
+    ASSERT_TRUE(sp_output_buffer->hidden_states.defined());
+    EXPECT_TRUE(stream_->getAcceptTokensGpu().defined());
+    EXPECT_TRUE(stream_->getAcceptLenGpu().defined());
+    EXPECT_TRUE(stream_->getProposeTokensGpu().defined());
+    EXPECT_TRUE(stream_->getDraftAllProbsGpu().defined());
+    EXPECT_TRUE(stream_->getLastHiddenStatesGpu().defined());
 }
 
 TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseLength) {

@@ -14,10 +14,14 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <sstream>
 #if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #endif
 #include "autil/TimeUtility.h"
@@ -29,7 +33,6 @@
 #include <random>
 #include <string>
 #include <vector>
-#include <ATen/cuda/CUDAContext.h>
 
 namespace rtp_llm {
 
@@ -72,6 +75,42 @@ void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inpu
     holder.hold_host(inputs.cum_log_probs);
 }
 
+bool hasSpecLogitsProcessor(const std::list<GenerateStreamPtr>& streams) {
+    for (const auto& stream : streams) {
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            if (std::dynamic_pointer_cast<SpecLogitsProcessor>(processor) != nullptr) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool hasUnsupportedMtpStatefulLogitsProcessor(const std::list<GenerateStreamPtr>& streams) {
+    for (const auto& stream : streams) {
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            if (processor == nullptr || std::dynamic_pointer_cast<SpecLogitsProcessor>(processor) != nullptr) {
+                continue;
+            }
+            if (processor->isStateful() || std::dynamic_pointer_cast<TreeLogitsProcessor>(processor) != nullptr) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void recordSpecTensorUseOnCurrentStream(const torch::Tensor& tensor) {
+#if USING_CUDA
+    if (tensor.defined() && tensor.is_cuda()) {
+        c10::cuda::CUDACachingAllocator::recordStream(tensor.storage().data_ptr(),
+                                                      at::cuda::getCurrentCUDAStream(tensor.device().index()));
+    }
+#else
+    (void)tensor;
+#endif
+}
+
 torch::Tensor toCudaWithHostHold(const torch::Tensor& tensor, TensorHolder& holder) {
     if (!tensor.defined() || tensor.is_cuda()) {
         return tensor;
@@ -96,6 +135,61 @@ torch::Tensor toCudaInt32WithHostHold(const torch::Tensor& tensor, TensorHolder&
     }
     holder.hold_host(tensor);
     return tensor.to(cuda_i32, /*non_blocking=*/true);
+}
+
+void applySpecLogitsAcceptLenCap(const SamplerInputs&                   sampler_input,
+                                 const SamplerOutput&                   target_sampler_output,
+                                 speculative::SpeculativeSamplerOutput& output,
+                                 int64_t                                batch_size,
+                                 int64_t                                propose_step) {
+    if (!sampler_input.spec_cap_gpu.defined()) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(output.accept_len.defined() && output.accept_len.is_cuda(),
+                            "spec logits cap requires CUDA accept_len");
+
+    if (sampler_input.spec_mask_ready_event) {
+        sampler_input.spec_mask_ready_event->block(cuda_graph::graphGetCurrentStream());
+    }
+    recordSpecTensorUseOnCurrentStream(sampler_input.spec_cap_gpu);
+    auto cap_gpu      = sampler_input.spec_cap_gpu.to(output.accept_len.options());
+    auto cap_plus_one = cap_gpu + 1;
+    output.accept_len = torch::minimum(output.accept_len, cap_plus_one);
+
+    RTP_LLM_CHECK_WITH_INFO(output.accept_tokens.defined() && output.accept_tokens.is_cuda(),
+                            "spec logits cap requires CUDA accept_tokens");
+    RTP_LLM_CHECK_WITH_INFO(target_sampler_output.token_ids.defined(),
+                            "spec logits cap requires target sampler token_ids");
+    auto target_token_ids = target_sampler_output.token_ids;
+    if (!target_token_ids.is_cuda()) {
+        target_token_ids = target_token_ids.to(output.accept_tokens.device(), /*non_blocking=*/true);
+    }
+    const int64_t token_stride  = target_token_ids.size(1);
+    auto          target_tokens = target_token_ids.reshape({batch_size, propose_step + 1, token_stride})
+                             .select(2, token_stride - 1)
+                             .to(output.accept_tokens.options());
+    auto cap_index =
+        sampler_input.spec_cap_gpu.to(torch::TensorOptions().device(output.accept_tokens.device()).dtype(torch::kLong));
+    auto replacement = target_tokens.gather(1, cap_index.unsqueeze(1));
+
+    auto cols = torch::arange(propose_step + 1,
+                              torch::TensorOptions().device(output.accept_tokens.device()).dtype(torch::kLong))
+                    .unsqueeze(0)
+                    .expand({batch_size, propose_step + 1});
+    auto replace_mask = (cap_gpu < propose_step).unsqueeze(1) & (output.accept_len > cap_gpu).unsqueeze(1)
+                        & (cols == cap_index.unsqueeze(1));
+    output.accept_tokens =
+        torch::where(replace_mask, replacement.expand({batch_size, propose_step + 1}), output.accept_tokens);
+
+    output.accept_tokens_cpu = output.accept_tokens.to(torch::kCPU, /*non_blocking=*/true);
+    output.accept_len_cpu    = output.accept_len.to(torch::kCPU, /*non_blocking=*/true);
+    output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+    // The spec artifact is read by logits masking before sampling and by cap
+    // application here. Recording after cap keeps future artifact pools from
+    // reusing mask/cap storage before the sampler stream has consumed both.
+    if (sampler_input.spec_mask_consumed_event) {
+        sampler_input.spec_mask_consumed_event->record(cuda_graph::graphGetCurrentStream());
+    }
 }
 
 }  // namespace
@@ -376,6 +470,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
     target_verify_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
     draft_prefill_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
+    spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
+    spec_logits_verify_runner_(std::make_unique<SpecLogitsVerifyRunner>()),
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)) {
     data_type_        = params.model_config_.data_type;
     hidden_size_      = params.model_config_.hidden_size * params.model_config_.hc_mult;
@@ -472,7 +568,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                               params.sp_config,
                                                               warm_up_));
 
-    LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);
+    LogitsProcessorFactory::init(
+        params.model_config_.ckpt_path, params.sp_config.tree_decode_config, params.grammar_config);
     cudaProfilerBegin();
 
     for (auto& mtp_params : *propose_params->mtp_model_params_) {
@@ -765,7 +862,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
 
-    StreamGroups   stream_groups(streams);
+    StreamGroups    stream_groups(streams);
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     GptModelOutputs draft_prefill_model_output;
@@ -780,12 +877,16 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     torch::Tensor              spec_token_ids_t;
     std::vector<torch::Tensor> draft_probs_list;
     torch::Event               accept_len_ready_event = cuda_graph::makeGraphEvent();
+    auto spec_logits_result = std::make_shared<SpecLogitsVerifyRunner::LaunchResult>();
 
     // Stream-async events are recorded on the main stream as soon as tensors
     // become valid. rejection_event guards accept_len/tokens D2H; draft_event
     // guards all_probs cloning. They stay null when stream-async is off.
     std::shared_ptr<torch::Event> rejection_event;
     std::shared_ptr<torch::Event> draft_event;
+    bool                          prev_bookkeeping_synced_for_spec_logits = false;
+    bool                          spec_logits_async_launched              = false;
+    bool                          spec_logits_processor_present           = false;
 
     waitPreviousBookkeepingAndKvSwaps(streams);
 
@@ -829,7 +930,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
         ensureModelInputsOnCuda(model_input, "decode.after_tp_sync");
     }
-    size_t batch_size = model_input.input_lengths.size(0);
+    size_t batch_size             = model_input.input_lengths.size(0);
+    spec_logits_processor_present = isTpRank0() && !model_input.is_fake_stream && hasSpecLogitsProcessor(streams);
+    if (isTpRank0() && !model_input.is_fake_stream && hasUnsupportedMtpStatefulLogitsProcessor(streams)) {
+        return absl::InternalError(
+            "MTP spec decode found a stateful logits processor without SpecLogitsProcessor support; "
+            "disable MTP or implement spec verify for this processor");
+    }
 
     // release hold buffers before draft model forward
     releaseAllModelBuffers();
@@ -841,6 +948,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t);
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
     }
+
+    auto draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    draft_tokens_ready_event->record(cuda_graph::graphGetCurrentStream());
 
     // Launch draft-prefill prepare BEFORE target verify forward so it overlaps
     // with target verify GPU work instead of running serially after it. Sync
@@ -867,6 +977,65 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
     }
 
+    if (spec_logits_processor_present && propose_step_ > 1 && draft_token_ids_t.defined()) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_spec_logits_verify_async)");
+        if (useStreamAsync() && useDropBroadSync()) {
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+                "executor.mtp.decode_step(wait_prev_bookkeeping_pre_spec_logits,stream_count=%zu)", streams.size());
+            spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+            stream_groups                           = StreamGroups(streams);
+            prev_bookkeeping_synced_for_spec_logits = true;
+        }
+
+        auto spec_streams = streams;
+        auto draft_tokens = draft_token_ids_t;
+        spec_logits_verify_async_runner_.launch([this,
+                                                 spec_streams = std::move(spec_streams),
+                                                 draft_tokens,
+                                                 draft_tokens_ready_event,
+                                                 spec_logits_result]() mutable {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_logits_verify_async_worker)");
+            try {
+                *spec_logits_result =
+                    buildSpecLogitsVerifyInline(spec_streams, draft_tokens, std::move(draft_tokens_ready_event));
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_ERROR("spec logits async worker failed: %s", e.what());
+                throw;
+            } catch (...) {
+                RTP_LLM_LOG_ERROR("spec logits async worker failed with unknown exception");
+                throw;
+            }
+        });
+        spec_logits_async_launched = true;
+    }
+
+    if (spec_logits_processor_present && !spec_logits_async_launched) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_logits_verify_inline)");
+        if (useStreamAsync() && useDropBroadSync()) {
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+                "executor.mtp.decode_step(wait_prev_bookkeeping_pre_spec_logits,stream_count=%zu)", streams.size());
+            spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+            stream_groups                           = StreamGroups(streams);
+            prev_bookkeeping_synced_for_spec_logits = true;
+        }
+        std::shared_ptr<torch::Event> draft_tokens_ready_event;
+        if (draft_sampler_output.token_ids.defined() && draft_sampler_output.token_ids.is_cuda()) {
+            draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+            draft_tokens_ready_event->record(cuda_graph::graphGetCurrentStream());
+        }
+        *spec_logits_result =
+            buildSpecLogitsVerifyInline(streams, draft_sampler_output.token_ids, std::move(draft_tokens_ready_event));
+    }
+
+    if (spec_logits_async_launched) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(wait_spec_logits_verify_async)");
+        spec_logits_verify_async_runner_.sync(cuda_graph::graphGetCurrentStream());
+    }
+    if (spec_logits_processor_present && !spec_logits_result->has_active_processor) {
+        return absl::InternalError("MTP async spec logits processor is present but no verify artifact was produced; "
+                                   "disable MTP/async or implement spec verify for this processor");
+    }
+
     // eplb
     if (expert_balancer_) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(eplb_step_forward)");
@@ -888,7 +1057,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             // gatherSpecSamplerInput reads host stream state updated by the previous
             // bookkeeping worker. DROP_BROAD_SYNC therefore needs this narrow sync
             // unless the broad sync at decodeStep start already waited.
-            if (useStreamAsync() && useDropBroadSync()) {
+            if (useStreamAsync() && useDropBroadSync() && !prev_bookkeeping_synced_for_spec_logits) {
                 RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                     "executor.mtp.decode_step(wait_prev_bookkeeping_pre_sampler,stream_count=%zu)", streams.size());
                 spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
@@ -898,9 +1067,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             }
 
             // target model sample
-            CHECK_AND_RETURN_REF(
-                sampler_input,
-                batch_stream_processor_->gatherSpecSamplerInput(stream_groups, model_input, model_output));
+            CHECK_AND_RETURN_REF(sampler_input,
+                                 batch_stream_processor_->gatherSpecSamplerInput(
+                                     stream_groups, model_input, model_output, *spec_logits_result));
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
             sampler_output           = std::move(sampler_->forward(sampler_input));
             sampler_output.all_probs = sampler_output.all_probs.reshape(
@@ -908,6 +1077,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
             // rejection sampling
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
+            applySpecLogitsAcceptLenCap(
+                sampler_input, sampler_output, speculative_sampler_output, batch_size, propose_step_);
         }
         batch_stream_processor_->updateDecodePostDraftModelInput(
             model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
@@ -919,7 +1090,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
         model_input.last_hidden_states = model_output.all_hidden_states;
     }
-
 
     // Record before broadcast/draft work so the worker waits only for
     // accept_len/accept_tokens, not the queue tail.
@@ -1047,7 +1217,7 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
                                                                cuda_i32);
             const auto& sequence_lengths =
                 sequence_lengths_for_prepare.defined() ? sequence_lengths_for_prepare : model_input.sequence_lengths;
-            model_input_copy.prefix_lengths = toCudaInt32WithHostHold(sequence_lengths, buffer_holder_);
+            model_input_copy.prefix_lengths          = toCudaInt32WithHostHold(sequence_lengths, buffer_holder_);
             model_input_copy.sequence_lengths_plus_1 = model_input_copy.prefix_lengths + 1;
         }
     }
@@ -1142,6 +1312,41 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     RTP_LLM_LOG_DEBUG("[MTP decode] target model verify forward end");
     model_input.is_target_verify = false;
     return model_output;
+}
+
+SpecLogitsVerifyRunner::LaunchResult
+MtpExecutor::buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
+                                         const torch::Tensor&                draft_tokens,
+                                         std::shared_ptr<torch::Event>       draft_tokens_ready_event) {
+    SpecLogitsVerifyRunner::LaunchTask task;
+    task.total_streams            = streams.size();
+    task.propose_step             = static_cast<int>(propose_step_);
+    task.vocab_size               = vocab_size_;
+    task.draft_tokens             = draft_tokens;
+    task.draft_tokens_ready_event = std::move(draft_tokens_ready_event);
+
+    size_t stream_idx = 0;
+    for (const auto& stream : streams) {
+        size_t processor_idx = 0;
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            auto spec_processor = std::dynamic_pointer_cast<SpecLogitsProcessor>(processor);
+            if (spec_processor) {
+                task.active.push_back({spec_processor,
+                                       stream_idx,
+                                       processor_idx,
+                                       static_cast<uint64_t>(stream->streamId()),
+                                       static_cast<int64_t>(stream->seqLength()),
+                                       static_cast<int64_t>(stream->outputTokenLen())});
+            }
+            ++processor_idx;
+        }
+        ++stream_idx;
+    }
+
+    if (task.active.empty()) {
+        return {};
+    }
+    return spec_logits_verify_runner_->buildInline(task);
 }
 
 void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
@@ -1448,10 +1653,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         tensor_d      = tensor_d.reshape({static_cast<int64_t>(batch_size)});
         return tensor_d.is_contiguous() ? tensor_d : tensor_d.contiguous();
     };
-    spec_prefix_lengths =
-        model_input.sequence_lengths.defined() ?
-            toCudaInt32WithHostHold(model_input.sequence_lengths, buffer_holder_) :
-            torch::Tensor();
+    spec_prefix_lengths = model_input.sequence_lengths.defined() ?
+                              toCudaInt32WithHostHold(model_input.sequence_lengths, buffer_holder_) :
+                              torch::Tensor();
 
     torch::Tensor pre_propose_token_t_raw;
     {
@@ -1660,13 +1864,13 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
         return toCudaInt32WithHostHold(tensor, buffer_holder_);
     };
 
-    torch::Tensor accept_len_all       = to_cuda_i32(spec_decode_output.accept_len);
-    torch::Tensor accept_tokens_all    = to_cuda_i32(spec_decode_output.accept_tokens);
-    torch::Tensor propose_tokens_all   = to_cuda_i32(draft_prefill_output.sampler_output.token_ids);
-    torch::Tensor draft_all_probs_full = draft_prefill_output.sampler_output.all_probs.defined() ?
-                                             toCudaWithHostHold(draft_prefill_output.sampler_output.all_probs,
-                                                                buffer_holder_) :
-                                             torch::Tensor();
+    torch::Tensor accept_len_all     = to_cuda_i32(spec_decode_output.accept_len);
+    torch::Tensor accept_tokens_all  = to_cuda_i32(spec_decode_output.accept_tokens);
+    torch::Tensor propose_tokens_all = to_cuda_i32(draft_prefill_output.sampler_output.token_ids);
+    torch::Tensor draft_all_probs_full =
+        draft_prefill_output.sampler_output.all_probs.defined() ?
+            toCudaWithHostHold(draft_prefill_output.sampler_output.all_probs, buffer_holder_) :
+            torch::Tensor();
     torch::Tensor draft_all_hidden_full =
         draft_prefill_output.model_output.all_hidden_states.defined() ?
             toCudaWithHostHold(draft_prefill_output.model_output.all_hidden_states, buffer_holder_) :

@@ -20,6 +20,31 @@ from rtp_llm.ops import RoleType
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info
 
+_GRAMMAR_RESPONSE_FORMAT_TYPES = frozenset(
+    {"json_schema", "json_object", "regex", "ebnf", "structural_tag"}
+)
+_JSON_OBJECT_SCHEMA: Dict[str, str] = {"type": "object"}
+
+
+def _compact_json(value: Union[str, Dict[str, Any]]) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _response_format_is_grammar(rf: Optional[Union[str, Dict[str, Any]]]) -> bool:
+    if rf is None:
+        return False
+    if isinstance(rf, str):
+        try:
+            rf = json.loads(rf)
+        except Exception:
+            return True
+    if not isinstance(rf, dict):
+        return False
+    return rf.get("type") in _GRAMMAR_RESPONSE_FORMAT_TYPES
+
+
 class RequestFormat:
     RAW = "raw"
     CHAT_API = "chatapi"
@@ -76,25 +101,6 @@ def _reset_sanitize_warn_state():
     global _last_sanitize_warn_time, _last_downgrade_warn_time
     _last_sanitize_warn_time = 0.0
     _last_downgrade_warn_time = 0.0
-
-
-def _is_plain_text_response_format(value: Any) -> bool:
-    """Return whether ``response_format`` explicitly requests normal text.
-
-    OpenAI-compatible clients may send ``{"type": "text"}`` even though text
-    is already the default. It is a compatibility sentinel, not a structured
-    output request, and therefore needs no backend transport.
-    """
-    parsed = value
-    if isinstance(parsed, str):
-        stripped = parsed.strip()
-        if stripped == "text":
-            return True
-        try:
-            parsed = json.loads(stripped)
-        except (TypeError, ValueError):
-            return False
-    return isinstance(parsed, dict) and parsed == {"type": "text"}
 
 
 class GenerateConfig(BaseModel):
@@ -164,8 +170,6 @@ class GenerateConfig(BaseModel):
     chat_id: Optional[str] = None
     task_id: Optional[Union[str, int]] = None
     request_format: str = RequestFormat.RAW
-    # Compatibility-only request sentinels. The backend cannot execute structured
-    # output yet, so validate() rejects every non-default value before Model RPC.
     json_format: bool = False
     response_format: Optional[Union[str, Dict[str, Any]]] = None
     json_schema: Optional[Union[str, Dict[str, Any]]] = None
@@ -554,18 +558,7 @@ class GenerateConfig(BaseModel):
             if item not in self.stop_words_list:
                 self.stop_words_list.append(item)
 
-    def validate_supported_features(self):
-        """Reject parsed compatibility fields that have no executable backend."""
-        structured_output_controls = self._requested_structured_output_controls()
-        if structured_output_controls:
-            raise FtRuntimeException(
-                ExceptionType.UNSUPPORTED_OPERATION,
-                "structured output is not supported yet; unsupported controls: "
-                + ", ".join(structured_output_controls),
-            )
-
     def validate(self):
-        self.validate_supported_features()
         try:
             check_with_info(
                 is_union_positive_integer(self.top_k),
@@ -701,8 +694,43 @@ class GenerateConfig(BaseModel):
                         self.prompt_logits_start <= self.prompt_logits_end,
                         f"prompt_logits_start ({self.prompt_logits_start}) must <= prompt_logits_end ({self.prompt_logits_end})",
                     )
+            has_grammar_constraint = self._has_grammar_constraint()
+            if (
+                self.has_num_beams() or self.num_return_sequences > 1
+            ) and has_grammar_constraint:
+                raise ValueError(
+                    "grammar-constrained decoding does not support beam search or num_return_sequences > 1"
+                )
+            self._normalize_grammar_fields()
         except Exception as e:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))
+
+    def _has_grammar_constraint(self) -> bool:
+        return (
+            self.json_format
+            or self.json_schema is not None
+            or self.regex is not None
+            or self.ebnf is not None
+            or self.structural_tag is not None
+            or _response_format_is_grammar(self.response_format)
+        )
+
+    def _normalize_grammar_fields(self):
+        if (
+            self.json_format
+            and self.response_format is None
+            and self.json_schema is None
+            and self.regex is None
+            and self.ebnf is None
+            and self.structural_tag is None
+        ):
+            self.json_schema = _JSON_OBJECT_SCHEMA
+        if self.json_schema is not None:
+            self.json_schema = _compact_json(self.json_schema)
+        if self.structural_tag is not None:
+            self.structural_tag = _compact_json(self.structural_tag)
+        if self.response_format is not None:
+            self.response_format = _compact_json(self.response_format)
 
     def enforce_prompt_scoring_constraints(self):
         """Clamp config fields for prompt scoring mode. Call after setting return_prompt_logits=True."""
@@ -710,22 +738,3 @@ class GenerateConfig(BaseModel):
         self.is_streaming = False
         self.reuse_cache = False
         self.can_use_pd_separation = False
-
-    def _requested_structured_output_controls(self) -> List[str]:
-        """Return user-facing names for controls the backend cannot execute yet."""
-        controls: List[str] = []
-        if self.json_format:
-            controls.append("json_format")
-        if self.response_format is not None and not _is_plain_text_response_format(
-            self.response_format
-        ):
-            controls.append("response_format")
-        for name in (
-            "json_schema",
-            "regex",
-            "ebnf",
-            "structural_tag",
-        ):
-            if getattr(self, name) is not None:
-                controls.append(name)
-        return controls

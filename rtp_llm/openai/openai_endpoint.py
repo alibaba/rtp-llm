@@ -46,6 +46,15 @@ from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
 
+_INT32_MAX = 2_147_483_647
+
+
+def _positive_int_or_none(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    value = int(value)
+    return value if value > 0 else None
+
 
 class OpenaiEndpoint(object):
     def __init__(
@@ -165,14 +174,68 @@ class OpenaiEndpoint(object):
     ) -> List[List[int]]:
         return [i for i, _ in itertools.groupby(sorted(stop_words_list))]
 
+    @staticmethod
+    def _apply_json_format(config: GenerateConfig) -> None:
+        config.json_format = True
+        config.json_schema = json.dumps(
+            {"type": "object"}, ensure_ascii=False, separators=(",", ":")
+        )
+
+    @staticmethod
+    def _apply_response_format(rf, config: GenerateConfig) -> None:
+        config.json_format = False
+        config.json_schema = None
+        config.regex = None
+        config.ebnf = None
+        config.structural_tag = None
+        config.response_format = None
+        if rf.type == "text":
+            return
+        if rf.type == "json_schema":
+            assert rf.json_schema is not None and rf.json_schema.schema is not None
+            config.json_schema = json.dumps(
+                rf.json_schema.schema, ensure_ascii=False, separators=(",", ":")
+            )
+        elif rf.type == "json_object":
+            config.json_schema = json.dumps(
+                {"type": "object"}, ensure_ascii=False, separators=(",", ":")
+            )
+        elif rf.type == "regex":
+            assert rf.pattern
+            config.regex = rf.pattern
+        elif rf.type == "ebnf":
+            assert rf.grammar
+            config.ebnf = rf.grammar
+        elif rf.type == "structural_tag":
+            assert rf.structural_tag
+            config.structural_tag = json.dumps(
+                rf.structural_tag, ensure_ascii=False, separators=(",", ":")
+            )
+        else:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                f"unknown response_format.type: {rf.type!r}",
+            )
+
+    def _ensure_think_end_token_ids(self, config: GenerateConfig) -> None:
+        if config.end_think_token_ids:
+            return
+        end_token_id = self.generate_env_config.think_end_token_id
+        if end_token_id != -1:
+            config.end_think_token_ids = [end_token_id]
+            return
+        think_end_tag = self.generate_env_config.think_end_tag.encode("utf-8").decode(
+            "unicode_escape"
+        )
+        config.end_think_token_ids = self.tokenizer.encode(
+            think_end_tag, add_special_tokens=False
+        )
+
     def _extract_generation_config(
         self, request: ChatCompletionRequest
     ) -> GenerateConfig:
         # TODO(wangyin): implement this
         config = request.extra_configs or GenerateConfig()
-        if request.response_format is not None:
-            config.response_format = request.response_format
-        config.validate_supported_features()
         if request.trace_id != None:
             config.trace_id = request.trace_id
         if request.stream == True:
@@ -181,7 +244,15 @@ class OpenaiEndpoint(object):
             config.temperature = request.temperature
         if request.top_p != None:
             config.top_p = request.top_p
-        if request.max_tokens != None:
+        if request.top_k != None:
+            config.top_k = request.top_k
+        max_completion_tokens = _positive_int_or_none(request.max_completion_tokens)
+        max_tokens_cap = _positive_int_or_none(request.max_tokens)
+        if max_completion_tokens is not None:
+            config.max_new_tokens = max_completion_tokens
+            if max_tokens_cap is not None:
+                config.max_new_tokens = min(config.max_new_tokens, max_tokens_cap)
+        elif request.max_tokens is not None:
             config.max_new_tokens = request.max_tokens
         if request.n != None:
             config.num_return_sequences = request.n
@@ -231,16 +302,28 @@ class OpenaiEndpoint(object):
         if config.return_prompt_logits and request.prompt_logprobs is None:
             config.validate()
             request.stream = False
+        if request.response_format is not None:
+            self._apply_response_format(request.response_format, config)
+        elif request.json_format or config.json_format:
+            self._apply_json_format(config)
         config.convert_select_tokens(len(self.tokenizer), self.tokenizer)
 
-        if (
-            request.extra_configs
-            and request.extra_configs.max_thinking_tokens is not None
-            and isinstance(request.extra_configs.max_thinking_tokens, int)
-        ):
-            config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
         # add_thinking_params now accepts generate_env_config parameter
         config.add_thinking_params(self.tokenizer, self.generate_env_config)
+        if (
+            request.extra_configs is not None
+            and "max_thinking_tokens" in request.extra_configs.model_fields_set
+        ):
+            config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
+        if request.thinking_budget is not None:
+            budget = int(request.thinking_budget)
+            config.max_thinking_tokens = _INT32_MAX if budget < 0 else budget
+        if request.enable_thinking_requested() and config.max_thinking_tokens != 0:
+            config.in_think_mode = True
+            self._ensure_think_end_token_ids(config)
+        if request.disable_thinking():
+            config.in_think_mode = False
+            config.max_thinking_tokens = 0
         if request.debug_info:
             config.return_output_ids = True
         return config

@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cstring>
 #include <memory>
+#include <limits>
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
@@ -14,6 +15,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -82,10 +84,14 @@ public:
                                           const RuntimeConfig&   runtime_config,
                                           const ResourceContext& resource_context,
                                           const vector<int>&     input_ids,
-                                          const int              block_id) {
+                                          const int              block_id,
+                                          const vector<int>&     begin_think_token_ids = {},
+                                          const vector<int>&     end_think_token_ids   = {}) {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
         query->input_ids       = torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
         query->generate_config = make_shared<GenerateConfig>();
+        query->generate_config->begin_think_token_ids = begin_think_token_ids;
+        query->generate_config->end_think_token_ids   = end_think_token_ids;
         GenerateStreamPtr stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         BatchKVCacheResource addr;
@@ -213,6 +219,47 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTok
     for (int64_t row = 4; row < 8; ++row) {
         EXPECT_EQ(6, data[row * stride]);
         EXPECT_EQ(7, data[row * stride + 1]);
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 16;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 2;
+    cache_config.group_types    = {CacheGroupType::FULL};
+
+    ResourceContext resource_context;
+    auto stream = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1, {7}, {8, 9});
+    stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    StreamGroups stream_groups({stream});
+
+    GptModelInputs  model_input;
+    GptModelOutputs model_output;
+    model_output.logits = torch::zeros({3, 16}, torch::kFloat32);
+
+    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_input, model_output);
+    ASSERT_TRUE(sampler_inputs_status.ok());
+    auto sampler_inputs = sampler_inputs_status.value();
+
+    ASSERT_NE(sampler_inputs.logits_processor_states_ptr, nullptr);
+    sampler_inputs.logits_processor_states_ptr->batchProcess(sampler_inputs);
+
+    float neg_inf = -std::numeric_limits<float>::max();
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_EQ(neg_inf, sampler_inputs.logits[i][7].item<float>());
+        EXPECT_EQ(neg_inf, sampler_inputs.logits[i][8].item<float>());
+        EXPECT_EQ(0, sampler_inputs.logits[i][9].item<float>());
     }
 }
 

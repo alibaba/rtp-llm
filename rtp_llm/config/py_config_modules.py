@@ -17,6 +17,7 @@ from rtp_llm.ops import (
     EPLBConfig,
     FfnDisAggregateConfig,
     FMHAConfig,
+    GrammarConfig,
     GrpcConfig,
     HWKernelConfig,
     MiscellaneousConfig,
@@ -560,6 +561,7 @@ class PyEnvConfigs:
         self.arpc_config = ArpcConfig()
         self.grpc_config = GrpcConfig()
         self.dash_sc_grpc_config = DashScGrpcConfig()
+        self.grammar_config = GrammarConfig()
         self.deep_ep_config = DeepEPConfig()
         self.prefill_cp_config = PrefillCPConfig()
 
@@ -615,5 +617,6 @@ class PyEnvConfigs:
             + "\n\n"
             "[grpc_config]\n" + self.grpc_config.to_string() + "\n\n"
             "[dash_sc_grpc_config]\n" + self.dash_sc_grpc_config.to_string() + "\n\n"
+            "[grammar_config]\n" + self.grammar_config.to_string() + "\n\n"
             "[prefill_cp_config]\n" + self.prefill_cp_config.to_string() + "\n\n"
         )
