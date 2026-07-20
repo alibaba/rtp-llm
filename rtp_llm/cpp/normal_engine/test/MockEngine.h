@@ -65,6 +65,7 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     model_config.attn_config.kv_head_num                        = 2;
     model_config.activation_type                                = ActivationType::Silu;
     kv_cache_config.test_block_num                              = 100;
+    kv_cache_config.device_cache_min_free_blocks                = 1;
     kv_cache_config.reuse_cache                                 = config.reuse_cache;
     kv_cache_config.multi_task_prompt_tokens                    = config.multi_task_prompt_tokens;
     runtime_config.max_generate_batch_size                      = 128;

@@ -147,6 +147,15 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "block_tree_cache_allocator_test_helper",
+    hdrs = [
+        "BlockTreeCacheAllocatorTestHelper.h",
+    ],
+    copts = test_copts,
+    deps = ["//rtp_llm/cpp/cache/block_tree_cache"],
+)
+
 cc_test(
     name = "block_cache_test",
     srcs = [
@@ -220,6 +229,8 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
+        ":block_tree_cache_allocator_test_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
@@ -281,6 +292,8 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
+        ":block_tree_cache_allocator_test_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
@@ -295,6 +308,8 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
+        ":block_tree_cache_allocator_test_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
@@ -309,6 +324,8 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
+        ":block_tree_cache_allocator_test_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
@@ -337,6 +354,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
+        ":block_tree_cache_allocator_test_helper",
         "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
         "//rtp_llm/cpp/cache/connector/p2p:layer_block_converter",
     ],

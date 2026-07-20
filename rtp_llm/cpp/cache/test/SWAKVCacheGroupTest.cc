@@ -266,6 +266,34 @@ TEST_F(SWAKVCacheGroupTest, Malloc_DSV4PromptTailKeepsPenultimateBlock) {
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 2);
 }
 
+TEST_F(SWAKVCacheGroupTest, EmptyBlockIdsKeepTailBlocksAcrossLongSequenceBoundaries) {
+    constexpr int kSeqSizePerBlock = 256;
+    constexpr int kMaxSeqLen       = 1000000;
+    auto          group            = makeGroup(kSeqSizePerBlock);
+
+    const int max_seq_slots = (kMaxSeqLen + kSeqSizePerBlock - 1) / kSeqSizePerBlock;
+    for (int seq_slots = 1; seq_slots <= max_seq_slots; ++seq_slots) {
+        for (const int seq_len : {std::min(kMaxSeqLen, (seq_slots - 1) * kSeqSizePerBlock + 1),
+                                  std::min(kMaxSeqLen, seq_slots * kSeqSizePerBlock)}) {
+            BlockIds block_ids(1);
+            ASSERT_TRUE(group.malloc(block_ids, seq_len, /*enable_reuse_cache=*/false, /*reserve_step=*/0))
+                << "seq_len=" << seq_len;
+
+            const auto& blocks = block_ids.blocks();
+            ASSERT_EQ(blocks.size(), static_cast<size_t>(seq_slots)) << "seq_len=" << seq_len;
+            if (blocks.size() == 1) {
+                EXPECT_FALSE(isNullBlockIdx(blocks[0])) << "seq_len=" << seq_len;
+            } else {
+                EXPECT_FALSE(isNullBlockIdx(blocks[blocks.size() - 2])) << "seq_len=" << seq_len;
+                EXPECT_FALSE(isNullBlockIdx(blocks.back())) << "seq_len=" << seq_len;
+            }
+
+            group.free(blocks);
+            EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_) << "seq_len=" << seq_len;
+        }
+    }
+}
+
 TEST_F(SWAKVCacheGroupTest, Malloc_NoOpWhenEnoughBlocks) {
     auto     group = makeGroup(4);
     BlockIds block_ids(1);

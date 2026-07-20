@@ -21,6 +21,7 @@
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
+#include "rtp_llm/cpp/cache/test/BlockTreeCacheAllocatorTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
@@ -31,13 +32,15 @@
 namespace rtp_llm {
 namespace test {
 
+using TestHybridPoolKVCacheAllocator = BlockTreeCacheTestAllocator<HybridPoolKVCacheAllocator>;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 // Build a tiny multi-pool config with two groups: gid=0 LINEAR(layers 0,1)
 // and gid=1 FULL(layers 2,3). Each group has its own per-group block budget,
-// so HybridPoolKVCacheAllocator creates two independent BlockPools.
+// so TestHybridPoolKVCacheAllocator creates two independent BlockPools.
 static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num = 6,
                                                  uint32_t       full_block_num   = 8,
                                                  CacheGroupType second_type      = CacheGroupType::FULL) {
@@ -217,10 +220,10 @@ static size_t validBlockCount(const BlockIndicesType& blocks) {
         std::count_if(blocks.begin(), blocks.end(), [](BlockIdxType block) { return !isNullBlockIdx(block); }));
 }
 
-// Create HybridPoolKVCacheAllocator with SharedBlockCache injected (required before init()).
-static HybridPoolKVCacheAllocatorPtr
+// Create TestHybridPoolKVCacheAllocator with SharedBlockCache injected (required before init()).
+static std::shared_ptr<TestHybridPoolKVCacheAllocator>
 makeAllocator(const CacheConfig& config, RoleType role_type = RoleType::PDFUSION, int64_t reserve_block_ratio = 0) {
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(
+    auto allocator = std::make_shared<TestHybridPoolKVCacheAllocator>(
         config, AllocationType::DEVICE, nullptr, reserve_block_ratio, role_type);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
@@ -421,7 +424,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, SwaDefaultRegionGroupPoolUsesGpuBacking) 
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, GetBlockPoolReturnsNullptrInHybridPoolMode) {
-    // HybridPoolKVCacheAllocator owns one BlockPool per group and does not
+    // TestHybridPoolKVCacheAllocator owns one BlockPool per group and does not
     // expose a single canonical block_pool_; getBlockPool() must return nullptr.
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);
@@ -1411,26 +1414,18 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionMarksCanonicalResour
     FreeInfo seed_free{seed_res, seed_tokens};
     allocator->free(seed_free);
 
-    auto evicted = allocator->popBlocksFromCache(/*min_blocks_to_free=*/4);
-    ASSERT_NE(evicted, nullptr);
-    ASSERT_TRUE(evicted->hasCacheKeys());
-    EXPECT_TRUE(evicted->cacheResource(0).cacheKeysAreCpCanonical());
-
     KVCacheResource canonical_source;
     canonical_source.setCacheKeys(full_keys);
     const auto expected_canonical = canonical_source.localCacheKeys(cp_mapper->cpSize() - 1, cp_mapper->cpSize());
-    EXPECT_EQ(evicted->cacheKeys(0), expected_canonical);
-    const auto& dependencies = evicted->cacheResource(0).blockDependencies();
-    ASSERT_EQ(dependencies.size(), expected_canonical.size());
-    for (size_t i = 0; i < dependencies.size(); ++i) {
-        EXPECT_EQ(dependencies[i].ordinal, static_cast<uint32_t>(i));
-        if (i == 0) {
-            EXPECT_FALSE(dependencies[i].has_parent);
-        } else {
-            EXPECT_TRUE(dependencies[i].has_parent);
-            EXPECT_EQ(dependencies[i].parent_key, expected_canonical[i - 1]);
-        }
-    }
+    const auto before             = allocator->blockTreeCacheOwner()->getKeySnapshot(expected_canonical.size() + 1);
+    EXPECT_EQ(before.keys, expected_canonical);
+
+    // The migrated allocator publishes to BlockTreeCache, so eviction is observed
+    // through the tree rather than the retired SharedBlockCache pop resource.
+    EXPECT_GT(allocator->blockTreeCacheOwner()->reclaimBlocks(/*num_blocks=*/4096), 0);
+    const auto after = allocator->blockTreeCacheOwner()->getKeySnapshot(expected_canonical.size() + 1);
+    EXPECT_GT(after.version, before.version);
+    EXPECT_TRUE(after.keys.empty());
 }
 
 }  // namespace test

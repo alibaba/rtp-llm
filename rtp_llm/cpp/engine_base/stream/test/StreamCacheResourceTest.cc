@@ -24,12 +24,58 @@
 #include "rtp_llm/cpp/config/RoleTypes.h"
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <thread>
 
 using namespace std;
 
 namespace rtp_llm {
+
+class ImmediateAllocatorContext: public AsyncContext {
+public:
+    explicit ImmediateAllocatorContext(bool success, bool done = true): success_(success), done_(done) {}
+
+    void waitDone() override {
+        done_ = true;
+    }
+
+    bool done() const override {
+        return done_;
+    }
+
+    bool success() const override {
+        return success_;
+    }
+
+    void setDone(bool done) {
+        done_ = done;
+    }
+
+private:
+    bool success_{false};
+    bool done_{true};
+};
+
+class DestructionObserverContext: public AsyncContext {
+public:
+    explicit DestructionObserverContext(std::function<void()> observer): observer_(std::move(observer)) {}
+
+    ~DestructionObserverContext() override {
+        observer_();
+    }
+
+    void waitDone() override {}
+    bool done() const override {
+        return false;
+    }
+    bool success() const override {
+        return false;
+    }
+
+private:
+    std::function<void()> observer_;
+};
 
 class StreamCacheResourceTest: public DeviceTestBase {
 protected:
@@ -72,10 +118,13 @@ protected:
     void prepareResourceWithCacheConfig(const CacheConfig&      cache_config,
                                         const std::vector<int>& input_tokens,
                                         bool                    reuse_cache,
-                                        RoleType                role_type) {
-        cache_manager_ = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr);
+                                        RoleType                role_type,
+                                        const KVCacheConfig&    kv_cache_config      = {},
+                                        size_t                  expected_free_blocks = 8) {
+        cache_manager_ = std::make_shared<KVCacheManager>(
+            cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr, kv_cache_config);
         ASSERT_TRUE(cache_manager_->init());
-        ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
+        ASSERT_EQ(cache_manager_->freeBlocksNum(), expected_free_blocks);
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager_;
         resource_context.reuse_cache   = reuse_cache;
@@ -351,7 +400,13 @@ TEST_F(StreamCacheResourceTest, testCPShardedConnectorReuseUsesCanonicalBlockWid
 }
 
 TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyForFirstMalloc) {
-    prepareHybridResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto cache_config                                     = test::makeSimpleHybridMhaCacheConfig(/*layer_num=*/4,
+                                                             /*block_num=*/9,
+                                                             /*tokens_per_block=*/2,
+                                                             rtp_llm::DataType::TYPE_FP16,
+                                                             /*group_layer_num=*/2);
+    cache_config.disable_decode_first_malloc_device_reuse = true;
+    prepareResourceWithCacheConfig(cache_config, {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, RoleType::DECODE);
     auto& resource = stream_->streamCacheResource();
     ASSERT_GT(cache_manager_->cacheConfig().groupNums(), 1);
 
@@ -478,9 +533,23 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_DoesNotStoreCacheAsync_Whe
     ASSERT_EQ(resource.tryReleaseKVBlock(blocks), blocks);
 }
 
-TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TieredMemoryCache_EvictsDeviceBlocksWithSeparateMeta) {
-    prepareResource(/*reuse_cache=*/true);
+TEST_F(StreamCacheResourceTest, testTieredReleaseUsesBlockTreeForMemoryAndConnectorOnlyForRemote) {
+    KVCacheConfig tiered_config;
+    tiered_config.enable_memory_cache          = true;
+    tiered_config.enable_tiered_memory_cache   = true;
+    tiered_config.reuse_cache                  = true;
+    tiered_config.memory_cache_size_mb         = 1;
+    tiered_config.device_cache_min_free_blocks = 0;
+    auto cache_config                          = test::makeSimpleMhaCacheConfig(
+        /*layer_num=*/3, /*block_num=*/16, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
+    prepareResourceWithCacheConfig(cache_config,
+                                   {1, 2, 3, 4, 5, 6},
+                                   /*reuse_cache=*/true,
+                                   RoleType::PDFUSION,
+                                   tiered_config,
+                                   /*expected_free_blocks=*/15);
     auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(cache_manager_->blockTreeCache()->isMemoryCacheEnabled());
 
     stream_->generate_input_->generate_config->reuse_cache         = true;
     resource.resource_context_.enable_memory_cache                 = true;
@@ -488,7 +557,7 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TieredMemoryCache_EvictsDe
     resource.resource_context_.enable_remote_cache                 = true;
     stream_->generate_input_->generate_config->enable_remote_cache = true;
     resource.resource_context_.enable_tiered_memory_cache          = true;
-    resource.resource_context_.device_cache_min_free_blocks        = 8;
+    resource.resource_context_.device_cache_min_free_blocks        = 0;
 
     auto mock_coord =
         std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
@@ -497,34 +566,34 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TieredMemoryCache_EvictsDe
                                                                              cache_manager_->allocator_);
 
     cache_manager_->coordinator_ = mock_coord;
+    EXPECT_FALSE(mock_coord->hasMemoryConnector());
 
     std::vector<std::shared_ptr<KVCacheConnectorReadWriteContext>> captured_ctxs;
     auto store_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     EXPECT_CALL(*mock_coord, asyncWrite(testing::_))
-        .Times(2)
-        .WillRepeatedly(
-            testing::Invoke([&](const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
-                captured_ctxs.push_back(connector_context);
-                return store_ctx;
-            }));
+        .WillOnce(testing::Invoke([&](const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
+            captured_ctxs.push_back(connector_context);
+            return store_ctx;
+        }));
 
     ASSERT_TRUE(resource.incrKVBlock().ok());
     ASSERT_GT(resource.curBlocksNum(), 0);
+    // Enable eviction only after admission; the absolute min-free setting is also
+    // allocator reserve headroom and would reject this intentionally small fixture.
+    cache_manager_->blockTreeCache()->setTierWatermark(Tier::DEVICE, 0.01, 0);
 
     stream_->generate_status_->status = StreamState::FINISHED;
     stream_->fillSubGenerateStatus(StreamState::FINISHED);
     const int blocks = resource.curBlocksNum();
     ASSERT_EQ(resource.tryReleaseKVBlock(blocks), blocks);
+    cache_manager_->blockTreeCache()->waitForPendingTasks();
 
-    ASSERT_EQ(captured_ctxs.size(), 2u);
+    ASSERT_EQ(captured_ctxs.size(), 1u);
     ASSERT_NE(captured_ctxs[0], nullptr);
-    ASSERT_NE(captured_ctxs[1], nullptr);
     EXPECT_FALSE(captured_ctxs[0]->meta()->enableMemoryCache());
     EXPECT_TRUE(captured_ctxs[0]->meta()->enableRemoteCache());
-    EXPECT_TRUE(captured_ctxs[1]->meta()->enableMemoryCache());
-    EXPECT_FALSE(captured_ctxs[1]->meta()->enableRemoteCache());
-    EXPECT_FALSE(captured_ctxs[1]->kvCacheResource().cacheKeys().empty());
-    EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
+    EXPECT_GT(cache_manager_->blockTreeCache()->getStats().host_heap_total_size, 0u);
+    EXPECT_EQ(cache_manager_->freeBlocksNum(), 15u);
 }
 
 // ============================================================================
@@ -823,6 +892,66 @@ TEST_F(StreamCacheResourceTest, testWaitLoadCacheDone_ZeroReuseLen_DoesNotOverwr
     EXPECT_EQ(stream_->memoryReuseLength(), 40);
     EXPECT_EQ(stream_->remoteReuseLength(), 20);
     EXPECT_EQ(stream_->getMtpTokenIndex(), 100);
+}
+
+TEST_F(StreamCacheResourceTest, testAllocatorLoadContextGatesConnectorLaunchUntilDone) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    auto load_context                = std::make_shared<ImmediateAllocatorContext>(true, false);
+    resource.allocator_load_context_ = load_context;
+
+    EXPECT_TRUE(resource.asyncLoadCache());
+    EXPECT_FALSE(resource.loadCacheDone());
+    load_context->setDone(true);
+    EXPECT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(resource.allocator_load_context_, nullptr);
+    EXPECT_FALSE(stream_->hasError());
+}
+
+TEST_F(StreamCacheResourceTest, testAllocatorLoadFailureIsTerminalAndDoesNotLaunchConnector) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    auto mock_coord =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
+    EXPECT_CALL(*mock_coord, asyncRead(testing::_)).Times(0);
+    cache_manager_->coordinator_ = mock_coord;
+
+    resource.allocator_load_context_ = std::make_shared<ImmediateAllocatorContext>(false);
+    EXPECT_TRUE(resource.asyncLoadCache());
+    EXPECT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(resource.allocator_load_context_, nullptr);
+    EXPECT_TRUE(stream_->hasError());
+}
+
+TEST_F(StreamCacheResourceTest, testReleaseResetsAllocatorContextBeforeFreeingRequestBlocks) {
+    prepareResource(/*reuse_cache=*/false);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_GT(resource.curBlocksNum(), 0);
+    ASSERT_LT(cache_manager_->freeBlocksNum(), 8u);
+
+    bool context_destroyed_before_free       = false;
+    bool request_blocks_still_present        = false;
+    resource.allocator_load_context_         = std::make_shared<DestructionObserverContext>([&] {
+        context_destroyed_before_free = true;
+        request_blocks_still_present  = resource.curBlocksNum() > 0 && cache_manager_->freeBlocksNum() < 8u;
+    });
+    std::weak_ptr<AsyncContext> weak_context = resource.allocator_load_context_;
+
+    stream_->releaseResource();
+
+    EXPECT_TRUE(context_destroyed_before_free);
+    EXPECT_TRUE(request_blocks_still_present);
+    EXPECT_TRUE(weak_context.expired());
+    EXPECT_EQ(resource.allocator_load_context_, nullptr);
+    EXPECT_EQ(resource.curBlocksNum(), 0);
+    EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
 }
 
 }  // namespace rtp_llm

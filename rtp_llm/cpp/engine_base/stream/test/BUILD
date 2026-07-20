@@ -55,6 +55,12 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps,
+    # Count the otherwise non-virtual cancellation seam without changing the
+    # production API. This is the Itanium ABI symbol for
+    # rtp_llm::KVCacheManager::cancelLoadBack(shared_ptr<AsyncContext> const&).
+    linkopts = [
+        "-Wl,--wrap=_ZN7rtp_llm14KVCacheManager14cancelLoadBackERKSt10shared_ptrINS_12AsyncContextEE",
+    ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

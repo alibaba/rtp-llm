@@ -257,8 +257,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionCompletedAsyncLoadStaysInAdmissi
     auto done_ctx = createDoneAsyncContext();
     EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(done_ctx)));
 
-    auto scheduler = createPDFusionRatioScheduler();
-    auto loaded    = createStream({1, 2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    auto scheduler                           = createPDFusionRatioScheduler();
+    auto loaded                              = createStream({1, 2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
     loaded->generateConfig()->max_new_tokens = 2;
     ASSERT_TRUE(scheduler->enqueue(loaded).ok());
 
@@ -269,7 +269,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionCompletedAsyncLoadStaysInAdmissi
     ASSERT_EQ(cache_manager_->freeBlocksNum(), 1);
     ASSERT_EQ(loaded->estimatePeakNeedBlocks(/*remaining_tokens=*/1), 1);
 
-    auto candidate = createStream({3});
+    auto candidate                              = createStream({3});
     candidate->generateConfig()->max_new_tokens = 2;
     ASSERT_EQ(candidate->estimatePeakNeedBlocks(/*remaining_tokens=*/1), 1);
     ASSERT_TRUE(scheduler->enqueue(candidate).ok());
@@ -299,10 +299,10 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionLoadingCacheReservesDelayedBeamT
 
     auto scheduler = createPDFusionRatioScheduler();
     auto loaded    = createStream({1, 2, 3, 4, 5},
-                                  /*reuse_cache=*/true,
-                                  /*enable_memory_cache=*/true,
-                                  /*max_new_tokens=*/3,
-                                  /*variable_num_beams=*/{1, 4});
+                               /*reuse_cache=*/true,
+                               /*enable_memory_cache=*/true,
+                               /*max_new_tokens=*/3,
+                               /*variable_num_beams=*/{1, 4});
     ASSERT_EQ(loaded->currentBatchSize(), 1);
     ASSERT_EQ(loaded->maxBatchSize(), 4);
     ASSERT_TRUE(scheduler->enqueue(loaded).ok());
@@ -506,10 +506,10 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_IncludedInEmptyAndOn
 }
 
 // ============================================================================
-// 8. loading_cache_streams_ included in waitPredicate()
+// 8. loading-only work relies on timed polling rather than waitPredicate()
 // ============================================================================
 
-TEST_F(FIFOSchedulerAsyncCacheTest, testWaitPredicate_IncludesLoadingCacheStreams) {
+TEST_F(FIFOSchedulerAsyncCacheTest, testWaitPredicate_LoadingOnlyUsesTimedPolling) {
     auto scheduler = createScheduler();
     // Empty scheduler -> waitPredicate should be false
     ASSERT_FALSE(scheduler->waitPredicate());
@@ -517,7 +517,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testWaitPredicate_IncludesLoadingCacheStream
     // Add a fake stream to loading_cache_streams_
     auto stream = createStream({1, 2, 3});
     scheduler->loading_cache_streams_.emplace_back(stream);
-    ASSERT_TRUE(scheduler->waitPredicate());
+    ASSERT_FALSE(scheduler->waitPredicate());
 }
 
 // ============================================================================
@@ -639,6 +639,18 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleOrdering_LoadDoneStreamsAtWaitin
     ASSERT_TRUE(result2.ok());
     // Both streams should be running now
     ASSERT_GE(result2.value().size(), 1);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingOnlyStateUsesTimedPollWithoutImmediatePredicateSpin) {
+    auto scheduler = createScheduler();
+    ASSERT_FALSE(scheduler->waitPredicate());
+
+    auto stream = createStream({1, 2, 3});
+    scheduler->loading_cache_streams_.emplace_back(stream);
+
+    // A pending load is polled by schedule()'s 10 ms timed wait. It must not
+    // make the condition predicate immediately true and spin the scheduler.
+    EXPECT_FALSE(scheduler->waitPredicate());
 }
 
 }  // namespace rtp_llm

@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTransferConverter.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
@@ -24,6 +25,7 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -298,10 +300,43 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
     ASSERT_TRUE(cache_manager->init());
 
-    EXPECT_EQ(cache_manager->cacheConfig().block_num, 1);
+    EXPECT_EQ(cache_manager->cacheConfig().block_num, 2);
+    EXPECT_EQ(cache_manager->totalBlocksNum(), 1);
+    EXPECT_EQ(cache_manager->freeBlocksNum(), 1);
 
-    EXPECT_EQ(cache_manager->totalBlocksNum(), 0);
-    EXPECT_EQ(cache_manager->freeBlocksNum(), 0);
+    auto       resource = makeDSV4BatchResource(cache_manager->cacheConfig());
+    auto       tokens   = makeDSV4CompleteTokenIds(/*initial_seq_len=*/1,
+                                           /*max_seq_len=*/2,
+                                           /*seq_size_per_block=*/2);
+    MallocInfo malloc_info{resource, tokens};
+    malloc_info.reuse_cache         = false;
+    malloc_info.enable_device_cache = false;
+    ASSERT_TRUE(cache_manager->malloc(malloc_info).success);
+    ASSERT_EQ(resource->blocksNum(/*batch_id=*/0, /*group_id=*/0), 1);
+    EXPECT_EQ(resource->blocks(0, 0).front(), 1);
+    cache_manager->free(FreeInfo{resource, tokens});
+    EXPECT_EQ(cache_manager->freeBlocksNum(), 1);
+}
+
+TEST_F(KVCacheManagerTest, WarmupPreservesExplicitChargedIndependentPoolPolicy) {
+    auto      config       = makeCompactDSV4ManagerConfig(/*block_num=*/16);
+    const int explicit_gid = config.groupIdForTag("hca_state");
+    ASSERT_GE(explicit_gid, 0);
+
+    auto policies                                                      = config.groupPoliciesSnapshot();
+    policies[static_cast<size_t>(explicit_gid)].explicit_block_num     = 4;
+    policies[static_cast<size_t>(explicit_gid)].charge_to_paged_budget = true;
+    config.setGroupPolicies(policies);
+
+    auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
+    ASSERT_TRUE(manager->init());
+
+    const auto& finalized = manager->cacheConfig();
+    const auto  policy    = finalized.policyForGroup(static_cast<size_t>(explicit_gid));
+    EXPECT_EQ(policy.explicit_block_num, 4u);
+    EXPECT_TRUE(policy.charge_to_paged_budget);
+    EXPECT_EQ(finalized.blockNumForGroup(static_cast<size_t>(explicit_gid)), 4u);
+    EXPECT_GT(finalized.explicitly_sized_pool_reserve_bytes, 0u);
 }
 
 TEST_F(KVCacheManagerTest, InitRejectsSingleLinearGroup) {
@@ -322,6 +357,58 @@ TEST_F(KVCacheManagerTest, InitAcceptsFullAndLinearGroups) {
     ASSERT_TRUE(cache_manager->init());
     EXPECT_NE(cache_manager->convertIndexToAddr(/*block_index=*/1, /*layer_id=*/0).kv_addr, nullptr);
     EXPECT_NE(cache_manager->convertIndexToAddr(/*block_index=*/1, /*layer_id=*/3).kv_addr, nullptr);
+}
+
+TEST_F(KVCacheManagerTest, InitPublishesOneOwnedBlockTreeCacheAndInjectsSameObserver) {
+    auto cache_config = makeSimpleHybridMhaCacheConfig(
+        /*layer_num=*/4, /*block_num=*/6, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_NE(cache_manager->blockTreeCache(), nullptr);
+    ASSERT_NE(cache_manager->allocator_, nullptr);
+    EXPECT_EQ(cache_manager->allocator_->blockTreeCache(), cache_manager->blockTreeCache().get());
+
+    const auto target_groups = cache_manager->allocator_->cacheGroups();
+    ASSERT_EQ(target_groups.size(), static_cast<size_t>(cache_config.groupNums()));
+    for (const auto& target_group : target_groups) {
+        ASSERT_NE(target_group, nullptr);
+        EXPECT_EQ(cache_manager->blockTreeCache()->deviceKVGroup(target_group->tag()).get(), target_group.get());
+    }
+}
+
+TEST_F(KVCacheManagerTest, TeardownDisconnectsSurvivingAllocatorBeforeOwnedBlockTreeCacheDies) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/2, /*block_num=*/6, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    ASSERT_TRUE(cache_manager->init());
+
+    KVCacheAllocatorPtr           surviving_allocator = cache_manager->allocator_;
+    std::weak_ptr<BlockTreeCache> cache_lifetime      = cache_manager->blockTreeCache();
+    ASSERT_NE(surviving_allocator->blockTreeCache(), nullptr);
+    ASSERT_FALSE(cache_lifetime.expired());
+
+    cache_manager.reset();
+
+    EXPECT_EQ(surviving_allocator->blockTreeCache(), nullptr);
+    EXPECT_TRUE(cache_lifetime.expired());
+    EXPECT_FALSE(surviving_allocator->cacheGroups().empty());
+}
+
+TEST_F(KVCacheManagerTest, FactoryFailureDoesNotPublishOrInjectBlockTreeCache) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/2, /*block_num=*/6, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache_disk = true;
+    auto cache_manager                       = std::make_shared<KVCacheManager>(cache_config,
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          kv_cache_config);
+
+    EXPECT_FALSE(cache_manager->init());
+    EXPECT_EQ(cache_manager->blockTreeCache(), nullptr);
+    ASSERT_NE(cache_manager->allocator_, nullptr);
+    EXPECT_EQ(cache_manager->allocator_->blockTreeCache(), nullptr);
 }
 
 TEST_F(KVCacheManagerTest, DSV4IndependentPoolsUseGpuBacking) {
@@ -835,52 +922,6 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
     manager->free(FreeInfo{second_resource, second_tokens});
 }
 
-TEST_F(KVCacheManagerTest, DSV4PopCachedBlocksPreservesGroupShape) {
-    auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/16);
-    auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
-    ASSERT_TRUE(manager->init());
-
-    const int spb      = static_cast<int>(manager_config.seq_size_per_block);
-    const int seq_len  = 3 * spb + 1;
-    auto      resource = makeDSV4BatchResource(manager_config);
-    auto      tokens   = makeDSV4CompleteTokenIds(seq_len, seq_len, spb);
-
-    MallocInfo malloc_info{resource, tokens};
-    malloc_info.reuse_cache         = true;
-    malloc_info.enable_device_cache = false;
-    ASSERT_TRUE(manager->malloc(malloc_info).success);
-
-    InsertInfo insert_info{resource, tokens, /*is_resident=*/false};
-    manager->insertIntoCache(insert_info);
-    FreeInfo free_info{resource, tokens};
-    manager->free(free_info);
-
-    auto evicted = manager->popBlocksFromCache(/*min_blocks_to_free=*/10);
-    ASSERT_NE(evicted, nullptr);
-    ASSERT_TRUE(evicted->hasCacheKeys());
-    EXPECT_EQ(evicted->groupNums(), kDsv4PoolNum);
-    EXPECT_EQ(evicted->cacheResource(0).layerGroupBlocks().size(), static_cast<size_t>(manager_config.layer_num));
-
-    bool saw_paged_block = false;
-    bool saw_tail_block  = false;
-    for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
-        ASSERT_EQ(evicted->blocksNum(0, gid), static_cast<int>(evicted->cacheKeys(0).size())) << "group " << gid;
-        for (auto block : evicted->blocks(0, gid)) {
-            if (!isNullBlockIdx(block)) {
-                if (isFullGroup(manager_config, gid)) {
-                    saw_paged_block = true;
-                } else {
-                    saw_tail_block = true;
-                }
-            }
-        }
-    }
-    EXPECT_TRUE(saw_paged_block);
-    EXPECT_TRUE(saw_tail_block);
-
-    manager->blockCacheFree(evicted);
-}
-
 TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenMemoryCacheDisabled) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
@@ -917,8 +958,8 @@ TEST_F(KVCacheManagerTest, Init_Throws_WhenMemoryCacheEnabledButSyncTimeoutInval
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     EXPECT_THROW(kv_cache_manager->init(), std::runtime_error);
-    ASSERT_NE(kv_cache_manager->coordinator_, nullptr);
-    EXPECT_EQ(kv_cache_manager->coordinator_->update_thread_, nullptr);
+    // Construction rejects the invalid timeout before coordinator_ can be published.
+    EXPECT_EQ(kv_cache_manager->coordinator_, nullptr);
 }
 
 TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenMemoryCacheEnabledAndConfigValid) {
@@ -939,6 +980,25 @@ TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenMemoryCacheEnabledAndConfigValid)
     auto coordinator = kv_cache_manager->coordinator_;
     ASSERT_NE(coordinator, nullptr);
     EXPECT_EQ(coordinator->connectors_.size(), 1u);
+}
+
+TEST_F(KVCacheManagerTest, TieredMemoryCacheIsOwnedOnlyByBlockTreeCache) {
+    auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache        = true;
+    kv_cache_config.enable_tiered_memory_cache = true;
+    kv_cache_config.reuse_cache                = true;
+    kv_cache_config.memory_cache_size_mb       = 1;
+
+    auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    ASSERT_TRUE(manager->init());
+    ASSERT_NE(manager->coordinator_, nullptr);
+    EXPECT_FALSE(manager->coordinator_->hasMemoryConnector());
+    EXPECT_TRUE(manager->coordinator_->connectors_.empty());
+    ASSERT_NE(manager->blockTreeCache(), nullptr);
+    EXPECT_TRUE(manager->blockTreeCache()->isMemoryCacheEnabled());
+    ASSERT_EQ(manager->blockTreeCache()->componentGroups().size(), 1u);
+    EXPECT_NE(manager->blockTreeCache()->componentGroups().front()->hostPool(), nullptr);
 }
 
 TEST_F(KVCacheManagerTest, AsyncLoadCache_ReturnFromCoordinator_Success) {
@@ -992,8 +1052,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunction_ReturnFalse_CoordinatorReturnFalse) {
     auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config);
     kv_cache_manager->coordinator_ = mock_coordinator;
 
-    FunctionRequestPB request;
-    request.mutable_mem_request();
+    FunctionRequestPB  request;
     FunctionResponsePB response;
 
     EXPECT_CALL(*mock_coordinator, executeFunction(::testing::_, ::testing::_)).WillOnce(::testing::Return(false));
@@ -1012,8 +1071,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunction_ReturnTrue_Success) {
     auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config);
     kv_cache_manager->coordinator_ = mock_coordinator;
 
-    FunctionRequestPB request;
-    request.mutable_mem_request();
+    FunctionRequestPB  request;
     FunctionResponsePB response;
 
     EXPECT_CALL(*mock_coordinator, executeFunction(::testing::_, ::testing::_)).WillOnce(::testing::Return(true));
@@ -1021,58 +1079,258 @@ TEST_F(KVCacheManagerTest, ExecuteFunction_ReturnTrue_Success) {
     EXPECT_TRUE(kv_cache_manager->executeFunction(request, response));
 }
 
-TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
+TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsEmptyMemoryRequestWithoutCoordinatorFallback) {
+    auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    RuntimeConfig runtime_config;
+    auto          allocator = std::make_shared<MockKVCacheAllocator>(cache_config);
+    auto          mock_coordinator =
+        std::make_shared<MockKVCacheConnectorCoordinator>(cache_config, kv_cache_config, runtime_config, allocator);
+    auto manager          = std::make_shared<KVCacheManager>(cache_config);
+    manager->coordinator_ = mock_coordinator;
+
+    FunctionRequestPB request;
+    request.mutable_mem_request();
+    FunctionResponsePB response;
+    EXPECT_CALL(*mock_coordinator, executeFunction(::testing::_, ::testing::_)).Times(0);
+    EXPECT_FALSE(manager->executeFunction(request, response));
+    ASSERT_TRUE(response.has_mem_response());
+    EXPECT_FALSE(response.mem_response().success());
+}
+
+TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesAllUntaggedMemoryItemsToNonTieredCoordinator) {
+    auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache = true;
+    kv_cache_config.reuse_cache         = true;
+    RuntimeConfig runtime_config;
+    auto          allocator = std::make_shared<MockKVCacheAllocator>(cache_config);
+    auto          mock_coordinator =
+        std::make_shared<MockKVCacheConnectorCoordinator>(cache_config, kv_cache_config, runtime_config, allocator);
+    mock_coordinator->memory_connector_ =
+        std::make_shared<KVCacheMemoryConnector>(cache_config, kv_cache_config, allocator, std::vector<std::string>{});
+    auto manager          = std::make_shared<KVCacheManager>(cache_config, true, nullptr, kv_cache_config);
+    manager->coordinator_ = mock_coordinator;
+
+    FunctionRequestPB request;
+    auto*             memory_request = request.mutable_mem_request();
+    memory_request->set_copy_direction(MemoryOperationRequestPB::D2H);
+    auto* item = memory_request->add_copy_items();
+    item->set_backing_type(MemoryOperationRequestPB::MEMORY);
+    item->set_mem_block(1);
+    auto* tagged_block = item->add_tagged_gpu_blocks();
+    tagged_block->set_tag(cache_config.tagForGroup(0));
+    tagged_block->set_block_id(1);
+    tagged_block->set_layer_id(0);
+    FunctionResponsePB response;
+    EXPECT_CALL(*mock_coordinator, executeFunction(::testing::_, ::testing::_)).WillOnce(::testing::Return(true));
+    EXPECT_TRUE(manager->executeFunction(request, response));
+}
+
+static void appendValidTaggedTransfer(const std::shared_ptr<KVCacheManager>& manager, FunctionRequestPB& request) {
+    ASSERT_NE(manager->blockTreeCache(), nullptr);
+    const TransferDescriptor descriptor = TransferDescriptor::deviceToHost(/*group_id=*/0, {1}, /*host_block=*/1);
+    ASSERT_TRUE(BlockTreeTransferConverter::appendTransfer(
+        descriptor, manager->blockTreeCache()->componentGroups(), *request.mutable_mem_request()));
+}
+
+TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesAllTaggedMemoryItemsOnlyToTieredBlockTree) {
+    auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache        = true;
+    kv_cache_config.enable_tiered_memory_cache = true;
+    kv_cache_config.memory_cache_size_mb       = 1;
+    auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    ASSERT_TRUE(manager->init());
+
+    FunctionRequestPB request;
+    appendValidTaggedTransfer(manager, request);
+    FunctionResponsePB response;
+    EXPECT_TRUE(manager->executeFunction(request, response));
+    ASSERT_TRUE(response.has_mem_response());
+    EXPECT_TRUE(response.mem_response().success());
+}
+
+TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsMixedPartialUnavailableAndOutOfRangeTaggedItems) {
+    auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig tiered_config;
+    tiered_config.enable_memory_cache        = true;
+    tiered_config.enable_tiered_memory_cache = true;
+    tiered_config.memory_cache_size_mb       = 1;
+    auto tiered_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, tiered_config);
+    ASSERT_TRUE(tiered_manager->init());
+
+    {
+        FunctionRequestPB request;
+        appendValidTaggedTransfer(tiered_manager, request);
+        auto* mixed = request.mutable_mem_request()->add_copy_items();
+        mixed->CopyFrom(request.mem_request().copy_items(0));
+        mixed->clear_component_group_tags();
+        FunctionResponsePB response;
+        EXPECT_FALSE(tiered_manager->executeFunction(request, response));
+        EXPECT_FALSE(response.mem_response().success());
+    }
+    {
+        FunctionRequestPB request;
+        appendValidTaggedTransfer(tiered_manager, request);
+        request.mutable_mem_request()->mutable_copy_items(0)->clear_tagged_gpu_blocks();
+        FunctionResponsePB response;
+        EXPECT_FALSE(tiered_manager->executeFunction(request, response));
+        EXPECT_FALSE(response.mem_response().success());
+    }
+    {
+        KVCacheConfig unavailable_config;
+        auto unavailable_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, unavailable_config);
+        ASSERT_TRUE(unavailable_manager->init());
+        FunctionRequestPB request;
+        // Build a physically valid tagged transfer from the tiered topology, then
+        // verify that a manager without the requested HOST tier rejects it.
+        appendValidTaggedTransfer(tiered_manager, request);
+        FunctionResponsePB response;
+        EXPECT_FALSE(unavailable_manager->executeFunction(request, response));
+        EXPECT_FALSE(response.mem_response().success());
+    }
+    {
+        FunctionRequestPB request;
+        appendValidTaggedTransfer(tiered_manager, request);
+        auto*              item   = request.mutable_mem_request()->mutable_copy_items(0);
+        const BlockIdxType usable = static_cast<BlockIdxType>(
+            tiered_manager->blockTreeCache()->componentGroups().front()->devicePools().front()->totalBlocksNum());
+        ASSERT_EQ(item->tagged_gpu_blocks_size(), 1);
+        const std::string stable_tag = item->tagged_gpu_blocks(0).tag();
+        item->mutable_tagged_gpu_blocks(0)->set_block_id(usable + 1);
+        EXPECT_EQ(item->tagged_gpu_blocks(0).tag(), stable_tag);
+        const auto         backing               = tiered_manager->allocator_->cacheGroups().front()->blockPool();
+        const size_t       request_refs_before   = backing->requestRefBlocksNum();
+        const size_t       connector_refs_before = backing->connectorRefBlocksNum();
+        const size_t       cache_refs_before     = backing->blockCacheRefBlocksNum();
+        FunctionResponsePB response;
+        EXPECT_FALSE(tiered_manager->executeFunction(request, response));
+        EXPECT_FALSE(response.mem_response().success());
+        EXPECT_EQ(backing->requestRefBlocksNum(), request_refs_before);
+        EXPECT_EQ(backing->connectorRefBlocksNum(), connector_refs_before);
+        EXPECT_EQ(backing->blockCacheRefBlocksNum(), cache_refs_before);
+    }
+}
+
+TEST_F(KVCacheManagerTest, MultiRankZeroUsesDedicatedBroadcastManagerAndRetainsCoordinator) {
+    auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig     kv_cache_config;
+    ParallelismConfig parallelism_config;
+    RuntimeConfig     runtime_config;
+    kv_cache_config.enable_memory_cache        = true;
+    kv_cache_config.enable_tiered_memory_cache = true;
+    kv_cache_config.memory_cache_size_mb       = 1;
+    parallelism_config.tp_size                 = 2;
+    parallelism_config.tp_rank                 = 0;
+    parallelism_config.world_size              = 2;
+    runtime_config.worker_grpc_addrs           = {"127.0.0.1:12345", "127.0.0.1:12346"};
+
+    auto manager = std::make_shared<KVCacheManager>(
+        cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
+    ASSERT_TRUE(manager->init());
+    ASSERT_NE(manager->coordinator_, nullptr);
+    ASSERT_NE(manager->blockTreeCache(), nullptr);
+    ASSERT_NE(manager->blockTreeCache()->broadcast_manager_, nullptr);
+    EXPECT_EQ(manager->blockTreeCache()->broadcast_manager_->workerNum(), 2u);
+
+    FunctionRequestPB request;
+    appendValidTaggedTransfer(manager, request);
+    FunctionResponsePB response;
+    EXPECT_TRUE(manager->executeFunction(request, response));
+}
+
+TEST_F(KVCacheManagerTest, NonZeroMultiRankKeepsCoordinatorWithoutLocalBroadcastManager) {
+    auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig     kv_cache_config;
+    ParallelismConfig parallelism_config;
+    RuntimeConfig     runtime_config;
+    kv_cache_config.enable_memory_cache        = true;
+    kv_cache_config.enable_tiered_memory_cache = true;
+    kv_cache_config.memory_cache_size_mb       = 1;
+    parallelism_config.tp_size                 = 2;
+    parallelism_config.tp_rank                 = 1;
+    parallelism_config.world_size              = 2;
+    parallelism_config.world_rank              = 1;
+    runtime_config.worker_grpc_addrs           = {"127.0.0.1:12345", "127.0.0.1:12346"};
+
+    auto manager = std::make_shared<KVCacheManager>(
+        cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
+    ASSERT_TRUE(manager->init());
+    ASSERT_NE(manager->coordinator_, nullptr);
+    ASSERT_NE(manager->blockTreeCache(), nullptr);
+    EXPECT_EQ(manager->blockTreeCache()->broadcast_manager_, nullptr);
+}
+
+TEST_F(KVCacheManagerTest, MultiRankZeroRejectsMismatchedBroadcastAddressCount) {
+    auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig     kv_cache_config;
+    ParallelismConfig parallelism_config;
+    RuntimeConfig     runtime_config;
+    parallelism_config.tp_size       = 2;
+    parallelism_config.tp_rank       = 0;
+    parallelism_config.world_size    = 2;
+    runtime_config.worker_grpc_addrs = {"127.0.0.1:12345"};
+
+    auto manager = std::make_shared<KVCacheManager>(
+        cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
+    EXPECT_FALSE(manager->init());
+}
+
+TEST_F(KVCacheManagerTest, GetKVCacheInfoUsesAuthoritativeBlockTreeSnapshot) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 8, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache = false;  // avoid starting real memory connector in coordinator->init()
-    kv_cache_config.reuse_cache         = false;
+    kv_cache_config.reuse_cache = true;
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
     ASSERT_NE(kv_cache_manager->allocator_, nullptr);
-    ASSERT_NE(kv_cache_manager->coordinator_, nullptr);
+    ASSERT_NE(kv_cache_manager->blockTreeCache(), nullptr);
 
-    // Seed device block cache with keys: 10, 11, 12 (put makes MRU at front => snapshot order: 12,11,10)
+    const auto empty = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true);
+    EXPECT_TRUE(empty.cached_keys.empty());
+
+    auto       resource = makeDSV4BatchResource(cache_config);
+    auto       tokens   = makeDSV4CompleteTokenIds(/*initial_seq_len=*/4, /*max_seq_len=*/4, /*seq_size_per_block=*/2);
+    MallocInfo malloc_info{resource, tokens};
+    malloc_info.reuse_cache         = true;
+    malloc_info.enable_device_cache = false;
+    ASSERT_TRUE(kv_cache_manager->malloc(malloc_info).success);
+    kv_cache_manager->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false});
+
+    const auto tree_snapshot = kv_cache_manager->blockTreeCache()->getKeySnapshot(/*limit=*/10000);
+    ASSERT_GT(tree_snapshot.version, empty.version);
+    ASSERT_FALSE(tree_snapshot.keys.empty());
+
     auto shared_cache = kv_cache_manager->allocator_->sharedBlockCache();
     ASSERT_NE(shared_cache, nullptr);
-    {
-        std::vector<BlockIdxType> group_block_ids(1);
-        group_block_ids[0] = 1;
-        shared_cache->put(10, group_block_ids, false);
-        group_block_ids[0] = 2;
-        shared_cache->put(11, group_block_ids, false);
-        group_block_ids[0] = 3;
-        shared_cache->put(12, group_block_ids, false);
-    }
+    shared_cache->put(/*cache_key=*/987654321, BlockIndicesType{1}, /*is_resident=*/false);
 
-    // Inject a lightweight memory connector with a MemoryBlockCache snapshot:
-    // put 11 then 13 => MRU order: 13,11 (11 duplicates device key)
-    auto mem_connector = std::make_shared<KVCacheMemoryConnector>(
-        cache_config, kv_cache_config, kv_cache_manager->allocator_, std::vector<std::string>{});
-    mem_connector->block_cache_ = std::make_shared<MemoryDiskBlockCache>();
-    {
-        MemoryBlockCache::CacheItem item;
-        item.cache_key   = 11;
-        item.block_index = 101;
-        item.block_size  = 1;
-        item.is_resident = false;
-        ASSERT_TRUE(mem_connector->block_cache_->put(item).first);
-        item.cache_key   = 13;
-        item.block_index = 102;
-        ASSERT_TRUE(mem_connector->block_cache_->put(item).first);
-    }
-    kv_cache_manager->coordinator_->memory_connector_ = mem_connector;
+    const auto changed = kv_cache_manager->getKVCacheInfo(/*latest_version=*/empty.version, /*need_cache_keys=*/true);
+    EXPECT_EQ(changed.version, tree_snapshot.version);
+    EXPECT_EQ(changed.cached_keys, tree_snapshot.keys);
+    EXPECT_LE(changed.cached_keys.size(), 10000u);
+    EXPECT_EQ(std::find(changed.cached_keys.begin(), changed.cached_keys.end(), 987654321), changed.cached_keys.end());
 
-    // latest_version=-1 forces SharedBlockCache snapshot to return all current keys.
-    auto info = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true);
+    const auto same =
+        kv_cache_manager->getKVCacheInfo(/*latest_version=*/tree_snapshot.version, /*need_cache_keys=*/true);
+    EXPECT_EQ(same.version, tree_snapshot.version);
+    EXPECT_TRUE(same.cached_keys.empty());
 
-    // Current implementation uses unordered_set -> assign, so order is not stable.
-    // Only validate de-dup and set-equality.
-    std::vector<CacheKeyType> got = info.cached_keys;
-    std::sort(got.begin(), got.end());
-    std::vector<CacheKeyType> expected = {10, 11, 12, 13};
-    std::sort(expected.begin(), expected.end());
-    EXPECT_EQ(got, expected);
+    const auto version_only =
+        kv_cache_manager->getKVCacheInfo(/*latest_version=*/empty.version, /*need_cache_keys=*/false);
+    EXPECT_EQ(version_only.version, tree_snapshot.version);
+    EXPECT_TRUE(version_only.cached_keys.empty());
+
+    const auto before_duplicate = kv_cache_manager->blockTreeCache()->getKeySnapshot(/*limit=*/10000);
+    kv_cache_manager->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false});
+    const auto after_duplicate = kv_cache_manager->blockTreeCache()->getKeySnapshot(/*limit=*/10000);
+    EXPECT_EQ(after_duplicate.version, before_duplicate.version);
+    EXPECT_EQ(after_duplicate.keys, before_duplicate.keys);
+    EXPECT_EQ(kv_cache_manager->getKVCacheInfo(after_duplicate.version, true).cached_keys, std::vector<CacheKeyType>{});
+
+    kv_cache_manager->free(FreeInfo{resource, tokens});
+    kv_cache_manager->blockTreeCache()->reclaimBlocks(/*num_blocks=*/100, Tier::DEVICE);
 }
 
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
@@ -1286,11 +1544,8 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
     // Expect freeBlocksNum >= free_after_c (at least as good as before D was allocated).
     EXPECT_GE(manager->freeBlocksNum(), free_after_c);
 
-    // --- Pop all remaining cached blocks and verify full pool recovery ---
-    auto evicted = manager->popBlocksFromCache(/*min_blocks_to_free=*/100);
-    if (evicted) {
-        manager->blockCacheFree(evicted);
-    }
+    // --- Reclaim all remaining BlockTreeCache holders and verify full pool recovery ---
+    manager->blockTreeCache()->reclaimBlocks(/*num_blocks=*/4096);
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 
@@ -1362,10 +1617,7 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
     }
 
     manager->free(FreeInfo{reuse_res, reuse_tokens});
-    auto evicted = manager->popBlocksFromCache(/*min_blocks_to_free=*/100);
-    if (evicted) {
-        manager->blockCacheFree(evicted);
-    }
+    manager->blockTreeCache()->reclaimBlocks(/*num_blocks=*/4096);
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 
@@ -1498,11 +1750,8 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     // === Phase 4: Free all and verify full pool recovery ===
     manager->free(FreeInfo{res_c, tokens_c});
 
-    // Pop remaining cached blocks to restore pool.
-    auto evicted = manager->popBlocksFromCache(/*min_blocks_to_free=*/100);
-    if (evicted) {
-        manager->blockCacheFree(evicted);
-    }
+    // Reclaim remaining declarative cache holders to restore every physical pool.
+    manager->blockTreeCache()->reclaimBlocks(/*num_blocks=*/4096);
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle) {
