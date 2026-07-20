@@ -22,10 +22,15 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                       parallelism_config,
                       model_specific_config,
                       cache_manager,
-                      metrics_reporter) {
-    RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu]",
+                      metrics_reporter),
+    cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()
+                             && runtime_config.fifo_scheduler_config.cp_force_single_prefill) {
+    RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], "
+                     "cp_force_single_prefill is [%d], max_inited_kv_cache_streams is [%zu]",
                      max_generate_batch_size_,
-                     max_batch_tokens_size_);
+                     max_batch_tokens_size_,
+                     cp_force_single_prefill_,
+                     max_inited_kv_cache_streams_);
 }
 
 FIFOScheduler::~FIFOScheduler() {
@@ -37,12 +42,17 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
                                           const GenerateStreamPtr&       new_stream) {
     RTP_LLM_PROFILE_FUNCTION();
     if (pd_sep_config_.role_type == RoleType::DECODE) {
-        if (running_streams_.size() + streams.size() + 1 < max_generate_batch_size_) {
+        if (running_streams_.size() + streams.size() + 1 <= max_generate_batch_size_) {
             return true;
         }
     }
     // prefill and decode not mixed together
     if (!running_streams_.empty()) {
+        return false;
+    }
+    // Conservative CP prefill mode: cap at one stream per round unless
+    // runtime config explicitly allows CP prefill batching.
+    if (cp_force_single_prefill_ && !streams.empty()) {
         return false;
     }
     if (running_streams_.size() + streams.size() + 1 > max_generate_batch_size_) {
@@ -96,16 +106,10 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     // WAITING -> RUNNING: can run
     // WAITING -> LOADING_CACHE: load cache ok
     //
-    // Two-phase state transition for WAITING streams:
-    //   Phase 1 (evaluateWaitingStreams): Streams that pass memory check get CanRun event,
-    //       but are NOT removed from waiting_streams_ yet. This is because evaluateWaitingStreams
-    //       iterates over waiting_streams_ and removing elements during iteration would be unsafe.
-    //   Phase 2 (evaluateAndUpdateStreams): Actually moves streams from waiting_streams_ to
-    //       their new state (RUNNING or LOADING_CACHE) based on the events set in Phase 1.
-    // This separation ensures safe iteration while deferring structural modifications.
+    // evaluateWaitingStreams advances only streams admitted in this round.
+    // A pre-existing CanRun event from PD setup must not bypass admission.
     size_t prev_waiting_size = waiting_streams_.size();
     evaluateWaitingStreams(waiting_streams_);
-    evaluateAndUpdateStreams(waiting_streams_);
     running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
     new_streams_.clear();
 
