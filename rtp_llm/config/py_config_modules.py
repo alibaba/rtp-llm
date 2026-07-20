@@ -405,14 +405,10 @@ class MasterConfig:
 
 class JITConfig:
     def __init__(self):
-        self.remote_jit_read_dir: str = ""
-        self.warm_up_jit_and_write_remote: str = ""
+        self.remote_jit_dir: str = ""
 
     def to_string(self):
-        return (
-            f"remote_jit_read_dir: {self.remote_jit_read_dir}\n"
-            f"warm_up_jit_and_write_remote: {self.warm_up_jit_and_write_remote}"
-        )
+        return f"remote_jit_dir: {self.remote_jit_dir}"
 
 
 class DeepEPConfig:

@@ -174,13 +174,6 @@ class MagaServerManager(object):
                 [str(_) for _ in self._device_ids]
             )
 
-        # Set DeepGEMM JIT cache directory to use a persistent global cache
-        # instead of the temporary test.outputs directory. This allows kernel
-        # cache reuse across test runs, avoiding expensive JIT compilation overhead.
-        if "DG_JIT_CACHE_DIR" not in current_env:
-            home_dir = os.environ.get("HOME", os.path.expanduser("~"))
-            current_env["DG_JIT_CACHE_DIR"] = os.path.join(home_dir, ".deep_gemm")
-
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
         cwd_path = os.environ.get("MAGA_SERVER_WORK_DIR", bazel_outputs_dir)
         # 创建一个文件来存储子进程的日志
@@ -239,7 +232,11 @@ class MagaServerManager(object):
 
         return self.wait_sever_done(timeout)
 
-    def stop_server(self):
+    def stop_server(
+        self,
+        graceful_parent_first: bool = False,
+        graceful_timeout_s: float = 30.0,
+    ):
         with self._state_lock:
             self._stop_requested = True
             server_process = self._server_process
@@ -251,27 +248,45 @@ class MagaServerManager(object):
                 # 不适用 setsid/killpg 是因为 setsid 可能会在 test 父进程意外退出的情况遗留 start_server 占用测试资源
                 logging.info("stop server and children: %d", server_process.pid)
                 parent = psutil.Process(server_process.pid)
-                children = list(
-                    parent.children(recursive=True)
-                )  # 获取所有子进程（递归）
+                if graceful_parent_first:
+                    parent.terminate()
+                    try:
+                        parent.wait(timeout=graceful_timeout_s)
+                        parent = None
+                    except psutil.TimeoutExpired:
+                        logging.warning(
+                            "Parent process did not exit within %.1fs; "
+                            "falling back to recursive cleanup",
+                            graceful_timeout_s,
+                        )
+
+                if parent is None:
+                    children = []
+                else:
+                    children = list(parent.children(recursive=True))
                 for child in children:
                     child.terminate()  # 先尝试优雅终止
                 _, alive = psutil.wait_procs(children, timeout=5)
                 for child in alive:
                     child.kill()  # 强制终止未退出的进程
-                parent.terminate()
-                # 添加超时机制，避免永久阻塞
-                try:
-                    parent.wait(timeout=10)
-                except psutil.TimeoutExpired:
-                    logging.warning(
-                        "Parent process did not exit gracefully, force killing"
-                    )
-                    parent.kill()
-                    parent.wait(timeout=5)
+                if parent is not None:
+                    parent.terminate()
+                    # 添加超时机制，避免永久阻塞
+                    try:
+                        parent.wait(timeout=10)
+                    except psutil.TimeoutExpired:
+                        logging.warning(
+                            "Parent process did not exit gracefully, force killing"
+                        )
+                        parent.kill()
+                        parent.wait(timeout=5)
                 with self._state_lock:
                     if self._server_process is server_process:
                         self._server_process = None
+                try:
+                    server_process.wait(timeout=0)
+                except subprocess.TimeoutExpired:
+                    pass
             except Exception as e:
                 logging.warning("failed to get process with: " + str(e))
                 with self._state_lock:

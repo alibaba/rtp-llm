@@ -324,5 +324,12 @@ def umount_file(path: str, force: bool = False):
     _nfs_manager.unmount_nfs_path(path)
 
 
+def umount_all() -> None:
+    # Public shutdown hook for callers that os._exit() and thus bypass the
+    # atexit-registered Fuser.umount_all: unmount every FUSE and NFS mount.
+    _fuser.umount_all(force=True)
+    _nfs_manager.unmount_all()
+
+
 def fuse_available() -> bool:
     return _get_fuser().available

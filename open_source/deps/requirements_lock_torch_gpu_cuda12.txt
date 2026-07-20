@@ -3190,6 +3190,9 @@ uvicorn==0.30.0 \
     --hash=sha256:78fa0b5f56abb8562024a59041caeb555c86e48d0efdd23c3fe7de7a4075bdab \
     --hash=sha256:f678dec4fa3a39706bbf49b9ec5fc40049d42418716cea52b53f07828a60aa37
     # via -r open_source/deps/requirements_base.txt
+watchdog==6.0.0 \
+    --hash=sha256:20ffe5b202af80ab4266dcd3e91aae72bf2da48c0d33bdb15c66658e685e94e2
+    # via -r open_source/deps/requirements_base.txt
 wcwidth==0.2.13 \
     --hash=sha256:3da69048e4540d84af32131829ff948f1e022c1c6bdb8d6102117aac784f6859 \
     --hash=sha256:72ea0c06399eb286d978fdedb6923a9eb47e1c486ce63e9b4e64fc18303972b5

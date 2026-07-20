@@ -72,7 +72,7 @@ arch_with_version_dep = select({
     "//conditions:default": ["decord==0.6.0"],
 })
 
-requirement([
+requirement(names = [
     "sentencepiece",
     "transformers",
     "pynvml",
@@ -129,6 +129,8 @@ requirement([
     "aiter",
     "fastsafetensors",
     "pybind11_stubgen",
+    "watchdog",
+    "zstandard",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
 
@@ -143,6 +145,11 @@ py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",
+    ], exclude = [
+        "utils/jit_cache_manager.py",
+        "utils/jit_cache_store.py",
+        "utils/test/*.py",
+        "utils/test/**/*.py",
     ]),
     deps = [
         ":torch",
@@ -154,6 +161,21 @@ py_library(
         ":psutil",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
     ] + arch_dep + internal_deps()
+)
+
+py_library(
+    name = "jit_cache_manager_lib",
+    srcs = [
+        "utils/jit_cache_manager.py",
+        "utils/jit_cache_store.py",
+    ],
+    deps = [
+        ":config_ops",
+        ":utils",
+        ":watchdog",
+        ":zstandard",
+    ],
+    visibility = ["//visibility:public"],
 )
 
 py_library(
@@ -426,6 +448,8 @@ py_library(
         ":concurrent_log_handler",
         ":blobfile",
         ":partial_json_parser",
+        ":utils",
+        ":jit_cache_manager_lib",
     ],
     data = jit_deps(),
     imports = ["."],
@@ -563,7 +587,6 @@ py_package(
 )
 
 whl_reqs = [
-    "filelock>=3.20.0",
     "jinja2",
     "sympy",
     "typing-extensions",
@@ -603,6 +626,8 @@ whl_reqs = [
     "oss2",
     "orjson",
     "aiohttp",
+    "watchdog==6.0.0",
+    "zstandard==0.23.0",
     "json5",
     "dashscope>=1.11.0",
     "jieba",

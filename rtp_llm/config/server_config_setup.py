@@ -945,7 +945,6 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
         py_env_configs: PyEnvConfigs object to configure
     """
     setup_default_args(py_env_configs)
-    setup_jit_cache_envs(py_env_configs)
     fetch_model_files_to_local(py_env_configs)
     ll_num_max_token = py_env_configs.concurrency_config.concurrency_limit
     sp_type = py_env_configs.sp_config.type  # Get SpeculativeType enum value

@@ -11,4 +11,7 @@ py_library(
     srcs = glob([
         "*.py",
     ]),
+    deps = [
+        "//rtp_llm:torch",
+    ],
 )
