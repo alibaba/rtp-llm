@@ -151,7 +151,6 @@ def get_tool_choice_function_name(tool_choice: Optional[ToolChoice]) -> Optional
         raise ValueError("tool_choice.function.name must be a non-empty string")
     return name
 
-
 class ResponseFormatJSONSchema(BaseModel):
     name: Optional[str] = None
     schema: Optional[Dict[str, Any]] = None
@@ -159,10 +158,33 @@ class ResponseFormatJSONSchema(BaseModel):
 
 
 class ResponseFormat(BaseModel):
-    type: Literal["text", "json_schema", "json_object", "regex", "ebnf"]
+    type: Literal[
+        "text", "json_schema", "json_object", "regex", "ebnf", "structural_tag"
+    ]
     json_schema: Optional[ResponseFormatJSONSchema] = None
     pattern: Optional[str] = None
     grammar: Optional[str] = None
+    structural_tag: Optional[Dict[str, Any]] = None
+
+    @model_validator(mode="after")
+    def _check_payload(self) -> "ResponseFormat":
+        if self.type == "json_schema":
+            if self.json_schema is None or self.json_schema.schema is None:
+                raise ValueError(
+                    "response_format.type=json_schema requires json_schema.schema"
+                )
+        elif self.type == "regex":
+            if not self.pattern:
+                raise ValueError("response_format.type=regex requires pattern")
+        elif self.type == "ebnf":
+            if not self.grammar:
+                raise ValueError("response_format.type=ebnf requires grammar")
+        elif self.type == "structural_tag":
+            if not self.structural_tag:
+                raise ValueError(
+                    "response_format.type=structural_tag requires structural_tag"
+                )
+        return self
 
 
 class ChatCompletionRequest(BaseModel):

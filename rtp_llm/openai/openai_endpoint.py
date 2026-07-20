@@ -28,6 +28,7 @@ from rtp_llm.openai.api_datatype import (
     FunctionCall,
     ModelCard,
     ModelList,
+    ResponseFormat,
     RoleEnum,
     ToolCall,
     UsageInfo,
@@ -174,6 +175,55 @@ class OpenaiEndpoint(object):
     ) -> List[List[int]]:
         return [i for i, _ in itertools.groupby(sorted(stop_words_list))]
 
+    @staticmethod
+    def _apply_json_format(config: GenerateConfig) -> None:
+        config.json_format = True
+        config.json_schema = json.dumps(
+            {"type": "object"}, ensure_ascii=False, separators=(",", ":")
+        )
+
+    @staticmethod
+    def _apply_response_format(rf, config: GenerateConfig) -> None:
+        # ChatCompletionRequest.response_format is Union[ResponseFormat, str, dict]
+        # (DashSc sends serialized forms); normalize to the typed model first.
+        if isinstance(rf, str):
+            rf = json.loads(rf)
+        if isinstance(rf, dict):
+            rf = ResponseFormat(**rf)
+        config.json_format = False
+        config.json_schema = None
+        config.regex = None
+        config.ebnf = None
+        config.structural_tag = None
+        config.response_format = None
+        if rf.type == "text":
+            return
+        if rf.type == "json_schema":
+            assert rf.json_schema is not None and rf.json_schema.schema is not None
+            config.json_schema = json.dumps(
+                rf.json_schema.schema, ensure_ascii=False, separators=(",", ":")
+            )
+        elif rf.type == "json_object":
+            config.json_schema = json.dumps(
+                {"type": "object"}, ensure_ascii=False, separators=(",", ":")
+            )
+        elif rf.type == "regex":
+            assert rf.pattern
+            config.regex = rf.pattern
+        elif rf.type == "ebnf":
+            assert rf.grammar
+            config.ebnf = rf.grammar
+        elif rf.type == "structural_tag":
+            assert rf.structural_tag
+            config.structural_tag = json.dumps(
+                rf.structural_tag, ensure_ascii=False, separators=(",", ":")
+            )
+        else:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                f"unknown response_format.type: {rf.type!r}",
+            )
+
     def _ensure_think_end_token_ids(self, config: GenerateConfig) -> None:
         if config.end_think_token_ids:
             return
@@ -193,20 +243,6 @@ class OpenaiEndpoint(object):
     ) -> GenerateConfig:
         # TODO(wangyin): implement this
         config = request.extra_configs or GenerateConfig()
-        if request.response_format is not None:
-            # TODO: enable response_format when grammar-constrained decoding is
-            # wired through the backend for this branch.
-            raise FtRuntimeException(
-                ExceptionType.UNSUPPORTED_OPERATION,
-                "response_format is not supported yet",
-            )
-        if request.json_format:
-            # TODO: enable json_format with the response_format / grammar path
-            # when grammar-constrained decoding is wired through this branch.
-            raise FtRuntimeException(
-                ExceptionType.UNSUPPORTED_OPERATION,
-                "json_format is not supported yet",
-            )
         if request.trace_id != None:
             config.trace_id = request.trace_id
         if request.stream == True:
@@ -265,14 +301,12 @@ class OpenaiEndpoint(object):
         if config.return_prompt_logits and request.prompt_logprobs is None:
             config.validate()
             request.stream = False
+        if request.response_format is not None:
+            self._apply_response_format(request.response_format, config)
+        elif request.json_format or config.json_format:
+            self._apply_json_format(config)
         config.convert_select_tokens(len(self.tokenizer), self.tokenizer)
 
-        if (
-            request.extra_configs
-            and request.extra_configs.max_thinking_tokens is not None
-            and isinstance(request.extra_configs.max_thinking_tokens, int)
-        ):
-            config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
         # add_thinking_params now accepts generate_env_config parameter
         config.add_thinking_params(self.tokenizer, self.generate_env_config)
         if request.thinking_budget is not None:
