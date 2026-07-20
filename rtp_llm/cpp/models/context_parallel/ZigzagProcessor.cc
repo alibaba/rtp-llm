@@ -147,4 +147,41 @@ size_t ZigZagProcessor::handleOutputs(torch::Tensor&                            
 #endif
 }
 
+torch::Tensor ZigZagProcessor::computeLocalLastHidden(const torch::Tensor&                      hidden_states,
+                                                      const GptModelInputs&                     inputs,
+                                                      const torch_ext::PyContextParallelParams& cp_params) {
+    const int64_t chunk_len  = hidden_states.size(0);
+    const int64_t hidden_dim = hidden_states.size(1);
+
+    torch::Tensor valid_indices = torch::nonzero(cp_params.prefill_qkv_padding_mask).squeeze(-1);
+    torch::Tensor combined      = cp_params.prefill_qkv_restore_indice.index_select(0, valid_indices);
+    torch::Tensor output_indices =
+        inputs.lm_output_indexes.to(combined.options().dtype(torch::kLong), /*non_blocking=*/true);
+    torch::Tensor selected = combined.index_select(0, output_indices).to(torch::kLong);
+
+    const int64_t num_lm     = selected.size(0);
+    torch::Tensor owner      = selected.div(chunk_len, c10::string_view("floor"));
+    torch::Tensor local_off  = selected - owner.mul(chunk_len);
+    torch::Tensor mine       = owner == static_cast<int64_t>(parallelism_config_.tp_rank);
+    torch::Tensor mine_rows  = torch::nonzero(mine).squeeze(-1);
+    torch::Tensor local_rows = torch::zeros({num_lm, hidden_dim}, hidden_states.options());
+    if (mine_rows.size(0) > 0) {
+        torch::Tensor my_local_off = local_off.index_select(0, mine_rows);
+        local_rows.index_copy_(0, mine_rows, hidden_states.index_select(0, my_local_off));
+    }
+    return local_rows;
+}
+
+void ZigZagProcessor::handleOutputsLastHidden(torch::Tensor&                            hidden_states,
+                                              const GptModelInputs&                     inputs,
+                                              const torch_ext::PyContextParallelParams& cp_params) {
+#if !USING_CUDA
+    RTP_LLM_FAIL("Context parallel not supported on ROCm");
+#else
+    torch::Tensor local_rows = computeLocalLastHidden(hidden_states, inputs, cp_params);
+    auto          reduced    = execAllReduce({local_rows, ReduceOp::Sum, false, ParallelMode::TP});
+    hidden_states            = reduced.buffer;
+#endif
+}
+
 }  // namespace rtp_llm

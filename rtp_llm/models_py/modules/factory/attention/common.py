@@ -54,8 +54,18 @@ def create_write_cache_store_impl(
         WriteCacheStoreOp instance if cache store is needed, None otherwise
     """
     if attn_inputs.is_prefill and attn_inputs.cache_store_inputs:
+        input_lengths = attn_inputs.input_lengths
+        cp_info = getattr(attn_inputs, "context_parallel_info", None)
+        if cp_info is not None:
+            actual_lengths = getattr(cp_info, "prefill_actual_input_lengths_cpu", None)
+            if actual_lengths is not None and actual_lengths.numel() > 0:
+                # ContextParallelProcessor rewrites input_lengths to the
+                # rank-local chunk length. Cache keys stay in the full request
+                # namespace, so cache-store planning must use the captured
+                # pre-sharding lengths.
+                input_lengths = actual_lengths
         return WriteCacheStoreOp(
-            attn_inputs.input_lengths,
+            input_lengths,
             attn_inputs.prefix_lengths,
             attn_inputs.kv_cache_block_id,
             attn_inputs.cache_store_inputs,

@@ -119,10 +119,27 @@ cc_library(
 )
 
 cc_library(
+    name = "bf16_gemm_op",
+    srcs = [
+        "Bf16GemmOp.cc",
+    ],
+    hdrs = [
+        "Bf16GemmOp.h",
+    ],
+    copts = cuda_copts(),
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cublas",
+        "@local_config_cuda//cuda:cublas_headers",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_bindings",
     srcs = glob([
         "*.cc",
     ], exclude = [
+        "Bf16GemmOp.cc",
         "RegisterCudaOps.cc",
         "SplitKvCacheCopy.cc",
         "NoBlockCopy.cc",
@@ -132,6 +149,7 @@ cc_library(
     hdrs = glob([
         "*.h",
     ], exclude = [
+        "Bf16GemmOp.h",
         "SplitKvCacheCopy.h",
         "cuda_host_utils.h",
         "launch_utils.h",
@@ -155,6 +173,9 @@ cc_library(
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + select({
         "@//:using_cuda12_9": [
+            "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp4_quant",
+        ],
+        "@//:using_cuda13_x86": [
             "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp4_quant",
         ],
         "//conditions:default": [],
@@ -198,10 +219,14 @@ cc_library(
     copts = copts() + ["-fno-strict-aliasing"],
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
+        ":bf16_gemm_op",
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base"
     ] + select({
         "@//:using_cuda12_9": [
+            "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
+        ],
+        "@//:using_cuda13_x86": [
             "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
         ],
         "//conditions:default": [],

@@ -25,7 +25,15 @@ public:
                          const GptModelInputs&                     inputs,
                          const torch_ext::PyContextParallelParams& cp_params) override;
 
+    void handleOutputsLastHidden(torch::Tensor&                            hidden_states,
+                                 const GptModelInputs&                     inputs,
+                                 const torch_ext::PyContextParallelParams& cp_params) override;
+
 protected:
+    torch::Tensor computeLocalLastHidden(const torch::Tensor&                      hidden_states,
+                                         const GptModelInputs&                     inputs,
+                                         const torch_ext::PyContextParallelParams& cp_params);
+
     bool plan(const std::vector<int>& total_input_tokens,
               std::vector<int>&       input_tokens,
               std::vector<int>&       shuffle_indices,
