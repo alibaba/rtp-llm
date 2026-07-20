@@ -6,6 +6,7 @@
 #define private public
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -18,7 +19,7 @@ namespace rtp_llm {
 
 template<typename T>
 std::vector<T> toVec(const torch::Tensor& t) {
-    auto c = t.contiguous();
+    auto c = t.is_cuda() ? t.cpu().contiguous() : t.contiguous();
     return std::vector<T>(c.data_ptr<T>(), c.data_ptr<T>() + c.numel());
 }
 
@@ -65,7 +66,8 @@ TEST_F(NormalBatchStreamProcessorTest, testWarmUpWithoutCacheManager) {
     EXPECT_TRUE(processor.model_input_gatherer_config_.kv_cache_group_types.empty());
     ASSERT_EQ(stream->kvCache().groupNums(), 1);
     EXPECT_EQ(stream->kvCache().cacheResource().soleGroupTagForLayer(0), "__warmup__");
-    auto model_input = processor.gatherModelInput(stream_groups);
+    TensorHolder holder;
+    auto         model_input = processor.gatherModelInput(stream_groups, holder);
     ASSERT_TRUE(model_input.ok());
     EXPECT_FALSE(model_input->kv_cache_block_id.defined());
     EXPECT_FALSE(model_input->kv_cache_kernel_block_id.defined());
@@ -108,7 +110,8 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
 
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
-    auto merge_input_status = processor.gatherModelInput(stream_groups);
+    TensorHolder holder;
+    auto         merge_input_status = processor.gatherModelInput(stream_groups, holder);
     ASSERT_TRUE(merge_input_status.ok());
     EXPECT_TRUE(merge_input_status.value().pd_separation);
     const auto& cache_keys = merge_input_status.value().cache_keys;
@@ -197,8 +200,9 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
 
     {
         StreamGroups stream_groups(streams);
+        TensorHolder holder;
 
-        auto merge_input_status = processor.gatherModelInput(stream_groups);
+        auto merge_input_status = processor.gatherModelInput(stream_groups, holder);
 
         EXPECT_TRUE(merge_input_status.ok());
         auto&       model_input       = merge_input_status.value();
@@ -222,7 +226,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
             model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
 
         StreamGroups stream_groups(streams);
-        auto         merge_input_status = processor.gatherModelInput(stream_groups);
+        TensorHolder holder;
+        auto         merge_input_status = processor.gatherModelInput(stream_groups, holder);
         EXPECT_TRUE(merge_input_status.ok());
         auto& model_input = merge_input_status.value();
         EXPECT_FALSE(model_input.attention_mask.defined());
@@ -263,7 +268,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
 
     StreamGroups stream_groups(streams);
-    auto         merge_input_status = processor.gatherModelInput(stream_groups);
+    TensorHolder holder;
+    auto         merge_input_status = processor.gatherModelInput(stream_groups, holder);
     EXPECT_TRUE(merge_input_status.ok());
 
     SamplerInputs sampler_inputs;
@@ -342,7 +348,8 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
 
     StreamGroups stream_groups(streams);
-    auto         merge_input_status = processor.gatherModelInput(stream_groups);
+    TensorHolder holder;
+    auto         merge_input_status = processor.gatherModelInput(stream_groups, holder);
     EXPECT_TRUE(merge_input_status.ok());
     EXPECT_TRUE(merge_input_status.value().need_all_logits);
 
@@ -427,8 +434,9 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
 
     {
         StreamGroups stream_groups(streams);
+        TensorHolder holder;
 
-        auto merge_input_status = processor.gatherModelInput(stream_groups);
+        auto merge_input_status = processor.gatherModelInput(stream_groups, holder);
         EXPECT_TRUE(merge_input_status.ok());
 
         auto&       model_input      = merge_input_status.value();

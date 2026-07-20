@@ -1,4 +1,5 @@
 #include <memory>
+#include <chrono>
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
@@ -18,6 +19,10 @@
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
+#if USING_CUDA
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
+#include <ATen/cuda/CUDAContext.h>
+#endif
 
 namespace rtp_llm {
 
@@ -162,7 +167,7 @@ private:
 
 class FakeFastTopKSampler: public spec::FastTopKSampler {
 public:
-    FakeFastTopKSampler() {}
+    FakeFastTopKSampler(): spec::FastTopKSampler(torch::Tensor()) {}
 
     spec::FastTopKSamplerOutput forward(const torch::Tensor& logits, int top_k = 1) override {
         checkInputs(logits);
@@ -190,7 +195,7 @@ private:
 
 class FakeSpeculativeSampler: public spec::SpeculativeSampler {
 public:
-    FakeSpeculativeSampler(size_t propose_step): spec::SpeculativeSampler(propose_step) {}
+    FakeSpeculativeSampler(size_t propose_step): spec::SpeculativeSampler(torch::Tensor(), propose_step) {}
 
     spec::SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
                                            SamplerOutput&                      draft_sampler_output,
@@ -661,16 +666,13 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     auto next_draft_input               = GptModelInputs{};
     auto next_draft_output              = GptModelOutputs{};
     next_draft_output.logits            = torch::tensor({1.9f, 1.10f, 1.11f, 1.12f}).reshape({(int64_t)batch_size, 4});
-    next_draft_output.all_hidden_states = torch::tensor({0.1f, 0.1f, 0.2f, 0.22f, 0.3f, 0.33f}).reshape({3, 2});
+    next_draft_output.all_hidden_states =
+        torch::tensor({0.1f, 0.1f, 0.2f, 0.22f, 0.3f, 0.33f, 0.0f, 0.0f, 0.0f, 0.0f}).reshape({5, 2});
 
-    next_draft_input.combo_tokens       = torch::tensor({3, 2, 0}, torch::kInt32);
-    next_draft_input.input_lengths      = torch::tensor({3}, torch::kInt32);
-    next_draft_input.prefix_lengths     = torch::tensor({2}, torch::kInt32);
-    next_draft_input.lm_output_indexes  = torch::tensor({2}, torch::kInt32);
-    next_draft_input.last_hidden_states = torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f}).reshape({3, 2});
-
-    components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
-    components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
+    next_draft_input.combo_tokens      = torch::tensor({3, 2, 0, 0, 0}, torch::kInt32);
+    next_draft_input.input_lengths     = torch::tensor({5}, torch::kInt32);
+    next_draft_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
+    next_draft_input.lm_output_indexes = torch::tensor({2}, torch::kInt32);
 
     // set fake model outputs
     auto target_input              = GptModelInputs{};
@@ -686,6 +688,11 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     target_output.all_hidden_states =
         torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f, 0.09f, 0.10f})
             .reshape({(int64_t)(propose_step + 1), 2});
+
+    next_draft_input.last_hidden_states = target_output.all_hidden_states;
+
+    components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
+    components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
 
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
@@ -721,10 +728,14 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
         {draft_sampler_output_1, draft_sampler_output_2, draft_sampler_output_3, next_draft_sampler_output});
 
     // set fake speculative sampler outputs
-    auto accept_tokens              = torch::tensor({{3, 2, 0}}, torch::kInt32);
-    auto speculative_sampler_output = spec::SpeculativeSamplerOutput{{accept_tokens}, {3}};
-    auto draft_spec_sample_input    = SamplerOutput{};
-    auto target_spec_sample_input   = SamplerOutput{};
+    auto accept_tokens                           = torch::tensor({{3, 2, 0, 0, 0}}, torch::kInt32);
+    auto speculative_sampler_output              = spec::SpeculativeSamplerOutput();
+    speculative_sampler_output.accept_tokens_cpu = accept_tokens;
+    speculative_sampler_output.accept_tokens     = accept_tokens.to(torch::kCUDA);
+    speculative_sampler_output.accept_len_cpu    = torch::tensor({3}, torch::kInt32);
+    speculative_sampler_output.accept_len        = speculative_sampler_output.accept_len_cpu.to(torch::kCUDA);
+    auto draft_spec_sample_input                 = SamplerOutput{};
+    auto target_spec_sample_input                = SamplerOutput{};
 
     vector<vector<float>> draft_all_probs_list;
     draft_all_probs_list.push_back(toVec<float>(stream1_draft_token_probs));
@@ -827,19 +838,14 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     auto next_draft_output = GptModelOutputs{};
     next_draft_output.logits =
         torch::tensor({1.9f, 1.10f, 1.11f, 1.12f, 2.9f, 2.10f, 2.11f, 2.12f}).reshape({(int64_t)batch_size, 4});
-    next_draft_output.all_hidden_states =
-        torch::tensor({0.1f, 0.11f, 1.1f, 1.11f, 1.2f, 1.22f, 1.3f, 1.33f, 1.4f, 1.44f, 1.5f, 1.55f}).reshape({6, 2});
+    next_draft_output.all_hidden_states = torch::tensor({0.1f, 0.11f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                                         0.0f, 0.0f,  0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.5f, 1.55f})
+                                              .reshape({10, 2});
 
-    next_draft_input.combo_tokens      = torch::tensor({3, 3, 0, 2, 2, 1}, torch::kInt32);
-    next_draft_input.input_lengths     = torch::tensor({1, 5}, torch::kInt32);
+    next_draft_input.combo_tokens      = torch::tensor({3, 0, 0, 0, 0, 3, 0, 2, 2, 1}, torch::kInt32);
+    next_draft_input.input_lengths     = torch::tensor({5, 5}, torch::kInt32);
     next_draft_input.prefix_lengths    = torch::tensor({3, 2}, torch::kInt32);
-    next_draft_input.lm_output_indexes = torch::tensor({0, 5}, torch::kInt32);
-    next_draft_input.last_hidden_states =
-        torch::tensor({0.01f, 0.02f, 0.11f, 0.12f, 0.13f, 0.14f, 0.15f, 0.16f, 0.17f, 0.18f, 0.19f, 0.2f})
-            .reshape({6, 2});
-
-    components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
-    components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
+    next_draft_input.lm_output_indexes = torch::tensor({0, 9}, torch::kInt32);
 
     // set target model
     // verify [3, 2, 0, 0, 0], [3, 0, 2, 2, 1]
@@ -859,6 +865,11 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
         torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f, 0.09f, 0.10f,
                        0.11f, 0.12f, 0.13f, 0.14f, 0.15f, 0.16f, 0.17f, 0.18f, 0.19f, 0.20f})
             .reshape({(int64_t)(batch_size * (propose_step + 1)), 2});
+
+    next_draft_input.last_hidden_states = target_output.all_hidden_states;
+
+    components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
+    components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
 
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
@@ -900,11 +911,14 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     components.fake_sampler->setOutputs({sampler_output});
 
     // set fake speculative sampler outputs
-    auto accept_tokens1             = torch::tensor({{3}}, torch::kInt32);
-    auto accept_tokens2             = torch::tensor({{3, 0, 2, 2, 1}}, torch::kInt32);
-    auto speculative_sampler_output = spec::SpeculativeSamplerOutput{{accept_tokens1, accept_tokens2}, {1, 5}};
-    auto draft_spec_sample_input    = SamplerOutput{};
-    auto target_spec_sample_input   = SamplerOutput{};
+    auto accept_tokens                           = torch::tensor({{3, 0, 0, 0, 0}, {3, 0, 2, 2, 1}}, torch::kInt32);
+    auto speculative_sampler_output              = spec::SpeculativeSamplerOutput();
+    speculative_sampler_output.accept_tokens_cpu = accept_tokens;
+    speculative_sampler_output.accept_tokens     = accept_tokens.to(torch::kCUDA);
+    speculative_sampler_output.accept_len_cpu    = torch::tensor({1, 5}, torch::kInt32);
+    speculative_sampler_output.accept_len        = speculative_sampler_output.accept_len_cpu.to(torch::kCUDA);
+    auto draft_spec_sample_input                 = SamplerOutput{};
+    auto target_spec_sample_input                = SamplerOutput{};
 
     vector<vector<float>> draft_all_probs_list;
     draft_all_probs_list.push_back({0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0});
@@ -1039,6 +1053,100 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
     EXPECT_EQ((std::vector<int>{5, 5, 5, 6, 6, 6, 7, 7, 7, 8,  8,  8,  9,  9,  9,
                                 7, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10, 10, 11, 11, 11}),
               toVec<int>(model_input.combo_position_ids));
+}
+
+TEST_F(MtpExecutorTest, testDispatchStatePrepareKernel) {
+    // Test invokeMtpDispatchStatePrepare correctness
+    const int64_t batch_size = 8;
+    auto          cuda_i32   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto          cuda_i64   = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+
+    auto accept_len   = torch::tensor({3, 1, 5, 2, 4, 1, 3, 2}, cuda_i32);
+    auto prev_seq_len = torch::tensor({100, 200, 50, 300, 150, 400, 75, 250}, cuda_i32);
+    auto next_seq_len = torch::empty({batch_size}, cuda_i32);
+    auto hidden_idx   = torch::empty({batch_size}, cuda_i64);
+
+#if USING_CUDA
+    invokeMtpDispatchStatePrepare(
+        accept_len, prev_seq_len, next_seq_len, hidden_idx, batch_size, at::cuda::getCurrentCUDAStream().stream());
+    cudaDeviceSynchronize();
+#endif
+
+    // Verify next_seq_len = prev_seq_len + accept_len
+    auto expected_next = (prev_seq_len + accept_len).cpu();
+    auto actual_next   = next_seq_len.cpu();
+    EXPECT_TRUE(torch::equal(actual_next, expected_next))
+        << "next_seq_len mismatch:\n"
+        << actual_next << "\nvs expected:\n"
+        << expected_next;
+
+    // Verify hidden_idx = accept_len - 1
+    auto expected_idx = (accept_len.to(torch::kInt64) - 1).cpu();
+    auto actual_idx   = hidden_idx.cpu();
+    EXPECT_TRUE(torch::equal(actual_idx, expected_idx))
+        << "hidden_idx mismatch:\n"
+        << actual_idx << "\nvs expected:\n"
+        << expected_idx;
+}
+
+TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
+    // Micro-benchmark: compare per-stream scalar ops vs batched approach
+    const int64_t batch_size = 128;
+    const int     iterations = 1000;
+    auto          cuda_i32   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto          cuda_i64   = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+
+    auto accept_len   = torch::randint(1, 5, {batch_size}, cuda_i32);
+    auto prev_seq_len = torch::randint(10, 1000, {batch_size}, cuda_i32);
+
+    // Pre-allocate output buffers
+    auto next_seq_len = torch::empty({batch_size}, cuda_i32);
+    auto hidden_idx   = torch::empty({batch_size}, cuda_i64);
+
+    // Warm up
+    for (int i = 0; i < 10; i++) {
+#if USING_CUDA
+        invokeMtpDispatchStatePrepare(
+            accept_len, prev_seq_len, next_seq_len, hidden_idx, batch_size, at::cuda::getCurrentCUDAStream().stream());
+#endif
+    }
+    cudaDeviceSynchronize();
+
+    // Benchmark batched approach (fused kernel)
+    auto start_batched = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; i++) {
+#if USING_CUDA
+        invokeMtpDispatchStatePrepare(
+            accept_len, prev_seq_len, next_seq_len, hidden_idx, batch_size, at::cuda::getCurrentCUDAStream().stream());
+#endif
+    }
+    cudaDeviceSynchronize();
+    auto end_batched  = std::chrono::high_resolution_clock::now();
+    auto us_batched   = std::chrono::duration_cast<std::chrono::microseconds>(end_batched - start_batched).count();
+
+    // Benchmark per-stream scalar approach (old way)
+    auto start_scalar = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; i++) {
+        for (int64_t j = 0; j < batch_size; j++) {
+            auto al_slice     = accept_len.narrow(0, j, 1);
+            auto prev_slice   = prev_seq_len.narrow(0, j, 1);
+            auto next_slice   = (prev_slice + al_slice).to(torch::kInt32);
+            auto hidden_slice = (al_slice - 1).to(torch::kLong);
+            (void)next_slice;
+            (void)hidden_slice;
+        }
+    }
+    cudaDeviceSynchronize();
+    auto end_scalar  = std::chrono::high_resolution_clock::now();
+    auto us_scalar   = std::chrono::duration_cast<std::chrono::microseconds>(end_scalar - start_scalar).count();
+
+    double speedup = static_cast<double>(us_scalar) / static_cast<double>(us_batched);
+    RTP_LLM_LOG_INFO("[dispatch-bench] batch_size=%ld iterations=%d", batch_size, iterations);
+    RTP_LLM_LOG_INFO("[dispatch-bench] batched: %ld us total, %.2f us/iter",
+                     us_batched, (double)us_batched / iterations);
+    RTP_LLM_LOG_INFO("[dispatch-bench] scalar:  %ld us total, %.2f us/iter",
+                     us_scalar, (double)us_scalar / iterations);
+    RTP_LLM_LOG_INFO("[dispatch-bench] speedup: %.1fx", speedup);
 }
 
 }  // namespace rtp_llm

@@ -1,9 +1,11 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <cstdlib>
 #include <algorithm>
 #include <memory>
+#include <string>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
@@ -15,6 +17,35 @@
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
+    const char* env = std::getenv(env_name);
+    const bool  on  = (env != nullptr && std::string(env) == "1");
+    RTP_LLM_LOG_INFO("[%s] %s=%s -> %s=%d", log_tag, env_name, env ? env : "(unset)", label, static_cast<int>(on));
+    return on;
+}
+
+void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inputs) {
+    holder.hold_host(inputs.token_ids);
+    holder.hold_host(inputs.input_lengths);
+    holder.hold_host(inputs.sequence_lengths);
+    holder.hold_host(inputs.num_beams_in);
+    holder.hold_host(inputs.num_beams_out);
+    holder.hold_host(inputs.top_k);
+    holder.hold_host(inputs.top_p);
+    holder.hold_host(inputs.temperature);
+    holder.hold_host(inputs.repetition_penalty);
+    holder.hold_host(inputs.presence_penalty);
+    holder.hold_host(inputs.frequency_penalty);
+    holder.hold_host(inputs.no_repeat_ngram_size);
+    holder.hold_host(inputs.do_sample);
+    holder.hold_host(inputs.finished_mask);
+    holder.hold_host(inputs.cum_log_probs);
+}
+
+}  // namespace
 
 NormalExecutor::ModelFactory NormalExecutor::test_model_factory = nullptr;
 
@@ -35,7 +66,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_)),
     is_propose_(is_propose),
-    propose_model_index_(propose_model_index) {
+    propose_model_index_(propose_model_index),
+    dispatch_runner_(cuda_graph::graphGetStreamFromPool(true)) {
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
     parallelism_config_ = params.parallelism_config;
@@ -56,6 +88,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                        params.model_config_.hidden_size,
                                                        params.parallelism_config.ep_rank,
                                                        params.parallelism_config.ep_size,
+                                                       params.parallelism_config.world_size,
                                                        params.py_eplb,
                                                        moe_weight_type,
                                                        params.model_config_.quant_algo,
@@ -125,17 +158,37 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 }
 
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {
-    StreamGroups                   stream_groups(streams);
     RtpLLMExecutorMetricsCollector executor_collector;
     RtpLLMTokenPSMetricsCollector  tps_collector;
     GptModelInputs                 model_input;
     GptModelOutputs                model_output;
     SamplerOutput                  sampler_output;
     RTP_LLM_PROFILE_FUNCTION();
+    // Cap outstanding stream-async bookkeeping to one step unless DROP_BROAD_SYNC is on.
+    // Still sync when gatherModelInput lacks NormalAsyncDeviceState; host
+    // token/seq_len fallbacks race the previous worker.
+    bool worker_synced = false;
+    if (useStreamAsync() && !useDropBroadSync()) {
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch(stream_count=%zu)", streams.size());
+        dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+        worker_synced = true;
+    }
+
+    StreamGroups stream_groups(streams);
+
+    if (useStreamAsync() && useDropBroadSync() && !gatherCanUseDeviceState(stream_groups)) {
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch(stream_count=%zu)", streams.size());
+        dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+        worker_synced = true;
+        // Rebuild StreamGroups after waiting: cached maxSeqLen/batch sizes can
+        // be stale while the previous worker mutates GenerateStream host state.
+        stream_groups = StreamGroups(streams);
+    }
+
     {
         RTP_LLM_PROFILE_SCOPE("executor.gather_model_input");
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
+        auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups, buffer_holder_);
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
         model_input                              = std::move(model_input_status.value());
         executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -144,14 +197,29 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.tp_sync_input");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+
+        // Move metadata to CUDA before tpSyncModelInputs so broadcasts use the
+        // GPU packed-buffer path instead of CPU execBroadcastCpu/unpack loops.
+        ensureModelInputsOnCuda(model_input, "process.before_tp_sync");
+
         tpSyncModelInputs(model_input, parallelism_config_);
         if (model_input.skip_run) {
             return absl::OkStatus();
         }
+
+        // Post-sync guard for fields not covered by the root device bitmap
+        // (notably sequence_lengths_plus_1) before model_->forward.
+        ensureModelInputsOnCuda(model_input, "process.after_tp_sync");
+
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
     // make sure last model input is released before forward
+    // TensorHolder release point (NormalExecutor): after current TP sync has
+    // consumed model-input H2D staging, advance the one-extra-round hold window
+    // for model-input sources and previous sampler-input host tensors.
+    buffer_holder_.release();
+    // PyWrappedModel TensorHolder release point for the previous model forward.
     model_->releaseBuffers();
 
     {
@@ -188,24 +256,63 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         model_->releaseBuffers();
         return absl::OkStatus();
     }
+
     {
         RTP_LLM_PROFILE_SCOPE("executor.sampler_forward");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+
+        // Sampler input still reads CPU stream state mutated by the previous
+        // worker. DROP_BROAD_SYNC therefore needs this narrow sync unless an
+        // earlier host-fallback gather already waited.
+        if (useStreamAsync() && useDropBroadSync() && !worker_synced) {
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch_pre_sampler(stream_count=%zu)", streams.size());
+            dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+            worker_synced = true;
+            // Rebuild after waiting so sampler buffers use the current seqLength
+            // instead of appending one column behind.
+            stream_groups = StreamGroups(streams);
+        }
+
         CHECK_AND_RETURN_REF(sampler_input,
                              batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
+        holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
         sampler_output = std::move(sampler_->forward(sampler_input));
         RTP_LLM_LOG_DEBUG("sampler forward done");
         executor_collector.sample_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
-    {
-        RTP_LLM_PROFILE_SCOPE("executor.dispatch_output");
+
+    // Stream-async dispatch is opt-in and only useful for decode-only batches:
+    // the next iteration can overlap forward prep with worker D2H/update work.
+    // Prefill gets no overlap benefit and would only add worker startup cost.
+    const bool is_decode_only = stream_groups.totalContextBatchSize() == 0 && stream_groups.totalDecodeBatchSize() > 0;
+    if (useStreamAsync() && is_decode_only) {
+        RTP_LLM_PROFILE_SCOPE("executor.dispatch_output(stream_async)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto    result =
-            batch_stream_processor_->dispatch(stream_groups, {std::move(model_output), std::move(sampler_output)});
+
+        // Record as soon as sampler outputs are valid so the worker waits with
+        // cudaStreamWaitEvent before pinned D2H staging.
+        auto sampler_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+        sampler_event->record(cuda_graph::graphGetCurrentStream());
+
+        // Metrics and KV release stay on the main thread; dispatch_output_us
+        // now measures launch cost, while worker time is in async_runner.thread.
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         reportMetrics(stream_groups, executor_collector, tps_collector);
 
-        model_->releaseBuffers();
+        return dispatchOutputAsync(
+            stream_groups, std::move(model_output), std::move(sampler_output), std::move(sampler_event));
+    }
+
+    {
+        RTP_LLM_PROFILE_SCOPE("executor.dispatch_output");
+        int64_t      start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output)};
+        if (useDeviceInput()) {
+            publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
+        }
+        auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
+        executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        reportMetrics(stream_groups, executor_collector, tps_collector);
 
         return result;
     }
@@ -242,6 +349,251 @@ bool NormalExecutor::updateEplbConfig(const EPLBConfig& config) {
         return expert_balancer_->updateEplbConfig(config);
     }
     return true;
+}
+
+bool NormalExecutor::useStreamAsync() const {
+    static const bool enabled = []() {
+        return readEnvFlagOnce("RTP_LLM_STREAM_ASYNC", "normal-stream-async", "useStreamAsync");
+    }();
+    return enabled;
+}
+
+bool NormalExecutor::useDropBroadSync() const {
+    static const bool enabled = []() {
+        return readEnvFlagOnce("RTP_LLM_DROP_BROAD_SYNC", "normal-drop-broad-sync", "enabled");
+    }();
+    return enabled;
+}
+
+bool NormalExecutor::useDeviceInput() const {
+    static const bool enabled = []() {
+        return readEnvFlagOnce("RTP_LLM_DEVICE_INPUT", "normal-device-input", "enabled");
+    }();
+    return enabled;
+}
+
+bool NormalExecutor::checkDeviceInput() const {
+    static const bool enabled = []() {
+        return readEnvFlagOnce("RTP_LLM_DEVICE_INPUT_CHECK", "normal-device-input", "enabled");
+    }();
+    return enabled;
+}
+
+void NormalExecutor::ensureModelInputsOnCuda(GptModelInputs& model_input, const char* tag) {
+    if (!useDeviceInput()) {
+        return;
+    }
+
+    auto to_cuda = [this, tag](torch::Tensor& tensor, const char* name) {
+        if (!tensor.defined() || tensor.is_cuda()) {
+            return;
+        }
+        if (tensor.numel() == 0) {
+            tensor = torch::empty(tensor.sizes(), torch::TensorOptions(tensor.dtype()).device(torch::kCUDA));
+            return;
+        }
+        if (!tensor.is_pinned()) {
+            // Non-pinned CPU H2D forces a synchronous copy, defeating the
+            // whole point of pre-staging tensors to CUDA. Fall back rather
+            // than abort, but warn loudly so we can fix the producer.
+            RTP_LLM_LOG_WARNING(
+                "[normal-device-input] %s.%s is CPU but not pinned; H2D falls back to blocking copy", tag, name);
+            tensor = tensor.to(torch::kCUDA);
+            return;
+        }
+        // non_blocking=true requires the source tensor to outlive the copy;
+        // the holder keeps a reference until the next process() iteration
+        // releases it (after the broadcast has consumed the tensor).
+        buffer_holder_.hold_host(tensor);
+        tensor = tensor.to(torch::kCUDA, /*non_blocking=*/true);
+    };
+
+    to_cuda(model_input.combo_tokens, "combo_tokens");
+    to_cuda(model_input.input_lengths, "input_lengths");
+    to_cuda(model_input.sequence_lengths, "sequence_lengths");
+    to_cuda(model_input.prefix_lengths, "prefix_lengths");
+    to_cuda(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
+    to_cuda(model_input.lm_output_indexes, "lm_output_indexes");
+    checkModelInputsOnCuda(model_input, tag);
+}
+
+void NormalExecutor::checkModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const {
+    if (!checkDeviceInput()) {
+        return;
+    }
+    auto check = [tag](const torch::Tensor& tensor, const char* name) {
+        if (!tensor.defined()) {
+            return;
+        }
+        RTP_LLM_CHECK_WITH_INFO(tensor.is_cuda(),
+                                "[normal-device-input] %s.%s expected CUDA tensor, got device=%s numel=%ld",
+                                tag,
+                                name,
+                                tensor.device().str().c_str(),
+                                tensor.numel());
+    };
+    check(model_input.combo_tokens, "combo_tokens");
+    check(model_input.input_lengths, "input_lengths");
+    check(model_input.sequence_lengths, "sequence_lengths");
+    check(model_input.prefix_lengths, "prefix_lengths");
+    check(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
+    check(model_input.lm_output_indexes, "lm_output_indexes");
+}
+
+bool NormalExecutor::gatherCanUseDeviceState(const StreamGroups& stream_groups) const {
+    // Decode-only batch is the only shape the device-state path supports.
+    if (stream_groups.totalContextBatchSize() != 0 || stream_groups.totalDecodeBatchSize() == 0) {
+        return false;
+    }
+    for (const auto& stream : stream_groups.decodeStreams()) {
+        // Use config-only proxies for the batch-1 check. currentBatchSize() reads
+        // outputTokenLen() → seqLength() which itself races with the worker we're
+        // trying to decide whether to skip syncing.
+        if (stream->hasNumBeams() || stream->numReturnSequences() > 1) {
+            return false;
+        }
+        const auto& state = stream->getNormalAsyncDeviceState();
+        if (!state.last_sample_token_gpu.defined() || !state.last_sample_token_gpu.is_cuda()
+            || !state.next_seq_len_gpu.defined() || !state.next_seq_len_gpu.is_cuda()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups, const SamplerOutput& sampler_output) {
+    RTP_LLM_PROFILE_SCOPE("executor.publish_normal_device_state");
+
+    auto all_streams = stream_groups.allStreams();
+    if (all_streams.empty()) {
+        return;
+    }
+
+    auto clear_states = [&all_streams]() {
+        for (auto& stream : all_streams) {
+            stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{});
+        }
+    };
+
+    const auto& token_ids = sampler_output.token_ids;
+    if (!token_ids.defined() || token_ids.numel() == 0 || token_ids.dim() < 1) {
+        RTP_LLM_LOG_WARNING("[normal-device-state] skip publish: token_ids undefined/empty");
+        clear_states();
+        return;
+    }
+
+    for (const auto& stream : all_streams) {
+        if (stream->currentBatchSize() != 1 || stream->nextBatchSize() != 1) {
+            RTP_LLM_LOG_WARNING(
+                "[normal-device-state] skip publish: only batch-1 decode is supported, stream=%ld cur_bs=%d next_bs=%d",
+                stream->streamId(),
+                stream->currentBatchSize(),
+                stream->nextBatchSize());
+            clear_states();
+            return;
+        }
+    }
+
+    const auto    cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    torch::Tensor token_ids_gpu =
+        (token_ids.is_cuda() && token_ids.scalar_type() == torch::kInt32) ? token_ids : token_ids.to(cuda_i32);
+    const int64_t token_rows = token_ids_gpu.size(0);
+    if (token_rows < static_cast<int64_t>(all_streams.size())) {
+        RTP_LLM_LOG_WARNING(
+            "[normal-device-state] skip publish: token_ids rows=%ld stream_count=%zu", token_rows, all_streams.size());
+        clear_states();
+        return;
+    }
+
+    int64_t batch_idx_out = 0;
+    for (auto& stream : all_streams) {
+        torch::Tensor last_sample_token_gpu;
+        if (token_ids_gpu.dim() == 1) {
+            last_sample_token_gpu = token_ids_gpu.narrow(0, batch_idx_out, 1).to(torch::kInt32);
+        } else {
+            const int64_t last_col = token_ids_gpu.size(-1) - 1;
+            last_sample_token_gpu =
+                token_ids_gpu.narrow(0, batch_idx_out, 1).select(-1, last_col).reshape({1}).to(torch::kInt32);
+        }
+
+        // Mirror next_seq_len_gpu on host for the next iter's scheduler.
+        // Fall back to live seqLength only on first publish (no prior worker).
+        const auto& prev_state = stream->getNormalAsyncDeviceState();
+        const int   cur_real_seq_len =
+            prev_state.next_real_seq_len > 0 ? prev_state.next_real_seq_len : stream->seqLength();
+
+        torch::Tensor cur_seq_len_gpu;
+        const auto&   prev_next_seq_len = prev_state.next_seq_len_gpu;
+        if (prev_next_seq_len.defined() && prev_next_seq_len.is_cuda()) {
+            cur_seq_len_gpu = prev_next_seq_len;
+        } else {
+            cur_seq_len_gpu = torch::full({1}, static_cast<int64_t>(cur_real_seq_len), cuda_i32);
+        }
+
+        GenerateStream::NormalAsyncDeviceState state;
+        state.last_sample_token_gpu = std::move(last_sample_token_gpu);
+        state.next_seq_len_gpu      = (cur_seq_len_gpu + 1).to(torch::kInt32);
+        state.last_real_seq_len     = cur_real_seq_len;
+        state.next_real_seq_len     = cur_real_seq_len + 1;
+        stream->setNormalAsyncDeviceState(std::move(state));
+        batch_idx_out += 1;
+    }
+}
+
+absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           stream_groups,
+                                                 GptModelOutputs               model_output,
+                                                 SamplerOutput                 sampler_output,
+                                                 std::shared_ptr<torch::Event> sampler_event) {
+    RTP_LLM_PROFILE_SCOPE("executor.dispatch_output_async");
+
+    if (useDeviceInput()) {
+        publishNormalDeviceState(stream_groups, sampler_output);
+    }
+
+    auto* processor           = batch_stream_processor_.get();
+    auto  stream_groups_copy  = stream_groups;
+    auto  model_output_copy   = std::move(model_output);
+    auto  sampler_output_copy = std::move(sampler_output);
+
+    // Claim each stream's KV resource before handing work to the runner so
+    // releaseResource defers while the worker reads/updates those blocks.
+    auto streams_for_inc = stream_groups_copy.allStreams();
+    for (auto& s : streams_for_inc) {
+        s->incPendingAsyncBookkeeping();
+    }
+
+    dispatch_runner_.launch([processor,
+                             stream_groups_copy  = std::move(stream_groups_copy),
+                             model_output_copy   = std::move(model_output_copy),
+                             sampler_output_copy = std::move(sampler_output_copy),
+                             sampler_event]() mutable {
+        RTP_LLM_PROFILE_SCOPE("executor.dispatch_output_worker");
+
+        auto worker_streams = stream_groups_copy.allStreams();
+
+        // RAII: every captured stream is decremented exactly once, and the
+        // value capture keeps GenerateStreamPtr alive until after dec runs.
+        auto dec_guard = std::shared_ptr<void>(nullptr, [worker_streams](void*) {
+            for (auto& s : worker_streams) {
+                s->decPendingAsyncBookkeepingAndMaybeRelease();
+            }
+        });
+
+        // Queue a stream wait, then do pinned D2H on the worker stream while
+        // the main thread continues to the next gather.
+        if (sampler_event) {
+            sampler_event->block(cuda_graph::graphGetCurrentStream());
+        }
+
+        auto status =
+            processor->dispatch(stream_groups_copy, {std::move(model_output_copy), std::move(sampler_output_copy)});
+        if (!status.ok()) {
+            RTP_LLM_LOG_ERROR("[normal-stream-async] dispatch (worker) failed: %s", status.ToString().c_str());
+        }
+        // dec_guard destructs here, dec'ing each stream's pending count.
+    });
+
+    return absl::OkStatus();
 }
 
 }  // namespace rtp_llm

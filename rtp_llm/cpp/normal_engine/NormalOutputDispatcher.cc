@@ -1,14 +1,47 @@
 #include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include <cstdlib>
+#include <string>
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
 #include "ATen/cuda/CUDAContext.h"
 #endif
 
 namespace rtp_llm {
+namespace {
+
+bool asyncDebugEnabled() {
+    const char* env = std::getenv("RTP_LLM_ASYNC_DEBUG");
+    return env != nullptr && std::string(env) == "1";
+}
+
+torch::Tensor copyToPinnedCpuAsync(const torch::Tensor& tensor, bool& need_sync) {
+    if (!tensor.defined() || !tensor.is_cuda()) {
+        return tensor;
+    }
+
+    auto cpu_tensor = torch::empty(
+        tensor.sizes(), torch::TensorOptions().dtype(tensor.scalar_type()).device(torch::kCPU).pinned_memory(true));
+    cpu_tensor.copy_(tensor, /*non_blocking=*/true);
+    need_sync = true;
+    return cpu_tensor;
+}
+
+void syncPinnedCpuCopies(bool need_sync) {
+    if (!need_sync) {
+        return;
+    }
+    // Keep D2H waiting explicit here instead of hiding it inside Tensor::cpu().
+    // The copy launch returns quickly; only this worker thread blocks on its
+    // stream while the main engine thread can continue issuing CUDA work.
+    cuda_graph::graphGetCurrentStream().synchronize();
+}
+
+}  // namespace
 
 absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                                               const MergedOutput& merge_outputs) const {
@@ -16,17 +49,37 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     const auto&  sampler_output       = merge_outputs.sampler_output;
     const size_t total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
     RTP_LLM_CHECK(total_batch_size_out == (size_t)sampler_output.token_ids.size(0));
-    // token_ids and success may be CUDA tensors (Sampler keeps them on GPU to avoid D2H sync during sampling).
-    // Move to CPU once here so dispatchSingleStream can use data_ptr safely.
-    const torch::Tensor token_ids_cpu =
-        sampler_output.token_ids.defined() ? sampler_output.token_ids.cpu() : torch::Tensor();
+    // token_ids and success may be CUDA tensors. Keep the non-beam token copy
+    // narrow, then stage D2H through pinned CPU buffers and synchronize once.
+    bool any_beam_search = false;
+    if (sampler_output.token_ids.defined() && sampler_output.token_ids.size(1) > 1) {
+        for (auto& stream : stream_groups.allStreams()) {
+            if (stream->currentNumBeams() > 1 || stream->nextNumBeams() > 1) {
+                any_beam_search = true;
+                break;
+            }
+        }
+    }
+    torch::Tensor token_ids_for_copy;
+    if (sampler_output.token_ids.defined()) {
+        if (any_beam_search) {
+            token_ids_for_copy = sampler_output.token_ids;
+        } else {
+            // Slice the last column on-device so the D2H is only [B, 1] int32.
+            const int64_t last_col = sampler_output.token_ids.size(1) - 1;
+            token_ids_for_copy     = sampler_output.token_ids.narrow(1, last_col, 1).contiguous();
+        }
+    }
+    bool                need_d2h_sync = false;
+    const torch::Tensor token_ids_cpu = copyToPinnedCpuAsync(token_ids_for_copy, need_d2h_sync);
+    const torch::Tensor success_cpu   = copyToPinnedCpuAsync(sampler_output.success, need_d2h_sync);
+    syncPinnedCpuCopies(need_d2h_sync);
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
-    const torch::Tensor success_cpu = sampler_output.success.defined() ? sampler_output.success.cpu() : torch::Tensor();
-    int                 batch_idx_in     = 0;
-    int                 batch_idx_out    = 0;
-    int                 token_offset     = 0;
-    bool                return_all_probs = stream_groups.needReturnAllProbs() != ReturnAllProbsMode::NONE;
-    auto                new_tokens_all   = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
+    int  batch_idx_in     = 0;
+    int  batch_idx_out    = 0;
+    int  token_offset     = 0;
+    bool return_all_probs = stream_groups.needReturnAllProbs() != ReturnAllProbsMode::NONE;
+    auto new_tokens_all   = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
 
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
@@ -203,6 +256,19 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     for (int i = 0; i < cur_batch_size; ++i) {
         if (success_cpu.defined() && !(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {
+            if (asyncDebugEnabled()) {
+                const auto& state = stream->getNormalAsyncDeviceState();
+                RTP_LLM_LOG_ERROR("[async-debug] sampler success=false: stream=%ld pd_sep=%d status=%s "
+                                  "pending=%d seq_len=%d state_next_real=%d batch_idx_in=%d token_stride=%zu",
+                                  stream->streamId(),
+                                  stream->queryPdSep(),
+                                  StreamStateToString(stream->getStatus()).c_str(),
+                                  stream->hasPendingAsyncBookkeeping(),
+                                  stream->seqLength(),
+                                  state.next_real_seq_len,
+                                  batch_idx_in + i,
+                                  token_stride);
+            }
             stream->reportError(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
         }
     }

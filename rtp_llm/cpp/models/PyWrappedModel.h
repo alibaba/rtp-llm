@@ -5,6 +5,7 @@
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <optional>
 #include <string>
+#include <atomic>
 #include <mutex>
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
@@ -40,6 +41,11 @@ public:
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
+    torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
+    torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
+    void            prepareAttentionInputs(const GptModelInputs& inputs) override;
+    void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
+    void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
@@ -84,7 +90,7 @@ private:
     std::shared_ptr<KVCacheManager>                 cache_manager_;  // For cache_store access
     torch::Tensor                                   residual_scale_fp32_;
     torch::Tensor                                   residual_scale_;
-    ModelBufferHolder                               buffer_holder_;
+    TensorHolder                               buffer_holder_;
 
     GraphBase* graph_runner_{nullptr};
     py::object py_model_;
@@ -104,6 +110,11 @@ private:
     // is_pinned() is expensive on CPU; only assert during first N forwards as a sanity check.
     static constexpr int kPinnedCheckForwardCount = 3;
     int                  pinned_check_remaining_{kPinnedCheckForwardCount};
+
+    std::atomic<bool>                prepared_attention_inputs_{false};
+    torch_ext::PyAttentionInputs     attention_inputs_;
+    torch_ext::AttentionInputsByTag  attention_inputs_by_tag_;
+    CudaGraphState                   graph_state_;
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.

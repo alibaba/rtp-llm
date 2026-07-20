@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include <array>
 #include <atomic>
@@ -42,6 +43,7 @@ private:
     GreedySamplingBufferSlot*                                        current_greedy_sampling_slot_ = nullptr;
     std::array<GreedySamplingBufferSlot, kGreedySamplingBufferSlots> greedy_sampling_buffer_slots_;
     std::atomic<bool>                                                forward_in_progress_{false};
+    cuda_graph::GraphStream                                          copy_stream_;
 };
 
 }  // namespace rtp_llm

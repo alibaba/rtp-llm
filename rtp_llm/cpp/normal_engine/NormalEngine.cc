@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <c10/core/InferenceMode.h>
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <thread>
 #include <random>
@@ -333,6 +334,14 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
                                      torch::Tensor(),
                                      false};
         stream->update(update_info);
+        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+            .epoch                 = 0,
+            .last_sample_token_gpu = torch::zeros({1}, cuda_i32),
+            .next_seq_len_gpu      = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32),
+            .last_real_seq_len     = stream->seqLength(),
+            .next_real_seq_len     = stream->seqLength(),
+        });
     }
     return stream;
 }
@@ -550,7 +559,8 @@ bool NormalEngine::isEagle() {
 
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
     if (isMTPEagle()) {
-        int propose_step = sp_config.gen_num_per_cycle;
+        int propose_step   = sp_config.gen_num_per_cycle;
+        int mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
         switch (pd_sep_config.role_type) {
             case RoleType::PREFILL:
                 if (streams.empty()) {
@@ -561,7 +571,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
             case RoleType::DECODE:
                 if (streams.empty()) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_));
+                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size));
                 }
                 break;
             case RoleType::PDFUSION: {
@@ -580,7 +590,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                 }
                 if (!has_decode) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_));
+                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size));
                 }
                 break;
             }

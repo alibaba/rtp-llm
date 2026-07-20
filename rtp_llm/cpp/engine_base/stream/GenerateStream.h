@@ -14,13 +14,15 @@
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include <atomic>
+#include <condition_variable>
 #include <iterator>
 #include <mutex>
 #include <optional>
 
 namespace rtp_llm {
 
-// WARNGING: buffer in generate stream should all be host to avoid gpu buffer hold more time (except kv cache)
+// GenerateStream-owned buffers stay on host by default; KV cache is the device-side exception.
 
 struct StreamUpdateInfo {
     const torch::Tensor new_tokens;
@@ -47,6 +49,10 @@ struct StreamSpecUpdateInfo {
     int                 draft_token;
     const torch::Tensor draft_hidden_states;
     const torch::Tensor draft_token_probs;
+    // GPU tensor of propose tokens for the next step.
+    // shape: [propose_step] (the per-stream slice). When defined, PDFUSION
+    // path will skip D2H and consume this GPU tensor directly.
+    torch::Tensor draft_token_gpu;
 
     bool update_remote_generate = true;
     bool force_update_info      = false;
@@ -72,7 +78,10 @@ public:
 
 public:
     size_t        propose_step = 0;
-    torch::Tensor tokens;  // selected tokens
+    torch::Tensor tokens;  // selected tokens (CPU, preserved for PD-disaggregate / RPC / tests)
+    // GPU mirror of next-step propose tokens, used by PDFUSION fast paths to
+    // avoid a D2H + CPU loop + H2D round trip.
+    torch::Tensor propose_tokens_gpu;
     torch::Tensor hidden_states;
     torch::Tensor all_probs;
 
@@ -477,6 +486,134 @@ public:
         return sp_output_buffer_;
     }
 
+    // Opaque CUDA event used by async MTP to wait for linear-attention KV swaps
+    // without including cuda_runtime.h in this header.
+    void setPendingSwapDoneEvent(std::shared_ptr<void> event) {
+        std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
+        pending_swap_done_event_ = std::move(event);
+    }
+    std::shared_ptr<void> getPendingSwapDoneEvent() const {
+        std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
+        return pending_swap_done_event_;
+    }
+    void clearPendingSwapDoneEvent() {
+        std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
+        pending_swap_done_event_.reset();
+    }
+
+    // Count worker claims on this stream's KV resource.
+    // releaseResource waits for zero so worker-side update/specUpdate cannot
+    // write into blocks already returned to the pool.
+    void incPendingAsyncBookkeeping();
+    void decPendingAsyncBookkeepingAndMaybeRelease();
+    bool hasPendingAsyncBookkeeping() const;
+    void waitPendingAsyncBookkeeping();
+    void markDeferredRelease();
+    bool isDeferredReleasePending() const;
+
+    // Per-stream CUDA state used to prepare the next MTP decode step while host
+    // bookkeeping may still be in flight. It carries accept_len/tokens,
+    // next_seq_len, propose_tokens; epoch guards stale clears in tests.
+    struct MtpAsyncDeviceState {
+        uint64_t      epoch = 0;
+        torch::Tensor accept_len_gpu;
+        torch::Tensor accept_tokens_gpu;
+        torch::Tensor next_seq_len_gpu;
+        torch::Tensor propose_tokens_gpu;
+        // Main-thread mirrors used when DROP_BROAD_SYNC lets the next step run
+        // before worker-side specUpdate has written sp_output_buffer fields.
+        torch::Tensor last_hidden_states_gpu;
+        torch::Tensor draft_all_probs_gpu;
+        // True host seqLength observed when this state is published. MTP async
+        // uses it as the base for the next KV allocation upper bound.
+        // -1 = unset (first iter / cleared).
+        int last_real_seq_len = -1;
+        // Host seq_len override for the next iter's incrKVBlock. In async MTP
+        // this may be an upper bound based on last_real_seq_len, not a value to
+        // chain as the next round's true length.
+        // -1 = unset (first iter / cleared).
+        int next_real_seq_len = -1;
+    };
+
+    uint64_t setMtpAsyncDeviceState(MtpAsyncDeviceState state) {
+        state.epoch      = ++mtp_async_epoch_counter_;
+        mtp_async_state_ = std::move(state);
+        return mtp_async_state_.epoch;
+    }
+    const MtpAsyncDeviceState& getMtpAsyncDeviceState() const {
+        return mtp_async_state_;
+    }
+    bool clearMtpAsyncDeviceState(uint64_t epoch) {
+        // Legacy/testing escape hatch. Active MTP decode paths should keep
+        // device tensors alive and overwrite them on the next publish.
+        if (mtp_async_state_.epoch != epoch) {
+            return false;
+        }
+        mtp_async_state_ = MtpAsyncDeviceState{};
+        return true;
+    }
+
+    // ---- Back-compat wrappers (callers added before) ----
+    void setSpecDecodeDeviceState(torch::Tensor accept_len_gpu,
+                                  torch::Tensor accept_tokens_gpu,
+                                  torch::Tensor next_seq_len_gpu,
+                                  torch::Tensor propose_tokens_gpu = torch::Tensor()) {
+        MtpAsyncDeviceState state;
+        state.accept_len_gpu     = std::move(accept_len_gpu);
+        state.accept_tokens_gpu  = std::move(accept_tokens_gpu);
+        state.next_seq_len_gpu   = std::move(next_seq_len_gpu);
+        state.propose_tokens_gpu = std::move(propose_tokens_gpu);
+        setMtpAsyncDeviceState(std::move(state));
+    }
+    const torch::Tensor& getAcceptLenGpu() const {
+        return mtp_async_state_.accept_len_gpu;
+    }
+    const torch::Tensor& getAcceptTokensGpu() const {
+        return mtp_async_state_.accept_tokens_gpu;
+    }
+    const torch::Tensor& getNextSeqLenGpu() const {
+        return mtp_async_state_.next_seq_len_gpu;
+    }
+    const torch::Tensor& getProposeTokensGpu() const {
+        return mtp_async_state_.propose_tokens_gpu;
+    }
+    const torch::Tensor& getLastHiddenStatesGpu() const {
+        return mtp_async_state_.last_hidden_states_gpu;
+    }
+    const torch::Tensor& getDraftAllProbsGpu() const {
+        return mtp_async_state_.draft_all_probs_gpu;
+    }
+    void clearSpecDecodeDeviceState() {
+        // Unconditional legacy/testing escape hatch. Active MTP decode paths
+        // should publish/overwrite MtpAsyncDeviceState instead of clearing it.
+        mtp_async_state_ = MtpAsyncDeviceState{};
+    }
+
+    // Normal decode async device state. Unlike MTP, normal decode accepts one
+    // sampler token per step, so the next-step state only needs the sampled
+    // token and the committed sequence length after that token.
+    struct NormalAsyncDeviceState {
+        uint64_t      epoch = 0;
+        torch::Tensor last_sample_token_gpu;  // [1] int32
+        torch::Tensor next_seq_len_gpu;       // [1] int32, seqLength after sample
+        // Host seqLength before the sampled token represented by this state.
+        // -1 = unset (first iter / cleared).
+        int last_real_seq_len = -1;
+        // Host mirror of next_seq_len_gpu, computed at publish time so the
+        // scheduler can drive incrKVBlock without racing the async worker.
+        // -1 = unset (first iter / cleared).
+        int next_real_seq_len = -1;
+    };
+
+    uint64_t setNormalAsyncDeviceState(NormalAsyncDeviceState state) {
+        state.epoch         = ++normal_async_epoch_counter_;
+        normal_async_state_ = std::move(state);
+        return normal_async_state_.epoch;
+    }
+    const NormalAsyncDeviceState& getNormalAsyncDeviceState() const {
+        return normal_async_state_;
+    }
+
     GenerateStreamPtr getProposeStream() {
         return propose_stream_;
     }
@@ -597,19 +734,9 @@ protected:
     kmonitor::MetricsReporterPtr metrics_reporter_;
     rtp_llm::SpecialTokens       special_tokens_;
 
-    // Shared ownership diamond:
-    //   GenerateStream owns both stream_cache_resource_ and generate_status_ (GenerateStateMachine).
-    //   generate_status_ also holds a shared_ptr to the same StreamCacheResource.
-    //
-    //   GenerateStream ──shared_ptr──> StreamCacheResource
-    //        │                               ^
-    //        └──shared_ptr──> GenerateStateMachine ──shared_ptr──┘
-    //
-    // This is intentional: GenerateStateMachine needs direct access to StreamCacheResource
-    // for state transitions (e.g., loading cache, releasing blocks). Both owners share the
-    // same instance via shared_ptr, so reference counting ensures correct lifetime management.
-    // No circular reference exists because neither StreamCacheResource nor GenerateStateMachine
-    // holds a back-reference to GenerateStream.
+    // GenerateStream and GenerateStateMachine share StreamCacheResource by
+    // shared_ptr; neither resource nor state machine points back here, so no
+    // ownership cycle is created.
 
     torch::Tensor                            cum_log_probs_;
     torch::Tensor                            all_probs_;
@@ -634,6 +761,30 @@ protected:
     bool                               contain_propose_token_ = false;
     int                                mtp_token_index_       = 0;
     SpeculativeExecutorStreamOutputPtr sp_output_buffer_      = nullptr;
+    // cudaEvent_t (type-erased) recorded after specUpdate runs
+    // swapLinearBlocks. MtpExecutor waits on it before issuing the next
+    // target verify. nullptr on streams without pending swaps.
+    std::shared_ptr<void>       pending_swap_done_event_;
+    std::shared_ptr<std::mutex> pending_swap_done_event_mutex_ = std::make_shared<std::mutex>();
+
+    // Separate lock/cv avoids deadlocking releaseResource with worker updates
+    // that need mutex_. Shared ownership preserves the coordinator across
+    // GenerateStream copies captured by async workers.
+    struct AsyncBookkeepingCoordinator {
+        std::atomic<int>        count{0};
+        std::atomic<bool>       defer_release{false};
+        std::mutex              mu;
+        std::condition_variable cv;
+    };
+    std::shared_ptr<AsyncBookkeepingCoordinator> async_bookkeeping_ = std::make_shared<AsyncBookkeepingCoordinator>();
+
+    // Stream-async device-resident state for the next decode step's prepare.
+    // These structs stay default-constructed (epoch=0, undefined tensors) until
+    // their corresponding async/sync publisher installs a usable state.
+    MtpAsyncDeviceState    mtp_async_state_;
+    uint64_t               mtp_async_epoch_counter_ = 0;
+    NormalAsyncDeviceState normal_async_state_;
+    uint64_t               normal_async_epoch_counter_ = 0;
 
     bool return_all_hidden_states_ = false;
 

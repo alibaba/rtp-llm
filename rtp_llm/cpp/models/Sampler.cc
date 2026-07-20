@@ -14,7 +14,8 @@ using namespace std;
 namespace rtp_llm {
 
 Sampler::Sampler(const SamplerInitParams& params):
-    fixed_max_batch_size_(params.max_batch_size > 0 && params.fixed_max_batch_size) {
+    fixed_max_batch_size_(params.max_batch_size > 0 && params.fixed_max_batch_size),
+    copy_stream_(cuda_graph::graphGetStreamFromPool(false)) {
     if (params.max_batch_size > 0) {
         allocateGreedySamplingBuffers(params.max_batch_size);
     }
@@ -83,7 +84,6 @@ void Sampler::markGreedySamplingBufferReady() {
         }
     }
 }
-
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_PROFILE_SCOPE("sampler.forward");
@@ -123,11 +123,19 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         torch::empty({(int64_t)inputs.batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
     auto all_beam_indices =
         has_num_beams ? torch::empty({(int64_t)inputs.batch_size_out}, torch::kInt32) : torch::Tensor();
-    // Move token_ids to CUDA once so sampleGreedy writes GPU→GPU (no blocking D2H sync).
-    // Callers that need CPU access should call .cpu() explicitly.
-    // Use blocking transfer: on ROCm, hipMemcpyAsync from pageable memory is truly async
-    // and can cause memory access faults if a kernel reads the buffer before transfer completes.
-    auto inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA);
+    torch::Tensor inputs_token_ids_cuda;
+    {
+        auto main_stream     = cuda_graph::graphGetCurrentStream();
+        auto copy_done_event = cuda_graph::makeGraphEvent();
+        {
+            cuda_graph::GraphStreamGuard guard(copy_stream_);
+            inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
+            copy_done_event.record(copy_stream_);
+        }
+        copy_done_event.block(main_stream);
+        inputs_token_ids_cuda.record_stream(main_stream);
+    }
+
     auto all_token_ids_out     = variable_num_beams ?
                                      torch::empty({(int64_t)inputs.batch_size_out, (int64_t)max_seq_len},
                                               torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA)) :
