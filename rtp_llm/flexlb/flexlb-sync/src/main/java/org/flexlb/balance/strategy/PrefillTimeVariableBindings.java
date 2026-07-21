@@ -21,16 +21,9 @@ final class PrefillTimeVariableBindings {
     private static final Set<String> BATCH_VAR_NAMES = Set.of(
             "totalInputTokens", "totalHitCacheTokens", "totalComputeTokens",
             "maxInputTokens", "maxComputeTokens");
-    private static final Set<String> REQUEST_VAR_NAMES = Set.of(
-            "inputTokens", "hitCacheTokens", "computeTokens", "hasHitCache");
-
     private static final ThreadLocal<BindingContext> BINDING_CTX = ThreadLocal.withInitial(BindingContext::new);
 
     private PrefillTimeVariableBindings() {
-    }
-
-    static boolean supports(String name) {
-        return BATCH_SIZE.equals(name) || BATCH_VAR_NAMES.contains(name) || REQUEST_VAR_NAMES.contains(name);
     }
 
     static boolean isBatchScoped(String name) {

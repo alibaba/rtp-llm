@@ -2,15 +2,11 @@ package org.flexlb.balance.strategy;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.endpoint.SimpleWorkerEndpoint;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -57,39 +53,26 @@ class RandomStrategyTest {
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any(WorkerEndpoint.class))).thenReturn(true);
         randomStrategy = new RandomStrategy(
-                new EngineWorkerStatus(new ModelMetaConfig(), endpointRegistry),
+                new EngineWorkerStatus(endpointRegistry),
                 configService,
                 resourceMeasureFactory);
     }
 
     @AfterEach
     void tearDown() {
+        endpointRegistry.close();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
     }
 
-    /** Register a mock PrefillEndpoint for the given ipPort and WorkerStatus. */
     private void registerPrefill(String ipPort, WorkerStatus ws) {
-        PrefillEndpoint ep = Mockito.mock(PrefillEndpoint.class);
-        Mockito.when(ep.getIp()).thenReturn(ws.getIp());
-        Mockito.when(ep.getHttpPort()).thenReturn(ws.getPort());
-        Mockito.when(ep.getGrpcPort()).thenReturn(ws.getGrpcPort());
-        Mockito.when(ep.getStatus()).thenReturn(ws);
-        Mockito.when(ep.ipPort()).thenReturn(ipPort);
-        endpointRegistry.putPrefill(ipPort, ep);
+        endpointRegistry.ensureEndpoint(RoleType.PREFILL, ipPort, ws);
     }
 
-    /** Register a mock DecodeEndpoint for the given ipPort and WorkerStatus. */
     private void registerDecode(String ipPort, WorkerStatus ws) {
-        DecodeEndpoint ep = Mockito.mock(DecodeEndpoint.class);
-        Mockito.when(ep.getIp()).thenReturn(ws.getIp());
-        Mockito.when(ep.getHttpPort()).thenReturn(ws.getPort());
-        Mockito.when(ep.getGrpcPort()).thenReturn(ws.getGrpcPort());
-        Mockito.when(ep.getStatus()).thenReturn(ws);
-        Mockito.when(ep.ipPort()).thenReturn(ipPort);
-        endpointRegistry.putDecode(ipPort, ep);
+        endpointRegistry.ensureEndpoint(RoleType.DECODE, ipPort, ws);
     }
 
     @Test
@@ -197,8 +180,7 @@ class RandomStrategyTest {
         vitWorker.setRole(RoleType.VIT);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap()
                 .put("127.0.0.3:8080", vitWorker);
-        endpointRegistry.putVit(
-                "127.0.0.3:8080", new SimpleWorkerEndpoint(vitWorker));
+        endpointRegistry.ensureEndpoint(RoleType.VIT, "127.0.0.3:8080", vitWorker);
 
         BalanceContext context = new BalanceContext();
         context.setRequest(new Request());

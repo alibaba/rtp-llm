@@ -1,6 +1,5 @@
 package org.flexlb.balance.strategy;
 
-import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.ResourceMeasure;
@@ -8,7 +7,6 @@ import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
@@ -48,7 +46,6 @@ public class RandomStrategy implements LoadBalanceStrategy {
 
     @Override
     public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
-        Request request = balanceContext.getRequest();
         logger.debug("Selecting worker for , role: {}, group: {}", roleType, group);
 
         Map<String, WorkerEndpoint> workerEndpointMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
@@ -58,10 +55,6 @@ public class RandomStrategy implements LoadBalanceStrategy {
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
         List<WorkerEndpoint> endpoints = new ArrayList<>(workerEndpointMap.values());
-        if (CollectionUtils.isEmpty(endpoints)) {
-            logger.warn("No available workers");
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
-        }
 
         // Random select with wrap-around to skip dead workers, no extra allocation
         int size = endpoints.size();
@@ -80,7 +73,7 @@ public class RandomStrategy implements LoadBalanceStrategy {
         }
 
         logger.debug("Selected worker ip: {}, httpPort: {}", selectedWorker.getIp(), selectedWorker.getHttpPort());
-        return buildServerStatus(selectedWorker, roleType, balanceContext.getRequestId(), request);
+        return buildServerStatus(selectedWorker, roleType, balanceContext.getRequestId());
     }
 
     private boolean isWorkerAvailable(BalanceContext balanceContext, RoleType roleType, WorkerEndpoint ep) {
@@ -96,7 +89,7 @@ public class RandomStrategy implements LoadBalanceStrategy {
         return resourceMeasure == null || resourceMeasure.isResourceAvailable(ep);
     }
 
-    private ServerStatus buildServerStatus(WorkerEndpoint ep, RoleType roleType, long requestId, Request request) {
+    private ServerStatus buildServerStatus(WorkerEndpoint ep, RoleType roleType, long requestId) {
         ServerStatus result = new ServerStatus();
         try {
             result.setSuccess(true);

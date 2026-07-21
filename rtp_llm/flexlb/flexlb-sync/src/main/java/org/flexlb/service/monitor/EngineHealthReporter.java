@@ -3,7 +3,6 @@ package org.flexlb.service.monitor;
 import io.netty.channel.EventLoopGroup;
 import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.SingleThreadEventExecutor;
-import lombok.Data;
 import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
@@ -65,15 +64,14 @@ import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_RUNNING_QUER
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_STEP_LATENCY_VAR;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.FORWARD_TO_MASTER_RESULT;
-import static org.flexlb.constant.MetricConstant.REQUEST_NETWORK_DELAY_MS;
 import static org.flexlb.constant.MetricConstant.GRPC_SERVER_PROCESS_MS;
+import static org.flexlb.constant.MetricConstant.REQUEST_NETWORK_DELAY_MS;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_EVENT;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_NODE;
 
 /**
  * Engine health reporter for monitoring engine status and metrics
  */
-@Data
 @Component
 public class EngineHealthReporter {
 
@@ -95,7 +93,6 @@ public class EngineHealthReporter {
         this.monitor = monitor;
         this.cacheMetricsReporter = cacheMetricsReporter;
         this.engineGrpcClient = engineGrpcClient;
-
         this.eventLoopGroupMap = Map.of(
                 "serverWorker", serverLoopResources.onServer(true),
                 "serverSelector", serverLoopResources.onServerSelect(true),

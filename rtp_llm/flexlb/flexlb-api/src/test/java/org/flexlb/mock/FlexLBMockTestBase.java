@@ -1,10 +1,10 @@
 package org.flexlb.mock;
 
 import io.netty.channel.nio.NioEventLoopGroup;
-import java.io.IOException;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.scheduler.Router;
@@ -17,6 +17,7 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -29,6 +30,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -155,7 +157,7 @@ public abstract class FlexLBMockTestBase {
         reporter = mock(BatchSchedulerReporter.class);
 
         // 6. Create real EndpointRegistry (scheduler=null for now, replaced below)
-        endpointRegistry = new EndpointRegistry(configService, () -> null, reporter);
+        endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
 
         // 7. Engine status is mocked by default; E2E subclasses can use the real registry-backed view.
         engineWorkerStatus = createEngineWorkerStatus();
@@ -184,19 +186,18 @@ public abstract class FlexLBMockTestBase {
         decodeWs.setTotalKvCacheTokens(new java.util.concurrent.atomic.AtomicLong(2_000_000L));
 
         // 9. Register decode endpoint (no scheduler dependency)
-        endpointRegistry.ensureDecodeEndpoint(decodeIpPort, decodeWs);
+        endpointRegistry.ensureEndpoint(RoleType.DECODE, decodeIpPort, decodeWs);
 
         // 10. Fixed routing by default; E2E subclasses can install the production router.
         router = createRouter();
 
         // 11. Create real scheduler
         scheduler = new FlexlbBatchScheduler(
-                configService, router, grpcClient, engineWorkerStatus,
+                configService, router, grpcClient,
                 endpointRegistry, dispatcher, reporter, null);
 
         // 12. Register prefill endpoint with the real scheduler as BatchDecisionHandler
-        PrefillEndpoint prefillEp = new PrefillEndpoint(prefillWs, config, scheduler, reporter);
-        endpointRegistry.putPrefill(prefillIpPort, prefillEp);
+        endpointRegistry.ensureEndpoint(RoleType.PREFILL, prefillIpPort, prefillWs);
 
         // 13. Register in EngineWorkerStatus static map for completeness
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
@@ -285,7 +286,6 @@ public abstract class FlexLBMockTestBase {
         cfg.setFlexlbBatchWindowMs(300);
         cfg.setCostSloMs(50_000L);
         cfg.setCostSloRiskMarginMs(50L);
-        cfg.setFlexlbBatchFillThreshold(1.0);
         cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);
         cfg.setFlexlbInflightTtlMs(300_000L);
         return cfg;
@@ -311,7 +311,7 @@ public abstract class FlexLBMockTestBase {
      * Cancel a request by ID.
      */
     protected void cancelRequest(long requestId) {
-        scheduler.cancel(requestId);
+        scheduler.cancel(requestId, CancelReason.CLIENT_CANCELLED, 0);
     }
 
     /**
@@ -319,7 +319,7 @@ public abstract class FlexLBMockTestBase {
      */
     protected void triggerTtlCleanup() {
         scheduler.cleanupInflight();
-        endpointRegistry.evictExpiredAll(config.getFlexlbInflightTtlMs());
+        endpointRegistry.scheduledEviction();
     }
 
     // ==================== Helper: endpoint accessors ====================
@@ -363,8 +363,7 @@ public abstract class FlexLBMockTestBase {
         ws.setAvailableKvCacheTokens(new AtomicLong(1_000_000L));
         ws.setTotalKvCacheTokens(new AtomicLong(2_000_000L));
 
-        PrefillEndpoint ep = new PrefillEndpoint(ws, config, scheduler, reporter);
-        endpointRegistry.putPrefill(ipPort, ep);
+        endpointRegistry.ensureEndpoint(RoleType.PREFILL, ipPort, ws);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put(ipPort, ws);
 
         additionalPrefillWorkers.add(worker);
@@ -415,8 +414,8 @@ public abstract class FlexLBMockTestBase {
         ws.setAvailableKvCacheTokens(new AtomicLong(1_000_000_000L));
         ws.setTotalKvCacheTokens(new AtomicLong(2_000_000_000L));
 
-        DecodeEndpoint endpoint = endpointRegistry.ensureDecodeEndpoint(ipPort, ws);
-        endpoint.calibrate(java.util.Map.of(), java.util.Map.of(), 1_000_000_000L);
+        DecodeEndpoint endpoint = (DecodeEndpoint) endpointRegistry.ensureEndpoint(RoleType.DECODE, ipPort, ws);
+        endpoint.onWorkerStatusUpdate(ws, new WorkerStatusResponse());
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort, ws);
         additionalDecodeIpPorts.add(ipPort);
         return endpoint;

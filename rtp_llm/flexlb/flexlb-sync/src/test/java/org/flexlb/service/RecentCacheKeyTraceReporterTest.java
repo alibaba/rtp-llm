@@ -3,6 +3,7 @@ package org.flexlb.service;
 import org.flexlb.cache.core.ShardedRecentCacheKeyWindow;
 import org.flexlb.cache.monitor.CacheHitTheoryStats;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -160,7 +161,12 @@ class RecentCacheKeyTraceReporterTest {
     }
 
     private static ShardedRecentCacheKeyWindow smallWindow() {
-        return new ShardedRecentCacheKeyWindow(1, 60_000L, 100L);
+        FlexlbConfig config = new FlexlbConfig();
+        config.setCacheHitTimeWindowMs(60_000L);
+        config.setCacheHitMaxCacheKeys(3_200L);
+        ConfigService configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        return new ShardedRecentCacheKeyWindow(configService);
     }
 
     private static BalanceContext contextWithConfig(FlexlbConfig config) {

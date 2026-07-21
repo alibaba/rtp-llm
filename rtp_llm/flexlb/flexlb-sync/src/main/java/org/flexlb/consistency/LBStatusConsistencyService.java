@@ -13,7 +13,6 @@ import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
-
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -77,7 +76,6 @@ public class LBStatusConsistencyService implements MasterElectService {
         }
         log.info("start init ZookeeperMasterElectService.");
 
-        SCHEDULED_EXECUTOR_SERVICE.scheduleWithFixedDelay(this::syncLBStatusFromMaster, 1000, 500, TimeUnit.MILLISECONDS);
     }
 
     @Override
@@ -164,13 +162,6 @@ public class LBStatusConsistencyService implements MasterElectService {
         resp.setSuccess(true);
         // TODO Get master status
         return resp;
-    }
-
-    /**
-     * Slave node syncs LB status from master node
-     */
-    private void syncLBStatusFromMaster() {
-        // TODO Get master status
     }
 
     @PreDestroy

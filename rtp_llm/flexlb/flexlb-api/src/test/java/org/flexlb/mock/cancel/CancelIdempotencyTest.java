@@ -47,7 +47,6 @@ class CancelIdempotencyTest extends FlexLBMockTestBase {
         cfg.setFlexlbBatchWindowMs(300);
         cfg.setCostSloMs(50_000L);
         cfg.setCostSloRiskMarginMs(50L);
-        cfg.setFlexlbBatchFillThreshold(1.0);
         cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);
         cfg.setFlexlbInflightTtlMs(300_000L);
         return cfg;

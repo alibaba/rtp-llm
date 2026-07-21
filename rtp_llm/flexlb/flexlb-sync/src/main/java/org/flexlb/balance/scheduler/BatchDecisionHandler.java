@@ -8,7 +8,6 @@ import java.util.List;
  * Each method corresponds to a decision the batcher makes during its run loop:
  * <ul>
  *   <li>{@link #onExpired} — head item's deadline has passed, must be dropped</li>
- *   <li>{@link #onUrgent} — head item is within the risk margin, dispatch alone immediately</li>
  *   <li>{@link #onBatchReady} — a batch has been assembled and is ready for gRPC dispatch</li>
  *   <li>{@link #onOfferFailure} — a new item could not be enqueued (batcher stopped or queue full)</li>
  * </ul>
@@ -20,11 +19,6 @@ public interface BatchDecisionHandler {
      * The scheduler removes it from inflight, rolls back the route, and fails the future.
      */
     void onExpired(BatchItem head);
-
-    /**
-     * Called when the head item is within the risk margin — must be dispatched alone immediately.
-     */
-    void onUrgent(BatchItem head, DispatchMeta meta);
 
     /**
      * Called when the batcher has assembled a batch ready for dispatch.

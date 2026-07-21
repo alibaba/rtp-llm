@@ -6,12 +6,12 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -59,9 +59,10 @@ class CostBasedDecodeStrategyTest {
         for (Map.Entry<String, WorkerStatus> entry : workerMap.entrySet()) {
             WorkerStatus ws = entry.getValue();
             ws.setGrpcPort(9090);
-            DecodeEndpoint ep = registry.ensureDecodeEndpoint(entry.getKey(), ws);
+            DecodeEndpoint ep = (DecodeEndpoint) registry.ensureEndpoint(
+                    RoleType.DECODE, entry.getKey(), ws);
             // Initialize reported KV cache from status
-            ep.calibrate(null, null, ws.getAvailableKvCacheTokens().get());
+            ep.onWorkerStatusUpdate(ws, new WorkerStatusResponse());
         }
         return registry;
     }
@@ -70,7 +71,7 @@ class CostBasedDecodeStrategyTest {
     void should_handle_empty_worker_map_when_no_workers_available() {
         EndpointRegistry emptyRegistry = new EndpointRegistry(configService, () -> null,
                 Mockito.mock(BatchSchedulerReporter.class));
-        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), emptyRegistry);
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(emptyRegistry);
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = new DecodeResourceMeasure(configService);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
@@ -109,7 +110,7 @@ class CostBasedDecodeStrategyTest {
         decodeMap.put("127.0.0.3:8080", worker3);
 
         EndpointRegistry registry = createDecodeRegistry(decodeMap);
-        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), registry);
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(registry);
 
         Request req = new Request();
         req.setSeqLen(1000);
@@ -152,7 +153,7 @@ class CostBasedDecodeStrategyTest {
         decodeMap.put("127.0.0.3:8080", worker3);
 
         EndpointRegistry registry = createDecodeRegistry(decodeMap);
-        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), registry);
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(registry);
 
         Request req = new Request();
         req.setSeqLen(1000);
@@ -184,7 +185,7 @@ class CostBasedDecodeStrategyTest {
         modelStatus.getDecodeStatusMap().put("127.0.0.1:8080", worker1);
 
         EndpointRegistry registry = createDecodeRegistry(modelStatus.getDecodeStatusMap());
-        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), registry);
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(registry);
 
         Request req = new Request();
         req.setSeqLen(1000);
@@ -222,7 +223,7 @@ class CostBasedDecodeStrategyTest {
         decodeMap.put("127.0.0.2:8080", worker2);
 
         EndpointRegistry registry = createDecodeRegistry(decodeMap);
-        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), registry);
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(registry);
 
         Request req = new Request();
         req.setSeqLen(1000);
@@ -247,7 +248,8 @@ class CostBasedDecodeStrategyTest {
             if (status.isSuccess()) {
                 String selectedIp = status.getServerIp();
                 selectionCount.put(selectedIp, selectionCount.getOrDefault(selectedIp, 0) + 1);
-                costBasedDecodeStrategy.rollBack(registry.get(selectedIp + ":8080"), 1000L + i);
+                costBasedDecodeStrategy.rollBack(
+                        registry.get(RoleType.DECODE, selectedIp + ":8080"), 1000L + i);
             }
         }
 
@@ -280,7 +282,7 @@ class CostBasedDecodeStrategyTest {
         decodeMap.put("127.0.0.2:8080", worker2);
 
         EndpointRegistry registry = createDecodeRegistry(decodeMap);
-        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), registry);
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(registry);
 
         Request req = new Request();
         req.setSeqLen(500);
@@ -318,7 +320,7 @@ class CostBasedDecodeStrategyTest {
         decodeMap.put("127.0.0.2:8080", worker2);
 
         EndpointRegistry registry = createDecodeRegistry(decodeMap);
-        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), registry);
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(registry);
 
         Request req = new Request();
         req.setSeqLen(200);

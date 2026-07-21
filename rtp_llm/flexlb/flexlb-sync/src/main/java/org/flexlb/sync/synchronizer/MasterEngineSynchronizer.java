@@ -128,7 +128,4 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
         return completedSyncCount > 0;
     }
 
-    public int getCompletedSyncCount() {
-        return completedSyncCount;
-    }
 }

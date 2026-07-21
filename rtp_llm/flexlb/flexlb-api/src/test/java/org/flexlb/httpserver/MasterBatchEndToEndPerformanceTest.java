@@ -21,10 +21,10 @@ import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
@@ -53,6 +53,7 @@ import org.springframework.mock.env.MockEnvironment;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.math.BigInteger;
+import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -169,7 +170,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
     @Override
     protected EngineWorkerStatus createEngineWorkerStatus() {
-        return new EngineWorkerStatus(new ModelMetaConfig(), endpointRegistry);
+        return new EngineWorkerStatus(endpointRegistry);
     }
 
     @Override
@@ -201,7 +202,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 anyString(), anyString(), anyString(), anyString());
         getDecodeEndpoint().getStatus().getAvailableKvCacheTokens().set(1_000_000_000L);
         getDecodeEndpoint().getStatus().getTotalKvCacheTokens().set(2_000_000_000L);
-        getDecodeEndpoint().calibrate(Map.of(), Map.of(), 1_000_000_000L);
+        getDecodeEndpoint().onWorkerStatusUpdate(
+                getDecodeEndpoint().getStatus(), new WorkerStatusResponse());
 
         RouteService routeService = new RouteService(
                 configService,
@@ -225,8 +227,12 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 reporter,
                 latencyRecorder);
 
+        int grpcPort;
+        try (ServerSocket socket = new ServerSocket(0)) {
+            grpcPort = socket.getLocalPort();
+        }
         MockEnvironment environment = new MockEnvironment()
-                .withProperty("server.port", "-2")
+                .withProperty("server.port", Integer.toString(grpcPort - 2))
                 .withProperty("FLEXLB_GRPC_EXECUTOR_CORE_SIZE", "16")
                 .withProperty("FLEXLB_GRPC_EXECUTOR_MAX_SIZE", "32")
                 .withProperty("FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE", "4096");
@@ -240,7 +246,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         masterServer.start();
 
         masterChannel = NettyChannelBuilder
-                .forAddress("127.0.0.1", masterServer.getBoundPort())
+                .forAddress("127.0.0.1", grpcPort)
                 .usePlaintext()
                 .build();
         masterStub = FlexlbServiceGrpc.newStub(masterChannel)

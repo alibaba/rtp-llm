@@ -3,7 +3,6 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Logger;
-import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -29,38 +28,19 @@ import java.util.concurrent.TimeUnit;
  *
  * <h3>Key differences from {@link SloBudgetBatcherAlgorithm}</h3>
  * <ul>
- *   <li>No SLO deadline tracking — does not read {@code BatchItem.deadlineMs()}.</li>
+ *   <li>No SLO deadline tracking — the sort key is only used for FIFO ordering.</li>
  *   <li>No EMA arrival rate estimation.</li>
  *   <li>Uses FIFO selection subject to the Engine-reported aggregate token
  *       capacity; it does not use SLO incremental-cost admission.</li>
  *   <li>No inflight-batch backpressure check.</li>
  * </ul>
  */
-@Component
 public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
 
     @Override
     public long computeSortKey(BatcherContext ctx, BatchItem item) {
         // FIFO: arrival timestamp as sort key; no SLO deadline tracking
         return item.enqueuedAtMs();
-    }
-
-    @Override
-    public long headWaitMs(BatcherContext ctx) {
-        BatchItem head = ctx.peek();
-        if (head == null) {
-            return 0;
-        }
-        long elapsedMs = ctx.now() - head.enqueuedAtMs();
-        return Math.max(0, ctx.cfg().getFlexlbBatchFixedWaitMs() - elapsedMs);
-    }
-
-    @Override
-    public long queueWaitMs(BatcherContext ctx) {
-        if (!ctx.isEmpty()) {
-            return headWaitMs(ctx);
-        }
-        return ctx.cfg().getFlexlbBatchFixedWaitMs();
     }
 
     @Override
@@ -171,6 +151,6 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
                 reason, picked.size(), waitMs, ctx.size(), ctx.key(), head.requestId());
 
         ctx.dispatch(picked,
-                new DispatchMeta(reason, 1.0, ctx.size() - picked.size()));
+                new DispatchMeta(reason, ctx.size() - picked.size()));
     }
 }
