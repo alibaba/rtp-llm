@@ -26,10 +26,9 @@ from rtp_llm.ops.compute_ops import (
 # Pad max_q_len / max_kv_len to this minimum so the dispatch selects flash kernels.
 _TRTLLM_FMHA_V2_MIN_SEQ_LEN = 16
 
-# This interface uses persistent CTAs, so partial outputs stay within each CTA
-# instead of being stored in the workspace. Only a few runtime variables need
-# workspace storage.
-_TRTLLM_FMHA_V2_WORKSPACE_SIZE_BYTES = 1024
+# Match FlashInfer v0.6.9 FMHA v2 tests: runtime softmax statistics and
+# conditional kernel scratch are allocated from this pooled workspace.
+_TRTLLM_FMHA_V2_WORKSPACE_SIZE_BYTES = 128 * 1024 * 1024
 _g_trtllm_fmha_v2_workspace_pool: list[torch.Tensor] = []
 _g_trtllm_fmha_v2_pool_lock = __import__("threading").Lock()
 
