@@ -5,6 +5,8 @@
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
+#include <algorithm>
+
 namespace rtp_llm {
 #define TRANS_OPTIONAL(name)                                                                                           \
     if (config_proto->has_##name()) {                                                                                  \
@@ -36,6 +38,8 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->force_sp_accept          = config_proto->force_sp_accept();
     generate_config->return_cum_log_probs     = config_proto->return_cum_log_probs();
     generate_config->return_all_probs         = config_proto->return_all_probs();
+    generate_config->return_logprobs          = config_proto->return_logprobs();
+    generate_config->top_logprobs             = static_cast<int>(config_proto->top_logprobs());
     generate_config->return_softmax_probs     = config_proto->return_softmax_probs();
     generate_config->can_use_pd_separation    = config_proto->can_use_pd_separation();
     generate_config->gen_timeline             = config_proto->gen_timeline();
@@ -284,6 +288,48 @@ void QueryConverter::stackBuffersToTensorPB(TensorPB*        target_pb,
     QueryConverter::transTensorPB(target_pb, stacked);
 }
 
+void QueryConverter::padAndStackLogprobTensorsToTensorPB(TensorPB*                         target_pb,
+                                                         const std::vector<torch::Tensor>& tensors) {
+    if (tensors.empty()) {
+        return;
+    }
+
+    const auto& reference = tensors.front();
+    RTP_LLM_CHECK_WITH_INFO(reference.defined() && reference.dim() >= 1,
+                            "logprob tensor must be defined and have a token-row dimension");
+
+    int64_t max_rows = 0;
+    for (const auto& tensor : tensors) {
+        RTP_LLM_CHECK_WITH_INFO(tensor.defined() && tensor.dim() == reference.dim(),
+                                "logprob tensors must have a consistent rank for padding");
+        RTP_LLM_CHECK_WITH_INFO(tensor.scalar_type() == reference.scalar_type()
+                                    && tensor.device() == reference.device(),
+                                "logprob tensors must have a consistent dtype and device for padding");
+        for (int64_t dim = 1; dim < reference.dim(); ++dim) {
+            RTP_LLM_CHECK_WITH_INFO(tensor.size(dim) == reference.size(dim),
+                                    "logprob tensor trailing dimensions must match for padding");
+        }
+        max_rows = std::max(max_rows, tensor.size(0));
+    }
+
+    std::vector<int64_t> merged_shape;
+    merged_shape.reserve(static_cast<size_t>(reference.dim()) + 1);
+    merged_shape.push_back(static_cast<int64_t>(tensors.size()));
+    merged_shape.push_back(max_rows);
+    for (int64_t dim = 1; dim < reference.dim(); ++dim) {
+        merged_shape.push_back(reference.size(dim));
+    }
+
+    auto merged = torch::zeros(merged_shape, reference.options());
+    for (size_t index = 0; index < tensors.size(); ++index) {
+        const int64_t rows = tensors[index].size(0);
+        if (rows > 0) {
+            merged[static_cast<int64_t>(index)].narrow(0, 0, rows).copy_(tensors[index]);
+        }
+    }
+    transTensorPB(target_pb, merged.contiguous());
+}
+
 void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
                                    const GenerateOutputs* responses,
                                    bool                   dump_aux_info,
@@ -354,6 +400,105 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
 
     stackBuffersToTensorPB(
         flatten_output->mutable_all_hidden_states(), source_outputs, [](const auto& r) { return r.all_hidden_states; });
+
+    // Logprob outputs are optional and absent for the common disabled path.
+    // When enabled, placement metadata is emitted for every output. Compact
+    // row counts may differ, so zero-count outputs get a zero-width tensor and
+    // transport padding is removed by the RPC client using logprobs_counts.
+    std::vector<torch::Tensor> token_logprobs;
+    std::vector<torch::Tensor> top_logprob_token_ids;
+    std::vector<torch::Tensor> top_logprobs;
+
+    bool          logprobs_enabled = false;
+    torch::Tensor token_reference;
+    torch::Tensor top_token_reference;
+    torch::Tensor top_logprobs_reference;
+    for (const auto& response : source_outputs) {
+        const bool has_token_logprobs = response.token_logprobs.has_value() && response.token_logprobs->defined();
+        const bool has_top_token_ids =
+            response.top_logprob_token_ids.has_value() && response.top_logprob_token_ids->defined();
+        const bool has_top_logprobs = response.top_logprobs.has_value() && response.top_logprobs->defined();
+        RTP_LLM_CHECK_WITH_INFO(has_token_logprobs == has_top_token_ids && has_token_logprobs == has_top_logprobs,
+                                "Logprob tensors must be present or absent together.");
+        logprobs_enabled =
+            logprobs_enabled || has_token_logprobs || response.logprobs_offset != 0 || response.logprobs_count != 0;
+        if (has_token_logprobs && !token_reference.defined()) {
+            token_reference        = *response.token_logprobs;
+            top_token_reference    = *response.top_logprob_token_ids;
+            top_logprobs_reference = *response.top_logprobs;
+        }
+    }
+
+    if (logprobs_enabled) {
+        token_logprobs.reserve(source_outputs.size());
+        top_logprob_token_ids.reserve(source_outputs.size());
+        top_logprobs.reserve(source_outputs.size());
+    }
+    for (const auto& response : source_outputs) {
+        if (!logprobs_enabled) {
+            break;
+        }
+
+        const bool has_tensors = response.token_logprobs.has_value() && response.token_logprobs->defined();
+        int64_t    offset      = response.logprobs_offset;
+        int64_t    count       = response.logprobs_count;
+
+        // Compatibility for callers constructed before placement metadata was
+        // introduced: an aligned non-empty tensor still means offset=0.
+        if (has_tensors && offset == 0 && count == 0 && response.token_logprobs->size(0) > 0) {
+            count = response.token_logprobs->size(0);
+        }
+        RTP_LLM_CHECK_WITH_INFO(offset >= 0 && count >= 0, "logprobs offset/count must be non-negative");
+        if (response.output_ids.defined()) {
+            const int64_t output_token_count = response.output_ids.numel();
+            RTP_LLM_CHECK_WITH_INFO(offset + count == output_token_count,
+                                    "compact logprobs must cover one suffix of output_ids");
+        }
+        flatten_output->add_logprobs_offsets(static_cast<int32_t>(offset));
+        flatten_output->add_logprobs_counts(static_cast<int32_t>(count));
+
+        if (!has_tensors) {
+            RTP_LLM_CHECK_WITH_INFO(count == 0, "positive logprobs_count requires compact tensors");
+            if (token_reference.defined()) {
+                token_logprobs.push_back(torch::empty({0}, token_reference.options()));
+                top_logprob_token_ids.push_back(
+                    torch::empty({0, top_token_reference.size(1)}, top_token_reference.options()));
+                top_logprobs.push_back(
+                    torch::empty({0, top_logprobs_reference.size(1)}, top_logprobs_reference.options()));
+            }
+            continue;
+        }
+
+        RTP_LLM_CHECK(response.token_logprobs->dim() == 1);
+        RTP_LLM_CHECK(response.top_logprob_token_ids->dim() == 2);
+        RTP_LLM_CHECK(response.top_logprobs->dim() == 2);
+        RTP_LLM_CHECK(response.top_logprob_token_ids->size(0) == response.token_logprobs->size(0));
+        RTP_LLM_CHECK(response.top_logprobs->sizes() == response.top_logprob_token_ids->sizes());
+
+        RTP_LLM_CHECK_WITH_INFO(count == response.token_logprobs->size(0),
+                                "logprobs_count must equal the compact tensor row count");
+        token_logprobs.push_back(response.token_logprobs->contiguous());
+        top_logprob_token_ids.push_back(response.top_logprob_token_ids->contiguous());
+        top_logprobs.push_back(response.top_logprobs->contiguous());
+    }
+
+    auto serialize_optional_tensors =
+        [&](const std::vector<torch::Tensor>& tensors, auto mutable_tensor_pb, const char* field_name) {
+            if (tensors.empty()) {
+                return;
+            }
+            RTP_LLM_CHECK_WITH_INFO(tensors.size() == source_outputs.size(),
+                                    "Inconsistent %s tensor presence in a batch for stacking.",
+                                    field_name);
+            padAndStackLogprobTensorsToTensorPB(mutable_tensor_pb(), tensors);
+        };
+    serialize_optional_tensors(
+        token_logprobs, [&]() { return flatten_output->mutable_token_logprobs(); }, "token_logprobs");
+    serialize_optional_tensors(
+        top_logprob_token_ids,
+        [&]() { return flatten_output->mutable_top_logprob_token_ids(); },
+        "top_logprob_token_ids");
+    serialize_optional_tensors(top_logprobs, [&]() { return flatten_output->mutable_top_logprobs(); }, "top_logprobs");
 
     RTP_LLM_LOG_DEBUG("transResponse done");
 }

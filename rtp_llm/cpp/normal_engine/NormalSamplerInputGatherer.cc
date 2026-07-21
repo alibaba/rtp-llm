@@ -24,11 +24,13 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
 
     setLogitsProcessorInputs(sampler_inputs, all_streams);
 
-    size_t total_decode_batch_size_in = 0;
-    int    batch_idx                  = 0;
-    bool   return_logits              = false;
-    bool   calculate_softmax_probs    = false;
-    bool   need_tiling                = false;
+    size_t               total_decode_batch_size_in = 0;
+    int                  batch_idx                  = 0;
+    bool                 return_logits              = false;
+    bool                 calculate_softmax_probs    = false;
+    bool                 need_tiling                = false;
+    size_t               model_batch_idx            = 0;
+    std::vector<int64_t> raw_logprobs_row_indices;
     for (auto& stream : all_streams) {
         auto complete_token_ids = stream->completeTokenIds();
         auto complete_seq_len   = complete_token_ids.size(1);
@@ -52,6 +54,12 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
         }
         return_logits |= stream->returnLogits();
         calculate_softmax_probs |= stream->calculateSoftmaxProbs();
+        if (stream->shouldComputeLogprobs()) {
+            for (int i = 0; i < current_batch_size; ++i) {
+                raw_logprobs_row_indices.push_back(static_cast<int64_t>(model_batch_idx + i));
+            }
+        }
+        model_batch_idx += current_batch_size;
         RTP_LLM_LOG_DEBUG("stream [%ld], sampler inputs token ids = [%s]",
                           stream->streamId(),
                           tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
@@ -59,6 +67,43 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
 
     auto vocab_size           = (size_t)model_output.logits.size(1);
     sampler_inputs.vocab_size = vocab_size;
+
+    if (!raw_logprobs_row_indices.empty()) {
+        RTP_LLM_CHECK(model_output.logits.defined());
+        RTP_LLM_CHECK(model_output.logits.dim() == 2);
+        const int64_t real_vocab_size = all_streams.front()->vocabSize();
+        RTP_LLM_CHECK(real_vocab_size > 0);
+        RTP_LLM_CHECK_WITH_INFO(real_vocab_size <= model_output.logits.size(1),
+                                "real vocab size %ld exceeds logits width %ld for logprobs",
+                                real_vocab_size,
+                                model_output.logits.size(1));
+        for (const auto& stream : all_streams) {
+            RTP_LLM_CHECK(stream->vocabSize() == real_vocab_size);
+        }
+        RTP_LLM_CHECK(model_batch_idx == static_cast<size_t>(model_output.logits.size(0)));
+
+        auto row_indices_options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
+        if (model_output.logits.is_cuda()) {
+            row_indices_options = row_indices_options.pinned_memory(true);
+        }
+        sampler_inputs.raw_logprobs_row_indices =
+            torch::empty({static_cast<int64_t>(raw_logprobs_row_indices.size())}, row_indices_options);
+        std::memcpy(sampler_inputs.raw_logprobs_row_indices.data_ptr<int64_t>(),
+                    raw_logprobs_row_indices.data(),
+                    raw_logprobs_row_indices.size() * sizeof(int64_t));
+        // The pinned host tensor is carried by SamplerInputs/SamplerOutput, so
+        // it outlives this asynchronous H2D and the same-stream index_select.
+        auto row_indices_device = model_output.logits.is_cuda() ?
+                                      sampler_inputs.raw_logprobs_row_indices.to(model_output.logits.device(),
+                                                                                 torch::kInt64,
+                                                                                 /*non_blocking=*/true,
+                                                                                 /*copy=*/true) :
+                                      sampler_inputs.raw_logprobs_row_indices;
+        // index_select materializes the compact snapshot before the sampler's
+        // logits processors are allowed to mutate the full sampling tensor.
+        sampler_inputs.raw_logprobs_logits =
+            model_output.logits.narrow(1, 0, real_vocab_size).index_select(0, row_indices_device);
+    }
     if (return_all_probs) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size_in, (int64_t)vocab_size},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
@@ -205,7 +250,7 @@ void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&        
     std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, score_batch, idx = 0](auto& stream) mutable {
         const auto stream_id = static_cast<uint64_t>(stream->streamId());
         if (score_batch) {
-            const int score_len = static_cast<int>(stream->scoreLen());
+            const int score_len     = static_cast<int>(stream->scoreLen());
             size_t    processor_idx = 0;
             for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
                 if (processor->isStateful()) {

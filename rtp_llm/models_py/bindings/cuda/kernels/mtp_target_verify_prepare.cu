@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 #include <algorithm>
+#include <limits>
+#include <math_constants.h>
 
 namespace rtp_llm {
 
@@ -282,6 +284,494 @@ void invokeMtpDispatchStatePrepare(const torch::Tensor& accept_len,
                                                                         next_seq_len.data_ptr<int32_t>(),
                                                                         hidden_idx.data_ptr<int64_t>(),
                                                                         static_cast<int32_t>(batch_size));
+}
+
+template<typename scalar_t>
+__global__ void mtpRowLogSoftmaxStatsKernel(const scalar_t* __restrict__ logits,
+                                            float* __restrict__ row_max_output,
+                                            float* __restrict__ row_shifted_logsumexp,
+                                            int64_t row_stride,
+                                            int64_t real_vocab_size) {
+    const int64_t row        = static_cast<int64_t>(blockIdx.x);
+    const auto*   row_logits = logits + row * row_stride;
+
+    float thread_max = -CUDART_INF_F;
+    for (int64_t col = threadIdx.x; col < real_vocab_size; col += blockDim.x) {
+        thread_max = fmaxf(thread_max, static_cast<float>(row_logits[col]));
+    }
+
+    __shared__ float reduction[256];
+    reduction[threadIdx.x] = thread_max;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            reduction[threadIdx.x] = fmaxf(reduction[threadIdx.x], reduction[threadIdx.x + stride]);
+        }
+        __syncthreads();
+    }
+
+    const float row_max = reduction[0];
+    if (row_max == CUDART_INF_F || row_max == -CUDART_INF_F) {
+        if (threadIdx.x == 0) {
+            row_max_output[row]        = row_max;
+            row_shifted_logsumexp[row] = 0.0f;
+        }
+        return;
+    }
+
+    float thread_sum = 0.0f;
+    for (int64_t col = threadIdx.x; col < real_vocab_size; col += blockDim.x) {
+        thread_sum += expf(static_cast<float>(row_logits[col]) - row_max);
+    }
+    reduction[threadIdx.x] = thread_sum;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            reduction[threadIdx.x] += reduction[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        row_max_output[row]        = row_max;
+        row_shifted_logsumexp[row] = logf(reduction[0]);
+    }
+}
+
+template<typename scalar_t>
+void launchMtpRowLogSoftmaxStats(const torch::Tensor& logits,
+                                 torch::Tensor&       row_max,
+                                 torch::Tensor&       row_shifted_logsumexp,
+                                 int64_t              real_vocab_size,
+                                 cudaStream_t         stream) {
+    constexpr int block_size = 256;
+    mtpRowLogSoftmaxStatsKernel<scalar_t>
+        <<<static_cast<unsigned int>(logits.size(0)), block_size, 0, stream>>>(logits.data_ptr<scalar_t>(),
+                                                                               row_max.data_ptr<float>(),
+                                                                               row_shifted_logsumexp.data_ptr<float>(),
+                                                                               logits.stride(0),
+                                                                               real_vocab_size);
+}
+
+void invokeMtpRowLogSoftmaxStats(const torch::Tensor& logits,
+                                 torch::Tensor&       row_max,
+                                 torch::Tensor&       row_shifted_logsumexp,
+                                 int64_t              real_vocab_size,
+                                 cudaStream_t         stream) {
+    RTP_LLM_CHECK_WITH_INFO(logits.defined() && logits.is_cuda(), "MTP logits must be a CUDA tensor");
+    RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2, "MTP logits must be 2-D, got dim=%ld", logits.dim());
+    RTP_LLM_CHECK_WITH_INFO(logits.stride(1) == 1, "MTP logits innermost stride must be 1, got %ld", logits.stride(1));
+    RTP_LLM_CHECK_WITH_INFO(real_vocab_size > 0 && real_vocab_size <= logits.size(1),
+                            "real_vocab_size %ld must be in [1, logits width %ld]",
+                            real_vocab_size,
+                            logits.size(1));
+    auto check_output = [&logits](const torch::Tensor& output, const char* name) {
+        RTP_LLM_CHECK_WITH_INFO(output.defined() && output.is_cuda(), "MTP %s must be a CUDA tensor", name);
+        RTP_LLM_CHECK_WITH_INFO(output.scalar_type() == torch::kFloat32, "MTP %s must be float32", name);
+        RTP_LLM_CHECK_WITH_INFO(output.is_contiguous() && output.numel() == logits.size(0),
+                                "MTP %s must be contiguous with one value per logits row",
+                                name);
+    };
+    check_output(row_max, "row_max");
+    check_output(row_shifted_logsumexp, "row_shifted_logsumexp");
+    if (logits.size(0) == 0) {
+        return;
+    }
+
+    switch (logits.scalar_type()) {
+        case torch::kFloat32:
+            launchMtpRowLogSoftmaxStats<float>(logits, row_max, row_shifted_logsumexp, real_vocab_size, stream);
+            break;
+        case torch::kFloat16:
+            launchMtpRowLogSoftmaxStats<at::Half>(logits, row_max, row_shifted_logsumexp, real_vocab_size, stream);
+            break;
+        case torch::kBFloat16:
+            launchMtpRowLogSoftmaxStats<at::BFloat16>(logits, row_max, row_shifted_logsumexp, real_vocab_size, stream);
+            break;
+        default:
+            RTP_LLM_CHECK_WITH_INFO(false, "unsupported MTP logits dtype %s", c10::toString(logits.scalar_type()));
+    }
+}
+
+namespace {
+
+constexpr int kMtpSelectedLogprobsBlockSize = 256;
+constexpr int kMtpSelectedLogprobsMaxTopK   = 20;
+
+struct MtpTopCandidate {
+    float   value;
+    int32_t token_id;
+};
+
+__device__ __forceinline__ bool mtpTopCandidateBetter(const MtpTopCandidate& lhs, const MtpTopCandidate& rhs) {
+    const bool lhs_nan = isnan(lhs.value);
+    const bool rhs_nan = isnan(rhs.value);
+    if (lhs_nan != rhs_nan) {
+        // Keep NaNs visible and deterministic instead of silently dropping
+        // them from Top-K. The row normalizer is also NaN in this case.
+        return lhs_nan;
+    }
+    if (lhs.value > rhs.value) {
+        return true;
+    }
+    if (lhs.value < rhs.value) {
+        return false;
+    }
+    if (lhs.token_id >= 0 && rhs.token_id < 0) {
+        return true;
+    }
+    if (lhs.token_id < 0 && rhs.token_id >= 0) {
+        return false;
+    }
+    return lhs.token_id < rhs.token_id;
+}
+
+template<int LOCAL_TOP_K>
+__device__ __forceinline__ void
+insertMtpLocalTopK(float value, int32_t token_id, float (&values)[LOCAL_TOP_K], int32_t (&token_ids)[LOCAL_TOP_K]) {
+    const MtpTopCandidate candidate{value, token_id};
+    const MtpTopCandidate tail{values[LOCAL_TOP_K - 1], token_ids[LOCAL_TOP_K - 1]};
+    if (!mtpTopCandidateBetter(candidate, tail)) {
+        return;
+    }
+
+    int  insertion_pos = LOCAL_TOP_K - 1;
+    bool keep_moving   = true;
+#pragma unroll
+    for (int pos = LOCAL_TOP_K - 1; pos > 0; --pos) {
+        const MtpTopCandidate previous{values[pos - 1], token_ids[pos - 1]};
+        const bool            move_previous = keep_moving && mtpTopCandidateBetter(candidate, previous);
+        if (move_previous) {
+            values[pos]    = previous.value;
+            token_ids[pos] = previous.token_id;
+            insertion_pos  = pos - 1;
+        } else {
+            keep_moving = false;
+        }
+    }
+    values[insertion_pos]    = value;
+    token_ids[insertion_pos] = token_id;
+}
+
+template<typename scalar_t, int LOCAL_TOP_K>
+__global__ void mtpSelectedRowLogProbsKernel(const scalar_t* __restrict__ logits,
+                                             const int64_t* __restrict__ source_row_indices,
+                                             const int32_t* __restrict__ emitted_token_ids_i32,
+                                             const int64_t* __restrict__ emitted_token_ids_i64,
+                                             float* __restrict__ token_logprobs,
+                                             int32_t* __restrict__ top_logprob_token_ids,
+                                             float* __restrict__ top_logprobs,
+                                             int64_t logits_rows,
+                                             int64_t row_stride,
+                                             int64_t vocab_size,
+                                             int32_t top_k) {
+    const int64_t selected_row = static_cast<int64_t>(blockIdx.x);
+    const int64_t source_row   = source_row_indices[selected_row];
+    const int     tid          = static_cast<int>(threadIdx.x);
+
+    if (source_row < 0 || source_row >= logits_rows) {
+        if (tid == 0) {
+            token_logprobs[selected_row] = -CUDART_INF_F;
+        }
+        for (int rank = tid; rank < top_k; rank += blockDim.x) {
+            const int64_t output_offset          = selected_row * top_k + rank;
+            top_logprob_token_ids[output_offset] = -1;
+            top_logprobs[output_offset]          = -CUDART_INF_F;
+        }
+        return;
+    }
+
+    const scalar_t* row_logits = logits + source_row * row_stride;
+
+    float   thread_max = -CUDART_INF_F;
+    int     has_nan    = 0;
+    float   local_top_values[LOCAL_TOP_K > 0 ? LOCAL_TOP_K : 1];
+    int32_t local_top_token_ids[LOCAL_TOP_K > 0 ? LOCAL_TOP_K : 1];
+    if constexpr (LOCAL_TOP_K > 0) {
+#pragma unroll
+        for (int rank = 0; rank < LOCAL_TOP_K; ++rank) {
+            local_top_values[rank]    = -CUDART_INF_F;
+            local_top_token_ids[rank] = -1;
+        }
+    }
+
+    for (int64_t token_id = tid; token_id < vocab_size; token_id += blockDim.x) {
+        const float value = static_cast<float>(row_logits[token_id]);
+        has_nan |= isnan(value);
+        thread_max = fmaxf(thread_max, value);
+        if constexpr (LOCAL_TOP_K > 0) {
+            insertMtpLocalTopK<LOCAL_TOP_K>(
+                value, static_cast<int32_t>(token_id), local_top_values, local_top_token_ids);
+        }
+    }
+
+    __shared__ float   reduction_values[kMtpSelectedLogprobsBlockSize];
+    __shared__ int32_t reduction_token_ids[kMtpSelectedLogprobsBlockSize];
+    __shared__ int32_t reduction_owners[kMtpSelectedLogprobsBlockSize];
+    __shared__ int32_t nan_flags[kMtpSelectedLogprobsBlockSize];
+    __shared__ int32_t winning_owner;
+
+    reduction_values[tid] = thread_max;
+    nan_flags[tid]        = has_nan;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            reduction_values[tid] = fmaxf(reduction_values[tid], reduction_values[tid + stride]);
+            nan_flags[tid] |= nan_flags[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    const float row_max     = reduction_values[0];
+    const bool  row_has_nan = nan_flags[0] != 0;
+    float       row_shifted_logsumexp;
+    if (row_has_nan) {
+        row_shifted_logsumexp = CUDART_NAN_F;
+    } else if (row_max == CUDART_INF_F || row_max == -CUDART_INF_F) {
+        row_shifted_logsumexp = 0.0f;
+    } else {
+        float thread_sum = 0.0f;
+        for (int64_t token_id = tid; token_id < vocab_size; token_id += blockDim.x) {
+            thread_sum += expf(static_cast<float>(row_logits[token_id]) - row_max);
+        }
+        reduction_values[tid] = thread_sum;
+        __syncthreads();
+        for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                reduction_values[tid] += reduction_values[tid + stride];
+            }
+            __syncthreads();
+        }
+        row_shifted_logsumexp = logf(reduction_values[0]);
+    }
+
+    if (tid == 0) {
+        int64_t emitted_token_id =
+            emitted_token_ids_i64 != nullptr ? emitted_token_ids_i64[source_row] : emitted_token_ids_i32[source_row];
+        emitted_token_id = emitted_token_id < 0 ? 0 : emitted_token_id;
+        emitted_token_id = emitted_token_id >= vocab_size ? vocab_size - 1 : emitted_token_id;
+        token_logprobs[selected_row] =
+            (static_cast<float>(row_logits[emitted_token_id]) - row_max) - row_shifted_logsumexp;
+    }
+
+    if constexpr (LOCAL_TOP_K > 0) {
+        int local_cursor = 0;
+        for (int rank = 0; rank < top_k; ++rank) {
+            reduction_values[tid]    = local_top_values[local_cursor];
+            reduction_token_ids[tid] = local_top_token_ids[local_cursor];
+            reduction_owners[tid]    = tid;
+            __syncthreads();
+            for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    const MtpTopCandidate current{reduction_values[tid], reduction_token_ids[tid]};
+                    const MtpTopCandidate other{reduction_values[tid + stride], reduction_token_ids[tid + stride]};
+                    if (mtpTopCandidateBetter(other, current)) {
+                        reduction_values[tid]    = other.value;
+                        reduction_token_ids[tid] = other.token_id;
+                        reduction_owners[tid]    = reduction_owners[tid + stride];
+                    }
+                }
+                __syncthreads();
+            }
+            if (tid == 0) {
+                const int64_t output_offset          = selected_row * top_k + rank;
+                top_logprob_token_ids[output_offset] = reduction_token_ids[0];
+                top_logprobs[output_offset]          = (reduction_values[0] - row_max) - row_shifted_logsumexp;
+                winning_owner                        = reduction_owners[0];
+            }
+            __syncthreads();
+            if (tid == winning_owner) {
+                ++local_cursor;
+            }
+            __syncthreads();
+        }
+    }
+}
+
+template<typename scalar_t, int LOCAL_TOP_K>
+void launchMtpSelectedRowLogProbs(const torch::Tensor& logits,
+                                  const torch::Tensor& source_row_indices,
+                                  const torch::Tensor& emitted_token_ids,
+                                  torch::Tensor&       token_logprobs,
+                                  torch::Tensor&       top_logprob_token_ids,
+                                  torch::Tensor&       top_logprobs,
+                                  int32_t              top_k,
+                                  cudaStream_t         stream) {
+    const int32_t* emitted_token_ids_i32 =
+        emitted_token_ids.scalar_type() == torch::kInt32 ? emitted_token_ids.data_ptr<int32_t>() : nullptr;
+    const int64_t* emitted_token_ids_i64 =
+        emitted_token_ids.scalar_type() == torch::kInt64 ? emitted_token_ids.data_ptr<int64_t>() : nullptr;
+    int32_t* top_ids_ptr   = top_k > 0 ? top_logprob_token_ids.data_ptr<int32_t>() : nullptr;
+    float*   top_probs_ptr = top_k > 0 ? top_logprobs.data_ptr<float>() : nullptr;
+    mtpSelectedRowLogProbsKernel<scalar_t, LOCAL_TOP_K>
+        <<<static_cast<unsigned int>(source_row_indices.numel()), kMtpSelectedLogprobsBlockSize, 0, stream>>>(
+            logits.data_ptr<scalar_t>(),
+            source_row_indices.data_ptr<int64_t>(),
+            emitted_token_ids_i32,
+            emitted_token_ids_i64,
+            token_logprobs.data_ptr<float>(),
+            top_ids_ptr,
+            top_probs_ptr,
+            logits.size(0),
+            logits.stride(0),
+            logits.size(1),
+            top_k);
+}
+
+template<typename scalar_t>
+void dispatchMtpSelectedRowLogProbsTopK(const torch::Tensor& logits,
+                                        const torch::Tensor& source_row_indices,
+                                        const torch::Tensor& emitted_token_ids,
+                                        torch::Tensor&       token_logprobs,
+                                        torch::Tensor&       top_logprob_token_ids,
+                                        torch::Tensor&       top_logprobs,
+                                        int32_t              top_k,
+                                        cudaStream_t         stream) {
+#define LAUNCH_MTP_SELECTED_LOGPROBS(LOCAL_TOP_K)                                                                      \
+    launchMtpSelectedRowLogProbs<scalar_t, LOCAL_TOP_K>(logits,                                                        \
+                                                        source_row_indices,                                            \
+                                                        emitted_token_ids,                                             \
+                                                        token_logprobs,                                                \
+                                                        top_logprob_token_ids,                                         \
+                                                        top_logprobs,                                                  \
+                                                        top_k,                                                         \
+                                                        stream)
+    if (top_k == 0) {
+        LAUNCH_MTP_SELECTED_LOGPROBS(0);
+    } else if (top_k == 1) {
+        LAUNCH_MTP_SELECTED_LOGPROBS(1);
+    } else if (top_k == 2) {
+        LAUNCH_MTP_SELECTED_LOGPROBS(2);
+    } else if (top_k <= 4) {
+        LAUNCH_MTP_SELECTED_LOGPROBS(4);
+    } else if (top_k <= 8) {
+        LAUNCH_MTP_SELECTED_LOGPROBS(8);
+    } else if (top_k <= 16) {
+        LAUNCH_MTP_SELECTED_LOGPROBS(16);
+    } else {
+        LAUNCH_MTP_SELECTED_LOGPROBS(20);
+    }
+#undef LAUNCH_MTP_SELECTED_LOGPROBS
+}
+
+void checkMtpSelectedLogprobsCudaTensor(const torch::Tensor& tensor, const torch::Device& device, const char* name) {
+    RTP_LLM_CHECK_WITH_INFO(tensor.defined(), "%s must be defined", name);
+    RTP_LLM_CHECK_WITH_INFO(tensor.is_cuda(), "%s must be CUDA", name);
+    RTP_LLM_CHECK_WITH_INFO(tensor.device() == device, "%s must be on the logits device", name);
+    RTP_LLM_CHECK_WITH_INFO(tensor.is_contiguous(), "%s must be contiguous", name);
+}
+
+}  // namespace
+
+void invokeMtpSelectedRowLogProbs(const torch::Tensor& logits,
+                                  const torch::Tensor& source_row_indices,
+                                  const torch::Tensor& emitted_token_ids,
+                                  torch::Tensor&       token_logprobs,
+                                  torch::Tensor&       top_logprob_token_ids,
+                                  torch::Tensor&       top_logprobs,
+                                  int64_t              top_k,
+                                  cudaStream_t         stream) {
+    RTP_LLM_CHECK_WITH_INFO(logits.defined() && logits.is_cuda(), "MTP logits must be a CUDA tensor");
+    RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2, "MTP logits must be 2-D, got dim=%ld", logits.dim());
+    RTP_LLM_CHECK_WITH_INFO(logits.stride(1) == 1, "MTP logits innermost stride must be 1, got %ld", logits.stride(1));
+    RTP_LLM_CHECK_WITH_INFO(logits.stride(0) >= logits.size(1),
+                            "MTP logits row stride %ld must cover width %ld",
+                            logits.stride(0),
+                            logits.size(1));
+    RTP_LLM_CHECK_WITH_INFO(logits.size(1) > 0, "MTP logits vocabulary must be non-empty");
+    RTP_LLM_CHECK_WITH_INFO(logits.size(1) <= std::numeric_limits<int32_t>::max(),
+                            "MTP logits vocabulary %ld exceeds int32 token IDs",
+                            logits.size(1));
+    RTP_LLM_CHECK_WITH_INFO(logits.scalar_type() == torch::kFloat32 || logits.scalar_type() == torch::kFloat16
+                                || logits.scalar_type() == torch::kBFloat16,
+                            "unsupported MTP logits dtype %s",
+                            c10::toString(logits.scalar_type()));
+    RTP_LLM_CHECK_WITH_INFO(top_k >= 0 && top_k <= kMtpSelectedLogprobsMaxTopK,
+                            "MTP selected-row top_k %ld must be in [0, %d]",
+                            top_k,
+                            kMtpSelectedLogprobsMaxTopK);
+    RTP_LLM_CHECK_WITH_INFO(
+        top_k <= logits.size(1), "MTP selected-row top_k %ld exceeds vocabulary %ld", top_k, logits.size(1));
+
+    const auto device = logits.device();
+    checkMtpSelectedLogprobsCudaTensor(source_row_indices, device, "source_row_indices");
+    RTP_LLM_CHECK_WITH_INFO(source_row_indices.scalar_type() == torch::kInt64, "source_row_indices must be int64");
+    RTP_LLM_CHECK_WITH_INFO(
+        source_row_indices.dim() == 1, "source_row_indices must be 1-D, got dim=%ld", source_row_indices.dim());
+    const int64_t selected_rows = source_row_indices.numel();
+    RTP_LLM_CHECK_WITH_INFO(selected_rows <= std::numeric_limits<unsigned int>::max(),
+                            "selected MTP rows %ld exceed CUDA grid capacity",
+                            selected_rows);
+
+    checkMtpSelectedLogprobsCudaTensor(emitted_token_ids, device, "emitted_token_ids");
+    RTP_LLM_CHECK_WITH_INFO(emitted_token_ids.scalar_type() == torch::kInt32
+                                || emitted_token_ids.scalar_type() == torch::kInt64,
+                            "emitted_token_ids must be int32 or int64");
+    RTP_LLM_CHECK_WITH_INFO(emitted_token_ids.numel() >= logits.size(0),
+                            "emitted_token_ids numel %ld must cover all %ld dense logits rows",
+                            emitted_token_ids.numel(),
+                            logits.size(0));
+
+    checkMtpSelectedLogprobsCudaTensor(token_logprobs, device, "token_logprobs");
+    RTP_LLM_CHECK_WITH_INFO(token_logprobs.scalar_type() == torch::kFloat32, "token_logprobs must be float32");
+    RTP_LLM_CHECK_WITH_INFO(token_logprobs.dim() == 1 && token_logprobs.size(0) == selected_rows,
+                            "token_logprobs must have shape [%ld]",
+                            selected_rows);
+
+    checkMtpSelectedLogprobsCudaTensor(top_logprob_token_ids, device, "top_logprob_token_ids");
+    RTP_LLM_CHECK_WITH_INFO(top_logprob_token_ids.scalar_type() == torch::kInt32,
+                            "top_logprob_token_ids must be int32");
+    RTP_LLM_CHECK_WITH_INFO(top_logprob_token_ids.dim() == 2 && top_logprob_token_ids.size(0) == selected_rows
+                                && top_logprob_token_ids.size(1) == top_k,
+                            "top_logprob_token_ids must have shape [%ld, %ld]",
+                            selected_rows,
+                            top_k);
+
+    checkMtpSelectedLogprobsCudaTensor(top_logprobs, device, "top_logprobs");
+    RTP_LLM_CHECK_WITH_INFO(top_logprobs.scalar_type() == torch::kFloat32, "top_logprobs must be float32");
+    RTP_LLM_CHECK_WITH_INFO(top_logprobs.dim() == 2 && top_logprobs.size(0) == selected_rows
+                                && top_logprobs.size(1) == top_k,
+                            "top_logprobs must have shape [%ld, %ld]",
+                            selected_rows,
+                            top_k);
+
+    if (selected_rows == 0) {
+        return;
+    }
+
+    switch (logits.scalar_type()) {
+        case torch::kFloat32:
+            dispatchMtpSelectedRowLogProbsTopK<float>(logits,
+                                                      source_row_indices,
+                                                      emitted_token_ids,
+                                                      token_logprobs,
+                                                      top_logprob_token_ids,
+                                                      top_logprobs,
+                                                      static_cast<int32_t>(top_k),
+                                                      stream);
+            break;
+        case torch::kFloat16:
+            dispatchMtpSelectedRowLogProbsTopK<at::Half>(logits,
+                                                         source_row_indices,
+                                                         emitted_token_ids,
+                                                         token_logprobs,
+                                                         top_logprob_token_ids,
+                                                         top_logprobs,
+                                                         static_cast<int32_t>(top_k),
+                                                         stream);
+            break;
+        case torch::kBFloat16:
+            dispatchMtpSelectedRowLogProbsTopK<at::BFloat16>(logits,
+                                                             source_row_indices,
+                                                             emitted_token_ids,
+                                                             token_logprobs,
+                                                             top_logprob_token_ids,
+                                                             top_logprobs,
+                                                             static_cast<int32_t>(top_k),
+                                                             stream);
+            break;
+        default:
+            RTP_LLM_CHECK_WITH_INFO(false, "unsupported MTP logits dtype %s", c10::toString(logits.scalar_type()));
+    }
 }
 
 // REBASE CONFLICT CONTEXT(518707c73): source branch added this fused

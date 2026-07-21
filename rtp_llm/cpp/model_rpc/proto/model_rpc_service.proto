@@ -105,6 +105,8 @@ message GenerateConfigPB {
     google.protobuf.StringValue ebnf = 61;
     google.protobuf.StringValue structural_tag = 62;
     google.protobuf.StringValue response_format = 63;
+    bool return_logprobs = 64;
+    uint32 top_logprobs = 65;
 }
 
 message MMPreprocessConfigPB {
@@ -194,6 +196,14 @@ message FlattenOutputPB {
     TensorPB logits = 6;
     TensorPB all_probs = 7;
     TensorPB all_hidden_states = 8;
+    TensorPB token_logprobs = 9;
+    TensorPB top_logprob_token_ids = 10;
+    TensorPB top_logprobs = 11;
+    // Per output, the compact logprob tensors describe
+    // output_ids[offset:offset + count].  Thinking/controller tokens before
+    // offset intentionally have no real probability row.
+    repeated int32 logprobs_offsets = 12;
+    repeated int32 logprobs_counts = 13;
 }
 
 message GenerateOutputsPB {

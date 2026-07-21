@@ -268,8 +268,12 @@ class OpenaiEndpoint(object):
             config.chat_id = request.chat_id
         if request.seed != None:
             config.random_seed = request.seed
-        if request.logprobs != None:
-            config.return_all_probs = request.logprobs
+        if request.logprobs is not None:
+            config.return_logprobs = request.logprobs
+            if request.top_logprobs is not None:
+                config.top_logprobs = request.top_logprobs
+            elif not request.logprobs:
+                config.top_logprobs = 0
         if request.logprobs or request.functions:
             config.is_streaming = True
         if request.response_format is not None:

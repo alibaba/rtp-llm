@@ -95,12 +95,18 @@ public:
                                           const vector<int>&     input_ids,
                                           const int              block_id,
                                           const vector<int>&     begin_think_token_ids = {},
-                                          const vector<int>&     end_think_token_ids   = {}) {
+                                          const vector<int>&     end_think_token_ids   = {},
+                                          bool                   return_logprobs       = false,
+                                          int                    top_logprobs          = 0,
+                                          bool                   in_think_mode         = false) {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
         query->input_ids       = torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
         query->generate_config = make_shared<GenerateConfig>();
         query->generate_config->begin_think_token_ids = begin_think_token_ids;
         query->generate_config->end_think_token_ids   = end_think_token_ids;
+        query->generate_config->return_logprobs       = return_logprobs;
+        query->generate_config->top_logprobs          = top_logprobs;
+        query->generate_config->in_think_mode         = in_think_mode;
         GenerateStreamPtr stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         BatchKVCacheResource addr;
@@ -143,6 +149,540 @@ public:
         EXPECT_EQ(expect_last_hidden_states, toVec<float>(last_hidden_states_h));
     }
 };
+
+class TestableMtpBatchStreamProcessor: public MtpBatchStreamProcessor {
+public:
+    using MtpBatchStreamProcessor::MtpBatchStreamProcessor;
+    using MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo;
+    using MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo;
+};
+
+TEST_F(MtpBatchStreamProcessorTest, testPrefillTargetLogprobsUseEmittedFirstToken) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+
+    model_config.max_seq_len    = 32;
+    model_config.vocab_size     = 5;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 1;
+
+    ResourceContext resource_context;
+    auto            stream = createContextStream(
+        model_config, runtime_config, resource_context, {1}, 1, {}, {}, /*return_logprobs=*/true, /*top_logprobs=*/2);
+    StreamGroups                    stream_groups({stream});
+    TestableMtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    MergedOutput target_output;
+    // The emitted token is the last sampler column (token 2), which is not the
+    // raw argmax. The selected logprob must still be gathered for token 2.
+    target_output.sampler_output.token_ids = torch::tensor({4, 2}, torch::kInt32).reshape({1, 2});
+
+    MergedOutput draft_output;
+    draft_output.sampler_output.token_ids = torch::tensor({3L}, torch::kInt64).reshape({1, 1});
+    draft_output.sampler_output.all_probs =
+        torch::tensor({0.05f, 0.15f, 0.20f, 0.25f, 0.35f}, torch::kFloat32).reshape({1, 5});
+
+    auto raw_logits      = torch::tensor({3.0f, -1.0f, 0.5f, 2.0f, 1.0f}, torch::kFloat32).reshape({1, 5});
+    auto target_logprobs = computeMtpTargetLogprobs(raw_logits, 2, /*real_vocab_size=*/5);
+    finalizeMtpTargetLogprobs(target_logprobs, torch::tensor({2}, torch::kInt32));
+    auto new_tokens_all = torch::empty({1, 1}, torch::kInt32);
+
+    std::vector<StreamSpecUpdateInfo> update_infos;
+    processor.preparePrefillSpecUpdateInfo(
+        stream_groups, target_output, draft_output, torch::Tensor(), target_logprobs, new_tokens_all, update_infos);
+
+    ASSERT_EQ(update_infos.size(), 1);
+    EXPECT_EQ(toVec<int32_t>(update_infos[0].new_tokens), std::vector<int32_t>({2}));
+    EXPECT_TRUE(
+        torch::allclose(update_infos[0].token_logprobs.cpu(), target_logprobs.token_logprobs.reshape({1, 1}).cpu()));
+    EXPECT_TRUE(torch::equal(update_infos[0].top_logprob_token_ids.cpu(),
+                             target_logprobs.top_logprob_token_ids.reshape({1, 1, 2}).cpu()));
+    EXPECT_TRUE(
+        torch::allclose(update_infos[0].top_logprobs.cpu(), target_logprobs.top_logprobs.reshape({1, 1, 2}).cpu()));
+    // Draft probabilities remain the independent next-step MTP distribution.
+    EXPECT_TRUE(torch::allclose(update_infos[0].draft_token_probs.cpu(), draft_output.sampler_output.all_probs));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testPrefillThinkingTokenNeedsNoTargetLogprobPayload) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types    = {CacheGroupType::FULL};
+    model_config.max_seq_len    = 32;
+    model_config.vocab_size     = 8;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 1;
+
+    ResourceContext resource_context;
+    auto            stream                        = createContextStream(model_config,
+                                      runtime_config,
+                                      resource_context,
+                                                                        {0},
+                                      1,
+                                      /*begin_think_token_ids=*/{7},
+                                      /*end_think_token_ids=*/{3, 4},
+                                      /*return_logprobs=*/true,
+                                      /*top_logprobs=*/2,
+                                      /*in_think_mode=*/true);
+    stream->generateConfig()->max_thinking_tokens = 10;
+    StreamGroups                    stream_groups({stream});
+    TestableMtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    MergedOutput target_output;
+    target_output.sampler_output.token_ids = torch::tensor({0, 2}, torch::kInt32).reshape({1, 2});
+    MergedOutput draft_output;
+    draft_output.sampler_output.token_ids = torch::tensor({1L}, torch::kInt64).reshape({1, 1});
+    draft_output.sampler_output.all_probs = torch::full({1, 8}, 0.125f, torch::kFloat32);
+
+    std::vector<StreamSpecUpdateInfo> update_infos;
+    auto                              new_tokens_all = torch::empty({1, 1}, torch::kInt32);
+    processor.preparePrefillSpecUpdateInfo(stream_groups,
+                                           target_output,
+                                           draft_output,
+                                           torch::Tensor(),
+                                           /*target_logprobs=*/{},
+                                           new_tokens_all,
+                                           update_infos);
+
+    ASSERT_EQ(update_infos.size(), 1);
+    EXPECT_EQ(update_infos[0].logprobs_offset, 1);
+    EXPECT_FALSE(update_infos[0].token_logprobs.defined());
+    EXPECT_FALSE(update_infos[0].top_logprob_token_ids.defined());
+    EXPECT_FALSE(update_infos[0].top_logprobs.defined());
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDecodeTargetLogprobsCoverReplacementAcceptedAndBonusTokens) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+
+    model_config.max_seq_len    = 32;
+    model_config.vocab_size     = 5;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 2;
+
+    ResourceContext resource_context;
+    auto            stream_replacement =
+        createContextStream(model_config, runtime_config, resource_context, {0}, 1, {}, {}, true, /*top_logprobs=*/1);
+    auto stream_partial =
+        createContextStream(model_config, runtime_config, resource_context, {1}, 2, {}, {}, true, /*top_logprobs=*/2);
+    auto stream_bonus =
+        createContextStream(model_config, runtime_config, resource_context, {2}, 3, {}, {}, true, /*top_logprobs=*/3);
+    StreamGroups                    stream_groups({stream_replacement, stream_partial, stream_bonus});
+    TestableMtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    speculative::SpeculativeSamplerOutput spec_output;
+    // P=2 target positions per stream. Length 1 is an immediate replacement,
+    // length 2 is accepted+replacement, and length 3 includes the bonus row.
+    spec_output.accept_len_cpu    = torch::tensor({1, 2, 3}, torch::kInt32);
+    spec_output.accept_tokens_cpu = torch::tensor({{4, 0, 0}, {3, 2, 0}, {1, 0, 4}}, torch::kInt32);
+    spec_output.accept_len        = spec_output.accept_len_cpu.to(torch::kCUDA);
+    spec_output.accept_tokens     = spec_output.accept_tokens_cpu.to(torch::kCUDA);
+
+    MergedOutput draft_prefill_output;
+    draft_prefill_output.model_output.all_hidden_states = torch::arange(0, 9, torch::kFloat32).reshape({9, 1});
+    draft_prefill_output.sampler_output.token_ids       = torch::tensor({0L, 1L, 2L}, torch::kInt64).reshape({3, 1});
+    draft_prefill_output.sampler_output.all_probs       = torch::tensor(
+        {{0.10f, 0.20f, 0.30f, 0.15f, 0.25f}, {0.30f, 0.10f, 0.20f, 0.25f, 0.15f}, {0.15f, 0.25f, 0.10f, 0.20f, 0.30f}},
+        torch::kFloat32);
+
+    auto target_logits   = torch::tensor({{5.0f, 1.0f, 0.0f, 2.0f, 3.0f},
+                                          {0.0f, 5.0f, 1.0f, 3.0f, 2.0f},
+                                          {1.0f, 0.0f, 5.0f, 2.0f, 3.0f},
+                                          {2.0f, 1.0f, 0.0f, 5.0f, 3.0f},
+                                          {3.0f, 2.0f, 1.0f, 0.0f, 5.0f},
+                                          {4.0f, 0.0f, 3.0f, 2.0f, 1.0f},
+                                          {1.0f, 4.0f, 0.0f, 3.0f, 2.0f},
+                                          {4.0f, 3.0f, 2.0f, 1.0f, 0.0f},
+                                          {0.0f, 1.0f, 2.0f, 3.0f, 4.0f}},
+                                       torch::kFloat32);
+    auto target_logprobs = captureMtpTargetLogprobs(target_logits, 3, /*real_vocab_size=*/5);
+    EXPECT_FALSE(target_logprobs.row_max.defined());
+    EXPECT_FALSE(target_logprobs.row_shifted_logsumexp.defined());
+    EXPECT_FALSE(target_logprobs.top_logits.defined());
+    EXPECT_FALSE(shouldFinalizeMtpTargetLogprobsEarly(/*stream_async_enabled=*/false, target_logprobs));
+    EXPECT_TRUE(shouldFinalizeMtpTargetLogprobsEarly(/*stream_async_enabled=*/true, target_logprobs));
+
+    // Mirror the stream-async identity path: finalize accepted rows before the
+    // regular bookkeeping worker assembles StreamSpecUpdateInfo. The latter
+    // must consume this compact payload without attempting a second finalize.
+    processor.finalizeDecodeTargetLogprobs(stream_groups, spec_output, target_logprobs);
+    ASSERT_TRUE(target_logprobs.finalized());
+    ASSERT_FALSE(target_logprobs.retainsFullLmHeadStorage());
+    auto early_token_logprobs = target_logprobs.token_logprobs.clone();
+    auto early_top_ids        = target_logprobs.top_logprob_token_ids.clone();
+    auto early_top_logprobs   = target_logprobs.top_logprobs.clone();
+
+    std::vector<StreamSpecUpdateInfo> update_infos;
+    processor.prepareDecodeSpecUpdateInfo(
+        stream_groups, spec_output, draft_prefill_output, target_logprobs, update_infos);
+
+    ASSERT_EQ(update_infos.size(), 3);
+    ASSERT_TRUE(target_logprobs.finalized());
+    EXPECT_TRUE(torch::equal(target_logprobs.token_logprobs, early_token_logprobs));
+    EXPECT_TRUE(torch::equal(target_logprobs.top_logprob_token_ids, early_top_ids));
+    EXPECT_TRUE(torch::equal(target_logprobs.top_logprobs, early_top_logprobs));
+    // Only 1+2+3 accepted rows are reduced, rather than all 3*(P+1)=9.
+    EXPECT_EQ(target_logprobs.token_logprobs.size(0), 6);
+    const std::vector<int64_t> row_offsets = {0, 1, 3};
+    const std::vector<int64_t> lengths     = {1, 2, 3};
+    const std::vector<int64_t> top_ks      = {1, 2, 3};
+    for (size_t i = 0; i < update_infos.size(); ++i) {
+        auto expected_selected =
+            target_logprobs.token_logprobs.narrow(0, row_offsets[i], lengths[i]).reshape({1, lengths[i]});
+        auto expected_top_ids = target_logprobs.top_logprob_token_ids.narrow(0, row_offsets[i], lengths[i])
+                                    .reshape({1, lengths[i], 3})
+                                    .narrow(2, 0, top_ks[i]);
+        auto expected_top_logprobs = target_logprobs.top_logprobs.narrow(0, row_offsets[i], lengths[i])
+                                         .reshape({1, lengths[i], 3})
+                                         .narrow(2, 0, top_ks[i]);
+
+        EXPECT_EQ(update_infos[i].num_new_tokens, lengths[i]);
+        EXPECT_TRUE(torch::allclose(update_infos[i].token_logprobs.cpu(), expected_selected.cpu()));
+        EXPECT_TRUE(torch::equal(update_infos[i].top_logprob_token_ids.cpu(), expected_top_ids.cpu()));
+        EXPECT_TRUE(torch::allclose(update_infos[i].top_logprobs.cpu(), expected_top_logprobs.cpu()));
+        EXPECT_TRUE(torch::allclose(update_infos[i].draft_token_probs.cpu(),
+                                    draft_prefill_output.sampler_output.all_probs.narrow(0, i, 1)));
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDecodeTargetLogprobsKeepOnlyContentSuffixInMixedBatch) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types    = {CacheGroupType::FULL};
+    model_config.max_seq_len    = 32;
+    model_config.vocab_size     = 8;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 5;
+
+    ResourceContext resource_context;
+    auto            reasoning_only = createContextStream(model_config,
+                                              runtime_config,
+                                              resource_context,
+                                                         {0},
+                                              1,
+                                              /*begin_think_token_ids=*/{7},
+                                              /*end_think_token_ids=*/{3, 4},
+                                              /*return_logprobs=*/true,
+                                              /*top_logprobs=*/20,
+                                              /*in_think_mode=*/true);
+    auto            crossing       = createContextStream(model_config,
+                                        runtime_config,
+                                        resource_context,
+                                                         {0},
+                                        2,
+                                        /*begin_think_token_ids=*/{7},
+                                        /*end_think_token_ids=*/{3, 4},
+                                        /*return_logprobs=*/true,
+                                        /*top_logprobs=*/0,
+                                        /*in_think_mode=*/true);
+    auto            content        = createContextStream(
+        model_config, runtime_config, resource_context, {0}, 3, {}, {}, /*return_logprobs=*/true, /*top_logprobs=*/1);
+    reasoning_only->generateConfig()->max_thinking_tokens = 10;
+    crossing->generateConfig()->max_thinking_tokens       = 10;
+
+    StreamGroups                    stream_groups({reasoning_only, crossing, content});
+    TestableMtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    speculative::SpeculativeSamplerOutput spec_output;
+    // The close token is end_think_token_ids.front() == 3.  It is still a
+    // reasoning token; the delimiter tail 4 and token 5 are content.
+    spec_output.accept_len_cpu = torch::tensor({2, 5, 1}, torch::kInt32);
+    spec_output.accept_tokens_cpu =
+        torch::tensor({{1, 2, 0, 0, 0, 0}, {1, 2, 3, 4, 5, 0}, {6, 0, 0, 0, 0, 0}}, torch::kInt32);
+    spec_output.accept_len    = spec_output.accept_len_cpu.to(torch::kCUDA);
+    spec_output.accept_tokens = spec_output.accept_tokens_cpu.to(torch::kCUDA);
+
+    MergedOutput draft_output;
+    draft_output.model_output.all_hidden_states = torch::arange(0, 18, torch::kFloat32).reshape({18, 1});
+    draft_output.sampler_output.token_ids       = torch::tensor({0L, 1L, 2L}, torch::kInt64).reshape({3, 1});
+    draft_output.sampler_output.all_probs       = torch::full({3, 8}, 0.125f, torch::kFloat32);
+
+    auto target_logits   = torch::arange(0, 144, torch::kFloat32).reshape({18, 8});
+    auto target_logprobs = captureMtpDecodeTargetLogprobs(target_logits, /*max_top_logprobs=*/8, /*real_vocab_size=*/8);
+    processor.finalizeDecodeTargetLogprobs(stream_groups, spec_output, target_logprobs);
+
+    ASSERT_TRUE(target_logprobs.finalized());
+    ASSERT_FALSE(target_logprobs.retainsFullLmHeadStorage());
+    // Dense selected rows are crossing[3,4] => [9,10], then content[0] => 12.
+    ASSERT_EQ(target_logprobs.token_logprobs.size(0), 3);
+    // The thinking-only k=20 stream contributes no row. The crossing stream
+    // requests k=0 and the content stream requests k=1, so the shared compact
+    // reduction must use width 1 rather than the capture-time/global width 8.
+    EXPECT_EQ(target_logprobs.maxTopLogprobs(), 1);
+    auto expected_rows   = torch::tensor({9, 10, 12}, torch::kInt64);
+    auto expected_logits = target_logits.index_select(0, expected_rows);
+    auto expected_ids    = torch::tensor({4, 5, 6}, torch::kInt64);
+    auto expected        = torch::log_softmax(expected_logits, -1).gather(1, expected_ids.unsqueeze(1)).squeeze(1);
+    EXPECT_TRUE(torch::allclose(target_logprobs.token_logprobs.cpu(), expected.cpu()));
+
+    std::vector<StreamSpecUpdateInfo> update_infos;
+    processor.prepareDecodeSpecUpdateInfo(stream_groups, spec_output, draft_output, target_logprobs, update_infos);
+    ASSERT_EQ(update_infos.size(), 3);
+    EXPECT_EQ(update_infos[0].logprobs_offset, 2);
+    EXPECT_FALSE(update_infos[0].token_logprobs.defined());
+    EXPECT_EQ(update_infos[1].logprobs_offset, 3);
+    EXPECT_EQ(update_infos[1].token_logprobs.sizes(), (torch::IntArrayRef{1, 2}));
+    EXPECT_EQ(update_infos[1].top_logprobs.sizes(), (torch::IntArrayRef{1, 2, 0}));
+    EXPECT_EQ(update_infos[2].logprobs_offset, 0);
+    EXPECT_EQ(update_infos[2].token_logprobs.sizes(), (torch::IntArrayRef{1, 1}));
+    EXPECT_EQ(update_infos[2].top_logprobs.sizes(), (torch::IntArrayRef{1, 1, 1}));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testPrefillMaxTopLogprobsIgnoresThinkingStreams) {
+    ModelConfig     model_config;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+    model_config.max_seq_len = 32;
+    model_config.vocab_size  = 32;
+
+    auto thinking   = createContextStream(model_config,
+                                        runtime_config,
+                                        resource_context,
+                                          {0},
+                                        1,
+                                        /*begin_think_token_ids=*/{7},
+                                        /*end_think_token_ids=*/{3, 4},
+                                        /*return_logprobs=*/true,
+                                        /*top_logprobs=*/20,
+                                        /*in_think_mode=*/true);
+    auto content_k0 = createContextStream(
+        model_config, runtime_config, resource_context, {0}, 2, {}, {}, /*return_logprobs=*/true, /*top_logprobs=*/0);
+    auto content_k1 = createContextStream(
+        model_config, runtime_config, resource_context, {0}, 3, {}, {}, /*return_logprobs=*/true, /*top_logprobs=*/1);
+
+    EXPECT_EQ(maxMtpActiveContentTopLogprobs(StreamGroups({thinking, content_k0})), 0);
+    EXPECT_EQ(maxMtpActiveContentTopLogprobs(StreamGroups({thinking, content_k0, content_k1})), 1);
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDecodeTargetLogprobsDeferMixedCompactionUntilAcceptance) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types    = {CacheGroupType::FULL};
+    model_config.max_seq_len    = 32;
+    model_config.vocab_size     = 5;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 1;
+
+    ResourceContext resource_context;
+    auto plain_stream   = createContextStream(model_config, runtime_config, resource_context, {0}, 1, {}, {}, false, 0);
+    auto logprob_stream = createContextStream(model_config, runtime_config, resource_context, {1}, 2, {}, {}, true, 2);
+    StreamGroups                    stream_groups({plain_stream, logprob_stream});
+    TestableMtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    speculative::SpeculativeSamplerOutput spec_output;
+    spec_output.accept_len_cpu    = torch::tensor({2, 1}, torch::kInt32);
+    spec_output.accept_tokens_cpu = torch::tensor({{1, 2}, {3, 0}}, torch::kInt32);
+    spec_output.accept_len        = spec_output.accept_len_cpu.to(torch::kCUDA);
+    spec_output.accept_tokens     = spec_output.accept_tokens_cpu.to(torch::kCUDA);
+
+    MergedOutput draft_output;
+    draft_output.sampler_output.token_ids = torch::tensor({0L, 1L}, torch::kInt64).reshape({2, 1});
+    draft_output.sampler_output.all_probs = torch::full({2, 5}, 0.2f, torch::kFloat32);
+
+    auto dense_logits    = torch::tensor({{5.0f, 1.0f, 0.0f, 2.0f, 3.0f},
+                                          {0.0f, 5.0f, 1.0f, 3.0f, 2.0f},
+                                          {1.0f, 0.0f, 5.0f, 4.0f, 3.0f},
+                                          {2.0f, 1.0f, 0.0f, 5.0f, 3.0f}},
+                                      torch::kFloat32);
+    auto target_logprobs = captureMtpDecodeTargetLogprobs(dense_logits, /*max_top_logprobs=*/2, /*real_vocab_size=*/5);
+    EXPECT_EQ(target_logprobs.raw_logits.size(0), 4);
+    EXPECT_EQ(target_logprobs.dense_row_count, 4);
+    EXPECT_EQ(target_logprobs.raw_logits.data_ptr<float>(), dense_logits.data_ptr<float>());
+    EXPECT_TRUE(target_logprobs.captured_dense_row_indices.empty());
+    EXPECT_TRUE(target_logprobs.retainsFullLmHeadStorage());
+    EXPECT_TRUE(shouldFinalizeMtpTargetLogprobsEarly(/*stream_async_enabled=*/true, target_logprobs));
+    EXPECT_FALSE(target_logprobs.row_max.defined());
+    EXPECT_FALSE(target_logprobs.row_shifted_logsumexp.defined());
+    EXPECT_FALSE(target_logprobs.top_logits.defined());
+
+    // The mixed decode capture stays zero-copy until acceptance. Early finalize
+    // then reduces only the one accepted row belonging to the requesting
+    // stream; the regular worker consumes the compact result idempotently.
+    processor.finalizeDecodeTargetLogprobs(stream_groups, spec_output, target_logprobs);
+    ASSERT_TRUE(target_logprobs.finalized());
+    ASSERT_FALSE(target_logprobs.retainsFullLmHeadStorage());
+
+    std::vector<StreamSpecUpdateInfo> update_infos;
+    processor.prepareDecodeSpecUpdateInfo(stream_groups, spec_output, draft_output, target_logprobs, update_infos);
+
+    ASSERT_EQ(update_infos.size(), 2);
+    ASSERT_TRUE(target_logprobs.finalized());
+    // The plain request contributes no rows, and the logprob request accepted
+    // only its first row. Its dense source row is 2, proving selection was
+    // deferred until acceptance rather than captured as a [2,V] mixed copy.
+    EXPECT_EQ(target_logprobs.token_logprobs.size(0), 1);
+    EXPECT_FALSE(update_infos[0].token_logprobs.defined());
+    EXPECT_FALSE(update_infos[0].top_logprob_token_ids.defined());
+    EXPECT_FALSE(update_infos[0].top_logprobs.defined());
+    ASSERT_TRUE(update_infos[1].token_logprobs.defined());
+    EXPECT_TRUE(torch::allclose(update_infos[1].token_logprobs,
+                                target_logprobs.token_logprobs.narrow(0, 0, 1).reshape({1, 1})));
+    EXPECT_TRUE(torch::equal(update_infos[1].top_logprob_token_ids,
+                             target_logprobs.top_logprob_token_ids.narrow(0, 0, 1).reshape({1, 1, 2})));
+    auto expected = torch::log_softmax(dense_logits.narrow(0, 2, 1), -1);
+    EXPECT_TRUE(
+        torch::allclose(target_logprobs.token_logprobs,
+                        expected.index({0, spec_output.accept_tokens_cpu.index({1, 0}).item<int64_t>()}).reshape({1})));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDispatchPrefillStagesCompactLogprobsToCpuAsOneBatch) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types    = {CacheGroupType::FULL};
+    model_config.max_seq_len    = 32;
+    model_config.vocab_size     = 5;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 1;
+
+    ResourceContext resource_context;
+    auto            stream = createContextStream(
+        model_config, runtime_config, resource_context, {1}, 1, {}, {}, /*return_logprobs=*/true, /*top_logprobs=*/2);
+    StreamGroups            stream_groups({stream});
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    MergedOutput target_output;
+    target_output.sampler_output.token_ids =
+        torch::tensor({4, 2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA)).reshape({1, 2});
+
+    MergedOutput draft_output;
+    draft_output.sampler_output.token_ids =
+        torch::tensor({3L}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA)).reshape({1, 1});
+    draft_output.sampler_output.all_probs =
+        torch::full({1, 5}, 0.2f, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+
+    auto raw_logits = torch::tensor({3.0f, -1.0f, 0.5f, 2.0f, 1.0f},
+                                    torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA))
+                          .reshape({1, 5});
+    auto expected        = torch::log_softmax(raw_logits.to(torch::kFloat32), -1);
+    auto target_logprobs = computeMtpTargetLogprobs(raw_logits, 2, /*real_vocab_size=*/5);
+    finalizeMtpTargetLogprobs(target_logprobs, target_output.sampler_output.token_ids.select(1, 1));
+
+    auto status =
+        processor.dispatchPrefill(stream_groups, target_output, draft_output, torch::Tensor(), target_logprobs);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    ASSERT_FALSE(stream->hasError());
+    EXPECT_FALSE(stream->getTokenLogProbs().is_cuda());
+    EXPECT_FALSE(stream->getTopLogprobTokenIds().is_cuda());
+    EXPECT_FALSE(stream->getTopLogProbs().is_cuda());
+    EXPECT_NEAR(stream->getTokenLogProbs().index({0, 0}).item<float>(), expected.index({0, 2}).item<float>(), 1e-3);
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testSpecUpdateLogprobsFollowStopTruncation) {
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    model_config.max_seq_len = 8;
+    model_config.vocab_size  = 8;
+    model_config.num_layers  = 1;
+
+    ResourceContext resource_context;
+    // specUpdate consults cache geometry before stop-word truncation. Supply
+    // the same minimal manager used by the existing decode tests; no cache
+    // allocation is needed because this MHA-only config has no linear blocks.
+    resource_context.cache_manager =
+        std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                                        /*block_num=*/10,
+                                                                        /*tokens_per_block=*/2,
+                                                                        rtp_llm::TYPE_INT8));
+    auto stream                               = createContextStream(model_config,
+                                      runtime_config,
+                                      resource_context,
+                                                                    {0},
+                                      1,
+                                      /*begin_think_token_ids=*/{6},
+                                      /*end_think_token_ids=*/{7},
+                                      /*return_logprobs=*/true,
+                                      /*top_logprobs=*/1);
+    stream->generateConfig()->stop_words_list = {{2}};
+
+    auto new_tokens = torch::tensor({{1, 2, 3}}, torch::kInt32);
+    auto selected   = torch::tensor({{-0.1f, -0.2f, -0.3f}}, torch::kFloat32);
+    auto top_ids    = torch::tensor({1, 2, 3}, torch::kInt32).reshape({1, 3, 1});
+    auto top_values = torch::tensor({-0.01f, -0.02f, -0.03f}, torch::kFloat32).reshape({1, 3, 1});
+
+    stream->specUpdate({new_tokens,
+                        3,
+                        -1,
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        selected,
+                        top_ids,
+                        top_values});
+
+    ASSERT_FALSE(stream->hasError());
+    EXPECT_EQ(stream->processorAcceptedTokenLen(), 2);
+    auto output_result = stream->nextOutput();
+    ASSERT_TRUE(output_result.ok());
+    const auto& output = output_result.value().generate_outputs[0];
+    EXPECT_EQ(toVec<int32_t>(output.output_ids), (std::vector<int32_t>{1, 2}));
+    EXPECT_TRUE(torch::allclose(output.token_logprobs.value(), selected.narrow(1, 0, 2).reshape({2})));
+    EXPECT_EQ(toVec<int32_t>(output.top_logprob_token_ids.value()), (std::vector<int32_t>{1, 2}));
+
+    // Reaching the logical token cap before a worker update must still drive
+    // needFinish() with a zero-width logprob payload. In particular, this path
+    // must not read new_tokens[-1] or mutate the speculative output buffer.
+    auto capped_stream                              = createContextStream(model_config,
+                                             runtime_config,
+                                             resource_context,
+                                                                          {0},
+                                             1,
+                                                                          {},
+                                                                          {},
+                                             /*return_logprobs=*/true,
+                                             /*top_logprobs=*/1);
+    capped_stream->generateConfig()->max_new_tokens = 0;
+    const auto original_spec_tokens                 = capped_stream->getSPOutputBuffer()->tokens.clone();
+    capped_stream->specUpdate({new_tokens,
+                               3,
+                               -1,
+                               torch::Tensor(),
+                               torch::Tensor(),
+                               torch::Tensor(),
+                               torch::Tensor(),
+                               selected,
+                               top_ids,
+                               top_values});
+
+    EXPECT_TRUE(capped_stream->hasEvent(StreamEvents::GenerateDone));
+    EXPECT_EQ(capped_stream->moveToNext(), StreamState::FINISHED);
+    EXPECT_TRUE(capped_stream->isFinished());
+    EXPECT_FALSE(capped_stream->hasError());
+    EXPECT_EQ(capped_stream->seqLength(), capped_stream->inputLength());
+    EXPECT_TRUE(torch::equal(capped_stream->getSPOutputBuffer()->tokens, original_spec_tokens));
+    EXPECT_FALSE(capped_stream->getTokenLogProbs().defined());
+}
 
 TEST_F(MtpBatchStreamProcessorTest, DISABLED_benchmarkScoreTokenIdsTorchCopyVsMemcpy) {
     constexpr int64_t stream_count = 64;
@@ -227,6 +767,139 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTok
         EXPECT_EQ(6, data[row * stride]);
         EXPECT_EQ(7, data[row * stride + 1]);
     }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputPreservesNarrowLogitsWithoutLogprobs) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+
+    model_config.max_seq_len    = 32;
+    model_config.vocab_size     = 100;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 1;
+
+    ResourceContext resource_context;
+    auto            stream = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+    StreamGroups            stream_groups({stream});
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    GptModelInputs  model_inputs;
+    GptModelOutputs model_output;
+    model_output.logits =
+        torch::arange(0, 8, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).reshape({2, 4});
+    auto original_logits = model_output.logits.clone();
+
+    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_inputs, model_output);
+    ASSERT_TRUE(sampler_inputs_status.ok());
+    EXPECT_EQ(sampler_inputs_status.value().logits.sizes(), (torch::IntArrayRef{2, 4}));
+    EXPECT_TRUE(torch::equal(sampler_inputs_status.value().logits, original_logits));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputPreservesPaddedLogitsWithoutLogprobs) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+
+    model_config.max_seq_len    = 32;
+    model_config.vocab_size     = 5;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 1;
+
+    ModelConfig small_vocab_model_config = model_config;
+    small_vocab_model_config.vocab_size  = 3;
+
+    ResourceContext resource_context;
+    auto small_vocab_stream = createContextStream(small_vocab_model_config, runtime_config, resource_context, {1}, 1);
+    auto large_vocab_stream = createContextStream(model_config, runtime_config, resource_context, {2}, 2);
+    small_vocab_stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+    large_vocab_stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+    StreamGroups stream_groups({small_vocab_stream, large_vocab_stream});
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    GptModelInputs  model_inputs;
+    GptModelOutputs model_output;
+    model_output.logits =
+        torch::arange(0, 32, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).reshape({4, 8});
+    auto original_logits = model_output.logits.clone();
+
+    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_inputs, model_output);
+    ASSERT_TRUE(sampler_inputs_status.ok());
+    const auto& sampler_inputs = sampler_inputs_status.value();
+    ASSERT_EQ(sampler_inputs.logits.sizes(), (torch::IntArrayRef{4, 8}));
+    ASSERT_EQ(sampler_inputs.all_probs.sizes(), (torch::IntArrayRef{4, 8}));
+    EXPECT_TRUE(torch::equal(model_output.logits, original_logits));
+    EXPECT_TRUE(torch::equal(sampler_inputs.logits, original_logits));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testSpecMaskExcludesPaddedSamplerLogitsWithoutLogprobs) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+
+    model_config.max_seq_len    = 32;
+    model_config.vocab_size     = 5;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 1;
+
+    ResourceContext resource_context;
+    auto            stream = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+    StreamGroups            stream_groups({stream});
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    GptModelInputs  model_inputs;
+    GptModelOutputs model_output;
+    // Real token logits are all negative while padded LM-head columns are zero.
+    // Without suffix masking, greedy sampling would select OOV token 5.
+    model_output.logits = torch::tensor(
+        {{-5.0f, -4.0f, -3.0f, -2.0f, -1.0f, 0.0f, 0.0f, 0.0f}, {-1.0f, -2.0f, -3.0f, -4.0f, -5.0f, 0.0f, 0.0f, 0.0f}},
+        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    auto original_logits = model_output.logits.clone();
+
+    SpecLogitsVerifyRunner::LaunchResult spec_mask_result;
+    spec_mask_result.has_active_processor = true;
+    spec_mask_result.spec_vocab_mask_gpu =
+        torch::tensor({{false, false, false, false, true}, {true, false, false, false, false}},
+                      torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
+
+    auto sampler_inputs_status =
+        processor.gatherSpecSamplerInput(stream_groups, model_inputs, model_output, spec_mask_result);
+    ASSERT_TRUE(sampler_inputs_status.ok());
+    auto sampler_inputs = std::move(sampler_inputs_status.value());
+
+    LogitsProcessorStates states;
+    states.batchProcess(sampler_inputs);
+    auto masked_logits = sampler_inputs.logits.cpu();
+
+    EXPECT_EQ(masked_logits.index({0, 4}).item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(masked_logits.index({1, 0}).item<float>(), BaseLogitsProcessor::neg_inf);
+    for (int64_t row = 0; row < 2; ++row) {
+        for (int64_t col = 5; col < 8; ++col) {
+            EXPECT_EQ(masked_logits.index({row, col}).item<float>(), BaseLogitsProcessor::neg_inf);
+        }
+    }
+    auto sampled_token_ids = masked_logits.argmax(/*dim=*/1);
+    EXPECT_EQ(toVec<int64_t>(sampled_token_ids), (std::vector<int64_t>{3, 1}));
+    EXPECT_TRUE(torch::all(sampled_token_ids < model_config.vocab_size).item<bool>());
+    EXPECT_TRUE(torch::equal(model_output.logits, original_logits));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens) {

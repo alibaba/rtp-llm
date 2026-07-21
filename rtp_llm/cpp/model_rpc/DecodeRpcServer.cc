@@ -310,7 +310,14 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                              torch::Tensor(),
                              torch::Tensor(),
                              torch::Tensor(),
-                             torch::Tensor()});
+                             torch::Tensor(),
+                             true,
+                             false,
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             -1,
+                             generate_stream->generateConfig()->return_logprobs ? 1 : 0});
     // REBASE CONFLICT CONTEXT(6511f0467): source branch added PD debug
     // logging and initialized NormalAsyncDeviceState after local first-token
     // generation; new base kept grpc-normal-state pending flow. Keep both.

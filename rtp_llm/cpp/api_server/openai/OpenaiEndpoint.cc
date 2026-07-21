@@ -1,3 +1,5 @@
+#include <stdexcept>
+
 #include "autil/StringUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/api_server/openai/OpenaiEndpoint.h"
@@ -47,6 +49,7 @@ OpenaiEndpoint::OpenaiEndpoint(const std::shared_ptr<Tokenizer>&  tokenizer,
 std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const ChatCompletionRequest& req) {
     GenerateConfig config = req.extra_configs.value_or(GenerateConfig());
     config.is_streaming   = true;
+
     if (req.temperature.has_value()) {
         config.temperature = req.temperature.value();
     }
@@ -59,7 +62,39 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
     if (req.max_tokens.has_value()) {
         config.max_new_tokens = req.max_tokens.value();
     }
-    config.num_return_sequences = req.n.value_or(1);
+    // Preserve the endpoint's legacy backend default when top-level n is
+    // absent, but validate logprobs against the effective request value from
+    // extra_configs before that legacy normalization.
+    const int effective_num_return_sequences = req.n.value_or(config.num_return_sequences);
+    config.num_return_sequences              = req.n.value_or(1);
+    if (req.logprobs.has_value()) {
+        config.return_logprobs = req.logprobs.value();
+        if (req.top_logprobs.has_value()) {
+            config.top_logprobs = req.top_logprobs.value();
+        } else if (!config.return_logprobs) {
+            config.top_logprobs = 0;
+        }
+    } else if (req.top_logprobs.has_value()) {
+        // A top-level top_logprobs value overrides extra_configs only after
+        // the effective return_logprobs flag has been inherited from it.
+        config.top_logprobs = req.top_logprobs.value();
+    }
+    if (config.top_logprobs < 0 || config.top_logprobs > 20) {
+        throw std::invalid_argument("top_logprobs must be between 0 and 20");
+    }
+    if (!config.return_logprobs && (req.top_logprobs.has_value() || config.top_logprobs > 0)) {
+        throw std::invalid_argument("top_logprobs requires logprobs=true");
+    }
+    if (config.return_logprobs && (effective_num_return_sequences > 1 || config.hasNumBeams())) {
+        throw std::invalid_argument("logprobs does not support n > 1 or beam search");
+    }
+    // The C++ OpenAI response ABI expects one row per visible output token and
+    // cannot represent RTP-LLM's compact content-only suffix. DashSC consumes
+    // the compact offset/count metadata directly and is unaffected by this
+    // endpoint check.
+    if (config.return_logprobs && config.in_think_mode) {
+        throw std::invalid_argument("logprobs is not supported when thinking output is enabled");
+    }
     std::vector<std::string> request_stop_words_list;
     if (req.stop.has_value()) {
         auto stop = req.stop.value();
@@ -85,9 +120,6 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
     // }
     if (req.seed.has_value()) {
         config.random_seed = req.seed.value();
-    }
-    if (req.logprobs.has_value()) {
-        config.return_all_probs = req.logprobs.value();
     }
     config.addSpecialTokens(model_config_.special_tokens);
 

@@ -143,6 +143,84 @@ class InternVLRenderer(CustomChatRenderer):
         self.roles = {RoleEnum.user: "USER", RoleEnum.assistant: "ASSISTANT"}
         self.video_frame_num = 8
 
+    @staticmethod
+    def _removes_decoder_leading_space(
+        decoded_prev_token: str, decoded_string: str
+    ) -> bool:
+        return bool(
+            decoded_string.startswith(" ")
+            and (not decoded_prev_token or not decoded_prev_token.startswith(" "))
+        )
+
+    @classmethod
+    def _normalize_decoded_delta(
+        cls, decoded_prev_token: str, decoded_string: str
+    ) -> str:
+        """Apply InternVL's context-sensitive leading-space normalization."""
+        if cls._removes_decoder_leading_space(decoded_prev_token, decoded_string):
+            return decoded_string[len(decoded_prev_token) + 1 :]
+        return decoded_string[len(decoded_prev_token) :]
+
+    @staticmethod
+    def _account_for_invisible_leading_space(
+        status: StreamStatus, removed_leading_space: bool
+    ) -> None:
+        """Account for a standalone space token swallowed by normalization."""
+        if (
+            removed_leading_space
+            and status.pending_logprobs
+            and status.pending_logprobs[0].token == " "
+        ):
+            status.pending_logprobs.pop(0)
+            # This counter is also the logprob ledger's accounted-token cursor.
+            status.emitted_logprob_token_count += 1
+
+    def _trim_pending_logprobs_to_visible_text(
+        self, status: StreamStatus, visible_delta: str
+    ) -> None:
+        """Trim logprobs using the same decoded-text semantics as InternVL."""
+        if not status.pending_logprobs:
+            return
+        if not visible_delta:
+            status.pending_logprobs = []
+            return
+
+        output_ids = list(status.output_ids)
+        context_count = status.emitted_logprob_token_count
+        pending_count = len(status.pending_logprobs)
+        if context_count + pending_count > len(output_ids):
+            return
+
+        # Accounted invisible tokens have not entered last_output_ids, but they
+        # remain part of the decoder context for the pending visible prefix.
+        previous_ids = (
+            list(status.prev_token_id)
+            + output_ids[len(status.last_output_ids) : context_count]
+        )
+        pending_ids = output_ids[context_count : context_count + pending_count]
+        decoded_prev_token = self.tokenizer.decode(previous_ids)
+        keep_count = 0
+        found_visible_prefix = False
+        for index in range(1, pending_count + 1):
+            candidate_string = self.tokenizer.decode(previous_ids + pending_ids[:index])
+            candidate_delta = self._normalize_decoded_delta(
+                decoded_prev_token, candidate_string
+            )
+            if candidate_delta == visible_delta or candidate_delta.startswith(
+                visible_delta
+            ):
+                keep_count = index
+                found_visible_prefix = True
+                break
+            if visible_delta.startswith(candidate_delta):
+                keep_count = index
+                found_visible_prefix = True
+
+        # If a context-sensitive tokenizer cannot reproduce the visible prefix,
+        # retaining the records is safer than guessing away a sampled token.
+        if found_visible_prefix:
+            status.pending_logprobs = status.pending_logprobs[:keep_count]
+
     def _render_messages(self, messages: List[ChatMessage]) -> PromptWithMMInput:
         # Use checkpoint path from model_config
         ckpt_path: str = self.model_config.checkpoint_path
@@ -176,49 +254,55 @@ class InternVLRenderer(CustomChatRenderer):
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
         )
+        self._accumulate_log_probs_from_tensors(
+            status,
+            output.output_ids,
+            output.token_logprobs,
+            output.top_logprob_token_ids,
+            output.top_logprobs,
+        )
         decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
         decoded_string = self.tokenizer.decode(status.tokens_to_decode)
+        decoded_string, trimmed_incomplete_utf8 = self._prepare_decoded_string_for_emit(
+            status, decoded_string, is_streaming
+        )
+        if decoded_string is None:
+            return await self._create_empty_delta(output.aux_info)
         # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
-        if is_streaming:
-            if len(decoded_string) > 0 and "\uFFFD" == decoded_string[-1]:
-                return await self._create_empty_delta(output.aux_info)
-        else:
-            while (len(decoded_string) > 0) and ("\uFFFD" == decoded_string[-1]):
-                decoded_string = decoded_string[:-1]
-        if (
-            len(decoded_prev_token) == 0
-            and len(decoded_string) > 0
-            and decoded_string[0] == " "
-        ):
-            status.delta_output_string = decoded_string[1:]
-        elif (
-            len(decoded_prev_token) > 0
-            and len(decoded_string) > 0
-            and decoded_string[0] == " "
-            and decoded_prev_token[0] != " "
-        ):
-            status.delta_output_string = decoded_string[len(decoded_prev_token) + 1 :]
-        else:
-            status.delta_output_string = decoded_string[len(decoded_prev_token) :]
+        removed_leading_space = self._removes_decoder_leading_space(
+            decoded_prev_token, decoded_string
+        )
+        status.delta_output_string = self._normalize_decoded_delta(
+            decoded_prev_token, decoded_string
+        )
+        self._account_for_invisible_leading_space(status, removed_leading_space)
 
         # Process stop words: truncate complete stop words, detect partial stop words
+        untruncated_delta = status.delta_output_string
         status.delta_output_string, should_buffer = self._process_stop_words(
-            status.delta_output_string,
+            untruncated_delta,
             stop_words_str,
             stop_word_slice_list,
             is_streaming,
             status,
         )
+        if trimmed_incomplete_utf8 or len(status.delta_output_string) < len(
+            untruncated_delta
+        ):
+            self._trim_pending_logprobs_to_visible_text(
+                status, status.delta_output_string
+            )
 
         if should_buffer:
             return await self._create_empty_delta(output.aux_info)
 
         # Build delta output
         if len(status.delta_output_string) > 0:
+            current_logprobs = self._take_pending_logprobs(status)
             status.update_result()
             delta = OutputDelta(
                 output_str=status.delta_output_string,
-                logprobs=await self._generate_log_probs(status, output),
+                logprobs=current_logprobs,
                 input_length=output.aux_info.input_len,
                 output_length=output.aux_info.output_len,
                 reuse_length=output.aux_info.reuse_len,
@@ -226,6 +310,12 @@ class InternVLRenderer(CustomChatRenderer):
             status.delta_output_string = ""
             return delta
         else:
+            # A decoder-only leading space can make a sampled token temporarily
+            # invisible. Keep its probability pending until later text makes the
+            # token visible. At termination there is no later text, so discard it
+            # instead of emitting logprobs with an empty content delta.
+            if status.finish_reason is not None:
+                self._trim_pending_logprobs_to_visible_text(status, "")
             return await self._create_empty_delta(output.aux_info)
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:

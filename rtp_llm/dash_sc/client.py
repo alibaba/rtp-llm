@@ -63,6 +63,16 @@ def _append_fp32_scalar(
     request.raw_input_contents.append(struct.pack("<f", float(value)))
 
 
+def _append_bool_scalar(
+    request: predict_v2_pb2.ModelInferRequest, name: str, value: bool
+) -> None:
+    inp = request.inputs.add()
+    inp.name = name
+    inp.datatype = "BOOL"
+    inp.shape.append(1)
+    request.raw_input_contents.append(b"\x01" if value else b"\x00")
+
+
 def append_input_ids_to_model_infer_request(
     request: predict_v2_pb2.ModelInferRequest,
     input_ids: list[int],
@@ -91,6 +101,9 @@ def append_sampling_params_to_model_infer_request(
     _append_fp32_scalar(request, "repetition_penalty", sampling.repetition_penalty)
     _append_fp32_scalar(request, "frequency_penalty", sampling.frequency_penalty)
     _append_fp32_scalar(request, "presence_penalty", sampling.presence_penalty)
+    if sampling.return_logprobs:
+        _append_bool_scalar(request, "logprobs", True)
+        _append_int32_scalar(request, "top_logprobs", sampling.top_logprobs)
     if sampling.max_new_think_tokens is not None:
         _append_int32_scalar(
             request, "max_new_think_tokens", sampling.max_new_think_tokens

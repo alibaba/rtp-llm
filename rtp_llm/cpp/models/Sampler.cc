@@ -212,7 +212,9 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                           std::move(all_cum_log_probs_out),
                           std::move(inputs.all_probs),
                           std::move(all_beam_indices),
-                          std::move(all_success)});
+                          std::move(all_success),
+                          inputs.raw_logprobs_logits,
+                          inputs.raw_logprobs_row_indices});
 }
 
 void Sampler::preprocessLogits(const SamplerInputs& inputs) {

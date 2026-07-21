@@ -276,7 +276,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         for delta in deltas[1:]:
             self._merge_output_str(merged, delta)
             if delta.logprobs is not None:
-                merged.logprobs = delta.logprobs
+                merged.logprobs = (merged.logprobs or []) + delta.logprobs
 
         return merged
 
@@ -374,6 +374,17 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         stop_word_slice_list: List[str],
         is_streaming: bool,
     ) -> OutputDelta:
+        # Logprob responses intentionally bypass reasoning/tool parsing so each
+        # backend token remains aligned with exactly one OpenAI logprob record.
+        if status.request.logprobs:
+            return await super()._update_single_status(
+                status,
+                output,
+                max_new_tokens,
+                stop_words_str,
+                stop_word_slice_list,
+                is_streaming,
+            )
         if status.finish_reason != None:
             return await self._create_empty_delta(status.output.aux_info)
         status.update_output(

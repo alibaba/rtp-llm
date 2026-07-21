@@ -105,13 +105,15 @@ TEST_F(OpenaiEndpointTest, ExtractGenerationConfig) {
     auto        openai_endpoint = std::make_shared<OpenaiEndpoint>(tokenizer_, render_, model_config);
 
     ChatCompletionRequest req;
-    req.stream      = false;
-    req.temperature = 52.1;
-    req.top_p       = 12.34;
-    req.top_k       = 1;
-    req.max_tokens  = 100;
-    req.stop        = "hello world";
-    req.seed        = 10;
+    req.stream       = false;
+    req.temperature  = 52.1;
+    req.top_p        = 12.34;
+    req.top_k        = 1;
+    req.max_tokens   = 100;
+    req.stop         = "hello world";
+    req.seed         = 10;
+    req.logprobs     = true;
+    req.top_logprobs = 5;
 
     std::vector<std::string>      stop_words_list    = {std::get<std::string>(req.stop.value())};
     std::vector<std::vector<int>> tokenize_words_res = {{1, 2, 3}};
@@ -128,6 +130,72 @@ TEST_F(OpenaiEndpointTest, ExtractGenerationConfig) {
     EXPECT_EQ(config->stop_words_str, stop_words_list);
     EXPECT_EQ(config->stop_words_list, tokenize_words_res);
     EXPECT_EQ(config->random_seed, req.seed.value());
+    EXPECT_TRUE(config->return_logprobs);
+    EXPECT_EQ(config->top_logprobs, 5);
+    EXPECT_FALSE(config->return_all_probs);
+
+    ChatCompletionRequest effective_extra_logprobs;
+    GenerateConfig        effective_extra_config;
+    effective_extra_config.return_logprobs = true;
+    effective_extra_config.top_logprobs    = 2;
+    effective_extra_logprobs.extra_configs = effective_extra_config;
+    effective_extra_logprobs.top_logprobs  = 4;
+    EXPECT_CALL(*mock_render_, tokenize_words(std::vector<std::string>()))
+        .WillOnce(Return(std::vector<std::vector<int>>()));
+    auto effective_config = openai_endpoint->extract_generation_config(effective_extra_logprobs);
+    EXPECT_TRUE(effective_config->return_logprobs);
+    EXPECT_EQ(effective_config->top_logprobs, 4);
+
+    ChatCompletionRequest mixed_top_logprobs;
+    GenerateConfig        mixed_extra_config;
+    mixed_extra_config.top_logprobs  = 5;
+    mixed_top_logprobs.logprobs      = true;
+    mixed_top_logprobs.extra_configs = mixed_extra_config;
+    EXPECT_CALL(*mock_render_, tokenize_words(std::vector<std::string>()))
+        .WillOnce(Return(std::vector<std::vector<int>>()));
+    auto mixed_config = openai_endpoint->extract_generation_config(mixed_top_logprobs);
+    EXPECT_TRUE(mixed_config->return_logprobs);
+    EXPECT_EQ(mixed_config->top_logprobs, 5);
+
+    ChatCompletionRequest top_without_logprobs;
+    top_without_logprobs.top_logprobs = 1;
+    EXPECT_THROW(openai_endpoint->extract_generation_config(top_without_logprobs), std::exception);
+
+    ChatCompletionRequest zero_top_without_logprobs;
+    zero_top_without_logprobs.top_logprobs = 0;
+    EXPECT_THROW(openai_endpoint->extract_generation_config(zero_top_without_logprobs), std::exception);
+
+    ChatCompletionRequest invalid_top_logprobs;
+    invalid_top_logprobs.logprobs     = true;
+    invalid_top_logprobs.top_logprobs = 21;
+    EXPECT_THROW(openai_endpoint->extract_generation_config(invalid_top_logprobs), std::exception);
+
+    ChatCompletionRequest invalid_extra_top_logprobs;
+    GenerateConfig        invalid_extra_config;
+    invalid_extra_config.return_logprobs     = true;
+    invalid_extra_config.top_logprobs        = 21;
+    invalid_extra_top_logprobs.extra_configs = invalid_extra_config;
+    EXPECT_THROW(openai_endpoint->extract_generation_config(invalid_extra_top_logprobs), std::exception);
+
+    ChatCompletionRequest invalid_extra_n;
+    GenerateConfig        invalid_extra_n_config;
+    invalid_extra_n_config.return_logprobs      = true;
+    invalid_extra_n_config.num_return_sequences = 2;
+    invalid_extra_n.extra_configs               = invalid_extra_n_config;
+    EXPECT_THROW(openai_endpoint->extract_generation_config(invalid_extra_n), std::exception);
+
+    ChatCompletionRequest extra_top_without_logprobs;
+    GenerateConfig        extra_top_without_logprobs_config;
+    extra_top_without_logprobs_config.top_logprobs = 1;
+    extra_top_without_logprobs.extra_configs       = extra_top_without_logprobs_config;
+    EXPECT_THROW(openai_endpoint->extract_generation_config(extra_top_without_logprobs), std::exception);
+
+    ChatCompletionRequest thinking_logprobs;
+    GenerateConfig        thinking_logprobs_config;
+    thinking_logprobs_config.return_logprobs = true;
+    thinking_logprobs_config.in_think_mode   = true;
+    thinking_logprobs.extra_configs          = thinking_logprobs_config;
+    EXPECT_THROW(openai_endpoint->extract_generation_config(thinking_logprobs), std::exception);
 }
 
 TEST_F(OpenaiEndpointTest, GetChatRender) {
