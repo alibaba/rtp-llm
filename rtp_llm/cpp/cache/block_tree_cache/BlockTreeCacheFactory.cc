@@ -325,7 +325,6 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     std::vector<BlockTreeCache::PerTagMapping> mappings(static_cast<size_t>(group_count), {-1, -1});
     std::vector<ComponentGroupPtr>             component_groups;
     std::vector<Component>                     components;
-    std::vector<size_t>                        payload_sizes;
     tags.reserve(static_cast<size_t>(group_count));
     device_groups.reserve(static_cast<size_t>(group_count));
     for (int gid = 0; gid < group_count; ++gid) {
@@ -335,7 +334,6 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
 
     const auto plan = buildAggregationPlan(cache_config);
     component_groups.reserve(plan.members.size());
-    payload_sizes.reserve(plan.members.size());
     for (size_t aggregate_index = 0; aggregate_index < plan.members.size(); ++aggregate_index) {
         const auto&                     members = plan.members[aggregate_index];
         const auto&                     first = cache_config.topology().groupById(static_cast<size_t>(members.front()));
@@ -344,7 +342,6 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         std::vector<DeviceBlockPoolPtr> device_pools;
         std::vector<std::string>        member_tags;
         std::vector<int>                component_indices;
-        size_t                          aggregate_payload = 0;
         device_pools.reserve(members.size());
         member_tags.reserve(members.size());
         component_indices.reserve(members.size());
@@ -360,7 +357,6 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
             component.tag                          = declared.tag;
             component.component_group_id           = component_group_id;
             component.type                         = declared.policy.group_type;
-            component.device_pool_index            = static_cast<int>(local_pool);
             const size_t group_stride              = declared.kv_block_stride_bytes + declared.kv_scale_stride_bytes;
             const bool   legacy_shared_single_pool = !cache_config.use_independent_block_pools && group_count == 1
                                                    && cache_config.mtp_sub_configs.empty()
@@ -386,10 +382,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
                     physical_stride =
                         static_cast<size_t>(cache_config.layer_to_block_stride_bytes[static_cast<size_t>(layer_id)]);
                 }
-                RTP_LLM_CHECK_WITH_INFO(aggregate_payload <= std::numeric_limits<size_t>::max() - physical_stride,
-                                        "component group payload overflow");
-                component.memory_block_layer_tag_slots.push_back({layer_id, declared.tag, physical_stride});
-                aggregate_payload += physical_stride;
+                component.model_layer_ids.push_back(layer_id);
+                component.layer_bytes.push_back(physical_stride);
             }
             component_indices.push_back(component.component_id);
             components.push_back(std::move(component));
@@ -397,16 +391,19 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         }
 
         component_group->setDevicePools(std::move(device_pools), std::move(member_tags));
-        component_group->component_indices = std::move(component_indices);
-        component_group->host_block_size   = aggregate_payload;
+        RTP_LLM_CHECK_WITH_INFO(component_group->finalizeLayout(std::move(component_indices), components),
+                                "createBlockTreeCache: failed to finalize layout for component group %d",
+                                component_group_id);
+        RTP_LLM_LOG_INFO("createBlockTreeCache: group[%d] layout sealed: payload_bytes=%zu",
+                         component_group_id,
+                         component_group->layout().payloadBytes());
         component_groups.push_back(std::move(component_group));
-        payload_sizes.push_back(aggregate_payload);
     }
 
     auto   tree            = std::make_unique<BlockTree>(static_cast<int>(component_groups.size()));
     size_t combined_stride = 0;
-    for (const size_t payload : payload_sizes) {
-        combined_stride += alignUp(payload, kPoolAlignment);
+    for (const auto& component_group : component_groups) {
+        combined_stride += alignUp(component_group->layout().payloadBytes(), kPoolAlignment);
     }
 
     if (host_enabled && !component_groups.empty()) {
@@ -417,7 +414,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
             return nullptr;
         }
         for (size_t i = 0; i < component_groups.size(); ++i) {
-            auto pool = createHostPool("block_tree_host_g" + std::to_string(i), payload_sizes[i], usable);
+            const size_t payload = component_groups[i]->layout().payloadBytes();
+            auto         pool    = createHostPool("block_tree_host_g" + std::to_string(i), payload, usable);
             if (!pool) {
                 return nullptr;
             }
@@ -441,7 +439,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
             auto pool = createDiskPool(kv_cache_config,
                                        guard,
                                        "block_tree_disk_g" + std::to_string(i),
-                                       payload_sizes[i],
+                                       component_groups[i]->layout().payloadBytes(),
                                        usable,
                                        parallelism_config.world_rank,
                                        parallelism_config.local_rank);

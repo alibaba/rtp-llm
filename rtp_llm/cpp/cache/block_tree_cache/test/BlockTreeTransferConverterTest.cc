@@ -11,6 +11,16 @@
 namespace rtp_llm {
 namespace {
 
+Component makeConverterComponent(int component_id, int group_id, const std::string& tag) {
+    Component component;
+    component.component_id       = component_id;
+    component.component_group_id = group_id;
+    component.tag                = tag;
+    component.model_layer_ids    = {0};
+    component.layer_bytes        = {128};
+    return component;
+}
+
 std::vector<ComponentGroupPtr> makeComponentGroups() {
     MemoryLayoutConfig memory_layout;
     memory_layout.layer_num                = 1;
@@ -51,6 +61,16 @@ std::vector<ComponentGroupPtr> makeComponentGroups() {
         }
         component_group->setHostPool(host_pool);
         component_group->setDiskPool(disk_pool);
+
+        std::vector<Component> group_components;
+        std::vector<int>       component_indices;
+        const int              pool_count = (group_id == 1 || group_id == 2) ? 2 : 1;
+        for (int local = 0; local < pool_count; ++local) {
+            group_components.push_back(
+                makeConverterComponent(local, group_id, component_group->tags()[static_cast<size_t>(local)]));
+            component_indices.push_back(local);
+        }
+        EXPECT_TRUE(component_group->finalizeLayout(std::move(component_indices), group_components));
         component_groups.push_back(component_group);
     }
     return component_groups;

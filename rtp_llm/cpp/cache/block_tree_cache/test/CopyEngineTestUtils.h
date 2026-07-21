@@ -33,6 +33,14 @@ std::shared_ptr<BlockTreeDiskBlockPool> makeDiskPool(size_t                     
 
 BlockIdxType poolMalloc(IBlockPool& pool);
 
+Component makeSchemaComponent(int                        component_id,
+                              int                        component_group_id,
+                              const std::string&         tag,
+                              const std::vector<size_t>& layer_bytes,
+                              const std::vector<int>&    model_layer_ids = {});
+
+std::shared_ptr<const std::vector<Component>> makeComponentRegistry(std::vector<Component> components);
+
 TransferDescriptor makeDescriptor(Tier                             source_tier,
                                   Tier                             target_tier,
                                   const std::vector<BlockIdxType>& device_blocks,

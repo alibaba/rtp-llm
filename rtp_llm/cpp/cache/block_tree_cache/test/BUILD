@@ -25,6 +25,14 @@ test_deps = [
     "@com_google_googletest//:gtest_main",
 ] + cuda13_torch_link_deps + torch_deps() + no_block_copy_link_deps()
 
+cc_test(
+    name = "component_group_layout_test",
+    srcs = ["ComponentGroupLayoutTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+)
+
 cc_library(
     name = "copy_engine_test_utils",
     srcs = ["CopyEngineTestUtils.cc"],
@@ -40,6 +48,7 @@ cc_test(
     testonly = True,
     srcs = ["CopyEngineDeviceHostTest.cc"],
     copts = test_copts,
+    tags = ["exclusive"],
     deps = test_deps + [":copy_engine_test_utils"],
     env = {},
 )
@@ -99,6 +108,7 @@ cc_test(
     testonly = True,
     srcs = ["BlockTreeCacheFactoryTest.cc"],
     copts = pool_test_copts,
+    tags = ["exclusive"],
     deps = pool_test_deps + [
         ":block_tree_cache_test_utils",
         ":copy_engine_test_utils",
@@ -128,6 +138,7 @@ cc_test(
     name = "device_block_pool_test",
     srcs = ["DeviceBlockPoolTest.cc"],
     copts = pool_test_copts,
+    tags = ["exclusive"],
     deps = pool_test_deps,
     env = {},
 )
@@ -152,6 +163,7 @@ cc_test(
     name = "block_tree_evictor_test",
     srcs = ["BlockTreeEvictorTest.cc"],
     copts = test_copts,
+    tags = ["exclusive"],
     deps = test_deps,
     env = {},
 )
@@ -160,6 +172,7 @@ cc_test(
     name = "full_component_group_test",
     srcs = ["FullComponentGroupTest.cc"],
     copts = test_copts,
+    tags = ["exclusive"],
     deps = test_deps + [":block_tree_cache_test_utils"],
     env = {},
 )
@@ -168,6 +181,7 @@ cc_test(
     name = "swa_component_group_test",
     srcs = ["SWAComponentGroupTest.cc"],
     copts = test_copts,
+    tags = ["exclusive"],
     deps = test_deps + [":block_tree_cache_test_utils"],
     env = {},
 )
@@ -176,6 +190,7 @@ cc_test(
     name = "linear_component_group_test",
     srcs = ["LinearComponentGroupTest.cc"],
     copts = test_copts,
+    tags = ["exclusive"],
     deps = test_deps + [":block_tree_cache_test_utils"],
     env = {},
 )
@@ -202,6 +217,7 @@ cc_test(
     testonly = True,
     srcs = ["BlockTreeCacheTest.cc"],
     copts = test_copts,
+    tags = ["exclusive"],
     deps = test_deps + [
         ":block_tree_cache_test_utils",
         "//rtp_llm/cpp/cache:cache_async_context",
@@ -214,6 +230,7 @@ cc_test(
     testonly = True,
     srcs = ["BlockTreeCacheIntegrationTest.cc"],
     copts = test_copts,
+    tags = ["exclusive"],
     deps = test_deps + [":block_tree_cache_test_utils"],
     env = {},
 )
@@ -223,6 +240,7 @@ cc_test(
     testonly = True,
     srcs = ["BlockTreeCacheBroadcastTest.cc"],
     copts = test_copts,
+    tags = ["exclusive"],
     deps = test_deps + [
         ":block_tree_cache_test_utils",
         "//rtp_llm/cpp/cache:cache_async_context",

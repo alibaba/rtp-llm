@@ -1,9 +1,12 @@
 #include <gtest/gtest.h>
-#include <vector>
-#include <memory>
-#include <thread>
+
 #include <atomic>
 #include <algorithm>
+#include <memory>
+#include <string>
+#include <thread>
+#include <vector>
+
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 

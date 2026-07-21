@@ -60,8 +60,12 @@ BlockTreeTransferConverter::findComponentGroup(const std::vector<std::string>&  
 
 bool BlockTreeTransferConverter::validDeviceBlocks(const std::vector<BlockIdxType>& blocks,
                                                    const ComponentGroup&            component_group) {
-    const auto& device_pools = component_group.devicePools();
-    if (blocks.size() != device_pools.size() || blocks.empty()) {
+    if (blocks.size() != component_group.layout().componentCount() || blocks.empty()) {
+        return false;
+    }
+
+    const std::vector<DeviceBlockPoolPtr>& device_pools = component_group.devicePools();
+    if (blocks.size() != device_pools.size()) {
         return false;
     }
     bool has_valid_block = false;

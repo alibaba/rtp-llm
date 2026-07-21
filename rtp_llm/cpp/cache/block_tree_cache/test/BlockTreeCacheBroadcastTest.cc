@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtil.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/CopyEngineTestUtils.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 
 namespace rtp_llm {
@@ -123,6 +124,22 @@ static BlockIdxType prepareDeviceTarget(const std::shared_ptr<FullComponentGroup
     device_pool->incRef(*block);
     group->setDevicePools({device_pool}, {"tag_0"});
     return *block;
+}
+
+static void sealBroadcastLayout(const std::shared_ptr<FullComponentGroup>& group,
+                                std::vector<Component>&                    components,
+                                size_t                                     payload_bytes = 256) {
+    if (group->devicePoolCount() == 0) {
+        const std::string tag = "tag_" + std::to_string(group->component_group_id);
+        group->setDevicePools(
+            {makeDevicePool({{payload_bytes, 0}}, 8, "broadcast_layout_" + std::to_string(group->component_group_id))},
+            {tag});
+    }
+    const int         component_index = static_cast<int>(components.size());
+    const std::string component_tag   = group->tags().front();
+    components.push_back(copy_engine_test::makeSchemaComponent(
+        component_index, group->component_group_id, component_tag, {payload_bytes}));
+    RTP_LLM_CHECK(group->finalizeLayout({component_index}, components));
 }
 
 static MemoryOperationRequestPB makeBroadcastRequest() {
@@ -257,6 +274,8 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastHostLoadBackCommitsDeviceSlot) {
     group->setHostPool(host_pool);
     const BlockIdxType device_block = prepareDeviceTarget(group, "broadcast_host_load_back_success");
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
+    std::vector<Component> components;
+    sealBroadcastLayout(group, components);
     const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
@@ -266,7 +285,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastHostLoadBackCommitsDeviceSlot) {
     std::vector<ComponentGroupPtr>      groups = {group};
     std::unique_ptr<BlockTreeCache>     cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
                                                                       std::move(groups),
-                                                                      std::vector<Component>{},
+                                                                      std::move(components),
                                                                       std::move(config),
                                                                       /*storage_backend=*/nullptr,
                                                                       broadcast_manager);
@@ -325,6 +344,8 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastHostLoadBackFailureKeepsSourceSlot)
     group->setHostPool(host_pool);
     const BlockIdxType device_block = prepareDeviceTarget(group, "broadcast_host_load_back_failure");
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
+    std::vector<Component> components;
+    sealBroadcastLayout(group, components);
     const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
@@ -334,7 +355,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastHostLoadBackFailureKeepsSourceSlot)
     std::vector<ComponentGroupPtr>      groups = {group};
     std::unique_ptr<BlockTreeCache>     cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
                                                                       std::move(groups),
-                                                                      std::vector<Component>{},
+                                                                      std::move(components),
                                                                       std::move(config),
                                                                       /*storage_backend=*/nullptr,
                                                                       broadcast_manager);
@@ -394,6 +415,8 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastDiskLoadBackUsesTwoTransferStages) 
     group->setDiskPool(disk_pool);
     const BlockIdxType device_block = prepareDeviceTarget(group, "broadcast_disk_load_back");
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
+    std::vector<Component> components;
+    sealBroadcastLayout(group, components);
     const BlockIdxType disk_block = group->allocateSingleBlock(Tier::DISK);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
@@ -404,7 +427,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastDiskLoadBackUsesTwoTransferStages) 
     std::vector<ComponentGroupPtr>      groups = {group};
     std::unique_ptr<BlockTreeCache>     cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
                                                                       std::move(groups),
-                                                                      std::vector<Component>{},
+                                                                      std::move(components),
                                                                       std::move(config),
                                                                       /*storage_backend=*/nullptr,
                                                                       broadcast_manager);
@@ -475,6 +498,8 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastEvictionSuccessCommitsPlan) {
     full->component_group_id                          = 0;
     full->setHostPool(host_pool);
     full->setDiskPool(disk_pool);
+    std::vector<Component> components;
+    sealBroadcastLayout(full, components);
     const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
@@ -485,7 +510,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastEvictionSuccessCommitsPlan) {
     std::vector<ComponentGroupPtr>  groups = {full};
     std::unique_ptr<BlockTreeCache> cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
                                                                       std::move(groups),
-                                                                      std::vector<Component>{},
+                                                                      std::move(components),
                                                                       std::move(config),
                                                                       /*storage_backend=*/nullptr,
                                                                       broadcast_manager);
@@ -540,6 +565,8 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastEvictionFailureRollsBackPlan) {
     full->component_group_id                          = 0;
     full->setHostPool(host_pool);
     full->setDiskPool(disk_pool);
+    std::vector<Component> components;
+    sealBroadcastLayout(full, components);
     const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
@@ -550,7 +577,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastEvictionFailureRollsBackPlan) {
     std::vector<ComponentGroupPtr>  groups = {full};
     std::unique_ptr<BlockTreeCache> cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
                                                                       std::move(groups),
-                                                                      std::vector<Component>{},
+                                                                      std::move(components),
                                                                       std::move(config),
                                                                       /*storage_backend=*/nullptr,
                                                                       broadcast_manager);
@@ -586,13 +613,16 @@ TEST_F(BlockTreeCacheBroadcastTest, BuildEvictionTransferRequestIncludesPrimaryA
     primary_group->component_group_id                     = 0;
     primary_group->setHostPool(host_pool);
     primary_group->setDiskPool(disk_pool);
+    std::vector<Component> components;
+    sealBroadcastLayout(primary_group, components);
     std::shared_ptr<FullComponentGroup> cascade_group = std::make_shared<FullComponentGroup>();
     cascade_group->component_group_id                 = 1;
     cascade_group->setHostPool(host_pool);
     cascade_group->setDiskPool(disk_pool);
+    sealBroadcastLayout(cascade_group, components);
     std::vector<ComponentGroupPtr>  groups = {primary_group, cascade_group};
     std::unique_ptr<BlockTreeCache> cache =
-        makeBlockTreeCacheForTest(std::make_unique<BlockTree>(2), std::move(groups), std::vector<Component>{});
+        makeBlockTreeCacheForTest(std::make_unique<BlockTree>(2), std::move(groups), std::move(components));
     ASSERT_NE(cache, nullptr);
 
     BlockTreeEvictor::EvictionPlan plan;

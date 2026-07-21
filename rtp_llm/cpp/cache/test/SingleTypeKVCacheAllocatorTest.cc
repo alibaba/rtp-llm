@@ -32,7 +32,9 @@ using TestSingleTypeKVCacheAllocator = BlockTreeCacheTestAllocator<SingleTypeKVC
 
 class CountingSingleTypeCopyEngine: public CopyEngine {
 public:
-    using CopyEngine::CopyEngine;
+    CountingSingleTypeCopyEngine(const std::vector<ComponentGroupPtr>& groups,
+                                 const std::vector<Component>&         components):
+        CopyEngine(groups, std::make_shared<const std::vector<Component>>(components)) {}
 
     TransferHandle submit(const TransferDescriptor&) override {
         ++submit_count_;

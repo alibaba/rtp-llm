@@ -210,7 +210,7 @@ public:
         return nullptr;
     }
     const std::vector<Component>& components() const {
-        return components_;
+        return *components_;
     }
     CopyEnginePtr copyEngine() const {
         return copy_engine_;
@@ -244,13 +244,13 @@ private:
     friend class HybridKVCacheAllocator;
 
     bool initDeviceGroupTags();
+    bool validateConfiguration() const;
     void
     insertSparse(TreeNode* parent, const CacheKeysType& cache_keys, const std::vector<std::vector<GroupSlot>>& slots);
     void insertImpl(TreeNode*                                  parent,
                     const CacheKeysType&                       cache_keys,
                     const std::vector<std::vector<GroupSlot>>& slots,
                     bool                                       allow_sparse_slots);
-
     void taskStarted();
     void taskFinished();
     void drainTreeHolds();
@@ -306,10 +306,10 @@ private:
     bool executeLoadBackTransferBatch(const std::vector<TransferDescriptor>& descriptors, int timeout_ms);
     void performLoadBack(std::vector<LoadBackItem> items, std::shared_ptr<AsyncContext> ctx);
 
-    BlockTreeCacheConfig           config_;
-    std::unique_ptr<BlockTree>     tree_;
-    std::vector<ComponentGroupPtr> component_groups_;
-    std::vector<Component>         components_;
+    BlockTreeCacheConfig                          config_;
+    std::unique_ptr<BlockTree>                    tree_;
+    std::vector<ComponentGroupPtr>                component_groups_;
+    std::shared_ptr<const std::vector<Component>> components_;
     // Stable CacheTopology tags, aligned with allocator-local group storage.
     const std::vector<std::string>     per_tag_tags_;
     std::vector<DeviceKVCacheGroupPtr> per_tag_device_groups_;

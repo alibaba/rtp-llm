@@ -3,12 +3,15 @@
 #include <algorithm>
 #include <exception>
 #include <functional>
+#include <limits>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTransferConverter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -106,91 +109,6 @@ private:
     std::condition_variable cv_;
 };
 
-bool buildCopyEngineComponents(const std::vector<Component>&                     components,
-                               const std::vector<std::string>&                   per_tag_tags,
-                               const std::vector<DeviceKVCacheGroupPtr>&         per_tag_device_groups,
-                               const std::vector<BlockTreeCache::PerTagMapping>& per_tag_mapping,
-                               std::vector<Component>&                           copy_components) {
-    copy_components = components;
-    if (per_tag_tags.size() != per_tag_mapping.size() || per_tag_mapping.size() != per_tag_device_groups.size()) {
-        RTP_LLM_LOG_ERROR("BlockTreeCache::init: per-tag mapping and device group counts must match, mapping=%zu, "
-                          "tags=%zu device_groups=%zu",
-                          per_tag_mapping.size(),
-                          per_tag_tags.size(),
-                          per_tag_device_groups.size());
-        return false;
-    }
-    std::unordered_set<std::string> unique_tags;
-    for (const auto& tag : per_tag_tags) {
-        if (tag.empty() || !unique_tags.insert(tag).second) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache::init: topology tags must be non-empty and unique");
-            return false;
-        }
-    }
-    const bool injected_registry = std::any_of(per_tag_device_groups.begin(),
-                                               per_tag_device_groups.end(),
-                                               [](const auto& device_group) { return device_group != nullptr; });
-    // Directly constructed caches may omit device groups while retaining a
-    // same-sized logical mapping registry. Their component slot ids retain the
-    // legacy pool-addressing semantics.
-    if (!injected_registry) {
-        return true;
-    }
-    for (Component& component : copy_components) {
-        DeviceKVCacheGroupPtr device_group;
-        size_t                matching_mapping_count = 0;
-        for (size_t tag_group_index = 0; tag_group_index < per_tag_mapping.size(); ++tag_group_index) {
-            const auto& mapping = per_tag_mapping[tag_group_index];
-            if (per_tag_tags[tag_group_index] == component.tag
-                && mapping.component_group_id == component.component_group_id
-                && mapping.local_pool_index == component.device_pool_index) {
-                ++matching_mapping_count;
-                if (matching_mapping_count > 1) {
-                    RTP_LLM_LOG_ERROR("BlockTreeCache::init: component %d maps to multiple device groups",
-                                      component.component_id);
-                    return false;
-                }
-                device_group = per_tag_device_groups[tag_group_index];
-            }
-        }
-        if (matching_mapping_count == 0) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache::init: component %d has no injected device group mapping",
-                              component.component_id);
-            return false;
-        }
-        if (device_group == nullptr) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache::init: component %d maps to a null injected device group",
-                              component.component_id);
-            return false;
-        }
-        const auto group_layers = device_group->allLayerCacheBase();
-        if (group_layers.size() != component.memory_block_layer_tag_slots.size()) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache::init: component %d has %zu logical layer slots but device group %d "
-                              "has %zu layers",
-                              component.component_id,
-                              component.memory_block_layer_tag_slots.size(),
-                              device_group->group_id(),
-                              group_layers.size());
-            return false;
-        }
-        for (size_t slot_index = 0; slot_index < component.memory_block_layer_tag_slots.size(); ++slot_index) {
-            const int global_layer_id = component.memory_block_layer_tag_slots[slot_index].layer_id;
-            if (group_layers.find(global_layer_id) == group_layers.end()) {
-                RTP_LLM_LOG_ERROR("BlockTreeCache::init: component %d global layer %d is absent from device group %d",
-                                  component.component_id,
-                                  global_layer_id,
-                                  device_group->group_id());
-                return false;
-            }
-            // DeviceBlockPool uses a pool-local layer namespace for each declarative group.
-            // Keep the stored component descriptor logical/global, but project the CopyEngine
-            // snapshot into the direct pool's ordered local layer namespace.
-            component.memory_block_layer_tag_slots[slot_index].layer_id = static_cast<int>(slot_index);
-        }
-    }
-    return true;
-}
-
 }  // anonymous namespace
 
 BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>         tree,
@@ -205,7 +123,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>         tree,
     config_(std::move(config)),
     tree_(std::move(tree)),
     component_groups_(std::move(component_groups)),
-    components_(std::move(components)),
+    components_(std::make_shared<const std::vector<Component>>(std::move(components))),
     per_tag_tags_(std::move(per_tag_tags)),
     per_tag_device_groups_(std::move(per_tag_device_groups)),
     per_tag_mapping_(std::move(per_tag_mapping)),
@@ -220,20 +138,22 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>         tree,
         config_.enable_reverse_eviction) {}
 
 bool BlockTreeCache::init() {
+    if (initialized_) {
+        RTP_LLM_LOG_ERROR("BlockTreeCache::init: cache is already initialized");
+        return false;
+    }
+    if (!validateConfiguration()) {
+        RTP_LLM_LOG_ERROR("BlockTreeCache::init: invalid configuration");
+        return false;
+    }
     if (!initDeviceGroupTags()) {
         return false;
     }
-    std::vector<Component> copy_components;
-    if (!buildCopyEngineComponents(
-            components_, per_tag_tags_, per_tag_device_groups_, per_tag_mapping_, copy_components)) {
-        return false;
-    }
-    if (!evictor_.init(
-            components_, config_.device_eviction_policy, config_.host_eviction_policy, config_.disk_eviction_policy)) {
+    if (!evictor_.init(config_.device_eviction_policy, config_.host_eviction_policy, config_.disk_eviction_policy)) {
         RTP_LLM_LOG_ERROR("BlockTreeCache::init: failed to initialize BlockTreeEvictor");
         return false;
     }
-    copy_engine_ = std::make_shared<CopyEngine>(component_groups_, copy_components);
+    copy_engine_ = std::make_shared<CopyEngine>(component_groups_, components_);
 
     thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(
         static_cast<size_t>(config_.eviction_thread_pool_size), 1000, nullptr, "BlockTreeEvictionPool");
@@ -247,7 +167,7 @@ bool BlockTreeCache::init() {
                      "pool_threads=%d, storage_backend=%s, "
                      "device=%s, host=%s, disk=%s, remote=%s",
                      component_groups_.size(),
-                     components_.size(),
+                     components_->size(),
                      config_.eviction_thread_pool_size,
                      storage_backend_ ? "enabled" : "null",
                      config_.enable_device_cache ? "on" : "off",
@@ -327,6 +247,121 @@ bool BlockTreeCache::initDeviceGroupTags() {
         if (device_group_tags != component_groups_[group_id]->tags()) {
             RTP_LLM_LOG_ERROR("BlockTreeCache::initDeviceGroupTags: component group tag mapping mismatch, group=%zu",
                               group_id);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool BlockTreeCache::validateConfiguration() const {
+    if (tree_ == nullptr || components_ == nullptr) {
+        RTP_LLM_LOG_ERROR("BlockTreeCache: tree and component registry must be initialized");
+        return false;
+    }
+    if (component_groups_.empty() && !components_->empty()) {
+        RTP_LLM_LOG_ERROR("BlockTreeCache: empty component groups require an empty component registry");
+        return false;
+    }
+    if (config_.enable_disk_cache && !config_.enable_memory_cache) {
+        RTP_LLM_LOG_ERROR("BlockTreeCache: disk cache requires memory cache");
+        return false;
+    }
+    if (config_.enable_load_back && !config_.enable_memory_cache) {
+        RTP_LLM_LOG_ERROR("BlockTreeCache: load back requires memory cache");
+        return false;
+    }
+
+    for (size_t group_index = 0; group_index < component_groups_.size(); ++group_index) {
+        const ComponentGroupPtr& group = component_groups_[group_index];
+        if (group == nullptr || group->component_group_id != static_cast<int>(group_index)) {
+            RTP_LLM_LOG_ERROR("BlockTreeCache: component group must be non-null and indexed by id, index=%zu",
+                              group_index);
+            return false;
+        }
+        if (!group->hasLayout()) {
+            RTP_LLM_LOG_ERROR("BlockTreeCache: component group %zu has no finalized layout", group_index);
+            return false;
+        }
+
+        const auto& membership = group->componentIndices();
+        const auto& layout     = group->layout();
+        if (membership.empty() || membership.size() != layout.componentCount()
+            || membership.size() != group->devicePoolCount()) {
+            RTP_LLM_LOG_ERROR("BlockTreeCache: group %zu membership/layout/pool counts differ: %zu/%zu/%zu",
+                              group_index,
+                              membership.size(),
+                              layout.componentCount(),
+                              group->devicePoolCount());
+            return false;
+        }
+
+        std::unordered_set<std::string> tags;
+        size_t                          slice_index     = 0;
+        size_t                          expected_offset = 0;
+        for (size_t component_position = 0; component_position < membership.size(); ++component_position) {
+            const int component_index = membership[component_position];
+            if (component_index < 0 || static_cast<size_t>(component_index) >= components_->size()) {
+                RTP_LLM_LOG_ERROR(
+                    "BlockTreeCache: group %zu has invalid component index %d", group_index, component_index);
+                return false;
+            }
+            const Component& component = (*components_)[static_cast<size_t>(component_index)];
+            if (component.component_id != component_index
+                || component.component_group_id != static_cast<int>(group_index) || component.tag.empty()
+                || !tags.insert(component.tag).second || component.layerCount() == 0
+                || component.model_layer_ids.size() != component.layerCount()) {
+                RTP_LLM_LOG_ERROR("BlockTreeCache: invalid component binding index=%d group=%zu pool_position=%zu",
+                                  component_index,
+                                  group_index,
+                                  component_position);
+                return false;
+            }
+            for (size_t layer_index = 0; layer_index < component.layerCount(); ++layer_index) {
+                if (slice_index >= layout.slices().size()) {
+                    RTP_LLM_LOG_ERROR("BlockTreeCache: group %zu layout has too few slices", group_index);
+                    return false;
+                }
+                const auto&  slice = layout.slices()[slice_index++];
+                const size_t bytes = component.layerBytes(layer_index);
+                if (bytes == 0 || bytes > std::numeric_limits<size_t>::max() - expected_offset
+                    || slice.component_idx != component_position || slice.layer_idx != layer_index
+                    || slice.offset_bytes != expected_offset) {
+                    RTP_LLM_LOG_ERROR("BlockTreeCache: group %zu layout drift at component=%zu layer=%zu",
+                                      group_index,
+                                      component_position,
+                                      layer_index);
+                    return false;
+                }
+                expected_offset += bytes;
+            }
+        }
+        if (slice_index != layout.slices().size() || expected_offset != layout.payloadBytes()) {
+            RTP_LLM_LOG_ERROR("BlockTreeCache: group %zu layout slice count or payload drift", group_index);
+            return false;
+        }
+
+        const auto host_pool = group->hostPool();
+        const auto disk_pool = group->diskPool();
+        if (config_.enable_memory_cache && host_pool == nullptr) {
+            RTP_LLM_LOG_ERROR("BlockTreeCache: memory cache group %zu has no host pool", group_index);
+            return false;
+        }
+        if (config_.enable_disk_cache && disk_pool == nullptr) {
+            RTP_LLM_LOG_ERROR("BlockTreeCache: disk cache group %zu has no disk pool", group_index);
+            return false;
+        }
+        if (host_pool != nullptr && host_pool->payloadBytes() != layout.payloadBytes()) {
+            RTP_LLM_LOG_ERROR("BlockTreeCache: group %zu host/layout payload mismatch: %zu/%zu",
+                              group_index,
+                              host_pool->payloadBytes(),
+                              layout.payloadBytes());
+            return false;
+        }
+        if (disk_pool != nullptr && disk_pool->payloadBytes() != layout.payloadBytes()) {
+            RTP_LLM_LOG_ERROR("BlockTreeCache: group %zu disk/layout payload mismatch: %zu/%zu",
+                              group_index,
+                              disk_pool->payloadBytes(),
+                              layout.payloadBytes());
             return false;
         }
     }

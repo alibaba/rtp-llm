@@ -141,7 +141,7 @@ GroupSlot makeSlot(Tier tier, BlockIdxType block) {
 }
 
 bool initEvictor(BlockTreeEvictor& evictor) {
-    return evictor.init({}, EvictionPolicy::LRU, EvictionPolicy::LRU, EvictionPolicy::FIFO);
+    return evictor.init(EvictionPolicy::LRU, EvictionPolicy::LRU, EvictionPolicy::FIFO);
 }
 
 class BlockTreeEvictorTestPeer {
@@ -1228,7 +1228,7 @@ TEST(BlockTreeEvictorPolicyTest, MatchDoesNotChangeFifoAdmissionOrder) {
     group->setDevicePools({device_pool}, {"tag_0"});
     std::vector<ComponentGroupPtr> groups = {group};
     BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
-    ASSERT_TRUE(evictor.init({}, EvictionPolicy::FIFO, EvictionPolicy::LRU, EvictionPolicy::FIFO));
+    ASSERT_TRUE(evictor.init(EvictionPolicy::FIFO, EvictionPolicy::LRU, EvictionPolicy::FIFO));
 
     GroupBlockSet device_set = group->allocateBlocks(Tier::DEVICE, 2);
     ASSERT_EQ(device_set.per_node.size(), 2u);
@@ -1258,7 +1258,7 @@ TEST(BlockTreeEvictorPolicyTest, MatchUpdatesLfuHitCountAndOrder) {
     group->setDevicePools({device_pool}, {"tag_0"});
     std::vector<ComponentGroupPtr> groups = {group};
     BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
-    ASSERT_TRUE(evictor.init({}, EvictionPolicy::LFU, EvictionPolicy::LRU, EvictionPolicy::FIFO));
+    ASSERT_TRUE(evictor.init(EvictionPolicy::LFU, EvictionPolicy::LRU, EvictionPolicy::FIFO));
 
     GroupBlockSet device_set = group->allocateBlocks(Tier::DEVICE, 2);
     ASSERT_EQ(device_set.per_node.size(), 2u);

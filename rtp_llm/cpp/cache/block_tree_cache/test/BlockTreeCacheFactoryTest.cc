@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/SWAComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/CopyEngineTestUtils.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -746,18 +747,8 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkCountsPrimaryAnd
     ASSERT_EQ(cache->componentGroups()[0]->devicePools()[0].get(), backing.get());
     ASSERT_EQ(cache->componentGroups()[1]->devicePools()[0].get(), backing.get());
 
-    // BlockTreeCache::init gives the production CopyEngine a pool-local projection
-    // while keeping cache->components() in the logical/global layer namespace. Mirror
-    // that projection when replacing the engine so this test exercises watermark
-    // accounting instead of bypassing the shared pool's address boundary.
-    auto copy_components = cache->components();
-    for (auto& component : copy_components) {
-        for (size_t slot_index = 0; slot_index < component.memory_block_layer_tag_slots.size(); ++slot_index) {
-            component.memory_block_layer_tag_slots[slot_index].layer_id = static_cast<int>(slot_index);
-        }
-    }
     auto scripted_copy =
-        std::make_shared<block_tree_cache_test::ScriptedCopyEngine>(cache->componentGroups(), copy_components);
+        std::make_shared<block_tree_cache_test::ScriptedCopyEngine>(cache->componentGroups(), cache->components());
     block_tree_cache_test::BlockTreeCacheTestPeer::setCopyEngineForTest(*cache, scripted_copy);
 
     std::vector<std::vector<BlockIdxType>> request_blocks;
@@ -1079,12 +1070,14 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPoolCopyLayoutUsesPerLayerPhysicalStride
     ASSERT_EQ(cache->components().size(), 2u);
     for (const auto& component : cache->components()) {
         const auto& declared = config.topology().group(component.tag);
-        ASSERT_EQ(component.memory_block_layer_tag_slots.size(), declared.layer_ids.size());
-        for (const auto& slot : component.memory_block_layer_tag_slots) {
-            ASSERT_GE(slot.layer_id, 0);
-            ASSERT_LT(static_cast<size_t>(slot.layer_id), config.layer_to_block_stride_bytes.size());
-            EXPECT_EQ(slot.stride_bytes,
-                      static_cast<size_t>(config.layer_to_block_stride_bytes[static_cast<size_t>(slot.layer_id)]));
+        ASSERT_EQ(component.model_layer_ids, declared.layer_ids);
+        ASSERT_EQ(component.layer_bytes.size(), declared.layer_ids.size());
+        for (size_t layer_index = 0; layer_index < component.model_layer_ids.size(); ++layer_index) {
+            const int model_layer_id = component.model_layer_ids[layer_index];
+            ASSERT_GE(model_layer_id, 0);
+            ASSERT_LT(static_cast<size_t>(model_layer_id), config.layer_to_block_stride_bytes.size());
+            EXPECT_EQ(component.layer_bytes[layer_index],
+                      static_cast<size_t>(config.layer_to_block_stride_bytes[static_cast<size_t>(model_layer_id)]));
         }
     }
 
@@ -1120,9 +1113,9 @@ TEST_F(BlockTreeCacheFactoryTest, LegacySingleGroupAllowsMissingPhysicalStrideTa
     ASSERT_EQ(cache->components().size(), 1u);
     const size_t fallback_stride =
         config.topology().groupById(0).kv_block_stride_bytes + config.topology().groupById(0).kv_scale_stride_bytes;
-    ASSERT_FALSE(cache->components()[0].memory_block_layer_tag_slots.empty());
-    for (const auto& slot : cache->components()[0].memory_block_layer_tag_slots) {
-        EXPECT_EQ(slot.stride_bytes, fallback_stride);
+    ASSERT_FALSE(cache->components()[0].layer_bytes.empty());
+    for (const size_t layer_bytes : cache->components()[0].layer_bytes) {
+        EXPECT_EQ(layer_bytes, fallback_stride);
     }
 }
 
@@ -1134,6 +1127,108 @@ TEST_F(BlockTreeCacheFactoryTest, RejectsDiskCacheWithoutMemoryCacheBeforePublic
     kv_cache_config.enable_memory_cache_disk = true;
 
     expectFactoryRejects(config, allocator, kv_cache_config);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
+    if (!block_tree_cache_test::cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    CacheConfig cache_config;
+    cache_config.dtype                       = TYPE_FP16;
+    cache_config.layer_num                   = 3;
+    cache_config.layer_all_num               = 3;
+    cache_config.block_num                   = 8;
+    cache_config.seq_size_per_block          = 1;
+    cache_config.kernel_seq_size_per_block   = 1;
+    cache_config.use_independent_block_pools = true;
+
+    std::vector<KVCacheSpecPtr> specs;
+    const std::vector<std::string> group_tags = {"full_kv", "full_aux", "swa_kv"};
+    for (const auto& tag : group_tags) {
+        specs.push_back(test::makeResolvedMhaSpec(
+            DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/1, tag));
+    }
+    cache_config.fromGroupedSpecs(specs,
+                                  {{0}, {1}, {2}},
+                                  {CacheGroupType::FULL, CacheGroupType::FULL, CacheGroupType::SWA},
+                                  group_tags);
+    auto policies                   = cache_config.groupPoliciesSnapshot();
+    policies[2].enable_prefix_reuse = true;
+    policies[2].sliding_window_size = 2;
+    cache_config.setGroupPolicies(policies);
+
+    const size_t stride = specs.front()->block_size_bytes();
+    cache_config.setGroupBlockLayout({8, 8, 8}, {stride, stride, stride}, {0, 0, 0});
+    cache_config.kv_block_stride_bytes = stride;
+    cache_config.kv_block_size_bytes   = stride;
+    cache_config.block_size_bytes      = stride;
+    cache_config.layer_to_block_stride_bytes = {
+        static_cast<int>(stride), static_cast<int>(stride), static_cast<int>(stride)};
+
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(cache_config);
+    ASSERT_TRUE(allocator->init());
+    ASSERT_EQ(allocator->groupBlockPools().size(), 3u);
+
+    copy_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_full_swa");
+    KVCacheConfig                  kv_cache_config;
+    kv_cache_config.enable_device_cache           = true;
+    kv_cache_config.enable_memory_cache           = true;
+    kv_cache_config.enable_tiered_memory_cache    = true;
+    kv_cache_config.memory_cache_size_mb          = 1;
+    kv_cache_config.enable_memory_cache_disk      = true;
+    kv_cache_config.memory_cache_disk_size_mb     = 1;
+    kv_cache_config.memory_cache_disk_paths       = disk_dir.path;
+    kv_cache_config.memory_cache_disk_buffered_io = true;
+
+    BlockTreeCachePtr factory_cache =
+        createBlockTreeCache(cache_config, kv_cache_config, allocator, ParallelismConfig{});
+    ASSERT_NE(factory_cache, nullptr);
+    ASSERT_TRUE(factory_cache->isInitialized());
+    ASSERT_EQ(factory_cache->componentGroups().size(), 2u);
+    ASSERT_EQ(factory_cache->components().size(), 3u);
+    ASSERT_EQ(factory_cache->per_tag_mapping_.size(), 3u);
+    EXPECT_EQ(factory_cache->per_tag_mapping_[0].component_group_id, 0);
+    EXPECT_EQ(factory_cache->per_tag_mapping_[0].local_pool_index, 0);
+    EXPECT_EQ(factory_cache->per_tag_mapping_[1].component_group_id, 0);
+    EXPECT_EQ(factory_cache->per_tag_mapping_[1].local_pool_index, 1);
+    EXPECT_EQ(factory_cache->per_tag_mapping_[2].component_group_id, 1);
+    EXPECT_EQ(factory_cache->per_tag_mapping_[2].local_pool_index, 0);
+
+    auto swa_group = std::dynamic_pointer_cast<SWAComponentGroup>(factory_cache->componentGroups()[1]);
+    ASSERT_NE(swa_group, nullptr);
+    EXPECT_EQ(swa_group->slidingWindowSize(), 2u);
+    EXPECT_EQ(swa_group->seqSizePerBlock(), 1u);
+
+    for (const ComponentGroupPtr& group : factory_cache->componentGroups()) {
+        ASSERT_NE(group, nullptr);
+        ASSERT_NE(group->hostPool(), nullptr);
+        ASSERT_NE(group->diskPool(), nullptr);
+        ASSERT_EQ(group->componentIndices().size(), group->devicePoolCount());
+        ASSERT_TRUE(group->hasLayout());
+        EXPECT_EQ(group->layout().componentCount(), group->devicePoolCount());
+        EXPECT_EQ(group->hostPool()->payloadBytes(), group->layout().payloadBytes());
+        EXPECT_EQ(group->diskPool()->payloadBytes(), group->layout().payloadBytes());
+
+        GroupBlockSet device_blocks = group->allocateBlocks(Tier::DEVICE, 1);
+        ASSERT_EQ(device_blocks.per_node.size(), 1u);
+        ASSERT_EQ(device_blocks.per_node[0].size(), group->devicePoolCount());
+        const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST);
+        const BlockIdxType disk_block = group->allocateSingleBlock(Tier::DISK);
+        ASSERT_NE(host_block, NULL_BLOCK_IDX);
+        ASSERT_NE(disk_block, NULL_BLOCK_IDX);
+
+        EXPECT_EQ(factory_cache->executeTransfer(TransferDescriptor::deviceToHost(
+                      group->component_group_id, device_blocks.per_node[0], host_block)),
+                  CopyStatus::OK);
+        EXPECT_EQ(factory_cache->executeTransfer(
+                      TransferDescriptor::hostToDisk(group->component_group_id, host_block, disk_block)),
+                  CopyStatus::OK);
+
+        group->unreferenceBlocks(device_blocks);
+        group->releaseSingleBlock(Tier::HOST, host_block);
+        group->releaseSingleBlock(Tier::DISK, disk_block);
+    }
 }
 
 }  // namespace rtp_llm

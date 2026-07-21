@@ -35,15 +35,6 @@ inline const char* tierName(Tier tier) {
     return "UNKNOWN";
 }
 
-// Memory block layout descriptor for Host/Disk layers.
-// Describes the position and size of a (layer, group) slot within a packed memory block.
-// Mirrors the semantics of KVCacheMemoryConnector::layerTagSlots().
-struct MemoryBlockLayerTagSlot {
-    int         layer_id{-1};
-    std::string tag;              // group tag, e.g. "csa_kv", "hca_kv", "swa_kv"
-    size_t      stride_bytes{0};  // bytes this slot occupies in the memory block
-};
-
 // Sorting metadata for a candidate node. A single copy per GroupSlot follows the
 // data to its current serving tier (steady-state single-tier-service invariant).
 struct CandidateMeta {

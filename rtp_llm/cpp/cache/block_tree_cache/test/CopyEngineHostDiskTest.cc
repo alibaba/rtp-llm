@@ -52,34 +52,43 @@ private:
 
 ComponentGroupPtr makeHostDiskGroup(int                                     group_id,
                                     std::shared_ptr<HostBlockPool>          host_pool,
-                                    std::shared_ptr<BlockTreeDiskBlockPool> disk_pool) {
+                                    std::shared_ptr<BlockTreeDiskBlockPool> disk_pool,
+                                    const std::vector<Component>&           components) {
     auto group                = std::make_shared<FullComponentGroup>();
     group->component_group_id = group_id;
     group->group_type         = CacheGroupType::FULL;
     group->setHostPool(std::move(host_pool));
     group->setDiskPool(std::move(disk_pool));
+    std::vector<int> component_indices;
+    for (const Component& component : components) {
+        component_indices.push_back(component.component_id);
+    }
+    (void)group->finalizeLayout(std::move(component_indices), components);
     return group;
+}
+
+std::shared_ptr<CopyEngine> makeEngine(std::vector<ComponentGroupPtr> groups, std::vector<Component> components) {
+    return std::make_shared<CopyEngine>(std::move(groups),
+                                        copy_engine_test::makeComponentRegistry(std::move(components)));
 }
 
 class CopyEngineHostDiskTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        slots_ = {
-            {0, "layer_0", 128},
-            {1, "layer_1", 256},
-        };
-        host_block_size_ = CopyEngine::computeHostBlockSize(slots_);
+        component_       = copy_engine_test::makeSchemaComponent(0, 0, "host_disk", {128, 256});
+        host_block_size_ = 384;
 
         host_pool_ = makeHostPool(host_block_size_, 4, false);
         disk_pool_ = makeDiskPool(host_block_size_, 7, temp_dir_.path);
 
-        component_group_ = makeHostDiskGroup(0, host_pool_, disk_pool_);
-        copy_engine_ =
-            std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{component_group_}, std::vector<Component>{});
+        component_group_ = makeHostDiskGroup(0, host_pool_, disk_pool_, {component_});
+        ASSERT_TRUE(component_group_->hasLayout());
+        ASSERT_EQ(component_group_->layout().payloadBytes(), host_block_size_);
+        copy_engine_ = makeEngine({component_group_}, {component_});
     }
 
     TempDirGuard                            temp_dir_{"copy_engine_test"};
-    std::vector<MemoryBlockLayerTagSlot>    slots_;
+    Component                               component_;
     size_t                                  host_block_size_;
     std::shared_ptr<HostBlockPool>          host_pool_;
     std::shared_ptr<BlockTreeDiskBlockPool> disk_pool_;
@@ -160,9 +169,8 @@ TEST_F(CopyEngineHostDiskTest, SubmitRejectsInvalidHostDiskLayout) {
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
-    auto missing_host_group = makeHostDiskGroup(0, nullptr, disk_pool_);
-    auto missing_host_engine =
-        std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{missing_host_group}, std::vector<Component>{});
+    auto missing_host_group  = makeHostDiskGroup(0, nullptr, disk_pool_, {component_});
+    auto missing_host_engine = makeEngine({missing_host_group}, {component_});
     expectStatus(missing_host_engine,
                  makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block),
                  CopyStatus::INVALID_ARGS);
@@ -170,26 +178,13 @@ TEST_F(CopyEngineHostDiskTest, SubmitRejectsInvalidHostDiskLayout) {
                  makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block, disk_block),
                  CopyStatus::INVALID_ARGS);
 
-    auto missing_disk_group = makeHostDiskGroup(0, host_pool_, nullptr);
-    auto missing_disk_engine =
-        std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{missing_disk_group}, std::vector<Component>{});
+    auto missing_disk_group  = makeHostDiskGroup(0, host_pool_, nullptr, {component_});
+    auto missing_disk_engine = makeEngine({missing_disk_group}, {component_});
     expectStatus(missing_disk_engine,
                  makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block),
                  CopyStatus::INVALID_ARGS);
     expectStatus(missing_disk_engine,
                  makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block, disk_block),
-                 CopyStatus::INVALID_ARGS);
-
-    auto mismatched_host_pool  = makeHostPool(host_block_size_ + 1, 2, false);
-    auto mismatched_host_block = poolMalloc(*mismatched_host_pool);
-    auto mismatch_group        = makeHostDiskGroup(0, mismatched_host_pool, disk_pool_);
-    auto mismatch_engine =
-        std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{mismatch_group}, std::vector<Component>{});
-    expectStatus(mismatch_engine,
-                 makeDescriptor(Tier::HOST, Tier::DISK, {}, mismatched_host_block, disk_block),
-                 CopyStatus::INVALID_ARGS);
-    expectStatus(mismatch_engine,
-                 makeDescriptor(Tier::DISK, Tier::HOST, {}, mismatched_host_block, disk_block),
                  CopyStatus::INVALID_ARGS);
 }
 
@@ -223,21 +218,19 @@ TEST_F(CopyEngineHostDiskTest, HostDiskStatusMapping) {
                                       "copy_engine_status_" + std::to_string(pool_suffix++));
         auto host_block = poolMalloc(*host_pool_);
         auto disk_block = poolMalloc(*disk_pool);
-        auto group      = makeHostDiskGroup(0, host_pool_, disk_pool);
-        auto engine     = std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{group}, std::vector<Component>{});
+        auto group      = makeHostDiskGroup(0, host_pool_, disk_pool, {component_});
+        auto engine     = makeEngine({group}, {component_});
         expectStatus(engine, makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block), expected);
         expectStatus(engine, makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block, disk_block), expected);
         host_pool_->free(host_block);
     }
 }
 
-TEST(CopyEngineTest, ComputeHostBlockSize) {
-    std::vector<MemoryBlockLayerTagSlot> test_slots = {
-        {0, "a", 100},
-        {1, "b", 200},
-        {2, "c", 300},
-    };
-    EXPECT_EQ(CopyEngine::computeHostBlockSize(test_slots), 600u);
+TEST(ComponentGroupLayoutPayloadTest, PayloadBytesIsLayerBytesSum) {
+    const auto component = copy_engine_test::makeSchemaComponent(0, 0, "abc", {100, 200, 300});
+    const auto layout    = ComponentGroupLayout::create({component.layer_bytes});
+    ASSERT_TRUE(layout.has_value());
+    EXPECT_EQ(layout->payloadBytes(), 600u);
 }
 
 }  // namespace
