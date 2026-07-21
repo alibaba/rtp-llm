@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -83,6 +84,7 @@ struct EvictionMove {
     Tier                      target_tier{Tier::NONE};
     std::vector<BlockIdxType> source_blocks;
     std::vector<BlockIdxType> target_blocks;
+    int64_t                   source_tier_enter_time_us{0};
 };
 
 class ComponentGroupLayout {
@@ -235,12 +237,12 @@ public:
         return disk_pool_ ? disk_pool_->totalBlocksNum() : 0;
     }
 
-    GroupBlockSet allocateBlocks(Tier tier, size_t count);
-    void          referenceBlocks(const GroupBlockSet& set) const;
-    void          unreferenceBlocks(const GroupBlockSet& set) const;
+    GroupBlockSet allocateBlocks(Tier tier, size_t count, BlockRefType ref_type);
+    void          referenceBlocks(const GroupBlockSet& set, BlockRefType ref_type) const;
+    void          unreferenceBlocks(const GroupBlockSet& set, BlockRefType ref_type) const;
 
-    BlockIdxType allocateSingleBlock(Tier tier);
-    void         releaseSingleBlock(Tier tier, BlockIdxType block) const;
+    BlockIdxType allocateSingleBlock(Tier tier, BlockRefType ref_type);
+    void         releaseSingleBlock(Tier tier, BlockIdxType block, BlockRefType ref_type) const;
 
     std::vector<BlockIdxType> getBlocks(const GroupSlot& slot, Tier tier) const;
     void                      setBlocks(GroupSlot& slot, Tier tier, const std::vector<BlockIdxType>& blocks);

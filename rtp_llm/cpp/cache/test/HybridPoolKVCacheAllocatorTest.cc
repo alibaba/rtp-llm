@@ -475,8 +475,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IndependentPoolsUseOneBalancedReferenceCo
     auto         g1_blocks         = pool1->malloc(3).value();
     ASSERT_EQ(g0_blocks.size(), 2u);
     ASSERT_EQ(g1_blocks.size(), 3u);
-    pool0->incRef(g0_blocks);
-    pool1->incRef(g1_blocks);
+    pool0->incRef(g0_blocks, BlockRefType::REQUEST);
+    pool1->incRef(g1_blocks, BlockRefType::REQUEST);
 
     EXPECT_EQ(allocator->freeBlocksNum(), free_total_before - 5u);
     for (const auto block : g0_blocks) {
@@ -487,17 +487,17 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IndependentPoolsUseOneBalancedReferenceCo
     }
 
     // A second holder on the same numeric block id remains pool-local.
-    pool0->incRef(g0_blocks[0]);
-    pool1->incRef(g1_blocks[0]);
+    pool0->incRef(g0_blocks[0], BlockRefType::REQUEST);
+    pool1->incRef(g1_blocks[0], BlockRefType::REQUEST);
     EXPECT_EQ(pool0->refCount(g0_blocks[0]), 2u);
     EXPECT_EQ(pool1->refCount(g1_blocks[0]), 2u);
 
-    pool0->decRef(g0_blocks);
-    pool1->decRef(g1_blocks);
+    pool0->decRef(g0_blocks, BlockRefType::REQUEST);
+    pool1->decRef(g1_blocks, BlockRefType::REQUEST);
     EXPECT_EQ(allocator->freeBlocksNum(), free_total_before - 2u);
 
-    pool0->decRef(g0_blocks[0]);
-    pool1->decRef(g1_blocks[0]);
+    pool0->decRef(g0_blocks[0], BlockRefType::REQUEST);
+    pool1->decRef(g1_blocks[0], BlockRefType::REQUEST);
     EXPECT_EQ(allocator->freeBlocksNum(), free_total_before);
 }
 
@@ -854,7 +854,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackRestoresLinearBackfille
     auto& linear_ids       = batch_res->mutableBlockIds(0, /*gid=*/0);
     auto  removed_block_id = linear_ids.blocks()[1];
     ASSERT_FALSE(isNullBlockIdx(removed_block_id));
-    allocator->groupBlockPools()[0]->decRef(removed_block_id);
+    allocator->groupBlockPools()[0]->decRef(removed_block_id, BlockRefType::REQUEST);
     linear_ids.setAt(1, NULL_BLOCK_IDX);
     const auto counters_before = snapshotPoolCounters(allocator);
 

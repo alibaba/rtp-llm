@@ -153,7 +153,7 @@ TEST_F(DeviceLinearKVCacheGroupTest, MallocBackfillsExistingNullReadSlot) {
     ASSERT_EQ(allocated.size(), 2u);
     // New pool malloc reserves capacity at refCount 0; take a request ref so these
     // pre-existing request blocks are held while the group backfills the read slot.
-    block_pool->incRef(allocated);
+    block_pool->incRef(allocated, BlockRefType::REQUEST);
 
     BlockIds blocks;
     blocks.assign(BlockIndicesType{allocated[0], NULL_BLOCK_IDX, allocated[1]});
@@ -241,7 +241,7 @@ TEST_F(DeviceLinearKVCacheGroupTest, RemoveSkippedBlocksFreesNonStepBlocksButKee
     ASSERT_EQ(allocated.size(), 6u);
     // Hold a request ref on each block; removeSkippedBlocks() releases pruned blocks via
     // decRef(), which requires refCount > 0 (new pool malloc leaves them at 0).
-    block_pool->incRef(allocated);
+    block_pool->incRef(allocated, BlockRefType::REQUEST);
     BlockIds blocks;
     blocks.assign(allocated);
 
@@ -289,7 +289,7 @@ TEST_F(DeviceLinearKVCacheGroupTest, MallocFailsWhenBlockPoolExhausted) {
     // Exhaust all free blocks (block 0 is reserved).
     auto all_blocks = block_pool->malloc(block_pool->freeBlocksNum()).value();
     // Hold a request ref so the cleanup decRef() below has a holder to drop.
-    block_pool->incRef(all_blocks);
+    block_pool->incRef(all_blocks, BlockRefType::REQUEST);
     ASSERT_EQ(block_pool->freeBlocksNum(), 0u);
 
     auto                     spec = makeLinearSpec(/*seq_size_per_block=*/4);
@@ -300,7 +300,7 @@ TEST_F(DeviceLinearKVCacheGroupTest, MallocFailsWhenBlockPoolExhausted) {
     EXPECT_FALSE(group.malloc(blocks, /*seq_len=*/4, /*enable_reuse_cache=*/false));
 
     // Cleanup to avoid leaking refs in the test process.
-    block_pool->decRef(all_blocks);
+    block_pool->decRef(all_blocks, BlockRefType::REQUEST);
 }
 
 TEST_F(DeviceLinearKVCacheGroupTest, RemoveSkippedBlocksWithReserveStepKeepsLastTwoAndReserveTail) {
@@ -316,7 +316,7 @@ TEST_F(DeviceLinearKVCacheGroupTest, RemoveSkippedBlocksWithReserveStepKeepsLast
     ASSERT_EQ(allocated.size(), 6u);
     // Hold a request ref on each block; removeSkippedBlocks() releases pruned blocks via
     // decRef(), which requires refCount > 0 (new pool malloc leaves them at 0).
-    block_pool->incRef(allocated);
+    block_pool->incRef(allocated, BlockRefType::REQUEST);
     BlockIds blocks;
     blocks.assign(allocated);  // no NULLs
 
@@ -363,7 +363,7 @@ TEST_F(DeviceLinearKVCacheGroupTest, ReferenceAppendsAndIncrementsRefCountForVal
     auto blocks = block_pool->malloc(1).value();
     ASSERT_EQ(blocks.size(), 1u);
     // New pool malloc reserves capacity at refCount 0; take the request ref (refCount 1).
-    block_pool->incRef(blocks);
+    block_pool->incRef(blocks, BlockRefType::REQUEST);
     ASSERT_EQ(block_pool->freeBlocksNum(), 8u);
 
     BlockIds         dst;
@@ -378,10 +378,10 @@ TEST_F(DeviceLinearKVCacheGroupTest, ReferenceAppendsAndIncrementsRefCountForVal
     // so it should take two decRef calls to become free again.
     const size_t free_before = block_pool->freeBlocksNum();
     ASSERT_EQ(block_pool->refCount(blocks[0]), 2u);
-    block_pool->decRef(blocks[0]);
+    block_pool->decRef(blocks[0], BlockRefType::REQUEST);
     EXPECT_EQ(block_pool->refCount(blocks[0]), 1u);
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before);  // still referenced
-    block_pool->decRef(blocks[0]);
+    block_pool->decRef(blocks[0], BlockRefType::REQUEST);
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 1);
 }
 

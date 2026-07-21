@@ -208,6 +208,10 @@ size_t BlockTreeDiskBlockPool::strideBytes() const {
     return config().stride_bytes;
 }
 
+size_t BlockTreeDiskBlockPool::blockSizeBytes() const {
+    return payloadBytes();
+}
+
 size_t BlockTreeDiskBlockPool::readBytes() const {
     return read_bytes_.load(std::memory_order_relaxed);
 }

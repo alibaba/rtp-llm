@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -43,6 +44,7 @@ public:
     size_t logicalMatchedBlocks() const {
         return logical_matched_blocks_;
     }
+    size_t logicalMatchedBlocks(Tier tier) const;
 
     // Expose immutable planning metadata without publishing PendingLoadBackItem as a cross-module DTO.
     size_t itemCount() const {
@@ -114,6 +116,7 @@ private:
     uint64_t                                ticket_id_{0};
     PendingLoadBackItems                    items_;
     const size_t                            logical_matched_blocks_{0};
+    std::array<size_t, 3>                   logical_matched_blocks_by_tier_{};
 };
 
 class LoadBackTicketRegistry: public std::enable_shared_from_this<LoadBackTicketRegistry> {

@@ -226,7 +226,7 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
             }
         }
         if (!valid.empty()) {
-            referenceBlocksInGroup(gid, valid);
+            referenceBlocksInGroup(gid, valid, BlockRefType::REQUEST);
             referenced_blocks[static_cast<size_t>(gid)] = std::move(valid);
         }
     }
@@ -388,7 +388,14 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                                                                   kv_resource->blocks(0, gid));
         }
     }
-    return {true, reuse_blocks * reuse_unit_tokens, match_cost_time_us, nullptr, load_back_ticket};
+    MallocResult result{true, reuse_blocks * reuse_unit_tokens, match_cost_time_us, nullptr, load_back_ticket};
+    if (load_back_ticket != nullptr) {
+        result.memory_reuse_len =
+            static_cast<int>(load_back_ticket->logicalMatchedBlocks(Tier::HOST)) * reuse_unit_tokens;
+        result.disk_reuse_len =
+            static_cast<int>(load_back_ticket->logicalMatchedBlocks(Tier::DISK)) * reuse_unit_tokens;
+    }
+    return result;
 }
 
 MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
@@ -467,7 +474,7 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
                 }
             }
             if (!blocks_to_free.empty()) {
-                freeBlocksInGroup(gid, blocks_to_free);
+                freeBlocksInGroup(gid, blocks_to_free, BlockRefType::REQUEST);
             }
             for (size_t pos : filled_positions) {
                 block_ids.setAt(pos, NULL_BLOCK_IDX);
@@ -658,6 +665,7 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
 
     selected_resource->cacheKeys() = std::move(selected_keys);
     selected_resource->setBlockDependencies(std::move(selected_dependencies));
+    const BlockRefType ref_type = is_connector ? BlockRefType::CONNECTOR : BlockRefType::REQUEST;
     for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
         BlockIndicesType valid;
         for (auto b : selected_blocks[static_cast<size_t>(gid)]) {
@@ -666,7 +674,7 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
             }
         }
         if (!valid.empty()) {
-            referenceBlocksInGroup(gid, valid, is_connector);
+            referenceBlocksInGroup(gid, valid, ref_type);
         }
         selected_resource->mutableBlockIds(gid).assign(std::move(selected_blocks[static_cast<size_t>(gid)]));
     }
@@ -674,6 +682,7 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
 }
 
 void HybridKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector) {
+    const BlockRefType ref_type = is_connector ? BlockRefType::CONNECTOR : BlockRefType::REQUEST;
     for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
         BlockIndicesType valid;
         for (auto b : kvcache_resource.blocks(gid)) {
@@ -682,7 +691,7 @@ void HybridKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resou
             }
         }
         if (!valid.empty()) {
-            freeBlocksInGroup(gid, valid, is_connector);
+            freeBlocksInGroup(gid, valid, ref_type);
         }
     }
 }
@@ -907,7 +916,7 @@ void HybridKVCacheAllocator::rollbackBlockIdsToSize(int gid, BlockIds& block_ids
     const auto blocks_to_free = validBlocksAfter(block_ids.blocks(), original_size);
     block_ids.resize(original_size);
     if (!blocks_to_free.empty()) {
-        freeBlocksInGroup(gid, blocks_to_free);
+        freeBlocksInGroup(gid, blocks_to_free, BlockRefType::REQUEST);
     }
 }
 
@@ -922,7 +931,7 @@ void HybridKVCacheAllocator::rollbackInitMalloc(BatchKVCacheResource&           
         }
         if (static_cast<size_t>(gid) < referenced_blocks.size()
             && !referenced_blocks[static_cast<size_t>(gid)].empty()) {
-            freeBlocksInGroup(gid, referenced_blocks[static_cast<size_t>(gid)]);
+            freeBlocksInGroup(gid, referenced_blocks[static_cast<size_t>(gid)], BlockRefType::REQUEST);
         }
         block_ids.resize(0);
     }

@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
@@ -152,6 +153,8 @@ public:
     int evictForTag(const std::string& tag, size_t num_blocks);
 
     CacheStats           getStats() const;
+    std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
+    void                                      reportMetrics() const;
     BlockTreeKeySnapshot getKeySnapshot(size_t limit) const;
     void                 waitForPendingTasks();
     void                 onBlocksReleased();
@@ -161,6 +164,10 @@ public:
     void releaseMatchedBlocks(const std::vector<GroupBlockSet>& sets);
 
     TransferStatus executeTransfer(const TransferDescriptor& descriptor);
+
+    void setMetricsReporter(const std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
+        metrics_reporter_.setMetricsReporter(metrics_reporter);
+    }
 
     // ---- Configuration mutators (for runtime adjustment) ----
     void setTierWatermark(Tier tier, double ratio, size_t capacity) {
@@ -302,6 +309,7 @@ private:
     std::shared_ptr<StorageBackend>            storage_backend_;
     std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher_;
     std::unique_ptr<BlockCacheTaskPool>      task_pool_;
+    BlockTreeCacheMetricsReporter            metrics_reporter_;
     BlockTreeEvictor                           evictor_;
     bool                                       initialized_{false};
 

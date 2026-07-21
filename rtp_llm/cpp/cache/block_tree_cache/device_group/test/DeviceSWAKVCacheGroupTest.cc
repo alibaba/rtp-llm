@@ -470,7 +470,7 @@ TEST_F(DeviceSWAKVCacheGroupTest, RemoveSkippedBlocks_WithStep_FreesNonStepBlock
     // incRef gives each a single holder so removeSkippedBlocks' decRef can free them.
     auto allocated = block_pool->malloc(6).value();
     ASSERT_EQ(allocated.size(), 6u);
-    block_pool->incRef(allocated);
+    block_pool->incRef(allocated, BlockRefType::REQUEST);
     BlockIds blocks;
     blocks.assign(allocated);
 
@@ -506,7 +506,7 @@ TEST_F(DeviceSWAKVCacheGroupTest, RemoveSkippedBlocks_HCAStateReuseEnabledKeepsT
 
     auto allocated = block_pool->malloc(6).value();
     ASSERT_EQ(allocated.size(), 6u);
-    block_pool->incRef(allocated);
+    block_pool->incRef(allocated, BlockRefType::REQUEST);
     BlockIds blocks;
     blocks.assign(allocated);
 
@@ -532,7 +532,7 @@ TEST_F(DeviceSWAKVCacheGroupTest, RemoveSkippedBlocks_WithReserveStep) {
 
     auto allocated = block_pool->malloc(6).value();
     ASSERT_EQ(allocated.size(), 6u);
-    block_pool->incRef(allocated);
+    block_pool->incRef(allocated, BlockRefType::REQUEST);
     BlockIds blocks;
     blocks.assign(allocated);
 
@@ -624,7 +624,7 @@ TEST_F(DeviceSWAKVCacheGroupTest, Malloc_FailsAtomicallyWithoutLeak) {
     // ensureFreeBlocks() cannot evict and refill the pool.
     auto pre_alloc = block_pool_->malloc(7).value();
     ASSERT_EQ(pre_alloc.size(), 7u);
-    block_pool_->incRef(pre_alloc);
+    block_pool_->incRef(pre_alloc, BlockRefType::REQUEST);
     const size_t free_before = block_pool_->freeBlocksNum();
     ASSERT_EQ(free_before, total_blocks_ - 7);
 
@@ -640,7 +640,7 @@ TEST_F(DeviceSWAKVCacheGroupTest, Malloc_FailsAtomicallyWithoutLeak) {
 
     // The pre-allocated blocks must still be releasable, proving that DeviceBlockPool ref
     // counters were not corrupted by the failed malloc path.
-    block_pool_->decRef(pre_alloc);
+    block_pool_->decRef(pre_alloc, BlockRefType::REQUEST);
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
 }
 

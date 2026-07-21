@@ -208,7 +208,7 @@ TEST(DeviceBlockPoolTest, InvalidLayerAndBlockDoNotCorruptPoolState) {
 
     auto block = pool.malloc();
     ASSERT_TRUE(block.has_value());
-    pool.incRef(*block);
+    pool.incRef(*block, BlockRefType::REQUEST);
     const size_t free_before = pool.freeBlocksNum();
     const auto   refs_before = pool.refCount(*block);
 
@@ -218,7 +218,7 @@ TEST(DeviceBlockPoolTest, InvalidLayerAndBlockDoNotCorruptPoolState) {
     EXPECT_TRUE(pool.isAllocated(*block));
     EXPECT_EQ(pool.refCount(*block), refs_before);
     EXPECT_EQ(pool.freeBlocksNum(), free_before);
-    pool.decRef(*block);
+    pool.decRef(*block, BlockRefType::REQUEST);
 }
 
 TEST(DeviceBlockPoolTest, LifecycleStartsAllocatedBlockWithZeroRefCount) {
@@ -231,8 +231,8 @@ TEST(DeviceBlockPoolTest, LifecycleStartsAllocatedBlockWithZeroRefCount) {
     EXPECT_TRUE(pool.isAllocated(*block));
     EXPECT_EQ(pool.refCount(*block), 0u);
 
-    pool.incRef(*block);
-    pool.decRef(*block);
+    pool.incRef(*block, BlockRefType::REQUEST);
+    pool.decRef(*block, BlockRefType::REQUEST);
     EXPECT_FALSE(pool.isAllocated(*block));
 }
 
@@ -246,9 +246,9 @@ TEST(DeviceBlockPoolTest, LifecycleUsesIBlockPoolSemantics) {
     EXPECT_TRUE(pool.isAllocated(*block));
     EXPECT_EQ(pool.refCount(*block), 0u);
 
-    pool.incRef(*block);
+    pool.incRef(*block, BlockRefType::REQUEST);
     EXPECT_EQ(pool.refCount(*block), 1u);
-    pool.decRef(*block);
+    pool.decRef(*block, BlockRefType::REQUEST);
     EXPECT_FALSE(pool.isAllocated(*block));
 }
 

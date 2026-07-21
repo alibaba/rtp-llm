@@ -73,16 +73,16 @@ bool HybridTypeKVCacheAllocator::doInit() {
 
 void HybridTypeKVCacheAllocator::referenceBlocksInGroup(int                     gid,
                                                         const BlockIndicesType& blocks,
-                                                        bool                    is_connector) const {
+                                                        BlockRefType            ref_type) const {
     (void)gid;
-    (void)is_connector;
-    block_pool_->incRef(blocks);
+    block_pool_->incRef(blocks, ref_type);
 }
 
-void HybridTypeKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector) {
+void HybridTypeKVCacheAllocator::freeBlocksInGroup(int gid,
+                                                   const BlockIndicesType& blocks,
+                                                   BlockRefType            ref_type) {
     (void)gid;
-    (void)is_connector;
-    block_pool_->decRef(blocks);
+    block_pool_->decRef(blocks, ref_type);
 }
 
 GroupedCacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {

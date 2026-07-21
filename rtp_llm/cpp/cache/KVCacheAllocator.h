@@ -27,10 +27,15 @@ struct KVCacheTokenCapacity {
 struct KVCachePoolMetricsSnapshot {
     size_t      pool_index                = 0;
     std::string pool_name                 = "unnamed";
+    size_t      block_size_bytes          = 0;
     size_t      free_blocks               = 0;
     size_t      active_tree_cached_blocks = 0;
     size_t      total_blocks              = 0;
     size_t      reserve_blocks            = 0;
+    size_t      request_ref_count         = 0;
+    size_t      connector_ref_count       = 0;
+    size_t      block_cache_ref_count     = 0;
+    size_t      eviction_ref_count        = 0;
     float       used_ratio                = 0.0f;
 };
 

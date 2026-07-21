@@ -410,12 +410,7 @@ private:
 class RtpLLMCacheMetricsCollector final {
 public:
     int64_t kv_cache_item_num             = 0;
-    int64_t kv_cache_free_blocks          = 0;
-    int64_t kv_cache_available_blocks     = 0;
-    int64_t kv_cache_request_ref_blocks   = 0;
-    int64_t kv_cache_connector_ref_blocks = 0;
     int64_t kv_cache_left_seq             = 0;
-    float   kv_cache_used_ratio           = 0;
     int64_t mr_cost_time_ms               = 0;
 };
 
@@ -426,26 +421,52 @@ public:
 
 public:
     kmonitor::MutableMetric* kv_cache_item_num_metric             = nullptr;
-    kmonitor::MutableMetric* kv_cache_free_blocks_metric          = nullptr;
-    kmonitor::MutableMetric* kv_cache_available_blocks_metric     = nullptr;
-    kmonitor::MutableMetric* kv_cache_request_ref_blocks_metric   = nullptr;
-    kmonitor::MutableMetric* kv_cache_connector_ref_blocks_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_left_seq_metric             = nullptr;
-    kmonitor::MutableMetric* kv_cache_used_ratio_metric           = nullptr;
     kmonitor::MutableMetric* mr_cost_time_ms_metric               = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
 };
 
+class RtpLLMCacheOperationMetricsCollector final {
+public:
+    enum class OpType : int8_t {
+        MALLOC,
+        INSERT,
+        FREE,
+    };
+
+    OpType  operation_type = OpType::MALLOC;
+    int64_t latency_us     = 0;
+};
+
+class RtpLLMCacheOperationMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheOperationMetricsCollector* collector);
+
+private:
+    kmonitor::MutableMetric* malloc_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* insert_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* free_latency_us_metric   = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+// Reported once per BlockPool so each pool's capacity and utilization are visible.
 class RtpLLMCachePoolMetricsCollector final {
 public:
+    int64_t block_size_bytes      = 0;
     int64_t free_blocks          = 0;
     int64_t available_blocks     = 0;
-    int64_t request_ref_blocks   = 0;
-    int64_t connector_ref_blocks = 0;
+    int64_t active_blocks = 0;
     int64_t total_blocks         = 0;
     int64_t reserve_blocks       = 0;
+    int64_t request_ref_count     = 0;
+    int64_t connector_ref_count   = 0;
+    int64_t block_cache_ref_count = 0;
+    int64_t eviction_ref_count    = 0;
     float   used_ratio           = 0;
 };
 
@@ -455,13 +476,44 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCachePoolMetricsCollector* collector);
 
 public:
+    kmonitor::MutableMetric* block_size_bytes_metric      = nullptr;
     kmonitor::MutableMetric* free_blocks_metric          = nullptr;
     kmonitor::MutableMetric* available_blocks_metric     = nullptr;
-    kmonitor::MutableMetric* request_ref_blocks_metric   = nullptr;
-    kmonitor::MutableMetric* connector_ref_blocks_metric = nullptr;
+    kmonitor::MutableMetric* active_blocks_metric = nullptr;
     kmonitor::MutableMetric* total_blocks_metric         = nullptr;
     kmonitor::MutableMetric* reserve_blocks_metric       = nullptr;
+    kmonitor::MutableMetric* request_ref_count_metric     = nullptr;
+    kmonitor::MutableMetric* connector_ref_count_metric   = nullptr;
+    kmonitor::MutableMetric* block_cache_ref_count_metric = nullptr;
+    kmonitor::MutableMetric* eviction_ref_count_metric    = nullptr;
     kmonitor::MutableMetric* used_ratio_metric           = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMCacheTransferMetricsCollector final {
+public:
+    std::string source_tier;
+    std::string target_tier;
+    int64_t     block_count        = 0;
+    int64_t     latency_us         = 0;
+    int64_t     in_flight          = 0;
+    bool        success            = true;
+    bool        transfer_completed = true;
+};
+
+class RtpLLMCacheTransferMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheTransferMetricsCollector* collector);
+
+private:
+    kmonitor::MutableMetric* transfer_qps_metric         = nullptr;
+    kmonitor::MutableMetric* transfer_failed_qps_metric  = nullptr;
+    kmonitor::MutableMetric* transfer_block_count_metric = nullptr;
+    kmonitor::MutableMetric* transfer_latency_us_metric  = nullptr;
+    kmonitor::MutableMetric* transfer_in_flight_metric   = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -469,7 +521,14 @@ private:
 
 class RtpLLMCacheEvictionMetricsCollector final {
 public:
+    std::string source_tier;
+    std::string target_tier;
+    std::string group_type;
+    int64_t     evictable_block_count = 0;
     int64_t lifetime_ms = 0;
+    bool        report_evictable      = false;
+    bool        report_eviction       = false;
+    bool        report_lifetime       = false;
 };
 
 class RtpLLMCacheEvictionMetrics: public kmonitor::MetricsGroup {
@@ -478,6 +537,8 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheEvictionMetricsCollector* collector);
 
 public:
+    kmonitor::MutableMetric* evictable_block_count_metric     = nullptr;
+    kmonitor::MutableMetric* eviction_qps_metric              = nullptr;
     kmonitor::MutableMetric* evicted_block_lifetime_ms_metric = nullptr;
 
 private:
@@ -488,6 +549,10 @@ class RtpLLMCacheReuseMetricsCollector final {
 public:
     int64_t kv_cache_reuse_length = 0;
     float   kv_cache_hit_rate     = 0;
+    int64_t stream_cache_device_reuse_length = 0;
+    int64_t stream_cache_memory_reuse_length = 0;
+    int64_t stream_cache_disk_reuse_length   = 0;
+    int64_t stream_cache_remote_reuse_length = 0;
 };
 
 class RtpLLMDeviceCacheReuseMetricsCollector final {
@@ -604,6 +669,10 @@ public:
 public:
     kmonitor::MutableMetric* kv_cache_reuse_length = nullptr;
     kmonitor::MutableMetric* kv_cache_hit_rate     = nullptr;
+    kmonitor::MutableMetric* stream_cache_device_reuse_length = nullptr;
+    kmonitor::MutableMetric* stream_cache_memory_reuse_length = nullptr;
+    kmonitor::MutableMetric* stream_cache_disk_reuse_length   = nullptr;
+    kmonitor::MutableMetric* stream_cache_remote_reuse_length = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -617,7 +686,6 @@ public:
 public:
     kmonitor::MutableMetric* match_cost_time_us    = nullptr;
     kmonitor::MutableMetric* device_input_length   = nullptr;
-    kmonitor::MutableMetric* device_reuse_length   = nullptr;
     kmonitor::MutableMetric* device_cache_hit_rate = nullptr;
 
 private:

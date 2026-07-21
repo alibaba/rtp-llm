@@ -80,7 +80,7 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
             || static_cast<size_t>(component_group->component_group_id) >= component_groups.size()
             || component_group->tags().size() != component_group->devicePools().size()) {
             for (const auto& [pool, blocks] : request_holds) {
-                pool->decRef(blocks);
+                pool->decRef(blocks, BlockRefType::REQUEST);
             }
             return result;
         }
@@ -90,7 +90,7 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
             const auto& device_pool = component_group->devicePools()[pool_index];
             if (!device_pool) {
                 for (const auto& [pool, blocks] : request_holds) {
-                    pool->decRef(blocks);
+                    pool->decRef(blocks, BlockRefType::REQUEST);
                 }
                 return result;
             }
@@ -101,12 +101,12 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
                     device_pool->free(*allocated);
                 }
                 for (const auto& [pool, held_blocks] : request_holds) {
-                    pool->decRef(held_blocks);
+                    pool->decRef(held_blocks, BlockRefType::REQUEST);
                 }
                 return result;
             }
             BlockIndicesType blocks = std::move(*allocated);
-            device_pool->incRef(blocks);
+            device_pool->incRef(blocks, BlockRefType::REQUEST);
 
             for (size_t path_index = 0; path_index < keys.size(); ++path_index) {
                 auto& device_blocks = slots[path_index][component_group_id].device_blocks;
@@ -120,7 +120,7 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
 
     cache->insert(nullptr, keys, slots);
     for (const auto& [pool, blocks] : request_holds) {
-        pool->decRef(blocks);
+        pool->decRef(blocks, BlockRefType::REQUEST);
     }
     cache->onBlocksReleased();
 

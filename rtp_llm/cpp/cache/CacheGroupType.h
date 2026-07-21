@@ -17,6 +17,19 @@ enum class CacheGroupType : int8_t {
     SWA    = 2,
 };
 
+inline const char* metricCacheGroupTypeName(CacheGroupType group_type) {
+    if (group_type == CacheGroupType::LINEAR) {
+        return "linear";
+    }
+    if (group_type == CacheGroupType::FULL) {
+        return "full";
+    }
+    if (group_type == CacheGroupType::SWA) {
+        return "swa";
+    }
+    return "unknown";
+}
+
 enum class CacheReusePolicy : int8_t {
     REUSABLE     = 0,
     NON_REUSABLE = 1,

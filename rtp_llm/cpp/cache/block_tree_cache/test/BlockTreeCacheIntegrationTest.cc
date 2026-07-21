@@ -308,7 +308,7 @@ TEST_F(BlockTreeCacheIntegrationTest, WatermarkDemotionCopiesHostBlockToDisk) {
     std::vector<Component> layout_components = {
         block_transfer_engine_test::makeSchemaComponent(0, 0, "watermark_kv", {256})};
     ASSERT_TRUE(full->finalizeLayout({0}, layout_components));
-    auto host_block = full->allocateSingleBlock(Tier::HOST);
+    const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     std::vector<ComponentGroupPtr> groups = {full};
 
@@ -500,7 +500,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadBackSett
             std::vector<ComponentGroupPtr>{full}, components, copy_result);
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, pausable_per_rank_transfer_engine);
 
-        const BlockIdxType source_block = full->allocateSingleBlock(Tier::DISK);
+        const BlockIdxType source_block = full->allocateSingleBlock(Tier::DISK, BlockRefType::BLOCK_CACHE);
         ASSERT_NE(source_block, NULL_BLOCK_IDX);
         std::vector<std::vector<GroupSlot>> source_slots(1, std::vector<GroupSlot>(1));
         source_slots[0][0].disk_slot = source_block;
@@ -515,7 +515,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadBackSett
 
         const BlockIdList request_targets = device_pool->malloc(1).value();
         ASSERT_EQ(request_targets.size(), 1u);
-        device_pool->incRef(request_targets);
+        device_pool->incRef(request_targets, BlockRefType::REQUEST);
         const BlockIdxType target_block = request_targets.front();
         EXPECT_EQ(device_pool->refCount(target_block), 1u);
         result.load_back_ticket->items()[0].target_device_blocks = {target_block};
@@ -586,7 +586,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadBackSett
         EXPECT_TRUE(device_pool->isAllocated(target_block));
         EXPECT_EQ(device_pool->refCount(target_block), 1u);
 
-        device_pool->decRef(request_targets);
+        device_pool->decRef(request_targets, BlockRefType::REQUEST);
         EXPECT_FALSE(device_pool->isAllocated(target_block));
         EXPECT_EQ(device_pool->freeBlocksNum(), device_free_before);
     }
@@ -702,6 +702,7 @@ TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsTicketWitho
     ASSERT_NE(result.load_back_ticket, nullptr);
     EXPECT_FALSE(result.load_back_ticket->empty());
     EXPECT_EQ(result.load_back_ticket->logicalMatchedBlocks(), kPathLength);
+    EXPECT_EQ(result.load_back_ticket->logicalMatchedBlocks(GetParam()), kPathLength);
     EXPECT_EQ(result.load_back_blocks, 6u);
     EXPECT_EQ(result.host_load_back_blocks, GetParam() == Tier::HOST ? 6u : 0u);
     EXPECT_EQ(result.disk_load_back_blocks, GetParam() == Tier::DISK ? 6u : 0u);
@@ -723,7 +724,7 @@ TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsTicketWitho
             ASSERT_NE(pool, nullptr);
             BlockIdList targets = pool->malloc(1).value();
             ASSERT_EQ(targets.size(), 1u);
-            pool->incRef(targets);
+            pool->incRef(targets, BlockRefType::REQUEST);
             const BlockIdxType target = targets.front();
             EXPECT_EQ(pool->refCount(target), 1u);
             item.target_device_blocks.push_back(target);
@@ -762,11 +763,33 @@ TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsTicketWitho
     environment->reclaimAll();
     environment->cache->waitForPendingTasks();
     for (const auto& [pool, block] : request_targets) {
-        pool->decRef(block);
+        pool->decRef(block, BlockRefType::REQUEST);
     }
     environment->cache->onBlocksReleased();
     environment->reclaimAll();
     environment->expectFullyReclaimed();
+}
+
+TEST(LoadBackTicketMetricsTest, DeduplicatesPathAndPrefersLowerTier) {
+    std::shared_ptr<LoadBackTicketRegistry> registry = std::make_shared<LoadBackTicketRegistry>(
+        LoadBackTicketRegistry::CommitCallback{}, LoadBackTicketRegistry::AbortCallback{});
+    std::vector<PendingLoadBackItem> items(5);
+    items[0].path_index  = 0;
+    items[0].source_tier = Tier::DEVICE;
+    items[1].path_index  = 0;
+    items[1].source_tier = Tier::HOST;
+    items[2].path_index  = 0;
+    items[2].source_tier = Tier::DISK;
+    items[3].path_index  = 1;
+    items[3].source_tier = Tier::DEVICE;
+    items[4].path_index  = 1;
+    items[4].source_tier = Tier::HOST;
+
+    std::shared_ptr<LoadBackTicket> ticket = registry->createTicket(items, 2);
+    ASSERT_NE(ticket, nullptr);
+    EXPECT_EQ(ticket->logicalMatchedBlocks(Tier::DEVICE), 0u);
+    EXPECT_EQ(ticket->logicalMatchedBlocks(Tier::HOST), 1u);
+    EXPECT_EQ(ticket->logicalMatchedBlocks(Tier::DISK), 1u);
 }
 
 TEST_P(BlockTreeCacheLowerTierTest, CancelPausedLoadBackPreservesSourceAndDiscardsTargets) {
@@ -819,7 +842,7 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelPausedLoadBackPreservesSourceAndDiscar
             ASSERT_NE(pool, nullptr);
             BlockIdList targets = pool->malloc(1).value();
             ASSERT_EQ(targets.size(), 1u);
-            pool->incRef(targets);
+            pool->incRef(targets, BlockRefType::REQUEST);
             const BlockIdxType target = targets.front();
             EXPECT_EQ(pool->refCount(target), 1u);
             item.target_device_blocks.push_back(target);
@@ -871,7 +894,7 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelPausedLoadBackPreservesSourceAndDiscar
     result.load_back_ticket.reset();
     environment->cache->waitForPendingTasks();
     for (const auto& [pool, block] : target_blocks) {
-        pool->decRef(block);
+        pool->decRef(block, BlockRefType::REQUEST);
     }
     environment->cache->onBlocksReleased();
     environment->reclaimAll();
@@ -1050,7 +1073,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadBackAsyncCompletionRefreshesBefo
             ASSERT_NE(pool, nullptr);
             BlockIdList targets = pool->malloc(1).value();
             ASSERT_EQ(targets.size(), 1u);
-            pool->incRef(targets);
+            pool->incRef(targets, BlockRefType::REQUEST);
             const BlockIdxType target = targets.front();
             EXPECT_EQ(pool->refCount(target), 1u);
             item.target_device_blocks.push_back(target);
@@ -1106,7 +1129,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadBackAsyncCompletionRefreshesBefo
     EXPECT_TRUE(context->success());
     environment->cache->waitForPendingTasks();
     for (const auto& [pool, block] : request_target_blocks) {
-        pool->decRef(block);
+        pool->decRef(block, BlockRefType::REQUEST);
     }
     environment->cache->onBlocksReleased();
     environment->reclaimAll();
@@ -1131,10 +1154,12 @@ TEST_F(BlockTreeCacheIntegrationTest, SparseDisconnectedSWADoesNotPublishVacuous
         GroupSlot& swa_slot = find.path[path_index]->group_slots[1];
         ASSERT_TRUE(swa_slot.has_value(Tier::DEVICE));
         const std::vector<BlockIdxType> old_device_blocks = environment->groups[1]->getBlocks(swa_slot, Tier::DEVICE);
-        environment->groups[1]->unreferenceBlocks(GroupBlockSet{1, Tier::DEVICE, {old_device_blocks}});
+        environment->groups[1]->unreferenceBlocks(GroupBlockSet{1, Tier::DEVICE, {old_device_blocks}},
+                                                  BlockRefType::BLOCK_CACHE);
         environment->groups[1]->setBlocks(swa_slot, Tier::DEVICE, {});
         if (path_index >= 2) {
-            const BlockIdxType host_block = environment->groups[1]->allocateSingleBlock(Tier::HOST);
+            const BlockIdxType host_block =
+                environment->groups[1]->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
             ASSERT_NE(host_block, NULL_BLOCK_IDX);
             environment->groups[1]->setBlocks(swa_slot, Tier::HOST, {host_block});
             swa_host_blocks.push_back(host_block);

@@ -233,14 +233,20 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     for (int batch_id = 1; batch_id < kv_resource->batchSize(); ++batch_id) {
         full_kv_cache_group_->reference(kv_resource->mutableBlockIds(batch_id, 0), block_ids_0.blocks());
     }
-    return {true,
+    const int reuse_len =
             static_cast<int>(reuse_blocks
                              * (cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
                                     cp_slot_mapper_->logicalSeqSizePerBlock(config_, 0) :
-                                    static_cast<size_t>(full_kv_cache_group_->seqSizePerBlock()))),
-            match_cost_time_us,
-            nullptr,
-            load_back_ticket};
+                                static_cast<size_t>(full_kv_cache_group_->seqSizePerBlock())));
+    MallocResult result{true, reuse_len, match_cost_time_us, nullptr, load_back_ticket};
+    if (load_back_ticket != nullptr && reuse_blocks > 0) {
+        const int reuse_unit_tokens = reuse_len / static_cast<int>(reuse_blocks);
+        result.memory_reuse_len =
+            static_cast<int>(load_back_ticket->logicalMatchedBlocks(Tier::HOST)) * reuse_unit_tokens;
+        result.disk_reuse_len =
+            static_cast<int>(load_back_ticket->logicalMatchedBlocks(Tier::DISK)) * reuse_unit_tokens;
+    }
+    return result;
 }
 
 MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
@@ -445,8 +451,8 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
         return nullptr;
     }
 
-    (void)is_connector;
-    block_pool_->incRef(real_blocks);
+    const BlockRefType ref_type = is_connector ? BlockRefType::CONNECTOR : BlockRefType::REQUEST;
+    block_pool_->incRef(real_blocks, ref_type);
     selected_resource->mutableBlockIds(0).assign(std::move(selected_blocks));
     selected_resource->cacheKeys() = std::move(selected_cache_keys);
 
@@ -464,8 +470,8 @@ void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_r
         }
     }
     if (!blocks_to_free.empty()) {
-        (void)is_connector;
-        block_pool_->decRef(blocks_to_free);
+        const BlockRefType ref_type = is_connector ? BlockRefType::CONNECTOR : BlockRefType::REQUEST;
+        block_pool_->decRef(blocks_to_free, ref_type);
     }
 }
 

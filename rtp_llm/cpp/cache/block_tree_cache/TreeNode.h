@@ -41,6 +41,7 @@ struct CandidateMeta {
     uint64_t last_access_seq{0};  // LRU: logical clock of the last real match
     uint64_t admission_seq{0};    // FIFO: logical clock of entering the current tier
     uint64_t hit_count{0};        // LFU: cumulative real hit count
+    int64_t  tier_enter_time_us{0};
 };
 
 // Real data-transfer state; a slot is excluded from all heaps while != IDLE.

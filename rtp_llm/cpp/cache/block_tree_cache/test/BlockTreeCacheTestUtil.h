@@ -101,7 +101,8 @@ public:
                 }
                 const std::vector<BlockIdxType> blocks = group->getBlocks(slot, Tier::DEVICE);
                 if (!blocks.empty()) {
-                    group->referenceBlocks(GroupBlockSet{group->component_group_id, Tier::DEVICE, {blocks}});
+                    group->referenceBlocks(GroupBlockSet{group->component_group_id, Tier::DEVICE, {blocks}},
+                                           BlockRefType::BLOCK_CACHE);
                 }
             }
         }
@@ -117,7 +118,8 @@ public:
             const ComponentGroupPtr& group  = component_groups[gid];
             const auto               blocks = group->getBlocks(adopted.node->group_slots[gid], Tier::DEVICE);
             if (!blocks.empty()) {
-                group->referenceBlocks(GroupBlockSet{adopted.component_group_id, Tier::DEVICE, {blocks}});
+                group->referenceBlocks(GroupBlockSet{adopted.component_group_id, Tier::DEVICE, {blocks}},
+                                       BlockRefType::BLOCK_CACHE);
             }
         }
         cache.evictor_.onInsertCommitted(insert_result);

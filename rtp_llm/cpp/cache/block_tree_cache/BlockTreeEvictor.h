@@ -66,6 +66,8 @@ public:
     // A node is about to be removed from the tree: drop it from all heaps.
     void           onNodeAboutToRemove(TreeNode* node);
     CandidateStats candidateStats() const;
+    size_t                 candidateCount(int component_group_id, Tier tier) const;
+    std::vector<TreeNode*> candidateNodes(int component_group_id, Tier tier) const;
 
     // ---- Eviction selection & migration (caller owns synchronization) ----
     // Selection, prepare, finish, and rollback mutate tree/group/pool/heap state

@@ -9,7 +9,24 @@ LoadBackTicket::LoadBackTicket(std::shared_ptr<LoadBackTicketRegistry> registry,
     registry_(std::move(registry)),
     ticket_id_(ticket_id),
     items_(std::move(items)),
-    logical_matched_blocks_(logical_matched_blocks) {}
+    logical_matched_blocks_(logical_matched_blocks) {
+    std::unordered_map<size_t, Tier> reuse_tier_by_path;
+    for (const PendingLoadBackItem& item : items_) {
+        if (item.source_tier < Tier::DEVICE || item.source_tier > Tier::DISK) {
+            continue;
+        }
+        const std::pair<std::unordered_map<size_t, Tier>::iterator, bool> insert_result =
+            reuse_tier_by_path.emplace(item.path_index, item.source_tier);
+        if (!insert_result.second
+            && (item.source_tier == Tier::DISK
+                || (item.source_tier == Tier::HOST && insert_result.first->second == Tier::DEVICE))) {
+            insert_result.first->second = item.source_tier;
+        }
+    }
+    for (const std::pair<const size_t, Tier>& reuse_tier : reuse_tier_by_path) {
+        ++logical_matched_blocks_by_tier_[static_cast<size_t>(reuse_tier.second)];
+    }
+}
 
 LoadBackTicket::~LoadBackTicket() {
     if (registry_ != nullptr && ticket_id_ != 0) {
@@ -22,6 +39,13 @@ std::shared_ptr<AsyncContext> LoadBackTicket::commit() {
         return nullptr;
     }
     return registry_->commit(ticket_id_, *this);
+}
+
+size_t LoadBackTicket::logicalMatchedBlocks(Tier tier) const {
+    if (tier < Tier::DEVICE || tier > Tier::DISK) {
+        return 0;
+    }
+    return logical_matched_blocks_by_tier_[static_cast<size_t>(tier)];
 }
 
 LoadBackTicketRegistry::LoadBackTicketRegistry(CommitCallback commit_callback, AbortCallback abort_callback):

@@ -53,8 +53,8 @@ private:
     bool   doInit() override;
     size_t reservableFreeBlocksNum() const override;
 
-    void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const override;
-    void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) override;
+    void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, BlockRefType ref_type) const override;
+    void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, BlockRefType ref_type) override;
     bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const override;
 
     int    validateGroupIdForLayer(int layer_id, int group_id) const;

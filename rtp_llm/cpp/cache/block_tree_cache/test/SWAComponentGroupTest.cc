@@ -22,7 +22,7 @@ protected:
 
     void TearDown() override {
         for (const auto block : held_blocks_) {
-            pool_->decRef(block);
+            pool_->decRef(block, BlockRefType::REQUEST);
         }
     }
 
@@ -39,7 +39,7 @@ protected:
         if (!block.has_value()) {
             return NULL_BLOCK_IDX;
         }
-        pool_->incRef(block.value());
+        pool_->incRef(block.value(), BlockRefType::REQUEST);
         held_blocks_.insert(block.value());
         node->group_slots[static_cast<size_t>(gid)].device_blocks = {block.value()};
         return block.value();

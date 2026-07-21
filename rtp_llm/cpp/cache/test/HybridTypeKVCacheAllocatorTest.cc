@@ -706,7 +706,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockForksAliasedBlocksAcrossGrou
     const size_t free_before = allocator->freeBlocksNum();
     auto         blocks      = block_pool->malloc(6).value();
     ASSERT_EQ(blocks.size(), 6u);
-    block_pool->incRef(blocks);
+    block_pool->incRef(blocks, BlockRefType::REQUEST);
     ASSERT_EQ(allocator->freeBlocksNum(), free_before - 6);
 
     auto batch_res = makeBatchResource(/*batch_size=*/2, config, CacheKeysType{100, 101});
@@ -746,7 +746,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockCopyLastBlockAcrossGroups) {
     const size_t free_before = allocator->freeBlocksNum();
     auto         blocks      = block_pool->malloc(6).value();
     ASSERT_EQ(blocks.size(), 6u);
-    block_pool->incRef(blocks);
+    block_pool->incRef(blocks, BlockRefType::REQUEST);
     ASSERT_EQ(allocator->freeBlocksNum(), free_before - 6);
 
     auto batch_res = makeBatchResource(/*batch_size=*/2, config, CacheKeysType{100, 101});
@@ -800,7 +800,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockReservationFailureLeavesReso
     const size_t free_before = allocator->freeBlocksNum();
     auto         blocks      = block_pool->malloc(free_before - 1).value();
     ASSERT_EQ(blocks.size(), free_before - 1);
-    block_pool->incRef(blocks);
+    block_pool->incRef(blocks, BlockRefType::REQUEST);
     ASSERT_EQ(allocator->freeBlocksNum(), 1u);
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100});
@@ -832,7 +832,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockReservationFailureLeavesReso
     }
 
     allocator->free(FreeInfo{batch_res, nullptr});
-    block_pool->decRef(BlockIndicesType(blocks.begin() + 2, blocks.end()));
+    block_pool->decRef(BlockIndicesType(blocks.begin() + 2, blocks.end()), BlockRefType::REQUEST);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
@@ -847,7 +847,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockReusesDroppedBatchCapacityTr
     const size_t free_before = allocator->freeBlocksNum();
     auto         blocks      = block_pool->malloc(free_before).value();
     ASSERT_EQ(blocks.size(), free_before);
-    block_pool->incRef(blocks);
+    block_pool->incRef(blocks, BlockRefType::REQUEST);
     ASSERT_EQ(block_pool->freeBlocksNum(), 0u);
 
     auto batch_res = makeBatchResource(/*batch_size=*/2, config, CacheKeysType{100});
@@ -872,7 +872,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockReusesDroppedBatchCapacityTr
     EXPECT_EQ(block_pool->freeBlocksNum(), 0u);
 
     allocator->free(FreeInfo{batch_res, nullptr});
-    block_pool->decRef(BlockIndicesType(blocks.begin() + 4, blocks.end()));
+    block_pool->decRef(BlockIndicesType(blocks.begin() + 4, blocks.end()), BlockRefType::REQUEST);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
@@ -887,7 +887,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     const size_t free_before = allocator->freeBlocksNum();
     auto         blocks      = block_pool->malloc(4).value();
     ASSERT_EQ(blocks.size(), 4u);
-    block_pool->incRef(blocks);
+    block_pool->incRef(blocks, BlockRefType::REQUEST);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 4);
 
     KVCacheResource resource;
@@ -906,7 +906,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     ASSERT_EQ(ref->blocks(0).size(), 2u);
     ASSERT_EQ(ref->blocks(1).size(), 2u);
 
-    block_pool->decRef(blocks);
+    block_pool->decRef(blocks, BlockRefType::REQUEST);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 2) << "Only blocks[1] and blocks[3] should remain referenced";
 
     ref.reset();
@@ -1045,7 +1045,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     const size_t free_before_incr = block_pool->freeBlocksNum();
     ASSERT_GE(free_before_incr, 1u);
     auto keep = block_pool->malloc(free_before_incr - 1).value();
-    block_pool->incRef(keep);
+    block_pool->incRef(keep, BlockRefType::REQUEST);
     ASSERT_EQ(block_pool->freeBlocksNum(), 1u);
 
     // Incr to seq_len=9 => 3 slots per group. Linear adds 2 slots but allocates only 1 real block; full needs 2.
@@ -1065,7 +1065,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     EXPECT_EQ(block_pool->freeBlocksNum(), 1u);
 
     // Cleanup.
-    block_pool->decRef(keep);
+    block_pool->decRef(keep, BlockRefType::REQUEST);
 }
 
 // Prefill init path (StreamCacheResource::initKVBlock sets enable_remove_skipped_blocks=false).
@@ -1129,8 +1129,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DecodeIncrMallocAppliesSparseCleanupOnLin
     auto full_alloc   = block_pool->malloc(6).value();
     ASSERT_EQ(linear_alloc.size(), 6u);
     ASSERT_EQ(full_alloc.size(), 6u);
-    block_pool->incRef(linear_alloc);
-    block_pool->incRef(full_alloc);
+    block_pool->incRef(linear_alloc, BlockRefType::REQUEST);
+    block_pool->incRef(full_alloc, BlockRefType::REQUEST);
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{});
     batch_res->mutableBlockIds(0, gid_linear).assign(linear_alloc);

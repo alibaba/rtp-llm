@@ -5,40 +5,14 @@
 
 namespace rtp_llm {
 
-namespace {
-
-// old_rc/new_rc always differ by exactly 1 (a single incRef/decRef step),
-// so it is enough to detect the two threshold crossings independently:
-//   - refcount 0  <-> refcount >= 1 : unreferenced/tree-cached membership
-//   - refcount 1  <-> refcount >= 2 : active-tree-cached membership
-void adjustRefCountMetricsNoLock(uint32_t old_rc,
-                                 uint32_t new_rc,
-                                 size_t&  unreferenced_blocks_num,
-                                 size_t&  tree_cached_blocks_num,
-                                 size_t&  active_tree_cached_blocks_num) {
-    if (old_rc == 0 && new_rc >= 1) {
-        unreferenced_blocks_num -= 1;
-        tree_cached_blocks_num += 1;
-    }
-    if (old_rc >= 1 && new_rc == 0) {
-        unreferenced_blocks_num += 1;
-        tree_cached_blocks_num -= 1;
-    }
-    if (old_rc < 2 && new_rc >= 2) {
-        active_tree_cached_blocks_num += 1;
-    }
-    if (old_rc >= 2 && new_rc < 2) {
-        active_tree_cached_blocks_num -= 1;
-    }
-}
-
-}  // namespace
-
 IBlockPool::IBlockPool(std::shared_ptr<const BlockPoolConfigBase> config): config_(std::move(config)) {
     RTP_LLM_CHECK(config_ != nullptr);
     RTP_LLM_CHECK(config_->physical_block_count > 1);
     allocated_.assign(config_->physical_block_count, 0);
     refcounts_.assign(config_->physical_block_count, 0);
+    for (std::vector<uint32_t>& typed_refcounts : metric_refcounts_by_type_) {
+        typed_refcounts.assign(config_->physical_block_count, 0);
+    }
     free_blocks_.reserve(config_->physical_block_count - 1);
     for (BlockIdxType block = 1; block < static_cast<BlockIdxType>(config_->physical_block_count); ++block) {
         free_blocks_.push_back(block);
@@ -52,10 +26,14 @@ const std::string& IBlockPool::poolName() const {
 std::string IBlockPool::debugString() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::ostringstream          oss;
-    oss << "IBlockPool{name=" << config_->pool_name << ", total=" << totalBlocksNum() << ", used=" << used_blocks_num_
-        << ", free=" << availableFreeBlocksNoLock() << ", unreferenced=" << unreferenced_blocks_num_
-        << ", tree_cached=" << tree_cached_blocks_num_ << ", active_tree_cached=" << active_tree_cached_blocks_num_
-        << "}";
+    const size_t                free_blocks = availableFreeBlocksNoLock();
+    const size_t                used_blocks = totalBlocksNumNoLock() - free_blocks;
+    oss << "IBlockPool{name=" << config_->pool_name << ", total=" << totalBlocksNumNoLock() << ", used=" << used_blocks
+        << ", free=" << free_blocks << ", active_tree_cached=" << active_tree_cached_blocks_num_
+        << ", request_refs=" << metric_total_ref_counts_[refTypeIndex(BlockRefType::REQUEST)]
+        << ", connector_refs=" << metric_total_ref_counts_[refTypeIndex(BlockRefType::CONNECTOR)]
+        << ", block_cache_refs=" << metric_total_ref_counts_[refTypeIndex(BlockRefType::BLOCK_CACHE)]
+        << ", eviction_refs=" << metric_total_ref_counts_[refTypeIndex(BlockRefType::EVICTION)] << "}";
     return oss.str();
 }
 
@@ -89,9 +67,10 @@ std::optional<BlockIdList> IBlockPool::malloc(size_t n) {
     for (const auto block : result) {
         allocated_[block] = 1;
         refcounts_[block] = 0;
+        for (std::vector<uint32_t>& typed_refcounts : metric_refcounts_by_type_) {
+            typed_refcounts[block] = 0;
+        }
     }
-    used_blocks_num_ += n;
-    unreferenced_blocks_num_ += n;
     return result;
 }
 
@@ -120,11 +99,11 @@ void IBlockPool::free(const BlockIdList& blocks) {
     }
 }
 
-void IBlockPool::incRef(BlockIdxType block) {
-    incRef(BlockIdList{block});
+void IBlockPool::incRef(BlockIdxType block, BlockRefType ref_type) {
+    incRef(BlockIdList{block}, ref_type);
 }
 
-void IBlockPool::incRef(const BlockIdList& blocks) {
+void IBlockPool::incRef(const BlockIdList& blocks, BlockRefType ref_type) {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     if (blocks.empty()) {
@@ -134,26 +113,29 @@ void IBlockPool::incRef(const BlockIdList& blocks) {
     for (const auto block : blocks) {
         checkAllocatedNoLock(block);
     }
+    const size_t ref_type_index = refTypeIndex(ref_type);
     for (const auto block : blocks) {
         const uint32_t old_rc = refcounts_[block];
         const uint32_t new_rc = old_rc + 1;
         refcounts_[block]     = new_rc;
-        adjustRefCountMetricsNoLock(
-            old_rc, new_rc, unreferenced_blocks_num_, tree_cached_blocks_num_, active_tree_cached_blocks_num_);
+        metric_refcounts_by_type_[ref_type_index][block] += 1;
+        metric_total_ref_counts_[ref_type_index] += 1;
+        adjustActiveTreeCachedBlocksNoLock(old_rc, new_rc);
     }
 }
 
-void IBlockPool::decRef(BlockIdxType block) {
-    decRef(BlockIdList{block});
+void IBlockPool::decRef(BlockIdxType block, BlockRefType ref_type) {
+    decRef(BlockIdList{block}, ref_type);
 }
 
-void IBlockPool::decRef(const BlockIdList& blocks) {
+void IBlockPool::decRef(const BlockIdList& blocks, BlockRefType ref_type) {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     if (blocks.empty()) {
         return;
     }
     checkUniqueBlocksNoLock(blocks);
+    const size_t ref_type_index = refTypeIndex(ref_type);
     for (const auto block : blocks) {
         checkAllocatedNoLock(block);
         RTP_LLM_CHECK_WITH_INFO(refcounts_[block] > 0,
@@ -161,9 +143,8 @@ void IBlockPool::decRef(const BlockIdList& blocks) {
                                 block,
                                 config_->pool_name.c_str());
     }
-    // Only the last holder returns capacity to the free list.
     for (const auto block : blocks) {
-        decRefOneNoLock(block);
+        decRefOneNoLock(block, ref_type_index);
         if (refcounts_[block] == 0) {
             freeAllocatedBlockNoLock(block);
         }
@@ -175,6 +156,12 @@ uint32_t IBlockPool::refCount(BlockIdxType block) const {
     checkInitializedNoLock();
     checkAllocatedNoLock(block);
     return refcounts_[block];
+}
+
+size_t IBlockPool::totalRefCount(BlockRefType ref_type) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    return metric_total_ref_counts_[refTypeIndex(ref_type)];
 }
 
 bool IBlockPool::validBlock(BlockIdxType block) const {
@@ -190,7 +177,8 @@ bool IBlockPool::isAllocated(BlockIdxType block) const {
 }
 
 size_t IBlockPool::totalBlocksNum() const {
-    return config_->physical_block_count - 1;
+    std::lock_guard<std::mutex> lock(mutex_);
+    return totalBlocksNumNoLock();
 }
 
 size_t IBlockPool::freeBlocksNum() const {
@@ -200,22 +188,34 @@ size_t IBlockPool::freeBlocksNum() const {
 
 size_t IBlockPool::usedBlocksNum() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return used_blocks_num_;
-}
-
-size_t IBlockPool::unreferencedBlocksNum() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return unreferenced_blocks_num_;
-}
-
-size_t IBlockPool::treeCachedBlocksNum() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return tree_cached_blocks_num_;
+    return totalBlocksNumNoLock() - availableFreeBlocksNoLock();
 }
 
 size_t IBlockPool::activeTreeCachedBlocksNum() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return active_tree_cached_blocks_num_;
+}
+
+size_t IBlockPool::TEST_unreferencedBlocksNum() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    size_t                      count = 0;
+    for (size_t block = 1; block < allocated_.size(); ++block) {
+        if (allocated_[block] != 0 && refcounts_[block] == 0) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+size_t IBlockPool::TEST_treeCachedBlocksNum() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    size_t                      count = 0;
+    for (size_t block = 1; block < allocated_.size(); ++block) {
+        if (allocated_[block] != 0 && refcounts_[block] > 0) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 void IBlockPool::markInitialized() {
@@ -251,8 +251,21 @@ void IBlockPool::checkUniqueBlocksNoLock(const BlockIdList& blocks) const {
                             config_->pool_name.c_str());
 }
 
+size_t IBlockPool::refTypeIndex(BlockRefType ref_type) {
+    const size_t ref_type_index = static_cast<size_t>(ref_type);
+    RTP_LLM_CHECK_WITH_INFO(ref_type_index < kBlockRefTypeCount, "invalid block ref type [%zu]", ref_type_index);
+    return ref_type_index;
+}
+
+size_t IBlockPool::totalBlocksNumNoLock() const {
+    return config_->physical_block_count - 1;
+}
+
 size_t IBlockPool::availableFreeBlocksNoLock() const {
-    return totalBlocksNum() - used_blocks_num_;
+    RTP_LLM_CHECK(free_head_ <= free_blocks_.size());
+    const size_t available_blocks = free_blocks_.size() - free_head_ + released_blocks_.size();
+    RTP_LLM_CHECK(available_blocks <= totalBlocksNumNoLock());
+    return available_blocks;
 }
 
 void IBlockPool::refillAscendingFreeBlocksNoLock() {
@@ -277,24 +290,39 @@ void IBlockPool::pushFreeBlockNoLock(BlockIdxType block) {
     released_blocks_.push_back(block);
 }
 
-void IBlockPool::decRefOneNoLock(BlockIdxType block) {
+void IBlockPool::decRefOneNoLock(BlockIdxType block, size_t ref_type_index) {
     const uint32_t old_rc = refcounts_[block];
     const uint32_t new_rc = old_rc - 1;
     refcounts_[block]     = new_rc;
-    adjustRefCountMetricsNoLock(
-        old_rc, new_rc, unreferenced_blocks_num_, tree_cached_blocks_num_, active_tree_cached_blocks_num_);
+    adjustActiveTreeCachedBlocksNoLock(old_rc, new_rc);
+    if (metric_refcounts_by_type_[ref_type_index][block] > 0
+        && metric_total_ref_counts_[ref_type_index] > 0) {
+        metric_refcounts_by_type_[ref_type_index][block] -= 1;
+        metric_total_ref_counts_[ref_type_index] -= 1;
+    }
+}
+
+void IBlockPool::adjustActiveTreeCachedBlocksNoLock(uint32_t old_ref_count, uint32_t new_ref_count) {
+    if (old_ref_count < 2 && new_ref_count >= 2) {
+        active_tree_cached_blocks_num_ += 1;
+    }
+    if (old_ref_count >= 2 && new_ref_count < 2) {
+        active_tree_cached_blocks_num_ -= 1;
+    }
 }
 
 void IBlockPool::freeAllocatedBlockNoLock(BlockIdxType block) {
-    if (refcounts_[block] == 0) {
-        unreferenced_blocks_num_ -= 1;
-    } else {
-        tree_cached_blocks_num_ -= 1;
+    for (size_t ref_type_index = 0; ref_type_index < kBlockRefTypeCount; ++ref_type_index) {
+        const uint32_t metric_refcount = metric_refcounts_by_type_[ref_type_index][block];
+        metric_total_ref_counts_[ref_type_index] =
+            metric_total_ref_counts_[ref_type_index] >= metric_refcount ?
+                metric_total_ref_counts_[ref_type_index] - metric_refcount :
+                0;
+        metric_refcounts_by_type_[ref_type_index][block] = 0;
     }
     allocated_[block] = 0;
     refcounts_[block] = 0;
     pushFreeBlockNoLock(block);
-    used_blocks_num_ -= 1;
 }
 
 }  // namespace rtp_llm

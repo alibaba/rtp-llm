@@ -155,14 +155,12 @@ int HybridPoolKVCacheAllocator::validateGroupIdForLayer(int layer_id, int group_
 
 void HybridPoolKVCacheAllocator::referenceBlocksInGroup(int                     gid,
                                                         const BlockIndicesType& blocks,
-                                                        bool                    is_connector) const {
-    (void)is_connector;
-    group_block_pools_[static_cast<size_t>(gid)]->incRef(blocks);
+                                                        BlockRefType            ref_type) const {
+    group_block_pools_[static_cast<size_t>(gid)]->incRef(blocks, ref_type);
 }
 
-void HybridPoolKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector) {
-    (void)is_connector;
-    group_block_pools_[static_cast<size_t>(gid)]->decRef(blocks);
+void HybridPoolKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesType& blocks, BlockRefType ref_type) {
+    group_block_pools_[static_cast<size_t>(gid)]->decRef(blocks, ref_type);
 }
 
 GroupedCacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
@@ -441,10 +439,15 @@ std::vector<KVCachePoolMetricsSnapshot> HybridPoolKVCacheAllocator::poolMetricsS
         KVCachePoolMetricsSnapshot snapshot;
         snapshot.pool_index                = gid;
         snapshot.pool_name                 = pool->poolName();
+        snapshot.block_size_bytes          = pool->blockSizeBytes();
         snapshot.total_blocks              = pool->totalBlocksNum();
         snapshot.free_blocks               = pool->freeBlocksNum();
         snapshot.active_tree_cached_blocks = pool->activeTreeCachedBlocksNum();
         snapshot.reserve_blocks            = reserveBlocksForPool(gid, reserve_blocks, total_reservable_free_blocks);
+        snapshot.request_ref_count         = pool->totalRefCount(BlockRefType::REQUEST);
+        snapshot.connector_ref_count       = pool->totalRefCount(BlockRefType::CONNECTOR);
+        snapshot.block_cache_ref_count     = pool->totalRefCount(BlockRefType::BLOCK_CACHE);
+        snapshot.eviction_ref_count        = pool->totalRefCount(BlockRefType::EVICTION);
         snapshot.used_ratio                = (snapshot.total_blocks == 0) ?
                                                  0.0f :
                                                  static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.free_blocks)

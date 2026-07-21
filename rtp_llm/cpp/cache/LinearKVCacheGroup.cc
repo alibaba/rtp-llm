@@ -243,7 +243,7 @@ bool LinearKVCacheGroup::malloc(BlockIds&            block_ids,
             return false;
         }
         allocated_blocks = std::move(*allocated);
-        block_pool_->incRef(allocated_blocks);
+        block_pool_->incRef(allocated_blocks, BlockRefType::REQUEST);
     }
 
     size_t allocated_idx = 0;
@@ -295,7 +295,7 @@ void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_re
         pos_to_remove.push_back(static_cast<size_t>(i));
     }
     if (!blocks_to_free.empty()) {
-        block_pool_->decRef(blocks_to_free);
+        block_pool_->decRef(blocks_to_free, BlockRefType::REQUEST);
         block_ids.remove(pos_to_remove);
     }
 }
@@ -309,7 +309,7 @@ void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
     if (valid.empty()) {
         return;
     }
-    block_pool_->decRef(valid);
+    block_pool_->decRef(valid, BlockRefType::REQUEST);
 }
 
 void LinearKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
@@ -317,7 +317,7 @@ void LinearKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& 
     BlockIndicesType valid;
     filterValidBlocks(new_block_indices, valid);
     if (!valid.empty()) {
-        block_pool_->incRef(valid);
+        block_pool_->incRef(valid, BlockRefType::REQUEST);
     }
 }
 

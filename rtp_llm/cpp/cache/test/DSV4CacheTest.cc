@@ -2374,7 +2374,7 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
         auto blocks = block_pool->malloc(3);
         ASSERT_TRUE(blocks.has_value());
         ASSERT_EQ(blocks->size(), 3u);
-        block_pool->incRef(*blocks);
+        block_pool->incRef(*blocks, BlockRefType::REQUEST);
         batch_res->mutableBlockIds(0, gid).assign(*blocks);
     }
 
@@ -2409,7 +2409,7 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
     // Free all blocks
     for (int gid = 0; gid < 7; gid++) {
         const auto& blocks = batch_res->blocks(0, gid);
-        block_pool->decRef(blocks);
+        block_pool->decRef(blocks, BlockRefType::REQUEST);
     }
 }
 
@@ -2435,7 +2435,7 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
         auto blocks = block_pool->malloc(3);
         ASSERT_TRUE(blocks.has_value());
         ASSERT_EQ(blocks->size(), 3u);
-        block_pool->incRef(*blocks);
+        block_pool->incRef(*blocks, BlockRefType::REQUEST);
         batch_res->mutableBlockIds(0, gid).assign(*blocks);
     }
 
@@ -2466,7 +2466,7 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     allocator->blockTreeCacheOwner()->releaseMatchedBlocks(match.matched_block_sets);
 
     for (int gid = 0; gid < 7; gid++) {
-        block_pool->decRef(batch_res->blocks(0, gid));
+        block_pool->decRef(batch_res->blocks(0, gid), BlockRefType::REQUEST);
     }
 }
 

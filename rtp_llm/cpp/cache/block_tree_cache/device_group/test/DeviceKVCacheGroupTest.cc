@@ -38,7 +38,7 @@ TEST_F(DeviceKVCacheGroupTest, MaterializePositionsDeduplicatesMissingSlotsAndOn
     const auto existing = block_pool->malloc(1);
     ASSERT_TRUE(existing.has_value());
     ASSERT_EQ(existing->size(), 1u);
-    block_pool->incRef(*existing);
+    block_pool->incRef(*existing, BlockRefType::REQUEST);
 
     BlockIds block_ids(/*kernel_blocks_per_kv_block=*/1);
     block_ids.assign({NULL_BLOCK_IDX, existing->front(), NULL_BLOCK_IDX});
@@ -98,7 +98,7 @@ TEST_F(DeviceKVCacheGroupTest, MaterializePositionsRollsBackWhenPoolCannotSatisf
 
     auto pressure = block_pool->malloc(block_pool->freeBlocksNum() - 1);
     ASSERT_TRUE(pressure.has_value());
-    block_pool->incRef(*pressure);
+    block_pool->incRef(*pressure, BlockRefType::REQUEST);
     ASSERT_EQ(block_pool->freeBlocksNum(), 1u);
 
     BlockIds block_ids(/*kernel_blocks_per_kv_block=*/1);
@@ -113,7 +113,7 @@ TEST_F(DeviceKVCacheGroupTest, MaterializePositionsRollsBackWhenPoolCannotSatisf
         EXPECT_EQ(block_pool->refCount(block), 1u);
     }
 
-    block_pool->decRef(*pressure);
+    block_pool->decRef(*pressure, BlockRefType::REQUEST);
     EXPECT_EQ(block_pool->freeBlocksNum(), initial_free);
 }
 

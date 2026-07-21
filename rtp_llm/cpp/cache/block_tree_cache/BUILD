@@ -50,6 +50,7 @@ cc_library(
         "BlockTree.cc",
         "BlockTreeCache.cc",
         "BlockTreeCacheFactory.cc",
+        "BlockTreeCacheMetricsReporter.cc",
         "BlockTreeEvictor.cc",
         "transfer/BlockTransferRequestConverter.cc",
         "ComponentGroup.cc",
@@ -73,6 +74,7 @@ cc_library(
         "BlockTree.h",
         "BlockTreeCache.h",
         "BlockTreeCacheFactory.h",
+        "BlockTreeCacheMetricsReporter.h",
         "BlockTreeEvictor.h",
         "transfer/BlockTransferRequestConverter.h",
         "ComponentGroup.h",
@@ -112,6 +114,7 @@ cc_library(
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",
     ] + torch_deps() + no_block_copy_link_deps() + select({

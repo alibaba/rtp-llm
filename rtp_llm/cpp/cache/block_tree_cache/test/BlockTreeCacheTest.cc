@@ -575,7 +575,7 @@ TEST_F(BlockTreeCacheTest, FullMatch_PreservesPathAndPoolOrder) {
     auto                           cache  = BlockTreeCacheTestUtil::makeBlockTreeCache(
         std::make_unique<BlockTree>(1), std::move(groups), std::vector<Component>{});
 
-    GroupBlockSet request_blocks = full->allocateBlocks(Tier::DEVICE, 2);
+    GroupBlockSet request_blocks = full->allocateBlocks(Tier::DEVICE, 2, BlockRefType::REQUEST);
     ASSERT_EQ(request_blocks.per_node.size(), 2u);
     ASSERT_EQ(request_blocks.per_node[0].size(), 2u);
     ASSERT_EQ(request_blocks.per_node[1].size(), 2u);
@@ -591,7 +591,7 @@ TEST_F(BlockTreeCacheTest, FullMatch_PreservesPathAndPoolOrder) {
     slots[0][0].device_blocks = {a_pool0, a_pool1};
     slots[1][0].device_blocks = {b_pool0, b_pool1};
     cache->insert(nullptr, {100, 200}, slots);
-    full->unreferenceBlocks(request_blocks);
+    full->unreferenceBlocks(request_blocks, BlockRefType::REQUEST);
     EXPECT_TRUE(pool0->isAllocated(a_pool0));
     EXPECT_TRUE(pool0->isAllocated(b_pool0));
     EXPECT_TRUE(pool1->isAllocated(a_pool1));
@@ -633,8 +633,8 @@ TEST_F(BlockTreeCacheTest, DuplicateInsert_KeepsExistingSlotAndCallerOwnsLoser) 
     auto                           cache  = BlockTreeCacheTestUtil::makeBlockTreeCache(
         std::make_unique<BlockTree>(1), std::move(groups), std::vector<Component>{});
 
-    GroupBlockSet existing = full->allocateBlocks(Tier::DEVICE, 1);
-    GroupBlockSet loser    = full->allocateBlocks(Tier::DEVICE, 1);
+    GroupBlockSet existing = full->allocateBlocks(Tier::DEVICE, 1, BlockRefType::REQUEST);
+    GroupBlockSet loser    = full->allocateBlocks(Tier::DEVICE, 1, BlockRefType::REQUEST);
     ASSERT_EQ(existing.per_node.size(), 1u);
     ASSERT_EQ(loser.per_node.size(), 1u);
     ASSERT_EQ(existing.per_node[0].size(), 1u);
@@ -666,7 +666,7 @@ TEST_F(BlockTreeCacheTest, DuplicateInsert_KeepsExistingSlotAndCallerOwnsLoser) 
     EXPECT_EQ(pool->refCount(existing_block), 1u);
     EXPECT_EQ(pool->refCount(loser_block), 1u);
 
-    full->unreferenceBlocks(loser);
+    full->unreferenceBlocks(loser, BlockRefType::REQUEST);
     EXPECT_FALSE(pool->isAllocated(loser_block));
     EXPECT_TRUE(pool->isAllocated(existing_block));
 
@@ -697,7 +697,7 @@ TEST_F(BlockTreeCacheTest, DuplicateInsert_FillsExistingEmptyGroupAndAddsOneCach
     TreeNode* existing_node = cache->tree()->nodes().front().get();
     ASSERT_NE(existing_node, nullptr);
 
-    GroupBlockSet request_blocks = full->allocateBlocks(Tier::DEVICE, 1);
+    GroupBlockSet request_blocks = full->allocateBlocks(Tier::DEVICE, 1, BlockRefType::REQUEST);
     ASSERT_EQ(request_blocks.per_node.size(), 1u);
     ASSERT_EQ(request_blocks.per_node[0].size(), 1u);
     const BlockIdxType block = request_blocks.per_node[0][0];
@@ -737,7 +737,7 @@ TEST_F(BlockTreeCacheTest, InsertRejectsPartialMultiPoolGroupWithoutAddingCacheH
     auto                           cache  = BlockTreeCacheTestUtil::makeBlockTreeCache(
         std::make_unique<BlockTree>(1), std::move(groups), std::vector<Component>{});
 
-    GroupBlockSet request_blocks = full->allocateBlocks(Tier::DEVICE, 1);
+    GroupBlockSet request_blocks = full->allocateBlocks(Tier::DEVICE, 1, BlockRefType::REQUEST);
     ASSERT_EQ(request_blocks.per_node.size(), 1u);
     ASSERT_EQ(request_blocks.per_node[0].size(), 2u);
     const BlockIdxType block0 = request_blocks.per_node[0][0];
@@ -753,7 +753,7 @@ TEST_F(BlockTreeCacheTest, InsertRejectsPartialMultiPoolGroupWithoutAddingCacheH
     EXPECT_EQ(pool0->refCount(block0), 1u);
     EXPECT_EQ(pool1->refCount(block1), 1u);
 
-    full->unreferenceBlocks(request_blocks);
+    full->unreferenceBlocks(request_blocks, BlockRefType::REQUEST);
     EXPECT_FALSE(pool0->isAllocated(block0));
     EXPECT_FALSE(pool1->isAllocated(block1));
 }
@@ -773,7 +773,7 @@ TEST_F(BlockTreeCacheTest, InsertMatchReleaseReclaim_RefcountLifecycle) {
     auto                           cache  = BlockTreeCacheTestUtil::makeBlockTreeCache(
         std::make_unique<BlockTree>(1), std::move(groups), std::vector<Component>{});
 
-    GroupBlockSet request_blocks = full->allocateBlocks(Tier::DEVICE, 1);
+    GroupBlockSet request_blocks = full->allocateBlocks(Tier::DEVICE, 1, BlockRefType::REQUEST);
     ASSERT_EQ(request_blocks.per_node.size(), 1u);
     ASSERT_EQ(request_blocks.per_node[0].size(), 1u);
     const BlockIdxType block = request_blocks.per_node[0][0];
@@ -785,7 +785,7 @@ TEST_F(BlockTreeCacheTest, InsertMatchReleaseReclaim_RefcountLifecycle) {
     cache->insert(nullptr, {100}, slots);
     EXPECT_EQ(pool->refCount(block), 2u);
 
-    full->unreferenceBlocks(request_blocks);
+    full->unreferenceBlocks(request_blocks, BlockRefType::REQUEST);
     EXPECT_TRUE(pool->isAllocated(block));
     EXPECT_EQ(pool->refCount(block), 1u);
 
@@ -1031,7 +1031,7 @@ TEST_F(BlockTreeCacheTest, MatchKeepsAggregatedDevicePoolsSeparate) {
                                          std::move(per_tag_mapping));
     ASSERT_TRUE(cache->init());
 
-    GroupBlockSet request_holder = full->allocateBlocks(Tier::DEVICE, 2);
+    GroupBlockSet request_holder = full->allocateBlocks(Tier::DEVICE, 2, BlockRefType::REQUEST);
     ASSERT_EQ(request_holder.per_node.size(), 2u);
     ASSERT_EQ(request_holder.per_node[0].size(), 2u);
     ASSERT_EQ(request_holder.per_node[1].size(), 2u);
@@ -1043,7 +1043,7 @@ TEST_F(BlockTreeCacheTest, MatchKeepsAggregatedDevicePoolsSeparate) {
     slots[0][0].device_blocks = request_holder.per_node[0];
     slots[1][0].device_blocks = request_holder.per_node[1];
     cache->insert(nullptr, {100, 200}, slots);
-    full->unreferenceBlocks(request_holder);
+    full->unreferenceBlocks(request_holder, BlockRefType::REQUEST);
     device_pools[0]->free(*pool0_prefix);
     device_pools[1]->free(*pool1_prefix);
 
@@ -1105,7 +1105,7 @@ TEST_F(BlockTreeCacheTest, ReorderedPoolsPreserveTagAddressedMatchResults) {
                                                       std::move(per_tag_mapping));
         RTP_LLM_CHECK(cache->init());
 
-        GroupBlockSet request_holder = full->allocateBlocks(Tier::DEVICE, 2);
+        GroupBlockSet request_holder = full->allocateBlocks(Tier::DEVICE, 2, BlockRefType::REQUEST);
         RTP_LLM_CHECK(request_holder.per_node.size() == 2);
         RTP_LLM_CHECK(request_holder.per_node[0].size() == 2);
         RTP_LLM_CHECK(request_holder.per_node[1].size() == 2);
@@ -1113,7 +1113,7 @@ TEST_F(BlockTreeCacheTest, ReorderedPoolsPreserveTagAddressedMatchResults) {
         slots[0][0].device_blocks = request_holder.per_node[0];
         slots[1][0].device_blocks = request_holder.per_node[1];
         cache->insert(nullptr, {100, 200}, slots);
-        full->unreferenceBlocks(request_holder);
+        full->unreferenceBlocks(request_holder, BlockRefType::REQUEST);
         for (size_t index = 0; index < device_pools.size(); ++index) {
             device_pools[index]->free(prefix_blocks[index]);
         }
@@ -1366,7 +1366,8 @@ TEST_F(BlockTreeCacheTest, LoadBackDetectsHostData) {
     slot.host_block          = 7;
     const auto device_blocks = full->getBlocks(slot, Tier::DEVICE);
     ASSERT_EQ(device_blocks, (BlockIndicesType{55}));
-    full->unreferenceBlocks(GroupBlockSet{full->component_group_id, Tier::DEVICE, {device_blocks}});
+    full->unreferenceBlocks(GroupBlockSet{full->component_group_id, Tier::DEVICE, {device_blocks}},
+                            BlockRefType::BLOCK_CACHE);
     slot.device_blocks.clear();
 
     // Match should detect load_back
@@ -1406,7 +1407,7 @@ static std::unique_ptr<BlockTreeCache> makeHostOnlyLoadBackCache(DeviceBlockPool
         std::move(tree), std::move(groups), std::move(components), std::move(config));
     RTP_LLM_CHECK(cache != nullptr);
 
-    GroupBlockSet request_holder = full->allocateBlocks(Tier::DEVICE, 1);
+    GroupBlockSet request_holder = full->allocateBlocks(Tier::DEVICE, 1, BlockRefType::REQUEST);
     RTP_LLM_CHECK(request_holder.per_node.size() == 1);
     RTP_LLM_CHECK(request_holder.per_node[0].size() == 1);
     const BlockIdxType device_block = request_holder.per_node[0][0];
@@ -1414,16 +1415,17 @@ static std::unique_ptr<BlockTreeCache> makeHostOnlyLoadBackCache(DeviceBlockPool
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {device_block};
     cache->insert(nullptr, {200}, slots);
-    full->unreferenceBlocks(request_holder);
+    full->unreferenceBlocks(request_holder, BlockRefType::REQUEST);
 
     BlockTreeFindResult find = cache->tree()->findNode({200});
     RTP_LLM_CHECK(find.matched_node != nullptr);
     GroupSlot& slot = find.matched_node->group_slots[0];
-    slot.host_block = full->allocateSingleBlock(Tier::HOST);
+    slot.host_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     RTP_LLM_CHECK(slot.host_block != NULL_BLOCK_IDX);
     const auto device_blocks = full->getBlocks(slot, Tier::DEVICE);
     RTP_LLM_CHECK(device_blocks == BlockIndicesType{device_block});
-    full->unreferenceBlocks(GroupBlockSet{full->component_group_id, Tier::DEVICE, {device_blocks}});
+    full->unreferenceBlocks(GroupBlockSet{full->component_group_id, Tier::DEVICE, {device_blocks}},
+                            BlockRefType::BLOCK_CACHE);
     slot.device_blocks.clear();
     return cache;
 }
@@ -1514,7 +1516,7 @@ TEST_F(BlockTreeCacheTest, LoadBackGroupMappingUsesLocalPoolIndexOrderAndLeavesT
     ASSERT_NE(cache, nullptr);
 
     const ComponentGroupPtr& group        = cache->componentGroups().front();
-    const BlockIdxType       source_block = group->allocateSingleBlock(Tier::HOST);
+    const BlockIdxType       source_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(source_block, NULL_BLOCK_IDX);
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
@@ -1558,7 +1560,7 @@ TEST_F(BlockTreeCacheTest, PendingLoadBackTicketHardStopsSecondMatchUntilAbort) 
     ASSERT_NE(cache, nullptr);
 
     const ComponentGroupPtr& group        = cache->componentGroups().front();
-    const BlockIdxType       source_block = group->allocateSingleBlock(Tier::HOST);
+    const BlockIdxType       source_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(source_block, NULL_BLOCK_IDX);
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
@@ -1661,8 +1663,8 @@ TEST_F(BlockTreeCacheTest, LoadBackPreparedPrefixFailureRollsBackAllSourceAndTar
         std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->componentGroups(), cache->components());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, per_rank_transfer_engine);
 
-    const BlockIdxType first_source  = first_group->allocateSingleBlock(Tier::HOST);
-    const BlockIdxType second_source = second_group->allocateSingleBlock(Tier::HOST);
+    const BlockIdxType first_source  = first_group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType second_source = second_group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(first_source, NULL_BLOCK_IDX);
     ASSERT_NE(second_source, NULL_BLOCK_IDX);
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(2));
@@ -1687,7 +1689,7 @@ TEST_F(BlockTreeCacheTest, LoadBackPreparedPrefixFailureRollsBackAllSourceAndTar
     // so every item in the synthetic ticket owns exactly one source hold.
     PendingLoadBackItem duplicate_first_item = items.front();
     items.insert(items.begin() + 1, std::move(duplicate_first_item));
-    first_group->referenceBlocks(GroupBlockSet{0, Tier::HOST, {{first_source}}});
+    first_group->referenceBlocks(GroupBlockSet{0, Tier::HOST, {{first_source}}}, BlockRefType::REQUEST);
     ASSERT_EQ(items.size(), 3u);
     EXPECT_EQ(first_host_pool->refCount(first_source), 3u);
     EXPECT_EQ(second_host_pool->refCount(second_source), 2u);
@@ -1696,8 +1698,8 @@ TEST_F(BlockTreeCacheTest, LoadBackPreparedPrefixFailureRollsBackAllSourceAndTar
     const BlockIdList second_request_targets = second_device_pool->malloc(1).value();
     ASSERT_EQ(first_request_targets.size(), 1u);
     ASSERT_EQ(second_request_targets.size(), 1u);
-    first_device_pool->incRef(first_request_targets);
-    second_device_pool->incRef(second_request_targets);
+    first_device_pool->incRef(first_request_targets, BlockRefType::REQUEST);
+    second_device_pool->incRef(second_request_targets, BlockRefType::REQUEST);
     const BlockIdxType first_target  = first_request_targets.front();
     const BlockIdxType second_target = second_request_targets.front();
     items[0].target_device_blocks    = {first_target};
@@ -1737,8 +1739,8 @@ TEST_F(BlockTreeCacheTest, LoadBackPreparedPrefixFailureRollsBackAllSourceAndTar
     result.load_back_ticket.reset();
     EXPECT_EQ(first_host_pool->refCount(first_source), 1u) << "committed ticket must not release source twice";
     EXPECT_EQ(second_host_pool->refCount(second_source), 1u) << "committed ticket must not release source twice";
-    first_device_pool->decRef(first_request_targets);
-    second_device_pool->decRef(second_request_targets);
+    first_device_pool->decRef(first_request_targets, BlockRefType::REQUEST);
+    second_device_pool->decRef(second_request_targets, BlockRefType::REQUEST);
 }
 
 TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackCoreHoldersAndRetainsRequestTarget) {
@@ -1768,7 +1770,7 @@ TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackCoreHoldersAndRetainsR
         std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->componentGroups(), cache->components());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, per_rank_transfer_engine);
 
-    const BlockIdxType source_block = full->allocateSingleBlock(Tier::HOST);
+    const BlockIdxType source_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(source_block, NULL_BLOCK_IDX);
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].host_block = source_block;
@@ -1783,7 +1785,7 @@ TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackCoreHoldersAndRetainsR
 
     const BlockIdList request_targets = device_pool->malloc(1).value();
     ASSERT_EQ(request_targets.size(), 1u);
-    device_pool->incRef(request_targets);
+    device_pool->incRef(request_targets, BlockRefType::REQUEST);
     const BlockIdxType request_target = request_targets.front();
     EXPECT_EQ(device_pool->refCount(request_target), 1u);
     result.load_back_ticket->items().front().target_device_blocks = {request_target};
@@ -1813,7 +1815,7 @@ TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackCoreHoldersAndRetainsR
     result.load_back_ticket.reset();
     EXPECT_EQ(host_pool->refCount(source_block), source_ref_before) << "committed ticket must not release source twice";
     cache->waitForPendingTasks();
-    device_pool->decRef(request_targets);
+    device_pool->decRef(request_targets, BlockRefType::REQUEST);
 }
 
 TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackMixedDeviceAndHostItems) {
@@ -1851,11 +1853,11 @@ TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackMixedDeviceAndHostItem
         std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->componentGroups(), cache->components());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, per_rank_transfer_engine);
 
-    GroupBlockSet resident_holder = resident_group->allocateBlocks(Tier::DEVICE, 1);
+    GroupBlockSet resident_holder = resident_group->allocateBlocks(Tier::DEVICE, 1, BlockRefType::BLOCK_CACHE);
     ASSERT_EQ(resident_holder.per_node.size(), 1u);
     ASSERT_EQ(resident_holder.per_node.front().size(), 1u);
     const BlockIdxType resident_block = resident_holder.per_node.front().front();
-    const BlockIdxType host_block     = loading_group->allocateSingleBlock(Tier::HOST);
+    const BlockIdxType host_block     = loading_group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(2));
@@ -1875,7 +1877,7 @@ TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackMixedDeviceAndHostItem
 
     const BlockIdxType request_target = poolMalloc(*target_device_pool);
     ASSERT_NE(request_target, NULL_BLOCK_IDX);
-    target_device_pool->incRef(request_target);
+    target_device_pool->incRef(request_target, BlockRefType::REQUEST);
     ASSERT_EQ(target_device_pool->refCount(request_target), 1u);
     ASSERT_TRUE(result.load_back_ticket->bindTargetDeviceBlocks(0, {resident_block}));
     ASSERT_TRUE(result.load_back_ticket->bindTargetDeviceBlocks(1, {request_target}));
@@ -1901,7 +1903,7 @@ TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackMixedDeviceAndHostItem
     result.load_back_ticket.reset();
     EXPECT_EQ(resident_device_pool->refCount(resident_block), 1u);
     EXPECT_EQ(host_pool->refCount(host_block), 1u);
-    target_device_pool->decRef(request_target);
+    target_device_pool->decRef(request_target, BlockRefType::REQUEST);
 }
 
 // Deferred load_back: match() plans (references the source blocks) but does NOT execute
@@ -1957,7 +1959,7 @@ TEST_F(BlockTreeCacheTest, LoadBackTicketCommitTriggersLoadBack) {
 
     const BlockIdList request_targets = device_pool->malloc(1).value();
     ASSERT_EQ(request_targets.size(), 1u);
-    device_pool->incRef(request_targets);
+    device_pool->incRef(request_targets, BlockRefType::REQUEST);
     const BlockIdxType request_target = request_targets.front();
     EXPECT_EQ(device_pool->refCount(request_target), 1u);
     ASSERT_EQ(result.load_back_ticket->items().size(), 1u);
@@ -1968,7 +1970,7 @@ TEST_F(BlockTreeCacheTest, LoadBackTicketCommitTriggersLoadBack) {
 
     cache->releaseMatchedBlocks(result.matched_block_sets);
     cache->waitForPendingTasks();
-    device_pool->decRef(request_targets);
+    device_pool->decRef(request_targets, BlockRefType::REQUEST);
 }
 
 // C006-T01: destructor drains real root/live-node holds across Device, Host, and Disk.
@@ -2010,7 +2012,7 @@ TEST_F(BlockTreeCacheTest, ShutdownDrainsRootAndLiveTreeHoldsAcrossAllPhysicalTi
         std::make_unique<BlockTree>(1), std::move(groups), std::vector<Component>{}, std::move(config));
     ASSERT_NE(cache, nullptr);
 
-    GroupBlockSet root_device_holds = full->allocateBlocks(Tier::DEVICE, 1);
+    GroupBlockSet root_device_holds = full->allocateBlocks(Tier::DEVICE, 1, BlockRefType::BLOCK_CACHE);
     ASSERT_EQ(root_device_holds.per_node.size(), 1u);
     ASSERT_EQ(root_device_holds.per_node[0].size(), 3u);
     const BlockIdxType device_block_0 = root_device_holds.per_node[0][0];
@@ -2021,12 +2023,12 @@ TEST_F(BlockTreeCacheTest, ShutdownDrainsRootAndLiveTreeHoldsAcrossAllPhysicalTi
     ASSERT_NE(device_block_2, NULL_BLOCK_IDX);
 
     GroupBlockSet hole_holder{0, Tier::DEVICE, {{NULL_BLOCK_IDX, device_hole, NULL_BLOCK_IDX}}};
-    full->unreferenceBlocks(hole_holder);
+    full->unreferenceBlocks(hole_holder, BlockRefType::BLOCK_CACHE);
     root_device_holds.per_node[0][1]                    = NULL_BLOCK_IDX;
     cache->tree()->root()->group_slots[0].device_blocks = root_device_holds.per_node[0];
 
-    const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST);
-    const BlockIdxType disk_block = full->allocateSingleBlock(Tier::DISK);
+    const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType disk_block = full->allocateSingleBlock(Tier::DISK, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
     std::vector<std::vector<GroupSlot>> lower_tier_slots(2, std::vector<GroupSlot>(1));
@@ -2076,19 +2078,19 @@ TEST_F(BlockTreeCacheTest, ShutdownReleasesOnlyTreeHoldWhenExternalCoHolderSurvi
         std::make_unique<BlockTree>(1), std::move(groups), std::vector<Component>{});
     ASSERT_NE(cache, nullptr);
 
-    GroupBlockSet tree_holder = full->allocateBlocks(Tier::DEVICE, 1);
+    GroupBlockSet tree_holder = full->allocateBlocks(Tier::DEVICE, 1, BlockRefType::BLOCK_CACHE);
     ASSERT_EQ(tree_holder.per_node.size(), 1u);
     ASSERT_EQ(tree_holder.per_node[0].size(), 1u);
     const BlockIdxType block = tree_holder.per_node[0][0];
     ASSERT_NE(block, NULL_BLOCK_IDX);
     GroupBlockSet external_holder = tree_holder;
-    full->referenceBlocks(external_holder);
+    full->referenceBlocks(external_holder, BlockRefType::REQUEST);
     EXPECT_EQ(device_pool->refCount(block), 2u);
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = tree_holder.per_node[0];
     ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
-    full->unreferenceBlocks(tree_holder);
+    full->unreferenceBlocks(tree_holder, BlockRefType::BLOCK_CACHE);
 
     cache.reset();
 
@@ -2096,7 +2098,7 @@ TEST_F(BlockTreeCacheTest, ShutdownReleasesOnlyTreeHoldWhenExternalCoHolderSurvi
     EXPECT_EQ(device_pool->refCount(block), 1u);
     EXPECT_EQ(device_pool->freeBlocksNum(), free_before - 1);
 
-    full->unreferenceBlocks(external_holder);
+    full->unreferenceBlocks(external_holder, BlockRefType::REQUEST);
     EXPECT_FALSE(device_pool->isAllocated(block));
     EXPECT_EQ(device_pool->freeBlocksNum(), free_before);
 }
@@ -2133,12 +2135,12 @@ TEST_F(BlockTreeCacheTest, ShutdownDrainsOnlyHoldsRemainingAfterPartialMixedTier
         std::vector<ComponentGroupPtr>{full}, std::vector<Component>{});
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, per_rank_transfer_engine);
 
-    GroupBlockSet device_holder = full->allocateBlocks(Tier::DEVICE, 1);
+    GroupBlockSet device_holder = full->allocateBlocks(Tier::DEVICE, 1, BlockRefType::BLOCK_CACHE);
     ASSERT_EQ(device_holder.per_node.size(), 1u);
     ASSERT_EQ(device_holder.per_node[0].size(), 1u);
     const BlockIdxType device_block = device_holder.per_node[0][0];
-    const BlockIdxType host_block   = full->allocateSingleBlock(Tier::HOST);
-    const BlockIdxType disk_block   = full->allocateSingleBlock(Tier::DISK);
+    const BlockIdxType host_block   = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType disk_block   = full->allocateSingleBlock(Tier::DISK, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
@@ -2152,7 +2154,7 @@ TEST_F(BlockTreeCacheTest, ShutdownDrainsOnlyHoldsRemainingAfterPartialMixedTier
     ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, device_slots));
     ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {200}, host_slots));
     ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {300}, disk_slots));
-    full->unreferenceBlocks(device_holder);
+    full->unreferenceBlocks(device_holder, BlockRefType::BLOCK_CACHE);
     cache->onBlocksReleased();
 
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
@@ -2193,7 +2195,7 @@ TEST_F(BlockTreeCacheTest, LoadBackTicketOutlivesHostAndDiskCacheShutdown) {
             std::make_unique<BlockTree>(1), std::move(groups), std::vector<Component>{}, std::move(config));
         ASSERT_NE(cache, nullptr);
 
-        const BlockIdxType source_block = full->allocateSingleBlock(source_tier);
+        const BlockIdxType source_block = full->allocateSingleBlock(source_tier, BlockRefType::BLOCK_CACHE);
         ASSERT_NE(source_block, NULL_BLOCK_IDX);
         IBlockPool& source_pool =
             source_tier == Tier::HOST ? static_cast<IBlockPool&>(*host_pool) : static_cast<IBlockPool&>(*disk_pool);
@@ -2327,10 +2329,10 @@ TEST_F(BlockTreeCacheTest, TicketRegistryCloseDetachesAndAbortsOnce) {
     auto full                = std::make_shared<FullComponentGroup>();
     full->component_group_id = 0;
     full->setHostPool(host_pool);
-    const BlockIdxType source_block = full->allocateSingleBlock(Tier::HOST);
+    const BlockIdxType source_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::REQUEST);
     ASSERT_NE(source_block, NULL_BLOCK_IDX);
     GroupBlockSet source_protection{0, Tier::HOST, {{source_block}}};
-    full->referenceBlocks(source_protection);
+    full->referenceBlocks(source_protection, BlockRefType::REQUEST);
     EXPECT_EQ(host_pool->refCount(source_block), 2u);
 
     CallbackBarrier  abort_callback;
@@ -2346,7 +2348,7 @@ TEST_F(BlockTreeCacheTest, TicketRegistryCloseDetachesAndAbortsOnce) {
             const auto& items = ticket.items();
             ++abort_calls;
             EXPECT_EQ(items.size(), 1u);
-            full->unreferenceBlocks(source_protection);
+            full->unreferenceBlocks(source_protection, BlockRefType::REQUEST);
             abort_callback.enterAndWait();
         });
     PendingLoadBackItem pending_item;
@@ -2376,7 +2378,7 @@ TEST_F(BlockTreeCacheTest, TicketRegistryCloseDetachesAndAbortsOnce) {
     EXPECT_TRUE(shutdown.finished());
     EXPECT_EQ(abort_calls.load(), 1);
     EXPECT_EQ(commit_calls.load(), 0);
-    full->releaseSingleBlock(Tier::HOST, source_block);
+    full->releaseSingleBlock(Tier::HOST, source_block, BlockRefType::REQUEST);
     EXPECT_EQ(host_pool->freeBlocksNum(), 2u);
 }
 
@@ -2458,10 +2460,10 @@ TEST_F(BlockTreeCacheTest, TicketRegistryShutdownWaitsForAbortInFlight) {
     auto full                = std::make_shared<FullComponentGroup>();
     full->component_group_id = 0;
     full->setHostPool(host_pool);
-    const BlockIdxType source_block = full->allocateSingleBlock(Tier::HOST);
+    const BlockIdxType source_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::REQUEST);
     ASSERT_NE(source_block, NULL_BLOCK_IDX);
     GroupBlockSet source_protection{0, Tier::HOST, {{source_block}}};
-    full->referenceBlocks(source_protection);
+    full->referenceBlocks(source_protection, BlockRefType::REQUEST);
     EXPECT_EQ(host_pool->refCount(source_block), 2u);
 
     CallbackBarrier  abort_callback;
@@ -2479,7 +2481,7 @@ TEST_F(BlockTreeCacheTest, TicketRegistryShutdownWaitsForAbortInFlight) {
             ++abort_calls;
             EXPECT_EQ(items.size(), 1u);
             if (items.size() == 1u && items[0].group_id == 0) {
-                full->unreferenceBlocks(source_protection);
+                full->unreferenceBlocks(source_protection, BlockRefType::REQUEST);
                 abort_callback.enterAndWait();
                 return;
             }
@@ -2523,7 +2525,7 @@ TEST_F(BlockTreeCacheTest, TicketRegistryShutdownWaitsForAbortInFlight) {
     shutdown_pending_ticket.reset();
     EXPECT_EQ(abort_calls.load(), 2);
     EXPECT_EQ(registry->createTicket({pending_item}), nullptr);
-    full->releaseSingleBlock(Tier::HOST, source_block);
+    full->releaseSingleBlock(Tier::HOST, source_block, BlockRefType::REQUEST);
     EXPECT_EQ(host_pool->freeBlocksNum(), 2u);
 }
 

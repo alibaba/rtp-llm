@@ -81,7 +81,7 @@ bool FullKVCacheGroup::malloc(BlockIds&            block_ids,
     if (!result.has_value() || result->size() != static_cast<size_t>(need_blocks_num)) {
         return false;
     }
-    block_pool_->incRef(*result);
+    block_pool_->incRef(*result, BlockRefType::REQUEST);
 
     size_t allocated_index = 0;
     for (const size_t position : positions_to_backfill) {
@@ -130,7 +130,7 @@ void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
         }
     }
     if (!valid_blocks.empty()) {
-        block_pool_->decRef(valid_blocks);
+        block_pool_->decRef(valid_blocks, BlockRefType::REQUEST);
     }
     RTP_LLM_LOG_DEBUG("Freed %zu blocks", valid_blocks.size());
 }
@@ -145,7 +145,7 @@ void FullKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& ne
         }
     }
     if (!valid_blocks.empty()) {
-        block_pool_->incRef(valid_blocks);
+        block_pool_->incRef(valid_blocks, BlockRefType::REQUEST);
     }
 }
 

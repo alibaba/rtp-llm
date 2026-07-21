@@ -1062,14 +1062,14 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsMixedPartialUnavailableAndOutOf
         const auto         backing             = tiered_manager->allocator_->cacheGroups().front()->blockPool();
         const size_t       free_before         = backing->freeBlocksNum();
         const size_t       used_before         = backing->usedBlocksNum();
-        const size_t       unreferenced_before = backing->unreferencedBlocksNum();
+        const size_t       unreferenced_before = backing->TEST_unreferencedBlocksNum();
         const size_t       active_before       = backing->activeTreeCachedBlocksNum();
         FunctionResponsePB response;
         EXPECT_FALSE(tiered_manager->executeFunction(request, response));
         EXPECT_FALSE(response.mem_response().success());
         EXPECT_EQ(backing->freeBlocksNum(), free_before);
         EXPECT_EQ(backing->usedBlocksNum(), used_before);
-        EXPECT_EQ(backing->unreferencedBlocksNum(), unreferenced_before);
+        EXPECT_EQ(backing->TEST_unreferencedBlocksNum(), unreferenced_before);
         EXPECT_EQ(backing->activeTreeCachedBlocksNum(), active_before);
     }
 }

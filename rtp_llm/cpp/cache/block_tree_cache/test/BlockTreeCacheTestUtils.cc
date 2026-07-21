@@ -425,8 +425,8 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
 void FullSWAEnvironment::insertRequestPath() {
     ASSERT_TRUE(request_blocks.empty());
     request_blocks = {
-        groups[0]->allocateBlocks(Tier::DEVICE, options_.path_length),
-        groups[1]->allocateBlocks(Tier::DEVICE, options_.path_length),
+        groups[0]->allocateBlocks(Tier::DEVICE, options_.path_length, BlockRefType::REQUEST),
+        groups[1]->allocateBlocks(Tier::DEVICE, options_.path_length, BlockRefType::REQUEST),
     };
     ASSERT_EQ(request_blocks[0].per_node.size(), options_.path_length);
     ASSERT_EQ(request_blocks[1].per_node.size(), options_.path_length);
