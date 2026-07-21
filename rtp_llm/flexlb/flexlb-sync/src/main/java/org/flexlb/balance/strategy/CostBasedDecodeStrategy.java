@@ -192,29 +192,45 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         int n = candidateEndpoints.size();
         // 缓存 realKvUsed() 避免重复调用
         long[] cacheUsed = new long[n];
-        long totalCacheUsed = 0;
+        int minCacheUsedIdx = 0;
+        int maxCacheUsedIdx = 0;
         for (int i = 0; i < n; i++) {
             cacheUsed[i] = candidateEndpoints.get(i).realKvUsed();
-            totalCacheUsed += cacheUsed[i];
+            if (cacheUsed[i] < cacheUsed[minCacheUsedIdx]) {
+                minCacheUsedIdx = i;
+            }
+            if (cacheUsed[i] > cacheUsed[maxCacheUsedIdx]) {
+                maxCacheUsedIdx = i;
+            }
         }
-        double avgCacheUsed = (double) totalCacheUsed / n;
 
         double[] weights = new double[n];
         double totalWeight = 0;
         boolean allSameUsage = true;
         long firstCacheUsed = cacheUsed[0];
+        // Subtract the value that produces the maximum log-weight before exponentiation.
+        // This is mathematically equivalent to the previous average-centered weights, but
+        // keeps every exponent <= 0 and avoids exp(...) overflowing for large KV gaps.
+        long referenceCacheUsed = decayFactor >= 0
+                ? cacheUsed[minCacheUsedIdx]
+                : cacheUsed[maxCacheUsedIdx];
         for (int i = 0; i < n; i++) {
             if (cacheUsed[i] != firstCacheUsed) {
                 allSameUsage = false;
             }
-            double normalizedValue = cacheUsed[i] - avgCacheUsed;
+            double normalizedValue = (double) cacheUsed[i] - referenceCacheUsed;
             weights[i] = Math.exp(-decayFactor * normalizedValue);
             totalWeight += weights[i];
         }
 
-        if (allSameUsage || totalWeight <= 0) {
+        if (allSameUsage) {
             // 所有 endpoint 使用率相同，随机选一个
             return candidateEndpoints.get(ThreadLocalRandom.current().nextInt(n));
+        }
+        if (!Double.isFinite(totalWeight) || totalWeight <= 0) {
+            Logger.warn("Decode weighted selection produced invalid total weight: decayFactor={}, totalWeight={}",
+                    decayFactor, totalWeight);
+            return candidateEndpoints.get(minCacheUsedIdx);
         }
 
         // 加权随机选择
@@ -228,13 +244,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         }
 
         // fallback: 返回使用率最低的
-        int minIdx = 0;
-        for (int i = 1; i < n; i++) {
-            if (cacheUsed[i] < cacheUsed[minIdx]) {
-                minIdx = i;
-            }
-        }
-        return candidateEndpoints.get(minIdx);
+        return candidateEndpoints.get(minCacheUsedIdx);
     }
 
     private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen, long prefixLength, RoleType roleType, long requestId, ScheduleModeEnum scheduleMode) {

@@ -265,6 +265,50 @@ class CostBasedDecodeStrategyTest {
     }
 
     @Test
+    void should_not_overflow_weight_when_decode_workers_have_large_kv_usage_gap() {
+        Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+
+        int workerCount = 16;
+        for (int i = 1; i <= workerCount; i++) {
+            String ip = "127.0.0." + i;
+            WorkerStatus worker = createWorkerStatus(ip);
+            worker.getTotalKvCacheTokens().set(1_000_000);
+            // With 15 workers using 800K tokens and one empty worker, the previous
+            // average-centered formula evaluated exp(750), which overflows to Infinity.
+            worker.getAvailableKvCacheTokens().set(i == 1 ? 1_000_000 : 200_000);
+            decodeMap.put(ip + ":8080", worker);
+        }
+
+        EndpointRegistry registry = createDecodeRegistry(decodeMap);
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), registry);
+
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
+        Mockito.when(decodeResourceMeasure.isResourceAvailable(any())).thenReturn(true);
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(
+                configService, engineWorkerStatus, resourceMeasureFactory);
+
+        Request req = new Request();
+        req.setSeqLen(1);
+        BalanceContext balanceContext = new BalanceContext();
+        balanceContext.setRequest(req);
+        balanceContext.setConfig(configService.loadBalanceConfig());
+
+        for (int i = 0; i < 100; i++) {
+            long requestId = 10_000L + i;
+            req.setRequestId(requestId);
+            ServerStatus status = Assertions.assertDoesNotThrow(
+                    () -> costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null));
+
+            Assertions.assertTrue(status.isSuccess());
+            Assertions.assertEquals("127.0.0.1", status.getServerIp(),
+                    "The worker with the lowest KV usage should have the highest stable weight");
+            costBasedDecodeStrategy.rollBack(registry.get(status.getServerIp() + ":8080"), requestId);
+        }
+    }
+
+    @Test
     void should_skip_worker_with_insufficient_kv_cache_capacity() {
         Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
