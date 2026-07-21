@@ -17,6 +17,9 @@
 #include <c10/core/InferenceMode.h>
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <list>
 #include <memory>
 #include <thread>
 #include <random>
@@ -46,6 +49,19 @@ void releaseHostMemoryCache() {
 #endif
 }
 
+bool cacheStatusSnapshotEnabled() {
+    const char* env = std::getenv("RTP_LLM_CACHE_STATUS_SNAPSHOT");
+    return env != nullptr && std::strcmp(env, "1") == 0;
+}
+
+bool shouldRefreshCacheStatusSnapshot(RoleType role_type, const std::list<GenerateStreamPtr>& streams) {
+    if (!cacheStatusSnapshotEnabled() || (role_type != RoleType::PREFILL && role_type != RoleType::PDFUSION)) {
+        return false;
+    }
+    return std::any_of(streams.begin(), streams.end(), [](const GenerateStreamPtr& stream) {
+        return stream && !stream->isFakeStream() && stream->isContextStream();
+    });
+}
 }  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
@@ -519,7 +535,13 @@ absl::Status NormalEngine::step() {
     {
         [[maybe_unused]] auto profile_step = step_profiler_.stepScope();
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
+        const bool refresh_cache_status_snapshot =
+            resource_context_.cache_manager && shouldRefreshCacheStatusSnapshot(pd_sep_config.role_type, streams);
         status = executor_->process(streams);
+        if (status.ok() && refresh_cache_status_snapshot) {
+            RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");
+            resource_context_.cache_manager->refreshKVCacheInfoSnapshot();
+        }
     }
 
     // report step metrics

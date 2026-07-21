@@ -221,8 +221,8 @@ class FrontendServer(object):
             raise
         except BaseException as e:
             # 捕获非Cancel以外所有的异常,所以使用BaseException
-            self._access_logger.log_exception_access(request, e)
             format_e = format_exception(e)
+            self._access_logger.log_exception_access(request, e, format_e)
             kmonitor.report(
                 AccMetrics.ERROR_QPS_METRIC,
                 1,
@@ -411,7 +411,7 @@ class FrontendServer(object):
                     "error_code": error_code_str,
                 },
             )
-            self._access_logger.log_exception_access(request, e)
+            self._access_logger.log_exception_access(request, e, exception_json)
 
         rep = ORJSONResponse(exception_json, status_code=500)
         return rep
