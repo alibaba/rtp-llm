@@ -311,8 +311,10 @@ inline void setHybridAttentionKvCacheSpecs(ModelConfig& model_config) {
     swa_desc.cache_type      = KVCacheSpecType::OpaqueState;
     swa_desc.entry_elems     = static_cast<uint32_t>(model_config.attn_config.size_per_head)
                            * static_cast<uint32_t>(model_config.attn_config.kv_head_num) * 2;
-    swa_desc.explicit_entry_count = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-    swa_desc.entry_dtype          = DataType::TYPE_FP16;
+    swa_desc.explicit_entry_count =
+        static_cast<uint32_t>(model_config.attn_config.sliding_window > 0 ? model_config.attn_config.sliding_window :
+                                                                            model_config.attn_config.tokens_per_block);
+    swa_desc.entry_dtype = DataType::TYPE_FP16;
 
     KVCacheSpecDesc linear_desc;
     linear_desc.tag        = "linear";
@@ -330,7 +332,7 @@ inline void setHybridAttentionKvCacheSpecs(ModelConfig& model_config) {
     }
 }
 
-inline void setDsv4KvCacheSpecs(ModelConfig& model_config, const std::vector<int>& layer_compress_ratios) {
+inline void setDsv4KvCacheSpecs(ModelConfig& model_config) {
     const int layer_num = static_cast<int>(model_config.num_layers);
     model_config.hybrid_attention_config.hybrid_attention_types.assign(static_cast<size_t>(layer_num),
                                                                        HybridAttentionType::NONE);
@@ -354,8 +356,9 @@ inline void setDsv4KvCacheSpecs(ModelConfig& model_config, const std::vector<int
     model_config.kv_cache_spec_descs.clear();
     model_config.kv_cache_spec_descs.resize(static_cast<size_t>(layer_num));
     for (int i = 0; i < layer_num; ++i) {
-        const int ratio =
-            i < static_cast<int>(layer_compress_ratios.size()) ? layer_compress_ratios[static_cast<size_t>(i)] : 0;
+        const int ratio = i < static_cast<int>(model_config.attn_config.layer_compress_ratios.size()) ?
+                              model_config.attn_config.layer_compress_ratios[static_cast<size_t>(i)] :
+                              0;
         if (ratio == 4) {
             model_config.kv_cache_spec_descs[static_cast<size_t>(i)] = {
                 csa_kv, indexer_kv, indexer_state, csa_state, swa_kv};

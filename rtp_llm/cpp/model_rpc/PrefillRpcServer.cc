@@ -19,6 +19,79 @@ using grpc::ClientContext;
 
 namespace rtp_llm {
 
+namespace {
+
+class BatchOutputCollector: public grpc::internal::WriterInterface<GenerateOutputsPB> {
+public:
+    bool Write(const GenerateOutputsPB& output, grpc::WriteOptions) override {
+        if (!local_output_complete_) {
+            local_output_.CopyFrom(output);
+            has_local_output_ = true;
+        } else {
+            remote_output_.CopyFrom(output);
+            has_remote_output_ = true;
+        }
+        return true;
+    }
+
+    void markLocalOutputComplete() {
+        local_output_complete_ = true;
+    }
+
+    bool hasOutput() const {
+        return has_local_output_ || has_remote_output_;
+    }
+
+    GenerateOutputsPB finalOutput() const {
+        if (!has_remote_output_) {
+            return local_output_;
+        }
+        GenerateOutputsPB output = remote_output_;
+        if (!has_local_output_) {
+            return output;
+        }
+
+        const auto& local_ids  = local_output_.flatten_output().output_ids();
+        const auto& remote_ids = remote_output_.flatten_output().output_ids();
+        if (local_ids.shape_size() == 0) {
+            return output;
+        }
+        if (remote_ids.shape_size() == 0) {
+            output.mutable_flatten_output()->mutable_output_ids()->CopyFrom(local_ids);
+            return output;
+        }
+
+        auto local_tensor  = QueryConverter::transTensor(local_ids);
+        auto remote_tensor = QueryConverter::transTensor(remote_ids);
+        RTP_LLM_CHECK_WITH_INFO(local_tensor.dim() > 0 && local_tensor.dim() == remote_tensor.dim(),
+                                "PD batch output ids rank mismatch, got local=%ld remote=%ld",
+                                local_tensor.dim(),
+                                remote_tensor.dim());
+        const auto token_dim = local_tensor.dim() - 1;
+        for (int64_t dim = 0; dim < token_dim; ++dim) {
+            RTP_LLM_CHECK_WITH_INFO(local_tensor.size(dim) == remote_tensor.size(dim),
+                                    "PD batch output ids shape mismatch at dim=%ld, local=%ld remote=%ld",
+                                    dim,
+                                    local_tensor.size(dim),
+                                    remote_tensor.size(dim));
+        }
+        auto  merged     = torch::cat({local_tensor, remote_tensor}, token_dim).contiguous();
+        auto* merged_ids = output.mutable_flatten_output()->mutable_output_ids();
+        merged_ids->Clear();
+        QueryConverter::transTensorPB(merged_ids, merged);
+        return output;
+    }
+
+private:
+    GenerateOutputsPB local_output_;
+    GenerateOutputsPB remote_output_;
+    bool              local_output_complete_{false};
+    bool              has_local_output_{false};
+    bool              has_remote_output_{false};
+};
+
+}  // namespace
+
 #define CLIENT_GRPC_RET_IF_ERROR(prefill_context, state, error_code_value)                                             \
     if (!(state)) {                                                                                                    \
         auto   new_error_code = error_code_value;                                                                      \
@@ -86,6 +159,16 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
         return ret;
     }
     return grpc::Status::OK;
+}
+
+bool PrefillRpcServer::canUsePDSep(const GenerateInputPB& request) const {
+    const auto& config = request.generate_config();
+    const bool  has_prefill_only_output =
+        config.calculate_loss() != 0 || config.return_hidden_states() || config.return_all_hidden_states()
+        || config.return_logits() || config.return_all_probs() || config.return_all_probs_mode() > 1
+        || config.return_softmax_probs() || config.return_cum_log_probs() || config.return_prompt_logits();
+    return config.max_new_tokens() > 1 && config.num_beams() <= 1 && config.variable_num_beams().size() == 0
+           && config.num_return_sequences() <= 1 && config.can_use_pd_separation() && !has_prefill_only_output;
 }
 
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
@@ -404,11 +487,7 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start generate stream call", request->request_id());
     c10::InferenceMode inference_guard(true);
-    auto pd_separation = request->generate_config().max_new_tokens() > 1 && request->generate_config().num_beams() <= 1
-                         && request->generate_config().variable_num_beams().size() == 0
-                         && request->generate_config().num_return_sequences() <= 1
-                         && request->generate_config().can_use_pd_separation();
-    if (!pd_separation) {
+    if (!canUsePDSep(*request)) {
         return LocalRpcServer::GenerateStreamCall(server_context, request, writer);
     }
 
@@ -461,6 +540,120 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
 
     RTP_LLM_LOG_DEBUG("request [%ld] all done", prefill_context.request_id);
 
+    return grpc::Status::OK;
+}
+
+grpc::Status PrefillRpcServer::BatchGenerateCall(grpc::ServerContext*        server_context,
+                                                 const BatchGenerateInputPB* request,
+                                                 BatchGenerateOutputsPB*     response) {
+    RTP_LLM_PROFILE_SCOPE("rpc.prefill_batch_generate_call");
+    c10::InferenceMode inference_guard(true);
+    const int          batch_size = request->inputs_size();
+    if (batch_size == 0) {
+        return grpc::Status::OK;
+    }
+
+    bool has_pd_request     = false;
+    bool has_non_pd_request = false;
+    for (int i = 0; i < batch_size; ++i) {
+        if (canUsePDSep(request->inputs(i))) {
+            has_pd_request = true;
+        } else {
+            has_non_pd_request = true;
+        }
+    }
+    if (!has_pd_request) {
+        return LocalRpcServer::BatchGenerateCall(server_context, request, response);
+    }
+    if (has_non_pd_request) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                            "mixing PD and non-PD requests in one atomic batch is not supported");
+    }
+
+    RTP_LLM_LOG_INFO("receive PD batch generate request, batch_size=%d", batch_size);
+    AtomicGuardPtr request_guard = make_shared<AtomicGuard>(onflight_requests_);
+
+    std::vector<std::unique_ptr<BatchOutputCollector>>   collectors;
+    std::vector<std::unique_ptr<PrefillGenerateContext>> contexts;
+    collectors.reserve(batch_size);
+    contexts.reserve(batch_size);
+
+    const auto    max_retry_times      = maga_init_params_.pd_sep_config.prefill_retry_times;
+    const auto    max_retry_timeout_ms = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms;
+    constexpr int retry_interval_ms    = 1;
+
+    for (int i = 0; i < batch_size; ++i) {
+        auto       collector = std::make_unique<BatchOutputCollector>();
+        RPCContext rpc_context{&request->inputs(i), collector.get()};
+        auto       context              = std::make_unique<PrefillGenerateContext>(&this->resource(),
+                                                                rpc_context,
+                                                                request->inputs(i).generate_config().timeout_ms(),
+                                                                server_context,
+                                                                metrics_reporter_,
+                                                                meta_);
+        context->onflight_requests      = onflight_requests_;
+        context->loading_cache_requests = loading_cache_requests_;
+
+        auto& prefill_context = *context;
+        EXECUTE_WITH_RETRY(
+            prepareAllocateResource, prefill_context, max_retry_times, max_retry_timeout_ms, retry_interval_ms);
+        CHECK_ERROR_STATUS(prefill_context);
+
+        collectors.emplace_back(std::move(collector));
+        contexts.emplace_back(std::move(context));
+    }
+
+    std::vector<std::shared_ptr<GenerateInput>> inputs;
+    inputs.reserve(batch_size);
+    for (const auto& context : contexts) {
+        inputs.emplace_back(context->generate_input);
+    }
+    auto streams = engine_->batchEnqueue(inputs);
+    if (streams.size() != contexts.size()) {
+        return grpc::Status(grpc::StatusCode::INTERNAL,
+                            "batchEnqueue returned " + std::to_string(streams.size()) + " streams for "
+                                + std::to_string(contexts.size()) + " inputs");
+    }
+    for (size_t i = 0; i < contexts.size(); ++i) {
+        contexts[i]->setStream(streams[i]);
+        contexts[i]->stat_info.nextStage();  // enqueueRequest
+    }
+
+    for (auto& context : contexts) {
+        auto& prefill_context = *context;
+        EXECUTE_STAGE_FUNC(remoteLoadCacheStart, prefill_context);
+    }
+    for (auto& context : contexts) {
+        auto& prefill_context = *context;
+        EXECUTE_STAGE_FUNC(pollLocalOutput, prefill_context);
+    }
+    for (auto& collector : collectors) {
+        collector->markLocalOutputComplete();
+    }
+    for (auto& context : contexts) {
+        auto& prefill_context = *context;
+        EXECUTE_STAGE_FUNC(remoteLoadCacheEnd, prefill_context);
+        meta_->dequeue(context->request_id, context->getStream());
+        EXECUTE_STAGE_FUNC(remoteGenerate, prefill_context);
+    }
+    for (auto& context : contexts) {
+        auto& prefill_context = *context;
+        EXECUTE_STAGE_FUNC(pollRemoteOutput, prefill_context);
+        context->stat_info.nextStage();
+    }
+
+    for (size_t i = 0; i < collectors.size(); ++i) {
+        auto* result = response->add_results();
+        if (!collectors[i]->hasOutput()) {
+            auto* error = result->mutable_error_info();
+            error->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
+            error->set_error_message("PD batch item completed without an output");
+            continue;
+        }
+        result->mutable_final_output()->CopyFrom(collectors[i]->finalOutput());
+    }
+
+    RTP_LLM_LOG_INFO("PD batch generate done, batch_size=%d", batch_size);
     return grpc::Status::OK;
 }
 

@@ -17,11 +17,16 @@ public:
 
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
                                     const GenerateInputPB*                 request,
-                                    grpc::ServerWriter<GenerateOutputsPB>* writer);
+                                    grpc::ServerWriter<GenerateOutputsPB>* writer) override;
+
+    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
+                                   const BatchGenerateInputPB* request,
+                                   BatchGenerateOutputsPB*     response) override;
 
     grpc::Status RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response);
 
 private:
+    bool         canUsePDSep(const GenerateInputPB& request) const;
     ErrorInfo    waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream);
     grpc::Status prepareAllocateResource(PrefillGenerateContext& prefill_context);
     void         getRpcConnection(PrefillGenerateContext& prefill_context);

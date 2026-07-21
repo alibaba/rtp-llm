@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 
@@ -147,6 +148,57 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsRejectTopologyMismatch) {
     row->add_block_ids(1);
 
     EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(missing_tag, *topology));
+}
+
+TEST(PrefillRpcServerTest, PDSepEligibilityRejectsUnsupportedGenerationModes) {
+    PrefillRpcServer server;
+    GenerateInputPB  input;
+    auto*            config = input.mutable_generate_config();
+    config->set_max_new_tokens(2);
+    config->set_num_beams(1);
+    config->set_num_return_sequences(1);
+    config->set_can_use_pd_separation(true);
+
+    EXPECT_TRUE(server.canUsePDSep(input));
+
+    auto single_token = input;
+    single_token.mutable_generate_config()->set_max_new_tokens(1);
+    EXPECT_FALSE(server.canUsePDSep(single_token));
+
+    auto beam_search = input;
+    beam_search.mutable_generate_config()->set_num_beams(2);
+    EXPECT_FALSE(server.canUsePDSep(beam_search));
+
+    auto variable_beam = input;
+    variable_beam.mutable_generate_config()->add_variable_num_beams(2);
+    EXPECT_FALSE(server.canUsePDSep(variable_beam));
+
+    auto multi_return = input;
+    multi_return.mutable_generate_config()->set_num_return_sequences(2);
+    EXPECT_FALSE(server.canUsePDSep(multi_return));
+
+    auto explicitly_disabled = input;
+    explicitly_disabled.mutable_generate_config()->set_can_use_pd_separation(false);
+    EXPECT_FALSE(server.canUsePDSep(explicitly_disabled));
+
+    auto expect_aux_output_rejected = [&](auto setter) {
+        auto with_aux_output = input;
+        setter(*with_aux_output.mutable_generate_config());
+        EXPECT_FALSE(server.canUsePDSep(with_aux_output));
+    };
+    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_calculate_loss(1); });
+    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_hidden_states(true); });
+    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_all_hidden_states(true); });
+    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_logits(true); });
+    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_all_probs(true); });
+    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_all_probs_mode(2); });
+    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_softmax_probs(true); });
+    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_cum_log_probs(true); });
+    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_prompt_logits(true); });
+
+    auto target_logprob_without_prompt_logits = input;
+    target_logprob_without_prompt_logits.mutable_generate_config()->set_return_target_logprob(true);
+    EXPECT_TRUE(server.canUsePDSep(target_logprob_without_prompt_logits));
 }
 
 TEST(DecodeRpcServerTest, MtpCacheKeyUsesSharedBaseModelIdForEverySlot) {

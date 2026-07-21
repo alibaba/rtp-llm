@@ -124,6 +124,12 @@ public:
     virtual ~ModelBase()                                          = default;
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
+    virtual torch::Tensor   getMtpTargetHiddenStates(int64_t /*num_tokens*/) {
+        return torch::Tensor();
+    }
+    virtual torch::Tensor getMtpLastHiddenStates(int64_t /*num_tokens*/) {
+        return torch::Tensor();
+    }
 
     rtp_llm::Weights            weights_;
     rtp_llm::OverallExpertStats overall_expert_stats_;

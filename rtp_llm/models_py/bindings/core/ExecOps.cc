@@ -344,7 +344,25 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                               kv_addr,
                               kv_block_stride_bytes,
                               kv_block_transfer_bytes);
-            if (use_opaque_key_prefix) {
+            constexpr size_t kDsv4SwaFp8EntryBytes  = 584;
+            constexpr size_t kDsv4SwaTokenDataBytes = 576;
+            const bool       is_swa_cp_slice        = !has_policy_cp_slice && param.tag == "swa_kv" && param.cp_size > 1
+                                         && kv_block_transfer_bytes % kDsv4SwaFp8EntryBytes == 0;
+            // Some layouts treat the block as a single opaque KV chunk. Only
+            // the legacy MHA path splits k/v. SWA_KV is opaque logically, but
+            // its FP8 physical block is striped as DATA then SCALES, so CP
+            // slices must store those two regions independently.
+            if (is_swa_cp_slice) {
+                constexpr size_t      kSwaTokenDataBytes  = kDsv4SwaTokenDataBytes;
+                constexpr size_t      kSwaTokenScaleBytes = kDsv4SwaFp8EntryBytes - kSwaTokenDataBytes;
+                const size_t          local_entries       = kv_block_transfer_bytes / kDsv4SwaFp8EntryBytes;
+                const size_t          data_bytes          = local_entries * kSwaTokenDataBytes;
+                const size_t          scale_bytes         = local_entries * kSwaTokenScaleBytes;
+                void*                 scale_addr = static_cast<void*>(static_cast<int8_t*>(kv_addr) + data_bytes);
+                std::shared_ptr<void> scale_block_addr(kv_cache_owner, scale_addr);
+                request_blocks->addBlock("kv_" + cache_key, kv_block_addr, data_bytes, kv_gpu_mem, true);
+                request_blocks->addBlock("kv_scale_" + cache_key, scale_block_addr, scale_bytes, kv_gpu_mem, true);
+            } else if (use_opaque_key_prefix) {
                 request_blocks->addBlock("kv_" + cache_key, kv_block_addr, kv_block_transfer_bytes, kv_gpu_mem, true);
             } else {
                 RTP_LLM_CHECK_WITH_INFO(kv_block_transfer_bytes % 2 == 0,

@@ -1477,6 +1477,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("indexer_head_dim", &AttentionConfigs::indexer_head_dim)
         .def_readwrite("indexer_head_num", &AttentionConfigs::indexer_head_num)
         .def_readwrite("indexer_topk", &AttentionConfigs::indexer_topk)
+        .def_readwrite("layer_compress_ratios", &AttentionConfigs::layer_compress_ratios)
+        .def_readwrite("o_groups", &AttentionConfigs::o_groups)
+        .def_readwrite("o_lora_rank", &AttentionConfigs::o_lora_rank)
+        .def_readwrite("sliding_window", &AttentionConfigs::sliding_window)
+        .def_readwrite("compress_rope_theta", &AttentionConfigs::compress_rope_theta)
         .def_readwrite("dtype", &AttentionConfigs::dtype)
         .def_readwrite("max_seq_len", &AttentionConfigs::max_seq_len)
         .def_readwrite("gen_num_per_cycle", &AttentionConfigs::gen_num_per_cycle);

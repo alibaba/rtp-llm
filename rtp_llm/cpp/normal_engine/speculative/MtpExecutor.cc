@@ -27,6 +27,29 @@ bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;
 }
 
+void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
+                                                       ModelBase&      source,
+                                                       bool            request_actual_rows) {
+    if (!model_input.combo_tokens.defined() || model_input.combo_tokens.numel() == 0) {
+        return;
+    }
+    const auto rows   = request_actual_rows ? -1 : model_input.combo_tokens.numel();
+    auto       pre_hc = source.getMtpTargetHiddenStates(rows);
+    if (pre_hc.defined() && pre_hc.numel() > 0) {
+        model_input.last_hidden_states = pre_hc;
+    }
+}
+
+void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source) {
+    if (!model_output.all_hidden_states.defined() || model_output.all_hidden_states.size(0) == 0) {
+        return;
+    }
+    auto pre_hc = source.getMtpTargetHiddenStates(model_output.all_hidden_states.size(0));
+    if (pre_hc.defined() && pre_hc.numel() > 0) {
+        model_output.all_hidden_states = pre_hc;
+    }
+}
+
 void MtpExecutor::maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const {
     bool force = tp_rank_ == 0 && enable_detail_log_;
     if (force) {
@@ -312,6 +335,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     SamplerOutput   sampler_output;
     GptModelOutputs draft_model_output;
     SamplerOutput   draft_sampler_output;
+    const bool      cp_enabled = parallelism_config_.prefill_cp_config.is_enabled();
+    torch::Tensor   draft_last_hidden_states;
 
     // placeholder for some tensors
     torch::Tensor                      draft_probs;
@@ -343,6 +368,25 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     model_->releaseBuffers();
     draft_model_->releaseBuffers();
 
+    // CP input handling replaces combo_tokens with the rank-local chunk and
+    // rewrites input_lengths in place. The MTP shift below operates on the
+    // original request-major sequence, so preserve both tensors before the
+    // target forward and restore them after target sampling. input_lengths
+    // must be cloned because the CP processor mutates its storage in place.
+    torch::Tensor saved_combo_tokens;
+    torch::Tensor saved_input_lengths;
+    if (cp_enabled) {
+        auto snapshotInput = [](const torch::Tensor& tensor) {
+            auto snapshot = tensor.clone();
+            if (snapshot.device().is_cpu() && !snapshot.is_pinned()) {
+                snapshot = snapshot.pin_memory();
+            }
+            return snapshot;
+        };
+        saved_combo_tokens  = snapshotInput(model_input.combo_tokens);
+        saved_input_lengths = snapshotInput(model_input.input_lengths);
+    }
+
     // target model prefill
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
@@ -367,6 +411,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             CHECK_AND_RETURN_REF(sampler_input,
                                  batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
             sampler_output = std::move(sampler_->forward(sampler_input));
+            if (cp_enabled) {
+                model_input.combo_tokens  = saved_combo_tokens;
+                model_input.input_lengths = saved_input_lengths;
+            }
             batch_stream_processor_->updatePrefillPostDraftModelInput(
                 stream_groups, model_input, model_output, sampler_output);
         }
@@ -375,10 +423,14 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // draft model prefill
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
+        if (cp_enabled) {
+            model_input.last_hidden_states = torch::Tensor();
+        }
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
         const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
         applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
+        maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
         draft_model_output = std::move(draft_model_->forward(model_input));
     }
 
@@ -387,6 +439,14 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_->releaseBuffers();
         draft_model_->releaseBuffers();
         return absl::OkStatus();
+    }
+
+    if (cp_enabled) {
+        draft_last_hidden_states = draft_model_->getMtpLastHiddenStates(stream_groups.totalSamplerBatchSizeOut());
+        RTP_LLM_CHECK_WITH_INFO(draft_last_hidden_states.defined() && draft_last_hidden_states.numel() > 0,
+                                "CP MTP draft last-hidden buffer must contain per-request rows");
+    } else {
+        maybeOverrideLastHiddenWithMtpBuffer(draft_model_output, *draft_model_);
     }
 
     // draft model sample
@@ -418,7 +478,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         auto result =
             batch_stream_processor_->dispatchPrefill(stream_groups,
                                                      {std::move(model_output), std::move(sampler_output)},
-                                                     {std::move(draft_model_output), std::move(draft_sampler_output)});
+                                                     {std::move(draft_model_output), std::move(draft_sampler_output)},
+                                                     draft_last_hidden_states);
         RTP_LLM_LOG_DEBUG("dispatch done");
 
         model_->releaseBuffers();
@@ -651,6 +712,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(tp_sync_post_rejection)");
         tpSyncModelInputs(model_input, parallelism_config_);
+        maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     }
 
     {
@@ -667,8 +729,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             // All currently supported draft models are non-MRoPE and do not use
             // model_input.combo_position_ids, so the draft prefill CUDA graph does not need to copy it.
             draft_prefill_model_output = std::move(sp_prefill_draft_model_->forward(model_input));
+            maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *sp_prefill_draft_model_);
         } else {
             draft_prefill_model_output = std::move(draft_model_->forward(model_input));
+            maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_model_);
         }
     }
 
@@ -846,6 +910,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(loop_iter=%d)", i);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d/%d start, batch_size %zu", i, propose_step_ - 1, batch_size);
         draft_decode_model_output = std::move(draft_model_->forward(model_input));
+        maybeOverrideLastHiddenWithMtpBuffer(draft_decode_model_output, *draft_model_);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d forward done", i);
 
         // sample

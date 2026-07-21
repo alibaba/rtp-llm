@@ -7,6 +7,24 @@
 #include <cstring>
 
 namespace rtp_llm {
+namespace {
+
+torch::Tensor cloneHiddenSlice(const torch::Tensor& hidden_states, int64_t start, int64_t length) {
+    if (!hidden_states.defined() || length <= 0) {
+        return torch::Tensor();
+    }
+    RTP_LLM_CHECK_WITH_INFO(
+        hidden_states.dim() == 2, "MTP hidden states must be 2-D, got dim=%ld", hidden_states.dim());
+    RTP_LLM_CHECK_WITH_INFO(start >= 0 && start + length <= hidden_states.size(0),
+                            "MTP hidden slice out of range: start=%ld, length=%ld, rows=%ld",
+                            start,
+                            length,
+                            hidden_states.size(0));
+    return hidden_states.narrow(0, start, length).clone();
+}
+
+}  // namespace
+
 void MtpBatchStreamProcessor::expandTargetVerifyPositionIds(const StreamGroups& stream_groups,
                                                             GptModelInputs&     model_input) const {
     if (!model_input.combo_position_ids.defined()) {
@@ -48,13 +66,21 @@ void MtpBatchStreamProcessor::expandTargetVerifyPositionIds(const StreamGroups& 
 absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups& stream_groups,
                                                       const MergedOutput& prefill_output,
                                                       const MergedOutput& propose_output) const {
+    return dispatchPrefill(stream_groups, prefill_output, propose_output, torch::Tensor());
+}
+
+absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&  stream_groups,
+                                                      const MergedOutput&  prefill_output,
+                                                      const MergedOutput&  propose_output,
+                                                      const torch::Tensor& draft_last_hidden_states) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     const size_t                      total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
     auto                              new_tokens_all = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
     std::vector<StreamSpecUpdateInfo> spec_update_infos;
 
-    preparePrefillSpecUpdateInfo(stream_groups, prefill_output, propose_output, new_tokens_all, spec_update_infos);
+    preparePrefillSpecUpdateInfo(
+        stream_groups, prefill_output, propose_output, draft_last_hidden_states, new_tokens_all, spec_update_infos);
 
     // we set propose token in extra loop to avoid cuda sync
     updateProposeTokens(stream_groups, propose_output, spec_update_infos);
@@ -441,6 +467,7 @@ void MtpBatchStreamProcessor::updateMultiStepDraftSamplerOutput(const StreamGrou
 void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&                stream_groups,
                                                            const MergedOutput&                prefill_output,
                                                            const MergedOutput&                propose_output,
+                                                           const torch::Tensor&               draft_last_hidden_states,
                                                            const torch::Tensor&               new_tokens_all,
                                                            std::vector<StreamSpecUpdateInfo>& spec_update_infos) const {
     const auto& sampler_output       = prefill_output.sampler_output;
@@ -491,7 +518,12 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
 
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1) {
-            last_hidden_states = draft_model_output.all_hidden_states.narrow(0, token_offset + token_size - 1, 1);
+            if (draft_last_hidden_states.defined() && draft_last_hidden_states.numel() > 0) {
+                last_hidden_states = cloneHiddenSlice(draft_last_hidden_states, batch_idx_out, 1);
+            } else {
+                last_hidden_states =
+                    cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + token_size - 1, 1);
+            }
         }
 
         spec_update_infos.push_back({new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)});

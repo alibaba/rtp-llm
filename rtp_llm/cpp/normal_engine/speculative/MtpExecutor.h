@@ -90,6 +90,11 @@ public:
 protected:
     bool isTpRank0() const;
 
+    void maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
+                                              ModelBase&      source,
+                                              bool            request_actual_rows = false);
+    void maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source);
+
     void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
 
     absl::Status prefillStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);

@@ -95,13 +95,17 @@ static ModelConfig makeTinyDSV4ModelConfig() {
     mc.attn_config.kv_head_num                                   = 1;
     mc.attn_config.size_per_head                                 = 8;
     mc.attn_config.rope_head_dim                                 = 4;
+    mc.attn_config.sliding_window                                = 128;
     mc.attn_config.indexer_head_dim                              = 8;
     mc.attn_config.indexer_head_num                              = 2;
     mc.attn_config.indexer_topk                                  = 16;
+    mc.attn_config.o_groups                                      = 2;
+    mc.attn_config.o_lora_rank                                   = 16;
     mc.attn_config.tokens_per_block                              = 128;
+    mc.attn_config.layer_compress_ratios                         = {4, 128, 4, 128, 0};
     mc.hybrid_attention_config.enable_hybrid_attention           = true;
     mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
-    setDsv4KvCacheSpecs(mc, {4, 128, 4, 128, 0});
+    setDsv4KvCacheSpecs(mc);
     return mc;
 }
 
@@ -113,9 +117,12 @@ static ModelConfig makeProModelConfig() {
     mc.attn_config.kv_head_num      = 1;
     mc.attn_config.size_per_head    = 512;
     mc.attn_config.rope_head_dim    = 64;
+    mc.attn_config.sliding_window   = 128;
     mc.attn_config.indexer_head_dim = 128;
     mc.attn_config.indexer_head_num = 64;
     mc.attn_config.indexer_topk     = 1024;
+    mc.attn_config.o_groups         = 16;
+    mc.attn_config.o_lora_rank      = 1024;
     mc.attn_config.tokens_per_block = 128;
     std::vector<int> ratios;
     ratios.push_back(128);
@@ -124,7 +131,8 @@ static ModelConfig makeProModelConfig() {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
     ratios.push_back(0);
-    setDsv4KvCacheSpecs(mc, ratios);
+    mc.attn_config.layer_compress_ratios = ratios;
+    setDsv4KvCacheSpecs(mc);
     return mc;
 }
 

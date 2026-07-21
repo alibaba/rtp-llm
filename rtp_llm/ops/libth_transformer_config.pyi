@@ -88,6 +88,11 @@ class AttentionConfigs:
     indexer_head_dim: int
     indexer_head_num: int
     indexer_topk: int
+    layer_compress_ratios: list[int]
+    o_groups: int
+    o_lora_rank: int
+    sliding_window: int
+    compress_rope_theta: float
     is_causal: bool
     is_sparse: bool
     kv_cache_dtype: KvCacheDataType
