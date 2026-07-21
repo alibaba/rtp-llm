@@ -148,9 +148,6 @@ public:
     bool lastBlockAligned() const;
     void setLastBlockAligned(bool last_block_aligned);
 
-    size_t remoteReuseBlocksNum() const;
-    void   setRemoteReuseBlocksNum(size_t remote_reuse_blocks_num);
-
     void swapBlocks(size_t group_id, size_t rhs, size_t lhs);
 
     std::string debugString() const;

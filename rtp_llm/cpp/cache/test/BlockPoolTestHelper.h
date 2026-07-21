@@ -2,8 +2,12 @@
 
 #include <cstdint>
 #include <numeric>
+#include <string>
+#include <vector>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -58,20 +62,22 @@ inline KVCacheSpecPtr createTestKvCacheSpec(uint32_t          layer_num,
     }
 }
 
-inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes = 512,
-                                        size_t            v_block_stride_bytes = 512,
-                                        size_t            k_scale_stride_bytes = 0,
-                                        size_t            v_scale_stride_bytes = 0,
-                                        rtp_llm::DataType dtype                = rtp_llm::DataType::TYPE_FP16,
-                                        uint32_t          local_head_num_kv    = 1,
-                                        uint32_t          seq_size_per_block   = 1) {
+inline DeviceBlockPoolConfig createTestConfig(size_t            k_block_stride_bytes = 512,
+                                              size_t            v_block_stride_bytes = 512,
+                                              size_t            k_scale_stride_bytes = 0,
+                                              size_t            v_scale_stride_bytes = 0,
+                                              DataType          dtype = DataType::TYPE_FP16,
+                                              uint32_t          local_head_num_kv = 1,
+                                              uint32_t          seq_size_per_block = 1) {
     constexpr uint32_t kLayerNum = 4;
     constexpr uint32_t kBlockNum = 10;
-
-    auto spec = createTestKvCacheSpec(
-        kLayerNum, dtype, local_head_num_kv, seq_size_per_block, k_block_stride_bytes, v_block_stride_bytes);
-
-    rtp_llm::CacheConfig cache_config;
+    auto spec = createTestKvCacheSpec(kLayerNum,
+                                      dtype,
+                                      local_head_num_kv,
+                                      seq_size_per_block,
+                                      k_block_stride_bytes,
+                                      v_block_stride_bytes);
+    CacheConfig cache_config;
     cache_config.layer_num             = kLayerNum;
     cache_config.layer_all_num         = kLayerNum;
     cache_config.block_num             = kBlockNum;
@@ -79,12 +85,10 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
     cache_config.seq_size_per_block    = seq_size_per_block;
     cache_config.kv_block_stride_bytes = k_block_stride_bytes + v_block_stride_bytes;
     cache_config.kv_scale_stride_bytes = k_scale_stride_bytes + v_scale_stride_bytes;
-
     std::vector<int> layer_ids(kLayerNum);
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
-
-    return BlockPoolConfigHelper::createConfig(cache_config);
+    return DeviceBlockPoolConfigHelper::createConfig(cache_config);
 }
 
 inline void createDevice() {
@@ -95,11 +99,29 @@ inline void createDevice() {
                          rtp_llm::MlaOpsType::AUTO);
 }
 
-BlockPoolPtr createBlockPool() {
+// Build the DeviceBlockPool from the same test config, for the KVCacheGroup / allocator
+// tests (single-count incRef/decRef pool).
+inline DeviceBlockPoolPtr createDeviceBlockPool() {
     createDevice();
-    auto config     = createTestConfig();
-    auto block_pool = std::make_shared<BlockPool>(config);
-    return block_pool;
+    auto device_config                     = std::make_shared<DeviceBlockPoolConfig>(createTestConfig());
+    device_config->use_cuda_malloc_backing = false;
+    std::shared_ptr<const DeviceBlockPoolConfig> const_config = device_config;
+    return std::make_shared<DeviceBlockPool>(const_config);
+}
+
+inline std::vector<Component> makeUnitLayerComponents(size_t count, int group_id = 0) {
+    std::vector<Component> components;
+    components.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        Component component;
+        component.component_id       = static_cast<int>(i);
+        component.component_group_id = group_id;
+        component.tag                = "component_" + std::to_string(i);
+        component.model_layer_ids    = {0};
+        component.layer_bytes        = {1};
+        components.push_back(std::move(component));
+    }
+    return components;
 }
 
 }  // namespace rtp_llm

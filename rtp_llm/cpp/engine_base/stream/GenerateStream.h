@@ -207,6 +207,8 @@ public:
     int     remoteReuseLength() const;
     void    setMemoryReuseLength(int length);
     int     memoryReuseLength() const;
+    void    setDiskReuseLength(int length);
+    int     diskReuseLength() const;
     void    setInitialReuseLength(int initial_reuse_length);
     void    incLastOutputPos();
     void    setPrefillReuseLength(int64_t total, int64_t local, int64_t remote, int64_t memory);
@@ -706,6 +708,7 @@ protected:
     int                                   device_reuse_length_  = 0;
     int                                   remote_reuse_length_  = 0;
     int                                   memory_reuse_length_  = 0;
+    int                                   disk_reuse_length_    = 0;
     int                                   reuse_mm_length_      = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;

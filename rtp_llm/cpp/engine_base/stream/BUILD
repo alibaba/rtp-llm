@@ -60,7 +60,6 @@ cc_library(
         "@havenask//aios/autil:synchronized_queue",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/utils:linear_blocks_util",
-        "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
     ],
     visibility = ["//visibility:public"],
 )

@@ -81,6 +81,9 @@ CacheConfig HybridConfigCreator::initializeConfig(const ModelConfig&      model_
 KVCacheSpecPtr HybridConfigCreator::getSpecFromLayers(const LayerKVCacheSpecs& runtime_specs,
                                                       const std::vector<int>&  layer_ids,
                                                       const char*              spec_role) {
+    if (layer_ids.empty()) {
+        return nullptr;
+    }
     KVCacheSpecPtr result;
     std::string    fingerprint;
     for (int layer_id : layer_ids) {
@@ -100,16 +103,15 @@ KVCacheSpecPtr HybridConfigCreator::getSpecFromLayers(const LayerKVCacheSpecs& r
             result      = spec;
             fingerprint = spec->fingerprint();
         } else {
-            RTP_LLM_CHECK_WITH_INFO(fingerprint == spec->fingerprint(),
-                                    "%s layers have different kv_cache spec fingerprints",
-                                    spec_role);
+            RTP_LLM_CHECK_WITH_INFO(
+                fingerprint == spec->fingerprint(), "%s layers have different kv_cache spec fingerprints", spec_role);
         }
     }
     RTP_LLM_CHECK_WITH_INFO(result != nullptr, "no %s layers found", spec_role);
     return result->clone();
 }
 
-void HybridConfigCreator::prepareFullAttentionSpec(KVCacheSpecPtr            spec,
+void HybridConfigCreator::prepareFullAttentionSpec(KVCacheSpecPtr           spec,
                                                    const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,
                                                    rtp_llm::DataType        dtype,
@@ -136,7 +138,7 @@ void HybridConfigCreator::prepareFullAttentionSpec(KVCacheSpecPtr            spe
     spec->dtype = dtype;
 }
 
-void HybridConfigCreator::prepareLinearAttentionSpec(KVCacheSpecPtr            spec,
+void HybridConfigCreator::prepareLinearAttentionSpec(KVCacheSpecPtr           spec,
                                                      const ModelConfig&       model_config,
                                                      const ParallelismConfig& parallelism_config,
                                                      rtp_llm::DataType        dtype,
@@ -160,7 +162,7 @@ void HybridConfigCreator::prepareLinearAttentionSpec(KVCacheSpecPtr            s
 
     // local_num_k_heads, local_num_v_heads, and local_head_num_kv depend on TP
     // and cannot be provided by Python-side spec.
-    const int tp = std::max(1, static_cast<int>(parallelism_config.get_attn_tp_size()));
+    const int tp                   = std::max(1, static_cast<int>(parallelism_config.get_attn_tp_size()));
     linear_spec->local_num_k_heads = static_cast<uint32_t>(linear_config.linear_num_key_heads / tp);
     linear_spec->local_num_v_heads = static_cast<uint32_t>(linear_config.linear_num_value_heads / tp);
     RTP_LLM_CHECK_WITH_INFO(linear_spec->local_num_k_heads > 0 && linear_spec->local_num_v_heads > 0,
@@ -168,11 +170,11 @@ void HybridConfigCreator::prepareLinearAttentionSpec(KVCacheSpecPtr            s
                             linear_spec->local_num_k_heads,
                             linear_spec->local_num_v_heads,
                             tp);
-    spec->local_head_num_kv = static_cast<uint32_t>(std::max(
-        1,
-        (linear_config.linear_num_value_heads > 1) ?
-            static_cast<int>(linear_config.linear_num_value_heads / parallelism_config.get_attn_tp_size()) :
-            static_cast<int>(linear_config.linear_num_value_heads)));
+    spec->local_head_num_kv = static_cast<uint32_t>(
+        std::max(1,
+                 (linear_config.linear_num_value_heads > 1) ?
+                     static_cast<int>(linear_config.linear_num_value_heads / parallelism_config.get_attn_tp_size()) :
+                     static_cast<int>(linear_config.linear_num_value_heads)));
     // dtype depends on runtime quantization config and cannot be provided by Python-side spec.
     spec->dtype = dtype;
     // seq_size_per_block, head_k_dim, head_v_dim, conv_kernel_dim,
@@ -227,18 +229,23 @@ void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
                                              const KVCacheSpecPtr& full_spec,
                                              const KVCacheSpecPtr& linear_spec) {
     // Decide the physical KV block/scale sizes by taking max between full and linear specs.
-    const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
-    const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();
+    // Either spec may be nullptr when the model has no layers of that type.
+    RTP_LLM_CHECK_WITH_INFO(full_spec || linear_spec, "both full_spec and linear_spec are null");
+    const size_t full_kv_block_stride_bytes   = full_spec ? full_spec->block_size_bytes() : 0;
+    const size_t linear_kv_block_stride_bytes = linear_spec ? linear_spec->block_size_bytes() : 0;
 
     // now we only support that linear attention block have padding
-    RTP_LLM_CHECK_WITH_INFO(full_kv_block_stride_bytes >= linear_kv_block_stride_bytes,
-                            "not support full attention with padding now");
+    if (full_spec && linear_spec) {
+        RTP_LLM_CHECK_WITH_INFO(full_kv_block_stride_bytes >= linear_kv_block_stride_bytes,
+                                "not support full attention with padding now");
+    }
 
-    config.kv_block_stride_bytes = full_kv_block_stride_bytes;
+    config.kv_block_stride_bytes = std::max(full_kv_block_stride_bytes, linear_kv_block_stride_bytes);
     config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    config.kv_scale_stride_bytes =
+        full_spec ? full_spec->scale_block_size_bytes() : (linear_spec ? linear_spec->scale_block_size_bytes() : 0);
+    config.kv_scale_size_bytes = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
+    config.block_size_bytes    = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 }
 
 CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       model_config,
@@ -247,13 +254,13 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
                                                     bool                     is_mtp,
                                                     int                      gen_num_per_cycle) {
     (void)is_mtp;
-    auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
-    const auto physical_tokens_per_block =
-        kv_cache_config.seq_size_per_block > 0 ? static_cast<uint32_t>(kv_cache_config.seq_size_per_block) :
-                                                 static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-    const auto kernel_tokens_per_block =
-        kv_cache_config.kernel_seq_size_per_block > 0 ? static_cast<uint32_t>(kv_cache_config.kernel_seq_size_per_block) :
-                                                        physical_tokens_per_block;
+    auto       dtype                     = MemoryEvaluationHelper::getDataTypeForCache(model_config);
+    const auto physical_tokens_per_block = kv_cache_config.seq_size_per_block > 0 ?
+                                               static_cast<uint32_t>(kv_cache_config.seq_size_per_block) :
+                                               static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    const auto kernel_tokens_per_block   = kv_cache_config.kernel_seq_size_per_block > 0 ?
+                                               static_cast<uint32_t>(kv_cache_config.kernel_seq_size_per_block) :
+                                               physical_tokens_per_block;
     RTP_LLM_CHECK_WITH_INFO(physical_tokens_per_block > 0, "hybrid seq_size_per_block must be > 0");
     RTP_LLM_CHECK_WITH_INFO(kernel_tokens_per_block > 0, "hybrid kernel_seq_size_per_block must be > 0");
     SpecBuildContext ctx;
@@ -269,8 +276,8 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
     auto [linear_layers, full_layers] = HybridConfigCreator::splitLayersByAttentionType(model_config);
 
     // Initialize config
-    CacheConfig config = HybridConfigCreator::initializeConfig(model_config, linear_layers, full_layers, dtype);
-    config.seq_size_per_block        = physical_tokens_per_block;
+    CacheConfig config        = HybridConfigCreator::initializeConfig(model_config, linear_layers, full_layers, dtype);
+    config.seq_size_per_block = physical_tokens_per_block;
     config.kernel_seq_size_per_block = kernel_tokens_per_block;
 
     auto full_spec   = HybridConfigCreator::getSpecFromLayers(runtime_specs, full_layers, "full attention");
@@ -282,10 +289,14 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
         HybridConfigCreator::createLayerGroups(linear_layers, full_layers, group_layer_num);
     config.group_layer_num = group_layer_num;
 
-    HybridConfigCreator::prepareFullAttentionSpec(
-        full_spec, model_config, parallelism_config, dtype, static_cast<uint32_t>(full_layers.size()));
-    HybridConfigCreator::prepareLinearAttentionSpec(
-        linear_spec, model_config, parallelism_config, dtype, static_cast<uint32_t>(linear_layers.size()));
+    if (full_spec) {
+        HybridConfigCreator::prepareFullAttentionSpec(
+            full_spec, model_config, parallelism_config, dtype, static_cast<uint32_t>(full_layers.size()));
+    }
+    if (linear_spec) {
+        HybridConfigCreator::prepareLinearAttentionSpec(
+            linear_spec, model_config, parallelism_config, dtype, static_cast<uint32_t>(linear_layers.size()));
+    }
 
     // Setup cache config specs
     HybridConfigCreator::setupCacheConfigSpecs(config, linear_groups, full_groups, linear_spec, full_spec);

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <atomic>
 #include <memory>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -29,6 +28,7 @@ public:
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
     absl::Status         initKVBlock(size_t reserve_step = 0);
+    absl::Status         waitForAllocatorLoad();
     // seq_len_override (-1 = unset) is forwarded to MallocInfo::incr_seq_len_override.
     absl::Status incrKVBlock(size_t reserve_step = 0, int seq_len_override = -1);
     void         fakeInitKVBlock(size_t reserved_blocks = 0);
@@ -44,8 +44,8 @@ public:
     // TODO, remove this after remove fallback
     int singleBatchNeedBlocks(int seq_len, int reserve_step) const;
 
-    int curBlocksNum() const;
-    int mallocFailedTimes() const;
+    int  curBlocksNum() const;
+    int  mallocFailedTimes() const;
     bool isContextStream() const;
 
     const BatchKVCacheResource& kvCache() const;
@@ -123,16 +123,6 @@ public:
     }
 
 private:
-    void loadCacheSync();
-    void waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context);
-    void updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context);
-    std::shared_ptr<AsyncContext> storeCacheAsync(const std::shared_ptr<BatchKVCacheResource>& batch_resource,
-                                                  bool                                         enable_memory_cache,
-                                                  bool                                         enable_remote_cache);
-    void                          evictDeviceCacheToMemory();
-    void                          waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context);
-
-private:
     GenerateStream*          stream_;
     BatchKVCacheResourcePtr  batch_kv_cache_resource_;
     ResourceContext          resource_context_;
@@ -143,15 +133,13 @@ private:
     int                           malloc_failed_times_   = 0;
     bool                          fake_inited_           = false;
     bool                          resource_released_     = false;
-    std::shared_ptr<AsyncContext> load_cache_context_;
-    int                           load_cache_retry_count_ = 0;
+    // BlockTree host/disk load-back is an allocator prerequisite and is not a
+    // connector read context. Keep it separate so connector-specific result
+    // decoding/retry logic never dynamic-casts it to FusedAsyncReadContext.
+    std::shared_ptr<AsyncContext> allocator_load_context_;
 
     // Connector reference counting for PD separation (RAII auto-release)
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;
-    /// Async connector load is gated to once per cache lifecycle: duplicate `initKVBlock` must
-    /// not re-issue async read (see tests). Reset in `releaseResource()` when blocks are cleared
-    /// so any future reuse of this resource can load again. Concurrent callers use `exchange`.
-    std::atomic<bool> load_cache_once_{false};
 };
 
 }  // namespace rtp_llm

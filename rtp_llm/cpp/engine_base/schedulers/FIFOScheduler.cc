@@ -201,8 +201,9 @@ void FIFOScheduler::accountBatchMetrics(const GenerateStreamPtr& new_stream) {
 
 bool FIFOScheduler::waitPredicate() {
     // Check streams directly without calling empty() which acquires lock_ (already held by schedule())
-    return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !loading_cache_streams_.empty()
-           || !running_streams_.empty();
+    // A pending load is not itself a wakeup event: treating it as one makes
+    // cond_.wait return immediately and spins a CPU until the async copy ends.
+    return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !running_streams_.empty();
 }
 
 // 通过 GenerateStateMachine 驱动每个 stream 的状态转移，状态变化的 stream 移入对应队列
@@ -362,7 +363,7 @@ void FIFOScheduler::addStreamToNewState(const GenerateStreamPtr& stream, StreamS
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
-    if (need_fill_fake_stream_) {
+    if (need_fill_fake_stream_ || !loading_cache_streams_.empty()) {
         cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
     } else {
         cond_.wait(lock, [this] { return waitPredicate(); });

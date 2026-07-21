@@ -123,8 +123,8 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   bool                     is_mtp,
                                                   int                      gen_num_per_cycle) {
     // Routing priority:
-    //   1. enable_independent_kv_cache_pools=true  → HybridPool (independent BlockPool per group)
-    //   2. enable_hybrid_attention=true             → HybridType  (shared BlockPool across groups)
+    //   1. enable_independent_kv_cache_pools=true  → HybridPool (independent DeviceBlockPool per group)
+    //   2. enable_hybrid_attention=true             → HybridType  (shared DeviceBlockPool across groups)
     //   3. else                                     → Single       (standard MHA/MLA path)
     if (model_config.hybrid_attention_config.enable_independent_kv_cache_pools) {
         return HybridPoolConfigCreator::createConfig(

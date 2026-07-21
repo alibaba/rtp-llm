@@ -639,7 +639,7 @@ TEST_F(PdSepKVCacheReleaseTest, testPrefillContextStopStream_ReleasesPDSepHold) 
     auto& resource = stream_->streamCacheResource();
     resource.holdKVCacheForPDSep();
     ASSERT_NE(resource.pd_kvcache_ref_, nullptr);
-    ASSERT_GT(cache_manager_->allocator_->connectorRefBlocksNum(), 0);
+    ASSERT_GT(cache_manager_->allocator_->activeTreeCachedBlocksNum(), 0u);
 
     RemoteServerResource remote_resource;
     remote_resource.workers     = {"local"};
@@ -659,7 +659,7 @@ TEST_F(PdSepKVCacheReleaseTest, testPrefillContextStopStream_ReleasesPDSepHold) 
     }
 
     EXPECT_EQ(resource.pd_kvcache_ref_, nullptr);
-    EXPECT_EQ(cache_manager_->allocator_->connectorRefBlocksNum(), 0);
+    EXPECT_EQ(cache_manager_->allocator_->activeTreeCachedBlocksNum(), 0u);
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDeviceCache) {

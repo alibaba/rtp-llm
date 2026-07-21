@@ -5,7 +5,7 @@
 #include <torch/torch.h>
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/utils/Exception.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -112,7 +112,7 @@ protected:
         cache_config.kv_block_stride_bytes = spec->block_size_bytes();
         initializeSingleGroup(cache_config, spec);
 
-        auto pool_cfg   = BlockPoolConfigHelper::createConfig(cache_config);
+        auto pool_cfg   = DeviceBlockPoolConfigHelper::createConfig(cache_config);
         auto layout_cfg = pool_cfg.memory_layouts[0];
 
         layout_cfg.enable_kv_scale          = false;
@@ -208,7 +208,7 @@ TEST_F(MemoryLayoutStrategyTest, InitializationWithScaleTensor) {
     cache_config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
     initializeSingleGroup(cache_config, spec);
 
-    auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
+    auto pool_cfg = DeviceBlockPoolConfigHelper::createConfig(cache_config);
     auto config   = pool_cfg.memory_layouts[0];  // keep enable_kv_scale=true
 
     auto  kv_cache_tensor = torch::zeros({static_cast<int64_t>(config.kv_block_pool_size_bytes)}, torch::kInt8);
@@ -372,7 +372,7 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadFp16UsesBy
     cache_config.kv_block_stride_bytes = spec->block_size_bytes();
     initializeSingleGroup(cache_config, spec);
 
-    auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
+    auto pool_cfg = DeviceBlockPoolConfigHelper::createConfig(cache_config);
     auto config   = pool_cfg.memory_layouts[0];
 
     auto options = torch::TensorOptions().dtype(torch::kInt8).device(torch::kCPU);
@@ -444,7 +444,7 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadWithScale)
     cache_config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
     initializeSingleGroup(cache_config, spec);
 
-    auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
+    auto pool_cfg = DeviceBlockPoolConfigHelper::createConfig(cache_config);
     auto config   = pool_cfg.memory_layouts[0];  // keep enable_kv_scale=true
 
     auto options = torch::TensorOptions().dtype(torch::kInt8).device(torch::kCPU);

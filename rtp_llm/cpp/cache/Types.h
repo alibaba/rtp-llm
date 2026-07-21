@@ -16,6 +16,8 @@ namespace rtp_llm {
 class CompleteTokenIds;
 using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;
 
+class AsyncContext;
+
 typedef int32_t          GroupIdType;
 typedef std::vector<int> LayerIdsType;
 
@@ -37,12 +39,6 @@ struct BlockIdPair {
     BlockIdxType dst;
 };
 
-struct MatchResult {
-    size_t           reuse_length = 0;
-    size_t           reuse_blocks = 0;
-    BlockIndicesType block_indices;
-};
-
 // for p2p connector when TP settings of prefill & decode are different.
 struct KVPartitionBytes {
     size_t k_off = 0;
@@ -52,12 +48,12 @@ struct KVPartitionBytes {
 };
 
 struct MallocInfo {
-    BatchKVCacheResourcePtr       batch_kv_cache_resource;
-    CompleteTokenIdsPtr           complete_token_ids;
-    int64_t                       request_id          = 0;
-    bool                          verbose             = true;  // for failed log
-    bool                          reuse_cache         = true;
-    bool                          enable_device_cache = true;
+    BatchKVCacheResourcePtr batch_kv_cache_resource;
+    CompleteTokenIdsPtr     complete_token_ids;
+    int64_t                 request_id          = 0;
+    bool                    verbose             = true;  // for failed log
+    bool                    reuse_cache         = true;
+    bool                    enable_device_cache = true;
     // Sparse tail-group cleanup is only valid for incremental allocation.
     // Prefill init keeps reused prefix slots intact because model-path kernels
     // still read them by prefix_length.
@@ -74,6 +70,14 @@ struct MallocResult {
     int  reuse_len;
 
     int64_t match_cost_time_us = 0;
+
+    // Async load_back context produced when the allocator commits the deferred
+    // load_back (see LoadBackTicket); nullptr when no load_back was triggered
+    // (device cache disabled, no host/disk hit, or the ticket was aborted).
+    std::shared_ptr<AsyncContext> async_context = nullptr;
+
+    int memory_reuse_len = 0;
+    int disk_reuse_len   = 0;
 };
 
 struct FreeInfo {
@@ -84,9 +88,9 @@ struct FreeInfo {
 };
 
 struct InsertInfo {
-    BatchKVCacheResourcePtr       batch_kv_cache_resource;
-    CompleteTokenIdsPtr           complete_token_ids;
-    bool                          is_resident;
+    BatchKVCacheResourcePtr batch_kv_cache_resource;
+    CompleteTokenIdsPtr     complete_token_ids;
+    bool                    is_resident;
 };
 
 }  // namespace rtp_llm

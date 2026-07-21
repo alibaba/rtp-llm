@@ -15,6 +15,8 @@ namespace rtp_llm {
 absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPromptConstructor::construct(
     const KVCacheConfig& kv_cache_config, EngineBase* engine, KVCacheManager* cache_manager, bool insert_kv_cache) {
     std::unordered_map<std::string, SystemPromptParams> multi_task_prompt_args;
+    std::vector<std::shared_ptr<GenerateStream>>        prepared_streams;
+    prepared_streams.reserve(kv_cache_config.multi_task_prompt_tokens.size());
     for (const auto& item : kv_cache_config.multi_task_prompt_tokens) {
         const auto& task_id   = item.first;
         const auto& tokens_id = item.second;
@@ -26,8 +28,6 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
         generate_input->input_ids =
             torch::from_blob(const_cast<int*>(tokens_id.data()), {(int64_t)tokens_id.size()}, torch::kInt32).clone();
         generate_input->generate_config = generate_config;
-        // TODO(chanyin): last partial block will be wasted when need_release_resource is false
-        generate_input->need_release_resource = false;
 
         CHECK_AND_RETURN_REF(stream, engine->preRun(generate_input, preRunMode::build_system_prompt));
 
@@ -42,6 +42,13 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
             };
             cache_manager->insertIntoCache(insert_info);
             multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, blocks);
+        }
+        prepared_streams.push_back(std::move(stream));
+    }
+
+    if (insert_kv_cache) {
+        for (const auto& stream : prepared_streams) {
+            stream->setNeedReleaseResource(false);
         }
     }
     return multi_task_prompt_args;
