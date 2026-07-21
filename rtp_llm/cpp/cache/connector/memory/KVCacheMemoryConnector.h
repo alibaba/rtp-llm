@@ -28,6 +28,7 @@ class BlockPool;
 class BroadcastManager;
 class KVCacheAllocator;
 class MemoryAsyncContext;
+struct StagedMemoryCopyScratch;
 
 class KVCacheMemoryConnector: public KVCacheConnector {
 public:
@@ -143,17 +144,25 @@ private:
          sendMemoryRequest(const MemoryOperationRequestPB& mem_req, int64_t timeout_ms) const;
     void printCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const;
 
-    bool prepareCopyBuffers(BlockIdxType                     mem_block,
-                            const std::vector<BlockIdxType>& gpu_blocks,
-                            CopyDirection                    direction,
-                            bool                             is_complete,
-                            std::vector<torch::Tensor>&      dst,
-                            std::vector<torch::Tensor>&      src);
-    bool prepareLayerCopyBuffers(BlockIdxType                     mem_block,
-                                 const std::vector<BlockIdxType>& gpu_blocks,
-                                 CopyDirection                    direction,
-                                 std::vector<torch::Tensor>&      dst,
-                                 std::vector<torch::Tensor>&      src);
+    bool                                     prepareCopyBuffers(BlockIdxType                     mem_block,
+                                                                const std::vector<BlockIdxType>& gpu_blocks,
+                                                                CopyDirection                    direction,
+                                                                bool                             is_complete,
+                                                                std::vector<torch::Tensor>&      dst,
+                                                                std::vector<torch::Tensor>&      src);
+    bool                                     prepareLayerCopyBuffers(BlockIdxType                     mem_block,
+                                                                     const std::vector<BlockIdxType>& gpu_blocks,
+                                                                     CopyDirection                    direction,
+                                                                     std::vector<torch::Tensor>&      dst,
+                                                                     std::vector<torch::Tensor>&      src);
+    bool                                     tryCopyCacheWithBatchedMemoryCopy(const NormalizedCopyItems&       items,
+                                                                               CopyDirection                    direction,
+                                                                               const std::vector<LayerTagSlot>& slots);
+    bool                                     tryCopyCacheWithStagedMemoryCopy(const NormalizedCopyItems&       items,
+                                                                              CopyDirection                    direction,
+                                                                              const std::vector<LayerTagSlot>& slots);
+    std::unique_ptr<StagedMemoryCopyScratch> acquireStagedCopyScratchForDevice(int device_index);
+    void recycleStagedCopyScratchForDevice(int device_index, std::unique_ptr<StagedMemoryCopyScratch> scratch);
     bool appendCopyBytesToBuffers(const BlockInfo&            mem_block,
                                   const BlockInfo&            gpu_block,
                                   size_t                      byte_off,
@@ -298,15 +307,17 @@ private:
     std::shared_ptr<KVCacheAllocator> allocator_;
     const std::vector<std::string>    tp_addrs_;
 
-    std::shared_ptr<BlockPool>                  block_pool_;
-    mutable std::mutex                          malloc_mutex_;
-    std::shared_ptr<MemoryDiskBlockCache>       block_cache_;
-    std::shared_ptr<PrefixTreeMemoryBlockCache> prefix_block_cache_;
-    std::unique_ptr<DiskMountGuard>             disk_mount_guard_;
-    std::shared_ptr<DiskBlockPool>              complete_disk_pool_;
-    std::shared_ptr<DiskBlockPool>              incomplete_disk_pool_;
-    std::shared_ptr<BroadcastManager>           broadcast_manager_;
-    std::shared_ptr<autil::LockFreeThreadPool>  wait_done_thread_pool_;
+    std::shared_ptr<BlockPool>                                           block_pool_;
+    mutable std::mutex                                                   malloc_mutex_;
+    mutable std::mutex                                                   staged_copy_scratch_mutex_;
+    std::map<int, std::vector<std::unique_ptr<StagedMemoryCopyScratch>>> staged_copy_scratch_by_device_;
+    std::shared_ptr<MemoryDiskBlockCache>                                block_cache_;
+    std::shared_ptr<PrefixTreeMemoryBlockCache>                          prefix_block_cache_;
+    std::unique_ptr<DiskMountGuard>                                      disk_mount_guard_;
+    std::shared_ptr<DiskBlockPool>                                       complete_disk_pool_;
+    std::shared_ptr<DiskBlockPool>                                       incomplete_disk_pool_;
+    std::shared_ptr<BroadcastManager>                                    broadcast_manager_;
+    std::shared_ptr<autil::LockFreeThreadPool>                           wait_done_thread_pool_;
 
     std::shared_ptr<BlockPool> complete_pool_;
     std::shared_ptr<BlockPool> incomplete_pool_;
