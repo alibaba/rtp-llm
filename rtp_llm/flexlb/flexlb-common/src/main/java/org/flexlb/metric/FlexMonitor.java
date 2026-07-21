@@ -64,20 +64,6 @@ public interface FlexMonitor extends AutoCloseable {
         // No-op by default.
     }
 
-    /**
-     * Acquire ownership of all metrics carrying the supplied endpoint identity tags.
-     * The last closed lease allows the implementation to retire those metrics after
-     * {@code retirementGraceMs}. Implementations without dynamic metric storage may
-     * keep the default no-op lease.
-     *
-     * @param endpointTags endpoint identity tags (role, engineIp, engineIpPort)
-     * @param retirementGraceMs time allowed for in-flight callbacks to finish
-     * @return an idempotent ownership lease
-     */
-    default MetricLease acquireEndpointScope(FlexMetricTags endpointTags, long retirementGraceMs) {
-        return MetricLease.noop();
-    }
-
     @Override
     default void close() {
         // No-op by default.
