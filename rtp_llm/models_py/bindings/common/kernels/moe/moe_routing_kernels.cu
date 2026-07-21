@@ -25,12 +25,25 @@
 #include "3rdparty/cub/util_type.cuh"
 #endif
 
+#if !defined(__HIP_PLATFORM_AMD__) && defined(CUB_VERSION) && CUB_VERSION >= 300000
+#include <cuda/functional>
+#include <cuda/std/functional>
+#endif
+
 using namespace tensorrt_llm::kernels;
 using namespace tensorrt_llm::common;
 
 namespace tensorrt_llm::kernels {
 
 static constexpr int WARP_SIZE = 32;
+
+#if !defined(__HIP_PLATFORM_AMD__) && defined(CUB_VERSION) && CUB_VERSION >= 300000
+using SumReduceOp = cuda::std::plus<>;
+using MaxReduceOp = cuda::maximum<>;
+#else
+using SumReduceOp = cub::Sum;
+using MaxReduceOp = cub::Max;
+#endif
 
 // ====================== Softmax ======================
 
@@ -46,8 +59,8 @@ __launch_bounds__(TPB) __global__
     int64_t const bidx              = blockIdx.x;
     int64_t const thread_row_offset = bidx * num_cols;
 
-    cub::Sum sum;
-    float    threadData(-FLT_MAX);
+    SumReduceOp sum;
+    float       threadData(-FLT_MAX);
 
     if ((finished != nullptr) && finished[bidx]) {
         return;
@@ -58,7 +71,7 @@ __launch_bounds__(TPB) __global__
         threadData        = max(input[idx], threadData);
     }
 
-    float const maxElem = BlockReduce(tmpStorage).Reduce(threadData, cub::Max());
+    float const maxElem = BlockReduce(tmpStorage).Reduce(threadData, MaxReduceOp{});
     if (tidx == 0) {
         float_max = maxElem;
     }
