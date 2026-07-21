@@ -128,6 +128,84 @@ public class FlexlbConfig {
      */
     private int nettyWorkerThreadMultiplier = 2;
 
+    // ========== V1-α DP Batching Configuration ==========
+
+    /**
+     * Master-side DP batching switch. When enabled, RouteService bypasses the global
+     * QueueManager for DP-capable models and routes through DpBatchScheduler instead.
+     * Default off — old code path preserved.
+     */
+    private boolean dpBalanceEnabled = false;
+
+    /**
+     * Max requests per Prefill.Enqueue batch. 0 = auto-pick worker.dpSize so one batch
+     * fills exactly one DP cycle. Only effective when dpBalanceEnabled=true.
+     */
+    private int dpBatchSizeMax = 0;
+
+    /**
+     * Batch window (ms). First request entering an empty global batcher starts the
+     * timer; timeout flushes whatever has accumulated. Pick around one prefill step
+     * duration.
+     */
+    private long dpBatchWindowMs = 30;
+
+    /**
+     * Per-request max wait (ms). Any single request waiting longer than this triggers
+     * an immediate flush regardless of batch fill — protects low-QPS scenarios from
+     * being permanently stalled by the DP barrier.
+     */
+    private long dpBatchTimeoutMs = 100;
+
+    /**
+     * dp_rank assignment strategy within a single batch. V1 only supports "RR"
+     * (positional, the i-th request goes to slot {@code i % dpSize}). Cross-batch
+     * fairness lives one level up in {@link #dpGroupSelector}, since each batch
+     * is dispatched as a unit to one DP group.
+     * V2 plans to add "LPT" / "CACHE_AWARE_LPT" for length-aware bin packing.
+     */
+    private String dpAssignStrategy = "RR";
+
+    /**
+     * TTFT SLO target (ms). Used by the SLO-aware batch flush trigger to compute
+     * how long a request can wait before its TTFT budget is consumed.
+     */
+    private long dpTtftSloMs = 500;
+
+    /**
+     * Safety margin subtracted from the SLO slack when computing the batch
+     * deadline (ms). Guards against estimation inaccuracy.
+     */
+    private long dpSafeMarginMs = 50;
+
+    /**
+     * Minimum batch interval (ms). Even when estimated TTFT leaves plenty of
+     * slack, never batch faster than this to avoid thrashing.
+     */
+    private long dpMinBatchIntervalMs = 10;
+
+    /**
+     * Maximum batch interval (ms). Even when estimated TTFT is tight, never
+     * wait longer than this for a batch to fill.
+     */
+    private long dpMaxBatchIntervalMs = 100;
+
+    /**
+     * Bucket interval in tokens for grouping requests by compute_token_length.
+     * Requests with similar effective compute land in the same bucket, producing
+     * homogeneous batches that waste less time at the DP barrier.
+     * 0 = disable bucketing (all requests share one bucket).
+     */
+    private int dpBucketIntervalTokens = 0;
+
+    /**
+     * Plug-point name for the {@code GroupSelector} consulted by
+     * {@code DefaultDispatchPlanner} once per drained batch.
+     * Selects the best DP group via cache-aware scoring; falls back to
+     * round-robin when no cache keys are present.
+     */
+    private String dpGroupSelector = "CACHE_AWARE";
+
     /**
      * Get load balancing strategy for a role type
      * This method handles the logic of selecting the appropriate strategy based on role type and configuration
