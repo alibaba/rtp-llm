@@ -170,9 +170,22 @@ class BackendManager(object):
         if self.engine is not None:
             from rtp_llm.utils.fuser import _nfs_manager
 
-            _nfs_manager.unmount_all()
-            logging.info("all nfs paths unmounted")
-            self.engine.stop()
+            engine_stop_error = None
+            try:
+                self.engine.stop()
+            except Exception as e:
+                engine_stop_error = e
+                logging.exception("engine stop failed during backend shutdown")
+            finally:
+                try:
+                    _nfs_manager.unmount_all()
+                    logging.info("all nfs paths unmounted")
+                except Exception:
+                    logging.exception("nfs unmount failed during backend shutdown")
+                    if engine_stop_error is None:
+                        raise
+            if engine_stop_error is not None:
+                raise engine_stop_error
 
     def ready(self):
         if self.engine is not None:
