@@ -13,7 +13,6 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
-import org.flexlb.metric.MetricLease;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,29 +52,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public PrefillEndpoint(WorkerStatus status, FlexlbConfig config,
                            BatchDecisionHandler handler,
                            BatchSchedulerReporter reporter) {
-        this(status, config, handler, reporter, MetricLease.noop(), true);
-    }
-
-    PrefillEndpoint(WorkerStatus status, FlexlbConfig config,
-                    BatchDecisionHandler handler,
-                    BatchSchedulerReporter reporter,
-                    MetricLease metricLease) {
-        this(status, config, handler, reporter, metricLease, true);
+        this(status, config, handler, reporter, true);
     }
 
     PrefillEndpoint(WorkerStatus status, FlexlbConfig config,
                     BatchDecisionHandler handler,
                     BatchSchedulerReporter reporter,
                     boolean startBatcher) {
-        this(status, config, handler, reporter, MetricLease.noop(), startBatcher);
-    }
-
-    PrefillEndpoint(WorkerStatus status, FlexlbConfig config,
-                    BatchDecisionHandler handler,
-                    BatchSchedulerReporter reporter,
-                    MetricLease metricLease,
-                    boolean startBatcher) {
-        super(status, metricLease);
+        super(status);
         this.reporter = reporter;
         this.predictor = createPredictor(config);
         this.batcher = createBatcher(config, handler, reporter);
