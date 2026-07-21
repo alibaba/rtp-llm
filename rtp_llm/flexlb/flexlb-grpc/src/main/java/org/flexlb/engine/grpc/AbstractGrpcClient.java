@@ -166,7 +166,15 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
     protected Invoker getInvoker(String channelKey) {
         Invoker invoker = channelPool.get(channelKey);
         if (invoker == null) {
-            Logger.warn("ip:{} grpc channel not found, channelPool:{}", channelKey, channelPool);
+            // Log a compact summary only; the full pool dump (several KB per line)
+            // caused log flooding, so it is downgraded to DEBUG.
+            String ip = channelKey.split(":")[0];
+            List<String> sameIpKeys = channelPool.keySet().stream()
+                    .filter(k -> k.startsWith(ip + ":"))
+                    .toList();
+            Logger.warn("grpc channel not found, key:{}, pool size:{}, existing keys for ip {}:{}",
+                    channelKey, channelPool.size(), ip, sameIpKeys);
+            Logger.debug("channelPool full dump: {}", channelPool);
         }
         return invoker;
     }
