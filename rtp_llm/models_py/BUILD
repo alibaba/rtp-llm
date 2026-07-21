@@ -124,6 +124,8 @@ py_library(
     ] + glob([
         "layers/*.py",
         "new_models/*.py",
+        "new_models/qwen2/*.py",
+        "new_models/qwen2_moe/*.py",
         "new_models/qwen3/*.py",
         "new_models/qwen3_moe/*.py",
         "quant_methods/*.py",
