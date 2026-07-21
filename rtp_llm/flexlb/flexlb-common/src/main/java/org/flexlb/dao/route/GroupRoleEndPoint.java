@@ -66,7 +66,7 @@ public class GroupRoleEndPoint {
         return endpoints;
     }
 
-    Endpoint getRoleEndpoint(RoleType roleType) {
+    public Endpoint getRoleEndpoint(RoleType roleType) {
         if (roleType == RoleType.PREFILL) {
             return prefillEndpoint;
         } else if (roleType == RoleType.DECODE) {

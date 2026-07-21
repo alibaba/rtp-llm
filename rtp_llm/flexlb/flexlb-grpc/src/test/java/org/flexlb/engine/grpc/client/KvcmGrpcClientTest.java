@@ -25,6 +25,7 @@ import org.flexlb.kvcm.grpc.GetHostCacheStateResponse;
 import org.flexlb.kvcm.grpc.HostCacheMatch;
 import org.flexlb.kvcm.grpc.MetaNodeEndpoint;
 import org.flexlb.kvcm.grpc.MetaServiceGrpc;
+import org.flexlb.kvcm.grpc.QueryType;
 import org.flexlb.kvcm.grpc.Status;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -40,6 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.when;
 
 class KvcmGrpcClientTest {
@@ -48,9 +50,13 @@ class KvcmGrpcClientTest {
     private Server seedServer;
     private Server leaderServer;
     private KvcmGrpcClient client;
+    private KvcmQueryTypeResolver queryTypeResolver;
 
     @BeforeEach
     void setUp() throws IOException {
+        queryTypeResolver = Mockito.mock(KvcmQueryTypeResolver.class);
+        when(queryTypeResolver.resolve(any(RoleType.class), nullable(String.class)))
+                .thenReturn(QueryType.QT_PREFIX_MATCH);
         leaderServer = ServerBuilder.forPort(0)
                 .addService(new LeaderMetaService(lastCacheRequest))
                 .build()
@@ -75,8 +81,7 @@ class KvcmGrpcClientTest {
     @Test
     void usesBootstrapPortThenLeaderRpcPortAndQueriesFirstDeploymentNamespace() throws Exception {
         RoutingServiceDiscovery serviceDiscovery = serviceDiscovery();
-        client = new KvcmGrpcClient(
-                modelMetaConfig(seedServer.getPort()), serviceDiscovery, channelFactory());
+        client = newClient(modelMetaConfig(seedServer.getPort()), serviceDiscovery);
 
         Map<String, Integer> matches = waitForMatches(RoleType.PDFUSION);
         Map<String, Integer> decodeMatches = waitForMatches(RoleType.DECODE);
@@ -85,6 +90,7 @@ class KvcmGrpcClientTest {
         assertEquals(2, decodeMatches.get("10.0.0.1:8601"));
         GetHostCacheStateRequest request = lastCacheRequest.get();
         assertEquals("deployment-first", request.getInstanceId());
+        assertEquals(QueryType.QT_PREFIX_MATCH, request.getQueryType());
         assertEquals(List.of(11L, 22L, 33L), request.getBlockCacheKeysList());
         assertEquals(0, request.getMediumCount());
         assertTrue(client.findMatchingEngines(
@@ -94,19 +100,18 @@ class KvcmGrpcClientTest {
     }
 
     @Test
-    void configuredNamespaceTakesPriorityAndSkipsWorkerMetadataDiscovery() throws Exception {
+    void configuredNamespaceTakesPriorityForCacheQuery() throws Exception {
         RoutingServiceDiscovery serviceDiscovery = serviceDiscovery();
-        client = new KvcmGrpcClient(
-                modelMetaConfig(seedServer.getPort(), "vllm-test-0"),
-                serviceDiscovery,
-                channelFactory());
+        when(queryTypeResolver.resolve(RoleType.PDFUSION, null))
+                .thenReturn(QueryType.QT_PREFIX_MATCH_WITH_MAMBA);
+        client = newClient(
+                modelMetaConfig(seedServer.getPort(), "vllm-test-0"), serviceDiscovery);
 
         Map<String, Integer> matches = waitForMatches(RoleType.PDFUSION, null);
 
         assertEquals(2, matches.get("10.0.0.1:8601"));
         assertEquals("vllm-test-0", lastCacheRequest.get().getInstanceId());
-        Mockito.verify(serviceDiscovery, Mockito.never()).getHosts(Mockito.argThat(
-                endpoint -> "v-workers".equals(endpoint.getAddress())));
+        assertEquals(QueryType.QT_PREFIX_MATCH_WITH_MAMBA, lastCacheRequest.get().getQueryType());
     }
 
     private Map<String, Integer> waitForMatches(RoleType roleType) throws InterruptedException {
@@ -125,6 +130,18 @@ class KvcmGrpcClientTest {
         }
         fail("KVCM client did not become ready before the test deadline");
         return Map.of();
+    }
+
+    private KvcmGrpcClient newClient(
+            ModelMetaConfig modelMetaConfig,
+            RoutingServiceDiscovery serviceDiscovery) {
+        KvcmMetaServiceClient metaServiceClient = new KvcmMetaServiceClient(channelFactory());
+        return new KvcmGrpcClient(
+                modelMetaConfig,
+                metaServiceClient,
+                new KvcmLeaderResolver(modelMetaConfig, serviceDiscovery, metaServiceClient),
+                new KvcmNamespaceResolver(modelMetaConfig, serviceDiscovery),
+                queryTypeResolver);
     }
 
     private ModelMetaConfig modelMetaConfig(int bootstrapPort) {

@@ -154,6 +154,19 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
                 ServiceType.WORKER_STATUS);
     }
 
+    public EngineRpcService.KvCacheGroupListPB getKvCacheGroupsMetadata(
+            String ip,
+            int port,
+            EngineRpcService.KvCacheGroupsRequestPB request,
+            long requestTimeoutMs) {
+        return executeGrpcCall(
+                ip,
+                port,
+                stub -> stub.rpcServiceStub().getKvCacheGroupsMetadata(request),
+                requestTimeoutMs,
+                ServiceType.KV_CACHE_GROUP_METADATA);
+    }
+
     public EngineRpcService.CacheStatusPB getCacheStatus(
             String ip,
             int port,
@@ -242,6 +255,7 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
 
     private enum ServiceType {
         WORKER_STATUS("worker", "GetWorkerStatus"),
+        KV_CACHE_GROUP_METADATA("kv_cache_group_metadata", "GetKvCacheGroupsMetadata"),
         CACHE_STATUS("cache", "GetCacheStatus"),
         MULTIMODAL_WORKER_STATUS("multimodal_worker", "GetWorkerStatus"),
         MULTIMODAL_CACHE_STATUS("multimodal_cache", "GetCacheStatus");

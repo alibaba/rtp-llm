@@ -57,11 +57,20 @@ message GetClusterInfoResponse {
   MetaNodeEndpoint leader_endpoint = 4;
 }
 
+enum QueryType {
+  QT_UNSPECIFIED = 0;
+  QT_BATCH_GET = 1;
+  QT_PREFIX_MATCH = 2;
+  QT_REVERSE_ROLL_SW_MATCH = 3;
+  QT_PREFIX_MATCH_WITH_MAMBA = 4;
+}
+
 message GetHostCacheStateRequest {
   string trace_id = 1;
   string instance_id = 2;
-  repeated int64 block_cache_keys = 3;
-  repeated string medium = 4;
+  QueryType query_type = 3;
+  repeated int64 block_cache_keys = 4;
+  repeated string medium = 5;
 }
 
 message HostCacheMatch {

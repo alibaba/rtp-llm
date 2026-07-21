@@ -40,7 +40,7 @@ class EngineGrpcClientTest {
         listener.getValue().onAddressUpdate(List.of("10.0.0.1:8080"));
         listener.getValue().onAddressUpdate(List.of("10.0.0.1:8080"));
 
-        verify(channelFactory, times(4)).create(new GrpcTarget("10.0.0.1", 8081));
+        verify(channelFactory, times(5)).create(new GrpcTarget("10.0.0.1", 8081));
 
         listener.getValue().onAddressUpdate(List.of());
         for (ManagedChannel channel : createdChannels) {
