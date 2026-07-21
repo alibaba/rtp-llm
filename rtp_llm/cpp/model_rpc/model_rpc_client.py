@@ -4,6 +4,7 @@ import logging
 from typing import AsyncGenerator
 
 import grpc
+import torch
 from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -175,6 +176,8 @@ def trans_input(input_py: GenerateInput):
         input_py.generate_config.return_cum_log_probs
     )
     generate_config_pb.return_all_probs = input_py.generate_config.return_all_probs
+    generate_config_pb.return_logprobs = input_py.generate_config.return_logprobs
+    generate_config_pb.top_logprobs = input_py.generate_config.top_logprobs
     generate_config_pb.return_softmax_probs = (
         input_py.generate_config.return_softmax_probs
     )
@@ -265,6 +268,14 @@ def trans_output(
     logits_index = input_py.generate_config.logits_index
     aux_info_flag = input_py.generate_config.aux_info
 
+    def trans_optional_compact_tensor(tensor_pb, dtype):
+        shape = list(tensor_pb.shape)
+        if not shape:
+            return None
+        if any(dim == 0 for dim in shape):
+            return torch.empty(shape, dtype=dtype)
+        return trans_tensor(tensor_pb)
+
     all_output_ids = (
         trans_tensor(output_pb.output_ids)
         if output_pb.HasField("output_ids")
@@ -306,6 +317,48 @@ def trans_output(
         and output_pb.all_probs.shape[0] > 0
         else None
     )
+    all_token_logprobs = (
+        trans_optional_compact_tensor(output_pb.token_logprobs, torch.float32)
+        if output_pb.HasField("token_logprobs")
+        else None
+    )
+    all_top_logprob_token_ids = (
+        trans_optional_compact_tensor(output_pb.top_logprob_token_ids, torch.int32)
+        if output_pb.HasField("top_logprob_token_ids")
+        else None
+    )
+    all_top_logprobs = (
+        trans_optional_compact_tensor(output_pb.top_logprobs, torch.float32)
+        if output_pb.HasField("top_logprobs")
+        else None
+    )
+
+    logprobs_offsets = list(output_pb.logprobs_offsets)
+    logprobs_counts = list(output_pb.logprobs_counts)
+    has_logprobs_placement = bool(logprobs_offsets or logprobs_counts)
+    if has_logprobs_placement:
+        if len(logprobs_offsets) != num_outputs or len(logprobs_counts) != num_outputs:
+            raise ValueError(
+                "logprobs_offsets/logprobs_counts must contain one value per output"
+            )
+
+    def compact_logprob_slice(tensor, output_index: int, count: int, name: str):
+        if tensor is None:
+            if count:
+                raise ValueError(f"{name} is missing for logprobs_count={count}")
+            return None
+        if tensor.dim() < 2 or tensor.shape[0] != num_outputs:
+            raise ValueError(
+                f"{name} must have a leading output dimension of {num_outputs}: "
+                f"got {tuple(tensor.shape)}"
+            )
+        output_tensor = tensor[output_index]
+        if output_tensor.shape[0] < count:
+            raise ValueError(
+                f"{name} has only {output_tensor.shape[0]} padded rows for "
+                f"logprobs_count={count}"
+            )
+        return output_tensor.narrow(0, 0, count)
 
     outputs_py = GenerateOutputs()
     input_token_ids = input_py.token_ids.reshape(1, -1)
@@ -379,6 +432,40 @@ def trans_output(
 
         if all_all_probs is not None:
             output_py.all_probs = all_all_probs[i]
+
+        if has_logprobs_placement:
+            logprobs_offset = int(logprobs_offsets[i])
+            logprobs_count = int(logprobs_counts[i])
+            if logprobs_offset < 0 or logprobs_count < 0:
+                raise ValueError("logprobs offset/count must be non-negative")
+            if all_output_ids is not None:
+                padded_output_token_count = int(all_output_ids[i].numel())
+                if logprobs_offset + logprobs_count > padded_output_token_count:
+                    raise ValueError(
+                        "compact logprobs placement exceeds the output_ids token span"
+                    )
+            output_py.logprobs_offset = logprobs_offset
+            output_py.logprobs_count = logprobs_count
+            output_py.token_logprobs = compact_logprob_slice(
+                all_token_logprobs, i, logprobs_count, "token_logprobs"
+            )
+            output_py.top_logprob_token_ids = compact_logprob_slice(
+                all_top_logprob_token_ids,
+                i,
+                logprobs_count,
+                "top_logprob_token_ids",
+            )
+            output_py.top_logprobs = compact_logprob_slice(
+                all_top_logprobs, i, logprobs_count, "top_logprobs"
+            )
+        else:
+            # Legacy RPC responses carried one probability row per output id.
+            if all_token_logprobs is not None:
+                output_py.token_logprobs = all_token_logprobs[i]
+            if all_top_logprob_token_ids is not None:
+                output_py.top_logprob_token_ids = all_top_logprob_token_ids[i]
+            if all_top_logprobs is not None:
+                output_py.top_logprobs = all_top_logprobs[i]
 
         if (
             logits_index is not None

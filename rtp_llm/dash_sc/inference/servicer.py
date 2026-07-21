@@ -15,6 +15,7 @@ coroutine automatically.
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Iterator, Optional
@@ -41,6 +42,7 @@ from rtp_llm.dash_sc.codec import (
     iter_fake_model_stream_infer,
     parse_dash_sc_grpc_request,
     prepend_to_generated_ids_tensor,
+    unpack_int_tensor_flat,
 )
 from rtp_llm.dash_sc.grpc_metrics import (
     report_arrival,
@@ -94,6 +96,75 @@ def _set_access_backend_error_code(access_agg: Any, e: BaseException) -> None:
         access_agg.backend_error_code = _exception_metric_code(raw_code)
     except (TypeError, ValueError):
         access_agg.backend_error_code = str(raw_code)
+
+
+def _log_dashsc_grpc_egress_logprobs(
+    response: predict_v2_pb2.ModelStreamInferResponse,
+    *,
+    request_log_tag: str,
+    enabled: bool,
+    finished: bool,
+) -> None:
+    """Dump the exact token/logprob payload immediately before gRPC yield."""
+    if not enabled:
+        return
+    logger = logging.getLogger()
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    try:
+        infer = response.infer_response
+        token_ids: list[int] | None = None
+        for index, output in enumerate(infer.outputs):
+            if output.name not in ("generated_ids", "token_ids"):
+                continue
+            raw = (
+                infer.raw_output_contents[index]
+                if index < len(infer.raw_output_contents)
+                else None
+            )
+            token_ids = unpack_int_tensor_flat(output.datatype, raw)
+            break
+
+        logprobs_json: str | None = None
+        logprob_rows: int | None = None
+        logprobs_param = infer.parameters.get("logprobs")
+        if (
+            logprobs_param is not None
+            and logprobs_param.WhichOneof("parameter_choice") == "string_param"
+        ):
+            logprobs_json = logprobs_param.string_param
+            parsed = json.loads(logprobs_json)
+            logprob_rows = len(parsed) if isinstance(parsed, list) else -1
+
+        generate_think_token_num: int | None = None
+        think_param = infer.parameters.get("generate_think_token_num")
+        if (
+            think_param is not None
+            and think_param.WhichOneof("parameter_choice") == "int64_param"
+        ):
+            generate_think_token_num = int(think_param.int64_param)
+
+        logger.debug(
+            "[DashScGrpcLogprobs] [%s] stage=grpc_egress response_id=%s "
+            "finished=%s token_count=%s logprob_rows=%s aligned=%s "
+            "generate_think_token_num=%s token_ids=%s logprobs=%s",
+            request_log_tag,
+            infer.id,
+            finished,
+            len(token_ids) if token_ids is not None else None,
+            logprob_rows,
+            token_ids is not None and len(token_ids) == logprob_rows,
+            generate_think_token_num,
+            token_ids,
+            logprobs_json,
+        )
+    except Exception as error:
+        # This diagnostic sits on the final send path and must never affect it.
+        logger.warning(
+            "[DashScGrpcLogprobs] [%s] stage=grpc_egress diagnostic_error=%s",
+            request_log_tag,
+            type(error).__name__,
+        )
 
 
 def stream_log_tag(
@@ -324,16 +395,17 @@ def _split_on_first_close(
     generated_ids: list[int],
     close_token_id: Optional[int],
     eos_seq: tuple[int, ...],
-) -> tuple[Optional[int], list[int]]:
-    """Find the first ``close_token_id`` and return ``(idx, post_close_ids)``.
+) -> tuple[Optional[int], int, list[int]]:
+    """Return ``(close_idx, post_close_start, post_close_ids)``.
 
     The post-close suffix has the rest of ``eos_seq`` consumed if it appears
     immediately after the close token, so a multi-token ``</think>\\n\\n`` is
-    treated as a single boundary. Returns ``(None, generated_ids)`` if the
-    close token is not present.
+    treated as a single boundary. ``post_close_start`` lets callers slice the
+    aligned probability tensors at the exact same boundary. Returns
+    ``(None, 0, generated_ids)`` if the close token is not present.
     """
     if close_token_id is None:
-        return None, list(generated_ids)
+        return None, 0, list(generated_ids)
     for i, tid in enumerate(generated_ids):
         if tid == close_token_id:
             tail_start = i + 1
@@ -341,8 +413,103 @@ def _split_on_first_close(
                 rest = list(eos_seq[1:])
                 if list(generated_ids[tail_start : tail_start + len(rest)]) == rest:
                     tail_start += len(rest)
-            return i, list(generated_ids[tail_start:])
-    return None, list(generated_ids)
+            return i, tail_start, list(generated_ids[tail_start:])
+    return None, 0, list(generated_ids)
+
+
+def _slice_generate_output_token_span(
+    out_py: Any,
+    start: int,
+    end: int,
+) -> list[int]:
+    """Slice IDs and preserve compact-logprob placement within the new span."""
+    source_ids = _token_ids_list_from_generate_output(out_py)
+    num_tokens = len(source_ids)
+    if not (0 <= start <= end <= num_tokens):
+        raise ValueError(
+            f"invalid output token slice [{start}:{end}] for {num_tokens} tokens"
+        )
+
+    output_ids = getattr(out_py, "output_ids", None)
+    if output_ids is None:
+        if start != end:
+            raise ValueError("cannot select non-empty output span without output_ids")
+        out_py.output_ids = torch.empty((0,), dtype=torch.int32)
+    else:
+        ids_tensor = output_ids[0] if output_ids.dim() > 1 else output_ids
+        out_py.output_ids = ids_tensor[start:end].clone()
+
+    raw_logprobs_offset = getattr(out_py, "logprobs_offset", None)
+    raw_logprobs_count = getattr(out_py, "logprobs_count", None)
+    has_compact_placement = (
+        raw_logprobs_offset is not None or raw_logprobs_count is not None
+    )
+    compact_source_start = start
+    compact_source_end = end
+    if has_compact_placement:
+        if raw_logprobs_offset is None or raw_logprobs_count is None:
+            raise ValueError(
+                "logprobs_offset and logprobs_count must be provided together"
+            )
+        logprobs_offset = int(raw_logprobs_offset)
+        logprobs_count = int(raw_logprobs_count)
+        if (
+            logprobs_offset < 0
+            or logprobs_count < 0
+            or logprobs_offset + logprobs_count != num_tokens
+        ):
+            raise ValueError(
+                "compact logprobs must cover one output_ids suffix: "
+                f"offset={logprobs_offset}, count={logprobs_count}, "
+                f"tokens={num_tokens}"
+            )
+        sliced_token_count = end - start
+        sliced_logprobs_offset = min(
+            max(logprobs_offset - start, 0), sliced_token_count
+        )
+        sliced_logprobs_count = sliced_token_count - sliced_logprobs_offset
+        compact_source_start = max(start - logprobs_offset, 0)
+        compact_source_end = compact_source_start + sliced_logprobs_count
+        if compact_source_end > logprobs_count:
+            raise ValueError("compact logprob slice exceeds the source row count")
+        out_py.logprobs_offset = sliced_logprobs_offset
+        out_py.logprobs_count = sliced_logprobs_count
+
+    for name in ("token_logprobs", "top_logprob_token_ids", "top_logprobs"):
+        value = getattr(out_py, name, None)
+        if value is None:
+            continue
+        expected_rows = int(raw_logprobs_count) if has_compact_placement else num_tokens
+        if name == "token_logprobs":
+            if value.dim() == 1 and value.shape[0] == expected_rows:
+                sliced = value[compact_source_start:compact_source_end]
+            elif (
+                value.dim() == 2
+                and value.shape[0] == 1
+                and value.shape[1] == expected_rows
+            ):
+                sliced = value[:, compact_source_start:compact_source_end]
+            else:
+                raise ValueError(
+                    f"{name} does not align with {expected_rows} compact rows: "
+                    f"shape={tuple(value.shape)}"
+                )
+        else:
+            if value.dim() == 2 and value.shape[0] == expected_rows:
+                sliced = value[compact_source_start:compact_source_end, :]
+            elif (
+                value.dim() == 3
+                and value.shape[0] == 1
+                and value.shape[1] == expected_rows
+            ):
+                sliced = value[:, compact_source_start:compact_source_end, :]
+            else:
+                raise ValueError(
+                    f"{name} does not align with {expected_rows} compact rows: "
+                    f"shape={tuple(value.shape)}"
+                )
+        setattr(out_py, name, sliced.clone())
+    return source_ids[start:end]
 
 
 def _make_generate_input(
@@ -633,9 +800,12 @@ async def iter_real_model_stream_infer(
                     return_input_ids=other.return_input_ids,
                     is_streaming=is_streaming,
                     generate_config=generate_config,
+                    debug=other.debug,
                     eos_token_id=eos_id,
                     max_token_id=max_id,
                     _request_shape=request_shape,
+                    logprob_phase="empty",
+                    logprob_pre_content_token_count=0,
                 )
                 stats = (
                     0,
@@ -686,7 +856,8 @@ async def iter_real_model_stream_infer(
                 and generated_ids
                 and term_id in generated_ids
             ):
-                generated_ids = generated_ids[: generated_ids.index(term_id)]
+                term_index = generated_ids.index(term_id)
+                generated_ids = _slice_generate_output_token_span(out_py, 0, term_index)
                 ids_for_accounting = generated_ids
                 if should_echo and not echoed and generated_ids:
                     ids_for_accounting = matched_echo_ids + generated_ids
@@ -704,6 +875,52 @@ async def iter_real_model_stream_infer(
                 cumulative_sent_ids.extend(ids_for_accounting)
                 # Yield thinking content (always intermediate)
                 if generated_ids:
+                    echo_was_split = False
+                    if (
+                        should_echo
+                        and not echoed
+                        and bool(getattr(generate_config, "return_logprobs", False))
+                    ):
+                        # Echoed ids are the thinking BOS inserted into the
+                        # prompt. Keep them in their own frame and emit only
+                        # zero-valued alignment placeholders; reasoning
+                        # probabilities are not exposed downstream.
+                        echo_response = build_stream_response_from_generate_outputs(
+                            dash_sc_request_id=request.id,
+                            model_name=request.model_name,
+                            go=go,
+                            request_log_tag=tag,
+                            request_input_ids=input_ids_list,
+                            return_input_ids=other.return_input_ids,
+                            is_streaming=is_streaming,
+                            generate_config=generate_config,
+                            debug=other.debug,
+                            eos_token_id=eos_id,
+                            max_token_id=max_id,
+                            generate_think_token_num=generate_think_token_num,
+                            _request_shape=request_shape,
+                            stream_finished=False,
+                            token_ids=matched_echo_ids,
+                            include_logprobs=False,
+                            include_forced_token_logprobs=True,
+                            logprob_phase="thinking_bos",
+                            logprob_pre_content_token_count=len(matched_echo_ids),
+                        )
+                        echo_stats = (
+                            len(matched_echo_ids),
+                            False,
+                            _FINISH_REASON_NOT_FINISHED,
+                            prompt_token_num,
+                            prompt_cached_token_num,
+                            matched_echo_ids,
+                        )
+                        yield (
+                            (echo_response, echo_stats)
+                            if yield_access_stats
+                            else echo_response
+                        )
+                        echoed = True
+                        echo_was_split = True
                     response = build_stream_response_from_generate_outputs(
                         dash_sc_request_id=request.id,
                         model_name=request.model_name,
@@ -713,25 +930,37 @@ async def iter_real_model_stream_infer(
                         return_input_ids=other.return_input_ids,
                         is_streaming=is_streaming,
                         generate_config=generate_config,
+                        debug=other.debug,
                         eos_token_id=eos_id,
                         max_token_id=max_id,
                         generate_think_token_num=generate_think_token_num,
                         _request_shape=request_shape,
                         stream_finished=False,
-                        token_ids=generated_ids,
+                        include_logprobs=False,
+                        include_forced_token_logprobs=True,
+                        logprob_phase="thinking",
+                        logprob_pre_content_token_count=len(generated_ids),
                     )
-                    if should_echo and not echoed:
+                    if (
+                        should_echo
+                        and not echoed
+                        and not bool(getattr(generate_config, "return_logprobs", False))
+                    ):
                         if prepend_to_generated_ids_tensor(
                             response.infer_response, matched_echo_ids
                         ):
                             echoed = True
                     stats = (
-                        len(ids_for_accounting),
+                        (
+                            len(generated_ids)
+                            if echo_was_split
+                            else len(ids_for_accounting)
+                        ),
                         False,
                         _FINISH_REASON_NOT_FINISHED,
                         prompt_token_num,
                         prompt_cached_token_num,
-                        ids_for_accounting,
+                        generated_ids if echo_was_split else ids_for_accounting,
                     )
                     yield (response, stats) if yield_access_stats else response
                 # Yield </think> close tokens
@@ -745,6 +974,7 @@ async def iter_real_model_stream_infer(
                         return_input_ids=other.return_input_ids,
                         is_streaming=is_streaming,
                         generate_config=generate_config,
+                        debug=other.debug,
                         eos_token_id=eos_id,
                         max_token_id=max_id,
                         generate_think_token_num=generate_think_token_num,
@@ -754,6 +984,10 @@ async def iter_real_model_stream_infer(
                         _request_shape=request_shape,
                         stream_finished=not will_do_phase2,
                         token_ids=list(runtime.eos_tokens),
+                        include_logprobs=False,
+                        include_forced_token_logprobs=True,
+                        logprob_phase="thinking_close",
+                        logprob_pre_content_token_count=len(runtime.eos_tokens),
                     )
                     eos_finished = not will_do_phase2
                     eos_finish_reason = (
@@ -782,6 +1016,70 @@ async def iter_real_model_stream_infer(
                 and len(cumulative_sent_ids) >= max_new_tokens
             ):
                 finish_reason_override = FINISH_REASON_LENGTH
+            echo_was_split = False
+            if (
+                should_echo
+                and not echoed
+                and generated_ids
+                and bool(getattr(generate_config, "return_logprobs", False))
+            ):
+                echo_response = build_stream_response_from_generate_outputs(
+                    dash_sc_request_id=request.id,
+                    model_name=request.model_name,
+                    go=go,
+                    request_log_tag=tag,
+                    request_input_ids=input_ids_list,
+                    return_input_ids=other.return_input_ids,
+                    is_streaming=is_streaming,
+                    generate_config=generate_config,
+                    debug=other.debug,
+                    eos_token_id=eos_id,
+                    max_token_id=max_id,
+                    generate_think_token_num=generate_think_token_num,
+                    _request_shape=request_shape,
+                    stream_finished=False,
+                    token_ids=matched_echo_ids,
+                    include_logprobs=False,
+                    include_forced_token_logprobs=True,
+                    logprob_phase="thinking_bos",
+                    logprob_pre_content_token_count=len(matched_echo_ids),
+                )
+                echo_stats = (
+                    len(matched_echo_ids),
+                    False,
+                    _FINISH_REASON_NOT_FINISHED,
+                    prompt_token_num,
+                    prompt_cached_token_num,
+                    matched_echo_ids,
+                )
+                yield (
+                    (echo_response, echo_stats) if yield_access_stats else echo_response
+                )
+                echoed = True
+                echo_was_split = True
+            logprob_phase = "content"
+            logprob_pre_content_token_count = 0
+            if bool(getattr(generate_config, "in_think_mode", False)):
+                if close_offset is not None:
+                    close_index, _, _ = _split_on_first_close(
+                        generated_ids,
+                        think_close_token_id,
+                        runtime.eos_tokens,
+                    )
+                    if close_index is not None:
+                        # DashScope starts content immediately after the close
+                        # token. Do not consume the remaining textual delimiter
+                        # here (for example token 271), because its output-id
+                        # index is already part of the content span downstream.
+                        logprob_pre_content_token_count = close_index + 1
+                        logprob_phase = (
+                            "thinking_content_boundary"
+                            if logprob_pre_content_token_count < len(generated_ids)
+                            else "thinking_close"
+                        )
+                elif generate_think_token_num is None:
+                    logprob_phase = "thinking"
+                    logprob_pre_content_token_count = len(generated_ids)
             response = build_stream_response_from_generate_outputs(
                 dash_sc_request_id=request.id,
                 model_name=request.model_name,
@@ -791,13 +1089,25 @@ async def iter_real_model_stream_infer(
                 return_input_ids=other.return_input_ids,
                 is_streaming=is_streaming,
                 generate_config=generate_config,
+                debug=other.debug,
                 eos_token_id=eos_id,
                 max_token_id=max_id,
                 generate_think_token_num=generate_think_token_num,
                 finish_reason_override=finish_reason_override,
                 _request_shape=request_shape,
+                # Compact backends carry the authoritative content boundary.
+                # The phase-derived prefix is used only to mask legacy aligned
+                # responses that do not yet carry offset/count metadata.
+                logprob_placeholder_prefix_token_count=logprob_pre_content_token_count,
+                logprob_phase=logprob_phase,
+                logprob_pre_content_token_count=logprob_pre_content_token_count,
             )
-            if should_echo and not echoed and generated_ids:
+            if (
+                should_echo
+                and not echoed
+                and generated_ids
+                and not bool(getattr(generate_config, "return_logprobs", False))
+            ):
                 if prepend_to_generated_ids_tensor(
                     response.infer_response, matched_echo_ids
                 ):
@@ -809,12 +1119,12 @@ async def iter_real_model_stream_infer(
                 else (0 if response_finished else _FINISH_REASON_NOT_FINISHED)
             )
             stats = (
-                len(ids_for_accounting),
+                len(generated_ids) if echo_was_split else len(ids_for_accounting),
                 response_finished,
                 response_finish_reason,
                 prompt_token_num,
                 prompt_cached_token_num,
-                ids_for_accounting,
+                generated_ids if echo_was_split else ids_for_accounting,
             )
             yield (response, stats) if yield_access_stats else response
             if phase2_needed:
@@ -952,11 +1262,14 @@ async def iter_real_model_stream_infer(
                     return_input_ids=other.return_input_ids,
                     is_streaming=is_streaming,
                     generate_config=phase2_config,
+                    debug=other.debug,
                     eos_token_id=eos_id,
                     max_token_id=max_id,
                     generate_think_token_num=generate_think_token_num,
                     finish_reason_override=finish_reason_override,
                     _request_shape=request_shape,
+                    logprob_phase="content_phase2",
+                    logprob_pre_content_token_count=0,
                 )
                 stats = (
                     len(resp_ids),
@@ -1004,9 +1317,7 @@ async def iter_real_model_stream_infer(
                         buf_ids = _token_ids_list_from_generate_output(buf_out)
                         cleaned = _strip_trailing_eos(buf_ids, runtime.eos_tokens)
                         if cleaned != buf_ids:
-                            buf_out.output_ids = torch.tensor(
-                                cleaned, dtype=torch.int32
-                            )
+                            _slice_generate_output_token_span(buf_out, 0, len(cleaned))
                     resp, stats = _build_phase2_response(buf_go)
                     yield (resp, stats) if yield_access_stats else resp
 
@@ -1024,16 +1335,15 @@ async def iter_real_model_stream_infer(
                     if out_py.finished and runtime.eos_tokens:
                         cleaned = _strip_trailing_eos(generated_ids, runtime.eos_tokens)
                         if cleaned != generated_ids:
-                            generated_ids = cleaned
-                            out_py.output_ids = torch.tensor(
-                                generated_ids, dtype=torch.int32
+                            generated_ids = _slice_generate_output_token_span(
+                                out_py, 0, len(cleaned)
                             )
                     if generated_ids or out_py.finished:
                         resp, stats = _build_phase2_response(go)
                         yield (resp, stats) if yield_access_stats else resp
                     continue
 
-                close_idx, post_close = _split_on_first_close(
+                close_idx, post_close_start, post_close = _split_on_first_close(
                     generated_ids, think_close_token_id, runtime.eos_tokens
                 )
                 if close_idx is None:
@@ -1051,14 +1361,17 @@ async def iter_real_model_stream_infer(
                     phase2_seen_close = True
                     if out_py.finished and runtime.eos_tokens:
                         post_close = _strip_trailing_eos(post_close, runtime.eos_tokens)
-                    out_py.output_ids = torch.tensor(post_close, dtype=torch.int32)
+                    _slice_generate_output_token_span(
+                        out_py,
+                        post_close_start,
+                        post_close_start + len(post_close),
+                    )
                     if post_close or out_py.finished:
                         resp, stats = _build_phase2_response(go)
                         yield (resp, stats) if yield_access_stats else resp
                 elif out_py.finished:
                     # Case B: pre-close is real content; keep it, drop close.
-                    pre_close = list(generated_ids[:close_idx])
-                    out_py.output_ids = torch.tensor(pre_close, dtype=torch.int32)
+                    _slice_generate_output_token_span(out_py, 0, close_idx)
                     phase2_pending.append(go)
                     for item in _flush_phase2_pending():
                         yield item
@@ -1421,6 +1734,12 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                             finish_reason=finish_reason,
                             prompt_token_num=prompt_token_num,
                             prompt_cached_token_num=prompt_cached_token_num,
+                        )
+                        _log_dashsc_grpc_egress_logprobs(
+                            resp,
+                            request_log_tag=f"request_id={request.id}",
+                            enabled=bool(sampling.return_logprobs),
+                            finished=bool(finished),
                         )
                         yield resp
                     return

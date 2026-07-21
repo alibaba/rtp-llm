@@ -45,6 +45,11 @@ private:
     template<typename T>
     static void
     mergeAndPadTensorsToTensorPB(TensorPB* target_pb, const std::vector<torch::Tensor>& tensors, T pad_value);
+
+    // Logprob tensors are compact along dimension 0 and different outputs may
+    // therefore have different row counts.  Pad only for protobuf transport;
+    // logprobs_counts tells the client where to remove the transport padding.
+    static void padAndStackLogprobTensorsToTensorPB(TensorPB* target_pb, const std::vector<torch::Tensor>& tensors);
 };
 
 }  // namespace rtp_llm

@@ -197,7 +197,7 @@ class ChatCompletionRequest(BaseModel):
     seed: Optional[int] = None
     n: Optional[int] = None
     logprobs: Optional[bool] = None
-    top_logprobs: Optional[int] = None
+    top_logprobs: Optional[int] = Field(default=None, strict=True)
     response_format: Optional[ResponseFormat] = None
     json_format: Optional[bool] = None
 
@@ -224,6 +224,42 @@ class ChatCompletionRequest(BaseModel):
 
     @model_validator(mode="after")
     def _check_tool_choice(self) -> "ChatCompletionRequest":
+        # `extra_configs` is also exposed through the OpenAI endpoint. Normalize
+        # its logprobs settings onto the request so backend configuration and
+        # response rendering use the same effective values.
+        if (
+            self.logprobs is None
+            and self.extra_configs is not None
+            and self.extra_configs.return_logprobs
+        ):
+            self.logprobs = True
+        if self.top_logprobs is None and self.extra_configs is not None:
+            if self.logprobs is True:
+                self.top_logprobs = self.extra_configs.top_logprobs
+            elif self.extra_configs.top_logprobs > 0:
+                raise ValueError("top_logprobs requires logprobs=true")
+
+        if self.top_logprobs is not None:
+            if isinstance(self.top_logprobs, bool) or not isinstance(
+                self.top_logprobs, int
+            ):
+                raise ValueError("top_logprobs must be an integer between 0 and 20")
+            if not 0 <= self.top_logprobs <= 20:
+                raise ValueError("top_logprobs must be between 0 and 20")
+            if self.logprobs is not True:
+                raise ValueError("top_logprobs requires logprobs=true")
+
+        if self.logprobs is True:
+            if self.n is not None and self.n > 1:
+                raise ValueError("logprobs does not support n > 1")
+            if self.tools or self.functions:
+                raise ValueError("logprobs does not support tool or function calling")
+            if self.extra_configs is not None:
+                if self.extra_configs.num_return_sequences > 1:
+                    raise ValueError("logprobs does not support n > 1")
+                if self.extra_configs.has_num_beams():
+                    raise ValueError("logprobs does not support beam search")
+
         if self.tool_choice == "required" and not self.tools:
             raise ValueError("tool_choice='required' requires non-empty tools")
 

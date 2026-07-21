@@ -394,6 +394,98 @@ class OpenaiGenerateConfigTest(TestCase):
         )
         return openai_endpoint._extract_generation_config(request)
 
+    def test_openai_logprobs_uses_compact_sampling_config(self):
+        request = ChatCompletionRequest(messages=[], logprobs=True, top_logprobs=5)
+        config = self._extract_openai_generation_config(request)
+
+        self.assertTrue(config.return_logprobs)
+        self.assertEqual(config.top_logprobs, 5)
+        self.assertFalse(config.return_all_probs)
+        self.assertTrue(config.is_streaming)
+
+        default_top_config = self._extract_openai_generation_config(
+            ChatCompletionRequest(messages=[], logprobs=True)
+        )
+        self.assertEqual(default_top_config.top_logprobs, 0)
+
+        extra_config_request = ChatCompletionRequest(
+            messages=[],
+            extra_configs=GenerateConfig(return_logprobs=True, top_logprobs=4),
+        )
+        extra_config = self._extract_openai_generation_config(extra_config_request)
+        self.assertTrue(extra_config_request.logprobs)
+        self.assertEqual(extra_config_request.top_logprobs, 4)
+        self.assertTrue(extra_config.return_logprobs)
+        self.assertEqual(extra_config.top_logprobs, 4)
+        self.assertTrue(extra_config.is_streaming)
+
+        mixed_config_request = ChatCompletionRequest(
+            messages=[],
+            logprobs=True,
+            extra_configs=GenerateConfig(top_logprobs=5),
+        )
+        mixed_config = self._extract_openai_generation_config(mixed_config_request)
+        self.assertEqual(mixed_config_request.top_logprobs, 5)
+        self.assertTrue(mixed_config.return_logprobs)
+        self.assertEqual(mixed_config.top_logprobs, 5)
+
+    def test_openai_logprobs_request_validation(self):
+        for value in (-1, 21):
+            with self.subTest(top_logprobs=value):
+                with self.assertRaisesRegex(ValueError, "top_logprobs"):
+                    ChatCompletionRequest(
+                        messages=[], logprobs=True, top_logprobs=value
+                    )
+
+        with self.assertRaises(ValueError):
+            ChatCompletionRequest(messages=[], logprobs=True, top_logprobs=True)
+
+        with self.assertRaisesRegex(ValueError, "requires logprobs=true"):
+            ChatCompletionRequest(messages=[], top_logprobs=1)
+        with self.assertRaisesRegex(ValueError, "requires logprobs=true"):
+            ChatCompletionRequest(
+                messages=[], extra_configs=GenerateConfig(top_logprobs=1)
+            )
+        with self.assertRaisesRegex(ValueError, "n > 1"):
+            ChatCompletionRequest(messages=[], logprobs=True, n=2)
+        with self.assertRaisesRegex(ValueError, "n > 1"):
+            ChatCompletionRequest(
+                messages=[],
+                logprobs=True,
+                extra_configs=GenerateConfig(num_return_sequences=2),
+            )
+        with self.assertRaisesRegex(ValueError, "beam search"):
+            ChatCompletionRequest(
+                messages=[],
+                logprobs=True,
+                extra_configs=GenerateConfig(num_beams=2),
+            )
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get current weather",
+                "parameters": {"type": "object"},
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "tool or function calling"):
+            ChatCompletionRequest(messages=[], logprobs=True, tools=[tool])
+        with self.assertRaisesRegex(ValueError, "tool or function calling"):
+            ChatCompletionRequest(
+                messages=[], logprobs=True, functions=[tool["function"]]
+            )
+
+    def test_generate_config_logprobs_validation(self):
+        GenerateConfig(return_logprobs=True, top_logprobs=20).validate()
+        with self.assertRaisesRegex(Exception, "between 0 and 20"):
+            GenerateConfig(return_logprobs=True, top_logprobs=21).validate()
+        with self.assertRaisesRegex(Exception, "requires return_logprobs=true"):
+            GenerateConfig(top_logprobs=1).validate()
+        with self.assertRaisesRegex(Exception, "beam search"):
+            GenerateConfig(return_logprobs=True, num_beams=2).validate()
+        with self.assertRaisesRegex(Exception, "num_return_sequences"):
+            GenerateConfig(return_logprobs=True, num_return_sequences=2).validate()
+
     def _generate_config_with_stop_word(
         self,
         model_stop_word_str: Optional[List[str]] = None,
@@ -513,6 +605,17 @@ class OpenaiGenerateConfigTest(TestCase):
                     tools=tools,
                     tool_choice="required",
                 ),
+                GenerateConfig(),
+            )
+
+    def test_default_renderer_rejects_logprobs_when_it_parses_thinking(self):
+        renderer = CustomChatRenderer.__new__(CustomChatRenderer)
+        renderer.think_mode = True
+
+        with self.assertRaisesRegex(Exception, "renderer parses thinking output"):
+            OpenaiEndpoint._apply_renderer_chat_constraints(
+                renderer,
+                ChatCompletionRequest(messages=[], logprobs=True),
                 GenerateConfig(),
             )
 

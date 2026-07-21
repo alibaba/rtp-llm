@@ -16,6 +16,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+import torch
+
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.structural_tag import (
     DashScStructuralTagError,
@@ -135,6 +137,39 @@ def _parse_optional_parameter_int(request, param_name: str) -> int | None:
     return None
 
 
+def _parse_num_return_sequences_parameter_fallback(
+    request, ds_attrs: dict[str, Any]
+) -> int | None:
+    """Read the non-tensor ``num_return_sequences`` / ``n`` fallback.
+
+    Input tensors are the established Dash wire contract and retain their
+    existing precedence.  Direct Triton parameters were added as a compatibility
+    fallback for OpenAI-style logprob requests, so reject conflicting aliases
+    instead of silently choosing one.  Nested ``ds_header_attributes`` keeps the
+    same alias priority as before.
+    """
+    parameter_values = {
+        name: _parse_optional_parameter_int(request, name)
+        for name in ("num_return_sequences", "n")
+        if name in request.parameters
+    }
+    parsed_parameter_values = {
+        name: value for name, value in parameter_values.items() if value is not None
+    }
+    if len(set(parsed_parameter_values.values())) > 1:
+        raise DashScParameterError("conflicting n and num_return_sequences parameters")
+    for name in ("num_return_sequences", "n"):
+        if name in parsed_parameter_values:
+            return parsed_parameter_values[name]
+
+    value = _parse_optional_int_value(
+        _lookup_ds_request_control(ds_attrs, "num_return_sequences")
+    )
+    if value is None:
+        value = _parse_optional_int_value(_lookup_ds_request_control(ds_attrs, "n"))
+    return value
+
+
 def _parse_optional_parameter_bool(request, param_name: str) -> bool | None:
     if param_name not in request.parameters:
         return None
@@ -192,6 +227,127 @@ def _parse_optional_bool(value: Any) -> bool | None:
     if s in {"0", "false", "no", "n", "off", "disable", "disabled"}:
         return False
     return None
+
+
+def _is_single_value_tensor_shape(shape: Any) -> bool:
+    """Return whether a tensor shape contains exactly one scalar value.
+
+    Triton clients use both rank-0 ``[]`` and batch-wrapped ``[1, 1]`` shapes
+    for scalar controls in addition to ``[1]``.  All of them carry one value;
+    dimensions other than one would make the control ambiguous.
+    """
+    return all(int(dim) == 1 for dim in shape)
+
+
+def _parse_strict_bool_control(
+    request,
+    ds_attrs: dict[str, Any],
+    *names: str,
+) -> tuple[bool | None, bool]:
+    """Read an optional boolean request control without silently coercing errors.
+
+    The DashScope bridge has shipped the same OpenAI-compatible controls as input
+    tensors, Triton parameters, and nested ``ds_header_attributes`` values.  The
+    second return value records explicit presence so callers can distinguish an
+    omitted value from an invalid/false value.
+    """
+    for name in names:
+        inp, raw = _find_input_raw(request, name)
+        if inp is not None:
+            if raw is None:
+                raise DashScParameterError(f"invalid {name}: missing tensor payload")
+            if not _is_single_value_tensor_shape(inp.shape):
+                raise DashScParameterError(
+                    f"invalid {name}: tensor must contain exactly one value, "
+                    f"got shape {list(inp.shape)}"
+                )
+            if inp.datatype == "BOOL" and len(raw) == 1 and raw[0] in (0, 1):
+                return raw[0] == 1, True
+            if inp.datatype == "INT32" and len(raw) == 4:
+                value = struct.unpack("<i", raw)[0]
+                if value in (0, 1):
+                    return bool(value), True
+            if inp.datatype == "INT64" and len(raw) == 8:
+                value = struct.unpack("<q", raw)[0]
+                if value in (0, 1):
+                    return bool(value), True
+            raise DashScParameterError(f"invalid {name}: must be a boolean scalar")
+
+        if name in request.parameters:
+            param = request.parameters[name]
+            if param.HasField("bool_param"):
+                return bool(param.bool_param), True
+            if param.HasField("int64_param"):
+                value = int(param.int64_param)
+                if value in (0, 1):
+                    return bool(value), True
+            elif param.HasField("string_param"):
+                value = _parse_optional_bool(param.string_param)
+                if value is not None:
+                    return value, True
+            raise DashScParameterError(f"invalid {name}: must be a boolean")
+
+        raw_value = _lookup_ds_request_control(ds_attrs, name)
+        if raw_value is not None:
+            if isinstance(raw_value, bool):
+                value = raw_value
+            elif isinstance(raw_value, int) and raw_value in (0, 1):
+                value = bool(raw_value)
+            elif isinstance(raw_value, str):
+                value = _parse_optional_bool(raw_value)
+            else:
+                value = None
+            if value is None:
+                raise DashScParameterError(f"invalid {name}: must be a boolean")
+            return value, True
+    return None, False
+
+
+def _parse_strict_int_control(
+    request,
+    ds_attrs: dict[str, Any],
+    *names: str,
+) -> tuple[int | None, bool]:
+    """Read an optional integer request control, rejecting bool/float values."""
+    for name in names:
+        inp, raw = _find_input_raw(request, name)
+        if inp is not None:
+            if raw is None:
+                raise DashScParameterError(f"invalid {name}: missing tensor payload")
+            if not _is_single_value_tensor_shape(inp.shape):
+                raise DashScParameterError(
+                    f"invalid {name}: tensor must contain exactly one value, "
+                    f"got shape {list(inp.shape)}"
+                )
+            if inp.datatype == "INT32" and len(raw) == 4:
+                return int(struct.unpack("<i", raw)[0]), True
+            if inp.datatype == "INT64" and len(raw) == 8:
+                return int(struct.unpack("<q", raw)[0]), True
+            raise DashScParameterError(f"invalid {name}: must be an integer scalar")
+
+        if name in request.parameters:
+            param = request.parameters[name]
+            if param.HasField("int64_param"):
+                return int(param.int64_param), True
+            if param.HasField("string_param"):
+                value = str(param.string_param).strip()
+                try:
+                    return int(value), True
+                except (TypeError, ValueError):
+                    pass
+            raise DashScParameterError(f"invalid {name}: must be an integer")
+
+        raw_value = _lookup_ds_request_control(ds_attrs, name)
+        if raw_value is not None:
+            if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+                if isinstance(raw_value, str):
+                    try:
+                        return int(raw_value.strip()), True
+                    except (TypeError, ValueError):
+                        pass
+                raise DashScParameterError(f"invalid {name}: must be an integer")
+            return int(raw_value), True
+    return None, False
 
 
 def parse_ds_header_attributes(request) -> dict[str, Any]:
@@ -565,6 +721,7 @@ class OtherParams:
     timeout_ms: int | None = None
     traffic_reject_priority: int | None = None
     reasoning_effort: str | None = None
+    debug: bool = False
     request_headers: dict[str, str] = field(default_factory=dict)
 
 
@@ -584,6 +741,8 @@ class SamplingParams:
     repetition_penalty: float = 1.0
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0
+    return_logprobs: bool = False
+    top_logprobs: int = 0
     stop_words_list: tuple[tuple[int, ...], ...] = field(default_factory=tuple)
     max_new_think_tokens: int | None = None
     response_format: str | None = None
@@ -633,6 +792,8 @@ class SamplingParams:
             repetition_penalty=self.repetition_penalty,
             frequency_penalty=self.frequency_penalty,
             presence_penalty=self.presence_penalty,
+            return_logprobs=self.return_logprobs,
+            top_logprobs=self.top_logprobs,
             stop_words_list=self.stop_words_list_py(),
             max_thinking_tokens=max_thinking_tokens,
             return_input_ids=return_input_ids,
@@ -669,6 +830,7 @@ def parse_sampling_params(
     ``top_p``, ``top_k``, ``stop_words_list``, ``temperature``,
     ``min_new_tokens`` (or DashScope alias ``min_length``), ``seed``,
     ``repetition_penalty``, ``frequency_penalty``, ``presence_penalty``,
+    ``logprobs`` / ``return_logprobs``, ``top_logprobs``,
     ``max_new_think_tokens`` / ``max_think_length``.
 
     Legacy: if there is no ``top_k`` input, ``request.parameters["top_k"].int64_param``
@@ -683,6 +845,8 @@ def parse_sampling_params(
     repetition_penalty = 1.0
     frequency_penalty = 0.0
     presence_penalty = 0.0
+    return_logprobs = False
+    top_logprobs = 0
     max_new_think_tokens: int | None = None
     stop_words_list: tuple[tuple[int, ...], ...] = tuple()
     ds_attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
@@ -692,11 +856,26 @@ def parse_sampling_params(
         max_total_tokens,
     ) = _parse_max_token_limits(request, ds_attrs)
 
-    v = _parse_optional_scalar_int(request, "num_return_sequences")
-    if v is None:
-        v = _parse_optional_scalar_int(request, "n")
-    if v is not None:
-        num_return_sequences = max(0, v)
+    tensor_num_return_sequences = _parse_optional_scalar_int(
+        request, "num_return_sequences"
+    )
+    if tensor_num_return_sequences is None:
+        tensor_num_return_sequences = _parse_optional_scalar_int(request, "n")
+    parameter_num_return_sequences: int | None = None
+    if tensor_num_return_sequences is not None:
+        # Tensor controls are the pre-existing contract and continue to map to
+        # GenerateConfig regardless of the logprobs switch.
+        num_return_sequences = max(0, tensor_num_return_sequences)
+    else:
+        parameter_num_return_sequences = _parse_num_return_sequences_parameter_fallback(
+            request, ds_attrs
+        )
+        if parameter_num_return_sequences is not None:
+            parameter_num_return_sequences = max(0, parameter_num_return_sequences)
+            # Dash encodes only generate_outputs[0].  Never let a parameter
+            # fallback silently create backend results that cannot be returned.
+            if parameter_num_return_sequences > 1:
+                raise DashScParameterError("DashScope response does not support n > 1")
 
     vf = _parse_optional_scalar_float(request, "top_p")
     if vf is not None:
@@ -736,6 +915,33 @@ def parse_sampling_params(
     if vf is not None:
         presence_penalty = vf
 
+    parsed_logprobs, logprobs_was_set = _parse_strict_bool_control(
+        request, ds_attrs, "logprobs", "return_logprobs"
+    )
+    if logprobs_was_set:
+        return_logprobs = bool(parsed_logprobs)
+    parsed_top_logprobs, top_logprobs_was_set = _parse_strict_int_control(
+        request, ds_attrs, "top_logprobs"
+    )
+    if top_logprobs_was_set:
+        assert parsed_top_logprobs is not None
+        top_logprobs = parsed_top_logprobs
+        if not 0 <= top_logprobs <= 20:
+            raise DashScParameterError("top_logprobs must be between 0 and 20")
+        # DashScope serving always sends the disabled defaults together as
+        # ``logprobs=false, top_logprobs=0``.  Zero requests no candidates and
+        # must preserve the legacy non-logprobs path; only a positive K needs
+        # the feature to be enabled explicitly.
+        if top_logprobs > 0 and not return_logprobs:
+            raise DashScParameterError("top_logprobs requires logprobs=true")
+    if parameter_num_return_sequences is not None and return_logprobs:
+        # Before logprob support, request.parameters did not control backend
+        # fan-out.  Preserve that behavior for ordinary requests while allowing
+        # OpenAI-style logprob requests to carry their explicit single-result n.
+        num_return_sequences = parameter_num_return_sequences
+    if return_logprobs and num_return_sequences > 1:
+        raise DashScParameterError("logprobs does not support n > 1")
+
     for tensor_name in ("max_think_length", "max_new_think_tokens"):
         v = _parse_optional_scalar_int(request, tensor_name)
         if v is not None:
@@ -763,6 +969,8 @@ def parse_sampling_params(
         repetition_penalty=repetition_penalty,
         frequency_penalty=frequency_penalty,
         presence_penalty=presence_penalty,
+        return_logprobs=return_logprobs,
+        top_logprobs=top_logprobs,
         max_new_think_tokens=max_new_think_tokens,
         stop_words_list=stop_words_list,
         response_format=response_format,
@@ -825,6 +1033,10 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
             _lookup_ds_request_control(ds_attrs, "reasoning_effort")
         )
 
+    debug = _parse_optional_parameter_bool(request, "debug")
+    if debug is None:
+        debug = _parse_optional_bool(_lookup_ds_request_control(ds_attrs, "debug"))
+
     timeout_s = _parse_optional_int_value(ds_attrs.get("x-dashscope-inner-timeout"))
     timeout_ms = timeout_s * 1000 if timeout_s is not None and timeout_s > 0 else None
 
@@ -849,6 +1061,7 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
         timeout_ms=timeout_ms,
         traffic_reject_priority=traffic_reject_priority,
         reasoning_effort=reasoning_effort,
+        debug=bool(debug),
         request_headers=request_headers,
     )
 
@@ -940,12 +1153,17 @@ def prepend_to_generated_ids_tensor(
     """Prepend ``token_ids`` to the already-appended ``generated_ids`` tensor on ``infer``.
 
     Returns ``False`` and leaves ``infer`` untouched when ``token_ids`` is empty, when
-    ``generated_ids`` is absent, or when its declared shape is a zero-length / filler
-    payload (``shape[-1] <= 0``). On success, re-packs the raw bytes as
-    ``token_ids + existing_ids`` (INT32 little-endian) and updates ``shape`` to
-    ``[1, len(token_ids) + cur_len]``.
+    ``generated_ids`` is absent, when its declared shape is a zero-length / filler
+    payload, or when the frame already contains logprob tensors. Prompt echo tokens
+    have no sampled probability; callers must emit them in a separate no-logprob
+    frame instead of making the existing tensors misaligned.
     """
     if not token_ids:
+        return False
+    if any(
+        out.name in {"token_logprobs", "top_logprob_token_ids", "top_logprobs"}
+        for out in infer.outputs
+    ):
         return False
     for i, out in enumerate(infer.outputs):
         if out.name != "generated_ids":
@@ -999,6 +1217,7 @@ def _append_dashllm_limit_parameters(
     eos_token_id: int | None = None,
     max_token_id: int | None = None,
     generate_think_token_num: int | None = None,
+    debug: bool = False,
 ) -> None:
     """Mirror dashllm response parameters consumed by dashscope-serving."""
     if generate_config is not None:
@@ -1018,6 +1237,112 @@ def _append_dashllm_limit_parameters(
         infer.parameters["generate_think_token_num"].int64_param = int(
             generate_think_token_num
         )
+    if debug:
+        llm_params: dict[str, int] = {}
+        if generate_config is not None:
+            llm_params["max_new_tokens"] = int(
+                getattr(generate_config, "max_new_tokens", 0) or 0
+            )
+            llm_params["max_new_think_tokens"] = int(
+                getattr(generate_config, "max_thinking_tokens", 0) or 0
+            )
+        infer.parameters["debug_info"].string_param = json.dumps(
+            {"llm_params": llm_params}, separators=(",", ":")
+        )
+
+
+def _placeholder_top_token_ids(token_id: int, width: int) -> list[int]:
+    """Return one sampled-token-first row for a positional placeholder."""
+    candidates = [int(token_id)]
+    candidate = 0
+    while len(candidates) < width:
+        if candidate != token_id:
+            candidates.append(candidate)
+        candidate += 1
+    return candidates
+
+
+def _placeholder_top_logprob_tensors(
+    generated_ids: list[int],
+    width: int,
+    *,
+    id_dtype: torch.dtype = torch.int32,
+    prob_dtype: torch.dtype = torch.float32,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    ids = torch.tensor(
+        [_placeholder_top_token_ids(token_id, width) for token_id in generated_ids],
+        dtype=id_dtype,
+    ).reshape(len(generated_ids), width)
+    probs = torch.full(
+        (len(generated_ids), width),
+        -float("inf"),
+        dtype=prob_dtype,
+    )
+    if generated_ids and width:
+        probs[:, 0] = 0.0
+    return ids, probs
+
+
+def _append_forced_token_logprob_outputs(
+    infer: predict_v2_pb2.ModelInferResponse,
+    *,
+    generated_ids: list[int],
+    generate_config: Any,
+) -> None:
+    """Encode positional placeholders for tokens outside normal content.
+
+    DashScope accumulates token ids and logprob rows in parallel, then slices
+    the accumulated rows at the reasoning/content boundary.  Reasoning and
+    controller-inserted tokens therefore still need one alignment row each,
+    even though their model probability is intentionally not exposed.  A
+    sampled-token-first ``0.0`` row is an alignment marker, not a reported
+    model probability.
+    """
+    if not bool(getattr(generate_config, "return_logprobs", False)):
+        return
+    num_tokens = len(generated_ids)
+    if not num_tokens:
+        return
+    token_values = torch.zeros(num_tokens, dtype=torch.float32)
+    _append_tensor_output(
+        infer,
+        tensor_name="token_logprobs",
+        datatype="FP32",
+        shape=[1, num_tokens],
+        tensor=token_values,
+    )
+    requested_k = int(getattr(generate_config, "top_logprobs", 0) or 0)
+    wire_ids, wire_values = _placeholder_top_logprob_tensors(
+        generated_ids, max(1, requested_k)
+    )
+    wire_rows = [
+        {
+            str(candidate_id): float(candidate_logprob)
+            for candidate_id, candidate_logprob in zip(id_row, prob_row)
+        }
+        for id_row, prob_row in zip(wire_ids.tolist(), wire_values.tolist())
+    ]
+    if requested_k > 0:
+        top_ids = wire_ids[:, :requested_k]
+        top_values = wire_values[:, :requested_k]
+        _append_tensor_output(
+            infer,
+            tensor_name="top_logprob_token_ids",
+            datatype="INT32",
+            shape=[1, num_tokens, requested_k],
+            tensor=top_ids,
+        )
+        _append_tensor_output(
+            infer,
+            tensor_name="top_logprobs",
+            datatype="FP32",
+            shape=[1, num_tokens, requested_k],
+            tensor=top_values,
+        )
+    infer.parameters["logprobs"].string_param = json.dumps(
+        wire_rows,
+        separators=(",", ":"),
+    )
 
 
 def _append_int32_scalar_output(
@@ -1061,6 +1386,556 @@ def _append_aux_info_metrics_outputs(
     _append_prompt_cache_usage_parameters(infer, input_len, reuse_len)
 
 
+def _normalize_token_logprobs_tensor(
+    tensor: Any,
+    *,
+    tensor_name: str,
+    num_tokens: int,
+) -> torch.Tensor:
+    value = tensor.detach().cpu()
+    if not value.is_floating_point():
+        raise ValueError(f"{tensor_name} must use a floating-point dtype")
+    if value.dim() == 1 and value.shape[0] == num_tokens:
+        pass
+    elif value.dim() == 2 and tuple(value.shape) == (1, num_tokens):
+        value = value[0]
+    else:
+        raise ValueError(
+            f"{tensor_name} must have shape [{num_tokens}] or [1,{num_tokens}]: "
+            f"got {tuple(value.shape)}"
+        )
+    if not bool(torch.isfinite(value).all()):
+        raise ValueError(f"{tensor_name} contains NaN or infinity")
+    return value
+
+
+def _normalize_top_logprobs_tensor(
+    tensor: Any,
+    *,
+    tensor_name: str,
+    num_tokens: int,
+    floating_point: bool,
+) -> torch.Tensor:
+    value = tensor.detach().cpu()
+    if floating_point:
+        if not value.is_floating_point():
+            raise ValueError(f"{tensor_name} must use a floating-point dtype")
+    elif value.is_floating_point() or value.dtype == torch.bool:
+        raise ValueError(f"{tensor_name} must use an integer dtype")
+    if value.dim() == 3 and value.shape[0] == 1:
+        value = value[0]
+    if value.dim() != 2 or value.shape[0] != num_tokens:
+        raise ValueError(
+            f"{tensor_name} must have shape [num_output_tokens, top_logprobs]: "
+            f"got {tuple(value.shape)} for {num_tokens} tokens"
+        )
+    if floating_point and not bool(torch.isfinite(value).all()):
+        raise ValueError(f"{tensor_name} contains NaN or infinity")
+    if not floating_point and value.numel():
+        min_id = int(value.min().item())
+        max_id = int(value.max().item())
+        if min_id < -(1 << 31) or max_id >= (1 << 31):
+            raise ValueError(f"{tensor_name} contains values outside INT32 range")
+    return value
+
+
+def _logprob_token_rows(tensor: Any, *, tensor_name: str) -> int:
+    """Return the token-row count without moving the tensor off device."""
+    if tensor_name == "token_logprobs":
+        if tensor.dim() == 1:
+            return int(tensor.shape[0])
+        if tensor.dim() == 2 and tensor.shape[0] == 1:
+            return int(tensor.shape[1])
+    else:
+        if tensor.dim() == 2:
+            return int(tensor.shape[0])
+        if tensor.dim() == 3 and tensor.shape[0] == 1:
+            return int(tensor.shape[1])
+    raise ValueError(f"invalid {tensor_name} shape: {tuple(tensor.shape)}")
+
+
+def _slice_logprob_token_rows(tensor: Any, *, tensor_name: str, end: int) -> Any:
+    if tensor_name == "token_logprobs":
+        return tensor[:end] if tensor.dim() == 1 else tensor[:, :end]
+    return tensor[:end, :] if tensor.dim() == 2 else tensor[:, :end, :]
+
+
+def _drop_unused_mtp_logprob_tail(
+    token_logprobs: Any,
+    top_token_ids: Any,
+    top_logprobs: Any,
+    *,
+    num_tokens: int,
+) -> tuple[Any, Any, Any]:
+    """Discard the uncommitted MTP verification row from a stream packet.
+
+    Some MTP result packets expose probabilities for ``accept_len + 1`` target
+    rows while ``output_ids`` contains only the ``accept_len`` committed rows.
+    The final row is the unused verification tail and must never be forwarded
+    to DashLLM: its V3 parser requires one probability dictionary per emitted
+    token.  Keep strict validation for every other mismatch.
+    """
+    tensors = [
+        ("token_logprobs", token_logprobs),
+        ("top_logprob_token_ids", top_token_ids),
+        ("top_logprobs", top_logprobs),
+    ]
+    present = [(name, value) for name, value in tensors if value is not None]
+    if not present:
+        return token_logprobs, top_token_ids, top_logprobs
+    row_counts = {
+        _logprob_token_rows(value, tensor_name=name) for name, value in present
+    }
+    if row_counts == {num_tokens + 1}:
+        logging.debug(
+            "[DashScGrpc] dropping one uncommitted MTP logprob row: ids=%s probabilities=%s",
+            num_tokens,
+            num_tokens + 1,
+        )
+        sliced = {
+            name: _slice_logprob_token_rows(value, tensor_name=name, end=num_tokens)
+            for name, value in present
+        }
+        return (
+            sliced["token_logprobs"],
+            sliced.get("top_logprob_token_ids"),
+            sliced.get("top_logprobs"),
+        )
+    return token_logprobs, top_token_ids, top_logprobs
+
+
+def _append_tensor_output(
+    infer: predict_v2_pb2.ModelInferResponse,
+    *,
+    tensor_name: str,
+    datatype: str,
+    shape: list[int],
+    tensor: torch.Tensor,
+) -> None:
+    out = infer.outputs.add()
+    out.name = tensor_name
+    out.datatype = datatype
+    out.shape[:] = shape
+    if datatype == "FP32":
+        values = tensor.to(dtype=torch.float32).contiguous().reshape(-1).tolist()
+        raw = struct.pack(f"<{len(values)}f", *values) if values else b""
+    elif datatype == "INT32":
+        values = tensor.to(dtype=torch.int32).contiguous().reshape(-1).tolist()
+        raw = struct.pack(f"<{len(values)}i", *values) if values else b""
+    else:
+        raise ValueError(f"unsupported DashScope response datatype: {datatype}")
+    infer.raw_output_contents.append(raw)
+
+
+def _trim_one_elided_trailing_logprob_row(out_py: Any, num_tokens: int) -> None:
+    """Align compact rows after the engine elides one trailing output token.
+
+    A final async/MTP frame can retain placement metadata and probability
+    tensors for the sampled stop/capped token after that token has already
+    been removed from ``output_ids``.  Only this exact one-token trailing skew
+    is recoverable: keep the rows for surviving ids and discard the final row.
+    All other placement mismatches remain hard errors in the caller.
+    """
+    raw_offset = getattr(out_py, "logprobs_offset", None)
+    raw_count = getattr(out_py, "logprobs_count", None)
+    if raw_offset is None or raw_count is None:
+        return
+
+    logprobs_offset = int(raw_offset)
+    logprobs_count = int(raw_count)
+    if logprobs_offset < 0 or logprobs_count < 0:
+        return
+    if logprobs_offset + logprobs_count != num_tokens + 1:
+        return
+
+    trimmed_offset = min(logprobs_offset, num_tokens)
+    trimmed_count = num_tokens - trimmed_offset
+    for name in ("token_logprobs", "top_logprob_token_ids", "top_logprobs"):
+        value = getattr(out_py, name, None)
+        if value is None:
+            continue
+        if value.dim() >= 1 and value.shape[0] == logprobs_count:
+            trimmed = value.narrow(0, 0, trimmed_count)
+        elif (
+            value.dim() >= 2
+            and value.shape[0] == 1
+            and value.shape[1] == logprobs_count
+        ):
+            trimmed = value.narrow(1, 0, trimmed_count)
+        else:
+            raise ValueError(
+                f"{name} does not align with {logprobs_count} compact rows: "
+                f"shape={tuple(value.shape)}"
+            )
+        setattr(out_py, name, trimmed.clone())
+
+    out_py.logprobs_offset = trimmed_offset
+    out_py.logprobs_count = trimmed_count
+    logging.getLogger().debug(
+        "trimmed one elided trailing compact logprob row: "
+        "offset=%s count=%s tokens=%s",
+        logprobs_offset,
+        logprobs_count,
+        num_tokens,
+    )
+
+
+def _append_logprob_outputs(
+    infer: predict_v2_pb2.ModelInferResponse,
+    out_py: Any,
+    *,
+    generated_ids: list[int],
+    num_tokens: int,
+    generate_config: Any,
+    placeholder_prefix_token_count: int = 0,
+) -> None:
+    """Expand compact content logprobs into the aligned DashScope wire form.
+
+    RTP-LLM carries only real rows for
+    ``output_ids[logprobs_offset:logprobs_offset + logprobs_count]``.  This is
+    the sole boundary that materializes positional placeholders for the
+    preceding thinking/controller tokens. Legacy aligned backend tensors are
+    still accepted during rolling upgrades.
+    """
+    token_logprobs = getattr(out_py, "token_logprobs", None)
+    top_token_ids = getattr(out_py, "top_logprob_token_ids", None)
+    top_logprobs = getattr(out_py, "top_logprobs", None)
+    requested = bool(getattr(generate_config, "return_logprobs", False))
+    requested_k = int(getattr(generate_config, "top_logprobs", 0) or 0)
+    placeholder_prefix_token_count = int(placeholder_prefix_token_count)
+    if not 0 <= placeholder_prefix_token_count <= num_tokens:
+        raise ValueError(
+            "placeholder_prefix_token_count must be between 0 and the number "
+            f"of output tokens: got {placeholder_prefix_token_count} for {num_tokens}"
+        )
+
+    if not requested:
+        return
+
+    _trim_one_elided_trailing_logprob_row(out_py, num_tokens)
+    token_logprobs = getattr(out_py, "token_logprobs", None)
+    top_token_ids = getattr(out_py, "top_logprob_token_ids", None)
+    top_logprobs = getattr(out_py, "top_logprobs", None)
+
+    raw_offset = getattr(out_py, "logprobs_offset", None)
+    raw_count = getattr(out_py, "logprobs_count", None)
+    has_compact_placement = raw_offset is not None or raw_count is not None
+    if has_compact_placement and (raw_offset is None or raw_count is None):
+        raise ValueError("logprobs_offset and logprobs_count must be provided together")
+
+    if has_compact_placement:
+        logprobs_offset = int(raw_offset)
+        logprobs_count = int(raw_count)
+        if (
+            logprobs_offset < 0
+            or logprobs_count < 0
+            or logprobs_offset + logprobs_count != num_tokens
+        ):
+            raise ValueError(
+                "compact logprobs must cover one output_ids suffix: "
+                f"offset={logprobs_offset}, count={logprobs_count}, "
+                f"tokens={num_tokens}"
+            )
+        if (
+            placeholder_prefix_token_count
+            and placeholder_prefix_token_count != logprobs_offset
+        ):
+            raise ValueError(
+                "DashSC thinking boundary disagrees with backend logprob "
+                f"placement: dashsc={placeholder_prefix_token_count}, "
+                f"backend={logprobs_offset}"
+            )
+        real_row_count = logprobs_count
+    else:
+        # Legacy responses have one backend row per id. The servicer-provided
+        # boundary marks which aligned prefix rows must be replaced.
+        logprobs_offset = placeholder_prefix_token_count
+        real_row_count = num_tokens
+
+    if token_logprobs is None:
+        if top_token_ids is not None or top_logprobs is not None:
+            raise ValueError("top-logprob tensors require token_logprobs")
+        if (
+            has_compact_placement
+            and logprobs_offset == num_tokens
+            and not real_row_count
+        ):
+            _append_forced_token_logprob_outputs(
+                infer,
+                generated_ids=generated_ids,
+                generate_config=generate_config,
+            )
+            return
+        if num_tokens:
+            raise ValueError(
+                "token_logprobs is missing for a DashScope logprobs request"
+            )
+        return
+
+    token_logprobs, top_token_ids, top_logprobs = _drop_unused_mtp_logprob_tail(
+        token_logprobs,
+        top_token_ids,
+        top_logprobs,
+        num_tokens=real_row_count,
+    )
+
+    real_token_values = _normalize_token_logprobs_tensor(
+        token_logprobs,
+        tensor_name="token_logprobs",
+        num_tokens=real_row_count,
+    )
+    if has_compact_placement:
+        token_values = torch.cat(
+            [
+                torch.zeros(logprobs_offset, dtype=torch.float32),
+                real_token_values,
+            ]
+        )
+    else:
+        token_values = real_token_values
+        if logprobs_offset:
+            token_values = token_values.clone()
+            token_values[:logprobs_offset] = 0.0
+    _append_tensor_output(
+        infer,
+        tensor_name="token_logprobs",
+        datatype="FP32",
+        shape=[1, num_tokens],
+        tensor=token_values,
+    )
+
+    # dashllm/dashserving does not consume the compact tensors above when it
+    # builds the public DashScope response.  Its established response contract
+    # carries one token-id -> logprob dictionary per generated token in the
+    # string parameter named ``logprobs``.  Keep both encodings: the tensors
+    # are useful to direct ModelStreamInfer consumers, while this parameter is
+    # what reaches output.choices[].logprobs at the DashScope frontend.
+    wire_logprobs: list[dict[str, float]] = [
+        {str(token_id): float(token_values[i].item())}
+        for i, token_id in enumerate(generated_ids)
+    ]
+
+    if (top_token_ids is None) != (top_logprobs is None):
+        raise ValueError(
+            "top_logprob_token_ids and top_logprobs must be returned together"
+        )
+    if top_token_ids is None:
+        if requested_k > 0 and num_tokens:
+            raise ValueError(
+                "top-logprob tensors are missing for a positive top_logprobs request"
+            )
+        infer.parameters["logprobs"].string_param = json.dumps(
+            wire_logprobs, separators=(",", ":")
+        )
+        return
+
+    top_id_values = _normalize_top_logprobs_tensor(
+        top_token_ids,
+        tensor_name="top_logprob_token_ids",
+        num_tokens=real_row_count,
+        floating_point=False,
+    )
+    top_prob_values = _normalize_top_logprobs_tensor(
+        top_logprobs,
+        tensor_name="top_logprobs",
+        num_tokens=real_row_count,
+        floating_point=True,
+    )
+    if top_id_values.shape != top_prob_values.shape:
+        raise ValueError(
+            "top_logprob_token_ids and top_logprobs must have identical shapes"
+        )
+    actual_k = int(top_id_values.shape[1])
+    if requested and actual_k > requested_k:
+        raise ValueError(
+            f"backend returned top_logprobs={actual_k}, exceeding requested "
+            f"top_logprobs={requested_k}"
+        )
+    if has_compact_placement:
+        if actual_k > 0:
+            prefix_top_ids, prefix_top_probs = _placeholder_top_logprob_tensors(
+                generated_ids[:logprobs_offset],
+                actual_k,
+                id_dtype=top_id_values.dtype,
+                prob_dtype=top_prob_values.dtype,
+            )
+            top_id_values = torch.cat([prefix_top_ids, top_id_values], dim=0)
+            top_prob_values = torch.cat([prefix_top_probs, top_prob_values], dim=0)
+        else:
+            top_id_values = torch.empty((num_tokens, 0), dtype=top_id_values.dtype)
+            top_prob_values = torch.empty((num_tokens, 0), dtype=top_prob_values.dtype)
+    elif logprobs_offset and actual_k > 0:
+        top_id_values = top_id_values.clone()
+        top_prob_values = top_prob_values.clone()
+        prefix_top_ids, prefix_top_probs = _placeholder_top_logprob_tensors(
+            generated_ids[:logprobs_offset],
+            actual_k,
+            id_dtype=top_id_values.dtype,
+            prob_dtype=top_prob_values.dtype,
+        )
+        top_id_values[:logprobs_offset] = prefix_top_ids
+        top_prob_values[:logprobs_offset] = prefix_top_probs
+    for token_index in range(num_tokens):
+        for top_index in range(actual_k):
+            wire_logprobs[token_index][
+                str(int(top_id_values[token_index, top_index].item()))
+            ] = float(top_prob_values[token_index, top_index].item())
+    infer.parameters["logprobs"].string_param = json.dumps(
+        wire_logprobs, separators=(",", ":")
+    )
+    _append_tensor_output(
+        infer,
+        tensor_name="top_logprob_token_ids",
+        datatype="INT32",
+        shape=[1, num_tokens, actual_k],
+        tensor=top_id_values,
+    )
+    _append_tensor_output(
+        infer,
+        tensor_name="top_logprobs",
+        datatype="FP32",
+        shape=[1, num_tokens, actual_k],
+        tensor=top_prob_values,
+    )
+
+
+def _log_dashsc_logprob_frame(
+    *,
+    infer: predict_v2_pb2.ModelInferResponse,
+    out_py: Any,
+    request_log_tag: str,
+    generated_ids: list[int],
+    generate_config: Any,
+    generate_think_token_num: int | None,
+    phase: str,
+    pre_content_token_count: int | None,
+    include_logprobs: bool,
+    include_forced_token_logprobs: bool,
+    placeholder_prefix_token_count: int,
+    finished: bool,
+) -> None:
+    """Log backend-to-wire logprob counts for one DashScope response frame."""
+    if not bool(getattr(generate_config, "return_logprobs", False)):
+        return
+    logger = logging.getLogger()
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    try:
+        backend_placement_offset = getattr(out_py, "logprobs_offset", None)
+        source = "none"
+        if include_logprobs:
+            source = (
+                "backend_compact_with_placeholder_prefix"
+                if backend_placement_offset or placeholder_prefix_token_count
+                else "backend"
+            )
+        elif include_forced_token_logprobs:
+            source = "placeholder"
+        backend_generated_ids = _token_ids_list_from_generate_output(out_py)
+        backend_token_logprob_rows: int | None = None
+        backend_token_logprobs = getattr(out_py, "token_logprobs", None)
+        if include_logprobs and backend_token_logprobs is not None:
+            try:
+                backend_token_logprob_rows = _logprob_token_rows(
+                    backend_token_logprobs,
+                    tensor_name="token_logprobs",
+                )
+            except (AttributeError, ValueError):
+                backend_token_logprob_rows = -1
+
+        wire_tensor_logprob_rows: int | None = None
+        for output in infer.outputs:
+            if output.name != "token_logprobs":
+                continue
+            shape = list(output.shape)
+            wire_tensor_logprob_rows = (
+                int(shape[1]) if len(shape) == 2 and shape[0] == 1 else -1
+            )
+            break
+
+        wire_rows: list[Any] = []
+        wire_parse_error: str | None = None
+        wire_param = infer.parameters.get("logprobs")
+        if (
+            wire_param is not None
+            and wire_param.WhichOneof("parameter_choice") == "string_param"
+        ):
+            try:
+                parsed = json.loads(wire_param.string_param)
+                if isinstance(parsed, list):
+                    wire_rows = parsed
+                else:
+                    wire_parse_error = f"decoded_{type(parsed).__name__}"
+            except (TypeError, json.JSONDecodeError) as error:
+                wire_parse_error = type(error).__name__
+
+        token_count = len(generated_ids)
+        wire_count = len(wire_rows)
+        effective_prefix_count = (
+            int(backend_placement_offset)
+            if include_logprobs and backend_placement_offset is not None
+            else int(placeholder_prefix_token_count)
+        )
+        placeholder_rows = (
+            token_count
+            if include_forced_token_logprobs
+            else min(max(effective_prefix_count, 0), token_count)
+        )
+        real_rows = max(0, wire_count - placeholder_rows)
+        aligned = token_count == wire_count and (
+            wire_tensor_logprob_rows == token_count
+            or (token_count == 0 and wire_tensor_logprob_rows is None)
+        )
+        sampled_tokens_match = token_count == wire_count and all(
+            isinstance(row, dict) and str(token_id) in row
+            for token_id, row in zip(generated_ids, wire_rows)
+        )
+        if pre_content_token_count is None:
+            pre_content_count = None
+            content_count = None
+        else:
+            pre_content_count = max(0, min(int(pre_content_token_count), token_count))
+            content_count = token_count - pre_content_count
+        logger.debug(
+            "[DashScGrpcLogprobs] [%s] stage=wire response_id=%s "
+            "phase=%s source=%s "
+            "finished=%s backend_token_count=%s backend_token_logprob_rows=%s "
+            "wire_token_count=%s wire_tensor_logprob_rows=%s "
+            "wire_json_logprob_rows=%s aligned=%s sampled_tokens_match=%s "
+            "placeholder_logprob_rows=%s real_logprob_rows=%s "
+            "pre_content_token_count=%s content_token_count=%s "
+            "generate_think_token_num=%s top_logprobs=%s "
+            "token_ids_preview=%s wire_parse_error=%s",
+            request_log_tag,
+            infer.id,
+            phase,
+            source,
+            finished,
+            len(backend_generated_ids),
+            backend_token_logprob_rows,
+            token_count,
+            wire_tensor_logprob_rows,
+            wire_count,
+            aligned,
+            sampled_tokens_match,
+            placeholder_rows,
+            real_rows,
+            pre_content_count,
+            content_count,
+            generate_think_token_num,
+            int(getattr(generate_config, "top_logprobs", 0) or 0),
+            generated_ids[:4],
+            wire_parse_error,
+        )
+    except Exception as error:
+        # Observability must never change inference behavior.
+        logger.warning(
+            "[DashScGrpcLogprobs] [%s] stage=wire diagnostic_error=%s",
+            request_log_tag,
+            type(error).__name__,
+        )
+
+
 def build_stream_response_from_generate_outputs(
     dash_sc_request_id: str,
     model_name: str,
@@ -1078,6 +1953,12 @@ def build_stream_response_from_generate_outputs(
     *,
     stream_finished: bool | None = None,
     token_ids: list[int] | None = None,
+    include_logprobs: bool = True,
+    include_forced_token_logprobs: bool = False,
+    logprob_placeholder_prefix_token_count: int = 0,
+    logprob_phase: str = "unspecified",
+    logprob_pre_content_token_count: int | None = None,
+    debug: bool = False,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
     """Build ``ModelStreamInferResponse`` from one ``GenerateOutputs`` chunk.
 
@@ -1087,6 +1968,20 @@ def build_stream_response_from_generate_outputs(
 
     ``token_ids``: if provided, overrides the generated_ids from ``out_py``.
     Use when the servicer rewrites the token payload (e.g. injecting </think>).
+
+    ``include_logprobs``: encode probability tensors from the backend output.
+    Prompt-echo frames disable this because those ids were not sampled.
+
+    ``include_forced_token_logprobs``: encode logprob-zero alignment rows for
+    a frame containing only non-content tokens.
+
+    ``logprob_placeholder_prefix_token_count``: replace this many leading
+    backend rows with alignment placeholders for a reasoning/content boundary
+    frame.  The remaining suffix keeps its real backend probabilities.
+
+    ``logprob_phase`` / ``logprob_pre_content_token_count`` annotate only the
+    diagnostic log. The latter counts this frame's reasoning and delimiter
+    tokens before normal content begins.
     """
     del _request_shape  # reserved for future shape alignment
     if not go.generate_outputs:
@@ -1100,11 +1995,21 @@ def build_stream_response_from_generate_outputs(
 
     out_py = go.generate_outputs[0]
     finished = stream_finished if stream_finished is not None else out_py.finished
-    generated_ids = (
-        token_ids
-        if token_ids is not None
-        else _token_ids_list_from_generate_output(out_py)
-    )
+    backend_generated_ids = _token_ids_list_from_generate_output(out_py)
+    generated_ids = token_ids if token_ids is not None else backend_generated_ids
+    if (
+        include_logprobs
+        and token_ids is not None
+        and generated_ids != backend_generated_ids
+        and any(
+            getattr(out_py, name, None) is not None
+            for name in ("token_logprobs", "top_logprob_token_ids", "top_logprobs")
+        )
+    ):
+        raise ValueError(
+            "rewritten generated_ids require matching logprob tensor slicing or "
+            "include_logprobs=False"
+        )
 
     if return_input_ids and request_input_ids is not None:
         _append_prompt_token_ids_output(infer, request_input_ids)
@@ -1117,6 +2022,24 @@ def build_stream_response_from_generate_outputs(
         out_py,
         prompt_token_fallback=len(request_input_ids or []),
     )
+    # Append new optional tensors after the legacy response outputs so existing
+    # positional consumers retain their original indices. raw_output_contents
+    # stays one-to-one with outputs because each helper appends both together.
+    if include_logprobs:
+        _append_logprob_outputs(
+            infer,
+            out_py,
+            generated_ids=generated_ids,
+            num_tokens=len(generated_ids),
+            generate_config=generate_config,
+            placeholder_prefix_token_count=logprob_placeholder_prefix_token_count,
+        )
+    elif include_forced_token_logprobs:
+        _append_forced_token_logprob_outputs(
+            infer,
+            generated_ids=generated_ids,
+            generate_config=generate_config,
+        )
     infer.parameters["incremental_output"].int64_param = 1 if is_streaming else 0
     _append_dashllm_limit_parameters(
         infer,
@@ -1124,6 +2047,22 @@ def build_stream_response_from_generate_outputs(
         eos_token_id=eos_token_id,
         max_token_id=max_token_id,
         generate_think_token_num=generate_think_token_num,
+        debug=debug and finished,
+    )
+
+    _log_dashsc_logprob_frame(
+        infer=infer,
+        out_py=out_py,
+        request_log_tag=request_log_tag,
+        generated_ids=generated_ids,
+        generate_config=generate_config,
+        generate_think_token_num=generate_think_token_num,
+        phase=logprob_phase,
+        pre_content_token_count=logprob_pre_content_token_count,
+        include_logprobs=include_logprobs,
+        include_forced_token_logprobs=include_forced_token_logprobs,
+        placeholder_prefix_token_count=logprob_placeholder_prefix_token_count,
+        finished=bool(finished),
     )
 
     logging.debug("[DashScGrpc] [%s] generated_ids: %s", request_log_tag, generated_ids)

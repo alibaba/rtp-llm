@@ -160,7 +160,12 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                         .all_probs         = {},
                         .loss              = {},
                         .src_batch_indices = {},
-                        .all_hidden_states = {}});
+                        .all_hidden_states = {},
+                        // The prefill side already returned this token (and
+                        // its logprob, when requested).  Commit the token so a
+                        // think-close still advances phase, but do not reserve
+                        // or expect another local logprob row for it.
+                        .logprobs_offset = stream->generateConfig()->return_logprobs ? 1 : 0});
         if (stream->nextBatchSize() == 1) {
             c10::DeviceGuard runtime_device_guard(getTorchCudaDevice());
             const auto       cuda_i32 = runtimeCudaI32Options();

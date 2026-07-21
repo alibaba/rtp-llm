@@ -39,6 +39,21 @@ struct StreamUpdateInfo {
     const torch::Tensor all_hidden_states;
     bool                update_remote_generate = true;
     bool                force_update_info      = false;
+    // Compact raw-target log probabilities for the packet's content suffix.
+    // Shapes use `num_new_tokens - logprobs_offset` as their token dimension.
+    // These fields trail the existing positional aggregate members to keep old
+    // update call sites source-compatible.
+    const torch::Tensor token_logprobs;
+    const torch::Tensor top_logprob_token_ids;
+    const torch::Tensor top_logprobs;
+    // Sequence position before this update was committed. GenerateStream fills
+    // this before invoking updateOutput so finish checks can safely truncate a
+    // multi-token window without deriving a start position from requested N.
+    int output_start_pos = -1;
+    // Number of new tokens before the compact content-logprob suffix. This is
+    // evaluated against the pre-update output. Thinking-only packets use
+    // num_new_tokens; ordinary/content-only packets use zero.
+    int32_t logprobs_offset = 0;
 };
 
 struct StreamSpecUpdateInfo {
@@ -55,8 +70,22 @@ struct StreamSpecUpdateInfo {
     // GPU tensor of the last accepted target token for the next MTP step.
     torch::Tensor target_token_gpu;
 
+    // Compact raw-target log probabilities for the accepted content suffix.
+    // Shapes use `num_new_tokens - logprobs_offset` as their token dimension.
+    // Non-const so MTP assembly can fill them after constructing the rest of
+    // the update.
+    torch::Tensor token_logprobs;
+    torch::Tensor top_logprob_token_ids;
+    torch::Tensor top_logprobs;
+
     bool update_remote_generate = true;
     bool force_update_info      = false;
+
+    // Number of newly committed tokens before the compact logprob suffix.
+    // Thinking-only packets use num_new_tokens; ordinary/content-only packets
+    // use zero.  Kept trailing so existing aggregate initializers retain their
+    // source compatibility.
+    int32_t logprobs_offset = 0;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -269,10 +298,17 @@ public:
     size_t spIterCount() const;
     void   setSpIterCount(int sp_iter_count);
 
-    const ResourceContext&      resourceContext() const;
-    void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
-    void                        setLoss(const torch::Tensor& loss);
-    void                        setSoftmaxProbs(const torch::Tensor& softmax_probs, int start_pos);
+    const ResourceContext& resourceContext() const;
+    void                   setKVCache(const BatchKVCacheResource& kv_cache_resource);
+    void                   setLoss(const torch::Tensor& loss);
+    void                   setSoftmaxProbs(const torch::Tensor& softmax_probs, int start_pos);
+    // Logprob D2H is batched by the executor/dispatcher. All tensor arguments
+    // passed here must already be CPU tensors.
+    void                        setLogProbs(const torch::Tensor& token_logprobs,
+                                            const torch::Tensor& top_logprob_token_ids,
+                                            const torch::Tensor& top_logprobs,
+                                            const torch::Tensor& src_batch_indices,
+                                            int                  start_pos);
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
     BatchKVCacheResourcePtr     kvCachePtr();
@@ -304,6 +340,9 @@ public:
         last_hidden_states_ = std::move(hidden_states);
     };
     torch::Tensor        getSoftmaxProbs();
+    torch::Tensor        getTokenLogProbs() const;
+    torch::Tensor        getTopLogprobTokenIds() const;
+    torch::Tensor        getTopLogProbs() const;
     StreamCacheResource& streamCacheResource();
     void                 setPerfTest(bool perf_test_);
     bool                 isPerfTest() const {
@@ -339,6 +378,17 @@ public:
     size_t outputTokenLen() const {
         return seqLength() - inputLength();
     }
+
+    // DashScope exposes logprobs only after the first think-close token. The
+    // close token itself is still reasoning; any remaining textual delimiter
+    // tokens already belong to the content-logprob suffix.
+    bool hasLogprobsContentStarted() const;
+    bool shouldComputeLogprobs() const {
+        return generate_input_->generate_config->return_logprobs && hasLogprobsContentStarted();
+    }
+    // Return the first content-logprob token within a pre-commit candidate
+    // packet, in [0, num_new_tokens]. The method does not mutate stream state.
+    int32_t logprobsContentOffset(const torch::Tensor& candidate_tokens, int32_t num_new_tokens) const;
 
     void setReturnLastHiddenStates(bool flag) {
         return_all_hidden_states_ = flag;
@@ -695,6 +745,7 @@ public:
     bool     queryPdSep() const;
 
 protected:
+    void updateLogprobsContentStarted(int old_seq_length);
     void updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
     void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
     void updateLogitProcessorStatus(const torch::Tensor& new_tokens,
@@ -760,6 +811,11 @@ protected:
     torch::Tensor                            cum_log_probs_;
     torch::Tensor                            all_probs_;
     torch::Tensor                            softmax_probs_;
+    torch::Tensor                            token_logprobs_;
+    torch::Tensor                            top_logprob_token_ids_;
+    torch::Tensor                            top_logprobs_;
+    int64_t                                  logprobs_history_size_    = 0;
+    std::shared_ptr<std::atomic<bool>>       logprobs_content_started_ = std::make_shared<std::atomic<bool>>(false);
     torch::Tensor                            loss_;
     torch::Tensor                            last_hidden_states_;
     int                                      loss_index_ = 0;

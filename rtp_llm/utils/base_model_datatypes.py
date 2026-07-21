@@ -6,6 +6,7 @@ import torch
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.utils.multimodal_util import MultimodalInput
 
+
 class EmbeddingOutput:
     text_embedding: torch.Tensor
     extra_input: Optional[torch.Tensor]
@@ -44,7 +45,9 @@ class GenerateInput:
     prefix_length: int = 0
     token_type_ids: List[int] = field(default_factory=list)
     batch_group_size: int = 1
-    batch_group_id: int = -1  # Batch group ID for force batch grouping, -1 means not set
+    batch_group_id: int = (
+        -1
+    )  # Batch group ID for force batch grouping, -1 means not set
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
 
@@ -109,6 +112,14 @@ class GenerateOutput:
     loss: Optional[torch.Tensor] = None
     logits: Optional[torch.Tensor] = None
     all_probs: Optional[torch.Tensor] = None
+    token_logprobs: Optional[torch.Tensor] = None
+    top_logprob_token_ids: Optional[torch.Tensor] = None
+    top_logprobs: Optional[torch.Tensor] = None
+    # Compact logprob tensors cover
+    # output_ids[logprobs_offset:logprobs_offset + logprobs_count].  ``None``
+    # denotes the legacy one-row-per-output-token contract.
+    logprobs_offset: Optional[int] = None
+    logprobs_count: Optional[int] = None
 
     class Config:
         arbitrary_types_allowed = True

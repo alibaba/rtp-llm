@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import struct
 from unittest import TestCase, main
 
@@ -34,6 +35,10 @@ def _unpack_int32_le(raw: bytes) -> list[int]:
 
 def _unpack_int64_le(raw: bytes) -> list[int]:
     return [int(x) for x in struct.unpack("<%dq" % (len(raw) // 8), raw)]
+
+
+def _unpack_fp32_le(raw: bytes) -> list[float]:
+    return list(struct.unpack("<%df" % (len(raw) // 4), raw))
 
 
 def _tool_call_structural_tag() -> dict:
@@ -146,7 +151,7 @@ class DashScGrpcRequestTest(TestCase):
         req = predict_v2_pb2.ModelInferRequest()
         sp = parse_sampling_params(req)
         self.assertIsInstance(sp, SamplingParams)
-        self.assertEqual(sp.max_new_tokens, 32000)
+        self.assertEqual(sp.max_new_tokens, 131072)
         self.assertEqual(sp.top_k, 0)
         self.assertEqual(sp.top_p, 1.0)
         self.assertEqual(sp.stop_words_list, ())
@@ -182,6 +187,243 @@ class DashScGrpcRequestTest(TestCase):
         sp = parse_sampling_params(req)
         self.assertEqual(sp.num_return_sequences, 1)
         self.assertEqual(sp.min_new_tokens, 2)
+
+    def test_parse_logprobs_tensors_and_generate_config_mapping(self) -> None:
+        for shape in ([], [1], [1, 1]):
+            with self.subTest(shape=shape):
+                req = predict_v2_pb2.ModelInferRequest()
+                _add_tensor(req, "logprobs", "BOOL", shape, b"\x01")
+                _add_tensor(req, "top_logprobs", "INT32", shape, struct.pack("<i", 5))
+
+                sp = parse_sampling_params(req)
+                config = sp.to_generate_config()
+
+                self.assertTrue(sp.return_logprobs)
+                self.assertEqual(sp.top_logprobs, 5)
+                self.assertTrue(config.return_logprobs)
+                self.assertEqual(config.top_logprobs, 5)
+
+    def test_batch_wrapped_false_logprobs_preserves_disabled_path(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "logprobs", "BOOL", [1, 1], b"\x00")
+        _add_tensor(req, "top_logprobs", "INT32", [1, 1], struct.pack("<i", 0))
+
+        sp = parse_sampling_params(req)
+        config = sp.to_generate_config()
+
+        self.assertFalse(sp.return_logprobs)
+        self.assertEqual(sp.top_logprobs, 0)
+        self.assertFalse(config.return_logprobs)
+        self.assertEqual(config.top_logprobs, 0)
+
+    def test_online_disabled_defaults_with_ordinary_top_k(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["logprobs"].bool_param = False
+        req.parameters["top_logprobs"].int64_param = 0
+        req.parameters["top_k"].int64_param = 5
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "body": {
+                    "input": {"prompt": "今天中午吃什么？"},
+                    "parameters": {"max_length": 1000, "top_k": 5},
+                }
+            },
+            ensure_ascii=False,
+        )
+
+        sp = parse_sampling_params(req)
+        config = sp.to_generate_config()
+
+        self.assertEqual(sp.top_k, 5)
+        self.assertFalse(sp.return_logprobs)
+        self.assertEqual(sp.top_logprobs, 0)
+        self.assertFalse(config.return_logprobs)
+        self.assertEqual(config.top_logprobs, 0)
+
+    def test_positive_top_logprobs_still_requires_logprobs(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["logprobs"].bool_param = False
+        req.parameters["top_logprobs"].int64_param = 5
+
+        with self.assertRaisesRegex(
+            DashScParameterError, "top_logprobs requires logprobs=true"
+        ):
+            parse_sampling_params(req)
+
+    def test_parse_online_nested_logprobs_with_thinking_controls(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "body": {
+                    "parameters": {
+                        "logprobs": True,
+                        "top_logprobs": 5,
+                    }
+                }
+            }
+        )
+        _add_tensor(req, "min_length", "INT32", [1], struct.pack("<i", 3))
+        _add_tensor(req, "max_new_think_tokens", "INT32", [1], struct.pack("<i", 128))
+
+        sp = parse_sampling_params(req)
+
+        self.assertEqual(sp.min_new_tokens, 3)
+        self.assertEqual(sp.max_new_think_tokens, 128)
+        self.assertTrue(sp.return_logprobs)
+        self.assertEqual(sp.top_logprobs, 5)
+
+    def test_parse_return_logprobs_parameter_alias(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["return_logprobs"].bool_param = True
+        req.parameters["top_logprobs"].int64_param = 2
+
+        sp = parse_sampling_params(req)
+
+        self.assertTrue(sp.return_logprobs)
+        self.assertEqual(sp.top_logprobs, 2)
+
+    def test_parameter_n_fallback_preserves_non_logprobs_backend_fanout(
+        self,
+    ) -> None:
+        for param_name in ("n", "num_return_sequences"):
+            for value in (0, 1):
+                for return_logprobs in (False, True):
+                    with self.subTest(
+                        param_name=param_name,
+                        value=value,
+                        return_logprobs=return_logprobs,
+                    ):
+                        req = predict_v2_pb2.ModelInferRequest()
+                        req.parameters[param_name].int64_param = value
+                        if return_logprobs:
+                            req.parameters["logprobs"].bool_param = True
+
+                        sp = parse_sampling_params(req)
+                        config = sp.to_generate_config()
+                        expected = value if return_logprobs else 0
+
+                        self.assertEqual(sp.num_return_sequences, expected)
+                        self.assertEqual(config.num_return_sequences, expected)
+                        self.assertIs(sp.return_logprobs, return_logprobs)
+                        self.assertIs(config.return_logprobs, return_logprobs)
+
+    def test_parameter_n_defaults_do_not_enable_backend_fanout(self) -> None:
+        for return_logprobs in (False, True):
+            with self.subTest(return_logprobs=return_logprobs):
+                req = predict_v2_pb2.ModelInferRequest()
+                if return_logprobs:
+                    req.parameters["logprobs"].bool_param = True
+
+                sp = parse_sampling_params(req)
+                config = sp.to_generate_config()
+
+                self.assertEqual(sp.num_return_sequences, 0)
+                self.assertEqual(config.num_return_sequences, 0)
+
+    def test_parameter_n_greater_than_one_is_rejected_for_single_result_wire(
+        self,
+    ) -> None:
+        for param_name in ("n", "num_return_sequences"):
+            for return_logprobs in (False, True):
+                with self.subTest(
+                    param_name=param_name,
+                    return_logprobs=return_logprobs,
+                ):
+                    req = predict_v2_pb2.ModelInferRequest()
+                    req.parameters[param_name].int64_param = 2
+                    if return_logprobs:
+                        req.parameters["logprobs"].bool_param = True
+
+                    with self.assertRaisesRegex(
+                        DashScParameterError,
+                        "DashScope response does not support n > 1",
+                    ):
+                        parse_sampling_params(req)
+
+    def test_parameter_n_alias_conflict_is_rejected(self) -> None:
+        for return_logprobs in (False, True):
+            with self.subTest(return_logprobs=return_logprobs):
+                req = predict_v2_pb2.ModelInferRequest()
+                req.parameters["n"].int64_param = 1
+                req.parameters["num_return_sequences"].int64_param = 0
+                if return_logprobs:
+                    req.parameters["logprobs"].bool_param = True
+
+                with self.assertRaisesRegex(
+                    DashScParameterError,
+                    "conflicting n and num_return_sequences parameters",
+                ):
+                    parse_sampling_params(req)
+
+    def test_input_tensor_n_keeps_existing_mapping_and_logprobs_validation(
+        self,
+    ) -> None:
+        for tensor_name in ("n", "num_return_sequences"):
+            for value in (0, 1, 2):
+                for return_logprobs in (False, True):
+                    with self.subTest(
+                        tensor_name=tensor_name,
+                        value=value,
+                        return_logprobs=return_logprobs,
+                    ):
+                        req = predict_v2_pb2.ModelInferRequest()
+                        _add_tensor(
+                            req,
+                            tensor_name,
+                            "INT32",
+                            [1],
+                            struct.pack("<i", value),
+                        )
+                        if return_logprobs:
+                            req.parameters["logprobs"].bool_param = True
+
+                        if return_logprobs and value > 1:
+                            with self.assertRaisesRegex(
+                                DashScParameterError,
+                                "logprobs does not support n > 1",
+                            ):
+                                parse_sampling_params(req)
+                            continue
+
+                        sp = parse_sampling_params(req)
+                        config = sp.to_generate_config()
+                        self.assertEqual(sp.num_return_sequences, value)
+                        self.assertEqual(config.num_return_sequences, value)
+
+    def test_logprobs_validation(self) -> None:
+        invalid_cases = []
+
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["top_logprobs"].int64_param = 1
+        invalid_cases.append((req, "requires logprobs=true"))
+
+        for value in (-1, 21):
+            req = predict_v2_pb2.ModelInferRequest()
+            req.parameters["logprobs"].bool_param = True
+            req.parameters["top_logprobs"].int64_param = value
+            invalid_cases.append((req, "between 0 and 20"))
+
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["logprobs"].bool_param = True
+        _add_tensor(req, "n", "INT32", [1], struct.pack("<i", 2))
+        invalid_cases.append((req, "does not support n > 1"))
+
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "logprobs", "BOOL", [2], b"\x01\x00")
+        invalid_cases.append((req, "must contain exactly one value"))
+
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "logprobs", "BOOL", [1], b"\x02")
+        invalid_cases.append((req, "boolean scalar"))
+
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "top_logprobs", "INT32", [1], struct.pack("<2i", 1, 2))
+        invalid_cases.append((req, "integer scalar"))
+
+        for req, message in invalid_cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(DashScParameterError, message):
+                    parse_sampling_params(req)
 
     def test_parse_sampling_response_format_parameters(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
@@ -606,7 +848,7 @@ class DashScGrpcRequestTest(TestCase):
 
         sp = parse_sampling_params(req)
 
-        self.assertEqual(sp.max_new_tokens, 32000)
+        self.assertEqual(sp.max_new_tokens, 131072)
         self.assertFalse(sp.max_new_tokens_from_completion_alias)
 
     def test_parse_sampling_max_completion_tokens_non_positive_preserves_error_repro(
@@ -722,6 +964,21 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(sp.max_new_think_tokens, 7)
         self.assertIs(op.enable_thinking, False)
 
+    def test_build_request_writes_logprobs_controls(self) -> None:
+        req = build_model_infer_request(
+            request_id="test-logprobs",
+            model_name="default",
+            input_ids=[1, 2],
+            sampling=SamplingParams(return_logprobs=True, top_logprobs=4),
+        )
+
+        _, sp, _ = parse_dash_sc_grpc_request(req)
+
+        self.assertIsNotNone(sp)
+        assert sp is not None
+        self.assertTrue(sp.return_logprobs)
+        self.assertEqual(sp.top_logprobs, 4)
+
     def test_parse_sampling_legacy_top_k_parameter(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         p = predict_v2_pb2.InferParameter()
@@ -802,6 +1059,21 @@ class DashScGrpcRequestTest(TestCase):
         )
         op = parse_other_params(req)
         self.assertEqual(op.reasoning_effort, "xhigh")
+
+    def test_parse_other_params_debug_parameter(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["debug"].bool_param = True
+        self.assertTrue(parse_other_params(req).debug)
+
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["debug"].bool_param = False
+        self.assertFalse(parse_other_params(req).debug)
+
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"parameters": {"debug": True}}
+        )
+        self.assertTrue(parse_other_params(req).debug)
 
     def test_parse_other_params_dashscope_body_thinking_aliases(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
@@ -918,6 +1190,444 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             4,
         )
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 10)
+
+    def test_serializes_compact_logprob_tensors(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([7, 8], dtype=torch.int32),
+            token_logprobs=torch.tensor([-0.1, -0.2], dtype=torch.float32),
+            top_logprob_token_ids=torch.tensor([[7, 70], [8, 80]], dtype=torch.int64),
+            top_logprobs=torch.tensor(
+                [[-0.1, -1.1], [-0.2, -1.2]], dtype=torch.float32
+            ),
+            finished=True,
+        )
+        resp = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="logprobs",
+            model_name="m",
+            go=GenerateOutputs(generate_outputs=[out]),
+            request_log_tag="tag",
+            generate_config=GenerateConfig(return_logprobs=True, top_logprobs=2),
+        )
+        infer = resp.infer_response
+        metadata = {item.name: item for item in infer.outputs}
+        raw = {
+            infer.outputs[i].name: infer.raw_output_contents[i]
+            for i in range(len(infer.outputs))
+        }
+
+        self.assertEqual(
+            [item.name for item in infer.outputs[:5]],
+            [
+                "generated_ids",
+                "finish_reason",
+                "finished",
+                "prompt_token_num",
+                "prompt_cached_token_num",
+            ],
+        )
+        self.assertEqual(list(metadata["token_logprobs"].shape), [1, 2])
+        self.assertEqual(metadata["token_logprobs"].datatype, "FP32")
+        self.assertEqual(list(metadata["top_logprob_token_ids"].shape), [1, 2, 2])
+        self.assertEqual(metadata["top_logprob_token_ids"].datatype, "INT32")
+        self.assertEqual(list(metadata["top_logprobs"].shape), [1, 2, 2])
+        self.assertEqual(_unpack_int32_le(raw["generated_ids"]), [7, 8])
+        self.assertEqual(_unpack_int32_le(raw["top_logprob_token_ids"]), [7, 70, 8, 80])
+        for actual, expected in zip(
+            _unpack_fp32_le(raw["token_logprobs"]), [-0.1, -0.2]
+        ):
+            self.assertAlmostEqual(actual, expected)
+        for actual, expected in zip(
+            _unpack_fp32_le(raw["top_logprobs"]), [-0.1, -1.1, -0.2, -1.2]
+        ):
+            self.assertAlmostEqual(actual, expected)
+        gateway_logprobs = json.loads(infer.parameters["logprobs"].string_param)
+        self.assertEqual(len(gateway_logprobs), 2)
+        self.assertAlmostEqual(gateway_logprobs[0]["7"], -0.1)
+        self.assertAlmostEqual(gateway_logprobs[0]["70"], -1.1)
+        self.assertAlmostEqual(gateway_logprobs[1]["8"], -0.2)
+        self.assertAlmostEqual(gateway_logprobs[1]["80"], -1.2)
+
+    def test_rewritten_or_misaligned_logprobs_are_rejected(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([7, 8], dtype=torch.int32),
+            token_logprobs=torch.tensor([[-0.1], [-0.2]], dtype=torch.float32),
+            finished=True,
+        )
+        with self.assertRaisesRegex(ValueError, "shape"):
+            build_stream_response_from_generate_outputs(
+                dash_sc_request_id="bad-shape",
+                model_name="m",
+                go=GenerateOutputs(generate_outputs=[out]),
+                request_log_tag="tag",
+                generate_config=GenerateConfig(return_logprobs=True),
+            )
+
+        out.token_logprobs = torch.tensor([-0.1, -0.2], dtype=torch.float32)
+        with self.assertRaisesRegex(ValueError, "rewritten generated_ids"):
+            build_stream_response_from_generate_outputs(
+                dash_sc_request_id="bad-rewrite",
+                model_name="m",
+                go=GenerateOutputs(generate_outputs=[out]),
+                request_log_tag="tag",
+                token_ids=[7],
+                generate_config=GenerateConfig(return_logprobs=True),
+            )
+
+    def test_top_logprobs_zero_serializes_empty_aligned_top_tensors(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([7, 8], dtype=torch.int32),
+            token_logprobs=torch.tensor([-0.1, -0.2], dtype=torch.float32),
+            top_logprob_token_ids=torch.empty((2, 0), dtype=torch.int32),
+            top_logprobs=torch.empty((2, 0), dtype=torch.float32),
+            finished=True,
+        )
+        infer = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="top-zero",
+            model_name="m",
+            go=GenerateOutputs(generate_outputs=[out]),
+            request_log_tag="tag",
+            generate_config=GenerateConfig(return_logprobs=True, top_logprobs=0),
+        ).infer_response
+        metadata = {item.name: item for item in infer.outputs}
+        raw = {
+            infer.outputs[i].name: infer.raw_output_contents[i]
+            for i in range(len(infer.outputs))
+        }
+
+        self.assertEqual(list(metadata["top_logprob_token_ids"].shape), [1, 2, 0])
+        self.assertEqual(list(metadata["top_logprobs"].shape), [1, 2, 0])
+        self.assertEqual(raw["top_logprob_token_ids"], b"")
+        self.assertEqual(raw["top_logprobs"], b"")
+        gateway_logprobs = json.loads(infer.parameters["logprobs"].string_param)
+        self.assertEqual(len(gateway_logprobs), 2)
+        self.assertEqual(list(gateway_logprobs[0]), ["7"])
+        self.assertEqual(list(gateway_logprobs[1]), ["8"])
+
+    def test_mtp_uncommitted_tail_is_dropped_for_every_accept_length(self) -> None:
+        """MTP may expose P+1 verification rows but commit only 0..P tokens.
+
+        Keep this matrix explicit: these are the production failures reported
+        as 0/1, 1/2, 2/3, 3/4, 4/5 and 5/6 shape mismatches.
+        """
+        for accepted in range(6):
+            for compact in (False, True):
+                with self.subTest(accepted=accepted, compact=compact):
+                    self._assert_mtp_uncommitted_tail_is_dropped(
+                        accepted=accepted, compact=compact
+                    )
+
+    def _assert_mtp_uncommitted_tail_is_dropped(
+        self, *, accepted: int, compact: bool
+    ) -> None:
+        generated_ids = list(range(100, 100 + accepted))
+        probability_rows = accepted + 1
+        token_logprobs = torch.arange(probability_rows, dtype=torch.float32).neg()
+        top_ids = torch.arange(
+            100,
+            100 + probability_rows * 5,
+            dtype=torch.int32,
+        ).reshape(probability_rows, 5)
+        if accepted:
+            top_ids[:accepted, 0] = torch.tensor(generated_ids, dtype=torch.int32)
+        top_values = (
+            torch.arange(probability_rows * 5, dtype=torch.float32)
+            .neg()
+            .reshape(probability_rows, 5)
+        )
+        out = GenerateOutput(
+            output_ids=torch.tensor(generated_ids, dtype=torch.int32),
+            token_logprobs=token_logprobs,
+            top_logprob_token_ids=top_ids,
+            top_logprobs=top_values,
+            finished=accepted == 0,
+            logprobs_offset=0 if compact else None,
+            logprobs_count=probability_rows if compact else None,
+        )
+
+        infer = build_stream_response_from_generate_outputs(
+            dash_sc_request_id=f"mtp-accept-{accepted}",
+            model_name="m",
+            go=GenerateOutputs(generate_outputs=[out]),
+            request_log_tag="tag",
+            generate_config=GenerateConfig(return_logprobs=True, top_logprobs=5),
+        ).infer_response
+        metadata = {item.name: item for item in infer.outputs}
+        self.assertEqual(list(metadata["token_logprobs"].shape), [1, accepted])
+        self.assertEqual(
+            list(metadata["top_logprob_token_ids"].shape),
+            [1, accepted, 5],
+        )
+        records = json.loads(infer.parameters["logprobs"].string_param)
+        self.assertEqual(len(records), accepted)
+        for token_id, record in zip(generated_ids, records):
+            self.assertTrue(all(isinstance(key, str) for key in record))
+            self.assertIn(str(token_id), record)
+
+    def test_compact_mtp_tail_after_reasoning_prefix_is_dropped(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([10, 11], dtype=torch.int32),
+            token_logprobs=torch.tensor([-0.2, -0.3], dtype=torch.float32),
+            top_logprob_token_ids=torch.tensor([[11], [12]], dtype=torch.int32),
+            top_logprobs=torch.tensor([[-0.2], [-0.3]], dtype=torch.float32),
+            logprobs_offset=1,
+            logprobs_count=2,
+        )
+
+        infer = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="compact-prefix-tail",
+            model_name="m",
+            go=GenerateOutputs(generate_outputs=[out]),
+            request_log_tag="tag",
+            generate_config=GenerateConfig(return_logprobs=True, top_logprobs=1),
+        ).infer_response
+
+        records = json.loads(infer.parameters["logprobs"].string_param)
+        self.assertEqual(records[0], {"10": 0.0})
+        self.assertAlmostEqual(records[1]["11"], -0.2, places=6)
+        self.assertEqual(out.logprobs_offset, 1)
+        self.assertEqual(out.logprobs_count, 1)
+
+    def test_compact_thinking_offset_drops_one_elided_tail(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([10, 11], dtype=torch.int32),
+            logprobs_offset=3,
+            logprobs_count=0,
+        )
+
+        infer = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="compact-thinking-tail",
+            model_name="m",
+            go=GenerateOutputs(generate_outputs=[out]),
+            request_log_tag="tag",
+            generate_config=GenerateConfig(return_logprobs=True, top_logprobs=0),
+        ).infer_response
+
+        records = json.loads(infer.parameters["logprobs"].string_param)
+        self.assertEqual(records, [{"10": 0.0}, {"11": 0.0}])
+        self.assertEqual(out.logprobs_offset, 2)
+        self.assertEqual(out.logprobs_count, 0)
+
+    def test_logprob_shape_mismatch_other_than_one_mtp_tail_is_rejected(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([7], dtype=torch.int32),
+            token_logprobs=torch.tensor([-0.1, -0.2, -0.3]),
+            top_logprob_token_ids=torch.tensor([[7], [8], [9]], dtype=torch.int32),
+            top_logprobs=torch.tensor([[-0.1], [-0.2], [-0.3]]),
+        )
+        with self.assertRaisesRegex(ValueError, "shape"):
+            build_stream_response_from_generate_outputs(
+                dash_sc_request_id="mtp-invalid-extra-rows",
+                model_name="m",
+                go=GenerateOutputs(generate_outputs=[out]),
+                request_log_tag="tag",
+                generate_config=GenerateConfig(return_logprobs=True, top_logprobs=1),
+            )
+
+    def test_synthetic_frame_omits_logprob_payload(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([7], dtype=torch.int32),
+            token_logprobs=torch.tensor([-0.1], dtype=torch.float32),
+            top_logprob_token_ids=torch.tensor([[7, 70]], dtype=torch.int32),
+            top_logprobs=torch.tensor([[-0.1, -1.1]], dtype=torch.float32),
+            finished=False,
+        )
+        resp = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="synthetic",
+            model_name="m",
+            go=GenerateOutputs(generate_outputs=[out]),
+            request_log_tag="tag",
+            generate_config=GenerateConfig(return_logprobs=True, top_logprobs=2),
+            token_ids=[128822, 271],
+            include_logprobs=False,
+        )
+        infer = resp.infer_response
+        names = [item.name for item in infer.outputs]
+
+        self.assertEqual(_unpack_int32_le(infer.raw_output_contents[0]), [128822, 271])
+        self.assertNotIn("token_logprobs", names)
+        self.assertNotIn("top_logprob_token_ids", names)
+        self.assertNotIn("top_logprobs", names)
+        self.assertNotIn("logprobs", infer.parameters)
+
+    def test_forced_think_close_frame_has_aligned_logprob_payload(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([7], dtype=torch.int32),
+            token_logprobs=torch.tensor([-0.1], dtype=torch.float32),
+            top_logprob_token_ids=torch.tensor([[7, 70]], dtype=torch.int32),
+            top_logprobs=torch.tensor([[-0.1, -1.1]], dtype=torch.float32),
+            finished=False,
+        )
+        infer = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="forced-think-close",
+            model_name="m",
+            go=GenerateOutputs(generate_outputs=[out]),
+            request_log_tag="tag",
+            generate_config=GenerateConfig(return_logprobs=True, top_logprobs=5),
+            token_ids=[128822, 271],
+            include_logprobs=False,
+            include_forced_token_logprobs=True,
+        ).infer_response
+        metadata = {item.name: item for item in infer.outputs}
+
+        self.assertEqual(list(metadata["token_logprobs"].shape), [1, 2])
+        self.assertEqual(list(metadata["top_logprob_token_ids"].shape), [1, 2, 5])
+        wire_rows = json.loads(infer.parameters["logprobs"].string_param)
+        self.assertEqual(len(wire_rows), 2)
+        self.assertEqual(wire_rows[0]["128822"], 0.0)
+        self.assertEqual(wire_rows[1]["271"], 0.0)
+        self.assertTrue(all(len(row) == 5 for row in wire_rows))
+
+    def test_compact_thinking_only_frame_materializes_placeholders(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([10, 11, 128822], dtype=torch.int32),
+            logprobs_offset=3,
+            logprobs_count=0,
+            finished=False,
+        )
+        infer = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="compact-thinking-only",
+            model_name="m",
+            go=GenerateOutputs(generate_outputs=[out]),
+            request_log_tag="tag",
+            generate_config=GenerateConfig(return_logprobs=True, top_logprobs=2),
+        ).infer_response
+
+        metadata = {item.name: item for item in infer.outputs}
+        raw = {
+            item.name: infer.raw_output_contents[index]
+            for index, item in enumerate(infer.outputs)
+        }
+        self.assertEqual(list(metadata["token_logprobs"].shape), [1, 3])
+        self.assertEqual(_unpack_fp32_le(raw["token_logprobs"]), [0.0, 0.0, 0.0])
+        self.assertEqual(
+            _unpack_int32_le(raw["top_logprob_token_ids"]),
+            [10, 0, 11, 0, 128822, 0],
+        )
+        top_values = _unpack_fp32_le(raw["top_logprobs"])
+        self.assertEqual(top_values[::2], [0.0, 0.0, 0.0])
+        self.assertTrue(all(math.isinf(value) for value in top_values[1::2]))
+
+        wire_rows = json.loads(infer.parameters["logprobs"].string_param)
+        self.assertEqual(
+            wire_rows,
+            [
+                {"10": 0.0, "0": -math.inf},
+                {"11": 0.0, "0": -math.inf},
+                {"128822": 0.0, "0": -math.inf},
+            ],
+        )
+
+    def test_reasoning_prefix_uses_placeholders_and_content_keeps_logprobs(
+        self,
+    ) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([10, 128822, 271, 20], dtype=torch.int32),
+            token_logprobs=torch.tensor([-0.13, -0.20], dtype=torch.float32),
+            top_logprob_token_ids=torch.tensor(
+                [[271, 2], [20, 120]],
+                dtype=torch.int32,
+            ),
+            top_logprobs=torch.tensor(
+                [[-0.13, -1.13], [-0.20, -1.20]],
+                dtype=torch.float32,
+            ),
+            logprobs_offset=2,
+            logprobs_count=2,
+            finished=False,
+        )
+        infer = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="reasoning-content-boundary",
+            model_name="m",
+            go=GenerateOutputs(generate_outputs=[out]),
+            request_log_tag="tag",
+            generate_config=GenerateConfig(return_logprobs=True, top_logprobs=2),
+        ).infer_response
+
+        metadata = {item.name: item for item in infer.outputs}
+        raw = {
+            item.name: infer.raw_output_contents[index]
+            for index, item in enumerate(infer.outputs)
+        }
+        token_values = _unpack_fp32_le(raw["token_logprobs"])
+        self.assertEqual(token_values[:2], [0.0, 0.0])
+        self.assertAlmostEqual(token_values[2], -0.13)
+        self.assertAlmostEqual(token_values[3], -0.20)
+        self.assertEqual(list(metadata["token_logprobs"].shape), [1, 4])
+        self.assertEqual(
+            _unpack_int32_le(raw["top_logprob_token_ids"]),
+            [10, 0, 128822, 0, 271, 2, 20, 120],
+        )
+        top_values = _unpack_fp32_le(raw["top_logprobs"])
+        self.assertEqual(top_values[0], 0.0)
+        self.assertTrue(math.isinf(top_values[1]))
+        self.assertEqual(top_values[2], 0.0)
+        self.assertTrue(math.isinf(top_values[3]))
+        self.assertAlmostEqual(top_values[4], -0.13)
+        self.assertAlmostEqual(top_values[6], -0.20)
+
+        wire_rows = json.loads(infer.parameters["logprobs"].string_param)
+        self.assertEqual(wire_rows[0]["10"], 0.0)
+        self.assertEqual(wire_rows[1]["128822"], 0.0)
+        self.assertAlmostEqual(wire_rows[2]["271"], -0.13)
+        self.assertAlmostEqual(wire_rows[3]["20"], -0.20)
+
+    def test_disabled_request_ignores_stale_logprob_tensors(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([7], dtype=torch.int32),
+            token_logprobs=torch.tensor([-0.1], dtype=torch.float32),
+            top_logprob_token_ids=torch.tensor([[7]], dtype=torch.int32),
+            top_logprobs=torch.tensor([[-0.1]], dtype=torch.float32),
+            finished=True,
+        )
+        infer = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="disabled-stale",
+            model_name="m",
+            go=GenerateOutputs(generate_outputs=[out]),
+            request_log_tag="tag",
+            generate_config=GenerateConfig(return_logprobs=False),
+        ).infer_response
+
+        names = [item.name for item in infer.outputs]
+        self.assertNotIn("token_logprobs", names)
+        self.assertNotIn("top_logprob_token_ids", names)
+        self.assertNotIn("top_logprobs", names)
+        self.assertNotIn("logprobs", infer.parameters)
+
+    def test_stream_response_returns_dash_debug_info_when_requested(self) -> None:
+        config = GenerateConfig(max_new_tokens=128, max_thinking_tokens=100)
+        unfinished = GenerateOutput(
+            output_ids=torch.tensor([7], dtype=torch.int32), finished=False
+        )
+        unfinished_infer = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="debug-streaming",
+            model_name="m",
+            go=GenerateOutputs(generate_outputs=[unfinished]),
+            request_log_tag="tag",
+            generate_config=config,
+            debug=True,
+        ).infer_response
+        self.assertNotIn("debug_info", unfinished_infer.parameters)
+
+        finished = GenerateOutput(
+            output_ids=torch.tensor([8], dtype=torch.int32), finished=True
+        )
+        finished_infer = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="debug-finished",
+            model_name="m",
+            go=GenerateOutputs(generate_outputs=[finished]),
+            request_log_tag="tag",
+            generate_config=config,
+            debug=True,
+        ).infer_response
+        self.assertEqual(
+            json.loads(finished_infer.parameters["debug_info"].string_param),
+            {
+                "llm_params": {
+                    "max_new_tokens": 128,
+                    "max_new_think_tokens": 100,
+                }
+            },
+        )
 
     def test_error_response_uses_business_status_frame(self) -> None:
         resp = build_error_response(
@@ -1154,6 +1864,28 @@ class PrependToGeneratedIdsTensorTest(TestCase):
     def test_prepend_without_generated_ids_output_returns_false(self) -> None:
         resp = predict_v2_pb2.ModelStreamInferResponse()
         self.assertFalse(prepend_to_generated_ids_tensor(resp.infer_response, [100]))
+
+    def test_prepend_refuses_to_misalign_logprob_outputs(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([7, 8], dtype=torch.int32),
+            token_logprobs=torch.tensor([-0.1, -0.2], dtype=torch.float32),
+            finished=True,
+        )
+        infer = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="r",
+            model_name="m",
+            go=GenerateOutputs(generate_outputs=[out]),
+            request_log_tag="tag",
+            generate_config=GenerateConfig(return_logprobs=True),
+        ).infer_response
+
+        self.assertFalse(prepend_to_generated_ids_tensor(infer, [100]))
+        by_name = {
+            infer.outputs[i].name: infer.raw_output_contents[i]
+            for i in range(len(infer.outputs))
+        }
+        self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [7, 8])
+        self.assertEqual(len(_unpack_fp32_le(by_name["token_logprobs"])), 2)
 
 
 class StreamLogTagTest(TestCase):

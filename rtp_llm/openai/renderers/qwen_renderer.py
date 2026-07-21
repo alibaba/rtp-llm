@@ -433,6 +433,15 @@ class QwenRenderer(CustomChatRenderer):
         stop_word_slice_list: List[str],
         is_streaming: bool,
     ) -> OutputDelta:
+        if status.request.logprobs:
+            return await super()._update_single_status(
+                status,
+                output,
+                max_new_tokens,
+                stop_words_str,
+                stop_word_slice_list,
+                is_streaming,
+            )
         if status.request.tools or self.in_think_mode(status.request):
             return await self.qwen_reasoning_tool_renderer._update_single_status(
                 status,
@@ -513,6 +522,8 @@ class QwenRenderer(CustomChatRenderer):
     async def _create_status_list(
         self, n: int, request: ChatCompletionRequest
     ) -> List[StreamStatus]:
+        if request.logprobs:
+            return [StreamStatus(request) for _ in range(n)]
         if request.tools or self.in_think_mode(request):
             return await self.qwen_reasoning_tool_renderer._create_status_list(
                 n, request
@@ -530,6 +541,10 @@ class QwenRenderer(CustomChatRenderer):
         is_streaming: bool,
         think_status: ThinkStatus,
     ):
+        if buffer_list[0].request.logprobs:
+            return await super()._flush_buffer(
+                buffer_list, stop_words_str, is_streaming, think_status
+            )
         if buffer_list[0].request.tools or self.in_think_mode(buffer_list[0].request):
             return await self.qwen_reasoning_tool_renderer._flush_buffer(
                 buffer_list, stop_words_str, is_streaming, think_status
@@ -586,7 +601,9 @@ class QwenRenderer(CustomChatRenderer):
         input_len,  # output.aux_info
         output_len,  # output.aux_info
         reuse_len,  # output.aux_info
-        all_probs: torch.Tensor,
+        token_logprobs: torch.Tensor,
+        top_logprob_token_ids: torch.Tensor,
+        top_logprobs: torch.Tensor,
         output_ids: torch.Tensor,
         max_new_tokens: int,
         stop_words_str: List[str],
@@ -594,13 +611,15 @@ class QwenRenderer(CustomChatRenderer):
         is_streaming: bool,
     ) -> OutputDelta:
         # function call is disabled when logprobs is required.
-        if not isinstance(status, QwenStreamStatusSync):
+        if status.request.logprobs or not isinstance(status, QwenStreamStatusSync):
             return super()._update_single_status_sync(
                 status,
                 input_len,
                 output_len,
                 reuse_len,
-                all_probs,
+                token_logprobs,
+                top_logprob_token_ids,
+                top_logprobs,
                 output_ids,
                 max_new_tokens,
                 stop_words_str,
@@ -658,9 +677,7 @@ class QwenRenderer(CustomChatRenderer):
                 status.update_result()
                 return OutputDelta(
                     output_str=status.delta_output_string,
-                    logprobs=self._generate_log_probs_sync(
-                        status, all_probs, output_ids
-                    ),
+                    logprobs=None,
                     input_length=input_len,
                     output_length=output_len,
                     reuse_length=reuse_len,
@@ -682,7 +699,9 @@ class QwenRenderer(CustomChatRenderer):
         input_len_list,
         output_len_list,
         reuse_len_list,
-        all_probs_list,
+        token_logprobs_list,
+        top_logprob_token_ids_list,
+        top_logprobs_list,
         output_ids_list,
         stop_words_str: List[str],
         is_streaming: bool,
@@ -693,19 +712,19 @@ class QwenRenderer(CustomChatRenderer):
                 input_len_list,
                 output_len_list,
                 reuse_len_list,
-                all_probs_list,
+                token_logprobs_list,
+                top_logprob_token_ids_list,
+                top_logprobs_list,
                 output_ids_list,
                 stop_words_str,
                 is_streaming,
             )
         output_items: List[OutputDelta] = []
-        for status, input_len, output_len, reuse_len, all_probs, output_ids in zip(
+        for status, input_len, output_len, reuse_len in zip(
             buffer_list,
             input_len_list,
             output_len_list,
             reuse_len_list,
-            all_probs_list,
-            output_ids_list,
         ):
             if status.generating_function_call:
                 function_message = self._parse_function_response(
@@ -722,7 +741,7 @@ class QwenRenderer(CustomChatRenderer):
                 output_items.append(
                     OutputDelta(
                         function_message,
-                        self._generate_log_probs_sync(status, all_probs, output_ids),
+                        None,
                         input_len,
                         output_len,
                         reuse_len,
@@ -737,7 +756,7 @@ class QwenRenderer(CustomChatRenderer):
                 output_items.append(
                     OutputDelta(
                         trunc_string,
-                        self._generate_log_probs_sync(status, all_probs, output_ids),
+                        None,
                         input_len,
                         output_len,
                         reuse_len,

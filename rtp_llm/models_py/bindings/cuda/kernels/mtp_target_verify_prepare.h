@@ -37,6 +37,30 @@ void invokeMtpDispatchStatePrepare(const torch::Tensor& accept_len,
                                    int64_t              batch_size,
                                    cudaStream_t         stream);
 
+// Computes the two FP32 terms needed by stable log-softmax without materializing
+// an FP32 [rows, vocab] tensor: row_max and log(sum(exp(logit - row_max))).
+// Keeping the terms separate avoids losing a small normalization correction in
+// row_max + correction before the selected logit is subtracted.
+void invokeMtpRowLogSoftmaxStats(const torch::Tensor& logits,
+                                 torch::Tensor&       row_max,
+                                 torch::Tensor&       row_shifted_logsumexp,
+                                 int64_t              real_vocab_size,
+                                 cudaStream_t         stream);
+
+// Computes target-model logprobs for selected dense rows without gathering a
+// [selected_rows, vocab] tensor. source_row_indices maps each compact output
+// row to a row in logits and to the corresponding flattened emitted token ID.
+// logits may have a padded row stride, but its width must already be cropped to
+// the real vocabulary. Top-K values are returned in descending order.
+void invokeMtpSelectedRowLogProbs(const torch::Tensor& logits,
+                                  const torch::Tensor& source_row_indices,
+                                  const torch::Tensor& emitted_token_ids,
+                                  torch::Tensor&       token_logprobs,
+                                  torch::Tensor&       top_logprob_token_ids,
+                                  torch::Tensor&       top_logprobs,
+                                  int64_t              top_k,
+                                  cudaStream_t         stream);
+
 // REBASE CONFLICT CONTEXT(518707c73): keep new base dispatch-state publishing
 // kernel and add source branch prefill shift/append kernel to avoid sync-heavy
 // CPU token manipulation.
