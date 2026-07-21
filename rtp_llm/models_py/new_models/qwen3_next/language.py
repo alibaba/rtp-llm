@@ -3,10 +3,11 @@
 import logging
 import math
 from numbers import Real
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.layers.embedding import ParallelLMHead, VocabParallelEmbedding
@@ -17,7 +18,7 @@ from rtp_llm.models_py.layers.linear import (
 )
 from rtp_llm.models_py.layers.norm import RMSResNorm
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.module_base import RtpModule
+from rtp_llm.models_py.module_base import RtpModule, copy_weight_
 from rtp_llm.models_py.modules import FakeBalanceExpert, SelectTopk
 from rtp_llm.models_py.new_models.model_base import (
     required_config_value,
@@ -54,10 +55,6 @@ class Qwen3NextMetadata:
 def _build_qwen3_next_metadata(
     inputs: PyModelInputs, hidden_states: torch.Tensor
 ) -> Qwen3NextMetadata:
-    attn_meta = getattr(inputs, "attn_meta", None)
-    if attn_meta is not None:
-        return attn_meta
-
     attention_inputs = inputs.attention_inputs
     if attention_inputs is None:
         raise ValueError("Qwen3-Next requires attention inputs")
@@ -534,9 +531,7 @@ class Qwen3NextGatedDeltaNet(RtpModule):
         self.norm_w = nn.Parameter(
             torch.empty(self.head_v_dim, dtype=params_dtype), requires_grad=False
         )
-        from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
-            RmsNormGated,
-        )
+        from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
 
         self.norm_gated = RmsNormGated(
             self.norm_w,
@@ -555,6 +550,10 @@ class Qwen3NextGatedDeltaNet(RtpModule):
         )
         self.ssm_state_dtype = to_torch_dtype(linear_attn_config.ssm_state_dtype)
         self.conv_state_dtype = to_torch_dtype(linear_attn_config.conv_state_dtype)
+        self._qkvz_layouts: Dict[str, str] = {}
+        self._qkvz_split_parts: Dict[str, Set[str]] = {}
+        self._ba_layout: Optional[str] = None
+        self._ba_split_parts: Set[str] = set()
 
     def validate_runtime_device(self, device: torch.device) -> None:
         if device.type != "cuda":
@@ -648,6 +647,149 @@ class Qwen3NextGatedDeltaNet(RtpModule):
             .contiguous()
         )
 
+    @staticmethod
+    def _claim_layout(layouts: Dict[str, str], parameter: str, layout: str) -> None:
+        current = layouts.get(parameter)
+        if current is not None and current != layout:
+            raise RuntimeError(
+                f"Cannot mix {current} and {layout} checkpoint layouts for {parameter}"
+            )
+        layouts[parameter] = layout
+
+    def _split_qkv_or_z_rows(
+        self, tensor: torch.Tensor, component: str, unit: int
+    ) -> Tuple[torch.Tensor, int]:
+        global_k = self.head_k_dim * self.linear_attn_config.linear_num_key_heads
+        global_v = self.head_v_dim * self.linear_attn_config.linear_num_value_heads
+        if global_k % unit or global_v % unit:
+            raise ValueError(
+                f"QKV/Z group sizes {global_k}/{global_v} must align to unit {unit}"
+            )
+        q_rows = global_k // unit
+        v_rows = global_v // unit
+        if component == "qkv":
+            expected_rows = q_rows * 2 + v_rows
+        elif component == "z":
+            expected_rows = v_rows
+        else:
+            raise ValueError(f"Unknown QKV/Z component {component!r}")
+        if tensor.dim() < 1 or tensor.shape[0] != expected_rows:
+            raise ValueError(
+                f"in_proj_{component} tensor must have {expected_rows} rows, "
+                f"got {tuple(tensor.shape)}"
+            )
+        if q_rows % self.attn_tp_size or v_rows % self.attn_tp_size:
+            raise ValueError("QKV/Z groups must be divisible by attention TP")
+        local_q = q_rows // self.attn_tp_size
+        local_v = v_rows // self.attn_tp_size
+        q_start = self.attn_tp_rank * local_q
+        v_start = self.attn_tp_rank * local_v
+        if component == "qkv":
+            q, k, v = torch.split(tensor, [q_rows, q_rows, v_rows], dim=0)
+            local_tensor = torch.cat(
+                [
+                    q.narrow(0, q_start, local_q),
+                    k.narrow(0, q_start, local_q),
+                    v.narrow(0, v_start, local_v),
+                ],
+                dim=0,
+            )
+            offset = 0
+        else:
+            local_tensor = tensor.narrow(0, v_start, local_v)
+            if self.qkv_size % unit:
+                raise ValueError(
+                    f"Local QKV size {self.qkv_size} must align to unit {unit}"
+                )
+            offset = self.qkv_size // unit
+        return local_tensor.contiguous(), offset
+
+    def _load_split_qkvz(
+        self, component: str, parameter: str, tensor: torch.Tensor
+    ) -> None:
+        if parameter == "input_scale":
+            raise ValueError(
+                "Split QKV/Z input_scale cannot be represented by one fused runtime "
+                "scale; use a fused checkpoint or dynamic activation quantization"
+            )
+        if parameter == "weight_scale" and tensor.numel() == 1:
+            raise ValueError(
+                "Split QKV/Z scalar weight scales cannot be fused without "
+                "dequantization and requantization"
+            )
+        target = getattr(self.in_proj_qkvz, parameter, None)
+        if not isinstance(target, nn.Parameter):
+            raise RuntimeError(
+                f"Unsupported split QKV/Z tensor {self.in_proj_qkvz.prefix}.{parameter}"
+            )
+        self._claim_layout(self._qkvz_layouts, parameter, "split")
+        loaded_parts = self._qkvz_split_parts.setdefault(parameter, set())
+        if component in loaded_parts:
+            raise RuntimeError(f"Duplicate split QKV/Z tensor {component}.{parameter}")
+
+        unit = 1
+        if parameter == "weight":
+            if tensor.dim() != 2 or tensor.shape[1] != self.hidden_size:
+                raise ValueError(
+                    f"in_proj_{component}.weight must have input width "
+                    f"{self.hidden_size}, got {tuple(tensor.shape)}"
+                )
+        elif parameter == "weight_scale_inv":
+            block_n, block_k = self._block_size(self.in_proj_qkvz)
+            unit = block_n
+            expected_columns = math.ceil(self.hidden_size / block_k)
+            if tensor.dim() != 2 or tensor.shape[1] != expected_columns:
+                raise ValueError(
+                    f"in_proj_{component}.weight_scale_inv must have "
+                    f"{expected_columns} input blocks, got {tuple(tensor.shape)}"
+                )
+        elif parameter == "weight_scale":
+            if tensor.dim() not in (1, 2):
+                raise ValueError(
+                    f"in_proj_{component}.weight_scale must be row-oriented, "
+                    f"got {tuple(tensor.shape)}"
+                )
+        else:
+            raise RuntimeError(f"Unsupported split QKV/Z parameter {parameter!r}")
+
+        local, offset = self._split_qkv_or_z_rows(tensor, component, unit)
+        target_slice = target.data.narrow(0, offset, local.shape[0])
+        if local.shape != target_slice.shape and local.numel() == target_slice.numel():
+            local = local.reshape(target_slice.shape)
+        copy_weight_(
+            target_slice,
+            local,
+            f"{self.in_proj_qkvz.prefix}.{component}.{parameter}",
+        )
+        loaded_parts.add(component)
+        if loaded_parts == {"qkv", "z"}:
+            self.in_proj_qkvz._record_parameter_loaded(parameter)
+
+    def _load_split_ba(self, component: str, tensor: torch.Tensor) -> None:
+        if self._ba_layout is not None and self._ba_layout != "split":
+            raise RuntimeError("Cannot mix fused and split checkpoint layouts for B/A")
+        self._ba_layout = "split"
+        if component in self._ba_split_parts:
+            raise RuntimeError(f"Duplicate split B/A tensor in_proj_{component}.weight")
+        global_heads = self.linear_attn_config.linear_num_value_heads
+        expected = (global_heads, self.hidden_size)
+        if tuple(tensor.shape) != expected:
+            raise ValueError(
+                f"in_proj_{component}.weight must have shape {expected}, "
+                f"got {tuple(tensor.shape)}"
+            )
+        start = self.attn_tp_rank * self.local_num_v_heads
+        local = tensor.narrow(0, start, self.local_num_v_heads).t().contiguous()
+        offset = 0 if component == "b" else self.local_num_v_heads
+        copy_weight_(
+            self.in_proj_ba_w.data.narrow(1, offset, self.local_num_v_heads),
+            local,
+            f"in_proj_{component}.weight",
+        )
+        self._ba_split_parts.add(component)
+        if self._ba_split_parts == {"a", "b"}:
+            self._mark_weight_loaded("in_proj_ba_w")
+
     def _split_head_tensor(self, tensor: torch.Tensor, label: str) -> torch.Tensor:
         expected = self.linear_attn_config.linear_num_value_heads
         if tensor.dim() != 1 or tensor.shape[0] != expected:
@@ -690,17 +832,20 @@ class Qwen3NextGatedDeltaNet(RtpModule):
     def load_weights(self, weights: Dict[str, torch.Tensor]) -> None:
         for name, tensor in weights.items():
             if name == "in_proj_qkvz.weight":
+                self._claim_layout(self._qkvz_layouts, "weight", "fused")
                 reordered = reorder_qkvz([tensor], self.linear_attn_config)
                 self.in_proj_qkvz.load_weights(
                     {"weight": self._split_qkvz_rows(reordered, 1)}
                 )
             elif name == "in_proj_qkvz.weight_scale_inv":
+                self._claim_layout(self._qkvz_layouts, "weight_scale_inv", "fused")
                 block_n, _ = self._block_size(self.in_proj_qkvz)
                 reordered = reorder_qkvz_scale(tensor, self.linear_attn_config, block_n)
                 self.in_proj_qkvz.load_weights(
                     {"weight_scale_inv": self._split_qkvz_rows(reordered, block_n)}
                 )
             elif name == "in_proj_qkvz.weight_scale":
+                self._claim_layout(self._qkvz_layouts, "weight_scale", "fused")
                 if tensor.numel() == 1:
                     local = tensor
                 else:
@@ -709,12 +854,26 @@ class Qwen3NextGatedDeltaNet(RtpModule):
                     )
                 self.in_proj_qkvz.load_weights({"weight_scale": local})
             elif name == "in_proj_qkvz.input_scale":
+                self._claim_layout(self._qkvz_layouts, "input_scale", "fused")
                 self.in_proj_qkvz.load_weights({"input_scale": tensor})
+            elif name.startswith("in_proj_qkv."):
+                self._load_split_qkvz("qkv", name.removeprefix("in_proj_qkv."), tensor)
+            elif name.startswith("in_proj_z."):
+                self._load_split_qkvz("z", name.removeprefix("in_proj_z."), tensor)
             elif name == "in_proj_ba.weight":
+                if self._ba_layout is not None and self._ba_layout != "fused":
+                    raise RuntimeError(
+                        "Cannot mix split and fused checkpoint layouts for B/A"
+                    )
+                self._ba_layout = "fused"
                 if not self._assign_weight(
                     self, "in_proj_ba_w", self._split_ba(tensor)
                 ):
                     raise RuntimeError("Failed to load in_proj_ba.weight")
+            elif name == "in_proj_b.weight":
+                self._load_split_ba("b", tensor)
+            elif name == "in_proj_a.weight":
+                self._load_split_ba("a", tensor)
             elif name == "conv1d.weight":
                 if not self._assign_weight(
                     self, "conv1d_w", self._split_conv1d(tensor)
@@ -755,7 +914,7 @@ class Qwen3NextGatedDeltaNet(RtpModule):
         fmha_impl: Any,
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
-        attn_meta: Any = None,
+        attn_meta: Optional[Qwen3NextMetadata] = None,
     ) -> torch.Tensor:
         """Run Gated Delta Network linear attention.
 
@@ -885,7 +1044,7 @@ class Qwen3NextGatedDeltaNet(RtpModule):
         fused_gdn_gating,
         scatter_qkv,
         linear_cache_converter,
-        attn_meta,
+        attn_meta: Optional[Qwen3NextMetadata],
     ):
         from rtp_llm.models_py.triton_kernels.fla.block import (
             load_initial_state_from_block_map,
@@ -901,9 +1060,9 @@ class Qwen3NextGatedDeltaNet(RtpModule):
             if kv_cache_tensor is not None
             else None
         )
-        conv1d_meta = None
-        if attn_meta is not None and hasattr(attn_meta, "get_prefill_conv1d_meta"):
-            conv1d_meta = attn_meta.get_prefill_conv1d_meta()
+        conv1d_meta = (
+            attn_meta.get_prefill_conv1d_meta() if attn_meta is not None else None
+        )
         if conv1d_meta is None and cu_seqlens is not None:
             conv1d_meta = prepare_meta(
                 query_start_loc=cu_seqlens, device=mixed_qkv.device
@@ -1548,7 +1707,7 @@ class Qwen3NextDecoderLayer(RtpModule):
         fmha_impl: Any,
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
-        attn_meta: Any = None,
+        attn_meta: Optional[Qwen3NextMetadata] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
         if self.layer_type == HybridAttentionType.LINEAR:
@@ -1570,7 +1729,19 @@ class Qwen3NextDecoderLayer(RtpModule):
 class Qwen3NextForCausalLM(GptModelBase):
     """Qwen3-Next Dense + Linear Attention (prefix model.)."""
 
-    WEIGHTS_MAPPER = WeightsMapper(prefix_mapping={"model.": ""})
+    WEIGHTS_MAPPER = WeightsMapper(
+        prefix_mapping={
+            "model.language_model.": "",
+            "model.": "",
+        }
+    )
+
+    @staticmethod
+    def _is_core_checkpoint_weight(name: str) -> bool:
+        return not (name.startswith("mtp.") or name.startswith("model.visual."))
+
+    def checkpoint_weight_name_filter(self) -> Optional[Callable[[str], bool]]:
+        return self._is_core_checkpoint_weight
 
     def load_weights(self, weights):
         if isinstance(weights, dict):

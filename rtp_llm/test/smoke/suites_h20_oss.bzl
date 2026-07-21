@@ -368,7 +368,7 @@ def h20_oss_suites():
                 name="next_cudagraph_deepep",
                 task_info="data/model/qwen3_next/q_r_next_cuda_graph.json",
                 smoke_args="--act_type BF16 --seq_size_per_block 2048 --max_seq_len 128 --use_deepep_moe 1 --use_deepep_low_latency 1 --enable_cuda_graph 1 --warm_up 0  --concurrency_limit 8 --reserver_runtime_mem_mb 8192 --tp_size 2",
-                envs=["ACCL_LOW_LATENCY_OPTIMIZE=1"],
+                envs=["ACCL_LOW_LATENCY_OPTIMIZE=1", "USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
                 gpu_type=["H20"],
             ),
             smoke_test(
@@ -389,6 +389,7 @@ def h20_oss_suites():
                 name="next_bf16_basic",
                 task_info="data/model/qwen35/qwen35_bf16_tp2.json",
                 smoke_args="--tp_size 2 --act_type BF16 --seq_size_per_block 2048",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
                 gpu_type=["H20"],
             ),
             smoke_test(

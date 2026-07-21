@@ -4,18 +4,21 @@ import types
 import unittest
 
 import torch
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
-from rtp_llm.models_py.quant_methods import QuantizationConfig
-from rtp_llm.ops import DataType, HybridAttentionType
-
 from rtp_llm.models_py.new_models.qwen3_next.language import (
     Qwen3NextForCausalLM,
     Qwen3NextGatedDeltaNet,
+    Qwen3NextMetadata,
+    _build_qwen3_next_metadata,
     reorder_ba,
     reorder_qkvz,
     reorder_qkvz_scale,
 )
+from rtp_llm.models_py.quant_methods import QuantizationConfig
+from rtp_llm.models_py.registry import get_model_class
+from rtp_llm.ops import DataType, HybridAttentionType
 
 
 def _parallelism(
@@ -196,6 +199,28 @@ def _moe_weights():
 
 
 class Qwen3NextLoadTest(unittest.TestCase):
+    def test_production_model_type_alias_uses_qwen3_next_newloader(self):
+        self.assertIs(get_model_class("qwen35_moe"), Qwen3NextForCausalLM)
+
+    def test_qwen35_language_model_prefix_maps_to_runtime_root(self):
+        self.assertEqual(
+            Qwen3NextForCausalLM.WEIGHTS_MAPPER.map_name(
+                "model.language_model.layers.0.mlp.experts.0.gate_up_proj.weight"
+            ),
+            "layers.0.mlp.experts.0.gate_up_proj.weight",
+        )
+
+    def test_attention_metadata_has_explicit_runtime_type(self):
+        inputs = types.SimpleNamespace(
+            attention_inputs=types.SimpleNamespace(
+                is_prefill=False,
+                is_target_verify=False,
+            )
+        )
+        metadata = _build_qwen3_next_metadata(inputs, torch.zeros(1, 4))
+        self.assertIsInstance(metadata, Qwen3NextMetadata)
+        self.assertIsNone(metadata.get_prefill_conv1d_meta())
+
     def test_public_loader_streams_pytorch_checkpoint_and_runs_postprocess(self):
         config = _config(tie=False)
         config.logit_scale = 2.0
@@ -214,6 +239,21 @@ class Qwen3NextLoadTest(unittest.TestCase):
             torch.full_like(model.lm_head.weight, 6.0),
         )
         torch.testing.assert_close(model.norm.weight, torch.full((4,), 2.0))
+
+    def test_public_loader_skips_declared_non_core_checkpoint_tensors(self):
+        config = _config(tie=False)
+        weights = _dense_weights(include_lm_head=True)
+        weights["mtp.layers.0.proj.weight"] = torch.ones(1)
+        weights["model.visual.patch_embed.weight"] = torch.ones(1)
+        with tempfile.TemporaryDirectory() as model_path:
+            torch.save(weights, os.path.join(model_path, "model.pt"))
+            model = NewModelLoader(
+                config,
+                _load_config(),
+                model_path=model_path,
+            ).load()
+
+        NewModelLoader._validate_loaded_weights(model)
 
     def test_typed_model_loads_q_gate_and_ties_lm_head(self):
         model = Qwen3NextForCausalLM(_config(), _load_config())
@@ -391,6 +431,24 @@ class Qwen3NextLinearAttentionLoadTest(unittest.TestCase):
             "out_proj.weight": torch.arange(16, dtype=torch.float32).reshape(4, 4),
         }
 
+    def _split_projection_weights(self):
+        weights = self._weights()
+        del weights["in_proj_qkvz.weight"]
+        del weights["in_proj_ba.weight"]
+        weights.update(
+            {
+                "in_proj_qkv.weight": torch.arange(48, dtype=torch.float32).reshape(
+                    12, 4
+                ),
+                "in_proj_z.weight": torch.arange(16, dtype=torch.float32).reshape(4, 4),
+                "in_proj_b.weight": torch.arange(8, dtype=torch.float32).reshape(2, 4),
+                "in_proj_a.weight": torch.arange(8, 16, dtype=torch.float32).reshape(
+                    2, 4
+                ),
+            }
+        )
+        return weights
+
     def test_tp_ranks_receive_qkvz_ba_and_out_slices(self):
         config = _config(HybridAttentionType.LINEAR).linear_attention_config
         weights = self._weights()
@@ -423,6 +481,48 @@ class Qwen3NextLinearAttentionLoadTest(unittest.TestCase):
                 layer.dt_bias, weights["dt_bias"][rank : rank + 1]
             )
             torch.testing.assert_close(layer.a_log, weights["A_log"][rank : rank + 1])
+
+    def test_split_qkvz_and_ba_match_qwen35_tp_layout(self):
+        weights = self._split_projection_weights()
+        q, k, v = torch.split(weights["in_proj_qkv.weight"], [4, 4, 4], dim=0)
+        z = weights["in_proj_z.weight"]
+        b = weights["in_proj_b.weight"]
+        a = weights["in_proj_a.weight"]
+
+        for rank in range(2):
+            layer = self._layer(rank)
+            layer.load_weights(weights)
+            NewModelLoader._validate_loaded_weights(layer)
+            expected_qkvz = torch.cat(
+                [
+                    q[rank * 2 : rank * 2 + 2],
+                    k[rank * 2 : rank * 2 + 2],
+                    v[rank * 2 : rank * 2 + 2],
+                    z[rank * 2 : rank * 2 + 2],
+                ],
+                dim=0,
+            )
+            expected_ba = torch.cat([b[rank : rank + 1], a[rank : rank + 1]], dim=0).t()
+            torch.testing.assert_close(layer.in_proj_qkvz.weight, expected_qkvz)
+            torch.testing.assert_close(layer.in_proj_ba_w, expected_ba)
+
+    def test_split_projection_completeness_and_layout_mixing_fail(self):
+        weights = self._split_projection_weights()
+        del weights["in_proj_z.weight"]
+        layer = self._layer(0)
+        layer.load_weights(weights)
+        with self.assertRaisesRegex(RuntimeError, "in_proj_qkvz.*weight"):
+            NewModelLoader._validate_loaded_weights(layer)
+
+        layer = self._layer(0)
+        layer.load_weights({"in_proj_qkv.weight": torch.ones(12, 4)})
+        with self.assertRaisesRegex(RuntimeError, "mix.*checkpoint layouts"):
+            layer.load_weights({"in_proj_qkvz.weight": torch.ones(16, 4)})
+
+        layer = self._layer(0)
+        layer.load_weights({"in_proj_b.weight": torch.ones(2, 4)})
+        with self.assertRaisesRegex(RuntimeError, "mix.*checkpoint layouts"):
+            layer.load_weights({"in_proj_ba.weight": torch.ones(4, 4)})
 
     def test_unknown_linear_tensor_fails(self):
         with self.assertRaisesRegex(RuntimeError, "Unsupported"):
@@ -509,6 +609,54 @@ class Qwen3NextLinearAttentionLoadTest(unittest.TestCase):
             layer.out_proj.weight_scale_inv,
             out_scale[:, 1:2],
         )
+
+    def test_split_fp8_block_scales_follow_qwen35_tp_layout(self):
+        config = _config(HybridAttentionType.LINEAR)
+        linear = config.linear_attention_config
+        linear.linear_key_head_dim = 128
+        linear.linear_value_head_dim = 128
+        quant = QuantizationConfig(
+            "fp8_block",
+            source_config=types.SimpleNamespace(weight_block_size=[128, 128]),
+        )
+        qkv_scale = torch.arange(12, dtype=torch.float32).reshape(6, 2).add(1)
+        z_scale = torch.arange(4, dtype=torch.float32).reshape(2, 2).add(20)
+
+        for rank in range(2):
+            layer = Qwen3NextGatedDeltaNet(
+                linear_attn_config=linear,
+                hidden_size=256,
+                rms_norm_eps=config.layernorm_eps,
+                attn_tp_size=2,
+                attn_tp_rank=rank,
+                params_dtype=torch.float32,
+                quant_config=quant,
+                prefix="layers.0.linear_attn",
+            )
+            layer.load_weights(
+                {
+                    "in_proj_qkv.weight_scale_inv": qkv_scale,
+                    "in_proj_z.weight_scale_inv": z_scale,
+                }
+            )
+            q, k, v = torch.split(qkv_scale, [2, 2, 2], dim=0)
+            expected = torch.cat(
+                [
+                    q[rank : rank + 1],
+                    k[rank : rank + 1],
+                    v[rank : rank + 1],
+                    z_scale[rank : rank + 1],
+                ],
+                dim=0,
+            )
+            torch.testing.assert_close(layer.in_proj_qkvz.weight_scale_inv, expected)
+
+    def test_split_scalar_quant_scales_fail_explicitly(self):
+        layer = self._layer(0)
+        with self.assertRaisesRegex(ValueError, "scalar weight scales"):
+            layer.load_weights({"in_proj_qkv.weight_scale": torch.ones(1)})
+        with self.assertRaisesRegex(ValueError, "input_scale cannot be represented"):
+            layer.load_weights({"in_proj_qkv.input_scale": torch.ones(1)})
 
     def test_single_tp_out_scale_allows_partial_final_block(self):
         config = _config(HybridAttentionType.LINEAR)
