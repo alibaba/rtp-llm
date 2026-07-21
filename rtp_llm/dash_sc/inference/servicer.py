@@ -417,15 +417,20 @@ def _phase2_max_new_tokens_for_completion_alias(
     sampling: SamplingParams,
     generate_think_token_num: Optional[int],
 ) -> int:
-    max_new_tokens = int(sampling.max_new_tokens)
-    if (
-        sampling.max_total_tokens is not None
-        and sampling.max_total_tokens > 0
-        and generate_think_token_num is not None
-    ):
+    """Remaining phase-2 budget when ``max_completion_tokens`` set the alias.
+
+    Callers only invoke this when ``max_new_tokens_from_completion_alias`` is
+    True, where ``sampling.max_new_tokens`` is a *total* generation budget
+    (phase-1 thinking tokens included). Phase-2 therefore gets what is left
+    after deducting phase-1 think tokens; a ``max_tokens`` total cap
+    (``max_total_tokens``) applies on top via ``min``.
+    """
+    think_token_num = int(generate_think_token_num or 0)
+    max_new_tokens = max(0, int(sampling.max_new_tokens) - think_token_num)
+    if sampling.max_total_tokens is not None and sampling.max_total_tokens > 0:
         max_new_tokens = min(
             max_new_tokens,
-            max(0, int(sampling.max_total_tokens) - int(generate_think_token_num)),
+            max(0, int(sampling.max_total_tokens) - think_token_num),
         )
     return max_new_tokens
 
