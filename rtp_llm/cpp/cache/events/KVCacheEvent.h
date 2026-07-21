@@ -14,6 +14,7 @@ enum class KVCacheEventType {
 struct KVCacheEvent {
     KVCacheEventType type      = KVCacheEventType::BLOCK_ADD;
     int64_t          block_key = 0;
+    // Assigned by the ingress queue from committed publication order.
     uint64_t         sequence  = 0;
 };
 

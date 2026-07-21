@@ -413,7 +413,6 @@ public:
         if (!started_.load(std::memory_order_relaxed) || stopping_.load(std::memory_order_relaxed)) {
             return PublishResult::NOT_RUNNING;
         }
-        event.sequence    = next_sequence_.fetch_add(1, std::memory_order_relaxed);
         const auto result = queue_.tryPush(std::move(event));
         if (result == detail::QueuePushResult::ACCEPTED) {
             accepted_count_.fetch_add(1, std::memory_order_relaxed);
@@ -610,7 +609,6 @@ private:
     std::atomic<bool>                     started_{false};
     std::atomic<bool>                     stopping_{false};
     std::atomic<PublisherState>           state_{PublisherState::DISABLED};
-    std::atomic<uint64_t>                 next_sequence_{1};
     std::atomic<uint64_t>                 accepted_count_{0};
     std::atomic<uint64_t>                 dropped_count_{0};
     std::atomic<uint64_t>                 dirty_generation_{1};

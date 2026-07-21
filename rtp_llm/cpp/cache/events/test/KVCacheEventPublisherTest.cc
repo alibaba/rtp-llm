@@ -249,6 +249,46 @@ TEST(KVCacheEventPublisherTest, LogPublisherAcceptsEventsAsynchronously) {
     EXPECT_EQ(1, publisher.status().accepted_count);
 }
 
+TEST(KVCacheEventPublisherTest, PublisherLifecycleIsIdempotent) {
+    KVCacheEventPublisherConfig log_config;
+    log_config.type              = "log";
+    log_config.queue_capacity    = 8;
+    log_config.report_batch_size = 8;
+    log_config.flush_interval_ms = 1;
+
+    LogPublisher log_publisher(log_config, makeContext());
+    EXPECT_TRUE(log_publisher.start());
+    EXPECT_TRUE(log_publisher.start());
+    EXPECT_EQ(PublishResult::ACCEPTED,
+              log_publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 42, 0}));
+    log_publisher.stop();
+    log_publisher.stop();
+    EXPECT_EQ(PublisherState::STOPPED, log_publisher.status().state);
+    EXPECT_EQ(PublishResult::NOT_RUNNING,
+              log_publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 43, 0}));
+
+    KVCacheEventPublisherConfig kvcm_config;
+    kvcm_config.type                  = "kvcm";
+    kvcm_config.queue_capacity        = 8;
+    kvcm_config.report_batch_size     = 8;
+    kvcm_config.flush_interval_ms     = 1;
+    kvcm_config.heartbeat_interval_ms = 60000;
+    kvcm_config.snapshot_interval_ms  = 60000;
+    kvcm_config.retry_interval_ms     = 1;
+
+    auto reporter = std::make_shared<RecordingReporter>();
+    KVCMPublisher kvcm_publisher(
+        kvcm_config, makeContext(), [] { return KVCacheSnapshot{1, {}}; }, reporter);
+    EXPECT_TRUE(kvcm_publisher.start());
+    EXPECT_TRUE(kvcm_publisher.start());
+    ASSERT_TRUE(reporter->waitForBody("EVENT_BLOCK_SNAPSHOT", std::chrono::seconds(2)));
+    kvcm_publisher.stop();
+    kvcm_publisher.stop();
+    EXPECT_EQ(PublisherState::STOPPED, kvcm_publisher.status().state);
+    EXPECT_EQ(PublishResult::NOT_RUNNING,
+              kvcm_publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 44, 0}));
+}
+
 TEST(KVCacheEventPublisherTest, KVCMPublisherRegistersSnapshotsAndReportsDeltas) {
     KVCacheEventPublisherConfig config;
     config.type                  = "kvcm";

@@ -100,6 +100,10 @@ void KVCacheEventQueue::enqueue(KVCacheEvent event) noexcept {
             pos = enqueue_pos_.load(std::memory_order_relaxed);
         }
     }
+    // The queue position is the publication order. Assigning sequence here,
+    // after the position is reserved, keeps sequences monotonic even when
+    // multiple producers enter tryPush concurrently.
+    event.sequence = static_cast<uint64_t>(pos + 1);
     cell->event = std::move(event);
     published_size_.fetch_add(1, std::memory_order_relaxed);
     cell->sequence.store(pos + 1, std::memory_order_release);

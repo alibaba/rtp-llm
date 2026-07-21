@@ -68,8 +68,9 @@ all cache groups across all TP shards, while only the owner rank emits state tra
 snapshot to replace stale metadata. Within one mutation request, repeated transitions for the same block key are
 coalesced to the last state because KVCM applies aggregated ADDs before aggregated DELETEs.
 
-The queue is a bounded lock-free MPMC ring. Inference threads never wait for queue space, a consumer mutex, or network
-I/O; enqueue fails only when the configured capacity is actually exhausted or shutdown has started. A
+The queue is a bounded lock-free MPMC ring and assigns event sequence numbers from the committed queue order, so
+concurrent producers cannot publish a sequence inversion. Inference threads never wait for queue space, a consumer
+mutex, or network I/O; enqueue fails only when the configured capacity is actually exhausted or shutdown has started. A
 queue overflow, request failure, heartbeat failure, or periodic reconciliation marks the publisher dirty. After KVCM
 is reachable, it registers the node and commits a new complete snapshot. Reporting is fail-open and never changes
 cache allocation, reuse, eviction, engine readiness, or inference responses.
