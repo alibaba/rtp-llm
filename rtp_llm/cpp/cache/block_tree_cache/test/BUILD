@@ -26,6 +26,14 @@ test_deps = [
 ] + cuda13_torch_link_deps + torch_deps() + no_block_copy_link_deps()
 
 cc_test(
+    name = "component_group_layout_test",
+    srcs = ["ComponentGroupLayoutTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+)
+
+cc_test(
     name = "block_tree_test",
     srcs = ["BlockTreeTest.cc"],
     copts = test_copts,

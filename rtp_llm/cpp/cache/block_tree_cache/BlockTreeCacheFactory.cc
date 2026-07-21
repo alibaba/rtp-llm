@@ -227,10 +227,9 @@ AggregationPlan buildAggregationPlan(const CacheConfig& cache_config) {
     return plan;
 }
 
-bool validateBlockTreeCacheParameters(
-    const std::vector<ComponentGroupPtr>&             component_groups,
-    const std::vector<DeviceKVCacheGroupPtr>&         per_tag_device_groups,
-    const std::vector<BlockTreeCache::PerTagMapping>& per_tag_mapping) {
+bool validateBlockTreeCacheParameters(const std::vector<ComponentGroupPtr>&             component_groups,
+                                      const std::vector<DeviceKVCacheGroupPtr>&         per_tag_device_groups,
+                                      const std::vector<BlockTreeCache::PerTagMapping>& per_tag_mapping) {
     if (per_tag_mapping.empty()) {
         RTP_LLM_LOG_ERROR("createBlockTreeCache: per_tag_mapping must not be empty");
         return false;
@@ -253,13 +252,11 @@ bool validateBlockTreeCacheParameters(
     }
     for (size_t tag_group_index = 0; tag_group_index < per_tag_mapping.size(); ++tag_group_index) {
         const BlockTreeCache::PerTagMapping& mapping = per_tag_mapping[tag_group_index];
-        const bool non_reusable_mapping =
-            mapping.component_group_id == -1 && mapping.local_pool_index == -1;
+        const bool non_reusable_mapping = mapping.component_group_id == -1 && mapping.local_pool_index == -1;
         if (non_reusable_mapping) {
             continue;
         }
-        if (mapping.component_group_id < 0
-            || static_cast<size_t>(mapping.component_group_id) >= component_groups.size()
+        if (mapping.component_group_id < 0 || static_cast<size_t>(mapping.component_group_id) >= component_groups.size()
             || mapping.local_pool_index < 0
             || static_cast<size_t>(mapping.local_pool_index)
                    >= component_groups[static_cast<size_t>(mapping.component_group_id)]->devicePoolCount()) {
@@ -377,33 +374,27 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         }
     }
 
-    // 5. Build the global Component vector, per-tag DeviceKVCacheGroup registry, per-tag
-    // mapping, and inject device pools / kv groups / component_indices / host_block_size
-    // into each aggregated ComponentGroup.
+    // 5. Build the Component and DeviceKVCacheGroup registries.
     std::vector<Component>                     components;
     std::vector<DeviceKVCacheGroupPtr>         per_tag_device_groups(static_cast<size_t>(group_num));
     std::vector<BlockTreeCache::PerTagMapping> per_tag_mapping(static_cast<size_t>(group_num));
-    std::vector<size_t>                        cg_host_block_size(static_cast<size_t>(cg_num), 0);
+    std::vector<std::vector<int>>              cg_comp_indices(static_cast<size_t>(cg_num));
 
     for (int cg_id = 0; cg_id < cg_num; ++cg_id) {
         const auto&                     member_tags = plan.cg_member_tags[static_cast<size_t>(cg_id)];
         const auto                      type        = plan.cg_types[static_cast<size_t>(cg_id)];
         std::vector<DeviceBlockPoolPtr> cg_pools;
         std::vector<int>                comp_indices;
-        size_t                          host_block_size = 0;
 
         for (size_t local = 0; local < member_tags.size(); ++local) {
             const int  tag_gid = member_tags[local];
             const auto pool    = per_tag_pools[static_cast<size_t>(tag_gid)];
             cg_pools.push_back(pool);
 
-            // Component descriptor (one per REUSABLE tag): host packing layout is one slot
-            // per layer, each slot sized by that layer's physical device stride.
             Component comp;
             comp.component_id         = static_cast<int>(components.size());
             comp.component_group_id   = cg_id;
             comp.type                 = type;
-            comp.device_pool_index    = static_cast<int>(local);
             const size_t group_stride = cache_config.kvBlockStrideBytesForGroup(static_cast<size_t>(tag_gid))
                                         + cache_config.kvScaleStrideBytesForGroup(static_cast<size_t>(tag_gid));
             const bool legacy_shared_single_pool = !cache_config.use_independent_block_pools && group_num == 1
@@ -420,7 +411,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                     "falling back to group stride %zu",
                                     group_stride);
             }
-            const auto& tag = cache_config.tagForGroup(static_cast<size_t>(tag_gid));
+            comp.tag = cache_config.tagForGroup(static_cast<size_t>(tag_gid));
             for (int layer_id : cache_config.layerIdsForGroup(static_cast<size_t>(tag_gid))) {
                 size_t stride = group_stride;
                 if (!cache_config.use_independent_block_pools && !legacy_shared_single_pool) {
@@ -438,9 +429,9 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                     stride = static_cast<size_t>(physical_stride);
                 }
                 RTP_LLM_CHECK_WITH_INFO(
-                    stride > 0, "component tag %s layer %d has zero physical stride", tag.c_str(), layer_id);
-                comp.memory_block_layer_tag_slots.push_back(MemoryBlockLayerTagSlot{layer_id, tag, stride});
-                host_block_size += stride;
+                    stride > 0, "component tag %s layer %d has zero physical stride", comp.tag.c_str(), layer_id);
+                comp.model_layer_ids.push_back(layer_id);
+                comp.layer_bytes.push_back(stride);
             }
             comp_indices.push_back(comp.component_id);
             components.push_back(std::move(comp));
@@ -453,9 +444,18 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         }
 
         component_groups[static_cast<size_t>(cg_id)]->setDevicePools(cg_pools);
-        component_groups[static_cast<size_t>(cg_id)]->component_indices = comp_indices;
-        component_groups[static_cast<size_t>(cg_id)]->host_block_size   = host_block_size;
-        cg_host_block_size[static_cast<size_t>(cg_id)]                  = host_block_size;
+        cg_comp_indices[static_cast<size_t>(cg_id)] = std::move(comp_indices);
+    }
+
+    // Finalize layouts before sizing pools or publishing transfers.
+    for (int cg_id = 0; cg_id < cg_num; ++cg_id) {
+        RTP_LLM_CHECK_WITH_INFO(component_groups[static_cast<size_t>(cg_id)]->finalizeLayout(
+                                    std::move(cg_comp_indices[static_cast<size_t>(cg_id)]), components),
+                                "createBlockTreeCache: failed to finalize layout for component group %d",
+                                cg_id);
+        RTP_LLM_LOG_INFO("createBlockTreeCache: group[%d] layout sealed: payload_bytes=%zu",
+                         cg_id,
+                         component_groups[static_cast<size_t>(cg_id)]->layout().payloadBytes());
     }
 
     // 5b. NON_REUSABLE tags are not part of any ComponentGroup but still need a
@@ -479,11 +479,12 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
 
     // 6. Create per-ComponentGroup Host pools (L2). All groups share a unified usable block
     // count N so a host-resident tree node occupies one block in every group's pool:
-    // N = memory_cache_size_bytes / Sum(alignUp(host_block_size_g)) - 1 (reserved block 0).
+    // N = memory_cache_size_bytes / Sum(alignUp(layout_payload_bytes_g)) - 1 (reserved block 0).
     if (tiered_memory && kv_cache_config.memory_cache_size_mb > 0) {
         size_t sum_aligned = 0;
         for (int cg_id = 0; cg_id < cg_num; ++cg_id) {
-            sum_aligned += alignUp(cg_host_block_size[static_cast<size_t>(cg_id)], kBlockTreeCachePoolAlignment);
+            sum_aligned += alignUp(component_groups[static_cast<size_t>(cg_id)]->layout().payloadBytes(),
+                                   kBlockTreeCachePoolAlignment);
         }
         const size_t memory_cache_size_bytes = static_cast<size_t>(kv_cache_config.memory_cache_size_mb) * 1024 * 1024;
         const size_t usable_block_count      = computeHostUsableBlockCount(memory_cache_size_bytes, sum_aligned);
@@ -494,7 +495,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                 kv_cache_config.memory_cache_size_mb,
                                 sum_aligned);
         for (int cg_id = 0; cg_id < cg_num; ++cg_id) {
-            const size_t payload = cg_host_block_size[static_cast<size_t>(cg_id)];
+            const size_t payload = component_groups[static_cast<size_t>(cg_id)]->layout().payloadBytes();
             auto host_pool = createHostPool("block_tree_host_g" + std::to_string(cg_id), payload, usable_block_count);
             RTP_LLM_CHECK_WITH_INFO(
                 host_pool != nullptr, "failed to create tiered host pool for component group %d", cg_id);
@@ -506,7 +507,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     if (tiered_disk && kv_cache_config.memory_cache_disk_size_mb > 0) {
         size_t sum_aligned = 0;
         for (int cg_id = 0; cg_id < cg_num; ++cg_id) {
-            sum_aligned += alignUp(cg_host_block_size[static_cast<size_t>(cg_id)], kBlockTreeCachePoolAlignment);
+            sum_aligned += alignUp(component_groups[static_cast<size_t>(cg_id)]->layout().payloadBytes(),
+                                   kBlockTreeCachePoolAlignment);
         }
         const size_t disk_size_bytes = static_cast<size_t>(kv_cache_config.memory_cache_disk_size_mb) * 1024UL * 1024UL;
         const size_t usable_block_count =
@@ -518,7 +520,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             return nullptr;
         }
         for (int cg_id = 0; cg_id < cg_num; ++cg_id) {
-            const size_t payload = cg_host_block_size[static_cast<size_t>(cg_id)];
+            const size_t payload = component_groups[static_cast<size_t>(cg_id)]->layout().payloadBytes();
             if (payload == 0 || usable_block_count == 0) {
                 continue;
             }

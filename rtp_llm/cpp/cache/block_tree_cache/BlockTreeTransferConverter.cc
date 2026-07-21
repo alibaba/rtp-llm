@@ -43,8 +43,12 @@ BlockTreeTransferConverter::findComponentGroup(int                              
 
 bool BlockTreeTransferConverter::validDeviceBlocks(const std::vector<BlockIdxType>& blocks,
                                                    const ComponentGroup&            component_group) {
+    if (blocks.size() != component_group.layout().componentCount() || blocks.empty()) {
+        return false;
+    }
+
     const std::vector<DeviceBlockPoolPtr>& device_pools = component_group.devicePools();
-    if (blocks.size() != device_pools.size() || blocks.empty()) {
+    if (blocks.size() != device_pools.size()) {
         return false;
     }
 
@@ -239,7 +243,6 @@ bool BlockTreeTransferConverter::decodeTransfer(const MemoryOperationRequestPB& 
         RTP_LLM_LOG_WARNING("cannot decode memory operation item with unknown group=%d", item.component_group_id());
         return false;
     }
-
     bool success = false;
     switch (request.copy_direction()) {
         case MemoryOperationRequestPB::D2H:

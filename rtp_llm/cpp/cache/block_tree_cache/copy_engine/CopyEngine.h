@@ -7,20 +7,18 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/CopyEngineLayout.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/TransferTypes.h"
 
 namespace rtp_llm {
 
-// Internal executor implementation boundary; kept out of this public header.
 class DeviceHostTransferExecutor;
 class HostDiskTransferExecutor;
 
 class CopyEngine {
 public:
-    CopyEngine(const std::vector<ComponentGroupPtr>& component_groups,
-               const std::vector<Component>&         components,
-               DeviceHostCopyOptions                 device_host_options = {});
+    CopyEngine(std::vector<ComponentGroupPtr>                component_groups,
+               std::shared_ptr<const std::vector<Component>> component_registry,
+               DeviceHostCopyOptions                         device_host_options = {});
     CopyEngine() = delete;
     virtual ~CopyEngine();
 
@@ -28,18 +26,13 @@ public:
     // TODO: change to async later
     virtual TransferHandle submit(const TransferDescriptor& desc);
 
-    static size_t computeHostBlockSize(const std::vector<MemoryBlockLayerTagSlot>& slots);
-
 private:
     CopyStatus execute(const TransferDescriptor& desc);
+    CopyStatus validateRequest(const TransferDescriptor& desc, const ComponentGroup*& group) const;
 
-    void buildGroupLayouts(const std::vector<ComponentGroupPtr>& component_groups,
-                           const std::vector<Component>&         components);
-
-    static bool isDeviceHostTransfer(Tier source_tier, Tier target_tier);
-
-    std::vector<ResolvedGroupLayout> group_layouts_;
-    std::atomic<uint64_t>            next_request_id_{1};
+    std::vector<ComponentGroupPtr>                component_groups_;
+    std::shared_ptr<const std::vector<Component>> component_registry_;
+    std::atomic<uint64_t>                         next_request_id_{1};
 
     std::unique_ptr<DeviceHostTransferExecutor> device_host_executor_;
     std::unique_ptr<HostDiskTransferExecutor>   host_disk_executor_;

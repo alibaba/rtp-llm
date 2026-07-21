@@ -13,86 +13,15 @@
 
 namespace rtp_llm {
 
-CopyEngine::CopyEngine(const std::vector<ComponentGroupPtr>& component_groups,
-                       const std::vector<Component>&         components,
-                       DeviceHostCopyOptions                 device_host_options):
+CopyEngine::CopyEngine(std::vector<ComponentGroupPtr>                component_groups,
+                       std::shared_ptr<const std::vector<Component>> component_registry,
+                       DeviceHostCopyOptions                         device_host_options):
+    component_groups_(std::move(component_groups)),
+    component_registry_(std::move(component_registry)),
     device_host_executor_(std::make_unique<DeviceHostTransferExecutor>(std::move(device_host_options))),
-    host_disk_executor_(std::make_unique<HostDiskTransferExecutor>()) {
-    buildGroupLayouts(component_groups, components);
-}
+    host_disk_executor_(std::make_unique<HostDiskTransferExecutor>()) {}
 
 CopyEngine::~CopyEngine() = default;
-
-bool CopyEngine::isDeviceHostTransfer(Tier source_tier, Tier target_tier) {
-    return (source_tier == Tier::DEVICE && target_tier == Tier::HOST)
-           || (source_tier == Tier::HOST && target_tier == Tier::DEVICE);
-}
-
-void CopyEngine::buildGroupLayouts(const std::vector<ComponentGroupPtr>& component_groups,
-                                   const std::vector<Component>&         components) {
-    group_layouts_.reserve(component_groups.size());
-    for (size_t group_index = 0; group_index < component_groups.size(); ++group_index) {
-        const auto&         group = component_groups[group_index];
-        ResolvedGroupLayout layout;
-
-        layout.component_group_id = group->component_group_id;
-        // Nullable: device-only / host-disabled configs are legal. Per-path pool checks happen at submit.
-        // Hold shared ownership so the cached schema keeps its pools alive independently of the group.
-        layout.host_pool = group->hostPool();
-        layout.disk_pool = group->diskPool();
-
-        const auto& pools                 = group->devicePools();
-        bool        device_host_layout_ok = true;
-        layout.components.reserve(group->component_indices.size());
-        for (int component_index : group->component_indices) {
-            if (component_index < 0 || static_cast<size_t>(component_index) >= components.size()) {
-                RTP_LLM_LOG_WARNING("invalid component_index=%d group=%d",
-                                    component_index,
-                                    layout.component_group_id);
-                device_host_layout_ok = false;
-                break;
-            }
-            const auto& component = components[static_cast<size_t>(component_index)];
-            if (component.component_group_id != layout.component_group_id) {
-                RTP_LLM_LOG_WARNING("component[%d] belongs to group %d, expected %d",
-                                    component_index,
-                                    component.component_group_id,
-                                    layout.component_group_id);
-                device_host_layout_ok = false;
-                break;
-            }
-            if (component.device_pool_index < 0 || static_cast<size_t>(component.device_pool_index) >= pools.size()) {
-                RTP_LLM_LOG_WARNING("invalid device_pool_index=%d component=%d group=%d",
-                                    component.device_pool_index,
-                                    component_index,
-                                    layout.component_group_id);
-                device_host_layout_ok = false;
-                break;
-            }
-            const auto& pool = pools[static_cast<size_t>(component.device_pool_index)];
-            if (!pool) {
-                RTP_LLM_LOG_WARNING("null device pool %d component=%d group=%d",
-                                    component.device_pool_index,
-                                    component_index,
-                                    layout.component_group_id);
-                device_host_layout_ok = false;
-                break;
-            }
-
-            ResolvedComponentLayout comp_layout;
-            comp_layout.component_index   = component_index;
-            comp_layout.device_pool_index = component.device_pool_index;
-            comp_layout.device_pool       = pool;
-            comp_layout.layer_slots       = component.memory_block_layer_tag_slots;
-            layout.components.push_back(std::move(comp_layout));
-        }
-
-        layout.layout_bytes           = computeLayoutsBlockSize(layout.components);
-        layout.has_device_host_layout = device_host_layout_ok && layout.host_pool != nullptr
-                                        && !layout.components.empty() && layoutHasAnyLayerSlot(layout.components);
-        group_layouts_.push_back(std::move(layout));
-    }
-}
 
 // ---- TransferHandle ----
 
@@ -183,97 +112,83 @@ TransferHandle CopyEngine::submit(const TransferDescriptor& desc) {
 }
 
 CopyStatus CopyEngine::execute(const TransferDescriptor& desc) {
-    if (desc.component_group_id < 0 || static_cast<size_t>(desc.component_group_id) >= group_layouts_.size()) {
-        RTP_LLM_LOG_WARNING("invalid component_group_id=%d", desc.component_group_id);
-        return CopyStatus::INVALID_ARGS;
-    }
-    if (desc.source_tier == Tier::NONE || desc.target_tier == Tier::NONE || desc.source_tier == desc.target_tier) {
-        RTP_LLM_LOG_WARNING("invalid transfer tier pair source=%s target=%s",
-                            tierName(desc.source_tier),
-                            tierName(desc.target_tier));
-        return CopyStatus::INVALID_ARGS;
-    }
-
-    const ResolvedGroupLayout* layout = &group_layouts_[static_cast<size_t>(desc.component_group_id)];
-
-    if (isDeviceHostTransfer(desc.source_tier, desc.target_tier)) {
-        if (!layout->has_device_host_layout) {
-            RTP_LLM_LOG_WARNING("missing device-host layout group=%d", desc.component_group_id);
-            return CopyStatus::INVALID_ARGS;
-        }
-    } else if ((desc.source_tier == Tier::HOST && desc.target_tier == Tier::DISK)
-               || (desc.source_tier == Tier::DISK && desc.target_tier == Tier::HOST)) {
-        if (!layout->host_pool) {
-            RTP_LLM_LOG_WARNING("missing host_pool for host-disk transfer group=%d", desc.component_group_id);
-            return CopyStatus::INVALID_ARGS;
-        }
-        if (!layout->disk_pool) {
-            RTP_LLM_LOG_WARNING("missing disk_pool for host-disk transfer group=%d", desc.component_group_id);
-            return CopyStatus::INVALID_ARGS;
-        }
-    } else {
-        RTP_LLM_LOG_WARNING("unsupported transfer tier pair source=%s target=%s",
-                            tierName(desc.source_tier),
-                            tierName(desc.target_tier));
-        return CopyStatus::INVALID_ARGS;
+    const ComponentGroup* group  = nullptr;
+    const CopyStatus      status = validateRequest(desc, group);
+    if (status != CopyStatus::OK) {
+        return status;
     }
 
     if (desc.source_tier == Tier::DEVICE && desc.target_tier == Tier::HOST) {
-        if (isNullBlockIdx(desc.host_block)) {
-            RTP_LLM_LOG_WARNING("D2H descriptor has invalid host target block");
-            return CopyStatus::INVALID_ARGS;
-        }
-        if (desc.device_blocks.size() != layout->components.size()) {
-            RTP_LLM_LOG_WARNING("D2H device_blocks(%zu) does not match components(%zu)",
-                                desc.device_blocks.size(),
-                                layout->components.size());
-            return CopyStatus::INVALID_ARGS;
-        }
-        return device_host_executor_->execute(desc, *layout);
+        return device_host_executor_->execute(desc, *group, *component_registry_);
     }
-
     if (desc.source_tier == Tier::HOST && desc.target_tier == Tier::DEVICE) {
-        if (isNullBlockIdx(desc.host_block) || desc.device_blocks.empty()) {
-            RTP_LLM_LOG_WARNING("H2D descriptor has invalid source or target block");
-            return CopyStatus::INVALID_ARGS;
-        }
-        if (desc.device_blocks.size() != layout->components.size()) {
-            RTP_LLM_LOG_WARNING("H2D device_blocks(%zu) does not match components(%zu)",
-                                desc.device_blocks.size(),
-                                layout->components.size());
-            return CopyStatus::INVALID_ARGS;
-        }
-        return device_host_executor_->execute(desc, *layout);
+        return device_host_executor_->execute(desc, *group, *component_registry_);
     }
-
     if (desc.source_tier == Tier::HOST && desc.target_tier == Tier::DISK) {
-        if (isNullBlockIdx(desc.host_block) || isNullBlockIdx(desc.disk_block)) {
-            RTP_LLM_LOG_WARNING("H2Disk descriptor has invalid source or target block");
-            return CopyStatus::INVALID_ARGS;
-        }
-        return host_disk_executor_->execute(desc, *layout);
+        return host_disk_executor_->hostToDisk(desc, *group);
     }
-
-    if (desc.source_tier == Tier::DISK && desc.target_tier == Tier::HOST) {
-        if (isNullBlockIdx(desc.disk_block) || isNullBlockIdx(desc.host_block)) {
-            RTP_LLM_LOG_WARNING("Disk2H descriptor has invalid source or target block");
-            return CopyStatus::INVALID_ARGS;
-        }
-        return host_disk_executor_->execute(desc, *layout);
-    }
-
-    RTP_LLM_LOG_WARNING("unsupported transfer tier pair source=%s target=%s",
-                        tierName(desc.source_tier),
-                        tierName(desc.target_tier));
-    return CopyStatus::INVALID_ARGS;
+    return host_disk_executor_->diskToHost(desc, *group);
 }
 
-size_t CopyEngine::computeHostBlockSize(const std::vector<MemoryBlockLayerTagSlot>& slots) {
-    size_t total = 0;
-    for (const auto& slot : slots) {
-        total += slot.stride_bytes;
+CopyStatus CopyEngine::validateRequest(const TransferDescriptor& desc, const ComponentGroup*& group) const {
+    if (desc.component_group_id < 0 || static_cast<size_t>(desc.component_group_id) >= component_groups_.size()) {
+        RTP_LLM_LOG_WARNING("invalid component_group_id=%d", desc.component_group_id);
+        return CopyStatus::INVALID_ARGS;
     }
-    return total;
+    const ComponentGroupPtr& group_ptr = component_groups_[static_cast<size_t>(desc.component_group_id)];
+    if (group_ptr == nullptr || component_registry_ == nullptr) {
+        RTP_LLM_LOG_WARNING("null component group=%d", desc.component_group_id);
+        return CopyStatus::INVALID_ARGS;
+    }
+    group = group_ptr.get();
+
+    const bool device_host = (desc.source_tier == Tier::DEVICE && desc.target_tier == Tier::HOST)
+                             || (desc.source_tier == Tier::HOST && desc.target_tier == Tier::DEVICE);
+    if (device_host) {
+        const auto host_pool = group->hostPool();
+        if (host_pool == nullptr || !host_pool->validBlock(desc.host_block)) {
+            RTP_LLM_LOG_WARNING("device-host request has invalid host block group=%d", desc.component_group_id);
+            return CopyStatus::INVALID_ARGS;
+        }
+        if (desc.device_blocks.size() != group->componentIndices().size()) {
+            RTP_LLM_LOG_WARNING("device-host request device block count %zu != component count %zu group=%d",
+                                desc.device_blocks.size(),
+                                group->componentIndices().size(),
+                                desc.component_group_id);
+            return CopyStatus::INVALID_ARGS;
+        }
+        bool has_device_block = false;
+        for (size_t component_idx = 0; component_idx < desc.device_blocks.size(); ++component_idx) {
+            const BlockIdxType block = desc.device_blocks[component_idx];
+            if (isNullBlockIdx(block)) {
+                continue;
+            }
+            const DeviceBlockPoolPtr& pool = group->devicePools()[component_idx];
+            if (pool == nullptr || !pool->validBlock(block)) {
+                RTP_LLM_LOG_WARNING("invalid device block %d for component=%zu", block, component_idx);
+                return CopyStatus::INVALID_ARGS;
+            }
+            has_device_block = true;
+        }
+        return has_device_block ? CopyStatus::OK : CopyStatus::INVALID_ARGS;
+    }
+
+    const bool host_disk = (desc.source_tier == Tier::HOST && desc.target_tier == Tier::DISK)
+                           || (desc.source_tier == Tier::DISK && desc.target_tier == Tier::HOST);
+    if (host_disk) {
+        const auto host_pool = group->hostPool();
+        const auto disk_pool = group->diskPool();
+        if (host_pool == nullptr || disk_pool == nullptr || !host_pool->validBlock(desc.host_block)
+            || !disk_pool->validBlock(desc.disk_block)) {
+            RTP_LLM_LOG_WARNING("invalid host-disk request group=%d", desc.component_group_id);
+            return CopyStatus::INVALID_ARGS;
+        }
+        return CopyStatus::OK;
+    }
+
+    RTP_LLM_LOG_WARNING(
+        "unsupported transfer tier pair source=%s target=%s", tierName(desc.source_tier), tierName(desc.target_tier));
+    return CopyStatus::INVALID_ARGS;
 }
 
 }  // namespace rtp_llm

@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtil.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/CopyEngineTestUtils.h"
 
 namespace rtp_llm::block_tree_cache_test {
 class LoadBackShutdownTestPeer {
@@ -43,7 +44,9 @@ public:
                        const std::vector<Component>&         components,
                        CopyStatus                            result,
                        bool                                  pause_enabled = true):
-        CopyEngine(groups, components), pause_enabled_(pause_enabled), result_(result) {}
+        CopyEngine(groups, std::make_shared<const std::vector<Component>>(components)),
+        pause_enabled_(pause_enabled),
+        result_(result) {}
 
     TransferHandle submit(const TransferDescriptor& descriptor) override {
         {
@@ -289,6 +292,9 @@ TEST_F(BlockTreeCacheIntegrationTest, WatermarkDemotionCopiesHostBlockToDisk) {
     full->component_group_id = 0;
     full->setHostPool(host_pool);
     full->setDiskPool(disk_pool);
+    full->setDevicePools({DeviceBlockPoolPtr{}});
+    std::vector<Component> layout_components = {copy_engine_test::makeSchemaComponent(0, 0, "watermark_kv", {256})};
+    ASSERT_TRUE(full->finalizeLayout({0}, layout_components));
     auto host_block = full->allocateSingleBlock(Tier::HOST);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     std::vector<ComponentGroupPtr> groups = {full};
@@ -299,7 +305,7 @@ TEST_F(BlockTreeCacheIntegrationTest, WatermarkDemotionCopiesHostBlockToDisk) {
     cfg.enable_disk_cache   = true;
 
     auto cache =
-        makeBlockTreeCacheForTest(std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg));
+        makeBlockTreeCacheForTest(std::move(tree), std::move(groups), std::move(layout_components), std::move(cfg));
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].host_block = host_block;
@@ -419,14 +425,21 @@ TEST_F(BlockTreeCacheIntegrationTest, LoadBackDeviceAllocationFailureRollsBackAl
     std::shared_ptr<HostBlockPool> first_host_pool  = makeHostPool(1, 2);
     std::shared_ptr<HostBlockPool> second_host_pool = makeHostPool(1, 2);
 
+    std::vector<Component> components = {
+        copy_engine_test::makeSchemaComponent(0, 0, "atomic_first", {1}),
+        copy_engine_test::makeSchemaComponent(1, 1, "atomic_second", {1}),
+    };
+
     std::shared_ptr<FullComponentGroup> first_group = std::make_shared<FullComponentGroup>();
     first_group->component_group_id                 = 0;
     first_group->setDevicePools({first_device_pool});
     first_group->setHostPool(first_host_pool);
+    ASSERT_TRUE(first_group->finalizeLayout({0}, components));
     std::shared_ptr<FullComponentGroup> second_group = std::make_shared<FullComponentGroup>();
     second_group->component_group_id                 = 1;
     second_group->setDevicePools({exhausted_device_pool});
     second_group->setHostPool(second_host_pool);
+    ASSERT_TRUE(second_group->finalizeLayout({1}, components));
 
     GroupBlockSet exhausted_holder = second_group->allocateBlocks(Tier::DEVICE, 1);
     ASSERT_EQ(exhausted_holder.per_node.size(), 1u);
@@ -443,7 +456,7 @@ TEST_F(BlockTreeCacheIntegrationTest, LoadBackDeviceAllocationFailureRollsBackAl
     config.enable_memory_cache            = true;
     config.enable_load_back               = true;
     std::unique_ptr<BlockTreeCache> cache = makeBlockTreeCacheForTest(
-        std::make_unique<BlockTree>(2), std::move(component_groups), std::vector<Component>{}, std::move(config));
+        std::make_unique<BlockTree>(2), std::move(component_groups), std::move(components), std::move(config));
     ASSERT_NE(cache, nullptr);
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(2));
@@ -541,15 +554,14 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadBackSett
 
         auto full                = std::make_shared<FullComponentGroup>();
         full->component_group_id = 0;
-        full->component_indices  = {0};
-        full->host_block_size    = kBlockBytes;
         full->setDevicePools({device_pool});
         full->setHostPool(host_pool);
         full->setDiskPool(disk_pool);
 
         std::vector<Component> components = {
-            Component{0, 0, CacheGroupType::FULL, {{0, "shutdown_kv", kBlockBytes}}, 0},
+            copy_engine_test::makeSchemaComponent(0, 0, "shutdown_kv", {kBlockBytes}),
         };
+        ASSERT_TRUE(full->finalizeLayout({0}, components));
         std::vector<ComponentGroupPtr> groups = {full};
         BlockTreeCacheConfig           config;
         config.enable_device_cache = true;
@@ -1071,7 +1083,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadBackAsyncCompletionRefreshesBefo
 
     environment->releaseMatch(result);
     environment->releaseRequestRefs();
-    const size_t tree_nodes_before       = environment->cache->getStats().tree_node_count;
+    const size_t tree_nodes_before        = environment->cache->getStats().tree_node_count;
     const size_t device_candidates_before = environment->cache->getStats().device_heap_total_size;
 
     pausable_copy_engine->enablePause();

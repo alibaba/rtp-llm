@@ -4,7 +4,7 @@
 #include <memory>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/CopyEngineLayout.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/DeviceHostCopyStrategy.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/TransferTypes.h"
 
@@ -15,21 +15,26 @@ public:
     explicit DeviceHostTransferExecutor(DeviceHostCopyOptions options = {});
     ~DeviceHostTransferExecutor();
 
-    CopyStatus execute(const TransferDescriptor& desc, const ResolvedGroupLayout& layout);
+    CopyStatus
+    execute(const TransferDescriptor& desc, const ComponentGroup& group, const std::vector<Component>& components);
 
 private:
-    CopyStatus lowerAndExecute(const TransferDescriptor& desc, const ResolvedGroupLayout& layout, bool device_to_host);
+    CopyStatus lowerAndExecute(const TransferDescriptor&     desc,
+                               const ComponentGroup&         group,
+                               const std::vector<Component>& components,
+                               bool                          device_to_host);
 
-    DeviceHostCopyPlan lowerPlan(const TransferDescriptor& desc,
-                                 const ResolvedGroupLayout& layout,
-                                 bool device_to_host,
-                                 CopyStatus& out_status) const;
+    DeviceHostCopyPlan lowerPlan(const TransferDescriptor&     desc,
+                                 const ComponentGroup&         group,
+                                 const std::vector<Component>& components,
+                                 bool                          device_to_host,
+                                 CopyStatus&                   out_status) const;
 
     CopyStatus executeStrategies(const DeviceHostCopyPlan& plan);
 
     static std::vector<DeviceHostCopyPlan> splitByDevice(const DeviceHostCopyPlan& plan);
 
-    DeviceHostCopyOptions                             options_;
+    DeviceHostCopyOptions                                options_;
     std::vector<std::unique_ptr<DeviceHostCopyStrategy>> strategies_;
 };
 

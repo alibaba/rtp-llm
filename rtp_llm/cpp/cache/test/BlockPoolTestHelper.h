@@ -2,8 +2,11 @@
 
 #include <cstdint>
 #include <numeric>
+#include <string>
+#include <vector>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -104,6 +107,21 @@ inline DeviceBlockPoolPtr createDeviceBlockPool() {
     device_config->use_cuda_malloc_backing = false;
     std::shared_ptr<const DeviceBlockPoolConfig> const_config = device_config;
     return std::make_shared<DeviceBlockPool>(const_config);
+}
+
+inline std::vector<Component> makeUnitLayerComponents(size_t count, int group_id = 0) {
+    std::vector<Component> components;
+    components.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        Component component;
+        component.component_id       = static_cast<int>(i);
+        component.component_group_id = group_id;
+        component.tag                = "component_" + std::to_string(i);
+        component.model_layer_ids    = {0};
+        component.layer_bytes        = {1};
+        components.push_back(std::move(component));
+    }
+    return components;
 }
 
 }  // namespace rtp_llm

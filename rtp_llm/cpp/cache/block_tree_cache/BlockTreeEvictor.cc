@@ -22,14 +22,10 @@ BlockTreeEvictor::BlockTreeEvictor(std::vector<ComponentGroupPtr>& component_gro
     execute_transfer_(std::move(execute_transfer)),
     enable_reverse_eviction_(enable_reverse_eviction) {}
 
-bool BlockTreeEvictor::init(const std::vector<Component>& components,
-                            EvictionPolicy                device_policy,
-                            EvictionPolicy                host_policy,
-                            EvictionPolicy                disk_policy) {
+bool BlockTreeEvictor::init(EvictionPolicy device_policy, EvictionPolicy host_policy, EvictionPolicy disk_policy) {
     // Own one heap per (group, tier), using the cache-wide per-tier policies.
     heaps_.clear();
     heaps_.resize(component_groups_.size());
-    group_layer_tag_slots_.clear();
     for (size_t group_index = 0; group_index < component_groups_.size(); ++group_index) {
         const auto& group = component_groups_[group_index];
         if (group == nullptr) {
@@ -62,29 +58,7 @@ bool BlockTreeEvictor::init(const std::vector<Component>& components,
         tier_heaps.disk   = std::make_unique<EvictionHeap>(disk_policy);
     }
 
-    buildGroupLayerTagSlots(components);
     return true;
-}
-
-void BlockTreeEvictor::buildGroupLayerTagSlots(const std::vector<Component>& components) {
-    group_layer_tag_slots_.clear();
-    group_layer_tag_slots_.resize(component_groups_.size());
-
-    for (const auto& group : component_groups_) {
-        auto& layer_slots = group_layer_tag_slots_[static_cast<size_t>(group->component_group_id)];
-        for (int component_index : group->component_indices) {
-            if (component_index < 0 || static_cast<size_t>(component_index) >= components.size())
-                continue;
-            const auto& component = components[static_cast<size_t>(component_index)];
-            layer_slots.insert(layer_slots.end(),
-                               component.memory_block_layer_tag_slots.begin(),
-                               component.memory_block_layer_tag_slots.end());
-        }
-        std::sort(
-            layer_slots.begin(),
-            layer_slots.end(),
-            [](const MemoryBlockLayerTagSlot& a, const MemoryBlockLayerTagSlot& b) { return a.layer_id < b.layer_id; });
-    }
 }
 
 EvictionHeap* BlockTreeEvictor::heapFor(int group_id, Tier tier) {

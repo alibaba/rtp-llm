@@ -48,10 +48,7 @@ public:
                      ExecuteTransferFn               execute_transfer,
                      bool                            enable_reverse_eviction);
 
-    bool init(const std::vector<Component>& components,
-              EvictionPolicy                device_policy,
-              EvictionPolicy                host_policy,
-              EvictionPolicy                disk_policy);
+    bool init(EvictionPolicy device_policy, EvictionPolicy host_policy, EvictionPolicy disk_policy);
 
     // ---- Semantic events (must be called while holding BlockTreeCache mutex) ----
     // Initialize candidate meta for new nodes and refresh their candidacy.
@@ -97,8 +94,6 @@ private:
         std::unique_ptr<EvictionHeap> disk;
     };
 
-    void buildGroupLayerTagSlots(const std::vector<Component>& components);
-
     EvictionHeap*       heapFor(int group_id, Tier tier);
     const EvictionHeap* heapFor(int group_id, Tier tier) const;
     // The single candidate-eligibility gate (design section 4.3). Upserts the
@@ -122,11 +117,9 @@ private:
     std::vector<int> reusableGroupIds() const;
     size_t           computeGroupExcess(const ComponentGroup& group, Tier tier, double ratio) const;
 
-    std::vector<ComponentGroupPtr>&                   component_groups_;
-    ExecuteTransferFn                                 execute_transfer_;
-    bool                                              enable_reverse_eviction_{false};
-    std::vector<std::vector<MemoryBlockLayerTagSlot>> group_layer_tag_slots_;
-    std::vector<MemoryBlockLayerTagSlot>              empty_layer_tag_slots_;
+    std::vector<ComponentGroupPtr>& component_groups_;
+    ExecuteTransferFn               execute_transfer_;
+    bool                            enable_reverse_eviction_{false};
 
     // Heap ownership: vector index is the declared component_group_id. init()
     // rejects null groups and any id/index mismatch by returning false.

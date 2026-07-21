@@ -414,7 +414,7 @@ static void expectPoolCountersEq(const HybridPoolKVCacheAllocatorPtr& allocator,
     }
 }
 
-static size_t freePlusDeviceReclaimCandidates(const HybridPoolKVCacheAllocatorPtr& allocator,
+static size_t freePlusDeviceReclaimCandidates(const HybridPoolKVCacheAllocatorPtr&   allocator,
                                               const std::shared_ptr<BlockTreeCache>& cache) {
     return allocator->freeBlocksNum() + cache->getStats().device_heap_total_size;
 }
@@ -474,7 +474,7 @@ makeHybridPoolPreflightEnvironment(const std::vector<DeviceBlockPoolPtr>& device
     host_config->pool_type            = BlockPoolType::HOST;
     host_config->pool_name            = "hybrid_pool_preflight_host";
     host_config->physical_block_count = 3;
-    host_config->payload_bytes        = 1;
+    host_config->payload_bytes        = 2;
     host_config->stride_bytes         = 4096;
     host_config->enable_pinned        = false;
     host_config->alignment            = 4096;
@@ -488,6 +488,11 @@ makeHybridPoolPreflightEnvironment(const std::vector<DeviceBlockPoolPtr>& device
     primary->setDevicePools({device_pools[0], device_pools[1]});
     primary->setHostPool(environment.host_pool);
 
+    auto components = makeUnitLayerComponents(2);
+    if (!primary->finalizeLayout({0, 1}, components)) {
+        return environment;
+    }
+
     BlockTreeCacheConfig cache_config;
     cache_config.enable_device_cache = true;
     cache_config.enable_memory_cache = true;
@@ -495,7 +500,7 @@ makeHybridPoolPreflightEnvironment(const std::vector<DeviceBlockPoolPtr>& device
     environment.cache =
         std::make_shared<BlockTreeCache>(std::make_unique<BlockTree>(1),
                                          std::vector<ComponentGroupPtr>{primary},
-                                         std::vector<Component>{},
+                                         std::move(components),
                                          std::move(cache_config),
                                          nullptr,
                                          nullptr,
@@ -1173,7 +1178,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, RealCacheOnlyRefsAndAvailabilityAggregate
 
     const auto   counters_before = snapshotPoolCounters(allocator);
     const size_t free_before     = allocator->freeBlocksNum();
-    const auto   seed             = seedRealCachePath(allocator, config, CacheKeysType{100}, /*seq_length=*/4);
+    const auto   seed            = seedRealCachePath(allocator, config, CacheKeysType{100}, /*seq_length=*/4);
     ASSERT_EQ(seed.group_blocks.size(), 2u);
     ASSERT_EQ(seed.group_blocks[0].size(), 1u);
     ASSERT_EQ(seed.group_blocks[1].size(), 1u);
@@ -1331,8 +1336,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, CanonicalReclaimZeroRequestPreservesCache
     allocator->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false});
     allocator->free(FreeInfo{resource, tokens});
 
-    const auto counters_before        = snapshotPoolCounters(allocator);
-    const auto free_before            = allocator->freeBlocksNum();
+    const auto counters_before             = snapshotPoolCounters(allocator);
+    const auto free_before                 = allocator->freeBlocksNum();
     const auto free_plus_candidates_before = freePlusDeviceReclaimCandidates(allocator, cache);
     ASSERT_EQ(pools[0]->refCount(full_block), 1u);
     ASSERT_EQ(pools[1]->refCount(linear_block), 1u);
@@ -1357,9 +1362,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, CanonicalReclaimWithoutCandidatesPreserve
     ASSERT_TRUE(allocator->init());
     ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
-    const auto counters_before        = snapshotPoolCounters(allocator);
-    const auto free_before            = allocator->freeBlocksNum();
-    auto       cache            = block_tree_caches_.back();
+    const auto counters_before = snapshotPoolCounters(allocator);
+    const auto free_before     = allocator->freeBlocksNum();
+    auto       cache           = block_tree_caches_.back();
     ASSERT_NE(cache, nullptr);
     const auto free_plus_candidates_before = freePlusDeviceReclaimCandidates(allocator, cache);
 
@@ -1435,8 +1440,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, CanonicalReclaimBoundedPhasesKeepPlanAndP
     allocator->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false});
     allocator->free(FreeInfo{resource, tokens});
 
-    const auto counters_before              = snapshotPoolCounters(allocator);
-    const auto free_before                  = allocator->freeBlocksNum();
+    const auto counters_before             = snapshotPoolCounters(allocator);
+    const auto free_before                 = allocator->freeBlocksNum();
     const auto free_plus_candidates_before = freePlusDeviceReclaimCandidates(allocator, cache);
     ASSERT_EQ(cache->getStats().device_heap_total_size, 3u);
     ASSERT_EQ(allocator->activeTreeCachedBlocksNum(), 0u);
@@ -1776,8 +1781,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DirectFreeMakesEveryPoolCacheOnlyBlockRec
     ASSERT_EQ(pools.size(), 2u);
     auto cache = block_tree_caches_.back();
     ASSERT_NE(cache, nullptr);
-    const auto counters_before              = snapshotPoolCounters(allocator);
-    const auto free_before                  = allocator->freeBlocksNum();
+    const auto counters_before             = snapshotPoolCounters(allocator);
+    const auto free_before                 = allocator->freeBlocksNum();
     const auto free_plus_candidates_before = freePlusDeviceReclaimCandidates(allocator, cache);
 
     auto resource = makeBatchResource(/*batch_size=*/1, config);
@@ -1830,8 +1835,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ZeroBlockFreeWithoutBlockTreeCacheIsNoOp)
 
     const auto counters_before = snapshotPoolCounters(allocator);
     const auto free_before     = allocator->freeBlocksNum();
-    auto       resource         = makeBatchResource(/*batch_size=*/1, config);
-    auto       tokens           = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/0, /*seq_size_per_block=*/4);
+    auto       resource        = makeBatchResource(/*batch_size=*/1, config);
+    auto       tokens          = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/0, /*seq_size_per_block=*/4);
 
     allocator->free(FreeInfo{resource, tokens});
     EXPECT_EQ(resource->curBlocksNum(), 0);
@@ -2276,7 +2281,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionReclaimsDeviceBlocks
     // Canonical reclaim returns completed primary plans. Cascade group slots and
     // physical free-block progress remain separate observations.
     const size_t free_before = allocator->freeBlocksNum();
-    const int reclaimed = allocator->blockTreeCache()->reclaimBlocks(/*num_blocks=*/4, Tier::DEVICE);
+    const int    reclaimed   = allocator->blockTreeCache()->reclaimBlocks(/*num_blocks=*/4, Tier::DEVICE);
     EXPECT_EQ(reclaimed, 4);
     EXPECT_GE(allocator->freeBlocksNum(), free_before + 4);
 }

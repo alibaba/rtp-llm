@@ -78,7 +78,8 @@ private:
 class PausableHybridCopyEngine: public CopyEngine {
 public:
     explicit PausableHybridCopyEngine(CopyEnginePtr delegate):
-        CopyEngine(std::vector<ComponentGroupPtr>{}, std::vector<Component>{}), delegate_(std::move(delegate)) {}
+        CopyEngine(std::vector<ComponentGroupPtr>{}, std::make_shared<const std::vector<Component>>()),
+        delegate_(std::move(delegate)) {}
 
     TransferHandle submit(const TransferDescriptor& descriptor) override {
         {
@@ -566,10 +567,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, PopulatedIncrementIsSynchronousAndRestore
     ASSERT_TRUE(allocator->init());
     ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
-    auto         pool             = allocator->getDeviceBlockPool();
-    auto         batch_resource   = makeIncrementBatchResource(config);
-    auto         complete_tokens  = makeIncrementTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
-    const size_t free_before = allocator->freeBlocksNum();
+    auto         pool            = allocator->getDeviceBlockPool();
+    auto         batch_resource  = makeIncrementBatchResource(config);
+    auto         complete_tokens = makeIncrementTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    const size_t free_before     = allocator->freeBlocksNum();
     ASSERT_EQ(allocator->activeTreeCachedBlocksNum(), 0u);
 
     MallocInfo init_info{batch_resource, complete_tokens};
@@ -641,7 +642,7 @@ static HybridTypePreflightEnvironment makeHybridTypePreflightEnvironment(const D
     host_config->pool_type            = BlockPoolType::HOST;
     host_config->pool_name            = "hybrid_type_preflight_host";
     host_config->physical_block_count = 3;
-    host_config->payload_bytes        = 1;
+    host_config->payload_bytes        = 2;
     host_config->stride_bytes         = 4096;
     host_config->enable_pinned        = false;
     host_config->alignment            = 4096;
@@ -655,6 +656,11 @@ static HybridTypePreflightEnvironment makeHybridTypePreflightEnvironment(const D
     primary->setDevicePools({device_pool, device_pool});
     primary->setHostPool(environment.host_pool);
 
+    auto components = makeUnitLayerComponents(2);
+    if (!primary->finalizeLayout({0, 1}, components)) {
+        return environment;
+    }
+
     BlockTreeCacheConfig cache_config;
     cache_config.enable_device_cache = true;
     cache_config.enable_memory_cache = true;
@@ -662,7 +668,7 @@ static HybridTypePreflightEnvironment makeHybridTypePreflightEnvironment(const D
     environment.cache =
         std::make_shared<BlockTreeCache>(std::make_unique<BlockTree>(1),
                                          std::vector<ComponentGroupPtr>{primary},
-                                         std::vector<Component>{},
+                                         std::move(components),
                                          std::move(cache_config),
                                          nullptr,
                                          nullptr,
@@ -1091,8 +1097,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, FullSWAAsyncFailureFinalizesPlanningBefor
     }
     ASSERT_NE(cache->tree()->insertNode(nullptr, {100, 200, 300, 400}, slots).leaf, nullptr);
 
-    const auto failing_copy_engine =
-        std::make_shared<FailingHybridCopyEngine>(cache->componentGroups(), cache->components());
+    const auto failing_copy_engine = std::make_shared<FailingHybridCopyEngine>(
+        cache->componentGroups(), std::make_shared<const std::vector<Component>>(cache->components()));
     block_tree_cache_test::BlockTreeCacheTestPeer::setCopyEngine(*cache, failing_copy_engine);
     BatchKVCacheResourcePtr resource = makeHybridTypeLoadBackResource(config);
     resource->setBatchCacheKeys(0, CacheKeysType{100, 200, 300, 400, 500});
@@ -1268,7 +1274,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, FullSWAPartialReadyPreservesResidentSuffi
     allocator->setReserveBlockNum(0);
     CopyEnginePtr real_copy_engine = cache->copyEngine();
     ASSERT_NE(real_copy_engine, nullptr);
-    auto failing_copy_engine = std::make_shared<FailingHybridCopyEngine>(cache->componentGroups(), cache->components());
+    auto failing_copy_engine = std::make_shared<FailingHybridCopyEngine>(
+        cache->componentGroups(), std::make_shared<const std::vector<Component>>(cache->components()));
     block_tree_cache_test::BlockTreeCacheTestPeer::setCopyEngine(*cache, failing_copy_engine);
     BatchKVCacheResourcePtr failed_resource = make_resource();
     MallocInfo              failed_info{failed_resource, token_ids};

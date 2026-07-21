@@ -224,7 +224,7 @@ bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& c
 
 ScriptedCopyEngine::ScriptedCopyEngine(const std::vector<ComponentGroupPtr>& groups,
                                        const std::vector<Component>&         components):
-    CopyEngine(groups, components) {}
+    CopyEngine(groups, std::make_shared<const std::vector<Component>>(components)) {}
 
 TransferHandle ScriptedCopyEngine::submit(const TransferDescriptor& descriptor) {
     CopyStatus status = CopyStatus::OK;
@@ -326,32 +326,31 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
         };
     }
 
+    environment->components.resize(3);
+    environment->components[0]      = copy_engine_test::makeSchemaComponent(0, 0, "full_kv", {kComponentBytes});
+    environment->components[1]      = copy_engine_test::makeSchemaComponent(1, 0, "full_aux", {kComponentBytes});
+    environment->components[2]      = copy_engine_test::makeSchemaComponent(2, 1, "swa_kv", {kComponentBytes});
+    environment->components[2].type = CacheGroupType::SWA;
+
     auto full                = std::make_shared<FullComponentGroup>();
     full->component_group_id = 0;
-    full->component_indices  = {0, 1};
-    full->host_block_size    = 2 * kComponentBytes;
     full->setDevicePools({environment->device_pools[0], environment->device_pools[1]});
     full->setHostPool(environment->host_pools[0]);
     if (options.enable_disk) {
         full->setDiskPool(environment->disk_pools[0]);
     }
+    RTP_LLM_CHECK(full->finalizeLayout({0, 1}, environment->components));
 
     auto swa                = std::make_shared<SWAComponentGroup>(/*sliding_window_size=*/2,
                                                    /*seq_size_per_block=*/1);
     swa->component_group_id = 1;
-    swa->component_indices  = {2};
-    swa->host_block_size    = kComponentBytes;
     swa->setDevicePools({environment->device_pools[2]});
     swa->setHostPool(environment->host_pools[1]);
     if (options.enable_disk) {
         swa->setDiskPool(environment->disk_pools[1]);
     }
+    RTP_LLM_CHECK(swa->finalizeLayout({2}, environment->components));
     environment->groups = {full, swa};
-
-    environment->components.resize(3);
-    environment->components[0] = Component{0, 0, CacheGroupType::FULL, {{0, "full_kv", kComponentBytes}}, 0};
-    environment->components[1] = Component{1, 0, CacheGroupType::FULL, {{0, "full_aux", kComponentBytes}}, 1};
-    environment->components[2] = Component{2, 1, CacheGroupType::SWA, {{0, "swa_kv", kComponentBytes}}, 0};
 
     BlockTreeCacheConfig config;
     config.enable_device_cache     = true;

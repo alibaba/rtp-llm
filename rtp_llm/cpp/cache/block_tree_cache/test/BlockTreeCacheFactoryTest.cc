@@ -83,8 +83,8 @@ TEST(BlockTreeCacheFactoryTest, RejectsDiskCacheWithoutMemoryCache) {
     kv_cache_config.enable_memory_cache      = false;
     kv_cache_config.enable_memory_cache_disk = true;
 
-    BlockTreeCachePtr cache = createBlockTreeCache(
-        cache_config, kv_cache_config, std::shared_ptr<KVCacheAllocator>{}, ParallelismConfig{});
+    BlockTreeCachePtr cache =
+        createBlockTreeCache(cache_config, kv_cache_config, std::shared_ptr<KVCacheAllocator>{}, ParallelismConfig{});
     EXPECT_EQ(cache, nullptr);
 }
 
@@ -163,7 +163,11 @@ TEST(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
         ASSERT_NE(group, nullptr);
         ASSERT_NE(group->hostPool(), nullptr);
         ASSERT_NE(group->diskPool(), nullptr);
-        ASSERT_EQ(group->component_indices.size(), group->devicePoolCount());
+        ASSERT_EQ(group->componentIndices().size(), group->devicePoolCount());
+        ASSERT_TRUE(group->hasLayout());
+        EXPECT_EQ(group->layout().componentCount(), group->devicePoolCount());
+        EXPECT_EQ(group->hostPool()->payloadBytes(), group->layout().payloadBytes());
+        EXPECT_EQ(group->diskPool()->payloadBytes(), group->layout().payloadBytes());
 
         GroupBlockSet device_blocks = group->allocateBlocks(Tier::DEVICE, 1);
         ASSERT_EQ(device_blocks.per_node.size(), 1u);

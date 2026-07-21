@@ -89,6 +89,31 @@ BlockIdxType poolMalloc(IBlockPool& pool) {
     return block.has_value() ? *block : NULL_BLOCK_IDX;
 }
 
+Component makeSchemaComponent(int                        component_id,
+                              int                        component_group_id,
+                              const std::string&         tag,
+                              const std::vector<size_t>& layer_bytes,
+                              const std::vector<int>&    model_layer_ids) {
+    Component component;
+    component.component_id       = component_id;
+    component.component_group_id = component_group_id;
+    component.type               = CacheGroupType::FULL;
+    component.tag                = tag;
+    component.layer_bytes        = layer_bytes;
+    if (model_layer_ids.empty()) {
+        for (size_t layer_idx = 0; layer_idx < layer_bytes.size(); ++layer_idx) {
+            component.model_layer_ids.push_back(static_cast<int>(layer_idx));
+        }
+    } else {
+        component.model_layer_ids = model_layer_ids;
+    }
+    return component;
+}
+
+std::shared_ptr<const std::vector<Component>> makeComponentRegistry(std::vector<Component> components) {
+    return std::make_shared<const std::vector<Component>>(std::move(components));
+}
+
 TransferDescriptor makeDescriptor(Tier                             source_tier,
                                   Tier                             target_tier,
                                   const std::vector<BlockIdxType>& device_blocks,

@@ -582,6 +582,8 @@ TEST_F(BlockTreeCacheTest, ReclaimBlocksDoesNotAllocateHostBlock) {
     auto full                = std::make_shared<FullComponentGroup>();
     full->component_group_id = 0;
     full->setHostPool(host_pool);
+    // Slot-position pool lookups need one (null) entry; pools seal with the layout.
+    full->setDevicePools({DeviceBlockPoolPtr{}});
     std::vector<ComponentGroupPtr> groups = {full};
 
     BlockTreeCacheConfig ce_cfg;
@@ -647,6 +649,8 @@ TEST_F(BlockTreeCacheTest, ReusableReclaimDoesNotAllocateHostBlock) {
     auto full                = std::make_shared<FullComponentGroup>();
     full->component_group_id = 0;
     full->setHostPool(host_pool);
+    // Slot-position pool lookups need one (null) entry; pools seal with the layout.
+    full->setDevicePools({DeviceBlockPoolPtr{}});
     std::vector<ComponentGroupPtr> groups = {full};
 
     BlockTreeCacheConfig reuse_cfg;
@@ -720,10 +724,25 @@ TEST_F(BlockTreeCacheTest, HostDisabledDirectRelease) {
 }
 
 TEST_F(BlockTreeCacheTest, TierEnableQueries) {
-    auto tree                             = std::make_unique<BlockTree>(1);
-    auto full                             = std::make_shared<FullComponentGroup>();
-    full->component_group_id              = 0;
+    auto host_pool = makeHostPool(1, 2);
+    auto disk_pool = makeDiskPool(1, 2, std::make_unique<MemoryDiskBlockIO>());
+
+    auto tree                = std::make_unique<BlockTree>(1);
+    auto full                = std::make_shared<FullComponentGroup>();
+    full->component_group_id = 0;
+    full->setDevicePools({DeviceBlockPoolPtr{}});
+    full->setHostPool(host_pool);
+    full->setDiskPool(disk_pool);
     std::vector<ComponentGroupPtr> groups = {full};
+
+    Component component;
+    component.component_id            = 0;
+    component.component_group_id      = 0;
+    component.tag                     = "kv";
+    component.model_layer_ids         = {0};
+    component.layer_bytes             = {1};
+    std::vector<Component> components = {component};
+    ASSERT_TRUE(full->finalizeLayout({0}, components));
 
     BlockTreeCacheConfig cfg;
     cfg.enable_device_cache = true;
@@ -732,7 +751,7 @@ TEST_F(BlockTreeCacheTest, TierEnableQueries) {
     cfg.enable_remote_cache = true;
 
     std::unique_ptr<BlockTreeCache> cache = BlockTreeCacheTestUtil::makeBlockTreeCache(
-        std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg));
+        std::move(tree), std::move(groups), std::move(components), std::move(cfg));
 
     EXPECT_TRUE(cache->isDeviceCacheEnabled());
     EXPECT_TRUE(cache->isMemoryCacheEnabled());
@@ -821,12 +840,27 @@ TEST_F(BlockTreeCacheTest, MatchKeepsAggregatedDevicePoolsSeparate) {
     full->component_group_id                 = 0;
     full->setDevicePools({DeviceBlockPoolPtr{}, DeviceBlockPoolPtr{}});
 
+    Component first_component;
+    first_component.component_id       = 0;
+    first_component.component_group_id = 0;
+    first_component.tag                = "first";
+    first_component.model_layer_ids    = {0};
+    first_component.layer_bytes        = {1};
+    Component second_component;
+    second_component.component_id       = 1;
+    second_component.component_group_id = 0;
+    second_component.tag                = "second";
+    second_component.model_layer_ids    = {0};
+    second_component.layer_bytes        = {1};
+    std::vector<Component> components   = {first_component, second_component};
+    ASSERT_TRUE(full->finalizeLayout({0, 1}, components));
+
     std::vector<ComponentGroupPtr>             component_groups = {full};
     std::vector<BlockTreeCache::PerTagMapping> per_tag_mapping  = {{0, 0}, {0, 1}};
     std::unique_ptr<BlockTreeCache>            cache =
         std::make_unique<BlockTreeCache>(std::move(tree),
                                          std::move(component_groups),
-                                         std::vector<Component>{},
+                                         std::move(components),
                                          BlockTreeCacheConfig{},
                                          std::shared_ptr<StorageBackend>{},
                                          std::shared_ptr<BroadcastManager>{},
@@ -846,74 +880,6 @@ TEST_F(BlockTreeCacheTest, MatchKeepsAggregatedDevicePoolsSeparate) {
     EXPECT_EQ(result.matched_blocks, 2u);
     EXPECT_EQ(result.group_block_indices.at(0), (BlockIndicesType{10, 11}));
     EXPECT_EQ(result.group_block_indices.at(1), (BlockIndicesType{20, 21}));
-}
-
-static DeviceKVCacheGroupPtr makeInjectedDeviceGroupMarker(int group_id) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 1;
-    return std::make_shared<DeviceFullKVCacheGroup>(LayerIdsType{2}, std::move(spec), DeviceBlockPoolPtr{}, group_id);
-}
-
-static std::unique_ptr<BlockTreeCache>
-makeCopyProjectionInitializationCache(std::vector<BlockTreeCache::PerTagMapping> per_tag_mapping,
-                                      std::vector<DeviceKVCacheGroupPtr>         per_tag_device_groups,
-                                      size_t                                     device_pool_count) {
-    auto full                = std::make_shared<FullComponentGroup>();
-    full->component_group_id = 0;
-    full->component_indices  = {0};
-    full->setDevicePools(std::vector<DeviceBlockPoolPtr>(device_pool_count));
-
-    Component component;
-    component.component_id                 = 0;
-    component.component_group_id           = 0;
-    component.memory_block_layer_tag_slots = {{2, "kv", 1}};
-    component.device_pool_index            = 0;
-
-    return std::make_unique<BlockTreeCache>(std::make_unique<BlockTree>(1),
-                                            std::vector<ComponentGroupPtr>{std::move(full)},
-                                            std::vector<Component>{std::move(component)},
-                                            BlockTreeCacheConfig{},
-                                            std::shared_ptr<StorageBackend>{},
-                                            std::shared_ptr<BroadcastManager>{},
-                                            std::move(per_tag_device_groups),
-                                            std::move(per_tag_mapping));
-}
-
-TEST_F(BlockTreeCacheTest, InjectedDeviceRegistryRejectsComponentWithMissingMappingTuple) {
-    std::unique_ptr<BlockTreeCache> cache =
-        makeCopyProjectionInitializationCache({{/*component_group_id=*/0, /*local_pool_index=*/1}},
-                                              {makeInjectedDeviceGroupMarker(/*group_id=*/1)},
-                                              /*device_pool_count=*/2);
-    ASSERT_NE(cache, nullptr);
-    EXPECT_FALSE(cache->init());
-    EXPECT_FALSE(cache->isInitialized());
-}
-
-TEST_F(BlockTreeCacheTest, InjectedDeviceRegistryRejectsMatchedNullDeviceGroup) {
-    std::unique_ptr<BlockTreeCache> cache = makeCopyProjectionInitializationCache(
-        {{/*component_group_id=*/0, /*local_pool_index=*/0}, {/*component_group_id=*/0, /*local_pool_index=*/1}},
-        {nullptr, makeInjectedDeviceGroupMarker(/*group_id=*/1)},
-        /*device_pool_count=*/2);
-    ASSERT_NE(cache, nullptr);
-    EXPECT_FALSE(cache->init());
-    EXPECT_FALSE(cache->isInitialized());
-}
-
-TEST_F(BlockTreeCacheTest, FullyAbsentDeviceRegistriesPreserveDirectConstructionInitialization) {
-    std::unique_ptr<BlockTreeCache> cache = makeCopyProjectionInitializationCache({}, {}, /*device_pool_count=*/1);
-    ASSERT_NE(cache, nullptr);
-    EXPECT_TRUE(cache->init());
-    EXPECT_TRUE(cache->isInitialized());
-}
-
-TEST_F(BlockTreeCacheTest, NonemptyAllNullDeviceRegistryPreservesLegacyDirectConstructionInitialization) {
-    std::unique_ptr<BlockTreeCache> cache =
-        makeCopyProjectionInitializationCache({{/*component_group_id=*/0, /*local_pool_index=*/0}},
-                                              {nullptr},
-                                              /*device_pool_count=*/1);
-    ASSERT_NE(cache, nullptr);
-    EXPECT_TRUE(cache->init());
-    EXPECT_TRUE(cache->isInitialized());
 }
 
 TEST_F(BlockTreeCacheTest, MatchRequiresSWAWindowAfterGap) {
@@ -985,16 +951,18 @@ TEST_F(BlockTreeCacheTest, ReclaimBlocksDoesNotUpdateHostSlot) {
     auto tree                = std::make_unique<BlockTree>(1);
     auto full                = std::make_shared<FullComponentGroup>();
     full->component_group_id = 0;
-    full->component_indices  = {0};
     full->setHostPool(host_pool);
+    full->setDevicePools({DeviceBlockPoolPtr{}});
     std::vector<ComponentGroupPtr> groups = {full};
 
-    // Create a component with MemoryBlockLayerTagSlot so deviceToHost attempts real copy
     Component comp;
     comp.component_id                 = 0;
     comp.component_group_id           = 0;
-    comp.memory_block_layer_tag_slots = {{0, "kv", 128}};
+    comp.tag                          = "kv";
+    comp.model_layer_ids              = {0};
+    comp.layer_bytes                  = {256};
     std::vector<Component> components = {comp};
+    ASSERT_TRUE(full->finalizeLayout({0}, components));
 
     BlockTreeCacheConfig cfg;
     cfg.enable_device_cache = true;
@@ -1013,6 +981,54 @@ TEST_F(BlockTreeCacheTest, ReclaimBlocksDoesNotUpdateHostSlot) {
     auto find = cache->tree()->findNode({100});
     EXPECT_EQ(find.matched_node, nullptr);
     EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
+}
+
+TEST(BlockTreeCacheConfigurationTest, RejectsHostLayoutPayloadMismatchAtInit) {
+    auto host_pool            = makeHostPool(65, 2);
+    auto group                = std::make_shared<FullComponentGroup>();
+    group->component_group_id = 0;
+    group->setDevicePools({DeviceBlockPoolPtr{}});
+    group->setHostPool(host_pool);
+
+    Component component;
+    component.component_id            = 0;
+    component.component_group_id      = 0;
+    component.tag                     = "kv";
+    component.model_layer_ids         = {0};
+    component.layer_bytes             = {64};
+    std::vector<Component> components = {component};
+    ASSERT_TRUE(group->finalizeLayout({0}, components));
+
+    BlockTreeCacheConfig config;
+    config.enable_memory_cache            = true;
+    std::vector<ComponentGroupPtr> groups = {group};
+    auto                           cache  = BlockTreeCacheTestUtil::makeBlockTreeCache(
+        std::make_unique<BlockTree>(1), std::move(groups), std::move(components), std::move(config));
+
+    EXPECT_EQ(cache, nullptr);
+}
+
+TEST(BlockTreeCacheConfigurationTest, RejectsComponentBindingDrift) {
+    auto group                = std::make_shared<FullComponentGroup>();
+    group->component_group_id = 0;
+    group->setDevicePools({DeviceBlockPoolPtr{}});
+
+    Component component;
+    component.component_id            = 0;
+    component.component_group_id      = 0;
+    component.tag                     = "kv";
+    component.model_layer_ids         = {0};
+    component.layer_bytes             = {64};
+    std::vector<Component> components = {component};
+    ASSERT_TRUE(group->finalizeLayout({0}, components));
+    // Drift the descriptor so component_id no longer matches its registry index.
+    components[0].component_id = 1;
+
+    std::vector<ComponentGroupPtr> groups = {group};
+    auto                           cache  = BlockTreeCacheTestUtil::makeBlockTreeCache(
+        std::make_unique<BlockTree>(1), std::move(groups), std::move(components));
+
+    EXPECT_EQ(cache, nullptr);
 }
 
 TEST_F(BlockTreeCacheTest, LoadBackOnlyReloadsSWAWindow) {
@@ -1119,26 +1135,33 @@ TEST_F(BlockTreeCacheTest, LoadBackDetectsHostData) {
     EXPECT_EQ(result.load_back_blocks, 1u);
 }
 
-static std::unique_ptr<BlockTreeCache> makeHostOnlyLoadBackCache() {
+static std::unique_ptr<BlockTreeCache> makeHostOnlyLoadBackCache(DeviceBlockPoolPtr device_pool = nullptr) {
     std::unique_ptr<BlockTree>          tree = std::make_unique<BlockTree>(1);
     std::shared_ptr<FullComponentGroup> full = std::make_shared<FullComponentGroup>();
     full->component_group_id                 = 0;
-    std::vector<ComponentGroupPtr> groups    = {full};
+    full->setDevicePools({std::move(device_pool)});
+    full->setHostPool(makeHostPool(1, 2));
+    std::vector<ComponentGroupPtr> groups = {full};
 
-    std::unique_ptr<BlockTreeCache> cache =
-        BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree), std::move(groups), std::vector<Component>{});
-    cache->setEnableLoadBack(true);
+    Component component;
+    component.component_id            = 0;
+    component.component_group_id      = 0;
+    component.tag                     = "kv";
+    component.model_layer_ids         = {0};
+    component.layer_bytes             = {1};
+    std::vector<Component> components = {component};
+    RTP_LLM_CHECK(full->finalizeLayout({0}, components));
+
+    BlockTreeCacheConfig config;
+    config.enable_memory_cache            = true;
+    config.enable_load_back               = true;
+    std::unique_ptr<BlockTreeCache> cache = BlockTreeCacheTestUtil::makeBlockTreeCache(
+        std::move(tree), std::move(groups), std::move(components), std::move(config));
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
-    slots[0][0].device_blocks = {55};
-    cache->insert(nullptr, {200}, slots);
-
-    BlockTreeFindResult find = cache->tree()->findNode({200});
-    RTP_LLM_CHECK(find.matched_node != nullptr);
-    find.matched_node->group_slots[0].host_block = 7;
-    for (BlockIdxType& device_block_index : find.matched_node->group_slots[0].device_blocks) {
-        device_block_index = NULL_BLOCK_IDX;
-    }
+    slots[0][0].host_block = cache->componentGroups()[0]->allocateSingleBlock(Tier::HOST);
+    RTP_LLM_CHECK(!isNullBlockIdx(slots[0][0].host_block));
+    RTP_LLM_CHECK(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {200}, slots));
     return cache;
 }
 
@@ -1152,6 +1175,24 @@ makeMappingValidationCache(std::vector<BlockTreeCache::PerTagMapping> per_tag_ma
     full->setDevicePools(std::vector<DeviceBlockPoolPtr>(device_pool_count));
     full->setHostPool(host_pool);
 
+    const size_t payload_bytes = host_pool == nullptr ? device_pool_count : host_pool->payloadBytes();
+    RTP_LLM_CHECK(payload_bytes >= device_pool_count);
+    std::vector<Component> components;
+    std::vector<int>       membership;
+    size_t                 remaining_bytes = payload_bytes;
+    for (size_t pool_index = 0; pool_index < device_pool_count; ++pool_index) {
+        Component component;
+        component.component_id       = static_cast<int>(pool_index);
+        component.component_group_id = 0;
+        component.tag                = "component_" + std::to_string(pool_index);
+        component.model_layer_ids    = {0};
+        component.layer_bytes        = {pool_index + 1 == device_pool_count ? remaining_bytes : 1};
+        remaining_bytes -= component.layer_bytes.front();
+        components.push_back(std::move(component));
+        membership.push_back(static_cast<int>(pool_index));
+    }
+    RTP_LLM_CHECK(full->finalizeLayout(std::move(membership), components));
+
     BlockTreeCacheConfig config;
     config.enable_memory_cache = host_pool != nullptr;
     config.enable_load_back    = host_pool != nullptr;
@@ -1160,7 +1201,7 @@ makeMappingValidationCache(std::vector<BlockTreeCache::PerTagMapping> per_tag_ma
     std::vector<DeviceKVCacheGroupPtr> per_tag_device_groups(per_tag_mapping.size());
     auto                               cache = std::make_unique<BlockTreeCache>(std::make_unique<BlockTree>(1),
                                                   std::move(groups),
-                                                  std::vector<Component>{},
+                                                  std::move(components),
                                                   std::move(config),
                                                   nullptr,
                                                   nullptr,
@@ -1173,7 +1214,7 @@ makeMappingValidationCache(std::vector<BlockTreeCache::PerTagMapping> per_tag_ma
 }
 
 TEST_F(BlockTreeCacheTest, LoadBackGroupMappingUsesLocalPoolIndexOrderAndLeavesTicketUntouched) {
-    std::shared_ptr<HostBlockPool> host_pool = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/2);
+    std::shared_ptr<HostBlockPool> host_pool = makeHostPool(/*payload_bytes=*/2, /*usable_count=*/2);
     ASSERT_NE(host_pool, nullptr);
 
     // Global tag order is deliberately the reverse of the component group's local
@@ -1502,10 +1543,9 @@ TEST_F(BlockTreeCacheTest, LoadBackTicketCommitTriggersLoadBack) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
-    std::unique_ptr<BlockTreeCache>    cache = makeHostOnlyLoadBackCache();
-    DeliberateNonPhysicalTopologyGuard synthetic_topology(*cache);
     DeviceBlockPoolPtr                 device_pool = makeDevicePool({{1, 0}}, 1, "load_back_ticket_commit");
-    cache->component_groups_[0]->setDevicePools({device_pool});
+    std::unique_ptr<BlockTreeCache>    cache       = makeHostOnlyLoadBackCache(device_pool);
+    DeliberateNonPhysicalTopologyGuard synthetic_topology(*cache);
 
     BlockTreeMatchResult result = cache->match({200});
     ASSERT_NE(result.load_back_ticket, nullptr);

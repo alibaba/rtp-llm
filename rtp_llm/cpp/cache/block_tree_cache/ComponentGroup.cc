@@ -1,5 +1,11 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
 
+#include <limits>
+#include <unordered_set>
+
+#include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/Logger.h"
+
 namespace rtp_llm {
 
 LoadBackTicket::LoadBackTicket(std::shared_ptr<LoadBackTicketRegistry> registry,
@@ -140,7 +146,105 @@ void LoadBackTicketRegistry::shutdown() {
     abort_callback_  = {};
 }
 
-// ---- Base class default implementations (shared by Full/SWA/Linear) ----
+std::optional<ComponentGroupLayout>
+ComponentGroupLayout::create(const std::vector<std::vector<size_t>>& component_layer_bytes) {
+    if (component_layer_bytes.empty()) {
+        RTP_LLM_LOG_WARNING("ComponentGroupLayout: components must not be empty");
+        return std::nullopt;
+    }
+
+    ComponentGroupLayout layout;
+    size_t               offset = 0;
+    for (size_t component_idx = 0; component_idx < component_layer_bytes.size(); ++component_idx) {
+        const auto& layer_bytes = component_layer_bytes[component_idx];
+        if (layer_bytes.empty()) {
+            RTP_LLM_LOG_WARNING("ComponentGroupLayout: component=%zu has no layer binding", component_idx);
+            return std::nullopt;
+        }
+        if (layer_bytes.size() > std::numeric_limits<size_t>::max() - layout.slices_.size()) {
+            RTP_LLM_LOG_WARNING("ComponentGroupLayout: total layer count overflow at component=%zu", component_idx);
+            return std::nullopt;
+        }
+        layout.slices_.reserve(layout.slices_.size() + layer_bytes.size());
+        for (size_t layer_idx = 0; layer_idx < layer_bytes.size(); ++layer_idx) {
+            const size_t bytes = layer_bytes[layer_idx];
+            if (bytes == 0) {
+                RTP_LLM_LOG_WARNING(
+                    "ComponentGroupLayout: component=%zu layer=%zu has zero packed bytes", component_idx, layer_idx);
+                return std::nullopt;
+            }
+            if (bytes > std::numeric_limits<size_t>::max() - offset) {
+                RTP_LLM_LOG_WARNING("ComponentGroupLayout: payload offset overflow at component=%zu layer=%zu",
+                                    component_idx,
+                                    layer_idx);
+                return std::nullopt;
+            }
+            layout.slices_.push_back(Slice{component_idx, layer_idx, offset});
+            offset += bytes;
+        }
+    }
+
+    layout.payload_bytes_ = offset;
+    return layout;
+}
+
+bool ComponentGroup::finalizeLayout(std::vector<int> component_indices, const std::vector<Component>& components) {
+    if (layout_.has_value()) {
+        RTP_LLM_LOG_ERROR("ComponentGroup::finalizeLayout: group %d layout is already sealed", component_group_id);
+        return false;
+    }
+
+    std::unordered_set<std::string>  tags;
+    std::vector<std::vector<size_t>> component_layer_bytes;
+    component_layer_bytes.reserve(component_indices.size());
+    for (int component_index : component_indices) {
+        if (component_index < 0 || static_cast<size_t>(component_index) >= components.size()) {
+            RTP_LLM_LOG_ERROR("ComponentGroup::finalizeLayout: invalid component_index=%d group=%d registry_size=%zu",
+                              component_index,
+                              component_group_id,
+                              components.size());
+            return false;
+        }
+        const Component& component = components[static_cast<size_t>(component_index)];
+        if (component.component_group_id != component_group_id) {
+            RTP_LLM_LOG_ERROR("ComponentGroup::finalizeLayout: component[%d] belongs to group %d, expected %d",
+                              component_index,
+                              component.component_group_id,
+                              component_group_id);
+            return false;
+        }
+        if (component.tag.empty() || !tags.insert(component.tag).second) {
+            RTP_LLM_LOG_ERROR("ComponentGroup::finalizeLayout: component[%d] has empty or duplicate tag=%s",
+                              component_index,
+                              component.tag.c_str());
+            return false;
+        }
+        if (component.model_layer_ids.size() != component.layer_bytes.size()) {
+            RTP_LLM_LOG_ERROR(
+                "ComponentGroup::finalizeLayout: component[%d] layer id count %zu != layer bytes count %zu",
+                component_index,
+                component.model_layer_ids.size(),
+                component.layer_bytes.size());
+            return false;
+        }
+        component_layer_bytes.push_back(component.layer_bytes);
+    }
+
+    auto layout = ComponentGroupLayout::create(component_layer_bytes);
+    if (!layout.has_value()) {
+        RTP_LLM_LOG_ERROR("ComponentGroup::finalizeLayout: schema validation failed for group %d", component_group_id);
+        return false;
+    }
+    // Commit membership and layout together; neither is observable on failure.
+    component_indices_ = std::move(component_indices);
+    layout_            = std::move(*layout);
+    return true;
+}
+
+const ComponentGroupLayout& ComponentGroup::layout() const {
+    RTP_LLM_CHECK_WITH_INFO(layout_.has_value(), "ComponentGroup %d layout has not been finalized", component_group_id);
+    return *layout_;
+}
 
 void ComponentGroup::evictFromTier(TreeNode* node, GroupSlot& slot, Tier tier) {
     // Clear only the tier's block fields; heap membership is owned by BlockTreeEvictor.

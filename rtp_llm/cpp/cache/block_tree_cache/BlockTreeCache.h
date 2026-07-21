@@ -204,7 +204,7 @@ public:
         return per_tag_device_groups_[static_cast<size_t>(gid)];
     }
     const std::vector<Component>& components() const {
-        return components_;
+        return *components_;
     }
     CopyEnginePtr copyEngine() const {
         return copy_engine_;
@@ -236,6 +236,7 @@ public:
 
 private:
     bool initDeviceGroupIds();
+    bool validateConfiguration() const;
     void taskStarted();
     void taskFinished();
     void drainTreeHolds();
@@ -287,10 +288,10 @@ private:
         return per_tag_mapping_[static_cast<size_t>(gid)].component_group_id;
     }
 
-    BlockTreeCacheConfig           config_;
-    std::unique_ptr<BlockTree>     tree_;
-    std::vector<ComponentGroupPtr> component_groups_;
-    std::vector<Component>         components_;
+    BlockTreeCacheConfig                          config_;
+    std::unique_ptr<BlockTree>                    tree_;
+    std::vector<ComponentGroupPtr>                component_groups_;
+    std::shared_ptr<const std::vector<Component>> components_;
     // Per-tag gid -> DeviceKVCacheGroup (covers NON_REUSABLE tags too).
     std::vector<DeviceKVCacheGroupPtr> per_tag_device_groups_;
     // Per-tag gid -> (component_group_id, local_pool_index).

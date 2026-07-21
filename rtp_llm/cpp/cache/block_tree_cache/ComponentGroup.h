@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -132,11 +133,19 @@ private:
 };
 
 struct Component {
-    int                                  component_id{-1};
-    int                                  component_group_id{-1};
-    CacheGroupType                       type{CacheGroupType::FULL};
-    std::vector<MemoryBlockLayerTagSlot> memory_block_layer_tag_slots;
-    int                                  device_pool_index{-1};
+    int                 component_id{-1};
+    int                 component_group_id{-1};
+    CacheGroupType      type{CacheGroupType::FULL};
+    std::string         tag;
+    std::vector<int>    model_layer_ids;
+    std::vector<size_t> layer_bytes;
+
+    size_t layerCount() const {
+        return layer_bytes.size();
+    }
+    size_t layerBytes(size_t layer_idx) const {
+        return layer_bytes[layer_idx];
+    }
 };
 
 struct GroupBlockSet {
@@ -191,14 +200,50 @@ struct EvictionMove {
     std::vector<BlockIdxType> target_blocks;
 };
 
+class ComponentGroupLayout {
+public:
+    struct Slice {
+        size_t component_idx{0};
+        size_t layer_idx{0};  // Component-local, not model-global.
+        size_t offset_bytes{0};
+    };
+
+    static std::optional<ComponentGroupLayout> create(const std::vector<std::vector<size_t>>& component_layer_bytes);
+
+    const std::vector<Slice>& slices() const {
+        return slices_;
+    }
+    // Slices are emitted in canonical component order, so the last slice's
+    // component_idx + 1 is the component count. Not stored separately.
+    size_t componentCount() const {
+        return slices_.empty() ? 0 : slices_.back().component_idx + 1;
+    }
+    size_t payloadBytes() const {
+        return payload_bytes_;
+    }
+
+private:
+    std::vector<Slice> slices_;
+    size_t             payload_bytes_{0};
+};
+
 class ComponentGroup {
 public:
     virtual ~ComponentGroup() = default;
 
-    int              component_group_id{-1};
-    CacheGroupType   group_type{CacheGroupType::FULL};
-    std::vector<int> component_indices;
-    size_t           host_block_size{0};
+    int            component_group_id{-1};
+    CacheGroupType group_type{CacheGroupType::FULL};
+
+    bool finalizeLayout(std::vector<int> component_indices, const std::vector<Component>& components);
+
+    const std::vector<int>& componentIndices() const {
+        return component_indices_;
+    }
+
+    bool hasLayout() const {
+        return layout_.has_value();
+    }
+    const ComponentGroupLayout& layout() const;
 
     virtual std::unique_ptr<MatchValidator> createMatchValidator() = 0;
 
@@ -320,6 +365,10 @@ protected:
     std::vector<DeviceBlockPoolPtr> device_pools_;
     std::shared_ptr<HostBlockPool>  host_pool_;
     std::shared_ptr<DiskBlockPool>  disk_pool_;
+
+private:
+    std::vector<int>                    component_indices_;
+    std::optional<ComponentGroupLayout> layout_;
 };
 
 using ComponentGroupPtr = std::shared_ptr<ComponentGroup>;

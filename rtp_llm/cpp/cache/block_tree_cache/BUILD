@@ -78,7 +78,6 @@ cc_library(
         "StorageBackend.h",
         "TreeNode.h",
         "copy_engine/CopyEngine.h",
-        "copy_engine/CopyEngineLayout.h",
         "copy_engine/DeviceHostCopyStrategy.h",
         "copy_engine/DeviceHostTransferExecutor.h",
         "copy_engine/HostDiskTransferExecutor.h",

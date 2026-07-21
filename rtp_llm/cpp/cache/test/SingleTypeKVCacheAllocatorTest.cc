@@ -240,7 +240,7 @@ static SingleTypePreflightEnvironment makeSingleTypePreflightEnvironment(const D
     host_config->pool_type            = BlockPoolType::HOST;
     host_config->pool_name            = "single_type_preflight_host";
     host_config->physical_block_count = 3;
-    host_config->payload_bytes        = 1;
+    host_config->payload_bytes        = 2;
     host_config->stride_bytes         = 4096;
     host_config->enable_pinned        = false;
     host_config->alignment            = 4096;
@@ -254,6 +254,11 @@ static SingleTypePreflightEnvironment makeSingleTypePreflightEnvironment(const D
     primary->setDevicePools({device_pool, device_pool});
     primary->setHostPool(environment.host_pool);
 
+    auto components = makeUnitLayerComponents(2);
+    if (!primary->finalizeLayout({0, 1}, components)) {
+        return environment;
+    }
+
     BlockTreeCacheConfig cache_config;
     cache_config.enable_device_cache = true;
     cache_config.enable_memory_cache = true;
@@ -261,7 +266,7 @@ static SingleTypePreflightEnvironment makeSingleTypePreflightEnvironment(const D
     environment.cache =
         std::make_shared<BlockTreeCache>(std::make_unique<BlockTree>(1),
                                          std::vector<ComponentGroupPtr>{primary},
-                                         std::vector<Component>{},
+                                         std::move(components),
                                          std::move(cache_config),
                                          nullptr,
                                          nullptr,
@@ -1564,7 +1569,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenIncrMallocFails) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/5, /*seq_size_per_block=*/8);
     ASSERT_TRUE(initWithBlockTreeCache(config));
 
-    const size_t free_before      = allocator_->freeBlocksNum();
+    const size_t free_before = allocator_->freeBlocksNum();
     ASSERT_EQ(free_before, 4u);
 
     auto batch_resource     = createBatchKVCacheResource(/*batch_size=*/3, config.layer_num);

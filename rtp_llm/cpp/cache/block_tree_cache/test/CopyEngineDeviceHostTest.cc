@@ -33,7 +33,6 @@ struct DeviceLayerBufferSpec {
     size_t scale_bytes{0};
 };
 
-// Build a DeviceBlockPool with the given per-layer layout.
 static DeviceBlockPoolPtr
 makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs, size_t usable_count, const std::string& pool_name) {
     const auto physical_block_count = usable_count + 1;
@@ -130,32 +129,39 @@ static std::vector<uint8_t> readDeviceLayer(const DeviceBlockPoolPtr& pool, int 
     return out;
 }
 
-static Component makeComponent(int                                         component_id,
-                               int                                         component_group_id,
-                               const std::vector<MemoryBlockLayerTagSlot>& slots,
-                               int                                         device_pool_index = 0) {
-    Component component;
-    component.component_id                 = component_id;
-    component.component_group_id           = component_group_id;
-    component.type                         = CacheGroupType::FULL;
-    component.memory_block_layer_tag_slots = slots;
-    component.device_pool_index            = device_pool_index;
-    return component;
+static Component makeComponent(int                        component_id,
+                               int                        component_group_id,
+                               const std::vector<size_t>& layer_bytes,
+                               const std::string&         tag             = "",
+                               const std::vector<int>&    model_layer_ids = {}) {
+    return copy_engine_test::makeSchemaComponent(component_id,
+                                                 component_group_id,
+                                                 tag.empty() ? ("comp_" + std::to_string(component_id)) : tag,
+                                                 layer_bytes,
+                                                 model_layer_ids);
 }
 
 static ComponentGroupPtr makeDeviceHostGroup(int                             group_id,
                                              std::vector<int>                component_indices,
                                              std::vector<DeviceBlockPoolPtr> device_pools,
                                              std::shared_ptr<HostBlockPool>  host_pool,
+                                             const std::vector<Component>&   components,
                                              std::shared_ptr<DiskBlockPool>  disk_pool = nullptr) {
     auto group                = std::make_shared<FullComponentGroup>();
     group->component_group_id = group_id;
     group->group_type         = CacheGroupType::FULL;
-    group->component_indices  = std::move(component_indices);
     group->setDevicePools(std::move(device_pools));
     group->setHostPool(std::move(host_pool));
     group->setDiskPool(std::move(disk_pool));
+    (void)group->finalizeLayout(std::move(component_indices), components);
     return group;
+}
+
+static std::shared_ptr<CopyEngine> makeEngine(std::vector<ComponentGroupPtr> groups,
+                                              std::vector<Component>         components,
+                                              DeviceHostCopyOptions          options = {}) {
+    return std::make_shared<CopyEngine>(
+        std::move(groups), copy_engine_test::makeComponentRegistry(std::move(components)), std::move(options));
 }
 
 struct StrategyCounters {
@@ -213,13 +219,8 @@ protected:
     void SetUp() override {
         ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
 
-        // 3 layers with different strides: 100, 200, 150 bytes
-        slots_ = {
-            {0, "layer_0", 100},
-            {1, "layer_1", 200},
-            {2, "layer_2", 150},
-        };
-        host_block_size_ = CopyEngine::computeHostBlockSize(slots_);  // 450
+        layer_bytes_     = {100, 200, 150};
+        host_block_size_ = 450;
 
         // Create host pool — 10 usable blocks
         host_pool_ = makeHostPool(host_block_size_, 10, true);
@@ -229,21 +230,22 @@ protected:
         ASSERT_NE(device_block_, NULL_BLOCK_IDX);
         device_blocks_ = {device_block_};
 
-        component_       = makeComponent(0, 0, slots_);
-        component_group_ = makeDeviceHostGroup(0, {0}, {device_pool_}, host_pool_);
-        copy_engine_     = std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{component_group_},
-                                                    std::vector<Component>{component_});
+        component_       = makeComponent(0, 0, layer_bytes_);
+        component_group_ = makeDeviceHostGroup(0, {0}, {device_pool_}, host_pool_, {component_});
+        ASSERT_TRUE(component_group_->hasLayout());
+        ASSERT_EQ(component_group_->layout().payloadBytes(), host_block_size_);
+        copy_engine_ = makeEngine({component_group_}, {component_});
     }
 
-    std::vector<MemoryBlockLayerTagSlot> slots_;
-    size_t                               host_block_size_;
-    std::shared_ptr<HostBlockPool>       host_pool_;
-    std::shared_ptr<CopyEngine>          copy_engine_;
-    DeviceBlockPoolPtr                   device_pool_;
-    BlockIdxType                         device_block_;
-    std::vector<BlockIdxType>            device_blocks_;
-    Component                            component_;
-    ComponentGroupPtr                    component_group_;
+    std::vector<size_t>            layer_bytes_;
+    size_t                         host_block_size_;
+    std::shared_ptr<HostBlockPool> host_pool_;
+    std::shared_ptr<CopyEngine>    copy_engine_;
+    DeviceBlockPoolPtr             device_pool_;
+    BlockIdxType                   device_block_;
+    std::vector<BlockIdxType>      device_blocks_;
+    Component                      component_;
+    ComponentGroupPtr              component_group_;
 };
 
 TEST_F(CopyEngineTest, SubmitDeviceHostRoundTripPreservesLayout) {
@@ -258,12 +260,12 @@ TEST_F(CopyEngineTest, SubmitDeviceHostRoundTripPreservesLayout) {
     ASSERT_TRUE(copy_engine_->submit(d2h_desc).ok());
 
     const uint8_t* host_data = static_cast<const uint8_t*>(host_pool_->blockBuffer(host_block).addr);
-    for (size_t i = 0; i < slots_[0].stride_bytes; ++i)
+    for (size_t i = 0; i < layer_bytes_[0]; ++i)
         EXPECT_EQ(host_data[i], static_cast<uint8_t>(i & 0xFF));
-    for (size_t i = 0; i < slots_[1].stride_bytes; ++i)
-        EXPECT_EQ(host_data[slots_[0].stride_bytes + i], 0x5A);
-    const size_t off2 = slots_[0].stride_bytes + slots_[1].stride_bytes;
-    for (size_t i = 0; i < slots_[2].stride_bytes; ++i)
+    for (size_t i = 0; i < layer_bytes_[1]; ++i)
+        EXPECT_EQ(host_data[layer_bytes_[0] + i], 0x5A);
+    const size_t off2 = layer_bytes_[0] + layer_bytes_[1];
+    for (size_t i = 0; i < layer_bytes_[2]; ++i)
         EXPECT_EQ(host_data[off2 + i], static_cast<uint8_t>(i & 0xFF));
 
     fillDeviceLayer(device_pool_, 0, device_block_, {0x00});
@@ -275,14 +277,69 @@ TEST_F(CopyEngineTest, SubmitDeviceHostRoundTripPreservesLayout) {
     auto d0 = readDeviceLayer(device_pool_, 0, device_block_);
     auto d1 = readDeviceLayer(device_pool_, 1, device_block_);
     auto d2 = readDeviceLayer(device_pool_, 2, device_block_);
-    for (size_t i = 0; i < slots_[0].stride_bytes; ++i)
+    for (size_t i = 0; i < layer_bytes_[0]; ++i)
         EXPECT_EQ(d0[i], static_cast<uint8_t>(i & 0xFF));
     for (auto byte : d1)
         EXPECT_EQ(byte, 0x5A);
-    for (size_t i = 0; i < slots_[2].stride_bytes; ++i)
+    for (size_t i = 0; i < layer_bytes_[2]; ++i)
         EXPECT_EQ(d2[i], static_cast<uint8_t>(i & 0xFF));
 
     host_pool_->free(host_block);
+}
+
+TEST_F(CopyEngineTest, SharedDevicePoolComponentsIsolateByBlockId) {
+    auto shared_pool = makeDevicePool({{64, 0}, {32, 0}}, 4, "copy_engine_shared_pool");
+    auto host_pool   = makeHostPool(192, 4, true);
+    // Non-identity model layer ids: any path that leaked them into pool lookups
+    // would address out-of-range slots instead of descriptor-local {0, 1}.
+    auto comp_a = makeComponent(0, 0, {64, 32}, "tag_a", {2, 5});
+    auto comp_b = makeComponent(1, 0, {64, 32}, "tag_b", {3, 7});
+    auto group  = makeDeviceHostGroup(0, {0, 1}, {shared_pool, shared_pool}, host_pool, {comp_a, comp_b});
+    auto engine = makeEngine({group}, {comp_a, comp_b});
+
+    const BlockIdxType block_a = poolMalloc(*shared_pool);
+    const BlockIdxType block_b = poolMalloc(*shared_pool);
+    ASSERT_NE(block_a, NULL_BLOCK_IDX);
+    ASSERT_NE(block_b, NULL_BLOCK_IDX);
+    ASSERT_NE(block_a, block_b);
+
+    fillDeviceLayer(shared_pool, 0, block_a, {0xA0});
+    fillDeviceLayer(shared_pool, 1, block_a, {0xA1});
+    fillDeviceLayer(shared_pool, 0, block_b, {0xB0});
+    fillDeviceLayer(shared_pool, 1, block_b, {0xB1});
+
+    const BlockIdxType host_block = poolMalloc(*host_pool);
+    ASSERT_NE(host_block, NULL_BLOCK_IDX);
+    ASSERT_TRUE(engine->submit(makeDescriptor(Tier::DEVICE, Tier::HOST, {block_a, block_b}, host_block)).ok());
+
+    const uint8_t* host_data = static_cast<const uint8_t*>(host_pool->blockBuffer(host_block).addr);
+    for (size_t i = 0; i < 64; ++i)
+        EXPECT_EQ(host_data[i], 0xA0);
+    for (size_t i = 0; i < 32; ++i)
+        EXPECT_EQ(host_data[64 + i], 0xA1);
+    for (size_t i = 0; i < 64; ++i)
+        EXPECT_EQ(host_data[96 + i], 0xB0);
+    for (size_t i = 0; i < 32; ++i)
+        EXPECT_EQ(host_data[160 + i], 0xB1);
+
+    fillDeviceLayer(shared_pool, 0, block_a, {0x00});
+    fillDeviceLayer(shared_pool, 1, block_a, {0x00});
+    fillDeviceLayer(shared_pool, 0, block_b, {0x00});
+    fillDeviceLayer(shared_pool, 1, block_b, {0x00});
+    ASSERT_TRUE(engine->submit(makeDescriptor(Tier::HOST, Tier::DEVICE, {block_a, block_b}, host_block)).ok());
+
+    for (auto byte : readDeviceLayer(shared_pool, 0, block_a))
+        EXPECT_EQ(byte, 0xA0);
+    for (auto byte : readDeviceLayer(shared_pool, 1, block_a))
+        EXPECT_EQ(byte, 0xA1);
+    for (auto byte : readDeviceLayer(shared_pool, 0, block_b))
+        EXPECT_EQ(byte, 0xB0);
+    for (auto byte : readDeviceLayer(shared_pool, 1, block_b))
+        EXPECT_EQ(byte, 0xB1);
+
+    host_pool->free(host_block);
+    shared_pool->free(block_a);
+    shared_pool->free(block_b);
 }
 
 TEST_F(CopyEngineTest, SubmitRejectsMissingRequiredBlocks) {
@@ -389,119 +446,50 @@ TEST_F(CopyEngineTest, SubmitRejectsInvalidTierPairs) {
     host_pool_->free(host_block);
 }
 
-TEST_F(CopyEngineTest, SubmitRejectsInvalidComponentIndex) {
-    BlockIdxType host_block = poolMalloc(*host_pool_);
-    ASSERT_NE(host_block, NULL_BLOCK_IDX);
-    for (int component_index : {-1, 1}) {
-        SCOPED_TRACE(::testing::Message() << "component_index=" << component_index);
-        auto group = makeDeviceHostGroup(0, {component_index}, {device_pool_}, host_pool_);
-        auto engine =
-            std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{group}, std::vector<Component>{component_});
-        expectStatus(
-            engine, makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block), CopyStatus::INVALID_ARGS);
-    }
-    host_pool_->free(host_block);
-}
-
-TEST_F(CopyEngineTest, SubmitRejectsComponentFromDifferentGroup) {
-    BlockIdxType host_block = poolMalloc(*host_pool_);
-    ASSERT_NE(host_block, NULL_BLOCK_IDX);
-    auto wrong_component               = component_;
-    wrong_component.component_group_id = 1;
-    auto engine                        = std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{component_group_},
-                                               std::vector<Component>{wrong_component});
-    expectStatus(
-        engine, makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block), CopyStatus::INVALID_ARGS);
-    host_pool_->free(host_block);
-}
-
-TEST_F(CopyEngineTest, SubmitRejectsInvalidDevicePoolIndex) {
-    BlockIdxType host_block = poolMalloc(*host_pool_);
-    ASSERT_NE(host_block, NULL_BLOCK_IDX);
-    for (int pool_index : {-1, 1}) {
-        SCOPED_TRACE(::testing::Message() << "device_pool_index=" << pool_index);
-        auto component              = component_;
-        component.device_pool_index = pool_index;
-        auto engine                 = std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{component_group_},
-                                                   std::vector<Component>{component});
-        expectStatus(
-            engine, makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block), CopyStatus::INVALID_ARGS);
-    }
-
-    auto null_pool_group  = makeDeviceHostGroup(0, {0}, {nullptr}, host_pool_);
-    auto null_pool_engine = std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{null_pool_group},
-                                                         std::vector<Component>{component_});
-    expectStatus(null_pool_engine,
-                 makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block),
-                 CopyStatus::INVALID_ARGS);
-    host_pool_->free(host_block);
-}
-
 TEST_F(CopyEngineTest, SubmitRejectsIncompleteDeviceHostLayout) {
     BlockIdxType host_block = poolMalloc(*host_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     const auto desc = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block);
 
-    auto missing_host_group  = makeDeviceHostGroup(0, {0}, {device_pool_}, nullptr);
-    auto missing_host_engine = std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{missing_host_group},
-                                                            std::vector<Component>{component_});
+    auto missing_host_group  = makeDeviceHostGroup(0, {0}, {device_pool_}, nullptr, {component_});
+    auto missing_host_engine = makeEngine({missing_host_group}, {component_});
     expectStatus(missing_host_engine, desc, CopyStatus::INVALID_ARGS);
 
-    auto empty_group = makeDeviceHostGroup(0, {}, {device_pool_}, host_pool_);
-    auto empty_engine =
-        std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{empty_group}, std::vector<Component>{});
+    auto empty_group  = makeDeviceHostGroup(0, {}, {device_pool_}, host_pool_, {});
+    auto empty_engine = makeEngine({empty_group}, {});
     expectStatus(empty_engine, desc, CopyStatus::INVALID_ARGS);
 
-    auto empty_component    = makeComponent(0, 0, {});
-    auto empty_slots_group  = makeDeviceHostGroup(0, {0}, {device_pool_}, host_pool_);
-    auto empty_slots_engine = std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{empty_slots_group},
-                                                           std::vector<Component>{empty_component});
+    auto empty_component    = makeComponent(0, 0, std::vector<size_t>{});
+    auto empty_slots_group  = makeDeviceHostGroup(0, {0}, {device_pool_}, host_pool_, {empty_component});
+    auto empty_slots_engine = makeEngine({empty_slots_group}, {empty_component});
     expectStatus(empty_slots_engine, desc, CopyStatus::INVALID_ARGS);
     host_pool_->free(host_block);
 }
 
 TEST_F(CopyEngineTest, SubmitRejectsInvalidLayerSlotLayout) {
     {
-        const std::vector<MemoryBlockLayerTagSlot> zero_stride_slots = {
-            {0, "valid", 64},
-            {1, "zero", 0},
-        };
         auto host_pool   = makeHostPool(64, 2, true);
         auto device_pool = makeDevicePool({{64, 0}, {16, 0}}, 2, "copy_engine_zero_stride");
         auto block       = poolMalloc(*device_pool);
         auto host_block  = poolMalloc(*host_pool);
-        auto component   = makeComponent(0, 0, zero_stride_slots);
-        auto group       = makeDeviceHostGroup(0, {0}, {device_pool}, host_pool);
-        auto engine =
-            std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{group}, std::vector<Component>{component});
+        auto component   = makeComponent(0, 0, {64, 0});
+        auto group       = makeDeviceHostGroup(0, {0}, {device_pool}, host_pool, {component});
+        EXPECT_FALSE(group->hasLayout());
+        auto engine = makeEngine({group}, {component});
         expectStatus(engine, makeDescriptor(Tier::DEVICE, Tier::HOST, {block}, host_block), CopyStatus::INVALID_ARGS);
     }
 
     {
-        const std::vector<MemoryBlockLayerTagSlot> mismatched_slots = {{0, "mismatch", 65}};
-        auto                                       host_pool        = makeHostPool(65, 2, true);
+        auto host_pool   = makeHostPool(65, 2, true);
         auto device_pool = makeDevicePool({{64, 0}}, 2, "copy_engine_slot_mismatch");
         auto block       = poolMalloc(*device_pool);
         auto host_block  = poolMalloc(*host_pool);
-        auto component   = makeComponent(0, 0, mismatched_slots);
-        auto group       = makeDeviceHostGroup(0, {0}, {device_pool}, host_pool);
-        auto engine =
-            std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{group}, std::vector<Component>{component});
+        auto component   = makeComponent(0, 0, {65});
+        auto group       = makeDeviceHostGroup(0, {0}, {device_pool}, host_pool, {component});
+        auto engine      = makeEngine({group}, {component});
         expectStatus(engine, makeDescriptor(Tier::DEVICE, Tier::HOST, {block}, host_block), CopyStatus::INVALID_ARGS);
         expectStatus(engine, makeDescriptor(Tier::HOST, Tier::DEVICE, {block}, host_block), CopyStatus::INVALID_ARGS);
     }
-}
-
-TEST_F(CopyEngineTest, SubmitRejectsHostLayoutPayloadMismatch) {
-    auto host_pool  = makeHostPool(host_block_size_ + 1, 2, true);
-    auto host_block = poolMalloc(*host_pool);
-    auto group      = makeDeviceHostGroup(0, {0}, {device_pool_}, host_pool);
-    auto engine =
-        std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{group}, std::vector<Component>{component_});
-    expectStatus(
-        engine, makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block), CopyStatus::INVALID_ARGS);
-    expectStatus(
-        engine, makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, host_block), CopyStatus::INVALID_ARGS);
 }
 
 TEST_F(CopyEngineTest, UnusableCopyBufferReturnsDeviceIoError) {
@@ -577,15 +565,15 @@ TEST_F(CopyEngineTest, SubmitHostToDeviceIndependentDescriptors) {
 
     BlockIdxType host_block_1 = poolMalloc(*host_pool_);
     auto*        host_data_1  = static_cast<uint8_t*>(host_pool_->blockBuffer(host_block_1).addr);
-    std::memset(host_data_1, 0x12, slots_[0].stride_bytes);
-    std::memset(host_data_1 + slots_[0].stride_bytes, 0x34, slots_[1].stride_bytes);
-    std::memset(host_data_1 + slots_[0].stride_bytes + slots_[1].stride_bytes, 0x9A, slots_[2].stride_bytes);
+    std::memset(host_data_1, 0x12, layer_bytes_[0]);
+    std::memset(host_data_1 + layer_bytes_[0], 0x34, layer_bytes_[1]);
+    std::memset(host_data_1 + layer_bytes_[0] + layer_bytes_[1], 0x9A, layer_bytes_[2]);
 
     BlockIdxType host_block_2 = poolMalloc(*host_pool_);
     auto*        host_data_2  = static_cast<uint8_t*>(host_pool_->blockBuffer(host_block_2).addr);
-    std::memset(host_data_2, 0x56, slots_[0].stride_bytes);
-    std::memset(host_data_2 + slots_[0].stride_bytes, 0x78, slots_[1].stride_bytes);
-    std::memset(host_data_2 + slots_[0].stride_bytes + slots_[1].stride_bytes, 0xBC, slots_[2].stride_bytes);
+    std::memset(host_data_2, 0x56, layer_bytes_[0]);
+    std::memset(host_data_2 + layer_bytes_[0], 0x78, layer_bytes_[1]);
+    std::memset(host_data_2 + layer_bytes_[0] + layer_bytes_[1], 0xBC, layer_bytes_[2]);
 
     auto result_1 = copy_engine_->submit(makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, host_block_1));
     ASSERT_TRUE(result_1.ok());
@@ -627,12 +615,16 @@ protected:
         }
 
         std::vector<Component> components = {
-            makeComponent(0, 0, {{0, "kv_scale_0", 80}}, 0),
-            makeComponent(1, 0, {{0, "missing", 48}}, 1),
-            makeComponent(2, 0, {{0, "kv_scale_2", 40}}, 2),
+            makeComponent(0, 0, {80}, "kv_scale_0"),
+            makeComponent(1, 0, {48}, "missing"),
+            makeComponent(2, 0, {40}, "kv_scale_2"),
         };
-        auto group  = makeDeviceHostGroup(0, {0, 1, 2}, pools_, host_pool_);
-        engine_     = std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{group}, components);
+        // The middle component keeps a null pool binding; its device block is always
+        // NULL in descriptors, so lowering must skip it without touching the pool.
+        auto bound_pools = pools_;
+        bound_pools[1]   = nullptr;
+        auto group       = makeDeviceHostGroup(0, {0, 1, 2}, std::move(bound_pools), host_pool_, components);
+        engine_          = makeEngine({group}, components);
         host_block_ = poolMalloc(*host_pool_);
         ASSERT_NE(host_block_, NULL_BLOCK_IDX);
     }
@@ -710,10 +702,9 @@ TEST(CopyEngineIntegrationTest, DeviceHostDiskHostDeviceRoundTrip) {
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
-    auto component = makeComponent(0, 0, {{0, "kv_scale", payload_bytes}});
-    auto group     = makeDeviceHostGroup(0, {0}, {device_pool}, host_pool, disk_pool);
-    auto engine =
-        std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{group}, std::vector<Component>{component});
+    auto component = makeComponent(0, 0, {payload_bytes}, "kv_scale");
+    auto group     = makeDeviceHostGroup(0, {0}, {device_pool}, host_pool, {component}, disk_pool);
+    auto engine    = makeEngine({group}, {component});
     fillDeviceLayer(device_pool, 0, device_block, {0x6A, 0xD3});
     const auto expected = readDeviceLayer(device_pool, 0, device_block);
 
@@ -745,11 +736,8 @@ protected:
     void SetUp() override {
         ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
 
-        slots_ = {
-            {0, "layer_0", 128},
-            {1, "layer_1", 256},
-        };
-        host_block_size_ = CopyEngine::computeHostBlockSize(slots_);
+        layer_bytes_     = {128, 256};
+        host_block_size_ = 384;
 
         host_pool_    = makeHostPool(host_block_size_, 10, true);
         device_pool_  = makeDevicePool({{128, 0}, {256, 0}}, 10, "strategy_test_device");
@@ -757,23 +745,23 @@ protected:
         ASSERT_NE(device_block_, NULL_BLOCK_IDX);
         device_blocks_ = {device_block_};
 
-        component_       = makeComponent(0, 0, slots_);
-        component_group_ = makeDeviceHostGroup(0, {0}, {device_pool_}, host_pool_);
+        component_       = makeComponent(0, 0, layer_bytes_);
+        component_group_ = makeDeviceHostGroup(0, {0}, {device_pool_}, host_pool_, {component_});
+        ASSERT_TRUE(component_group_->hasLayout());
     }
 
     std::shared_ptr<CopyEngine> makeCopyEngine(DeviceHostCopyOptions options = {}) {
-        return std::make_shared<CopyEngine>(
-            std::vector<ComponentGroupPtr>{component_group_}, std::vector<Component>{component_}, std::move(options));
+        return makeEngine({component_group_}, {component_}, std::move(options));
     }
 
-    std::vector<MemoryBlockLayerTagSlot> slots_;
-    size_t                               host_block_size_;
-    std::shared_ptr<HostBlockPool>       host_pool_;
-    DeviceBlockPoolPtr                   device_pool_;
-    BlockIdxType                         device_block_;
-    std::vector<BlockIdxType>            device_blocks_;
-    Component                            component_;
-    ComponentGroupPtr                    component_group_;
+    std::vector<size_t>            layer_bytes_;
+    size_t                         host_block_size_;
+    std::shared_ptr<HostBlockPool> host_pool_;
+    DeviceBlockPoolPtr             device_pool_;
+    BlockIdxType                   device_block_;
+    std::vector<BlockIdxType>      device_blocks_;
+    Component                      component_;
+    ComponentGroupPtr              component_group_;
 };
 
 TEST_F(CopyEngineStrategyTest, GenericStrategyRoundTrip) {
@@ -891,8 +879,7 @@ TEST_F(CopyEngineStrategyTest, BatchNotApplicableFallsBackToGeneric) {
     plan.single_device      = true;
     plan.component_group_id = 0;
     plan.host               = {host_data, device_buffer.size_bytes};
-    plan.copy_tiles.push_back(
-        DeviceHostCopyTile{host_data, device_buffer.addr, 0, device_buffer.size_bytes, -1, 0, 0});
+    plan.copy_tiles.push_back(DeviceHostCopyTile{host_data, device_buffer.addr, 0, device_buffer.size_bytes, -1, 0, 0});
     EXPECT_EQ(executor.executeStrategies(plan), CopyStatus::OK);
     for (size_t i = 0; i < device_buffer.size_bytes; ++i)
         EXPECT_EQ(host_data[i], 0x71);
