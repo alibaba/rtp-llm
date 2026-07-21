@@ -23,13 +23,17 @@ struct KVCacheTokenCapacity {
 };
 
 struct KVCachePoolMetricsSnapshot {
-    size_t      pool_index           = 0;
-    std::string pool_name            = "unnamed";
-    size_t      free_blocks          = 0;
+    size_t      pool_index                = 0;
+    std::string pool_name                 = "unnamed";
+    size_t      block_size_bytes          = 0;
+    size_t      free_blocks               = 0;
     size_t      active_tree_cached_blocks = 0;
-    size_t      total_blocks         = 0;
-    size_t      reserve_blocks       = 0;
-    float       used_ratio           = 0.0f;
+    size_t      total_blocks              = 0;
+    size_t      reserve_blocks            = 0;
+    size_t      request_ref_count         = 0;
+    size_t      connector_ref_count       = 0;
+    size_t      block_cache_ref_count     = 0;
+    float       used_ratio                = 0.0f;
 };
 
 class KVCacheAllocator {
@@ -121,15 +125,15 @@ public:
         return reserve_block_num_;
     }
 
-    virtual void                    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
-    virtual int64_t                 getMrCostTimeMs() const;
-    virtual size_t                  freeBlocksNum() const;
-    virtual size_t                  activeTreeCachedBlocksNum() const;
-    virtual size_t                  availableTokensNum() const;
-    virtual size_t                  totalTokensNum() const;
-    virtual size_t                  totalBlocksNum() const;
-    virtual size_t                  maxAvailableTokensNum() const;
-    virtual KVCacheTokenCapacity    tokenCapacity(size_t default_seq_size_per_block) const;
+    virtual void                 regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
+    virtual int64_t              getMrCostTimeMs() const;
+    virtual size_t               freeBlocksNum() const;
+    virtual size_t               activeTreeCachedBlocksNum() const;
+    virtual size_t               availableTokensNum() const;
+    virtual size_t               totalTokensNum() const;
+    virtual size_t               totalBlocksNum() const;
+    virtual size_t               maxAvailableTokensNum() const;
+    virtual KVCacheTokenCapacity tokenCapacity(size_t default_seq_size_per_block) const;
     virtual std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const;
     virtual std::vector<int>                        independentEvictionGroupIds() const;
     /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).

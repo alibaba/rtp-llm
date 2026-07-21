@@ -169,11 +169,11 @@ TEST(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
         EXPECT_EQ(group->hostPool()->payloadBytes(), group->layout().payloadBytes());
         EXPECT_EQ(group->diskPool()->payloadBytes(), group->layout().payloadBytes());
 
-        GroupBlockSet device_blocks = group->allocateBlocks(Tier::DEVICE, 1);
+        GroupBlockSet device_blocks = group->allocateBlocks(Tier::DEVICE, 1, BlockRefType::BLOCK_CACHE);
         ASSERT_EQ(device_blocks.per_node.size(), 1u);
         ASSERT_EQ(device_blocks.per_node[0].size(), group->devicePoolCount());
-        const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST);
-        const BlockIdxType disk_block = group->allocateSingleBlock(Tier::DISK);
+        const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+        const BlockIdxType disk_block = group->allocateSingleBlock(Tier::DISK, BlockRefType::BLOCK_CACHE);
         ASSERT_NE(host_block, NULL_BLOCK_IDX);
         ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
@@ -184,9 +184,9 @@ TEST(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
                       TransferDescriptor::hostToDisk(group->component_group_id, host_block, disk_block)),
                   CopyStatus::OK);
 
-        group->unreferenceBlocks(device_blocks);
-        group->releaseSingleBlock(Tier::HOST, host_block);
-        group->releaseSingleBlock(Tier::DISK, disk_block);
+        group->unreferenceBlocks(device_blocks, BlockRefType::BLOCK_CACHE);
+        group->releaseSingleBlock(Tier::HOST, host_block, BlockRefType::BLOCK_CACHE);
+        group->releaseSingleBlock(Tier::DISK, disk_block, BlockRefType::BLOCK_CACHE);
     }
 }
 

@@ -62,6 +62,7 @@ public:
         return cache_base_ptr_;
     }
     size_t getTotalSizeBytes() const;
+    size_t blockSizeBytes() const override;
 
     std::string debugString() const override;
 

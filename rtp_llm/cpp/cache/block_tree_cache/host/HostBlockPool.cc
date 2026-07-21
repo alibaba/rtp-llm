@@ -159,6 +159,10 @@ size_t HostBlockPool::strideBytes() const {
     return config().stride_bytes;
 }
 
+size_t HostBlockPool::blockSizeBytes() const {
+    return payloadBytes();
+}
+
 std::string HostBlockPool::debugString() const {
     std::ostringstream oss;
     oss << "HostBlockPool{" << IBlockPool::debugString() << ", payload_bytes=" << payloadBytes()

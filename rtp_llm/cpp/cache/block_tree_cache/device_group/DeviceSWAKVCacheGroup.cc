@@ -151,7 +151,7 @@ bool DeviceSWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable
             return false;
         }
         allocated_blocks = std::move(*allocated_opt);
-        block_pool_->incRef(allocated_blocks);
+        block_pool_->incRef(allocated_blocks, BlockRefType::REQUEST);
     }
 
     BlockIndicesType new_ids;
@@ -199,7 +199,7 @@ void DeviceSWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable
         pos_to_remove.push_back(static_cast<size_t>(i));
     }
     if (!blocks_to_free.empty()) {
-        block_pool_->decRef(blocks_to_free);
+        block_pool_->decRef(blocks_to_free, BlockRefType::REQUEST);
         block_ids.remove(pos_to_remove);
     }
     checkSWATailBlockIds(block_ids, "DeviceSWAKVCacheGroup::removeSkippedBlocks");
@@ -212,7 +212,7 @@ void DeviceSWAKVCacheGroup::free(const BlockIndicesType& block_indices) {
     BlockIndicesType valid;
     filterValidBlocks(block_indices, valid);
     if (!valid.empty()) {
-        block_pool_->decRef(valid);
+        block_pool_->decRef(valid, BlockRefType::REQUEST);
     }
 }
 
@@ -221,7 +221,7 @@ void DeviceSWAKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesTyp
     BlockIndicesType valid;
     filterValidBlocks(new_block_indices, valid);
     if (!valid.empty()) {
-        block_pool_->incRef(valid);
+        block_pool_->incRef(valid, BlockRefType::REQUEST);
     }
 }
 

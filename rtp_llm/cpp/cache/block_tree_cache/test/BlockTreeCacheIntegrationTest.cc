@@ -295,7 +295,7 @@ TEST_F(BlockTreeCacheIntegrationTest, WatermarkDemotionCopiesHostBlockToDisk) {
     full->setDevicePools({DeviceBlockPoolPtr{}});
     std::vector<Component> layout_components = {copy_engine_test::makeSchemaComponent(0, 0, "watermark_kv", {256})};
     ASSERT_TRUE(full->finalizeLayout({0}, layout_components));
-    auto host_block = full->allocateSingleBlock(Tier::HOST);
+    const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     std::vector<ComponentGroupPtr> groups = {full};
 
@@ -441,13 +441,14 @@ TEST_F(BlockTreeCacheIntegrationTest, LoadBackDeviceAllocationFailureRollsBackAl
     second_group->setHostPool(second_host_pool);
     ASSERT_TRUE(second_group->finalizeLayout({1}, components));
 
-    GroupBlockSet exhausted_holder = second_group->allocateBlocks(Tier::DEVICE, 1);
+    GroupBlockSet exhausted_holder =
+        second_group->allocateBlocks(Tier::DEVICE, 1, BlockRefType::BLOCK_CACHE);
     ASSERT_EQ(exhausted_holder.per_node.size(), 1u);
     ASSERT_EQ(exhausted_holder.per_node[0].size(), 1u);
     EXPECT_EQ(exhausted_device_pool->freeBlocksNum(), 0u);
 
-    const BlockIdxType first_host_block  = first_group->allocateSingleBlock(Tier::HOST);
-    const BlockIdxType second_host_block = second_group->allocateSingleBlock(Tier::HOST);
+    const BlockIdxType first_host_block  = first_group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType second_host_block = second_group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(first_host_block, NULL_BLOCK_IDX);
     ASSERT_NE(second_host_block, NULL_BLOCK_IDX);
 
@@ -500,7 +501,7 @@ TEST_F(BlockTreeCacheIntegrationTest, LoadBackDeviceAllocationFailureRollsBackAl
     EXPECT_FALSE(first_host_pool->isAllocated(first_host_block));
     EXPECT_FALSE(second_host_pool->isAllocated(second_host_block));
 
-    second_group->unreferenceBlocks(exhausted_holder);
+    second_group->unreferenceBlocks(exhausted_holder, BlockRefType::BLOCK_CACHE);
     EXPECT_EQ(first_device_pool->freeBlocksNum(), 1u);
     EXPECT_EQ(exhausted_device_pool->freeBlocksNum(), 1u);
 }
@@ -576,7 +577,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadBackSett
             std::make_shared<PausableCopyEngine>(std::vector<ComponentGroupPtr>{full}, components, copy_result);
         BlockTreeCacheTestPeer::setCopyEngineForTest(*cache, pausable_copy_engine);
 
-        const BlockIdxType source_block = full->allocateSingleBlock(Tier::DISK);
+        const BlockIdxType source_block = full->allocateSingleBlock(Tier::DISK, BlockRefType::BLOCK_CACHE);
         ASSERT_NE(source_block, NULL_BLOCK_IDX);
         std::vector<std::vector<GroupSlot>> source_slots(1, std::vector<GroupSlot>(1));
         source_slots[0][0].disk_slot = source_block;
@@ -589,7 +590,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadBackSett
         EXPECT_EQ(result.load_back_ticket->items()[0].source_blocks, (std::vector<BlockIdxType>{source_block}));
         EXPECT_EQ(disk_pool->refCount(source_block), 2u);
 
-        GroupBlockSet request_target = full->allocateBlocks(Tier::DEVICE, 1);
+        GroupBlockSet request_target = full->allocateBlocks(Tier::DEVICE, 1, BlockRefType::REQUEST);
         ASSERT_EQ(request_target.per_node.size(), 1u);
         ASSERT_EQ(request_target.per_node[0].size(), 1u);
         const BlockIdxType target_block = request_target.per_node[0][0];
@@ -659,7 +660,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadBackSett
         outliving_ticket.reset();
         EXPECT_EQ(device_pool->refCount(target_block), 1u);
 
-        full->unreferenceBlocks(request_target);
+        full->unreferenceBlocks(request_target, BlockRefType::REQUEST);
         EXPECT_FALSE(device_pool->isAllocated(target_block));
         EXPECT_EQ(device_pool->freeBlocksNum(), device_free_before);
     }
@@ -796,7 +797,7 @@ TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsTicketWitho
             ASSERT_LT(static_cast<size_t>(gid), environment->device_pools.size());
             const BlockIdxType target = poolMalloc(*environment->device_pools[static_cast<size_t>(gid)]);
             ASSERT_NE(target, NULL_BLOCK_IDX);
-            environment->device_pools[static_cast<size_t>(gid)]->incRef(target);
+            environment->device_pools[static_cast<size_t>(gid)]->incRef(target, BlockRefType::REQUEST);
             item.target_device_blocks.push_back(target);
         }
         ASSERT_EQ(item.target_device_blocks.size(), item.device_group_ids.size());
@@ -1069,7 +1070,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadBackAsyncCompletionRefreshesBefo
             ASSERT_LT(static_cast<size_t>(gid), environment->device_pools.size());
             const BlockIdxType target = poolMalloc(*environment->device_pools[static_cast<size_t>(gid)]);
             ASSERT_NE(target, NULL_BLOCK_IDX);
-            environment->device_pools[static_cast<size_t>(gid)]->incRef(target);
+            environment->device_pools[static_cast<size_t>(gid)]->incRef(target, BlockRefType::REQUEST);
             item.target_device_blocks.push_back(target);
         }
         ASSERT_EQ(item.target_device_blocks.size(), item.device_group_ids.size());
@@ -1145,10 +1146,12 @@ TEST_F(BlockTreeCacheIntegrationTest, SparseDisconnectedSWADoesNotPublishVacuous
         GroupSlot& swa_slot = find.path[path_index]->group_slots[1];
         ASSERT_TRUE(swa_slot.has_value(Tier::DEVICE));
         const std::vector<BlockIdxType> old_device_blocks = environment->groups[1]->getBlocks(swa_slot, Tier::DEVICE);
-        environment->groups[1]->unreferenceBlocks(GroupBlockSet{1, Tier::DEVICE, {old_device_blocks}});
+        environment->groups[1]->unreferenceBlocks(GroupBlockSet{1, Tier::DEVICE, {old_device_blocks}},
+                                                  BlockRefType::BLOCK_CACHE);
         environment->groups[1]->setBlocks(swa_slot, Tier::DEVICE, {});
         if (path_index >= 2) {
-            const BlockIdxType host_block = environment->groups[1]->allocateSingleBlock(Tier::HOST);
+            const BlockIdxType host_block =
+                environment->groups[1]->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
             ASSERT_NE(host_block, NULL_BLOCK_IDX);
             environment->groups[1]->setBlocks(swa_slot, Tier::HOST, {host_block});
             swa_host_blocks.push_back(host_block);

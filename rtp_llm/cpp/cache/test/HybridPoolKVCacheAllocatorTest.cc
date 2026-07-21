@@ -511,7 +511,7 @@ makeHybridPoolPreflightEnvironment(const std::vector<DeviceBlockPoolPtr>& device
         return environment;
     }
 
-    environment.source_block = primary->allocateSingleBlock(Tier::HOST);
+    environment.source_block = primary->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     if (isNullBlockIdx(environment.source_block)) {
         environment.cache.reset();
         return environment;
@@ -638,7 +638,7 @@ static void seedHybridPoolLowerTier(BlockTreeCache& cache, Tier source_tier, Cac
     const std::vector<ComponentGroupPtr>& groups = cache.componentGroups();
     std::vector<std::vector<GroupSlot>>   slots(1, std::vector<GroupSlot>(groups.size()));
     for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
-        const BlockIdxType source_block = groups[group_id]->allocateSingleBlock(source_tier);
+        const BlockIdxType source_block = groups[group_id]->allocateSingleBlock(source_tier, BlockRefType::BLOCK_CACHE);
         ASSERT_NE(source_block, NULL_BLOCK_IDX) << "component_group_id=" << group_id;
         if (source_tier == Tier::HOST) {
             slots[0][group_id].host_block = source_block;
@@ -1125,10 +1125,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ActiveTreeCachedBlocksTrackMultipleRefere
     auto         g1_blocks         = pool1->malloc(3).value();
     ASSERT_EQ(g0_blocks.size(), 2u);
     ASSERT_EQ(g1_blocks.size(), 3u);
-    // Single-count malloc reserves capacity only (refCount 0); take one holder per block to
-    // occupy them (replicates the legacy auto request ref).
-    pool0->incRef(g0_blocks);
-    pool1->incRef(g1_blocks);
+    // malloc reserves capacity only; add one request holder per block.
+    pool0->incRef(g0_blocks, BlockRefType::REQUEST);
+    pool1->incRef(g1_blocks, BlockRefType::REQUEST);
 
     EXPECT_EQ(allocator->freeBlocksNum(), free_total_before - 5u);
     EXPECT_EQ(pool0->activeTreeCachedBlocksNum(), 0u);
@@ -1140,18 +1139,17 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ActiveTreeCachedBlocksTrackMultipleRefere
         EXPECT_EQ(pool1->refCount(b), 1u);
     }
 
-    // Take a SECOND holder on one block per group (what a connector transfer would do in the
-    // single-count model: another incRef on the same block).
-    pool0->incRef(g0_blocks[0]);
-    pool1->incRef(g1_blocks[0]);
+    // Take a connector holder on one block per group.
+    pool0->incRef(g0_blocks[0], BlockRefType::CONNECTOR);
+    pool1->incRef(g1_blocks[0], BlockRefType::CONNECTOR);
     EXPECT_EQ(pool0->refCount(g0_blocks[0]), 2u);
     EXPECT_EQ(pool1->refCount(g1_blocks[0]), 2u);
     EXPECT_EQ(pool0->activeTreeCachedBlocksNum(), 1u);
     EXPECT_EQ(pool1->activeTreeCachedBlocksNum(), 1u);
 
     // Release the first (request) holder on every block.
-    pool0->decRef(g0_blocks);
-    pool1->decRef(g1_blocks);
+    pool0->decRef(g0_blocks, BlockRefType::REQUEST);
+    pool1->decRef(g1_blocks, BlockRefType::REQUEST);
 
     // The two doubly-held blocks stay allocated (refCount drops to 1); the rest are freed.
     EXPECT_TRUE(pool0->isAllocated(g0_blocks[0]));
@@ -1163,8 +1161,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ActiveTreeCachedBlocksTrackMultipleRefere
     EXPECT_EQ(allocator->freeBlocksNum(), free_total_before - 2u);
 
     // Release the second holder → blocks are fully freed and availability is restored.
-    pool0->decRef(g0_blocks[0]);
-    pool1->decRef(g1_blocks[0]);
+    pool0->decRef(g0_blocks[0], BlockRefType::CONNECTOR);
+    pool1->decRef(g1_blocks[0], BlockRefType::CONNECTOR);
     EXPECT_FALSE(pool0->isAllocated(g0_blocks[0]));
     EXPECT_FALSE(pool1->isAllocated(g1_blocks[0]));
     EXPECT_EQ(allocator->freeBlocksNum(), free_total_before);
@@ -1545,10 +1543,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PoolMetricsSnapshotsReportActiveTreeCache
     auto block1 = pool1->malloc();
     ASSERT_TRUE(block0.has_value());
     ASSERT_TRUE(block1.has_value());
-    pool0->incRef(*block0);
-    pool0->incRef(*block0);
-    pool1->incRef(*block1);
-    pool1->incRef(*block1);
+    pool0->incRef(*block0, BlockRefType::REQUEST);
+    pool0->incRef(*block0, BlockRefType::REQUEST);
+    pool1->incRef(*block1, BlockRefType::REQUEST);
+    pool1->incRef(*block1, BlockRefType::REQUEST);
 
     const auto snapshots = allocator->poolMetricsSnapshots();
     ASSERT_EQ(snapshots.size(), 2u);
@@ -1556,10 +1554,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PoolMetricsSnapshotsReportActiveTreeCache
     EXPECT_EQ(snapshots[1].active_tree_cached_blocks, 1u);
     EXPECT_EQ(allocator->activeTreeCachedBlocksNum(), 2u);
 
-    pool0->decRef(*block0);
-    pool0->decRef(*block0);
-    pool1->decRef(*block1);
-    pool1->decRef(*block1);
+    pool0->decRef(*block0, BlockRefType::REQUEST);
+    pool0->decRef(*block0, BlockRefType::REQUEST);
+    pool1->decRef(*block1, BlockRefType::REQUEST);
+    pool1->decRef(*block1, BlockRefType::REQUEST);
     EXPECT_EQ(allocator->activeTreeCachedBlocksNum(), 0u);
 }
 
@@ -2174,8 +2172,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4AllLayerCacheBaseHasPerGroupTensors) 
     EXPECT_EQ(layout.group_types.size(), 7u);
 }
 
-// Single-count co-hold invariant: a block co-held by a request holder and a cache holder is
-// not freed when the request holder is released; only releasing the last holder frees it.
+// A request release must not free a block that still has a cache holder.
 TEST_F(HybridPoolKVCacheAllocatorTest, RequestReleaseDoesNotFreeCachedBlock) {
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);
@@ -2183,13 +2180,13 @@ TEST_F(HybridPoolKVCacheAllocatorTest, RequestReleaseDoesNotFreeCachedBlock) {
     ASSERT_TRUE(injectBlockTreeCache(allocator, config));
     auto pool  = allocator->groupBlockPools()[0];
     auto block = pool->malloc().value();
-    pool->incRef(block);  // cache holder
-    pool->incRef(block);  // request holder
+    pool->incRef(block, BlockRefType::BLOCK_CACHE);
+    pool->incRef(block, BlockRefType::REQUEST);
     EXPECT_EQ(pool->refCount(block), 2u);
-    pool->decRef(block);  // release request holder
+    pool->decRef(block, BlockRefType::REQUEST);
     EXPECT_TRUE(pool->isAllocated(block));
     EXPECT_EQ(pool->refCount(block), 1u);
-    pool->decRef(block);  // release cache holder
+    pool->decRef(block, BlockRefType::BLOCK_CACHE);
     EXPECT_FALSE(pool->isAllocated(block));
 }
 

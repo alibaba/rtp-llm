@@ -178,7 +178,7 @@ public:
     }
 
 private:
-    void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const override {
+    void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, BlockRefType ref_type) const override {
         bool gated = false;
         {
             std::unique_lock<std::mutex> lock(gate_mutex_);
@@ -191,7 +191,7 @@ private:
             }
         }
 
-        (void)is_connector;
+        (void)ref_type;
         group(gid)->reference(blocks);
 
         if (gated) {
@@ -202,7 +202,7 @@ private:
         }
     }
 
-    void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) override {
+    void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, BlockRefType ref_type) override {
         bool gated = false;
         {
             std::lock_guard<std::mutex> lock(release_gate_mutex_);
@@ -212,7 +212,7 @@ private:
             }
         }
 
-        (void)is_connector;
+        (void)ref_type;
         group(gid)->free(blocks);
 
         if (gated) {
@@ -679,7 +679,7 @@ static HybridTypePreflightEnvironment makeHybridTypePreflightEnvironment(const D
         return environment;
     }
 
-    environment.source_block = primary->allocateSingleBlock(Tier::HOST);
+    environment.source_block = primary->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     if (isNullBlockIdx(environment.source_block)) {
         environment.cache.reset();
         return environment;
@@ -853,7 +853,7 @@ static void seedHybridTypeLowerTier(BlockTreeCache& cache, Tier source_tier, Cac
     const std::vector<ComponentGroupPtr>& groups = cache.componentGroups();
     std::vector<std::vector<GroupSlot>>   slots(1, std::vector<GroupSlot>(groups.size()));
     for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
-        const BlockIdxType source_block = groups[group_id]->allocateSingleBlock(source_tier);
+        const BlockIdxType source_block = groups[group_id]->allocateSingleBlock(source_tier, BlockRefType::BLOCK_CACHE);
         ASSERT_NE(source_block, NULL_BLOCK_IDX) << "component_group_id=" << group_id;
         if (source_tier == Tier::HOST) {
             slots[0][group_id].host_block = source_block;
@@ -933,9 +933,11 @@ TEST_F(HybridTypeKVCacheAllocatorTest, FullSWAReserveRollbackFinalizesRequestBef
     const ComponentGroupPtr full_group = *full_it;
     const ComponentGroupPtr swa_group  = *swa_it;
 
-    const GroupBlockSet full_resident = full_group->allocateBlocks(Tier::DEVICE, 4);
-    const GroupBlockSet swa_resident  = swa_group->allocateBlocks(Tier::DEVICE, 2);
-    const GroupBlockSet swa_host      = swa_group->allocateBlocks(Tier::HOST, 2);
+    const GroupBlockSet full_resident =
+        full_group->allocateBlocks(Tier::DEVICE, 4, BlockRefType::BLOCK_CACHE);
+    const GroupBlockSet swa_resident =
+        swa_group->allocateBlocks(Tier::DEVICE, 2, BlockRefType::BLOCK_CACHE);
+    const GroupBlockSet swa_host = swa_group->allocateBlocks(Tier::HOST, 2, BlockRefType::BLOCK_CACHE);
     ASSERT_EQ(full_resident.per_node.size(), 4u);
     ASSERT_EQ(swa_resident.per_node.size(), 2u);
     ASSERT_EQ(swa_host.per_node.size(), 2u);
@@ -1062,9 +1064,11 @@ TEST_F(HybridTypeKVCacheAllocatorTest, FullSWAAsyncFailureFinalizesPlanningBefor
     const ComponentGroupPtr full_group = *full_it;
     const ComponentGroupPtr swa_group  = *swa_it;
 
-    const GroupBlockSet full_resident = full_group->allocateBlocks(Tier::DEVICE, 4);
-    const GroupBlockSet swa_resident  = swa_group->allocateBlocks(Tier::DEVICE, 2);
-    const GroupBlockSet swa_host      = swa_group->allocateBlocks(Tier::HOST, 2);
+    const GroupBlockSet full_resident =
+        full_group->allocateBlocks(Tier::DEVICE, 4, BlockRefType::BLOCK_CACHE);
+    const GroupBlockSet swa_resident =
+        swa_group->allocateBlocks(Tier::DEVICE, 2, BlockRefType::BLOCK_CACHE);
+    const GroupBlockSet swa_host = swa_group->allocateBlocks(Tier::HOST, 2, BlockRefType::BLOCK_CACHE);
     ASSERT_EQ(full_resident.per_node.size(), 4u);
     ASSERT_EQ(swa_resident.per_node.size(), 2u);
     ASSERT_EQ(swa_host.per_node.size(), 2u);
@@ -1182,9 +1186,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, FullSWAPartialReadyPreservesResidentSuffi
     const ComponentGroupPtr full_group = *full_it;
     const ComponentGroupPtr swa_group  = *swa_it;
 
-    GroupBlockSet full_resident = full_group->allocateBlocks(Tier::DEVICE, 4);
-    GroupBlockSet swa_resident  = swa_group->allocateBlocks(Tier::DEVICE, 2);
-    GroupBlockSet swa_host      = swa_group->allocateBlocks(Tier::HOST, 2);
+    GroupBlockSet full_resident = full_group->allocateBlocks(Tier::DEVICE, 4, BlockRefType::BLOCK_CACHE);
+    GroupBlockSet swa_resident = swa_group->allocateBlocks(Tier::DEVICE, 2, BlockRefType::BLOCK_CACHE);
+    GroupBlockSet swa_host = swa_group->allocateBlocks(Tier::HOST, 2, BlockRefType::BLOCK_CACHE);
     ASSERT_EQ(full_resident.per_node.size(), 4u);
     ASSERT_EQ(swa_resident.per_node.size(), 2u);
     ASSERT_EQ(swa_host.per_node.size(), 2u);
@@ -2201,7 +2205,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     ASSERT_TRUE(keep_opt.has_value());
     auto keep = keep_opt.value();
     // Single-count pool: hold the reserved blocks with a request ref (reserve-only malloc()).
-    block_pool->incRef(keep);
+    block_pool->incRef(keep, BlockRefType::REQUEST);
     ASSERT_EQ(block_pool->freeBlocksNum(), 1u);
 
     // Incr to seq_len=9 => 3 slots per group. Linear adds 2 slots but allocates only 1 real block; full needs 2.
@@ -2220,7 +2224,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     // Free blocks count should return to 1 (no leaks).
     EXPECT_EQ(block_pool->freeBlocksNum(), 1u);
 
-    block_pool->decRef(keep);
+    block_pool->decRef(keep, BlockRefType::REQUEST);
     allocator_->free(FreeInfo{batch_res, token_ids});
     EXPECT_EQ(batch_res->curBlocksNum(), 0u);
     EXPECT_EQ(allocator_->freeBlocksNum(), free_before);

@@ -412,7 +412,7 @@ void GenerateStream::setReuseLength(int reuse_length) {
 
 void GenerateStream::setLocalReuseLength(int length) {
     local_reuse_length_ = length;
-    setDeviceReuseLength(local_reuse_length_ > memory_reuse_length_ ? local_reuse_length_ - memory_reuse_length_ : 0);
+    setDeviceReuseLength(std::max(local_reuse_length_ - memory_reuse_length_ - disk_reuse_length_, 0));
 }
 
 void GenerateStream::setRemoteReuseLength(int length) {
@@ -437,11 +437,20 @@ int GenerateStream::remoteReuseLength() const {
 
 void GenerateStream::setMemoryReuseLength(int length) {
     memory_reuse_length_ = length;
-    setDeviceReuseLength(local_reuse_length_ > memory_reuse_length_ ? local_reuse_length_ - memory_reuse_length_ : 0);
+    setDeviceReuseLength(std::max(local_reuse_length_ - memory_reuse_length_ - disk_reuse_length_, 0));
 }
 
 int GenerateStream::memoryReuseLength() const {
     return memory_reuse_length_;
+}
+
+void GenerateStream::setDiskReuseLength(int length) {
+    disk_reuse_length_ = length;
+    setDeviceReuseLength(std::max(local_reuse_length_ - memory_reuse_length_ - disk_reuse_length_, 0));
+}
+
+int GenerateStream::diskReuseLength() const {
+    return disk_reuse_length_;
 }
 
 void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
@@ -1134,16 +1143,15 @@ void GenerateStream::reportStreamMetrics() {
 
 void GenerateStream::reportCacheReuseMetrics() const {
     if (metrics_reporter_ && stream_cache_resource_->reuseCache()) {
-        const int64_t input_length        = inputLength();
-        const int64_t total_reuse_length = initialReuseLength();
-        auto hit_ratio = [input_length](int64_t reuse_length) {
-            return input_length > 0 ? static_cast<float>(reuse_length * 100.0 / input_length) : 0.0f;
-        };
+        const int64_t                    input_length       = inputLength();
+        const int64_t                    total_reuse_length = initialReuseLength();
         RtpLLMCacheReuseMetricsCollector collector;
-        collector.kv_cache_reuse_length            = total_reuse_length;
-        collector.kv_cache_hit_rate                = hit_ratio(total_reuse_length);
+        collector.kv_cache_reuse_length = total_reuse_length;
+        collector.kv_cache_hit_rate =
+            input_length > 0 ? static_cast<float>(total_reuse_length * 100.0 / input_length) : 0.0f;
         collector.stream_cache_device_reuse_length = deviceReuseLength();
         collector.stream_cache_memory_reuse_length = memoryReuseLength();
+        collector.stream_cache_disk_reuse_length   = diskReuseLength();
         collector.stream_cache_remote_reuse_length = remoteReuseLength();
         kmonitor::MetricsTags tags;
         metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &collector);

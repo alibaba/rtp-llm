@@ -277,7 +277,7 @@ static SingleTypePreflightEnvironment makeSingleTypePreflightEnvironment(const D
         return environment;
     }
 
-    environment.source_block = primary->allocateSingleBlock(Tier::HOST);
+    environment.source_block = primary->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     if (isNullBlockIdx(environment.source_block)) {
         environment.cache.reset();
         return environment;
@@ -402,7 +402,7 @@ static KVCacheConfig makeSingleTypeTieredConfig(Tier source_tier, const std::str
 
 static BlockIdxType seedSingleTypeLowerTier(BlockTreeCache& cache, Tier source_tier, CacheKeyType key) {
     const ComponentGroupPtr& group        = cache.componentGroups().front();
-    const BlockIdxType       source_block = group->allocateSingleBlock(source_tier);
+    const BlockIdxType       source_block = group->allocateSingleBlock(source_tier, BlockRefType::BLOCK_CACHE);
     EXPECT_NE(source_block, NULL_BLOCK_IDX);
     if (isNullBlockIdx(source_block)) {
         return source_block;
@@ -493,13 +493,13 @@ TEST_F(SingleTypeKVCacheAllocatorTest, NonContiguousDeviceHostDevicePreservesIde
     ASSERT_TRUE(initWithTieredBlockTreeCache(config, makeSingleTypeTieredConfig(Tier::HOST, "")));
 
     const ComponentGroupPtr& group    = block_tree_cache_->componentGroups().front();
-    GroupBlockSet            resident = group->allocateBlocks(Tier::DEVICE, 2);
+    GroupBlockSet resident = group->allocateBlocks(Tier::DEVICE, 2, BlockRefType::BLOCK_CACHE);
     ASSERT_EQ(resident.per_node.size(), 2u);
     ASSERT_EQ(resident.per_node[0].size(), 1u);
     ASSERT_EQ(resident.per_node[1].size(), 1u);
     const BlockIdxType first_device = resident.per_node[0][0];
     const BlockIdxType last_device  = resident.per_node[1][0];
-    const BlockIdxType host_source  = group->allocateSingleBlock(Tier::HOST);
+    const BlockIdxType host_source  = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_source, NULL_BLOCK_IDX);
 
     const size_t device_payload_bytes = config.specForGroup(0)->k_block_size() + config.specForGroup(0)->v_block_size();
@@ -1334,7 +1334,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     ASSERT_EQ(blocks.size(), 4);
     // Single-count pool: malloc() reserves capacity with refCount 0. Add one ref to replicate
     // the legacy malloc(int) auto request-ref that requestFree()/decRef() later drops.
-    block_pool->incRef(blocks);
+    block_pool->incRef(blocks, BlockRefType::REQUEST);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 4);
 
     KVCacheResource resource;
@@ -1350,7 +1350,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     // Validate: incrKVCacheRef propagates reuseBlockNum to returned resource.
     EXPECT_EQ(ref_resource->reuseBlockNum(), resource.reuseBlockNum());
 
-    block_pool->decRef(blocks);
+    block_pool->decRef(blocks, BlockRefType::REQUEST);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);  // blocks[1] & blocks[2] are still referenced
     // incrKVCacheRef returns a resource with a custom deleter that calls decrKVCacheRef().
     // Release it to drop ref-counts and unblock the pending frees.
@@ -1371,7 +1371,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
     auto blocks = *blocks_opt;
     ASSERT_EQ(blocks.size(), 2);
     // Single-count pool: replicate the legacy malloc(int) auto request-ref.
-    block_pool->incRef(blocks);
+    block_pool->incRef(blocks, BlockRefType::REQUEST);
 
     KVCacheResource resource;
     resource.initGroups(1, config.layer_all_num, config.layerGroupIdsSnapshot());
@@ -1386,7 +1386,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
     EXPECT_EQ(ref_resource->cacheKeys(), (CacheKeysType{101, 103, 999}));
     EXPECT_EQ(ref_resource->blocks(0), (BlockIndicesType{blocks[0], blocks[1], NULL_BLOCK_IDX}));
 
-    block_pool->decRef(blocks);
+    block_pool->decRef(blocks, BlockRefType::REQUEST);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
 
     ref_resource.reset();
@@ -1406,7 +1406,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     auto blocks = *blocks_opt;
     ASSERT_EQ(blocks.size(), 2);
     // Single-count pool: replicate the legacy malloc(int) auto request-ref.
-    block_pool->incRef(blocks);
+    block_pool->incRef(blocks, BlockRefType::REQUEST);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
 
     KVCacheResource resource;
@@ -1417,7 +1417,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{});
     ASSERT_EQ(ref_resource, nullptr);
 
-    block_pool->decRef(blocks);
+    block_pool->decRef(blocks, BlockRefType::REQUEST);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);
 }
 
@@ -1491,7 +1491,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommon
     ASSERT_TRUE(pressure_blocks_opt.has_value());
     ASSERT_EQ(pressure_blocks_opt->size(), 1u);
     const BlockIdxType pressure_block = pressure_blocks_opt->front();
-    pool->incRef(*pressure_blocks_opt);
+    pool->incRef(*pressure_blocks_opt, BlockRefType::REQUEST);
     ASSERT_EQ(pool->refCount(pressure_block), 1u);
     const size_t free_before_fail = allocator_->freeBlocksNum();
     ASSERT_EQ(free_before_fail, 4u);
@@ -1514,7 +1514,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommon
     EXPECT_EQ(allocator_->activeTreeCachedBlocksNum(), 0u);
     EXPECT_EQ(pool->refCount(pressure_block), 1u);
 
-    pool->decRef(*pressure_blocks_opt);
+    pool->decRef(*pressure_blocks_opt, BlockRefType::REQUEST);
     EXPECT_FALSE(pool->isAllocated(pressure_block));
     EXPECT_EQ(allocator_->freeBlocksNum(), initial_free);
     EXPECT_EQ(allocator_->activeTreeCachedBlocksNum(), 0u);

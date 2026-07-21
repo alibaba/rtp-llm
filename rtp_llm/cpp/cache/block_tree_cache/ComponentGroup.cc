@@ -15,7 +15,22 @@ LoadBackTicket::LoadBackTicket(std::shared_ptr<LoadBackTicketRegistry> registry,
     registry_(std::move(registry)),
     ticket_id_(ticket_id),
     items_(std::move(items)),
-    logical_matched_blocks_(logical_matched_blocks) {}
+    logical_matched_blocks_(logical_matched_blocks) {
+    std::vector<Tier> logical_tiers(logical_matched_blocks_, Tier::DEVICE);
+    for (const PendingLoadBackItem& item : items_) {
+        if (item.path_index >= logical_tiers.size() || item.source_tier < Tier::DEVICE
+            || item.source_tier > Tier::DISK) {
+            continue;
+        }
+        Tier& logical_tier = logical_tiers[item.path_index];
+        if (static_cast<int>(item.source_tier) > static_cast<int>(logical_tier)) {
+            logical_tier = item.source_tier;
+        }
+    }
+    for (Tier tier : logical_tiers) {
+        logical_matched_blocks_by_tier_[static_cast<size_t>(tier)]++;
+    }
+}
 
 LoadBackTicket::~LoadBackTicket() {
     if (registry_ != nullptr && ticket_id_ != 0) {
@@ -28,6 +43,13 @@ std::shared_ptr<AsyncContext> LoadBackTicket::commit() {
         return nullptr;
     }
     return registry_->commit(ticket_id_, items_);
+}
+
+size_t LoadBackTicket::logicalMatchedBlocks(Tier tier) const {
+    if (tier < Tier::DEVICE || tier > Tier::DISK) {
+        return 0;
+    }
+    return logical_matched_blocks_by_tier_[static_cast<size_t>(tier)];
 }
 
 LoadBackTicketRegistry::LoadBackTicketRegistry(CommitCallback commit_callback, AbortCallback abort_callback):
@@ -328,21 +350,21 @@ bool ComponentGroup::isLeafAtTier(const TreeNode* node, int group_id, Tier tier)
 
 // ---- Unified structured block lifecycle ----
 
-GroupBlockSet ComponentGroup::allocateBlocks(Tier tier, size_t count) {
+GroupBlockSet ComponentGroup::allocateBlocks(Tier tier, size_t count, BlockRefType ref_type) {
     GroupBlockSet set{component_group_id, tier};
     if (tier == Tier::DEVICE) {
         set.per_node.assign(count, std::vector<BlockIdxType>(device_pools_.size(), NULL_BLOCK_IDX));
         for (size_t p = 0; p < device_pools_.size(); ++p) {
             if (!device_pools_[p]) {
-                unreferenceBlocks(set);
+                unreferenceBlocks(set, ref_type);
                 return {};
             }
-            auto blocks = device_pools_[p]->malloc(count);
+            const std::optional<BlockIdList> blocks = device_pools_[p]->malloc(count);
             if (!blocks.has_value()) {
-                unreferenceBlocks(set);
+                unreferenceBlocks(set, ref_type);
                 return {};
             }
-            device_pools_[p]->incRef(*blocks);
+            device_pools_[p]->incRef(*blocks, ref_type);
             for (size_t k = 0; k < count; ++k) {
                 set.per_node[k][p] = (*blocks)[k];
             }
@@ -352,9 +374,9 @@ GroupBlockSet ComponentGroup::allocateBlocks(Tier tier, size_t count) {
 
     set.per_node.resize(count);
     for (size_t k = 0; k < count; ++k) {
-        BlockIdxType b = allocateSingleBlock(tier);
+        BlockIdxType b = allocateSingleBlock(tier, ref_type);
         if (isNullBlockIdx(b)) {
-            unreferenceBlocks(set);
+            unreferenceBlocks(set, ref_type);
             return {};
         }
         set.per_node[k] = {b};
@@ -362,13 +384,13 @@ GroupBlockSet ComponentGroup::allocateBlocks(Tier tier, size_t count) {
     return set;
 }
 
-void ComponentGroup::referenceBlocks(const GroupBlockSet& set) const {
+void ComponentGroup::referenceBlocks(const GroupBlockSet& set, BlockRefType ref_type) const {
     switch (set.tier) {
         case Tier::DEVICE:
             for (const auto& node_blocks : set.per_node) {
                 for (size_t p = 0; p < node_blocks.size() && p < device_pools_.size(); ++p) {
                     if (device_pools_[p] && !isNullBlockIdx(node_blocks[p])) {
-                        device_pools_[p]->incRef(node_blocks[p]);
+                        device_pools_[p]->incRef(node_blocks[p], ref_type);
                     }
                 }
             }
@@ -378,7 +400,7 @@ void ComponentGroup::referenceBlocks(const GroupBlockSet& set) const {
                 for (const auto& node_blocks : set.per_node)
                     for (auto b : node_blocks)
                         if (!isNullBlockIdx(b))
-                            host_pool_->incRef(b);
+                            host_pool_->incRef(b, ref_type);
             }
             break;
         case Tier::DISK:
@@ -386,7 +408,7 @@ void ComponentGroup::referenceBlocks(const GroupBlockSet& set) const {
                 for (const auto& node_blocks : set.per_node)
                     for (auto b : node_blocks)
                         if (!isNullBlockIdx(b))
-                            disk_pool_->incRef(b);
+                            disk_pool_->incRef(b, ref_type);
             }
             break;
         default:
@@ -394,13 +416,13 @@ void ComponentGroup::referenceBlocks(const GroupBlockSet& set) const {
     }
 }
 
-void ComponentGroup::unreferenceBlocks(const GroupBlockSet& set) const {
+void ComponentGroup::unreferenceBlocks(const GroupBlockSet& set, BlockRefType ref_type) const {
     switch (set.tier) {
         case Tier::DEVICE:
             for (const auto& node_blocks : set.per_node) {
                 for (size_t p = 0; p < node_blocks.size() && p < device_pools_.size(); ++p) {
                     if (device_pools_[p] && !isNullBlockIdx(node_blocks[p])) {
-                        device_pools_[p]->decRef(node_blocks[p]);
+                        device_pools_[p]->decRef(node_blocks[p], ref_type);
                     }
                 }
             }
@@ -410,7 +432,7 @@ void ComponentGroup::unreferenceBlocks(const GroupBlockSet& set) const {
                 for (const auto& node_blocks : set.per_node)
                     for (auto b : node_blocks)
                         if (!isNullBlockIdx(b))
-                            host_pool_->decRef(b);
+                            host_pool_->decRef(b, ref_type);
             }
             break;
         case Tier::DISK:
@@ -418,7 +440,7 @@ void ComponentGroup::unreferenceBlocks(const GroupBlockSet& set) const {
                 for (const auto& node_blocks : set.per_node)
                     for (auto b : node_blocks)
                         if (!isNullBlockIdx(b))
-                            disk_pool_->decRef(b);
+                            disk_pool_->decRef(b, ref_type);
             }
             break;
         default:
@@ -426,7 +448,7 @@ void ComponentGroup::unreferenceBlocks(const GroupBlockSet& set) const {
     }
 }
 
-BlockIdxType ComponentGroup::allocateSingleBlock(Tier tier) {
+BlockIdxType ComponentGroup::allocateSingleBlock(Tier tier, BlockRefType ref_type) {
     // DEVICE spans multiple pools and has no scalar block: use allocateBlocks.
     IBlockPool* pool = nullptr;
     if (tier == Tier::HOST) {
@@ -436,22 +458,22 @@ BlockIdxType ComponentGroup::allocateSingleBlock(Tier tier) {
     }
     if (!pool)
         return NULL_BLOCK_IDX;
-    auto b = pool->malloc();
+    const std::optional<BlockIdxType> b = pool->malloc();
     if (!b.has_value())
         return NULL_BLOCK_IDX;
-    pool->incRef(*b);
+    pool->incRef(*b, ref_type);
     return *b;
 }
 
-void ComponentGroup::releaseSingleBlock(Tier tier, BlockIdxType block) const {
+void ComponentGroup::releaseSingleBlock(Tier tier, BlockIdxType block, BlockRefType ref_type) const {
     if (isNullBlockIdx(block))
         return;
     if (tier == Tier::HOST) {
         if (host_pool_)
-            host_pool_->decRef(block);
+            host_pool_->decRef(block, ref_type);
     } else if (tier == Tier::DISK) {
         if (disk_pool_)
-            disk_pool_->decRef(block);
+            disk_pool_->decRef(block, ref_type);
     }
 }
 

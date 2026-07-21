@@ -131,7 +131,7 @@ bool DeviceLinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool ena
             return false;
         }
         allocated_blocks = std::move(*allocated_opt);
-        block_pool_->incRef(allocated_blocks);
+        block_pool_->incRef(allocated_blocks, BlockRefType::REQUEST);
     }
 
     size_t allocated_idx = 0;
@@ -180,7 +180,7 @@ void DeviceLinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool ena
         pos_to_remove.push_back(static_cast<size_t>(i));
     }
     if (!blocks_to_free.empty()) {
-        block_pool_->decRef(blocks_to_free);
+        block_pool_->decRef(blocks_to_free, BlockRefType::REQUEST);
         block_ids.remove(pos_to_remove);  // null-out by position, updates kernel slots incrementally
     }
 }
@@ -194,7 +194,7 @@ void DeviceLinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
     if (valid.empty()) {
         return;
     }
-    block_pool_->decRef(valid);
+    block_pool_->decRef(valid, BlockRefType::REQUEST);
 }
 
 void DeviceLinearKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
@@ -202,7 +202,7 @@ void DeviceLinearKVCacheGroup::reference(BlockIds& block_ids, const BlockIndices
     BlockIndicesType valid;
     filterValidBlocks(new_block_indices, valid);
     if (!valid.empty()) {
-        block_pool_->incRef(valid);
+        block_pool_->incRef(valid, BlockRefType::REQUEST);
     }
 }
 

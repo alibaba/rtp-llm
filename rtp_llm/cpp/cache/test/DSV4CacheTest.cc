@@ -1799,11 +1799,11 @@ TEST_F(DSV4AllocatorTest, MallocAndFreeBlocks) {
 
     // Direct block pool malloc/free
     auto blocks = block_pool->malloc(3).value();
-    block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
+    block_pool->incRef(blocks, BlockRefType::REQUEST);
     ASSERT_EQ(blocks.size(), 3u);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 3);
 
-    block_pool->decRef(blocks);
+    block_pool->decRef(blocks, BlockRefType::REQUEST);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
@@ -1949,11 +1949,11 @@ TEST_F(DSV4AllocatorTest, FlashMallocAndFree) {
     ASSERT_GT(free_before, 5u);
 
     auto blocks = block_pool->malloc(5).value();
-    block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
+    block_pool->incRef(blocks, BlockRefType::REQUEST);
     ASSERT_EQ(blocks.size(), 5u);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 5);
 
-    block_pool->decRef(blocks);
+    block_pool->decRef(blocks, BlockRefType::REQUEST);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 

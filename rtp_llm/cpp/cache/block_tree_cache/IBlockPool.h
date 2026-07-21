@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -21,6 +22,15 @@ enum class BlockPoolType {
     DISK,
 };
 
+enum class BlockRefType : uint8_t {
+    REQUEST = 0,
+    CONNECTOR,
+    BLOCK_CACHE,
+    COUNT,
+};
+
+constexpr size_t kBlockRefTypeCount = static_cast<size_t>(BlockRefType::COUNT);
+
 struct BlockPoolConfigBase {
     virtual ~BlockPoolConfigBase() = default;
 
@@ -41,22 +51,24 @@ public:
 
     const std::string&  poolName() const;
     virtual std::string debugString() const;
+    virtual size_t      blockSizeBytes() const = 0;
 
     std::optional<BlockIdxType> malloc();
-    std::optional<BlockIdList>     malloc(size_t n);
+    std::optional<BlockIdList>  malloc(size_t n);
 
     void free(BlockIdxType block);
     void free(const BlockIdList& blocks);
 
-    void incRef(BlockIdxType block);
-    void incRef(const BlockIdList& blocks);
+    void incRef(BlockIdxType block, BlockRefType ref_type);
+    void incRef(const BlockIdList& blocks, BlockRefType ref_type);
 
     // Release one holder: decrement one reference and, only when the refcount reaches 0,
     // return the block's capacity to the free list. Category releases must use this rather
     // than free() directly. Requires refcount > 0.
-    void     decRef(BlockIdxType block);
-    void     decRef(const BlockIdList& blocks);
+    void     decRef(BlockIdxType block, BlockRefType ref_type);
+    void     decRef(const BlockIdList& blocks, BlockRefType ref_type);
     uint32_t refCount(BlockIdxType block) const;
+    size_t   totalRefCount(BlockRefType ref_type) const;
 
     bool validBlock(BlockIdxType block) const;
     bool isAllocated(BlockIdxType block) const;
@@ -81,10 +93,11 @@ protected:
     }
 
 private:
-    bool validBlockNoLock(BlockIdxType block) const;
-    void checkInitializedNoLock() const;
-    void checkAllocatedNoLock(BlockIdxType block) const;
-    void checkUniqueBlocksNoLock(const BlockIdList& blocks) const;
+    bool          validBlockNoLock(BlockIdxType block) const;
+    void          checkInitializedNoLock() const;
+    void          checkAllocatedNoLock(BlockIdxType block) const;
+    void          checkUniqueBlocksNoLock(const BlockIdList& blocks) const;
+    static size_t refTypeIndex(BlockRefType ref_type);
 
     size_t       availableFreeBlocksNoLock() const;
     void         refillAscendingFreeBlocksNoLock();
@@ -94,22 +107,24 @@ private:
     // Single-block primitives shared by decRef/free (one source of truth for refcount and
     // metrics). Callers must hold mutex_ and have validated the block is allocated (and, for
     // decRefOneNoLock, that refcount > 0).
-    void decRefOneNoLock(BlockIdxType block);
+    void decRefOneNoLock(BlockIdxType block, size_t ref_type_index);
     void freeAllocatedBlockNoLock(BlockIdxType block);
 
 private:
-    std::shared_ptr<const BlockPoolConfigBase> config_;
-    mutable std::mutex                         mutex_;
-    bool                                       initialized_{false};
-    std::vector<uint8_t>                       allocated_;
-    std::vector<uint32_t>                      refcounts_;
-    std::vector<BlockIdxType>                  free_blocks_;
-    std::vector<BlockIdxType>                  released_blocks_;
-    size_t                                     free_head_{0};
-    size_t                                     used_blocks_num_{0};
-    size_t                                     unreferenced_blocks_num_{0};
-    size_t                                     tree_cached_blocks_num_{0};
-    size_t                                     active_tree_cached_blocks_num_{0};
+    std::shared_ptr<const BlockPoolConfigBase>            config_;
+    mutable std::mutex                                    mutex_;
+    bool                                                  initialized_{false};
+    std::vector<uint8_t>                                  allocated_;
+    std::vector<uint32_t>                                 refcounts_;
+    std::array<std::vector<uint32_t>, kBlockRefTypeCount> refcounts_by_type_;
+    std::array<size_t, kBlockRefTypeCount>                total_ref_counts_{};
+    std::vector<BlockIdxType>                             free_blocks_;
+    std::vector<BlockIdxType>                             released_blocks_;
+    size_t                                                free_head_{0};
+    size_t                                                used_blocks_num_{0};
+    size_t                                                unreferenced_blocks_num_{0};
+    size_t                                                tree_cached_blocks_num_{0};
+    size_t                                                active_tree_cached_blocks_num_{0};
 };
 
 }  // namespace rtp_llm

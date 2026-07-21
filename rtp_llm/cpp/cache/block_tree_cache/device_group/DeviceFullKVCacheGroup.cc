@@ -48,7 +48,7 @@ bool DeviceFullKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enabl
         return false;
     }
     // malloc() only reserves capacity at refCount 0; take the request holder ref to hold the blocks.
-    block_pool_->incRef(*result);
+    block_pool_->incRef(*result, BlockRefType::REQUEST);
     size_t allocated_index = 0;
     for (size_t position : positions_to_backfill) {
         block_ids.setAt(position, (*result)[allocated_index++]);
@@ -77,7 +77,7 @@ void DeviceFullKVCacheGroup::free(const BlockIndicesType& block_indices) {
         }
     }
     if (!valid_blocks.empty()) {
-        block_pool_->decRef(valid_blocks);
+        block_pool_->decRef(valid_blocks, BlockRefType::REQUEST);
     }
     RTP_LLM_LOG_DEBUG("Freed %zu blocks", valid_blocks.size());
 }
@@ -92,7 +92,7 @@ void DeviceFullKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesTy
         }
     }
     if (!valid_blocks.empty()) {
-        block_pool_->incRef(valid_blocks);
+        block_pool_->incRef(valid_blocks, BlockRefType::REQUEST);
     }
 }
 

@@ -123,8 +123,8 @@ TEST(DeviceBlockPoolTest, LifecycleStartsAllocatedBlockWithZeroRefCount) {
     EXPECT_TRUE(pool.isAllocated(*block));
     EXPECT_EQ(pool.refCount(*block), 0u);
 
-    pool.incRef(*block);
-    pool.decRef(*block);
+    pool.incRef(*block, BlockRefType::REQUEST);
+    pool.decRef(*block, BlockRefType::REQUEST);
     EXPECT_FALSE(pool.isAllocated(*block));
 }
 
@@ -138,9 +138,9 @@ TEST(DeviceBlockPoolTest, LifecycleUsesIBlockPoolSemantics) {
     EXPECT_TRUE(pool.isAllocated(*block));
     EXPECT_EQ(pool.refCount(*block), 0u);
 
-    pool.incRef(*block);
+    pool.incRef(*block, BlockRefType::REQUEST);
     EXPECT_EQ(pool.refCount(*block), 1u);
-    pool.decRef(*block);
+    pool.decRef(*block, BlockRefType::REQUEST);
     EXPECT_FALSE(pool.isAllocated(*block));
 }
 

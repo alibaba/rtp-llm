@@ -366,21 +366,24 @@ void BlockTreeCache::drainTreeHolds() {
                 // Keep shutdown symmetric with referenceBlocks/unreferenceBlocks:
                 // pool-less structural slots carry no hold, while real pools are released exactly once.
                 component_group->unreferenceBlocks(
-                    GroupBlockSet{static_cast<int>(component_group_index), Tier::DEVICE, {device_blocks}});
+                    GroupBlockSet{static_cast<int>(component_group_index), Tier::DEVICE, {device_blocks}},
+                    BlockRefType::BLOCK_CACHE);
                 std::fill(slot.device_blocks.begin(), slot.device_blocks.end(), NULL_BLOCK_IDX);
             }
 
             if (!isNullBlockIdx(slot.host_block)) {
                 const BlockIdxType host_block = slot.host_block;
                 component_group->unreferenceBlocks(
-                    GroupBlockSet{static_cast<int>(component_group_index), Tier::HOST, {{host_block}}});
+                    GroupBlockSet{static_cast<int>(component_group_index), Tier::HOST, {{host_block}}},
+                    BlockRefType::BLOCK_CACHE);
                 slot.host_block = NULL_BLOCK_IDX;
             }
 
             if (!isNullBlockIdx(slot.disk_slot)) {
                 const BlockIdxType disk_block = slot.disk_slot;
                 component_group->unreferenceBlocks(
-                    GroupBlockSet{static_cast<int>(component_group_index), Tier::DISK, {{disk_block}}});
+                    GroupBlockSet{static_cast<int>(component_group_index), Tier::DISK, {{disk_block}}},
+                    BlockRefType::BLOCK_CACHE);
                 slot.disk_slot = NULL_BLOCK_IDX;
             }
 
@@ -586,7 +589,8 @@ void BlockTreeCache::insert(TreeNode*                                  parent,
             if (slot.has_value(Tier::DEVICE)) {
                 const std::vector<BlockIdxType> blocks = group->getBlocks(slot, Tier::DEVICE);
                 if (!blocks.empty()) {
-                    group->referenceBlocks(GroupBlockSet{group->component_group_id, Tier::DEVICE, {blocks}});
+                    group->referenceBlocks(GroupBlockSet{group->component_group_id, Tier::DEVICE, {blocks}},
+                                           BlockRefType::BLOCK_CACHE);
                 }
             }
         }
@@ -685,7 +689,7 @@ void BlockTreeCache::releaseMatchedBlocks(const std::vector<GroupBlockSet>& sets
     for (const auto& set : sets) {
         auto gid = static_cast<size_t>(set.component_group_id);
         if (gid < component_groups_.size()) {
-            component_groups_[gid]->unreferenceBlocks(set);
+            component_groups_[gid]->unreferenceBlocks(set, BlockRefType::REQUEST);
             // Releasing a match reference may make the node evictable again.
             evictor_.refreshCandidatesAfterRelease(set);
         }
@@ -701,6 +705,20 @@ CacheStats BlockTreeCache::getStats() const {
     stats.host_heap_total_size      = candidates.host_candidates;
     stats.disk_heap_total_size      = candidates.disk_candidates;
     return stats;
+}
+
+std::vector<BlockTreePoolMetricsSnapshot> BlockTreeCache::poolMetricsSnapshots() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return metrics_reporter_.collectPoolMetricsSnapshots(component_groups_, evictor_);
+}
+
+void BlockTreeCache::reportMetrics() const {
+    std::vector<BlockTreeEvictableMetricsSnapshot> snapshots;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        snapshots = metrics_reporter_.collectEvictableMetricsSnapshots(component_groups_, evictor_);
+    }
+    metrics_reporter_.reportEvictableBlockCount(snapshots);
 }
 
 BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(size_t limit) const {
@@ -829,7 +847,7 @@ void BlockTreeCache::prepareMatchedBlocks(const std::vector<TreeNode*>&     matc
         }
 
         if (!matched_device_blocks.per_node.empty()) {
-            component_group->referenceBlocks(matched_device_blocks);
+            component_group->referenceBlocks(matched_device_blocks, BlockRefType::REQUEST);
             result.matched_block_sets.push_back(std::move(matched_device_blocks));
         }
 
@@ -908,7 +926,8 @@ void BlockTreeCache::prepareMatchedLoadBackItem(TreeNode*                       
     }
 
     // Keep the source non-evictable until the ticket is committed or aborted.
-    component_group->referenceBlocks(GroupBlockSet{component_group->component_group_id, source_tier, {source_blocks}});
+    component_group->referenceBlocks(GroupBlockSet{component_group->component_group_id, source_tier, {source_blocks}},
+                                     BlockRefType::REQUEST);
     PendingLoadBackItem pending_item;
     pending_item.node             = path_node;
     pending_item.group_id         = component_group->component_group_id;
@@ -1082,7 +1101,8 @@ std::shared_ptr<AsyncContext> BlockTreeCache::commitLoadBack(const std::vector<P
 
         // Add a tree/copy holder. The request already owns these targets; on
         // failure only this additional holder is released.
-        component_group->referenceBlocks(GroupBlockSet{item.group_id, Tier::DEVICE, {item.target_device_blocks}});
+        component_group->referenceBlocks(GroupBlockSet{item.group_id, Tier::DEVICE, {item.target_device_blocks}},
+                                         BlockRefType::BLOCK_CACHE);
         async_items->push_back(
             LoadBackItem{item.node, item.group_id, item.source_tier, item.source_blocks, item.target_device_blocks});
     }
@@ -1115,20 +1135,20 @@ void BlockTreeCache::abortLoadBackUnsafe(const std::vector<PendingLoadBackItem>&
     bool global_refresh_required = false;
     for (size_t item_index = 0; item_index < items.size(); ++item_index) {
         const PendingLoadBackItem& item = items[item_index];
-        const size_t gid = static_cast<size_t>(item.group_id);
+        const size_t               gid  = static_cast<size_t>(item.group_id);
         if (item.group_id < 0 || gid >= component_groups_.size() || component_groups_[gid] == nullptr) {
             continue;
         }
         if (item_index < prepared_item_count && item.source_tier != Tier::DEVICE) {
             component_groups_[gid]->unreferenceBlocks(
-                GroupBlockSet{item.group_id, Tier::DEVICE, {item.target_device_blocks}});
+                GroupBlockSet{item.group_id, Tier::DEVICE, {item.target_device_blocks}}, BlockRefType::BLOCK_CACHE);
         }
         // Release the source reference taken while preparing the match.
         GroupBlockSet source_set{item.group_id, item.source_tier, {item.source_blocks}};
         if (item.source_tier != Tier::DEVICE) {
             source_set.nodes = {item.node};
         }
-        component_groups_[gid]->unreferenceBlocks(source_set);
+        component_groups_[gid]->unreferenceBlocks(source_set, BlockRefType::REQUEST);
         if (item.source_tier != Tier::DEVICE) {
             if (item_index < prepared_item_count) {
                 evictor_.finishLoadBack(item.node, item.group_id, item.source_tier, false);
@@ -1182,6 +1202,24 @@ bool BlockTreeCache::executeLoadBackTransferBatch(const std::vector<TransferDesc
 }
 
 void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::shared_ptr<AsyncContext> ctx) {
+    size_t host_transfer_blocks = 0;
+    size_t disk_transfer_blocks = 0;
+    for (const LoadBackItem& item : items) {
+        if (item.source_tier == Tier::HOST) {
+            ++host_transfer_blocks;
+        } else if (item.source_tier == Tier::DISK) {
+            ++disk_transfer_blocks;
+        }
+    }
+    int64_t host_transfer_begin_time_us = 0;
+    int64_t disk_transfer_begin_time_us = 0;
+    if (host_transfer_blocks > 0) {
+        host_transfer_begin_time_us = metrics_reporter_.reportTransferStarted(Tier::HOST, Tier::DEVICE);
+    }
+    if (disk_transfer_blocks > 0) {
+        disk_transfer_begin_time_us = metrics_reporter_.reportTransferStarted(Tier::DISK, Tier::DEVICE);
+    }
+
     std::shared_ptr<LoadBackAsyncContext> load_back_context = std::dynamic_pointer_cast<LoadBackAsyncContext>(ctx);
     std::vector<BlockIdxType>             staging_host_blocks(items.size(), NULL_BLOCK_IDX);
     std::vector<TransferDescriptor>       disk_to_host_descriptors;
@@ -1227,11 +1265,11 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
         if (item.source_tier == Tier::HOST && group->hostPool() != nullptr) {
             source_host_block = item.source_blocks[0];
         } else if (item.source_tier == Tier::DISK && group->hostPool() != nullptr && group->diskPool() != nullptr) {
-            source_host_block = group->allocateSingleBlock(Tier::HOST);
+            source_host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
             if (isNullBlockIdx(source_host_block) && reclaimOneForGroup(item.group_id, Tier::HOST)) {
                 // Disk load-back needs a temporary host staging block. Apply
                 // target-tier pressure once before failing the whole request.
-                source_host_block = group->allocateSingleBlock(Tier::HOST);
+                source_host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
             }
             if (!isNullBlockIdx(source_host_block)) {
                 staging_host_blocks[item_index] = source_host_block;
@@ -1259,6 +1297,14 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
     if (copy_success) {
         copy_success = executeLoadBackTransferBatch(host_to_device_descriptors, config_.memory_cache_sync_timeout_ms);
     }
+    if (host_transfer_blocks > 0) {
+        metrics_reporter_.reportTransferFinished(
+            Tier::HOST, Tier::DEVICE, host_transfer_blocks, host_transfer_begin_time_us, copy_success);
+    }
+    if (disk_transfer_blocks > 0) {
+        metrics_reporter_.reportTransferFinished(
+            Tier::DISK, Tier::DEVICE, disk_transfer_blocks, disk_transfer_begin_time_us, copy_success);
+    }
 
     for (size_t item_index = 0; item_index < items.size(); ++item_index) {
         LoadBackItem& item = items[item_index];
@@ -1267,11 +1313,13 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
         }
         ComponentGroupPtr& group = component_groups_[static_cast<size_t>(item.group_id)];
         if (!isNullBlockIdx(staging_host_blocks[item_index])) {
-            group->releaseSingleBlock(Tier::HOST, staging_host_blocks[item_index]);
+            group->releaseSingleBlock(Tier::HOST, staging_host_blocks[item_index], BlockRefType::BLOCK_CACHE);
         }
-        group->unreferenceBlocks(GroupBlockSet{item.group_id, item.source_tier, {item.source_blocks}});
+        group->unreferenceBlocks(GroupBlockSet{item.group_id, item.source_tier, {item.source_blocks}},
+                                 BlockRefType::REQUEST);
         if (!copy_success && item.source_tier != Tier::DEVICE) {
-            group->unreferenceBlocks(GroupBlockSet{item.group_id, Tier::DEVICE, {item.target_device_blocks}});
+            group->unreferenceBlocks(GroupBlockSet{item.group_id, Tier::DEVICE, {item.target_device_blocks}},
+                                     BlockRefType::BLOCK_CACHE);
         }
     }
 
@@ -1298,7 +1346,8 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
                 // Move to DEVICE, then retire source: release its cache-hold (saved
                 // ids) before evictFromTier clears the slot. load_back is async.
                 group->setBlocks(slot, Tier::DEVICE, item.target_device_blocks);
-                group->unreferenceBlocks(GroupBlockSet{item.group_id, item.source_tier, {item.source_blocks}});
+                group->unreferenceBlocks(GroupBlockSet{item.group_id, item.source_tier, {item.source_blocks}},
+                                         BlockRefType::BLOCK_CACHE);
                 group->evictFromTier(item.node, slot, item.source_tier);
             }
             // Clear LOADING_BACK and re-evaluate candidacy (DEVICE on success, else source).
@@ -1348,6 +1397,7 @@ bool BlockTreeCache::submitEvictionLocked(EvictionMove& eviction_move) {
         results.primary_success = true;
         results.cascade_success.assign(plan->cascade_moves.size(), true);
         evictor_.complete(*tree_, *plan, results);
+        metrics_reporter_.reportEvictionFinished(*plan, results, component_groups_);
         ++mutation_version_;
         return true;
     }
@@ -1366,6 +1416,11 @@ bool BlockTreeCache::submitEvictionLocked(EvictionMove& eviction_move) {
 }
 
 void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan& plan) {
+    const Tier    source_tier            = plan.primary.source_tier;
+    const Tier    target_tier            = plan.primary.target_tier;
+    const size_t  transfer_block_count   = plan.cascade_moves.size() + 1;
+    const int64_t transfer_begin_time_us = metrics_reporter_.reportTransferStarted(source_tier, target_tier);
+
     BlockTreeEvictor::CopyResultSet copy_results;
     if (broadcast_manager_ == nullptr) {
         copy_results = evictor_.performCopy(plan);
@@ -1376,6 +1431,13 @@ void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan& p
         copy_results.primary_success = copy_success;
         copy_results.cascade_success.assign(plan.cascade_moves.size(), copy_success);
     }
+
+    const bool transfer_success = copy_results.primary_success
+                                  && std::all_of(copy_results.cascade_success.begin(),
+                                                 copy_results.cascade_success.end(),
+                                                 [](bool success) { return success; });
+    metrics_reporter_.reportTransferFinished(
+        source_tier, target_tier, transfer_block_count, transfer_begin_time_us, transfer_success);
 
     bool         copy_ok          = copy_results.primary_success;
     CacheKeyType remote_cache_key = 0;
@@ -1401,6 +1463,7 @@ void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan& p
             checkWatermark();
         }
     }
+    metrics_reporter_.reportEvictionFinished(plan, copy_results, component_groups_);
 
     if (copy_ok && config_.enable_remote_cache && remote_group_id >= 0) {
         evictor_.writeRemoteThrough(storage_backend_, remote_cache_key, remote_group_id);

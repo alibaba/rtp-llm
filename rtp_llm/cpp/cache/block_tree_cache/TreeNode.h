@@ -35,12 +35,32 @@ inline const char* tierName(Tier tier) {
     return "UNKNOWN";
 }
 
+inline const char* metricTierName(Tier tier) {
+    if (tier == Tier::DEVICE) {
+        return "device";
+    }
+    if (tier == Tier::HOST) {
+        return "host";
+    }
+    if (tier == Tier::DISK) {
+        return "disk";
+    }
+    if (tier == Tier::REMOTE) {
+        return "remote";
+    }
+    if (tier == Tier::NONE) {
+        return "none";
+    }
+    return "unknown";
+}
+
 // Sorting metadata for a candidate node. A single copy per GroupSlot follows the
 // data to its current serving tier (steady-state single-tier-service invariant).
 struct CandidateMeta {
     uint64_t last_access_seq{0};  // LRU: logical clock of the last real match
     uint64_t admission_seq{0};    // FIFO: logical clock of entering the current tier
     uint64_t hit_count{0};        // LFU: cumulative real hit count
+    int64_t  tier_enter_time_us{0};
 };
 
 // Real data-transfer state; a slot is excluded from all heaps while != IDLE.

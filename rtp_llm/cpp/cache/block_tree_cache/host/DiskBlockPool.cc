@@ -206,6 +206,10 @@ size_t DiskBlockPool::strideBytes() const {
     return config().stride_bytes;
 }
 
+size_t DiskBlockPool::blockSizeBytes() const {
+    return payloadBytes();
+}
+
 size_t DiskBlockPool::readBytes() const {
     return read_bytes_.load(std::memory_order_relaxed);
 }

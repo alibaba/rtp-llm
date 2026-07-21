@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -65,6 +66,7 @@ public:
     size_t logicalMatchedBlocks() const {
         return logical_matched_blocks_;
     }
+    size_t logicalMatchedBlocks(Tier tier) const;
 
     std::vector<PendingLoadBackItem>& items() {
         return items_;
@@ -85,6 +87,7 @@ private:
     uint64_t                                ticket_id_{0};
     std::vector<PendingLoadBackItem>        items_;
     const size_t                            logical_matched_blocks_{0};
+    std::array<size_t, 3>                   logical_matched_blocks_by_tier_{};
 };
 
 class LoadBackTicketRegistry: public std::enable_shared_from_this<LoadBackTicketRegistry> {
@@ -196,6 +199,7 @@ struct EvictionMove {
     int                       component_group_id{-1};
     Tier                      source_tier{Tier::NONE};
     Tier                      target_tier{Tier::NONE};
+    int64_t                   source_tier_enter_time_us{0};
     std::vector<BlockIdxType> source_blocks;
     std::vector<BlockIdxType> target_blocks;
 };
@@ -347,12 +351,12 @@ public:
         return disk_pool_ ? disk_pool_->totalBlocksNum() : 0;
     }
 
-    GroupBlockSet allocateBlocks(Tier tier, size_t count);
-    void          referenceBlocks(const GroupBlockSet& set) const;
-    void          unreferenceBlocks(const GroupBlockSet& set) const;
+    GroupBlockSet allocateBlocks(Tier tier, size_t count, BlockRefType ref_type);
+    void          referenceBlocks(const GroupBlockSet& set, BlockRefType ref_type) const;
+    void          unreferenceBlocks(const GroupBlockSet& set, BlockRefType ref_type) const;
 
-    BlockIdxType allocateSingleBlock(Tier tier);
-    void         releaseSingleBlock(Tier tier, BlockIdxType block) const;
+    BlockIdxType allocateSingleBlock(Tier tier, BlockRefType ref_type);
+    void         releaseSingleBlock(Tier tier, BlockIdxType block, BlockRefType ref_type) const;
 
     std::vector<BlockIdxType> getBlocks(const GroupSlot& slot, Tier tier) const;
     void                      setBlocks(GroupSlot& slot, Tier tier, const std::vector<BlockIdxType>& blocks);

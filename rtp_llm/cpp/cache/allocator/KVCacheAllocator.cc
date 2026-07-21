@@ -56,9 +56,8 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
                 RtpLLMDeviceCacheReuseMetricsCollector collector;
                 collector.match_cost_time_us    = init_result.match_cost_time_us;
                 collector.device_input_length   = device_input_length;
-                collector.device_reuse_length   = init_result.reuse_len;
-                collector.device_cache_hit_rate = static_cast<float>(static_cast<int64_t>(collector.device_reuse_length)
-                                                                     * 100 / collector.device_input_length);
+                collector.device_cache_hit_rate = static_cast<float>(static_cast<int64_t>(init_result.reuse_len) * 100
+                                                                     / collector.device_input_length);
                 kmonitor::MetricsTags tags;
                 metrics_reporter_->report<RtpLLMDeviceCacheReuseMetrics, RtpLLMDeviceCacheReuseMetricsCollector>(
                     &tags, &collector);
@@ -295,7 +294,7 @@ int KVCacheAllocator::deviceCacheMetricTokensPerBlock() const {
 }
 
 KVCacheTokenCapacity KVCacheAllocator::tokenCapacity(size_t default_seq_size_per_block) const {
-    const size_t total_blocks     = totalBlocksNum();
+    const size_t total_blocks = totalBlocksNum();
     const size_t free_blocks  = freeBlocksNum();
     return {total_blocks * default_seq_size_per_block, free_blocks * default_seq_size_per_block};
 }

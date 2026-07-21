@@ -111,7 +111,7 @@ TEST_F(DeviceFullKVCacheGroupTest, MallocBackfillsMatchedLoadBackPlaceholder) {
 
     auto resident = block_pool->malloc();
     ASSERT_TRUE(resident.has_value());
-    block_pool->incRef(*resident);
+    block_pool->incRef(*resident, BlockRefType::REQUEST);
 
     BlockIds block_ids(/*kernel_blocks_per_kv_block=*/1);
     block_ids.assign({NULL_BLOCK_IDX, *resident});
@@ -144,14 +144,14 @@ TEST_F(DeviceFullKVCacheGroupTest, RequestReleaseKeepsCacheHeldBlock) {
     const auto block = block_ids.blocks()[0];
     EXPECT_EQ(block_pool->refCount(block), 1u);  // request holder
 
-    block_pool->incRef(block);  // additional cache holder
+    block_pool->incRef(block, BlockRefType::BLOCK_CACHE);
     EXPECT_EQ(block_pool->refCount(block), 2u);
 
     group1.free(BlockIndicesType{block});  // release request holder
     EXPECT_TRUE(block_pool->isAllocated(block));
     EXPECT_EQ(block_pool->refCount(block), 1u);
 
-    block_pool->decRef(block);  // release cache holder
+    block_pool->decRef(block, BlockRefType::BLOCK_CACHE);
     EXPECT_FALSE(block_pool->isAllocated(block));
 }
 

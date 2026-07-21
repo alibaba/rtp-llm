@@ -27,8 +27,8 @@ public:
 private:
     bool doInit() override;
 
-    void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const override;
-    void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) override;
+    void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, BlockRefType ref_type) const override;
+    void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, BlockRefType ref_type) override;
 
     int defaultGroupIdForLayer(int layer_id) const;
     int validateGroupIdForLayer(int layer_id, int group_id) const;

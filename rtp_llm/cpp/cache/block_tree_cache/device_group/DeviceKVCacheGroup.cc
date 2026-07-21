@@ -97,7 +97,7 @@ bool DeviceKVCacheGroup::materializePositions(BlockIds& block_ids, const std::ve
     if (!allocated.has_value() || allocated->size() != missing_positions.size()) {
         return false;
     }
-    block_pool_->incRef(*allocated);
+    block_pool_->incRef(*allocated, BlockRefType::REQUEST);
     for (size_t i = 0; i < missing_positions.size(); ++i) {
         block_ids.setAt(missing_positions[i], (*allocated)[i]);
     }
@@ -167,7 +167,7 @@ DeviceKVCacheGroup::convertIndexToBuffer(int layer_id, int block_id, int partiti
 }
 
 void DeviceKVCacheGroup::reference(const BlockIndicesType& new_block_indices) {
-    block_pool_->incRef(new_block_indices);
+    block_pool_->incRef(new_block_indices, BlockRefType::REQUEST);
 }
 
 bool DeviceKVCacheGroup::isCpShardable() const {

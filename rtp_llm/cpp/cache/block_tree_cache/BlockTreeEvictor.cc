@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 
@@ -129,31 +130,33 @@ void BlockTreeEvictor::refreshCandidate(ComponentGroup& group, TreeNode* node, T
 // ---- Semantic events ----
 void BlockTreeEvictor::onInsertCommitted(const BlockTreeInsertResult& result) {
     // Newly created nodes enter their current serving tier now; stamp meta clocks.
-    for (const auto& inserted : result.inserted_nodes) {
+    for (const BlockTreeInsertedNode& inserted : result.inserted_nodes) {
         TreeNode* node = inserted.node;
         if (node == nullptr)
             continue;
-        const uint64_t access = ++access_seq_;
-        const uint64_t admit  = ++admission_seq_;
-        for (auto& group : component_groups_) {
-            auto gid = static_cast<size_t>(group->component_group_id);
+        const uint64_t access             = ++access_seq_;
+        const uint64_t admit              = ++admission_seq_;
+        const int64_t  tier_enter_time_us = currentTimeUs();
+        for (ComponentGroupPtr& group : component_groups_) {
+            const size_t gid = static_cast<size_t>(group->component_group_id);
             if (gid >= node->group_slots.size())
                 continue;
-            auto& slot                          = node->group_slots[gid];
-            slot.candidate_meta.last_access_seq = access;
-            slot.candidate_meta.admission_seq   = admit;
-            slot.candidate_meta.hit_count       = 0;
+            GroupSlot& slot                        = node->group_slots[gid];
+            slot.candidate_meta.last_access_seq    = access;
+            slot.candidate_meta.admission_seq      = admit;
+            slot.candidate_meta.hit_count          = 0;
+            slot.candidate_meta.tier_enter_time_us = tier_enter_time_us;
         }
     }
 
     // Every newly inserted node is offered to every group. FULL's topology
     // predicate filters interior nodes; SWA/LINEAR admit every ready node.
-    for (const auto& inserted : result.inserted_nodes) {
+    for (const BlockTreeInsertedNode& inserted : result.inserted_nodes) {
         TreeNode* node = inserted.node;
         if (node == nullptr)
             continue;
-        for (auto& group : component_groups_) {
-            auto gid = static_cast<size_t>(group->component_group_id);
+        for (ComponentGroupPtr& group : component_groups_) {
+            const size_t gid = static_cast<size_t>(group->component_group_id);
             if (gid >= node->group_slots.size())
                 continue;
             refreshCandidate(*group, node, group->getTopTier(node->group_slots[gid]));
@@ -168,8 +171,8 @@ void BlockTreeEvictor::onInsertCommitted(const BlockTreeInsertResult& result) {
                                     nullptr :
                                     result.inserted_nodes.front().node->parent;
     if (existing_parent != nullptr && existing_parent->parent != nullptr) {
-        for (auto& group : component_groups_) {
-            auto gid = static_cast<size_t>(group->component_group_id);
+        for (ComponentGroupPtr& group : component_groups_) {
+            const size_t gid = static_cast<size_t>(group->component_group_id);
             if (gid >= existing_parent->group_slots.size())
                 continue;
             refreshCandidate(*group, existing_parent, group->getTopTier(existing_parent->group_slots[gid]));
@@ -262,6 +265,16 @@ CandidateStats BlockTreeEvictor::candidateStats() const {
             stats.disk_candidates += tier_heaps.disk->size();
     }
     return stats;
+}
+
+size_t BlockTreeEvictor::candidateCount(int component_group_id, Tier tier) const {
+    const EvictionHeap* heap = heapFor(component_group_id, tier);
+    return heap == nullptr ? 0 : heap->size();
+}
+
+std::vector<TreeNode*> BlockTreeEvictor::candidateNodes(int component_group_id, Tier tier) const {
+    const EvictionHeap* heap = heapFor(component_group_id, tier);
+    return heap == nullptr ? std::vector<TreeNode*>{} : heap->nodes();
 }
 
 // ---- Eviction selection ----
@@ -489,16 +502,18 @@ void BlockTreeEvictor::complete(BlockTree& tree, const EvictionPlan& plan, const
 // the transfer state, and re-admit the node at its new tier. Source blocks were
 // held only by cache.
 void BlockTreeEvictor::applyMoveCompletion(ComponentGroupPtr& group, const EvictionMove& move) {
-    auto& slot = move.node->group_slots[static_cast<size_t>(move.component_group_id)];
+    GroupSlot& slot = move.node->group_slots[static_cast<size_t>(move.component_group_id)];
     // Release source cache-hold (prepare-time snapshot) before clearing the slot.
-    group->unreferenceBlocks(GroupBlockSet{move.component_group_id, move.source_tier, {move.source_blocks}});
+    group->unreferenceBlocks(GroupBlockSet{move.component_group_id, move.source_tier, {move.source_blocks}},
+                             BlockRefType::BLOCK_CACHE);
     group->evictFromTier(move.node, slot, move.source_tier);
     slot.transfer_state = SlotTransferState::IDLE;
 
     if (move.target_tier != Tier::NONE) {
         group->setBlocks(slot, move.target_tier, move.target_blocks);
         // Section 7.5: keep last_access_seq / hit_count, refresh the admission clock.
-        slot.candidate_meta.admission_seq = ++admission_seq_;
+        slot.candidate_meta.admission_seq      = ++admission_seq_;
+        slot.candidate_meta.tier_enter_time_us = currentTimeUs();
         refreshCandidate(*group, move.node, move.target_tier);
     }
 }
@@ -554,14 +569,15 @@ bool BlockTreeEvictor::beginLoadBack(TreeNode* node, int group_id, Tier source) 
 }
 
 void BlockTreeEvictor::finishLoadBack(TreeNode* node, int group_id, Tier source, bool copy_ok) {
-    auto gid = static_cast<size_t>(group_id);
+    const size_t gid = static_cast<size_t>(group_id);
     if (node == nullptr || gid >= component_groups_.size() || gid >= node->group_slots.size())
         return;
-    auto& group         = component_groups_[gid];
-    auto& slot          = node->group_slots[gid];
-    slot.transfer_state = SlotTransferState::IDLE;
+    ComponentGroupPtr& group = component_groups_[gid];
+    GroupSlot&         slot  = node->group_slots[gid];
+    slot.transfer_state      = SlotTransferState::IDLE;
     if (copy_ok) {
-        slot.candidate_meta.admission_seq = ++admission_seq_;
+        slot.candidate_meta.admission_seq      = ++admission_seq_;
+        slot.candidate_meta.tier_enter_time_us = currentTimeUs();
         refreshCandidate(*group, node, Tier::DEVICE);
     } else {
         refreshCandidate(*group, node, source);
@@ -612,13 +628,14 @@ BlockTreeEvictor::makeMove(TreeNode* node, int component_group_id, Tier source_t
     eviction_move.source_tier        = source_tier;
     eviction_move.target_tier        = target_tier;
 
-    auto gid = static_cast<size_t>(component_group_id);
+    const size_t gid = static_cast<size_t>(component_group_id);
     if (node == nullptr || gid >= node->group_slots.size() || gid >= component_groups_.size())
         return eviction_move;
 
     // getBlocks encapsulates the tier->slot-field mapping and returns empty for
     // absent values, so the source_blocks.empty() guard still holds.
-    eviction_move.source_blocks = component_groups_[gid]->getBlocks(node->group_slots[gid], source_tier);
+    eviction_move.source_tier_enter_time_us = node->group_slots[gid].candidate_meta.tier_enter_time_us;
+    eviction_move.source_blocks             = component_groups_[gid]->getBlocks(node->group_slots[gid], source_tier);
     return eviction_move;
 }
 
@@ -664,7 +681,7 @@ bool BlockTreeEvictor::prepareMove(EvictionMove& eviction_move) {
     reserveSource(eviction_move);
     if (eviction_move.target_tier != Tier::NONE) {
         // cache self-allocated path: malloc + incRef, not yet written to slot/heap.
-        BlockIdxType target = group.allocateSingleBlock(eviction_move.target_tier);
+        BlockIdxType target = group.allocateSingleBlock(eviction_move.target_tier, BlockRefType::BLOCK_CACHE);
         if (isNullBlockIdx(target)) {
             restoreSource(eviction_move);
             return false;
@@ -706,7 +723,7 @@ void BlockTreeEvictor::releaseTargetBlocks(const EvictionMove& eviction_move) {
         return;
     auto& group = component_groups_[gid];
     for (auto block : eviction_move.target_blocks)
-        group->releaseSingleBlock(eviction_move.target_tier, block);
+        group->releaseSingleBlock(eviction_move.target_tier, block, BlockRefType::BLOCK_CACHE);
 }
 
 void BlockTreeEvictor::finalizeEviction(BlockTree& tree, TreeNode* node) {

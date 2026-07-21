@@ -296,7 +296,15 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     }
 
     kv_resource->cacheResource(0).setDeviceReuseBlockNum(reuse_blocks);
-    return {true, reuse_len, match_cost_time_us, async_ctx};
+    MallocResult result{true, reuse_len, match_cost_time_us, async_ctx};
+    if (load_back_ticket != nullptr && reuse_blocks > 0) {
+        const int reuse_unit_tokens = reuse_len / reuse_blocks;
+        result.memory_reuse_len =
+            static_cast<int>(load_back_ticket->logicalMatchedBlocks(Tier::HOST)) * reuse_unit_tokens;
+        result.disk_reuse_len =
+            static_cast<int>(load_back_ticket->logicalMatchedBlocks(Tier::DISK)) * reuse_unit_tokens;
+    }
+    return result;
 }
 
 MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
@@ -518,9 +526,8 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
         return nullptr;
     }
 
-    // Single-count pool: request and connector holders share one reference category
-    // (is_connector still distinguishes the release path via the deleter above).
-    block_pool_->incRef(referenced_blocks);
+    const BlockRefType ref_type = is_connector ? BlockRefType::CONNECTOR : BlockRefType::REQUEST;
+    block_pool_->incRef(referenced_blocks, ref_type);
     selected_resource->mutableBlockIds(0).assign(std::move(selected_blocks));
     selected_resource->setCacheKeys(std::move(selected_cache_keys));
     selected_resource->setBlockDependencies(std::move(selected_dependencies));
@@ -539,9 +546,8 @@ void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_r
         }
     }
     if (!blocks_to_free.empty()) {
-        // Single-count pool: both request and connector releases decrement one holder.
-        (void)is_connector;
-        block_pool_->decRef(blocks_to_free);
+        const BlockRefType ref_type = is_connector ? BlockRefType::CONNECTOR : BlockRefType::REQUEST;
+        block_pool_->decRef(blocks_to_free, ref_type);
     }
 }
 

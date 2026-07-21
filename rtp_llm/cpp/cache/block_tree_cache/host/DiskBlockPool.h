@@ -69,6 +69,7 @@ public:
 
     size_t             payloadBytes() const;
     size_t             strideBytes() const;
+    size_t             blockSizeBytes() const override;
     size_t             readBytes() const;
     size_t             writeBytes() const;
     uint64_t           blockOffset(BlockIdxType block) const;

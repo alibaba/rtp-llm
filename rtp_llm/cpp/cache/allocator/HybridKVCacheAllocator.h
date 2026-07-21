@@ -52,8 +52,8 @@ protected:
                     std::vector<BlockIndicesType>&       referenced_blocks);
     bool preflightLoadBackMappings(const std::shared_ptr<LoadBackTicket>& ticket) const;
 
-    virtual void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const = 0;
-    virtual void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false)            = 0;
+    virtual void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, BlockRefType ref_type) const = 0;
+    virtual void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, BlockRefType ref_type)            = 0;
     virtual bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const;
     bool         hasAvailableBlocksForReserveWithPendingTargets(const MallocInfo&          malloc_info,
                                                                 size_t                     reserve_blocks,

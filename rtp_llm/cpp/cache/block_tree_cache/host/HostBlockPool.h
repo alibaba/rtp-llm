@@ -48,6 +48,7 @@ public:
 
     size_t payloadBytes() const;
     size_t strideBytes() const;
+    size_t blockSizeBytes() const override;
 
     std::string debugString() const override;
 

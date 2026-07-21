@@ -168,6 +168,8 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
         stream_->setMtpTokenIndex(result.reuse_len);
         stream_->setInitialReuseLength(result.reuse_len);
         stream_->setLocalReuseLength(result.reuse_len);
+        stream_->setMemoryReuseLength(result.memory_reuse_len);
+        stream_->setDiskReuseLength(result.disk_reuse_len);
     }
     allocator_load_context_ = std::move(result.async_context);
     return absl::OkStatus();
@@ -229,6 +231,8 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step, int seq_len_o
         stream_->setMtpTokenIndex(result.reuse_len);
         stream_->setInitialReuseLength(result.reuse_len);
         stream_->setLocalReuseLength(result.reuse_len);
+        stream_->setMemoryReuseLength(result.memory_reuse_len);
+        stream_->setDiskReuseLength(result.disk_reuse_len);
     }
 
     if (result.async_context) {

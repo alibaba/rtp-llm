@@ -141,7 +141,7 @@ static BlockIdxType prepareDeviceTarget(const std::shared_ptr<FullComponentGroup
     if (isNullBlockIdx(device_block)) {
         return NULL_BLOCK_IDX;
     }
-    device_pool->incRef(device_block);
+    device_pool->incRef(device_block, BlockRefType::BLOCK_CACHE);
     group->setDevicePools({device_pool});
     return device_block;
 }
@@ -277,7 +277,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastHostLoadBackCommitsDeviceSlot) {
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
     std::vector<Component> components;
     sealBroadcastLayout(group, components);
-    const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST);
+    const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     BlockTreeCacheConfig config;
@@ -295,7 +295,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastHostLoadBackCommitsDeviceSlot) {
     BlockTreeFindResult find_result = cache->tree()->findNode({100});
     ASSERT_NE(find_result.matched_node, nullptr);
 
-    group->referenceBlocks(GroupBlockSet{0, Tier::HOST, {{host_block}}});
+    group->referenceBlocks(GroupBlockSet{0, Tier::HOST, {{host_block}}}, BlockRefType::REQUEST);
     ASSERT_TRUE(cache->evictor_.beginLoadBack(find_result.matched_node, 0, Tier::HOST));
     BlockTreeCache::LoadBackItem item{find_result.matched_node, 0, Tier::HOST, {host_block}, {device_block}};
     cache->performLoadBack({item}, /*ctx=*/nullptr);
@@ -337,7 +337,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastHostLoadBackFailureKeepsSourceSlot)
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
     std::vector<Component> components;
     sealBroadcastLayout(group, components);
-    const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST);
+    const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     BlockTreeCacheConfig config;
@@ -355,7 +355,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastHostLoadBackFailureKeepsSourceSlot)
     BlockTreeFindResult find_result = cache->tree()->findNode({100});
     ASSERT_NE(find_result.matched_node, nullptr);
 
-    group->referenceBlocks(GroupBlockSet{0, Tier::HOST, {{host_block}}});
+    group->referenceBlocks(GroupBlockSet{0, Tier::HOST, {{host_block}}}, BlockRefType::REQUEST);
     ASSERT_TRUE(cache->evictor_.beginLoadBack(find_result.matched_node, 0, Tier::HOST));
     BlockTreeCache::LoadBackItem item{find_result.matched_node, 0, Tier::HOST, {host_block}, {device_block}};
     cache->performLoadBack({item}, /*ctx=*/nullptr);
@@ -399,7 +399,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastDiskLoadBackUsesTwoTransferStages) 
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
     std::vector<Component> components;
     sealBroadcastLayout(group, components);
-    const BlockIdxType disk_block = group->allocateSingleBlock(Tier::DISK);
+    const BlockIdxType disk_block = group->allocateSingleBlock(Tier::DISK, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
     BlockTreeCacheConfig config;
@@ -418,7 +418,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastDiskLoadBackUsesTwoTransferStages) 
     BlockTreeFindResult find_result = cache->tree()->findNode({100});
     ASSERT_NE(find_result.matched_node, nullptr);
 
-    group->referenceBlocks(GroupBlockSet{0, Tier::DISK, {{disk_block}}});
+    group->referenceBlocks(GroupBlockSet{0, Tier::DISK, {{disk_block}}}, BlockRefType::REQUEST);
     ASSERT_TRUE(cache->evictor_.beginLoadBack(find_result.matched_node, 0, Tier::DISK));
     BlockTreeCache::LoadBackItem item{find_result.matched_node, 0, Tier::DISK, {disk_block}, {device_block}};
     cache->performLoadBack({item}, /*ctx=*/nullptr);
@@ -474,7 +474,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastEvictionSuccessCommitsPlan) {
     full->setDiskPool(disk_pool);
     std::vector<Component> components;
     sealBroadcastLayout(full, components);
-    const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST);
+    const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     BlockTreeCacheConfig config;
@@ -539,7 +539,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastEvictionFailureRollsBackPlan) {
     full->setDiskPool(disk_pool);
     std::vector<Component> components;
     sealBroadcastLayout(full, components);
-    const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST);
+    const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     BlockTreeCacheConfig config;

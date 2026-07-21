@@ -85,11 +85,11 @@ public:
     CacheLayerLayout getMTPModuleCacheLayerLayout(int mtp_module_id) const;
 
     // 资源统计和信息查询
-    size_t                  freeBlocksNum() const;
-    size_t                  availableTokensNum() const;
-    size_t                  totalBlocksNum() const;
-    size_t                  maxAvailableTokensNum() const;
-    KVCacheInfo             getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    size_t      freeBlocksNum() const;
+    size_t      availableTokensNum() const;
+    size_t      totalBlocksNum() const;
+    size_t      maxAvailableTokensNum() const;
+    KVCacheInfo getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
 
     // 系统资源管理
     void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
@@ -139,8 +139,8 @@ public:
     virtual bool writeKVBlockForTest(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
 
 private:
-    void allocateAndSync();
-    void reportMetricsLoop();
+    void                              allocateAndSync();
+    void                              reportMetricsLoop();
     std::shared_ptr<BroadcastManager> createBlockTreeBroadcastManager() const;
 
     // 成员变量

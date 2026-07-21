@@ -75,6 +75,9 @@ struct MallocResult {
     // load_back (see LoadBackTicket); nullptr when no load_back was triggered
     // (device cache disabled, no host/disk hit, or the ticket was aborted).
     std::shared_ptr<AsyncContext> async_context = nullptr;
+
+    int memory_reuse_len = 0;
+    int disk_reuse_len   = 0;
 };
 
 struct FreeInfo {

@@ -25,6 +25,9 @@ public:
         markInitialized();
         return true;
     }
+    size_t blockSizeBytes() const override {
+        return 0;
+    }
 };
 
 std::shared_ptr<TestPool> makeInitializedPool(size_t physical_block_count) {
@@ -74,7 +77,7 @@ TEST(IBlockPoolTest, BatchMallocIsAtomic) {
     EXPECT_EQ(pool.freeBlocksNum(), 1u);
 }
 
-TEST(IBlockPoolTest, RefcountMetricsFollowSingleRefcountModel) {
+TEST(IBlockPoolTest, RefcountMetricsFollowAggregateRefcount) {
     auto pool = TestPool(std::make_shared<TestPoolConfig>("test", 4));
     ASSERT_TRUE(pool.init());
 
@@ -82,15 +85,15 @@ TEST(IBlockPoolTest, RefcountMetricsFollowSingleRefcountModel) {
     ASSERT_TRUE(block.has_value());
     EXPECT_EQ(pool.unreferencedBlocksNum(), 1u);
 
-    pool.incRef(*block);
+    pool.incRef(*block, BlockRefType::REQUEST);
     EXPECT_EQ(pool.refCount(*block), 1u);
     EXPECT_EQ(pool.treeCachedBlocksNum(), 1u);
 
-    pool.incRef(*block);
+    pool.incRef(*block, BlockRefType::REQUEST);
     EXPECT_EQ(pool.refCount(*block), 2u);
     EXPECT_EQ(pool.activeTreeCachedBlocksNum(), 1u);
 
-    pool.decRef(*block);
+    pool.decRef(*block, BlockRefType::REQUEST);
     pool.free(*block);
     EXPECT_EQ(pool.freeBlocksNum(), 3u);
 }
@@ -120,16 +123,22 @@ TEST(IBlockPoolTest, DecRefDoesNotFreeWhileAnotherHolderExists) {
     ASSERT_TRUE(block.has_value());
 
     // malloc() only reserves capacity; owners must explicitly take refs.
-    pool->incRef(*block);  // cache holder
-    pool->incRef(*block);  // request holder
+    pool->incRef(*block, BlockRefType::BLOCK_CACHE);
+    pool->incRef(*block, BlockRefType::REQUEST);
     EXPECT_EQ(pool->refCount(*block), 2u);
+    EXPECT_EQ(pool->totalRefCount(BlockRefType::BLOCK_CACHE), 1u);
+    EXPECT_EQ(pool->totalRefCount(BlockRefType::REQUEST), 1u);
+    EXPECT_EQ(pool->totalRefCount(BlockRefType::CONNECTOR), 0u);
 
-    pool->decRef(*block);
+    pool->decRef(*block, BlockRefType::REQUEST);
     EXPECT_TRUE(pool->isAllocated(*block));
     EXPECT_EQ(pool->refCount(*block), 1u);
+    EXPECT_EQ(pool->totalRefCount(BlockRefType::REQUEST), 0u);
+    EXPECT_EQ(pool->totalRefCount(BlockRefType::BLOCK_CACHE), 1u);
 
-    pool->decRef(*block);
+    pool->decRef(*block, BlockRefType::BLOCK_CACHE);
     EXPECT_FALSE(pool->isAllocated(*block));
+    EXPECT_EQ(pool->totalRefCount(BlockRefType::BLOCK_CACHE), 0u);
 }
 
 TEST(IBlockPoolTest, DecRefFreesSingleRequestHolder) {
@@ -137,8 +146,8 @@ TEST(IBlockPoolTest, DecRefFreesSingleRequestHolder) {
     auto block = pool->malloc();
     ASSERT_TRUE(block.has_value());
 
-    pool->incRef(*block);  // request holder
-    pool->decRef(*block);
+    pool->incRef(*block, BlockRefType::REQUEST);
+    pool->decRef(*block, BlockRefType::REQUEST);
 
     EXPECT_FALSE(pool->isAllocated(*block));
 }
@@ -153,7 +162,7 @@ TEST(IBlockPoolTest, DecRefRejectsUnheldAllocatedBlock) {
     // guard is observable as a throw in this test env.
     const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
     StaticConfig::user_ft_core_dump_on_exception = false;
-    EXPECT_ANY_THROW(pool->decRef(*block));
+    EXPECT_ANY_THROW(pool->decRef(*block, BlockRefType::REQUEST));
     StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
 
     EXPECT_TRUE(pool->isAllocated(*block));

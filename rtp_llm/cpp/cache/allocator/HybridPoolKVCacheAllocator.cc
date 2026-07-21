@@ -147,17 +147,12 @@ int HybridPoolKVCacheAllocator::validateGroupIdForLayer(int layer_id, int group_
 
 void HybridPoolKVCacheAllocator::referenceBlocksInGroup(int                     gid,
                                                         const BlockIndicesType& blocks,
-                                                        bool                    is_connector) const {
-    // Single-count pool: request and connector holders are the same reference category.
-    // is_connector is retained in the signature for call-site parity but no longer selects
-    // an independent counter.
-    (void)is_connector;
-    group_block_pools_[static_cast<size_t>(gid)]->incRef(blocks);
+                                                        BlockRefType            ref_type) const {
+    group_block_pools_[static_cast<size_t>(gid)]->incRef(blocks, ref_type);
 }
 
-void HybridPoolKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector) {
-    (void)is_connector;
-    group_block_pools_[static_cast<size_t>(gid)]->decRef(blocks);
+void HybridPoolKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesType& blocks, BlockRefType ref_type) {
+    group_block_pools_[static_cast<size_t>(gid)]->decRef(blocks, ref_type);
 }
 
 CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
@@ -359,10 +354,10 @@ size_t HybridPoolKVCacheAllocator::minTokenCapacity(bool use_free_blocks, bool f
             if (!group_block_pools_[gid]) {
                 continue;
             }
-            saw_group        = true;
+            saw_group = true;
             const auto block =
                 use_free_blocks ? group_block_pools_[gid]->freeBlocksNum() : group_block_pools_[gid]->totalBlocksNum();
-            min_tokens       = std::min(min_tokens, block * logicalSeqSizePerBlockForCapacity(gid));
+            min_tokens = std::min(min_tokens, block * logicalSeqSizePerBlockForCapacity(gid));
         }
         return std::make_pair(saw_group, min_tokens);
     };
@@ -424,7 +419,7 @@ KVCacheTokenCapacity HybridPoolKVCacheAllocator::tokenCapacity(size_t default_se
 std::vector<KVCachePoolMetricsSnapshot> HybridPoolKVCacheAllocator::poolMetricsSnapshots() const {
     std::vector<KVCachePoolMetricsSnapshot> snapshots;
     snapshots.reserve(group_block_pools_.size());
-    const size_t reserve_blocks                    = reserveBlockNum();
+    const size_t reserve_blocks               = reserveBlockNum();
     const size_t total_reservable_free_blocks = totalReservableFreeBlocks();
     for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
         const auto& pool = group_block_pools_[gid];
@@ -432,14 +427,18 @@ std::vector<KVCachePoolMetricsSnapshot> HybridPoolKVCacheAllocator::poolMetricsS
             continue;
         }
         KVCachePoolMetricsSnapshot snapshot;
-        snapshot.pool_index           = gid;
-        snapshot.pool_name            = pool->poolName();
-        snapshot.total_blocks         = pool->totalBlocksNum();
-        snapshot.free_blocks          = pool->freeBlocksNum();
+        snapshot.pool_index                = gid;
+        snapshot.pool_name                 = pool->poolName();
+        snapshot.block_size_bytes          = pool->blockSizeBytes();
+        snapshot.total_blocks              = pool->totalBlocksNum();
+        snapshot.free_blocks               = pool->freeBlocksNum();
         snapshot.active_tree_cached_blocks = pool->activeTreeCachedBlocksNum();
         snapshot.reserve_blocks            = reserveBlocksForPool(gid, reserve_blocks, total_reservable_free_blocks);
-        snapshot.used_ratio           = (snapshot.total_blocks == 0) ?
-                                            0.0f :
+        snapshot.request_ref_count         = pool->totalRefCount(BlockRefType::REQUEST);
+        snapshot.connector_ref_count       = pool->totalRefCount(BlockRefType::CONNECTOR);
+        snapshot.block_cache_ref_count     = pool->totalRefCount(BlockRefType::BLOCK_CACHE);
+        snapshot.used_ratio                = (snapshot.total_blocks == 0) ?
+                                                 0.0f :
                                                  static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.free_blocks)
                                                      / static_cast<double>(snapshot.total_blocks));
         snapshots.push_back(snapshot);
@@ -501,19 +500,18 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
         const auto group_type             = config_.typeForGroup(static_cast<size_t>(gid));
         const int  group_common_seq       = cpEffectiveSeqLenForReserve(cp_mapper, group_type, raw_common_seq_len);
         const int  group_seq_len          = cpEffectiveSeqLenForReserve(cp_mapper, group_type, raw_seq_len);
-        const int group_reuse_blocks_len =
-            reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, gid) : 0;
-        const auto need = group(gid)->getNeedBlocks(
+        const int  group_reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, gid) : 0;
+        const auto need                   = group(gid)->getNeedBlocks(
             group_common_seq, group_seq_len, reserve_step, group_reuse_blocks_len, reuse_enabled);
         const int need_blocks = need.common_blocks + batch_size * need.extra_blocks;
         if (need_blocks <= 0) {
             continue;
         }
-        const auto&  pool             = group_block_pools_[static_cast<size_t>(gid)];
+        const auto&  pool = group_block_pools_[static_cast<size_t>(gid)];
         const size_t group_reserve_blocks =
             reserveBlocksForPool(static_cast<size_t>(gid), reserve_blocks, total_reservable_free_blocks);
         const size_t required_blocks = static_cast<size_t>(need_blocks) + group_reserve_blocks;
-        const size_t free_blocks = pool->freeBlocksNum();
+        const size_t free_blocks     = pool->freeBlocksNum();
         if (free_blocks < required_blocks) {
             if (malloc_info.verbose) {
                 RTP_LLM_LOG_INFO("HybridPool initMalloc rejected by reserve blocks: request_id=%ld pool_name=%s "

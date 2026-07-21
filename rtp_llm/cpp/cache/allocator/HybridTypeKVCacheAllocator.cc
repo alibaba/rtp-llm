@@ -18,8 +18,7 @@ HybridTypeKVCacheAllocator::HybridTypeKVCacheAllocator(const CacheConfig&       
 bool HybridTypeKVCacheAllocator::doInit() {
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "no cache groups found in CacheConfig");
 
-    auto device_config =
-        std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfig(config_));
+    auto device_config = std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfig(config_));
     device_config->use_cuda_malloc_backing = use_cuda_malloc_block_pool_;
 
     std::shared_ptr<const DeviceBlockPoolConfig> const_config = device_config;
@@ -59,17 +58,14 @@ bool HybridTypeKVCacheAllocator::doInit() {
 
 void HybridTypeKVCacheAllocator::referenceBlocksInGroup(int                     gid,
                                                         const BlockIndicesType& blocks,
-                                                        bool                    is_connector) const {
-    // Single-count shared pool: request/connector holders share one reference category.
+                                                        BlockRefType            ref_type) const {
     (void)gid;
-    (void)is_connector;
-    block_pool_->incRef(blocks);
+    block_pool_->incRef(blocks, ref_type);
 }
 
-void HybridTypeKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector) {
+void HybridTypeKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesType& blocks, BlockRefType ref_type) {
     (void)gid;
-    (void)is_connector;
-    block_pool_->decRef(blocks);
+    block_pool_->decRef(blocks, ref_type);
 }
 
 CacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {

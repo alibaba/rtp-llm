@@ -11,6 +11,7 @@
 #include "autil/LockFreeThreadPool.h"
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
@@ -157,15 +158,21 @@ public:
     // group (target_tier = NONE, content dropped). Returns the number actually freed.
     int evictForGroup(int component_group_id, size_t num_blocks);
 
-    CacheStats           getStats() const;
-    BlockTreeKeySnapshot getKeySnapshot(size_t limit) const;
-    void                 waitForPendingTasks();
-    void                 onBlocksReleased();
+    CacheStats                                getStats() const;
+    std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
+    void                                      reportMetrics() const;
+    BlockTreeKeySnapshot                      getKeySnapshot(size_t limit) const;
+    void                                      waitForPendingTasks();
+    void                                      onBlocksReleased();
 
     // Release path-lock references acquired during match().
     void releaseMatchedBlocks(const std::vector<GroupBlockSet>& sets);
 
     CopyStatus executeTransfer(const TransferDescriptor& descriptor);
+
+    void setMetricsReporter(const std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
+        metrics_reporter_.setMetricsReporter(metrics_reporter);
+    }
 
     // ---- Configuration mutators (for runtime adjustment) ----
     void setTierWatermark(Tier tier, double ratio, size_t capacity) {
@@ -303,6 +310,7 @@ private:
     std::shared_ptr<StorageBackend>            storage_backend_;
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
     std::shared_ptr<BroadcastManager>          broadcast_manager_;
+    BlockTreeCacheMetricsReporter              metrics_reporter_;
     BlockTreeEvictor                           evictor_;
     bool                                       initialized_{false};
 

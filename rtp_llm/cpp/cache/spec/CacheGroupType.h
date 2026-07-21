@@ -56,6 +56,19 @@ inline const char* cacheGroupTypeName(CacheGroupType group_type) {
     return "UNKNOWN";
 }
 
+inline const char* metricCacheGroupTypeName(CacheGroupType group_type) {
+    if (group_type == CacheGroupType::LINEAR) {
+        return "linear";
+    }
+    if (group_type == CacheGroupType::FULL) {
+        return "full";
+    }
+    if (group_type == CacheGroupType::SWA) {
+        return "swa";
+    }
+    return "unknown";
+}
+
 inline const char* cacheEvictPolicyName(CacheEvictPolicy evict_policy) {
     switch (evict_policy) {
         case CacheEvictPolicy::CHAIN:
