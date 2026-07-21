@@ -1,0 +1,57 @@
+diff --git a/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp8_mega_moe.cuh b/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp8_mega_moe.cuh
+--- a/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp8_mega_moe.cuh
++++ b/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp8_mega_moe.cuh
+@@ -1436,11 +1436,10 @@ sm100_fp8_fp8_mega_moe_impl(void* y,
+         DG_DEVICE_ASSERT(kNumChunkSlots * kNumEpilogueWarps * kNumChunkBytes <= static_cast<uint32_t>(
+             reinterpret_cast<uint8_t*>(barrier_start_ptr) - smem_buffer));
+
+-        // Per-warp buffer: 2 stage load buffers + 1 store buffer
++        // Per-warp double-buffered TMA load buffers
+         const auto combine_load_buffer = utils::PatternVisitor([&](const uint32_t& i) {
+             return math::advance_ptr<uint4>(smem_buffer, (epilogue_warp_idx + i * kNumEpilogueWarps) * kNumChunkBytes);
+         });
+-        const auto combine_store_buffer  = math::advance_ptr<uint4>(smem_buffer, (epilogue_warp_idx + kNumEpilogueWarps * 2) * kNumChunkBytes);
+
+         // Per-warp barriers
+         auto combine_load_barriers = utils::PatternVisitor([&](const uint32_t& i) {
+@@ -1556,7 +1555,14 @@ sm100_fp8_fp8_mega_moe_impl(void* y,
+                 }
+             }
+
+-            // Cast
++            // Cast and write coalesced 128-bit values directly. Keeping the
++            // final output off the shared-memory/TMA store pipeline avoids a
++            // rare single-row corruption observed when the pipelined TMA
++            // combine loads and output stores are active together.
++            auto* direct_y_ptr = reinterpret_cast<uint4*>(
++                math::advance_ptr(y,
++                    static_cast<uint64_t>(token_idx) * kNumHiddenBytes +
++                    chunk_byte_offset));
+             #pragma unroll
+             for (uint32_t j = 0; j < kNumUint4PerLane; ++ j) {
+                 uint4 casted;
+@@ -1565,23 +1571,7 @@ sm100_fp8_fp8_mega_moe_impl(void* y,
+                 for (uint32_t l = 0; l < kNumElemsPerUint4; ++ l)
+                     casted_bf16[l] = __float22bfloat162_rn(reduced[j * kNumElemsPerUint4 + l]);
+
+-                // Wait share memory release and write
+-                if (j == 0) {
+-                    ptx::tma_store_wait<0>();
+-                    __syncwarp();
+-                }
+-                ptx::st_shared(combine_store_buffer + j * 32 + lane_idx,
+-                               casted.x, casted.y, casted.z, casted.w);
+-            }
+-            __syncwarp();
+-
+-            // TMA store the token chunk
+-            if (cute::elect_one_sync()) {
+-                cute::tma_store_fence();
+-                ptx::tma_store_1d(
+-                    math::advance_ptr(y, static_cast<uint64_t>(token_idx) * kNumHiddenBytes + chunk_byte_offset),
+-                    combine_store_buffer, kNumChunkBytes);
+-                cute::tma_store_arrive();
++                direct_y_ptr[j * 32 + lane_idx] = casted;
+             }
+             __syncwarp();
+         };
