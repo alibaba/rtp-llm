@@ -38,6 +38,7 @@ from rtp_llm.dash_sc.codec import (
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     _dash_error_spec_for_ft_exception,
+    _phase2_max_new_tokens_for_completion_alias,
     build_think_runtime,
     iter_real_model_stream_infer,
 )
@@ -230,6 +231,47 @@ def _assert_parameter_error_response(
     testcase.assertEqual(_gen_ids(resp), [])
 
 
+class Phase2MaxNewTokensForCompletionAliasTest(unittest.TestCase):
+    """Unit tests: alias budget is a *total* budget (thinking included)."""
+
+    def test_alias_only_deducts_think_tokens(self) -> None:
+        sampling = SamplingParams(
+            max_new_tokens=100, max_new_tokens_from_completion_alias=True
+        )
+        self.assertEqual(_phase2_max_new_tokens_for_completion_alias(sampling, 10), 90)
+
+    def test_alias_only_clamps_to_zero_when_thinking_exhausts_budget(self) -> None:
+        sampling = SamplingParams(
+            max_new_tokens=3, max_new_tokens_from_completion_alias=True
+        )
+        self.assertEqual(_phase2_max_new_tokens_for_completion_alias(sampling, 3), 0)
+        self.assertEqual(_phase2_max_new_tokens_for_completion_alias(sampling, 5), 0)
+
+    def test_alias_with_none_think_tokens_keeps_full_budget(self) -> None:
+        sampling = SamplingParams(
+            max_new_tokens=100, max_new_tokens_from_completion_alias=True
+        )
+        self.assertEqual(
+            _phase2_max_new_tokens_for_completion_alias(sampling, None), 100
+        )
+
+    def test_total_cap_still_applies_when_tighter(self) -> None:
+        sampling = SamplingParams(
+            max_new_tokens=100,
+            max_new_tokens_from_completion_alias=True,
+            max_total_tokens=50,
+        )
+        self.assertEqual(_phase2_max_new_tokens_for_completion_alias(sampling, 10), 40)
+
+    def test_alias_budget_wins_when_tighter_than_total_cap(self) -> None:
+        sampling = SamplingParams(
+            max_new_tokens=100,
+            max_new_tokens_from_completion_alias=True,
+            max_total_tokens=105,
+        )
+        self.assertEqual(_phase2_max_new_tokens_for_completion_alias(sampling, 10), 90)
+
+
 class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
     def _minimal_request(self) -> predict_v2_pb2.ModelInferRequest:
         req = predict_v2_pb2.ModelInferRequest()
@@ -408,9 +450,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status_code"], 503)
         self.assertIn("route failed", payload["status_message"])
         self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.TASK_LIST_FULL)
-        self.assertEqual(
-            access_agg.backend_error_code, "8500_ROUTE_ERROR"
-        )
+        self.assertEqual(access_agg.backend_error_code, "8500_ROUTE_ERROR")
 
     async def test_stream_exception_yields_error_message(self) -> None:
         req = self._minimal_request()
@@ -736,7 +776,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [7, 8, 128821],
                 SamplingParams(
-                    max_new_tokens=2,
+                    max_new_tokens=4,
                     max_new_tokens_from_completion_alias=True,
                 ),
                 OtherParams(max_new_think_tokens=10),
@@ -751,7 +791,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
 
         phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
-        self.assertEqual(visitor.generate_inputs[0].generate_config.max_new_tokens, 2)
+        self.assertEqual(visitor.generate_inputs[0].generate_config.max_new_tokens, 4)
+        # Total budget 4 minus 2 phase-1 think tokens (echoed <think> + one id).
         self.assertEqual(visitor.generate_inputs[1].generate_config.max_new_tokens, 2)
         self.assertEqual(len(phase2_chunks), 1)
         self.assertEqual(_gen_ids(phase2_chunks[0]), [20, 21])
@@ -807,7 +848,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(visitor.generate_inputs[0].generate_config.max_new_tokens, 100)
-        self.assertEqual(visitor.generate_inputs[1].generate_config.max_new_tokens, 95)
+        # Alias budget 100 - 10 think tokens = 90; tighter than total cap 105 - 10.
+        self.assertEqual(visitor.generate_inputs[1].generate_config.max_new_tokens, 90)
         self.assertEqual(
             chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
             10,
@@ -853,6 +895,159 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(c.error_message for c in chunks))
         self.assertEqual(_gen_ids(chunks[-1]), [128822, 271])
         self.assertEqual(_finish_reason(chunks[-1]), LLMFinishReason.LENGTH)
+
+    async def test_phase2_completion_alias_without_total_cap_deducts_think_tokens(
+        self,
+    ) -> None:
+        """Alias-only (max_completion_tokens, no max_tokens) is a total budget:
+        phase-2 must get the alias budget minus phase-1 think tokens."""
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor(
+                        list(range(10, 20)) + [1], dtype=torch.int32
+                    ),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=2, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2])]
+        )
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(
+                    max_new_tokens=100,
+                    max_new_tokens_from_completion_alias=True,
+                ),
+                OtherParams(max_new_think_tokens=10),
+                visitor,
+                rtp_llm_request_id=100,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 2)
+        self.assertEqual(visitor.generate_inputs[0].generate_config.max_new_tokens, 100)
+        self.assertEqual(visitor.generate_inputs[1].generate_config.max_new_tokens, 90)
+        self.assertEqual(
+            chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
+            10,
+        )
+
+    async def test_phase2_completion_alias_without_total_cap_zero_budget_skips_phase2(
+        self,
+    ) -> None:
+        """Alias-only budget fully consumed by phase-1 thinking: no phase-2."""
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 11, 12, 1], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=2, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1])])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(
+                    max_new_tokens=3,
+                    max_new_tokens_from_completion_alias=True,
+                ),
+                OtherParams(max_new_think_tokens=10),
+                visitor,
+                rtp_llm_request_id=100,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertFalse(any(c.error_message for c in chunks))
+        self.assertEqual(_gen_ids(chunks[-1]), [128822, 271])
+        self.assertEqual(_finish_reason(chunks[-1]), LLMFinishReason.LENGTH)
+
+    async def test_phase2_completion_alias_total_cap_tighter_than_alias_budget(
+        self,
+    ) -> None:
+        """max_tokens (total cap) tighter than the alias budget must still win."""
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor(
+                        list(range(10, 20)) + [1], dtype=torch.int32
+                    ),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=2, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2])]
+        )
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(
+                    max_new_tokens=100,
+                    max_new_tokens_from_completion_alias=True,
+                    max_total_tokens=50,
+                ),
+                OtherParams(max_new_think_tokens=10),
+                visitor,
+                rtp_llm_request_id=100,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 2)
+        # min(alias 100 - 10, total cap 50 - 10) = 40.
+        self.assertEqual(visitor.generate_inputs[1].generate_config.max_new_tokens, 40)
 
     async def test_token1_phase2_closes_phase1_stream_before_phase2_enqueue(
         self,
