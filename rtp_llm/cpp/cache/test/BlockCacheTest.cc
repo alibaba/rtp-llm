@@ -191,6 +191,66 @@ TEST_F(BlockCacheTest, PublishesOneDeleteForLogicalEviction) {
     EXPECT_EQ(101, publisher->events[1].block_key);
 }
 
+TEST_F(BlockCacheTest, ConcurrentMutationsAndSnapshotsConverge) {
+    constexpr size_t kWriterCount   = 4;
+    constexpr size_t kKeysPerWriter = 1000;
+    constexpr size_t kKeyCount      = kWriterCount * kKeysPerWriter;
+
+    auto publisher = std::make_shared<RecordingPublisher>();
+    cache_->setEventPublisher(publisher, 1);
+
+    std::atomic<bool> stop_snapshot{false};
+    std::atomic<bool> snapshots_valid{true};
+    std::thread snapshotter([&] {
+        while (!stop_snapshot.load(std::memory_order_acquire)) {
+            const auto snapshot = cache_->logicalCacheSnapshot();
+            if (!std::is_sorted(snapshot.cache_keys.begin(), snapshot.cache_keys.end())
+                || std::adjacent_find(snapshot.cache_keys.begin(), snapshot.cache_keys.end())
+                       != snapshot.cache_keys.end()) {
+                snapshots_valid.store(false, std::memory_order_relaxed);
+            }
+        }
+    });
+
+    std::vector<std::thread> writers;
+    writers.reserve(kWriterCount);
+    for (size_t writer_id = 0; writer_id < kWriterCount; ++writer_id) {
+        writers.emplace_back([&, writer_id] {
+            for (size_t i = 0; i < kKeysPerWriter; ++i) {
+                const auto key = static_cast<CacheKeyType>(writer_id * kKeysPerWriter + i + 1);
+                CacheItem item{key, 0, static_cast<BlockIdxType>(key), false};
+                cache_->put(item);
+                if ((key & 1) == 0) {
+                    cache_->remove(key, 0);
+                }
+            }
+        });
+    }
+    for (auto& writer : writers) {
+        writer.join();
+    }
+    stop_snapshot.store(true, std::memory_order_release);
+    snapshotter.join();
+
+    EXPECT_TRUE(snapshots_valid.load(std::memory_order_relaxed));
+    const auto final_snapshot = cache_->logicalCacheSnapshot();
+    ASSERT_EQ(kKeyCount / 2, final_snapshot.cache_keys.size());
+
+    std::set<CacheKeyType> materialized;
+    for (const auto& event : publisher->events) {
+        if (event.type == KVCacheEventType::BLOCK_ADD) {
+            materialized.insert(static_cast<CacheKeyType>(event.block_key));
+        } else {
+            materialized.erase(static_cast<CacheKeyType>(event.block_key));
+        }
+    }
+    EXPECT_EQ(final_snapshot.cache_keys.size(), materialized.size());
+    for (const auto key : final_snapshot.cache_keys) {
+        EXPECT_EQ(1, key & 1);
+        EXPECT_EQ(1, materialized.count(key));
+    }
+}
+
 // ==================== selectAndEvict tests ====================
 
 TEST_F(BlockCacheTest, SelectAndEvictEmptyCache) {

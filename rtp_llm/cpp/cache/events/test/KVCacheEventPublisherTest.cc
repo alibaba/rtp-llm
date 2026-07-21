@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <gtest/gtest.h>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -90,6 +91,12 @@ public:
             cv_.notify_all();
             cv_.wait(lock, [this] { return release_mutation_; });
         }
+        if (block_next_snapshot_ && request.find("EVENT_BLOCK_SNAPSHOT") != std::string::npos) {
+            block_next_snapshot_ = false;
+            snapshot_blocked_    = true;
+            cv_.notify_all();
+            cv_.wait(lock, [this] { return release_snapshot_; });
+        }
         response = R"({"header":{"status":{"code":"OK"}}})";
         return true;
     }
@@ -121,6 +128,22 @@ public:
         cv_.notify_all();
     }
 
+    void blockNextSnapshot() {
+        std::lock_guard<std::mutex> lock(mu_);
+        block_next_snapshot_ = true;
+    }
+
+    bool waitUntilSnapshotBlocked(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mu_);
+        return cv_.wait_for(lock, timeout, [this] { return snapshot_blocked_; });
+    }
+
+    void releaseSnapshot() {
+        std::lock_guard<std::mutex> lock(mu_);
+        release_snapshot_ = true;
+        cv_.notify_all();
+    }
+
     std::vector<std::string> requests() const {
         std::lock_guard<std::mutex> lock(mu_);
         return requests_;
@@ -133,6 +156,9 @@ private:
     bool                     block_next_mutation_ = false;
     bool                     mutation_blocked_    = false;
     bool                     release_mutation_    = false;
+    bool                     block_next_snapshot_ = false;
+    bool                     snapshot_blocked_    = false;
+    bool                     release_snapshot_    = false;
 };
 
 class CountingReporter final: public KVCacheEventReporter {
@@ -188,6 +214,19 @@ KVCacheEventPublisherContext makeContext() {
     context.tp_size           = 2;
     context.dp_size           = 1;
     return context;
+}
+
+bool waitForState(KVCacheEventPublisher& publisher,
+                  PublisherState         expected,
+                  std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (publisher.status().state == expected) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return publisher.status().state == expected;
 }
 
 TEST(KVCacheEventPublisherTest, NullPublisherHasNoRuntimeResources) {
@@ -347,6 +386,107 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherRegistersSnapshotsAndReportsDeltas)
     // an authoritative snapshot rather than pretending the live engine exited.
     EXPECT_EQ(1, host_down_count);
     EXPECT_EQ(3, publisher->status().accepted_count);
+}
+
+TEST(KVCacheEventPublisherTest, KVCMPublisherRecoversFromRegistrationFailure) {
+    KVCacheEventPublisherConfig config;
+    config.type                  = "kvcm";
+    config.queue_capacity        = 8;
+    config.report_batch_size     = 8;
+    config.flush_interval_ms     = 1;
+    config.heartbeat_interval_ms = 60000;
+    config.snapshot_interval_ms  = 60000;
+    config.retry_interval_ms     = 1;
+
+    auto reporter = std::make_shared<RecordingReporter>();
+    reporter->failNextBodyContaining("\"instance_group\"");
+    KVCMPublisher publisher(config, makeContext(), [] { return KVCacheSnapshot{1, {10}}; }, reporter);
+
+    ASSERT_TRUE(publisher.start());
+    ASSERT_TRUE(reporter->waitForBodyCount("\"instance_group\"", 2, std::chrono::seconds(2)));
+    ASSERT_TRUE(reporter->waitForBody("EVENT_BLOCK_SNAPSHOT", std::chrono::seconds(2)));
+    EXPECT_TRUE(waitForState(publisher, PublisherState::READY, std::chrono::seconds(2)));
+    publisher.stop();
+}
+
+TEST(KVCacheEventPublisherTest, KVCMPublisherRecoversFromSnapshotProviderFailure) {
+    KVCacheEventPublisherConfig config;
+    config.type                  = "kvcm";
+    config.queue_capacity        = 8;
+    config.report_batch_size     = 8;
+    config.flush_interval_ms     = 1;
+    config.heartbeat_interval_ms = 60000;
+    config.snapshot_interval_ms  = 60000;
+    config.retry_interval_ms     = 1;
+
+    std::atomic<size_t> snapshot_attempts{0};
+    auto                reporter = std::make_shared<RecordingReporter>();
+    KVCMPublisher publisher(
+        config,
+        makeContext(),
+        [&snapshot_attempts] {
+            if (snapshot_attempts.fetch_add(1, std::memory_order_relaxed) == 0) {
+                throw std::runtime_error("injected snapshot failure");
+            }
+            return KVCacheSnapshot{2, {10, 20}};
+        },
+        reporter);
+
+    ASSERT_TRUE(publisher.start());
+    ASSERT_TRUE(reporter->waitForBody("EVENT_BLOCK_SNAPSHOT", std::chrono::seconds(2)));
+    EXPECT_GE(snapshot_attempts.load(std::memory_order_relaxed), 2);
+    EXPECT_TRUE(waitForState(publisher, PublisherState::READY, std::chrono::seconds(2)));
+    publisher.stop();
+}
+
+TEST(KVCacheEventPublisherTest, KVCMPublisherRecoversFromHeartbeatFailure) {
+    KVCacheEventPublisherConfig config;
+    config.type                  = "kvcm";
+    config.queue_capacity        = 8;
+    config.report_batch_size     = 8;
+    config.flush_interval_ms     = 1;
+    config.heartbeat_interval_ms = 100;
+    config.snapshot_interval_ms  = 60000;
+    config.retry_interval_ms     = 1;
+
+    auto reporter = std::make_shared<RecordingReporter>();
+    KVCMPublisher publisher(config, makeContext(), [] { return KVCacheSnapshot{1, {10}}; }, reporter);
+
+    ASSERT_TRUE(publisher.start());
+    ASSERT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_SNAPSHOT", 1, std::chrono::seconds(2)));
+    reporter->failNextBodyContaining("EVENT_HEARTBEAT");
+    ASSERT_TRUE(reporter->waitForBodyCount("EVENT_HEARTBEAT", 1, std::chrono::seconds(2)));
+    ASSERT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_SNAPSHOT", 2, std::chrono::seconds(2)));
+    EXPECT_TRUE(waitForState(publisher, PublisherState::READY, std::chrono::seconds(2)));
+    publisher.stop();
+}
+
+TEST(KVCacheEventPublisherTest, KVCMPublisherPreservesMutationsCreatedWhileSnapshotIsInFlight) {
+    KVCacheEventPublisherConfig config;
+    config.type                  = "kvcm";
+    config.queue_capacity        = 8;
+    config.report_batch_size     = 8;
+    config.flush_interval_ms     = 1;
+    config.heartbeat_interval_ms = 60000;
+    config.snapshot_interval_ms  = 50;
+    config.retry_interval_ms     = 1;
+
+    auto reporter = std::make_shared<BlockingReporter>();
+    KVCMPublisher publisher(config, makeContext(), [] { return KVCacheSnapshot{1, {10}}; }, reporter);
+
+    ASSERT_TRUE(publisher.start());
+    ASSERT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_SNAPSHOT", 1, std::chrono::seconds(2)));
+    reporter->blockNextSnapshot();
+    if (!reporter->waitUntilSnapshotBlocked(std::chrono::seconds(2))) {
+        reporter->releaseSnapshot();
+        publisher.stop();
+        FAIL() << "periodic snapshot request did not reach the blocking reporter";
+    }
+
+    EXPECT_EQ(PublishResult::ACCEPTED, publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 20, 0}));
+    reporter->releaseSnapshot();
+    ASSERT_TRUE(reporter->waitForBodyCount("\"block_key\":\"20\"", 1, std::chrono::seconds(2)));
+    publisher.stop();
 }
 
 TEST(KVCacheEventPublisherTest, KVCMPublisherCoalescesEachKeyToItsLastMutation) {
