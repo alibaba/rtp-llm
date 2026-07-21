@@ -11,6 +11,7 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
+from rtp_llm.config.exceptions import ExceptionCategory, FtRuntimeException
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
@@ -369,8 +370,17 @@ class FrontendServer(object):
                 },
             )
 
-        rep = ORJSONResponse(exception_json, status_code=500)
+        rep = ORJSONResponse(exception_json, status_code=self._exception_status_code(e))
         return rep
+
+    @staticmethod
+    def _exception_status_code(e: BaseException) -> int:
+        if (
+            isinstance(e, FtRuntimeException)
+            and e.exception_type.category == ExceptionCategory.BAD_REQUEST
+        ):
+            return 400
+        return 500
 
     async def _call_generate_with_report(
         self, generate_call: Callable[[], CompleteResponseAsyncGenerator]
