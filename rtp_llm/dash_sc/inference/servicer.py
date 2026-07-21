@@ -21,7 +21,11 @@ from typing import Any, AsyncIterator, Callable, Iterator, Optional
 
 import torch
 
-from rtp_llm.config.exceptions import ExceptionCategory, ExceptionType, FtRuntimeException
+from rtp_llm.config.exceptions import (
+    ExceptionCategory,
+    ExceptionType,
+    FtRuntimeException,
+)
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
@@ -111,14 +115,25 @@ _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY = {
 
 
 def stream_log_tag(
-    *, request_id_numeric: int, trace_id: str, phase: Optional[int] = None
+    *,
+    request_id_numeric: int,
+    trace_id: str,
+    phase: Optional[int] = None,
+    source_request_id: Optional[str] = None,
+    source_role: Optional[str] = None,
 ) -> str:
     """Align with C++ ``GenerateStream::streamLogTag()`` for log correlation.
 
     ``phase`` is appended only when set, so phase-1 logs stay byte-identical to the
-    pre-refactor format and grep patterns keep working.
+    pre-refactor format and grep patterns keep working. ``source_request_id`` and
+    ``source_role`` are appended only when non-empty, identifying the original
+    request ID and source role for cross-component log correlation.
     """
     base = f"request_id={request_id_numeric} trace_id={trace_id}"
+    if source_request_id:
+        base += f" source_request_id={source_request_id}"
+    if source_role:
+        base += f" source_role={source_role}"
     return f"{base} phase={phase}" if phase is not None else base
 
 
@@ -527,7 +542,19 @@ async def iter_real_model_stream_infer(
     sets ``stop_words_list`` on the request.
     """
     trace_str = str(request.id)
-    tag = stream_log_tag(request_id_numeric=rtp_llm_request_id, trace_id=trace_str)
+    _log_headers = dict(other.request_headers or {})
+    _log_headers.update(_headers_from_invocation_metadata(invocation_metadata))
+    # Match the trace_id fallback chain in _make_generate_input so that
+    # source_request_id and the log-tag trace_id stay consistent with C++.
+    trace_id = str(trace_str or extract_trace_id(_log_headers) or "")
+    _source_request_id = extract_correlation_request_id(_log_headers) or trace_id
+    _source_role = "dash"
+    tag = stream_log_tag(
+        request_id_numeric=rtp_llm_request_id,
+        trace_id=trace_id,
+        source_request_id=_source_request_id,
+        source_role=_source_role,
+    )
     runtime = think_runtime if think_runtime is not None else _ThinkRuntime()
     logging.debug(
         "[DashScGrpc] [%s] real infer start: model_name=%s input_len=%s sampling=%s",
@@ -911,7 +938,11 @@ async def iter_real_model_stream_infer(
                 else rtp_llm_request_id
             )
             phase2_tag = stream_log_tag(
-                request_id_numeric=phase2_request_id, trace_id=trace_str, phase=2
+                request_id_numeric=phase2_request_id,
+                trace_id=trace_id,
+                phase=2,
+                source_request_id=_source_request_id,
+                source_role=_source_role,
             )
             phase2_generate_input = _make_generate_input(
                 request_id=phase2_request_id,

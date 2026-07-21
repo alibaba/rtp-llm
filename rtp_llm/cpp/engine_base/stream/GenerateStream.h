@@ -462,11 +462,21 @@ public:
     }
 
     /// Log-friendly stream id: numeric ``streamId()`` (``request_id`` / ``inter_request_id``) + ``trace_id`` string.
+    /// Conditionally appends ``source_request_id`` and ``source_role`` from
+    /// ``request_info`` when non-empty (for cross-component log correlation).
     std::string streamLogTag() const {
-        char        buf[256];
         std::string tid = traceId();
-        snprintf(buf, sizeof(buf), "trace_id=%s req_id=%ld", tid.empty() ? "-" : tid.c_str(), streamId());
-        return std::string(buf);
+        std::string tag = "trace_id=" + (tid.empty() ? std::string("-") : tid);
+        tag += " req_id=" + std::to_string(streamId());
+        tag.reserve(80);
+        const auto& request_info = generate_input_->request_info;
+        if (!request_info.request_id.empty()) {
+            tag += " source_request_id=" + request_info.request_id;
+        }
+        if (!request_info.source_role.empty()) {
+            tag += " source_role=" + request_info.source_role;
+        }
+        return tag;
     }
 
     std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
