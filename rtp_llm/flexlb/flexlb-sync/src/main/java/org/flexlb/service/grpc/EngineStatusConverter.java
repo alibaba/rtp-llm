@@ -45,6 +45,9 @@ public class EngineStatusConverter {
             role = RoleType.PDFUSION;
         }
         response.setRole(role);
+        // Compatibility only: LocalRpcServer::GetWorkerStatus does not currently
+        // populate this field. Preserve it for protocol compatibility/telemetry,
+        // but do not use it as a scheduling or batching limit.
         response.setAvailableConcurrency(workerStatusPB.getAvailableConcurrency());
         response.setRunningQueryLen(workerStatusPB.getRunningQueryLen());
         response.setWaitingQueryLen(workerStatusPB.getWaitingQueryLen());
@@ -58,6 +61,8 @@ public class EngineStatusConverter {
         response.setAlive(workerStatusPB.getAlive());
         response.setAvailableKvCacheTokens(workerStatusPB.getAvailableKvCache());
         response.setTotalKvCacheTokens(workerStatusPB.getTotalKvCache());
+        response.setMaxSeqLen(workerStatusPB.getMaxSeqLen());
+        response.setMaxBatchTokensSize(workerStatusPB.getMaxBatchTokensSize());
 
         response.setRunningTaskInfo(convertToTaskInfoList(workerStatusPB.getRunningTaskInfoList()));
 

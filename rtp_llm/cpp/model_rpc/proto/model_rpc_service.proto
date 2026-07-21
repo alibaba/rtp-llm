@@ -430,6 +430,9 @@ message UpdateWeightsRequestPB {
 
 message WorkerStatusPB {
     string role = 1;              // 字符串角色名，如 "PREFILL"，向后兼容
+    // LocalRpcServer::GetWorkerStatus currently does not populate this field, so
+    // protobuf returns the default value 0. Keep it for wire compatibility, but
+    // do not use it for routing, admission control, or batch-size decisions.
     int32 available_concurrency = 2;
     repeated TaskInfoPB running_task_info = 3;
     repeated TaskInfoPB finished_task_list = 4;
@@ -449,6 +452,10 @@ message WorkerStatusPB {
     reserved 19;
     reserved "role_str";
     RoleTypePB role_type = 20;   // 类型安全的枚举字段
+    // Static limits used by the running Engine. FlexLB uses these values to
+    // avoid constructing a group that the Engine can never admit.
+    int64 max_seq_len = 21;
+    int64 max_batch_tokens_size = 22;
 }
 
 message EmbeddingInputPB {

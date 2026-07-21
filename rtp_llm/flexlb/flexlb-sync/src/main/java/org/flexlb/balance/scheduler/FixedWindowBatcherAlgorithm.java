@@ -15,13 +15,15 @@ import java.util.concurrent.TimeUnit;
  *
  * <h3>Algorithm</h3>
  * <ol>
+ *   <li>Oversized request rejection: if the head request's seqLen can never
+ *       fit the effective batch token capacity (the smaller of the configured
+ *       {@code flexlbBatchMaxCapacity} and the Engine-reported
+ *       {@code max_batch_tokens_size}), it can never be picked by any batch,
+ *       so it is rejected immediately instead of waiting for the deadline.</li>
  *   <li>Queue deadline: if the head request has waited longer than
  *       {@code flexlbBatchEnqueueDeadlineMs}, drop it as expired. This runs
  *       before backpressure to ensure stale requests are cleared even when
  *       the engine is under sustained backpressure.</li>
- *   <li>Oversized request rejection: if the head request's seqLen exceeds
- *       {@code flexlbBatchMaxCapacity}, it can never be picked by any batch,
- *       so it is dropped immediately instead of waiting for the deadline.</li>
  *   <li>Engine backpressure: if inflight batches ≥ max, park briefly.</li>
  *   <li>Batch full: if queue size ≥ {@code flexlbBatchSizeMax}, dispatch
  *       immediately without waiting for the window to expire.</li>
@@ -36,13 +38,14 @@ import java.util.concurrent.TimeUnit;
  *
  * <h3>Token-cap filtering</h3>
  * When picking items for a batch, requests whose cumulative seqLen would
- * exceed {@code flexlbBatchMaxCapacity} are skipped (not included in the
- * current batch) but remain in the queue for subsequent batches.
+ * reach or exceed the effective batch token capacity are skipped (not
+ * included in the current batch) but remain in the queue for subsequent
+ * batches. The Engine admits a group only when total context tokens are
+ * strictly below {@code max_batch_tokens_size}, hence the strict comparison.
  * <p>
- * However, a request whose own seqLen already exceeds
- * {@code flexlbBatchMaxCapacity} can never be picked by any batch. Such
- * oversized requests are rejected immediately when they reach the head of
- * the queue (see step 0.5 below), rather than waiting for the queue
+ * However, a request whose own seqLen already exceeds the capacity can never
+ * be picked by any batch. Such oversized requests are rejected immediately
+ * when they reach the head of the queue, rather than waiting for the queue
  * deadline to expire.
  *
  * <h3>Key differences from {@link SloBudgetBatcherAlgorithm}</h3>
@@ -50,6 +53,8 @@ import java.util.concurrent.TimeUnit;
  *   <li>No EMA arrival rate estimation.</li>
  *   <li>Deadline is a simple max-wait threshold, not an SLO-deadline
  *       computed from predicted prefill time.</li>
+ *   <li>Uses FIFO selection subject to the Engine-reported aggregate token
+ *       capacity; it does not use SLO incremental-cost admission.</li>
  * </ul>
  */
 @Component
@@ -137,6 +142,15 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         long fixedWaitMs = ctx.cfg().getFlexlbBatchFixedWaitMs();
         int batchMaxCount = Math.max(1, ctx.cfg().getFlexlbBatchSizeMax());
         long predictThresholdMs = ctx.cfg().getFlexlbBatchPredictThresholdMs();
+        long batchMaxTokens = ctx.batchTokenCapacity();
+
+        // The Engine admits a group only when total context tokens are strictly
+        // below max_batch_tokens_size. Reject an impossible head explicitly so
+        // it cannot block the FIFO queue or cause an entire group to fast-fail.
+        if (!BatcherContext.fitsBatchTokenCapacity(0, head.seqLen(), batchMaxTokens)) {
+            ctx.rejectForBatchTokenCapacity(head, batchMaxTokens);
+            return;
+        }
 
         // 0. Queue deadline: drop the head request if it has waited longer
         //     than the enqueue deadline. This runs BEFORE backpressure to
@@ -152,19 +166,6 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
             return;
         }
 
-        // 0.5. Reject oversized requests immediately instead of waiting for deadline.
-        //     A request whose seqLen exceeds batchMaxTokens can never be picked by
-        //     pickFirstN, so it would otherwise sit in the queue for 5s (deadline)
-        //     before being dropped with a misleading BATCH_SLO_EXPIRED error.
-        long batchMaxTokens = ctx.cfg().getFlexlbBatchMaxCapacity();
-        if (batchMaxTokens > 0 && head.seqLen() > batchMaxTokens) {
-            Logger.warn("flexlb_batch_drop request_id={} reason=request_oversized "
-                            + "seq_len={} batch_max_tokens={}",
-                    head.requestId(), head.seqLen(), batchMaxTokens);
-            ctx.dropHead(head);
-            return;
-        }
-
         // 1. Engine backpressure: park if the prefill worker already has too
         //    many batches inflight, to prevent overloading the engine.
         int maxInflightBatches = ctx.cfg().getFlexlbBatchFixedMaxInflightBatches();
@@ -175,16 +176,14 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
 
         // 2. Queue size >= batchMaxCount → dispatch immediately (batch full)
         if (ctx.size() >= batchMaxCount) {
-            List<BatchItem> picked = pickFirstN(ctx, batchMaxCount);
-            if (!picked.isEmpty()) {
-                dispatch(ctx, picked, "batch_full");
-            }
+            List<BatchItem> picked = pickWithinCapacity(ctx, batchMaxCount, batchMaxTokens);
+            dispatch(ctx, picked, "batch_full");
             return;
         }
 
         // 3. Queue size < batchMaxCount → check window timeout
         if (elapsedMs >= fixedWaitMs) {
-            List<BatchItem> picked = pickFirstN(ctx, batchMaxCount);
+            List<BatchItem> picked = pickWithinCapacity(ctx, batchMaxCount, batchMaxTokens);
             if (!picked.isEmpty()) {
                 dispatch(ctx, picked, "fixed_window_timeout");
             }
@@ -194,7 +193,7 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         // 4. Predictor-based early dispatch
         if (predictThresholdMs > 0) {
             PrefillTimePredictor predictor = ctx.prefillEp().getPredictor();
-            List<BatchItem> candidates = pickFirstN(ctx, batchMaxCount);
+            List<BatchItem> candidates = pickWithinCapacity(ctx, batchMaxCount, batchMaxTokens);
             if (!candidates.isEmpty() && predictor.predictBatchMs(candidates) >= predictThresholdMs) {
                 dispatch(ctx, candidates, "predict_threshold");
                 return;
@@ -208,24 +207,21 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
     // ==================== Internal helpers ====================
 
     /**
-     * Pick the first {@code maxCount} items from the queue in sorted order.
-     * Requests whose cumulative seqLen would exceed {@code flexlbBatchMaxCapacity}
-     * are skipped — they remain in the queue for subsequent batches.
+     * Greedily pick up to {@code maxCount} items in FIFO order while keeping
+     * the aggregate request sequence length strictly below the Engine limit.
      */
-    private static List<BatchItem> pickFirstN(BatcherContext ctx, int maxCount) {
-        long sumTokens = 0;
-        long batchMaxTokens = ctx.cfg().getFlexlbBatchMaxCapacity();
+    private static List<BatchItem> pickWithinCapacity(BatcherContext ctx, int maxCount, long batchMaxTokens) {
         List<BatchItem> picked = new ArrayList<>();
+        long totalTokens = 0;
         for (BatchItem item : ctx.sortedItems()) {
             if (picked.size() >= maxCount) {
                 break;
             }
-            long nextTokens = sumTokens + item.seqLen();
-            if (batchMaxTokens > 0 && nextTokens > batchMaxTokens) {
+            if (!BatcherContext.fitsBatchTokenCapacity(totalTokens, item.seqLen(), batchMaxTokens)) {
                 continue;
             }
-            sumTokens = nextTokens;
             picked.add(item);
+            totalTokens += item.seqLen();
         }
         return picked;
     }
@@ -252,6 +248,6 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
                 reason, picked.size(), waitMs, ctx.size(), ctx.key(), head.requestId());
 
         ctx.dispatch(picked,
-                new DispatchMeta(reason, 1.0, ctx.cfg().getFlexlbBatchMaxCapacity(), ctx.size() - picked.size()));
+                new DispatchMeta(reason, 1.0, ctx.size() - picked.size()));
     }
 }
