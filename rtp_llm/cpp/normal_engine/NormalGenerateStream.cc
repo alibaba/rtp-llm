@@ -29,11 +29,13 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     size_t          output_len = seqLength() - last_output_pos_;
     GenerateOutputs generate_results;
     generate_results.request_id = request_id_;
+    torch::Tensor all_hidden_states_cpu;
 
     for (int i = 0; i < nextBatchSize(); i++) {
         GenerateOutput generate_output;
         generate_output.aux_info.iter_count = iter_count_;
         generate_output.output_ids          = torch::empty({1, (int64_t)output_len}, torch::kInt32);
+        generate_output.finished            = isSubGenerateDoneWithoutLock(i);
 
         // TODO(xinfei.sxf) optimize this copy : only copy last token
         complete_token_ids_->copyTokensTo(
@@ -75,9 +77,19 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 generate_output.hidden_states = update_info.hidden_states.narrow(0, i, 1).cpu();
             }
         }
-        if (generate_input_->generate_config->return_all_hidden_states && update_info.all_hidden_states.defined()
-            && iter_count_ == 1) {
-            generate_output.all_hidden_states = update_info.all_hidden_states.cpu();
+        if (generate_input_->generate_config->return_all_hidden_states) {
+            const torch::Tensor* all_hidden_states = nullptr;
+            if (update_info.all_hidden_states.defined() && iter_count_ == 1) {
+                all_hidden_states = &update_info.all_hidden_states;
+            } else if (!isStreaming() && generate_output.finished && all_hidden_states_.defined()) {
+                all_hidden_states = &all_hidden_states_;
+            }
+            if (all_hidden_states != nullptr) {
+                if (!all_hidden_states_cpu.defined()) {
+                    all_hidden_states_cpu = all_hidden_states->cpu();
+                }
+                generate_output.all_hidden_states = all_hidden_states_cpu;
+            }
         }
         if (loss_.defined()) {
             RTP_LLM_CHECK_WITH_INFO(loss_index_ == inputLength() - 1,
@@ -94,8 +106,6 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
         if (update_info.prompt_logits.has_value()) {
             generate_output.prompt_logits = update_info.prompt_logits;
         }
-
-        generate_output.finished = isSubGenerateDoneWithoutLock(i);
         if (generate_input_->generate_config->aux_info) {
             generate_output.aux_info.iter_count   = iter_count_;
             generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
@@ -114,9 +124,9 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
 
             generate_output.aux_info.multimodal_lengths = generate_input_->multimodalLengths();
 
-            if (generate_input_->generate_config->return_softmax_probs && softmax_probs_.defined()) {
+            if (calculateSoftmaxProbs() && softmax_probs_.defined()) {
                 generate_output.aux_info.softmax_probs =
-                    softmax_probs_[i].narrow(0, last_output_pos_, output_len).clone();
+                    softmax_probs_[i].narrow(0, last_output_pos_ - inputLength(), output_len);
             }
             if (update_info.cum_log_probs.defined()) {
                 generate_output.aux_info.cum_log_probs = cum_log_probs_.narrow(0, i, 1).cpu().clone();
@@ -173,11 +183,16 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     if (needReturnHiddenStates() && update_info.all_hidden_states.defined()) {
         last_hidden_states_ = update_info.all_hidden_states;
     }
+    if (generate_input_->generate_config->return_all_hidden_states && update_info.all_hidden_states.defined()
+        && !all_hidden_states_.defined()) {
+        all_hidden_states_ = update_info.all_hidden_states;
+    }
 
-    if (generate_input_->generate_config->return_softmax_probs && update_info.softmax_probs.defined()) {
+    if (calculateSoftmaxProbs() && update_info.softmax_probs.defined()) {
         RTP_LLM_CHECK(update_info.softmax_probs.dim() == 2);
         RTP_LLM_CHECK(update_info.softmax_probs.size(1) == update_info.num_new_tokens);
-        setSoftmaxProbs(update_info.softmax_probs, seqLength() - update_info.num_new_tokens);
+        setSoftmaxProbs(
+            update_info.softmax_probs, seqLength() - update_info.num_new_tokens, update_info.src_batch_indices);
     }
 
     finished_ = needFinish();

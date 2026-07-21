@@ -146,6 +146,11 @@ message MultimodalOutputPB {
     repeated int32 split_size = 4;
 }
 
+message InputEmbeddingsPB {
+    repeated TensorPB embeddings = 1;   // 和embedding_locs一一对应
+    repeated int32 embedding_locs = 2;  // embedding的在token ids中的起始位置
+}
+
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
@@ -155,6 +160,7 @@ message GenerateInputPB {
     int64 start_time = 6;
     int32 batch_group_size = 7;
     google.protobuf.Int64Value batch_group_id = 8;
+    InputEmbeddingsPB input_embeddings = 9;
 }
 
 message AuxInfoPB {
@@ -204,6 +210,7 @@ message FlattenOutputPB {
     TensorPB all_probs = 7;
     TensorPB all_hidden_states = 8;
     PromptLogitsOutputPB prompt_logits = 9;
+    TensorPB all_softmax_probs = 10;
 }
 
 message GenerateOutputsPB {

@@ -278,6 +278,48 @@ class BaseModel(object):
         logging.info(f"After loading: {get_host_memory_usage():.2f} MB")
         return model
 
+    @classmethod
+    def load_embedding_from_config(
+        cls,
+        model_config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        hw_kernel_config: HWKernelConfig,
+        kv_cache_config: KVCacheConfig,
+        fmha_config: FMHAConfig,
+        moe_config: MoeConfig,
+        load_method: LoadMethod,
+        max_generate_batch_size: int,
+        vit_config: VitConfig,
+        merge_lora: bool,
+        device_resource_config: DeviceResourceConfig,
+        force_cpu_load_weights: bool = False,
+    ):
+        model = cls(
+            model_config=model_config,
+            parallelism_config=parallelism_config,
+            hw_kernel_config=hw_kernel_config,
+            kv_cache_config=kv_cache_config,
+            fmha_config=fmha_config,
+            moe_config=moe_config,
+            load_method=load_method,
+            max_generate_batch_size=max_generate_batch_size,
+            vit_config=vit_config,
+            merge_lora=merge_lora,
+            device_resource_config=device_resource_config,
+            force_cpu_load_weights=force_cpu_load_weights,
+        )
+        return model.load_embedding_weight()
+
+    @timer_wrapper(description="load embedding weight")
+    def load_embedding_weight(self):
+        self.model_weights_loader = self.create_model_loader()
+        device_str = self._get_device_str()
+        try:
+            return self.model_weights_loader.load_embedding_weight(device=device_str)
+        finally:
+            self.model_weights_loader.cleanup_database()
+            self.model_weights_loader.force_clean_all_memory()
+
     @staticmethod
     def get_weight_cls() -> Type[ModelDeployWeightInfo]:
         raise NotImplementedError

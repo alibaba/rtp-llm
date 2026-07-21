@@ -17,6 +17,7 @@ class GenerateStreamBuilder {
 public:
     GenerateStreamBuilder() {
         model_config_.max_seq_len = 2048;
+        model_config_.vocab_size  = 2048;
     }
 
     CacheConfig init_config() {
@@ -107,6 +108,98 @@ TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     // flip back to true and verify
     stream->generate_input_->generate_config->reuse_cache = true;
     ASSERT_TRUE(stream->reuseCache());
+}
+
+TEST_F(GenerateStreamTest, testNonStreamingFinalOutputReturnsCachedAllHiddenStates) {
+    auto builder                                                       = GenerateStreamBuilder();
+    auto stream                                                        = builder.createContextStream({1, 2});
+    stream->generate_input_->generate_config->max_new_tokens           = 2;
+    stream->generate_input_->generate_config->return_all_hidden_states = true;
+    stream->generate_input_->generate_config->return_incremental       = true;
+    stream->generate_input_->generate_config->is_streaming             = false;
+
+    auto first_all_hidden_states = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}).reshape({2, 2});
+    stream->step();
+    stream->update(StreamUpdateInfo{torch::tensor({10}, torch::kInt32).reshape({1, 1}),
+                                    1,
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    first_all_hidden_states,
+                                    false});
+    ASSERT_FALSE(stream->hasOutput());
+
+    stream->step();
+    stream->update(StreamUpdateInfo{torch::tensor({11}, torch::kInt32).reshape({1, 1}),
+                                    1,
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    false});
+
+    ASSERT_TRUE(stream->hasOutput());
+    auto output = stream->nextOutput();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().generate_outputs.size(), 1);
+    const auto& generate_output = output.value().generate_outputs[0];
+    ASSERT_TRUE(generate_output.finished);
+    ASSERT_TRUE(generate_output.all_hidden_states.has_value());
+    ASSERT_TRUE(torch::equal(generate_output.all_hidden_states.value(), first_all_hidden_states));
+}
+
+TEST_F(GenerateStreamTest, testAllHiddenStatesCopiedToCpuOnceForMultipleOutputs) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2}));
+    ASSERT_NE(stream, nullptr);
+    stream->generate_input_->generate_config->return_all_hidden_states = true;
+    stream->iter_count_                                                = 1;
+
+    auto all_hidden_states =
+        torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}, torch::TensorOptions().device(torch::kCUDA)).reshape({2, 2});
+    StreamUpdateInfo update_info{torch::Tensor(),
+                                 0,
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 all_hidden_states,
+                                 false};
+
+    auto outputs = stream->prepareGenerateOutput(update_info);
+
+    ASSERT_EQ(outputs.generate_outputs.size(), 2);
+    const auto& first  = outputs.generate_outputs[0].all_hidden_states;
+    const auto& second = outputs.generate_outputs[1].all_hidden_states;
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+    ASSERT_FALSE(first->is_cuda());
+    ASSERT_EQ(first->data_ptr(), second->data_ptr());
+    ASSERT_TRUE(torch::equal(first.value(), all_hidden_states.cpu()));
+}
+
+TEST_F(GenerateStreamTest, testInputEmbeddingsDisableTokenOnlyReuseCache) {
+    auto builder                                   = GenerateStreamBuilder();
+    auto stream                                    = builder.createContextStream({1, 2, 3, 4, 5, 6});
+    stream->generate_input_->input_embeddings      = std::vector<torch::Tensor>{torch::rand({1, 8}, torch::kFloat32)};
+    stream->generate_input_->input_embeddings_locs = std::vector<int32_t>{2};
+
+    ASSERT_TRUE(stream->hasInputEmbeddings());
+    ASSERT_FALSE(stream->reuseCache());
+    ASSERT_FALSE(stream->enableDeviceCache());
+    ASSERT_FALSE(stream->enableMemoryCache());
+    ASSERT_FALSE(stream->enableRemoteCache());
 }
 
 }  // namespace rtp_llm

@@ -234,6 +234,10 @@ public:
     int                        multimodalFeaturesLength() const;
     torch::Tensor              multimodalLocations() const;
 
+    bool                              hasInputEmbeddings() const;
+    const std::vector<torch::Tensor>& inputEmbeddings() const;
+    const std::vector<int32_t>&       inputEmbeddingsLocs() const;
+
     int64_t getTimeoutMs() const;
     void    checkTimeout();
 
@@ -265,7 +269,9 @@ public:
     const ResourceContext&      resourceContext() const;
     void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
     void                        setLoss(const torch::Tensor& loss);
-    void                        setSoftmaxProbs(const torch::Tensor& softmax_probs, int start_pos);
+    void                        setSoftmaxProbs(const torch::Tensor& softmax_probs,
+                                                int                  start_pos,
+                                                const torch::Tensor& src_batch_indices = torch::Tensor());
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
     BatchKVCacheResourcePtr     kvCachePtr();
@@ -496,19 +502,19 @@ public:
     }
 
     bool reuseCache() const {
-        return generate_input_->generate_config->reuse_cache;
+        return !hasInputEmbeddings() && generate_input_->generate_config->reuse_cache;
     }
 
     bool enableDeviceCache() const {
-        return generate_input_->generate_config->enable_device_cache;
+        return !hasInputEmbeddings() && generate_input_->generate_config->enable_device_cache;
     }
 
     bool enableMemoryCache() const {
-        return generate_input_->generate_config->enable_memory_cache;
+        return !hasInputEmbeddings() && generate_input_->generate_config->enable_memory_cache;
     }
 
     bool enableRemoteCache() const {
-        return generate_input_->generate_config->enable_remote_cache;
+        return !hasInputEmbeddings() && generate_input_->generate_config->enable_remote_cache;
     }
 
     int64_t deadlineMs() const {
@@ -610,6 +616,7 @@ protected:
     torch::Tensor                            softmax_probs_;
     torch::Tensor                            loss_;
     torch::Tensor                            last_hidden_states_;
+    torch::Tensor                            all_hidden_states_;
     int                                      loss_index_ = 0;
     std::shared_ptr<std::mutex>              mutex_;
     std::shared_ptr<std::condition_variable> cv_;

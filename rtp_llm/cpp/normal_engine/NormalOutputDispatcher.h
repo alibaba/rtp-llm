@@ -14,6 +14,10 @@ public:
     absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
 
 private:
+    torch::Tensor calculateSelectedTokenProbs(const torch::Tensor& logits,
+                                              const torch::Tensor& token_ids,
+                                              const torch::Tensor& src_batch_indices) const;
+
     void dispatchSingleStream(GenerateStreamPtr    stream,
                               const MergedOutput&  merge_outputs,
                               int                  batch_idx_in,

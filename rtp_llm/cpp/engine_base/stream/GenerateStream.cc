@@ -61,8 +61,10 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     if (generate_input_->generate_config->calculate_loss && inputLength() > 1) {
         loss_ = torch::zeros({(int64_t)inputLength() - 1}, torch::kFloat32);
     }
-    if (generate_input_->generate_config->return_softmax_probs) {
-        softmax_probs_ = torch::zeros({(int64_t)init_batch_size, (int64_t)max_seq_len_}, torch::kFloat32);
+    if (calculateSoftmaxProbs()) {
+        const auto max_output_len = std::max<int64_t>(
+            0, std::min<int64_t>(generate_input_->generate_config->max_new_tokens, max_seq_len_ - inputLength()));
+        softmax_probs_ = torch::empty({(int64_t)maxBatchSize(), max_output_len}, torch::kFloat32);
     }
     if (generate_input_->generate_config->return_all_hidden_states) {
         setReturnLastHiddenStates(true);
@@ -339,6 +341,16 @@ int GenerateStream::initialReuseLength() const {
 
 void GenerateStream::setReuseLength(int reuse_length) {
     reuse_length_ = reuse_length;
+    // Cap reuseLength so it doesn't exceed any input_embeddings location.
+    // Only needed during prefill; on decode/speculative paths the KV cache
+    // already incorporates the custom embeddings.
+    if (*is_context_stream_ && generate_input_->input_embeddings_locs) {
+        for (int32_t loc : generate_input_->input_embeddings_locs.value()) {
+            if (reuse_length_ > loc) {
+                reuse_length_ = loc;
+            }
+        }
+    }
 }
 
 void GenerateStream::setLocalReuseLength(int length) {
@@ -452,6 +464,21 @@ torch::Tensor GenerateStream::multimodalLocations() const {
         return torch::Tensor();
     }
     return generate_input_->mm_locs.value();
+}
+
+bool GenerateStream::hasInputEmbeddings() const {
+    return (generate_input_->input_embeddings.has_value() && !generate_input_->input_embeddings->empty())
+           || (generate_input_->input_embeddings_locs.has_value() && !generate_input_->input_embeddings_locs->empty());
+}
+
+const std::vector<torch::Tensor>& GenerateStream::inputEmbeddings() const {
+    static const std::vector<torch::Tensor> empty;
+    return generate_input_->input_embeddings.has_value() ? generate_input_->input_embeddings.value() : empty;
+}
+
+const std::vector<int32_t>& GenerateStream::inputEmbeddingsLocs() const {
+    static const std::vector<int32_t> empty;
+    return generate_input_->input_embeddings_locs.has_value() ? generate_input_->input_embeddings_locs.value() : empty;
 }
 
 vector<int> GenerateStream::textTokensMask() const {
@@ -919,17 +946,37 @@ void GenerateStream::setLoss(const torch::Tensor& loss) {
     loss_index_ += loss_size;
 }
 
-void GenerateStream::setSoftmaxProbs(const torch::Tensor& softmax_probs, int start_pos) {
+void GenerateStream::setSoftmaxProbs(const torch::Tensor& softmax_probs,
+                                     int                  start_pos,
+                                     const torch::Tensor& src_batch_indices) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto probs_cpu = softmax_probs.is_cuda() ? softmax_probs.cpu() : softmax_probs;
+    RTP_LLM_CHECK(softmax_probs_.defined());
+    auto probs_cpu = softmax_probs.to(torch::kCPU, torch::kFloat32).contiguous();
     RTP_LLM_CHECK(probs_cpu.dim() == 2);
     RTP_LLM_CHECK(probs_cpu.size(0) == currentBatchSize());
-    auto num_probs = probs_cpu.size(1);
-    for (int i = 0; i < currentBatchSize(); ++i) {
-        memcpy(softmax_probs_.data_ptr<float>() + i * softmax_probs_.size(1) + start_pos,
-               probs_cpu[i].data_ptr<float>(),
-               num_probs * sizeof(float));
+    auto num_probs        = probs_cpu.size(1);
+    auto output_start_pos = start_pos - inputLength();
+    RTP_LLM_CHECK(output_start_pos >= 0);
+    RTP_LLM_CHECK(output_start_pos + num_probs <= softmax_probs_.size(1));
+    RTP_LLM_CHECK(currentBatchSize() <= softmax_probs_.size(0));
+
+    // Beam search may expand or reorder batches on every step. Preserve the
+    // probabilities of previously generated tokens according to the same
+    // source-to-destination mapping used for token ids and KV cache blocks.
+    if (src_batch_indices.defined() && start_pos > (int)last_output_pos_) {
+        auto indices_cpu = src_batch_indices.to(torch::kCPU, torch::kLong).contiguous();
+        RTP_LLM_CHECK(indices_cpu.dim() == 1);
+        RTP_LLM_CHECK(indices_cpu.numel() == currentBatchSize());
+        RTP_LLM_CHECK(indices_cpu.min().item<int64_t>() >= 0);
+        RTP_LLM_CHECK(indices_cpu.max().item<int64_t>() < softmax_probs_.size(0));
+
+        auto history_start_pos = last_output_pos_ - inputLength();
+        auto history_len       = start_pos - last_output_pos_;
+        auto history           = softmax_probs_.narrow(1, history_start_pos, history_len).index_select(0, indices_cpu);
+        softmax_probs_.narrow(0, 0, currentBatchSize()).narrow(1, history_start_pos, history_len).copy_(history);
     }
+
+    softmax_probs_.narrow(0, 0, currentBatchSize()).narrow(1, output_start_pos, num_probs).copy_(probs_cpu);
 }
 
 torch::Tensor GenerateStream::getLoss() {
