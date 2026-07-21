@@ -27,16 +27,8 @@ public class ShardedRecentCacheKeyWindow {
                 System::currentTimeMillis);
     }
 
-    public ShardedRecentCacheKeyWindow(long timeWindowMs, long maxCacheKeys) {
-        this(DEFAULT_SHARD_COUNT, timeWindowMs, maxCacheKeys);
-    }
-
-    public ShardedRecentCacheKeyWindow(int shardCount, long timeWindowMs, long maxCacheKeys) {
-        this(shardCount, timeWindowMs, maxCacheKeys, System::currentTimeMillis);
-    }
-
-    public ShardedRecentCacheKeyWindow(int shardCount, long timeWindowMs, long maxCacheKeys,
-                                       LongSupplier nowSupplier) {
+    private ShardedRecentCacheKeyWindow(int shardCount, long timeWindowMs, long maxCacheKeys,
+                                        LongSupplier nowSupplier) {
         this.shardCount = shardCount;
         this.shards = new RecentCacheKeyWindow[shardCount];
         int perShardMaxKeys = Math.max(1, (int) (maxCacheKeys / shardCount));
@@ -50,21 +42,4 @@ public class ShardedRecentCacheKeyWindow {
         return shards[idx].record(cacheKeys);
     }
 
-    /**
-     * Aggregate snapshot across all shards for approximate total hit rate.
-     */
-    public RecentCacheKeyWindow.Snapshot aggregateSnapshot() {
-        long totalOccurrences = 0;
-        long totalHitOccurrences = 0;
-        long timeWindowMs = 0;
-        for (RecentCacheKeyWindow shard : shards) {
-            RecentCacheKeyWindow.Snapshot s = shard.snapshot();
-            if (s != null) {
-                totalOccurrences += s.getRequestOccurrences();
-                totalHitOccurrences += s.getRequestHitOccurrences();
-                timeWindowMs = s.getTimeWindowMs();
-            }
-        }
-        return new RecentCacheKeyWindow.Snapshot(timeWindowMs, totalOccurrences, totalHitOccurrences);
-    }
 }

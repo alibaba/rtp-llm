@@ -1,6 +1,5 @@
 package org.flexlb.cache.core;
 
-import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
@@ -15,7 +14,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.atomic.LongAdder;
 
 /**
  * KV cache manager
@@ -26,7 +24,6 @@ import java.util.concurrent.atomic.LongAdder;
  * @author FlexLB
  */
 @Slf4j
-@Getter
 @Component
 public class KvCacheManager {
 
@@ -44,11 +41,6 @@ public class KvCacheManager {
      */
     @Autowired
     private CacheMetricsReporter cacheMetricsReporter;
-
-    /**
-     * Performance statistics
-     */
-    private final LongAdder totalUpdates = new LongAdder();
 
     @PostConstruct
     public void init() {
@@ -92,7 +84,6 @@ public class KvCacheManager {
      */
     public void updateEngineCache(String engineIPort, String role, Set<Long> newCacheBlocks) {
         if (engineIPort == null || newCacheBlocks == null) {
-            DiffResult.empty(engineIPort);
             return;
         }
 
@@ -121,7 +112,6 @@ public class KvCacheManager {
             globalCacheIndex.removeCacheBlock(engineIPort, removedBlock);
         }
 
-        totalUpdates.increment();
         // Report metrics
         cacheMetricsReporter.reportEngineLocalMetrics(
                 engineIPort.split(":")[0], engineIPort, role, engineLocalView.size(engineIPort));
@@ -137,7 +127,6 @@ public class KvCacheManager {
         globalCacheIndex.clear();
         engineLocalView.clear();
 
-        totalUpdates.reset();
         // Report
         cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
 

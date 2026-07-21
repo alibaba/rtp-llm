@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import com.google.protobuf.ByteString;
 import com.google.protobuf.Int64Value;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
@@ -8,13 +7,12 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -57,6 +55,11 @@ class DefaultBatchDispatcherTest {
 
         dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
         callback = new TestCallback();
+    }
+
+    @AfterEach
+    void tearDown() {
+        dispatcher.shutdown();
     }
 
     @Test
@@ -234,24 +237,11 @@ class DefaultBatchDispatcherTest {
     // ---- helpers ----
 
     private PrefillEndpoint createPrefillEndpoint() {
-        WorkerStatus status = new WorkerStatus();
-        status.setIp("127.0.0.1");
-        status.setPort(8080);
-        status.setGrpcPort(8090);
-        status.setRole(RoleType.PREFILL);
-        FlexlbConfig epConfig = new FlexlbConfig();
-        epConfig.setFlexlbBatchQueueMaxSize(100);
-        epConfig.setFlexlbBatchFixedWaitMs(300);
-        return new PrefillEndpoint(status, epConfig, noopHandler(), reporter);
-    }
-
-    private static BatchDecisionHandler noopHandler() {
-        return new BatchDecisionHandler() {
-            @Override public void onExpired(BatchItem head) {}
-            @Override public void onUrgent(BatchItem head, DispatchMeta meta) {}
-            @Override public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {}
-            @Override public void onOfferFailure(BatchItem item, Throwable error) {}
-        };
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.getIp()).thenReturn("127.0.0.1");
+        when(endpoint.getHttpPort()).thenReturn(8080);
+        when(endpoint.getGrpcPort()).thenReturn(8090);
+        return endpoint;
     }
 
     private BatchItem createBatchItem(long requestId, long seqLen, long hitCacheLen, PrefillEndpoint prefillEp) {
@@ -281,7 +271,7 @@ class DefaultBatchDispatcherTest {
         debugInfo.setHitCacheLen(hitCacheLen);
         prefill.setDebugInfo(debugInfo);
 
-        return new BatchItem(ctx, new CompletableFuture<>(), null, prefill, null, prefillEp, null, 0, System.currentTimeMillis());
+        return new BatchItem(ctx, new CompletableFuture<>(), null, prefill, null, prefillEp, null, System.currentTimeMillis());
     }
 
     private EngineRpcService.EnqueueBatchResponsePB ackResponse(long batchId, List<Long> successIds) {

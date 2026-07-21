@@ -17,8 +17,8 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -227,7 +227,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         ConfigService configService = Mockito.mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         return new EndpointRegistry(
-                configService, null, Mockito.mock(BatchSchedulerReporter.class));
+                configService, () -> null, Mockito.mock(BatchSchedulerReporter.class));
     }
 
     private static WorkerStatus status(int port) {

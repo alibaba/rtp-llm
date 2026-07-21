@@ -40,13 +40,6 @@ public class RecentCacheKeyWindow {
     private int keySize;
     private int uniqueSize;
 
-    private long cumulativeRequestOccurrences;
-    private long cumulativeRequestHitOccurrences;
-
-    RecentCacheKeyWindow(long timeWindowMs, LongSupplier nowSupplier) {
-        this(timeWindowMs, DEFAULT_MAX_CACHE_KEYS, nowSupplier);
-    }
-
     RecentCacheKeyWindow(long timeWindowMs, long maxCacheKeys, LongSupplier nowSupplier) {
         this.timeWindowMs = normalizeTimeWindowMs(timeWindowMs);
         this.maxCacheKeys = normalizeCapacity(maxCacheKeys);
@@ -84,31 +77,12 @@ public class RecentCacheKeyWindow {
                 retainRequest(cacheKeys, requestOccurrences, nowMs);
             }
 
-            cumulativeRequestOccurrences += requestOccurrences;
-            cumulativeRequestHitOccurrences += requestHitOccurrences;
         }
 
         if (log.isInfoEnabled()) {
             logRequest(nowMs, requestOccurrences, requestHitOccurrences);
         }
         return new Snapshot(timeWindowMs, requestOccurrences, requestHitOccurrences);
-    }
-
-    public synchronized Snapshot snapshot() {
-        return new Snapshot(timeWindowMs, cumulativeRequestOccurrences, cumulativeRequestHitOccurrences);
-    }
-
-    public synchronized Snapshot clear() {
-        entryHead = 0;
-        entrySize = 0;
-        keyTail = 0;
-        keySize = 0;
-        uniqueSize = 0;
-        cumulativeRequestOccurrences = 0L;
-        cumulativeRequestHitOccurrences = 0L;
-        java.util.Arrays.fill(tableStates, EMPTY);
-        java.util.Arrays.fill(tableCounts, 0);
-        return new Snapshot(timeWindowMs, 0L, 0L);
     }
 
     private long countNonNull(List<Long> cacheKeys) {

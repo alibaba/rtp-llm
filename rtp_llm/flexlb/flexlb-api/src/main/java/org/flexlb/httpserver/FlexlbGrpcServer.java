@@ -22,11 +22,11 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import java.io.IOException;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 public class FlexlbGrpcServer {
@@ -129,10 +129,6 @@ public class FlexlbGrpcServer {
                 .start();
 
         Logger.info("FlexLB gRPC server started on port {}", port);
-    }
-
-    int getBoundPort() {
-        return server == null ? -1 : server.getPort();
     }
 
     /**

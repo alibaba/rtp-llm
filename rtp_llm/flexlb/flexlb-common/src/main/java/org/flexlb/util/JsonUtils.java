@@ -10,12 +10,10 @@ import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.ObjectWriter;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.type.CollectionType;
 import com.fasterxml.jackson.databind.type.MapType;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.lang3.StringUtils;
 import org.flexlb.enums.StatusEnum;
 import org.flexlb.exception.FlexLBException;
 
@@ -99,15 +97,6 @@ public class JsonUtils {
             return res;
         } catch (Throwable e) {
             throw StatusEnum.JSON_MAPPER_ERROR.toException("msg=" + e.getMessage() + ", text=" + text, e);
-        }
-    }
-
-    public static <T> T toObjectOrNull(String text, Class<T> clazz) {
-        ObjectReader reader = MAPPER.readerFor(clazz);
-        try {
-            return reader.readValue(text);
-        } catch (IOException e) {
-            return null;
         }
     }
 
@@ -221,23 +210,6 @@ public class JsonUtils {
     }
 
     /**
-     * Convert a Java object to bytes
-     *
-     * @param object The Java object.
-     * @return The bytes array
-     */
-    public static byte[] toBytes(Object object) {
-        try {
-            return WRITER.writeValueAsBytes(object);
-        } catch (JsonProcessingException e) {
-            if (log.isTraceEnabled()) {
-                log.trace("Failed to convert json to string:", e);
-            }
-            return "".getBytes();
-        }
-    }
-
-    /**
      * Convert a java object to a json node.
      *
      * @param object The java object.
@@ -261,17 +233,6 @@ public class JsonUtils {
         }
     }
 
-    public static JsonNode toTreeNodeOrNull(String text) {
-        if (StringUtils.isBlank(text)) {
-            return null;
-        }
-        try {
-            return READER.readTree(text);
-        } catch (JsonProcessingException e) {
-            return null;
-        }
-    }
-
     /**
      * Convert an object to a formatted string.
      */
@@ -284,15 +245,6 @@ public class JsonUtils {
             }
             return "";
         }
-    }
-
-    /**
-     * Create an empty tree object.
-     *
-     * @return The tree object.
-     */
-    public static ObjectNode createTreeObject() {
-        return MAPPER.createObjectNode();
     }
 
     public static ArrayNode createArrayNode() {

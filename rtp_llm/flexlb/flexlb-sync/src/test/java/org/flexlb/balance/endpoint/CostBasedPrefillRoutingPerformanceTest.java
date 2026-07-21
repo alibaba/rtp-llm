@@ -3,13 +3,12 @@ package org.flexlb.balance.endpoint;
 import ch.qos.logback.classic.Level;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
-import org.flexlb.balance.scheduler.BatchDecisionHandler;
+import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -121,19 +120,20 @@ class CostBasedPrefillRoutingPerformanceTest {
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(config);
         BatchSchedulerReporter reporter = Mockito.mock(BatchSchedulerReporter.class, withSettings().stubOnly());
-        BatchDecisionHandler decisionHandler = Mockito.mock(BatchDecisionHandler.class, withSettings().stubOnly());
-        endpointRegistry = new EndpointRegistry(configService, null, reporter);
+        FlexlbBatchScheduler scheduler = Mockito.mock(
+                FlexlbBatchScheduler.class, withSettings().stubOnly());
+        endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
 
         for (int index = 0; index < ENGINE_COUNT; index++) {
             int port = 61_000 + index;
             WorkerStatus status = workerStatus(port);
-            PrefillEndpoint endpoint = new PrefillEndpoint(
-                    status, config, decisionHandler, reporter, false);
-            endpointRegistry.putPrefill(status.getIpPort(), endpoint);
+            PrefillEndpoint endpoint = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
+                    RoleType.PREFILL, status.getIpPort(), status);
+            endpoint.getBatcher().shutdown();
         }
 
         EngineWorkerStatus engineWorkerStatus =
-                new EngineWorkerStatus(new ModelMetaConfig(), endpointRegistry);
+                new EngineWorkerStatus(endpointRegistry);
         ResourceMeasureFactory resourceMeasureFactory =
                 new ResourceMeasureFactory(List.of(new PrefillResourceMeasure(configService)));
         EngineHealthReporter healthReporter =

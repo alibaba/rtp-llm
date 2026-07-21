@@ -32,14 +32,6 @@ public class BatcherContext {
     BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
                    BatchDecisionHandler handler,
                    PriorityBlockingQueue<BatchItem> queue,
-                   BatchSchedulerReporter reporter) {
-        this(key, prefillEp, cfg, handler, queue, new AtomicInteger(queue.size()),
-                new AtomicLong(initialHeadSortKey(queue)), reporter);
-    }
-
-    BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
-                   BatchDecisionHandler handler,
-                   PriorityBlockingQueue<BatchItem> queue,
                    AtomicInteger queueDepth,
                    AtomicLong headSortKey,
                    BatchSchedulerReporter reporter) {
@@ -67,10 +59,6 @@ public class BatcherContext {
         return cfg;
     }
 
-    BatchDecisionHandler handler() {
-        return handler;
-    }
-
     BatchSchedulerReporter reporter() {
         return reporter;
     }
@@ -94,15 +82,6 @@ public class BatcherContext {
     }
 
     // ---- queue mutation ----
-
-    BatchItem poll() {
-        BatchItem item = queue.poll();
-        if (item != null) {
-            queueDepth.decrementAndGet();
-            refreshHeadSortKey();
-        }
-        return item;
-    }
 
     boolean remove(BatchItem item) {
         boolean removed = queue.remove(item);

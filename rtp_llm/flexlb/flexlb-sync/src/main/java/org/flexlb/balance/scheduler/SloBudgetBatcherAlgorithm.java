@@ -1,11 +1,9 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.util.Logger;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -55,7 +53,7 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
             return;
         }
         long now = ctx.now();
-        long budgetMs = head.deadlineMs() - now;
+        long budgetMs = head.sortKey() - now;
 
         // 1. expired → drop
         if (budgetMs < 0) {
@@ -121,8 +119,7 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
         } else if (insideWindow && !shouldWaitForMore) {
             dispatchBatch(ctx, picked, "arrival_guard", fillRatio, trace);
         } else {
-            recordPark(ctx, head, parkReason(insideWindow, picked.size(), minBatchSize, batchMaxCount,
-                    targetBatchSize, shouldWaitForMore), budgetMs, now);
+            recordPark(ctx, head, parkReason(insideWindow, picked.size(), minBatchSize, batchMaxCount), budgetMs, now);
             parkBriefly();
         }
     }
@@ -294,23 +291,15 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
     private static String parkReason(boolean insideWindow,
                                      int pickedSize,
                                      int minBatchSize,
-                                     int batchMaxCount,
-                                     int targetBatchSize,
-                                     boolean shouldWaitForMore) {
+                                     int batchMaxCount) {
         if (!insideWindow) {
             return "outside_window";
-        }
-        if (!shouldWaitForMore) {
-            return "unknown";
         }
         int minTarget = minTargetBatchSize(minBatchSize, batchMaxCount);
         if (pickedSize < minTarget) {
             return "wait_for_min_batch";
         }
-        if (pickedSize < targetBatchSize) {
-            return "wait_for_target_batch";
-        }
-        return "wait_for_more";
+        return "wait_for_target_batch";
     }
 
     private void recordPark(BatcherContext ctx, BatchItem head, String reason, long budgetMs, long nowMs) {
@@ -328,7 +317,7 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
         int queueBefore = ctx.size();
         int inflightBatches = ctx.prefillEp().getInflightBatchCount();
         long waitMs = nowMs - head.enqueuedAtMs();
-        long initialBudgetMs = head.deadlineMs() - head.enqueuedAtMs();
+        long initialBudgetMs = head.sortKey() - head.enqueuedAtMs();
         ParkTrace parkTrace = lastParkByRequest.remove(head.requestId());
         if (parkTrace == null) {
             parkTrace = ParkTrace.EMPTY;
@@ -338,7 +327,7 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
                         + "inflight_batches={} last_park_reason={} last_park_budget_ms={} "
                         + "last_park_wait_ms={} last_park_queue_size={} last_park_inflight_batches={}",
                 head.requestId(), head.seqLen(), waitMs, budgetMs, ctx.key(),
-                dropReason, initialBudgetMs, head.deadlineMs(), head.enqueuedAtMs(), queueBefore,
+                dropReason, initialBudgetMs, head.sortKey(), head.enqueuedAtMs(), queueBefore,
                 inflightBatches, parkTrace.reason(), parkTrace.budgetMs(),
                 parkTrace.waitMs(), parkTrace.queueSize(), parkTrace.inflightBatches());
         ctx.dropHead(head);
@@ -365,7 +354,7 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
             lastParkByRequest.remove(item.requestId());
         }
         ctx.dispatch(picked,
-                new DispatchMeta(reason, fillRatio, ctx.size() - picked.size()));
+                new DispatchMeta(reason, ctx.size() - picked.size()));
     }
 
     // ==================== Park ====================

@@ -5,7 +5,6 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.InflightAssertions;
@@ -28,11 +27,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>Flow:
  * 1. Start mock prefill with available_concurrency = 10
  * 2. Submit request → succeed (normal operation)
- * 3. Call {@code grpcClient.getWorkerStatus()} → verify response has concurrency = 10
+ * 3. Call {@code grpcClient.getWorkerStatusAsync()} → verify response has concurrency = 10
  * 4. Apply status update to WorkerStatus and PrefillEndpoint (simulates EngineSyncRunner)
  * 5. Verify WorkerStatus reflects concurrency = 10
  * 6. Change mock prefill behavior: available_concurrency = 0 (worker full)
- * 7. Call {@code grpcClient.getWorkerStatus()} again → verify concurrency = 0
+ * 7. Call {@code grpcClient.getWorkerStatusAsync()} again → verify concurrency = 0
  * 8. Apply status update
  * 9. Verify WorkerStatus reflects concurrency = 0 (master perceives worker is full)
  * 10. Clean up
@@ -75,7 +74,6 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
         cfg.setFlexlbBatchWindowMs(300);
         cfg.setCostSloMs(50_000L);
         cfg.setCostSloRiskMarginMs(50L);
-        cfg.setFlexlbBatchFillThreshold(1.0);
         cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);
         cfg.setFlexlbInflightTtlMs(300_000L);
         return cfg;
@@ -148,14 +146,15 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
     // ==================== Helper: simulate GrpcWorkerStatusRunner flow ====================
 
     /**
-     * Call {@code grpcClient.getWorkerStatus()} to fetch the worker status from the
+     * Call {@code grpcClient.getWorkerStatusAsync()} to fetch the worker status from the
      * mock prefill worker via gRPC.
      */
-    private EngineRpcService.WorkerStatusPB fetchWorkerStatus() {
+    private EngineRpcService.WorkerStatusPB fetchWorkerStatus() throws Exception {
         EngineRpcService.StatusVersionPB request = EngineRpcService.StatusVersionPB.newBuilder()
                 .setLatestFinishedVersion(0)
                 .build();
-        return grpcClient.getWorkerStatus(prefillIp, prefillGrpcPort, request, SYNC_TIMEOUT_MS);
+        return grpcClient.getWorkerStatusAsync(prefillIp, prefillGrpcPort, request, SYNC_TIMEOUT_MS)
+                .get(SYNC_TIMEOUT_MS, TimeUnit.MILLISECONDS);
     }
 
     /**
