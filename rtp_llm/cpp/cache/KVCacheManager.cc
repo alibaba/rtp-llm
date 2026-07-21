@@ -10,6 +10,8 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventPublisherConfig.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventPublisherFactory.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -563,12 +565,12 @@ void KVCacheManager::initCacheEventPublisher() {
     try {
         const auto& publisher_type = kv_cache_config_.kv_cache_event_publisher_type;
         if (warmup_ || publisher_type.empty() || publisher_type == "none") {
-            cache_event_publisher_ = std::make_shared<NullPublisher>();
+            cache_event_publisher_ = createNullKVCacheEventPublisher();
             return;
         }
         if (publisher_type != "log" && publisher_type != "kvcm") {
             RTP_LLM_LOG_WARNING("unknown KV cache event publisher type=%s; publisher disabled", publisher_type.c_str());
-            cache_event_publisher_ = std::make_shared<NullPublisher>();
+            cache_event_publisher_ = createNullKVCacheEventPublisher();
             return;
         }
         if (parallelism_config_.tp_rank != 0) {
@@ -576,14 +578,14 @@ void KVCacheManager::initCacheEventPublisher() {
                              publisher_type.c_str(),
                              static_cast<long long>(parallelism_config_.tp_rank),
                              static_cast<long long>(parallelism_config_.dp_rank));
-            cache_event_publisher_ = std::make_shared<NullPublisher>();
+            cache_event_publisher_ = createNullKVCacheEventPublisher();
             return;
         }
 
         publisher_block_cache_ = allocator_->getBlockPool()->blockCache();
         if (!publisher_block_cache_) {
             RTP_LLM_LOG_WARNING("KV cache event publisher disabled because BlockCache is unavailable");
-            cache_event_publisher_ = std::make_shared<NullPublisher>();
+            cache_event_publisher_ = createNullKVCacheEventPublisher();
             return;
         }
 
@@ -645,7 +647,7 @@ void KVCacheManager::initCacheEventPublisher() {
             RTP_LLM_LOG_WARNING("KV cache event publisher failed to start, type=%s; inference remains enabled",
                                 publisher_type.c_str());
             publisher_block_cache_->setEventPublisher(nullptr, config_.groupNums());
-            cache_event_publisher_ = std::make_shared<NullPublisher>();
+            cache_event_publisher_ = createNullKVCacheEventPublisher();
             publisher_block_cache_.reset();
             return;
         }
@@ -663,7 +665,7 @@ void KVCacheManager::initCacheEventPublisher() {
         if (cache_event_publisher_) {
             cache_event_publisher_->stop();
         }
-        cache_event_publisher_ = std::make_shared<NullPublisher>();
+        cache_event_publisher_ = createNullKVCacheEventPublisher();
         publisher_block_cache_.reset();
         RTP_LLM_LOG_WARNING("KV cache event publisher initialization failed; inference remains enabled: %s", e.what());
     } catch (...) {
@@ -673,7 +675,7 @@ void KVCacheManager::initCacheEventPublisher() {
         if (cache_event_publisher_) {
             cache_event_publisher_->stop();
         }
-        cache_event_publisher_ = std::make_shared<NullPublisher>();
+        cache_event_publisher_ = createNullKVCacheEventPublisher();
         publisher_block_cache_.reset();
         RTP_LLM_LOG_WARNING(
             "KV cache event publisher initialization failed with unknown error; inference remains enabled");

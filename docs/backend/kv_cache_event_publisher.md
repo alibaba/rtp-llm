@@ -17,6 +17,24 @@ flowchart LR
     Cache -->|"authoritative HBM snapshot"| KVCM
 ```
 
+The implementation is isolated from the cache core under `rtp_llm/cpp/cache/events/`:
+
+```text
+events/
+  KVCacheEvent.h                       # transport-neutral event and snapshot model
+  KVCacheEventPublisher.h              # interface consumed by BlockCache
+  KVCacheEventPublisherConfig.h        # construction-time configuration and identity
+  KVCacheEventPublisherFactory.h/.cc   # the only concrete-publisher selection point
+  KVCacheEventQueue.h/.cc              # bounded non-blocking ingress shared by async publishers
+  NullPublisher.h/.cc                  # disabled implementation
+  LogPublisher.h/.cc                   # rollout-validation implementation
+  KVCMPublisher.h/.cc                  # KVCM protocol and synchronization implementation
+  test/                                # Publisher factory, lifecycle, fault, and concurrency tests
+```
+
+`BlockCache` depends only on `KVCacheEventPublisher`; it does not include a concrete publisher, queue, HTTP, or KVCM
+protocol type. `KVCacheManager` constructs the selected implementation through the factory.
+
 ## Event semantics
 
 Events describe reusable logical cache keys, not physical block indices.

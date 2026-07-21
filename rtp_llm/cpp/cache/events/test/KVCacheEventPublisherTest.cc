@@ -1,4 +1,8 @@
-#include "rtp_llm/cpp/cache/KVCacheEventPublisher.h"
+// Publisher-specific behavior tests are owned by the cache/events subsystem.
+#include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventPublisherFactory.h"
+#include "rtp_llm/cpp/cache/events/LogPublisher.h"
+#include "rtp_llm/cpp/cache/events/NullPublisher.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -193,6 +197,26 @@ TEST(KVCacheEventPublisherTest, NullPublisherHasNoRuntimeResources) {
     EXPECT_EQ(PublishResult::DISABLED, publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 1, 0}));
     EXPECT_EQ(PublisherState::DISABLED, publisher.status().state);
     publisher.stop();
+}
+
+TEST(KVCacheEventPublisherTest, FactorySelectsConfiguredPublisherWithoutLeakingConcreteTypesToCache) {
+    KVCacheEventPublisherConfig config;
+    const auto                  context = makeContext();
+
+    config.type = "none";
+    auto publisher = createKVCacheEventPublisher(config, context);
+    ASSERT_NE(nullptr, publisher);
+    EXPECT_FALSE(publisher->enabled());
+
+    config.type = "log";
+    publisher   = createKVCacheEventPublisher(config, context);
+    ASSERT_NE(nullptr, publisher);
+    EXPECT_TRUE(publisher->enabled());
+
+    config.type = "unsupported";
+    publisher   = createKVCacheEventPublisher(config, context);
+    ASSERT_NE(nullptr, publisher);
+    EXPECT_FALSE(publisher->enabled());
 }
 
 TEST(KVCacheEventPublisherTest, KVCMPublisherRejectsIncompleteIdentity) {

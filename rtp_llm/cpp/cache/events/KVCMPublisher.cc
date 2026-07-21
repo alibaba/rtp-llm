@@ -1,204 +1,25 @@
-#include "rtp_llm/cpp/cache/KVCacheEventPublisher.h"
+#include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
 #include <algorithm>
 #include <atomic>
-#include <condition_variable>
+#include <chrono>
 #include <curl/curl.h>
 #include <exception>
 #include <mutex>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
-#include <sstream>
 #include <thread>
 #include <unordered_map>
 #include <utility>
 
+#include "rtp_llm/cpp/cache/events/KVCacheEventQueue.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 namespace {
 
 using JsonWriter = rapidjson::Writer<rapidjson::StringBuffer>;
-
-const char* eventTypeName(KVCacheEventType type) {
-    switch (type) {
-        case KVCacheEventType::BLOCK_ADD:
-            return "BLOCK_ADD";
-        case KVCacheEventType::BLOCK_DELETE:
-            return "BLOCK_DELETE";
-    }
-    return "UNKNOWN";
-}
-
-enum class QueuePushResult {
-    ACCEPTED,
-    STOPPED,
-    FULL,
-};
-
-class BoundedEventQueue {
-public:
-    explicit BoundedEventQueue(size_t capacity):
-        capacity_(std::max<size_t>(capacity, 1)),
-        ring_capacity_(std::max<size_t>(capacity_, 2)),
-        cells_(std::make_unique<Cell[]>(ring_capacity_)) {
-        for (size_t i = 0; i < ring_capacity_; ++i) {
-            cells_[i].sequence.store(i, std::memory_order_relaxed);
-        }
-    }
-
-    QueuePushResult tryPush(KVCacheEvent event) noexcept {
-        if (stopped_.load(std::memory_order_acquire)) {
-            return QueuePushResult::STOPPED;
-        }
-
-        size_t current_size = size_.load(std::memory_order_relaxed);
-        do {
-            if (current_size >= capacity_) {
-                return QueuePushResult::FULL;
-            }
-        } while (!size_.compare_exchange_weak(
-            current_size, current_size + 1, std::memory_order_acq_rel, std::memory_order_relaxed));
-
-        // stop() may race the capacity reservation. Do not create a new item
-        // after shutdown has become visible.
-        if (stopped_.load(std::memory_order_acquire)) {
-            size_.fetch_sub(1, std::memory_order_release);
-            return QueuePushResult::STOPPED;
-        }
-
-        enqueue(std::move(event));
-        cv_.notify_one();
-        return QueuePushResult::ACCEPTED;
-    }
-
-    std::vector<KVCacheEvent> waitPop(size_t max_batch_size, std::chrono::milliseconds timeout) {
-        const size_t max_count = std::max<size_t>(max_batch_size, 1);
-        if (published_size_.load(std::memory_order_acquire) == 0) {
-            std::unique_lock<std::mutex> lock(wait_mu_);
-            cv_.wait_for(lock, timeout, [this] {
-                return stopped_.load(std::memory_order_acquire)
-                       || published_size_.load(std::memory_order_acquire) > 0;
-            });
-        }
-
-        std::vector<KVCacheEvent> batch;
-        batch.reserve(std::min(max_count, published_size_.load(std::memory_order_acquire)));
-        KVCacheEvent event;
-        while (batch.size() < max_count && tryDequeue(event)) {
-            batch.push_back(std::move(event));
-        }
-        return batch;
-    }
-
-    void waitForStop(std::chrono::milliseconds timeout) {
-        std::unique_lock<std::mutex> lock(wait_mu_);
-        cv_.wait_for(lock, timeout, [this] { return stopped_.load(std::memory_order_acquire); });
-    }
-
-    void discardPending() {
-        // Drain only the events that were fully published at this boundary.
-        // Concurrently published events remain queued and are applied after the
-        // snapshot ACK (duplicates are harmless set operations).
-        const size_t target = published_size_.load(std::memory_order_acquire);
-        KVCacheEvent event;
-        for (size_t i = 0; i < target && tryDequeue(event); ++i) {
-        }
-    }
-
-    void wake() {
-        cv_.notify_one();
-    }
-
-    void stop() {
-        stopped_.store(true, std::memory_order_release);
-        cv_.notify_all();
-    }
-
-    size_t size() const noexcept {
-        return size_.load(std::memory_order_relaxed);
-    }
-
-private:
-    struct Cell {
-        std::atomic<size_t> sequence{0};
-        KVCacheEvent       event;
-    };
-
-    void enqueue(KVCacheEvent event) noexcept {
-        size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
-        Cell*  cell;
-        for (;;) {
-            cell             = &cells_[pos % ring_capacity_];
-            const size_t seq = cell->sequence.load(std::memory_order_acquire);
-            const auto   dif = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos);
-            if (dif == 0) {
-                if (enqueue_pos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
-                    break;
-                }
-            } else {
-                // Logical capacity was reserved before entering this method,
-                // so the ring cannot be full. Reload after another producer's
-                // progress instead of ever waiting on a mutex.
-                pos = enqueue_pos_.load(std::memory_order_relaxed);
-            }
-        }
-        cell->event = std::move(event);
-        // Publish the count before the slot. Once the sequence release makes
-        // the item visible, a consumer may dequeue it immediately.
-        published_size_.fetch_add(1, std::memory_order_relaxed);
-        cell->sequence.store(pos + 1, std::memory_order_release);
-    }
-
-    bool tryDequeue(KVCacheEvent& event) noexcept {
-        size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
-        Cell*  cell;
-        for (;;) {
-            cell             = &cells_[pos % ring_capacity_];
-            const size_t seq = cell->sequence.load(std::memory_order_acquire);
-            const auto   dif = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
-            if (dif == 0) {
-                if (dequeue_pos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
-                    break;
-                }
-            } else if (dif < 0) {
-                return false;
-            } else {
-                pos = dequeue_pos_.load(std::memory_order_relaxed);
-            }
-        }
-        event = std::move(cell->event);
-        cell->sequence.store(pos + ring_capacity_, std::memory_order_release);
-        published_size_.fetch_sub(1, std::memory_order_release);
-        size_.fetch_sub(1, std::memory_order_release);
-        return true;
-    }
-
-private:
-    const size_t            capacity_;
-    const size_t            ring_capacity_;
-    std::unique_ptr<Cell[]> cells_;
-    std::atomic<size_t>     enqueue_pos_{0};
-    std::atomic<size_t>     dequeue_pos_{0};
-    std::atomic<size_t>     size_{0};
-    std::atomic<size_t>     published_size_{0};
-    std::atomic<bool>       stopped_{false};
-    mutable std::mutex      wait_mu_;
-    std::condition_variable cv_;
-};
-
-PublishResult toPublishResult(QueuePushResult result) {
-    switch (result) {
-        case QueuePushResult::ACCEPTED:
-            return PublishResult::ACCEPTED;
-        case QueuePushResult::STOPPED:
-            return PublishResult::NOT_RUNNING;
-        case QueuePushResult::FULL:
-            return PublishResult::QUEUE_FULL;
-    }
-    return PublishResult::NOT_RUNNING;
-}
 
 bool jsonCodeIsOk(const rapidjson::Value& code) {
     if (code.IsString()) {
@@ -444,9 +265,8 @@ std::string buildMutationReport(const KVCacheEventPublisherContext& context,
 
 std::vector<KVCacheEvent> coalesceMutations(const std::vector<KVCacheEvent>& events) {
     // KVCM aggregates all ADDs before all DELETEs inside one ReportEvent
-    // request. Sending both transitions for one key can therefore invert a
-    // DELETE -> ADD sequence. Mutations are idempotent set operations, so the
-    // final transition for each key is the state this unsent batch must leave.
+    // request. The final transition for each key is therefore the only one
+    // this unsent batch may carry without inverting DELETE -> ADD.
     std::vector<KVCacheEvent>           coalesced;
     std::unordered_map<int64_t, size_t> key_to_index;
     coalesced.reserve(events.size());
@@ -536,171 +356,6 @@ std::string buildSnapshotReport(const KVCacheEventPublisherContext& context,
 
 }  // namespace
 
-bool NullPublisher::start() noexcept {
-    return true;
-}
-
-PublishResult NullPublisher::tryPublish(KVCacheEvent) noexcept {
-    return PublishResult::DISABLED;
-}
-
-void NullPublisher::stop() noexcept {}
-
-PublisherStatus NullPublisher::status() const noexcept {
-    return {PublisherState::DISABLED, 0, 0, 0};
-}
-
-bool NullPublisher::enabled() const noexcept {
-    return false;
-}
-
-class LogPublisher::Impl {
-public:
-    Impl(KVCacheEventPublisherConfig config, KVCacheEventPublisherContext context):
-        config_(std::move(config)), context_(std::move(context)), queue_(config_.queue_capacity) {}
-
-    ~Impl() {
-        stop();
-    }
-
-    bool start() noexcept {
-        bool expected = false;
-        if (!started_.compare_exchange_strong(expected, true)) {
-            return true;
-        }
-        state_.store(PublisherState::STARTING, std::memory_order_relaxed);
-        try {
-            worker_ = std::thread(&Impl::workerLoop, this);
-        } catch (const std::exception& e) {
-            started_.store(false, std::memory_order_relaxed);
-            state_.store(PublisherState::DEGRADED, std::memory_order_relaxed);
-            RTP_LLM_LOG_WARNING("start LogPublisher failed: %s", e.what());
-            return false;
-        }
-        return true;
-    }
-
-    PublishResult tryPublish(KVCacheEvent event) noexcept {
-        if (!started_.load(std::memory_order_relaxed) || stopping_.load(std::memory_order_relaxed)) {
-            return PublishResult::NOT_RUNNING;
-        }
-        event.sequence    = next_sequence_.fetch_add(1, std::memory_order_relaxed);
-        const auto result = queue_.tryPush(std::move(event));
-        if (result == QueuePushResult::ACCEPTED) {
-            accepted_count_.fetch_add(1, std::memory_order_relaxed);
-        } else {
-            dropped_count_.fetch_add(1, std::memory_order_relaxed);
-        }
-        return toPublishResult(result);
-    }
-
-    void stop() noexcept {
-        if (!started_.load(std::memory_order_relaxed)) {
-            return;
-        }
-        stopping_.store(true, std::memory_order_relaxed);
-        queue_.stop();
-        if (worker_.joinable()) {
-            worker_.join();
-        }
-        started_.store(false, std::memory_order_relaxed);
-        state_.store(PublisherState::STOPPED, std::memory_order_relaxed);
-    }
-
-    PublisherStatus status() const noexcept {
-        return {state_.load(std::memory_order_relaxed),
-                queue_.size(),
-                accepted_count_.load(std::memory_order_relaxed),
-                dropped_count_.load(std::memory_order_relaxed)};
-    }
-
-private:
-    void workerLoop() noexcept {
-        state_.store(PublisherState::LOGGING, std::memory_order_relaxed);
-        try {
-            while (!stopping_.load(std::memory_order_relaxed)) {
-                const auto batch = queue_.waitPop(config_.report_batch_size,
-                                                  std::chrono::milliseconds(std::max(config_.flush_interval_ms, 1)));
-                if (batch.empty()) {
-                    continue;
-                }
-
-                size_t             add_count    = 0;
-                size_t             delete_count = 0;
-                std::ostringstream samples;
-                const size_t       sample_count = std::min(batch.size(), config_.log_max_keys_per_batch);
-                for (size_t i = 0; i < batch.size(); ++i) {
-                    if (batch[i].type == KVCacheEventType::BLOCK_ADD) {
-                        ++add_count;
-                    } else {
-                        ++delete_count;
-                    }
-                    if (i < sample_count) {
-                        if (i > 0) {
-                            samples << ',';
-                        }
-                        samples << eventTypeName(batch[i].type) << ':' << batch[i].block_key;
-                    }
-                }
-                RTP_LLM_LOG_INFO("kv_cache_event publisher=log instance_id=%s host=%s dp_rank=%d batch_size=%zu "
-                                 "add=%zu delete=%zu sequence_begin=%llu sequence_end=%llu samples=%s",
-                                 context_.instance_id.c_str(),
-                                 context_.host_ip_port.c_str(),
-                                 context_.dp_rank,
-                                 batch.size(),
-                                 add_count,
-                                 delete_count,
-                                 static_cast<unsigned long long>(batch.front().sequence),
-                                 static_cast<unsigned long long>(batch.back().sequence),
-                                 samples.str().c_str());
-            }
-        } catch (const std::exception& e) {
-            state_.store(PublisherState::DEGRADED, std::memory_order_relaxed);
-            RTP_LLM_LOG_WARNING("LogPublisher worker stopped after exception: %s", e.what());
-        } catch (...) {
-            state_.store(PublisherState::DEGRADED, std::memory_order_relaxed);
-            RTP_LLM_LOG_WARNING("LogPublisher worker stopped after unknown exception");
-        }
-    }
-
-private:
-    KVCacheEventPublisherConfig  config_;
-    KVCacheEventPublisherContext context_;
-    BoundedEventQueue            queue_;
-    std::thread                  worker_;
-    std::atomic<bool>            started_{false};
-    std::atomic<bool>            stopping_{false};
-    std::atomic<PublisherState>  state_{PublisherState::DISABLED};
-    std::atomic<uint64_t>        next_sequence_{1};
-    std::atomic<uint64_t>        accepted_count_{0};
-    std::atomic<uint64_t>        dropped_count_{0};
-};
-
-LogPublisher::LogPublisher(KVCacheEventPublisherConfig config, KVCacheEventPublisherContext context):
-    impl_(std::make_unique<Impl>(std::move(config), std::move(context))) {}
-
-LogPublisher::~LogPublisher() = default;
-
-bool LogPublisher::start() noexcept {
-    return impl_->start();
-}
-
-PublishResult LogPublisher::tryPublish(KVCacheEvent event) noexcept {
-    return impl_->tryPublish(std::move(event));
-}
-
-void LogPublisher::stop() noexcept {
-    impl_->stop();
-}
-
-PublisherStatus LogPublisher::status() const noexcept {
-    return impl_->status();
-}
-
-bool LogPublisher::enabled() const noexcept {
-    return true;
-}
-
 class KVCMPublisher::Impl {
 public:
     Impl(KVCacheEventPublisherConfig           config,
@@ -717,9 +372,6 @@ public:
         } else if (!config_.manager_endpoint.empty()) {
             reporter_ =
                 std::make_shared<CurlKVCacheEventReporter>(config_.manager_endpoint, config_.request_timeout_ms);
-            // An authoritative snapshot is one atomic KVCM replacement and
-            // may contain every local cache key. Keep its timeout independent
-            // from latency-sensitive registration, heartbeat, and deltas.
             snapshot_reporter_ =
                 std::make_shared<CurlKVCacheEventReporter>(config_.manager_endpoint, config_.snapshot_timeout_ms);
         }
@@ -763,14 +415,14 @@ public:
         }
         event.sequence    = next_sequence_.fetch_add(1, std::memory_order_relaxed);
         const auto result = queue_.tryPush(std::move(event));
-        if (result == QueuePushResult::ACCEPTED) {
+        if (result == detail::QueuePushResult::ACCEPTED) {
             accepted_count_.fetch_add(1, std::memory_order_relaxed);
         } else {
             dropped_count_.fetch_add(1, std::memory_order_relaxed);
             dirty_generation_.fetch_add(1, std::memory_order_relaxed);
             queue_.wake();
         }
-        return toPublishResult(result);
+        return detail::toPublishResult(result);
     }
 
     void stop() noexcept {
@@ -819,10 +471,7 @@ private:
             return false;
         }
         trace_id = nextTraceId("node-register");
-        if (!post("/api/reportEvent", buildControlReport(context_, trace_id, ControlEventType::NODE_REGISTER))) {
-            return false;
-        }
-        return true;
+        return post("/api/reportEvent", buildControlReport(context_, trace_id, ControlEventType::NODE_REGISTER));
     }
 
     bool reconcile(uint64_t generation) {
@@ -864,7 +513,7 @@ private:
             return true;
         }
         const auto coalesced = coalesceMutations(batch);
-        const auto trace_id = nextTraceId("mutation");
+        const auto trace_id  = nextTraceId("mutation");
         return post("/api/reportEvent", buildMutationReport(context_, trace_id, coalesced));
     }
 
@@ -956,7 +605,7 @@ private:
     KVCacheSnapshotProvider               snapshot_provider_;
     std::shared_ptr<KVCacheEventReporter> reporter_;
     std::shared_ptr<KVCacheEventReporter> snapshot_reporter_;
-    BoundedEventQueue                     queue_;
+    detail::KVCacheEventQueue             queue_;
     std::thread                           worker_;
     std::atomic<bool>                     started_{false};
     std::atomic<bool>                     stopping_{false};
@@ -996,22 +645,6 @@ PublisherStatus KVCMPublisher::status() const noexcept {
 
 bool KVCMPublisher::enabled() const noexcept {
     return true;
-}
-
-KVCacheEventPublisherPtr createKVCacheEventPublisher(const KVCacheEventPublisherConfig&    config,
-                                                     const KVCacheEventPublisherContext&   context,
-                                                     KVCacheSnapshotProvider               snapshot_provider,
-                                                     std::shared_ptr<KVCacheEventReporter> reporter) {
-    if (config.type == "log") {
-        return std::make_shared<LogPublisher>(config, context);
-    }
-    if (config.type == "kvcm") {
-        return std::make_shared<KVCMPublisher>(config, context, std::move(snapshot_provider), std::move(reporter));
-    }
-    if (config.type != "none" && !config.type.empty()) {
-        RTP_LLM_LOG_WARNING("unknown KV cache event publisher type=%s, using NullPublisher", config.type.c_str());
-    }
-    return std::make_shared<NullPublisher>();
 }
 
 }  // namespace rtp_llm

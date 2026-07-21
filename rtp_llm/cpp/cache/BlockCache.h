@@ -7,7 +7,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/KVCacheEventPublisher.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/LRUCache.h"
