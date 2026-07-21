@@ -27,6 +27,7 @@ from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
+from rtp_llm.utils.oom_diag import install_oom_dump
 from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_ENV,
     DEFER_FIRST_SIGTERM_SECONDS_ENV,
@@ -163,6 +164,7 @@ def local_rank_start(
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
+        install_oom_dump()
         backend_manager = BackendManager(py_env_configs)
         if shutdown_pending:
             backend_manager.request_shutdown()

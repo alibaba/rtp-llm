@@ -1,10 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <algorithm>
 #include <limits>
+#include <string>
 #include <thread>
 
 #include "kmonitor/client/MetricsReporter.h"
@@ -33,6 +35,31 @@ namespace {
 constexpr int                  kDsv4PoolNum = 7;
 const std::vector<std::string> kDsv4Tags    = {
     "swa_kv", "csa_kv", "indexer_kv", "indexer_state", "csa_state", "hca_kv", "hca_state"};
+
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* name, const char* value): name_(name) {
+        const char* old_value = std::getenv(name_);
+        if (old_value != nullptr) {
+            old_value_ = old_value;
+            had_value_ = true;
+        }
+        setenv(name_, value, 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (had_value_) {
+            setenv(name_, old_value_.c_str(), 1);
+        } else {
+            unsetenv(name_);
+        }
+    }
+
+private:
+    const char* name_;
+    std::string old_value_;
+    bool        had_value_ = false;
+};
 }  // namespace
 
 class KVCacheManagerTest: public ::testing::Test {
@@ -1069,6 +1096,64 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
     std::vector<CacheKeyType> expected = {10, 11, 12, 13};
     std::sort(expected.begin(), expected.end());
     EXPECT_EQ(got, expected);
+}
+
+TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
+    ScopedEnvVar snapshot_env("RTP_LLM_CACHE_STATUS_SNAPSHOT", "1");
+
+    auto          cache_config = makeSimpleMhaCacheConfig(1, 8, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache = false;
+    kv_cache_config.reuse_cache         = false;
+
+    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    ASSERT_TRUE(kv_cache_manager->init());
+
+    auto shared_cache = kv_cache_manager->allocator_->sharedBlockCache();
+    ASSERT_NE(shared_cache, nullptr);
+
+    std::vector<BlockIdxType> group_slots(1);
+    group_slots[0] = 1;
+    shared_cache->put(10, group_slots, false);
+    group_slots[0] = 2;
+    shared_cache->put(11, group_slots, false);
+
+    kv_cache_manager->refreshKVCacheInfoSnapshot();
+
+    auto first = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true);
+    ASSERT_GE(first.version, 0);
+    auto first_keys = first.cached_keys;
+    std::sort(first_keys.begin(), first_keys.end());
+    EXPECT_EQ(first_keys, (std::vector<CacheKeyType>{10, 11}));
+
+    group_slots[0] = 3;
+    shared_cache->put(12, group_slots, false);
+
+    auto unchanged = kv_cache_manager->getKVCacheInfo(first.version, /*need_cache_keys=*/true);
+    EXPECT_EQ(unchanged.version, first.version);
+    auto unchanged_keys = unchanged.cached_keys;
+    std::sort(unchanged_keys.begin(), unchanged_keys.end());
+    EXPECT_EQ(unchanged_keys, (std::vector<CacheKeyType>{10, 11}));
+
+    auto stale = kv_cache_manager->getKVCacheInfo(first.version - 1, /*need_cache_keys=*/true);
+    EXPECT_EQ(stale.version, first.version);
+    auto stale_keys = stale.cached_keys;
+    std::sort(stale_keys.begin(), stale_keys.end());
+    EXPECT_EQ(stale_keys, (std::vector<CacheKeyType>{10, 11}));
+
+    kv_cache_manager->refreshKVCacheInfoSnapshot();
+
+    auto updated = kv_cache_manager->getKVCacheInfo(first.version, /*need_cache_keys=*/true);
+    EXPECT_GT(updated.version, first.version);
+    auto updated_keys = updated.cached_keys;
+    std::sort(updated_keys.begin(), updated_keys.end());
+    EXPECT_EQ(updated_keys, (std::vector<CacheKeyType>{10, 11, 12}));
+
+    auto current = kv_cache_manager->getKVCacheInfo(updated.version, /*need_cache_keys=*/true);
+    EXPECT_EQ(current.version, updated.version);
+    auto current_keys = current.cached_keys;
+    std::sort(current_keys.begin(), current_keys.end());
+    EXPECT_EQ(current_keys, (std::vector<CacheKeyType>{10, 11, 12}));
 }
 
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
