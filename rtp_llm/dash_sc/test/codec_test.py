@@ -1178,6 +1178,61 @@ class StreamLogTagTest(TestCase):
             "request_id=-1 trace_id=tid",
         )
 
+    def test_stream_log_tag_with_source_fields(self) -> None:
+        self.assertEqual(
+            stream_log_tag(
+                request_id_numeric=1,
+                trace_id="tid",
+                source_request_id="src-123",
+                source_role="dash",
+            ),
+            "request_id=1 trace_id=tid source_request_id=src-123 " "source_role=dash",
+        )
+
+    def test_stream_log_tag_empty_source_fields_not_appended(self) -> None:
+        self.assertEqual(
+            stream_log_tag(
+                request_id_numeric=1,
+                trace_id="tid",
+                source_request_id="",
+                source_role="",
+            ),
+            "request_id=1 trace_id=tid",
+        )
+
+    def test_stream_log_tag_source_fields_with_phase(self) -> None:
+        self.assertEqual(
+            stream_log_tag(
+                request_id_numeric=1,
+                trace_id="tid",
+                phase=2,
+                source_request_id="src-123",
+                source_role="dash",
+            ),
+            "request_id=1 trace_id=tid source_request_id=src-123 "
+            "source_role=dash phase=2",
+        )
+
+    def test_stream_log_tag_only_source_request_id(self) -> None:
+        self.assertEqual(
+            stream_log_tag(
+                request_id_numeric=1,
+                trace_id="tid",
+                source_request_id="src-123",
+            ),
+            "request_id=1 trace_id=tid source_request_id=src-123",
+        )
+
+    def test_stream_log_tag_only_source_role(self) -> None:
+        self.assertEqual(
+            stream_log_tag(
+                request_id_numeric=1,
+                trace_id="tid",
+                source_role="dash",
+            ),
+            "request_id=1 trace_id=tid source_role=dash",
+        )
+
 
 if __name__ == "__main__":
     main()
