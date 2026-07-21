@@ -5,6 +5,7 @@ from unittest import TestCase, main
 
 from transformers import AutoTokenizer
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
@@ -663,18 +664,71 @@ class OpenaiGenerateConfigTest(TestCase):
             self.tokenizer.encode("</think>\n\n", add_special_tokens=False),
         )
 
-    def test_openai_max_completion_tokens_non_positive_is_unset(self):
+    def test_openai_max_completion_tokens_zero_raises_invalid_params(self):
         request = ChatCompletionRequest(
             messages=[],
             max_tokens=64,
             max_completion_tokens=0,
         )
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._extract_openai_generation_config(request)
+        self.assertEqual(ctx.exception.exception_type, ExceptionType.INVALID_PARAMS)
+        self.assertEqual(
+            ctx.exception.message,
+            "Range of max_completion_tokens should be (0, 1024]",
+        )
+
+    def test_openai_max_completion_tokens_negative_raises_invalid_params(self):
+        request = ChatCompletionRequest(messages=[], max_completion_tokens=-1)
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._extract_openai_generation_config(request)
+        self.assertEqual(ctx.exception.exception_type, ExceptionType.INVALID_PARAMS)
+        self.assertEqual(
+            ctx.exception.message,
+            "Range of max_completion_tokens should be (0, 1024]",
+        )
+
+    def test_openai_max_tokens_zero_raises_invalid_params(self):
+        request = ChatCompletionRequest(messages=[], max_tokens=0)
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._extract_openai_generation_config(request)
+        self.assertEqual(ctx.exception.exception_type, ExceptionType.INVALID_PARAMS)
+        self.assertEqual(
+            ctx.exception.message,
+            "Range of max_tokens should be (0, 1024]",
+        )
+
+    def test_openai_max_tokens_negative_raises_invalid_params(self):
+        request = ChatCompletionRequest(messages=[], max_tokens=-1)
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._extract_openai_generation_config(request)
+        self.assertEqual(ctx.exception.exception_type, ExceptionType.INVALID_PARAMS)
+        self.assertEqual(
+            ctx.exception.message,
+            "Range of max_tokens should be (0, 1024]",
+        )
+
+    def test_openai_max_completion_tokens_none_does_not_raise(self):
+        request = ChatCompletionRequest(messages=[], max_tokens=64)
         config = self._extract_openai_generation_config(request)
         self.assertEqual(config.max_new_tokens, 64)
 
-        request = ChatCompletionRequest(messages=[], max_completion_tokens=-1)
+        request = ChatCompletionRequest(messages=[])
         config = self._extract_openai_generation_config(request)
         self.assertEqual(config.max_new_tokens, 32000)
+
+    def test_openai_max_completion_tokens_positive_min_merge_unchanged(self):
+        request = ChatCompletionRequest(
+            messages=[],
+            max_tokens=64,
+            max_completion_tokens=100,
+        )
+        config = self._extract_openai_generation_config(request)
+        self.assertEqual(config.max_new_tokens, 64)
+
+        request = ChatCompletionRequest(messages=[], max_completion_tokens=100)
+        config = self._extract_openai_generation_config(request)
+        self.assertEqual(config.max_new_tokens, 100)
 
     def assert_config_stop_word(
         self,

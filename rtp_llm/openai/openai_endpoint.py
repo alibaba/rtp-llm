@@ -212,6 +212,17 @@ class OpenaiEndpoint(object):
                 f"unknown response_format.type: {rf.type!r}",
             )
 
+    def _validate_max_tokens_range(self, request: ChatCompletionRequest) -> None:
+        for name, value in (
+            ("max_completion_tokens", request.max_completion_tokens),
+            ("max_tokens", request.max_tokens),
+        ):
+            if value is not None and int(value) <= 0:
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    f"Range of {name} should be (0, {self.max_seq_len}]",
+                )
+
     def _ensure_think_end_token_ids(self, config: GenerateConfig) -> None:
         if config.end_think_token_ids:
             return
@@ -288,6 +299,7 @@ class OpenaiEndpoint(object):
         if request.disable_thinking():
             config.in_think_mode = False
             config.max_thinking_tokens = 0
+        self._validate_max_tokens_range(request)
         max_completion_tokens = _positive_int_or_none(request.max_completion_tokens)
         max_tokens_cap = _positive_int_or_none(request.max_tokens)
         if max_completion_tokens is not None:
