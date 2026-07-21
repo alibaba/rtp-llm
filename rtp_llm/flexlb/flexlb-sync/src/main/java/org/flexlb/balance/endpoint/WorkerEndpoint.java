@@ -2,7 +2,6 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
-import org.flexlb.metric.MetricLease;
 
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -18,7 +17,6 @@ public abstract class WorkerEndpoint {
 
     // ---- the sole mutable holding ----
     protected volatile WorkerStatus status;
-    private final MetricLease metricLease;
 
     /**
      * Last time this endpoint was selected by a scheduling strategy.
@@ -33,12 +31,7 @@ public abstract class WorkerEndpoint {
     }
 
     protected WorkerEndpoint(WorkerStatus status) {
-        this(status, MetricLease.noop());
-    }
-
-    protected WorkerEndpoint(WorkerStatus status, MetricLease metricLease) {
         this.status = status;
-        this.metricLease = metricLease == null ? MetricLease.noop() : metricLease;
     }
 
     // ==================== identity (delegated to status) ====================
@@ -91,7 +84,7 @@ public abstract class WorkerEndpoint {
     }
 
     public void close() {
-        metricLease.close();
+        // No resources by default. Stateful endpoints override when needed.
     }
 
     // ==================== monitoring (EP-authoritative) ====================
