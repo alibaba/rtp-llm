@@ -118,6 +118,60 @@ def _weights():
     return weights
 
 
+class _CpuSelectTopk(torch.nn.Module):
+    def forward(self, router_logits, topk_ids, topk_weights):
+        probabilities = torch.softmax(router_logits, dim=-1)
+        values, indices = torch.topk(probabilities, topk_ids.shape[-1], dim=-1)
+        topk_ids.copy_(indices)
+        topk_weights.copy_(values)
+
+
+class _CpuFusedMoe(torch.nn.Module):
+    topk_ids_dtype = torch.int64
+
+    def __init__(self, w13, w2):
+        super().__init__()
+        self.register_buffer("w13", w13.detach().clone())
+        self.register_buffer("w2", w2.detach().clone())
+
+    def forward(self, hidden_states, topk_weights, topk_ids, activation):
+        if activation != "SiGLU":
+            raise AssertionError(f"unexpected activation {activation!r}")
+        intermediate_size = self.w13.shape[1] // 2
+        output = torch.zeros_like(hidden_states)
+        for token_idx in range(hidden_states.shape[0]):
+            token = hidden_states[token_idx : token_idx + 1]
+            for slot_idx in range(topk_ids.shape[1]):
+                expert_idx = int(topk_ids[token_idx, slot_idx])
+                up = self.w13[expert_idx, :intermediate_size]
+                gate = self.w13[expert_idx, intermediate_size:]
+                down = self.w2[expert_idx]
+                expert_output = F.linear(
+                    F.silu(F.linear(token, gate)) * F.linear(token, up), down
+                )
+                output[token_idx] += topk_weights[
+                    token_idx, slot_idx
+                ] * expert_output.squeeze(0)
+        return output
+
+
+class _IdentityAttention(torch.nn.Module):
+    def forward(self, hidden_states, fmha_impl, kv_cache=None):
+        return hidden_states
+
+
+def _rms_norm_reference(hidden_states, weight, eps):
+    variance = hidden_states.float().pow(2).mean(-1, keepdim=True)
+    normalized = hidden_states.float() * torch.rsqrt(variance + eps)
+    return (normalized * weight.float()).to(hidden_states.dtype)
+
+
+def _expert_reference(hidden_states, gate, up, down):
+    return F.linear(
+        F.silu(F.linear(hidden_states, gate)) * F.linear(hidden_states, up), down
+    )
+
+
 class Qwen2MoeLoadTest(unittest.TestCase):
     def test_registry_exposes_qwen2_dense_and_moe(self):
         self.assertEqual(get_model_class("qwen_2").__name__, "Qwen2ForCausalLM")
@@ -236,6 +290,82 @@ class Qwen2MoeLoadTest(unittest.TestCase):
 
         expected = F.linear(F.silu(F.linear(hidden, gate)) * F.linear(hidden, up), down)
         torch.testing.assert_close(layer(hidden), expected)
+
+    def test_moe_decoder_forward_matches_cpu_reference(self):
+        weights = _weights()
+        weights["model.layers.0.mlp.gate.weight"] = torch.tensor(
+            [[1.0, -0.5, 0.25, 0.0], [-0.75, 0.5, 0.0, 0.25]]
+        )
+        weights["model.layers.0.mlp.shared_expert_gate.weight"] = torch.tensor(
+            [[0.5, -0.25, 0.75, 0.1]]
+        )
+        for expert_idx, scale in enumerate((0.25, 0.75)):
+            prefix = f"model.layers.0.mlp.experts.{expert_idx}"
+            weights[f"{prefix}.gate_proj.weight"] = torch.eye(4) * (scale + 0.5)
+            weights[f"{prefix}.up_proj.weight"] = torch.eye(4) * (scale + 1.0)
+            weights[f"{prefix}.down_proj.weight"] = torch.eye(4) * (scale + 1.5)
+
+        model = Qwen2MoeForCausalLM(_config(), _load_config())
+        model.load_weights(weights)
+        NewModelLoader._validate_loaded_weights(model)
+        layer = model.layers[0]
+        layer.self_attn = _IdentityAttention()
+        layer.mlp.select_topk = _CpuSelectTopk()
+        layer.mlp.experts.fused_moe = _CpuFusedMoe(
+            layer.mlp.experts.w13, layer.mlp.experts.w2
+        )
+
+        hidden_states = torch.tensor(
+            [[0.5, -1.0, 0.75, 1.5], [-0.25, 1.25, -0.5, 0.75]]
+        )
+        residual = torch.tensor([[0.1, 0.2, -0.3, 0.4], [0.5, -0.25, 0.75, -1.0]])
+        actual_hidden, actual_residual = layer(hidden_states, residual, fmha_impl=None)
+
+        first_residual = hidden_states + residual
+        attention_input = _rms_norm_reference(
+            first_residual,
+            weights["model.layers.0.input_layernorm.weight"],
+            layer.input_layernorm.eps,
+        )
+        expected_residual = attention_input + first_residual
+        mlp_input = _rms_norm_reference(
+            expected_residual,
+            weights["model.layers.0.post_attention_layernorm.weight"],
+            layer.post_attention_layernorm.eps,
+        )
+
+        router_logits = F.linear(mlp_input, weights["model.layers.0.mlp.gate.weight"])
+        shifted_logits = router_logits - router_logits.max(dim=-1, keepdim=True).values
+        router_probabilities = shifted_logits.exp()
+        router_probabilities /= router_probabilities.sum(dim=-1, keepdim=True)
+        selected_probabilities, selected_experts = router_probabilities.max(dim=-1)
+        self.assertEqual(selected_experts.tolist(), [0, 1])
+        routed = torch.empty_like(mlp_input)
+        for token_idx, expert_idx in enumerate(selected_experts.tolist()):
+            prefix = f"model.layers.0.mlp.experts.{expert_idx}"
+            routed[token_idx] = selected_probabilities[token_idx] * _expert_reference(
+                mlp_input[token_idx : token_idx + 1],
+                weights[f"{prefix}.gate_proj.weight"],
+                weights[f"{prefix}.up_proj.weight"],
+                weights[f"{prefix}.down_proj.weight"],
+            ).squeeze(0)
+
+        shared = _expert_reference(
+            mlp_input,
+            weights["model.layers.0.mlp.shared_expert.gate_proj.weight"],
+            weights["model.layers.0.mlp.shared_expert.up_proj.weight"],
+            weights["model.layers.0.mlp.shared_expert.down_proj.weight"],
+        )
+        shared_gate = torch.sigmoid(
+            F.linear(
+                mlp_input,
+                weights["model.layers.0.mlp.shared_expert_gate.weight"],
+            )
+        )
+        expected_hidden = routed + shared * shared_gate
+
+        torch.testing.assert_close(actual_residual, expected_residual)
+        torch.testing.assert_close(actual_hidden, expected_hidden)
 
 
 if __name__ == "__main__":
