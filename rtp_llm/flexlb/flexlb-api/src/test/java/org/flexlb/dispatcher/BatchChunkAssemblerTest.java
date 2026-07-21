@@ -87,6 +87,38 @@ class BatchChunkAssemblerTest {
     }
 
     @Test
+    void buildChunkBodiesDeepCopyIsolatesRoleAddrsAcrossChunks() {
+        // When generate_config carries role_addrs, buildChunkBodies takes the deep-copy branch so
+        // each chunk owns an independent nested array. A per-chunk role_addrs append (the real
+        // per-chunk write) on one chunk must not leak into a sibling chunk or the source envelope.
+        // A shallow `new JSONObject(sourceGc)` would share the nested JSONArray reference and let
+        // the mutation bleed across chunks — this test fails in that case.
+        JSONObject envelope = new JSONObject();
+        envelope.put("model", "m");
+        envelope.put("prompt_batch", JSONArray.of("a", "b"));
+        JSONObject gc = new JSONObject();
+        JSONArray roleAddrs = new JSONArray();
+        roleAddrs.add("PREFILL@10.0.0.1:8000");
+        gc.put("role_addrs", roleAddrs);
+        envelope.put("generate_config", gc);
+
+        List<JSONArray> chunks = List.of(JSONArray.of("a"), JSONArray.of("b"));
+        List<JSONObject> bodies = BatchChunkAssembler.buildChunkBodies(envelope, chunks, "prompt_batch");
+
+        JSONArray addrs0 = bodies.get(0).getJSONObject("generate_config").getJSONArray("role_addrs");
+        JSONArray addrs1 = bodies.get(1).getJSONObject("generate_config").getJSONArray("role_addrs");
+        assertNotSame(addrs0, addrs1, "chunks must not share the nested role_addrs array");
+
+        // Mutate chunk 0's role_addrs; sibling chunk and source envelope must stay at size 1.
+        addrs0.add("DECODE@10.0.0.2:8000");
+        assertEquals(2, bodies.get(0).getJSONObject("generate_config").getJSONArray("role_addrs").size());
+        assertEquals(1, bodies.get(1).getJSONObject("generate_config").getJSONArray("role_addrs").size(),
+                "per-chunk role_addrs append leaked into a sibling chunk (shallow copy?)");
+        assertEquals(1, envelope.getJSONObject("generate_config").getJSONArray("role_addrs").size(),
+                "per-chunk role_addrs append mutated the source envelope (shallow copy?)");
+    }
+
+    @Test
     void buildChunkBodiesStampsForceBatchOnlyForPromptBatchEndpoints() {
         JSONObject envelope = new JSONObject();
         envelope.put("input", JSONArray.of("a", "b"));
