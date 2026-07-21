@@ -534,6 +534,15 @@ class Qwen3NextGatedDeltaNet(RtpModule):
         self.norm_w = nn.Parameter(
             torch.empty(self.head_v_dim, dtype=params_dtype), requires_grad=False
         )
+        from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
+            RmsNormGated,
+        )
+
+        self.norm_gated = RmsNormGated(
+            self.norm_w,
+            eps=self.rms_norm_eps,
+            group_size=self.head_v_dim,
+        )
         self.out_proj = ColumnParallelLinear(
             input_size=self.local_num_v_heads * self.head_v_dim,
             output_size=hidden_size,
@@ -757,7 +766,6 @@ class Qwen3NextGatedDeltaNet(RtpModule):
             causal_conv1d_update,
             prepare_causal_conv1d_metadata,
         )
-        from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
         from rtp_llm.models_py.triton_kernels.common.scatter_qkv import scatter_qkv
         from rtp_llm.models_py.triton_kernels.fla.chunk import (
             chunk_gated_delta_rule,
@@ -848,13 +856,7 @@ class Qwen3NextGatedDeltaNet(RtpModule):
                 linear_cache_converter,
             )
 
-        # Norm gating
-        norm = RmsNormGated(
-            self.norm_w,
-            eps=self.rms_norm_eps,
-            group_size=self.head_v_dim,
-        )
-        attn_output = norm(
+        attn_output = self.norm_gated(
             attn_out.reshape(-1, self.head_v_dim), z.reshape(-1, self.head_v_dim)
         )
         attn_output = attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim)

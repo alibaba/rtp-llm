@@ -446,6 +446,12 @@ class Qwen3NextLinearAttentionLoadTest(unittest.TestCase):
             prefix="layers.0.linear_attn",
         )
         self.assertEqual(layer.rms_norm_eps, 3e-5)
+        self.assertEqual(layer.norm_gated.eps, 3e-5)
+        self.assertIs(layer.norm_gated.weight, layer.norm_w)
+        self.assertIs(layer._modules["norm_gated"], layer.norm_gated)
+        layer.to(dtype=torch.float64)
+        self.assertIs(layer.norm_gated.weight, layer.norm_w)
+        self.assertIsInstance(layer.norm_w, torch.nn.Parameter)
 
     def test_qkvz_per_channel_scale_accepts_vector_layout(self):
         config = _config(HybridAttentionType.LINEAR)
