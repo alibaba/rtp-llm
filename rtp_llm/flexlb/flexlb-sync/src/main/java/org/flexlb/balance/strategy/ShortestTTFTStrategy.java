@@ -132,7 +132,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
 
         reportCacheHitMetrics(roleType, selected.ep().getIp(), selected.ep().ipPort(), selected.hitCache(), seqLen);
 
-        return buildServerStatus(selected, roleType, requestId, config, balanceContext);
+        return buildServerStatus(selected, roleType, requestId, config);
     }
 
     /**
@@ -266,14 +266,14 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
     }
 
     private ServerStatus buildServerStatus(ScoredEndpoint selected, RoleType roleType, long requestId,
-                                           FlexlbConfig config, BalanceContext balanceContext) {
+                                           FlexlbConfig config) {
         PrefillEndpoint ep = selected.ep();
         long ttft = selected.ttft();
         long bestCacheHit = selected.hitCache();
 
         // Non-batch path: reserve prefill inflight for load-aware scoring.
         // Batch path uses FlexlbBatchScheduler.commitBatch() instead — skip here to avoid double-counting.
-        if (isNonBatchPath(config, balanceContext)) {
+        if (isNonBatchPath(config)) {
             ep.commitBatch(requestId, ttft, Collections.emptyList());
         }
 
@@ -300,7 +300,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
      * <p>When batch is enabled, FlexlbBatchScheduler handles all inflight tracking;
      * placeholders are only needed when batch is fully off ({@code flexlbBatchEnabled=false}).
      */
-    private static boolean isNonBatchPath(FlexlbConfig config, BalanceContext ctx) {
+    private static boolean isNonBatchPath(FlexlbConfig config) {
         return !config.isFlexlbBatchEnabled();
     }
 }

@@ -6,8 +6,8 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
-import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalanceStrategy;
+import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -71,7 +71,6 @@ public class DefaultRouter implements Router {
         }
 
         // 2. Get routing configuration
-        long requestId = balanceContext.getRequestId();
         ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
         List<RoleType> roleTypeList = workerStatus.getRoleTypeList();
         if (CollectionUtils.isEmpty(roleTypeList)) {
@@ -83,15 +82,12 @@ public class DefaultRouter implements Router {
         RoutingResult routingResult = routeByRoleType(balanceContext, roleTypeList);
 
         // 4. Build response based on routing result
-        Response response;
         if (routingResult.success()) {
-            response = buildSuccessResponse(requestId, routingResult.serverStatusList());
-        } else {
-            rollBackRoutingFailure(balanceContext, routingResult);
-            response = buildFailureResponse(requestId, routingResult);
+            return buildSuccessResponse(routingResult.serverStatusList());
         }
 
-        return response;
+        rollBackRoutingFailure(balanceContext, routingResult);
+        return buildFailureResponse(routingResult);
     }
 
     /**
@@ -121,7 +117,7 @@ public class DefaultRouter implements Router {
      * @param roleTypeList List of required role types
      * @return Routing result
      */
-    public RoutingResult routeByRoleType(BalanceContext balanceContext, List<RoleType> roleTypeList) {
+    private RoutingResult routeByRoleType(BalanceContext balanceContext, List<RoleType> roleTypeList) {
         List<ServerStatus> serverStatusList = new ArrayList<>();
         GroupRoutingDecision groupRoutingDecision = groupRoutingPolicy.route(balanceContext);
         String policyGroup = groupRoutingDecision.group();
@@ -186,14 +182,14 @@ public class DefaultRouter implements Router {
         }
     }
 
-    private Response buildSuccessResponse(long requestId, List<ServerStatus> serverStatusList) {
+    private Response buildSuccessResponse(List<ServerStatus> serverStatusList) {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(serverStatusList);
         return response;
     }
 
-    private Response buildFailureResponse(long requestId, RoutingResult routingResult) {
+    private Response buildFailureResponse(RoutingResult routingResult) {
         StrategyErrorType errorType = routingResult.failedRoleType().getErrorType();
         String detailMessage = routingResult.errorMessage();
 

@@ -19,14 +19,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
@@ -66,7 +64,7 @@ class PrefillEndpointTest {
         endpoint.commitBatch(1L, 100, List.of(item));
 
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.getInflightRequestCount());
+        assertEquals(1, endpoint.realPendingCount());
     }
 
     @Test
@@ -94,7 +92,7 @@ class PrefillEndpointTest {
         endpoint.commitBatch(2L, 50, List.of(item3));
 
         assertEquals(2, endpoint.getInflightBatchCount());
-        assertEquals(3, endpoint.getInflightRequestCount());
+        assertEquals(3, endpoint.realPendingCount());
     }
 
     // ---- repack batch ----
@@ -105,10 +103,9 @@ class PrefillEndpointTest {
         BatchItem item2 = createBatchItem(2L, 300, 100);
         endpoint.commitBatch(1L, 100, List.of(item1, item2));
 
-        BatchInflight result = endpoint.repackBatch(1L, Set.of(2L));
-        assertNotNull(result);
-        assertEquals(1, result.requests().size());
-        assertEquals(1L, result.requests().get(0).requestId());
+        endpoint.repackBatch(1L, Set.of(2L));
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.realPendingCount());
     }
 
     @Test
@@ -116,8 +113,7 @@ class PrefillEndpointTest {
         BatchItem item1 = createBatchItem(1L, 500, 200);
         endpoint.commitBatch(1L, 100, List.of(item1));
 
-        BatchInflight result = endpoint.repackBatch(1L, Set.of(1L));
-        assertNull(result);
+        endpoint.repackBatch(1L, Set.of(1L));
         assertEquals(0, endpoint.getInflightBatchCount());
     }
 
@@ -135,7 +131,7 @@ class PrefillEndpointTest {
         successTask.setErrorCode(0);
         finished.put("1", successTask);
 
-        endpoint.calibrate(finished, Map.of());
+        calibrate(finished, Map.of());
 
         assertEquals(0, endpoint.getInflightBatchCount());
     }
@@ -154,13 +150,10 @@ class PrefillEndpointTest {
         failedTask.setErrorMessage("engine error");
         finished.put("2", failedTask);
 
-        endpoint.calibrate(finished, Map.of());
+        calibrate(finished, Map.of());
 
         assertEquals(1, endpoint.getInflightBatchCount());
-        BatchInflight remaining = endpoint.getInflightBatches().get(1L);
-        assertNotNull(remaining);
-        assertEquals(1, remaining.requests().size());
-        assertEquals(1L, remaining.requests().get(0).requestId());
+        assertEquals(1, endpoint.realPendingCount());
     }
 
     @Test
@@ -176,27 +169,8 @@ class PrefillEndpointTest {
         finished.put("1", badTask);
 
         // should not throw, just log a warning for missing non-batch inflight
-        endpoint.calibrate(finished, Map.of());
+        calibrate(finished, Map.of());
         assertEquals(1, endpoint.getInflightBatchCount());
-    }
-
-    @Test
-    void calibrateUpdatesProgressAnchorsForRunningBatches() {
-        BatchItem item = createBatchItem(1L, 500, 200);
-        endpoint.commitBatch(1L, 100, List.of(item));
-
-        Map<String, TaskInfo> running = new HashMap<>();
-        TaskInfo runningTask = new TaskInfo();
-        runningTask.setRequestId(1L);
-        runningTask.setBatchId(1L);
-        runningTask.setPhase(TaskPhase.RUNNING);
-        running.put("1", runningTask);
-
-        endpoint.calibrate(Map.of(), running);
-
-        BatchInflight batch = endpoint.getInflightBatches().get(1L);
-        assertNotNull(batch);
-        assertTrue(batch.progressBaseMs() > 0, "Running batch should have its progress anchor updated");
     }
 
     @Test
@@ -214,7 +188,7 @@ class PrefillEndpointTest {
         foreignTask.setErrorCode(0);
         finished.put("999", foreignTask);
 
-        endpoint.calibrate(finished, new HashMap<>());
+        calibrate(finished, new HashMap<>());
         // Batch should NOT be removed — requestId doesn't match
         assertEquals(1, endpoint.getInflightBatchCount());
     }
@@ -231,7 +205,7 @@ class PrefillEndpointTest {
         task.setErrorCode(0);
         finished.put("100", task);
 
-        endpoint.calibrate(finished, new HashMap<>());
+        calibrate(finished, new HashMap<>());
         assertEquals(0, endpoint.getInflightBatchCount());
     }
 
@@ -266,7 +240,7 @@ class PrefillEndpointTest {
         runningTask.setBatchId(1L);
         runningTask.setPhase(TaskPhase.RUNNING);
         running.put("1", runningTask);
-        endpoint.calibrate(Map.of(), running);
+        calibrate(Map.of(), running);
 
         Thread.sleep(50);
 
@@ -348,6 +322,13 @@ class PrefillEndpointTest {
 
     // ---- helpers ----
 
+    private void calibrate(Map<String, TaskInfo> finished, Map<String, TaskInfo> running) {
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setFinishedTaskInfo(finished);
+        response.setRunningTaskInfo(running);
+        endpoint.onWorkerStatusUpdate(endpoint.getStatus(), response);
+    }
+
     private BatchItem createBatchItem(long requestId, long seqLen, long hitCacheLen) {
         Request request = new Request();
         request.setRequestId(requestId);
@@ -365,13 +346,12 @@ class PrefillEndpointTest {
         debugInfo.setHitCacheLen(hitCacheLen);
         prefill.setDebugInfo(debugInfo);
 
-        return new BatchItem(ctx, null, null, prefill, null, endpoint, null, 0, System.currentTimeMillis());
+        return new BatchItem(ctx, null, null, prefill, null, endpoint, null, System.currentTimeMillis());
     }
 
     private static BatchDecisionHandler noopHandler() {
         return new BatchDecisionHandler() {
             @Override public void onExpired(BatchItem head) {}
-            @Override public void onUrgent(BatchItem head, DispatchMeta meta) {}
             @Override public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {}
             @Override public void onOfferFailure(BatchItem item, Throwable error) {}
         };

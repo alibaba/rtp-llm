@@ -2,7 +2,6 @@ package org.flexlb.mock.cancel;
 
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.MockWorkerBehavior;
 import org.junit.jupiter.api.Test;
@@ -11,7 +10,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -40,7 +38,6 @@ class CancelAtPrefillTest extends FlexLBMockTestBase {
         cfg.setFlexlbBatchWindowMs(300);
         cfg.setCostSloMs(50_000L);
         cfg.setCostSloRiskMarginMs(50L);
-        cfg.setFlexlbBatchFillThreshold(1.0);
         cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);
         return cfg;
     }

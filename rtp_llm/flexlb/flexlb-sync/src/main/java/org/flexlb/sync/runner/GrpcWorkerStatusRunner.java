@@ -4,9 +4,8 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.master.WorkerStatusResponse;
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
@@ -18,7 +17,6 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 
@@ -166,7 +164,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
                 // 3. Notify scheduler (cleanup finished requests)
                 if (batchScheduler != null) {
-                    batchScheduler.onWorkerStatusUpdate(workerStatus, newWorkerStatus);
+                    batchScheduler.onWorkerStatusUpdate(newWorkerStatus);
                 }
 
                 Long latestFinishedVersion = newWorkerStatus.getLatestFinishedVersion();

@@ -23,7 +23,6 @@ import java.util.concurrent.atomic.AtomicLong;
 public class WorkerBatcher {
 
     private final String key;
-    private final PrefillEndpoint prefillEp;
     private final FlexlbConfig cfg;
     private final BatchDecisionHandler handler;
     private final PriorityBlockingQueue<BatchItem> queue =
@@ -39,7 +38,6 @@ public class WorkerBatcher {
                          BatchDecisionHandler handler,
                          BatchSchedulerReporter reporter) {
         this.key = key;
-        this.prefillEp = prefillEp;
         this.cfg = cfg;
         this.handler = handler;
         this.algorithm = createAlgorithm(cfg);
@@ -92,13 +90,9 @@ public class WorkerBatcher {
         return queueDepth.get();
     }
 
-    public long headSortKey() {
-        return headSortKey.get();
-    }
-
     /**
      * Estimated remaining wait time of the head request.
-     * Delegates to the algorithm-specific {@link BatcherAlgorithm#headWaitMs}.
+     * Uses deadline semantics for SLO batching and elapsed-window semantics for fixed-window batching.
      */
     public long headWaitMs() {
         long currentHeadSortKey = headSortKey.get();
@@ -111,17 +105,6 @@ public class WorkerBatcher {
             return Math.max(0, cfg.getFlexlbBatchFixedWaitMs() - elapsedMs);
         }
         return Math.max(0, currentHeadSortKey - now);
-    }
-
-    /**
-     * Estimated time a new request would wait in the queue before dispatch.
-     * Delegates to the algorithm-specific {@link BatcherAlgorithm#queueWaitMs}.
-     */
-    public long queueWaitMs() {
-        if (queueDepth.get() == 0 && algorithm instanceof FixedWindowBatcherAlgorithm) {
-            return cfg.getFlexlbBatchFixedWaitMs();
-        }
-        return headWaitMs();
     }
 
     public void shutdown() {

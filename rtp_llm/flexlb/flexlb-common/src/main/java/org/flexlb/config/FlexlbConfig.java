@@ -492,11 +492,7 @@ public class FlexlbConfig {
 
     // ========== SLO-Budget Batcher Configuration ==========
 
-    private double flexlbBatchFillThreshold = 0.5;
-
     private int flexlbBatchMaxCapacity = 1048576;
-
-    private int flexlbBatchSearchIter = 10;
 
     private int flexlbBatchScanAhead = 64;
 

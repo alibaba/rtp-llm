@@ -6,7 +6,6 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 
-import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -43,7 +42,6 @@ public final class BatchItem {
                      ServerStatus decode,
                      PrefillEndpoint prefillEp,
                      DecodeEndpoint decodeEp,
-                     long sortKey,
                      long enqueuedAtMs) {
         this.ctx = ctx;
         this.future = future;
@@ -52,7 +50,6 @@ public final class BatchItem {
         this.decode = decode;
         this.prefillEp = prefillEp;
         this.decodeEp = decodeEp;
-        this.sortKey = sortKey;
         this.enqueuedAtMs = enqueuedAtMs;
     }
 
@@ -73,10 +70,6 @@ public final class BatchItem {
     /** Set by {@link WorkerBatcher#offer} after {@link BatcherAlgorithm#computeSortKey}. */
     public void setSortKey(long sortKey) { this.sortKey = sortKey; }
 
-    /** @deprecated use {@link #sortKey()} instead; kept for SLO-budget references. */
-    @Deprecated
-    public long deadlineMs() { return sortKey; }
-
     // -- derived accessors --
 
     public long requestId() {
@@ -95,41 +88,10 @@ public final class BatchItem {
         return hitCacheOf(prefill);
     }
 
-    /** Compute tokens = seqLen - hitCache (floor at 0). */
-    public long computeTokens() {
-        return Math.max(0, seqLen() - hitCache());
-    }
-
     /** Extract cache-hit length from a {@link ServerStatus} debug info. */
-    public static long hitCacheOf(ServerStatus ss) {
+    private static long hitCacheOf(ServerStatus ss) {
         return ss != null && ss.getDebugInfo() != null
                 ? ss.getDebugInfo().getHitCacheLen() : 0;
     }
 
-    // -- Object --
-
-    @Override
-    public boolean equals(Object o) {
-        if (this == o) return true;
-        if (!(o instanceof BatchItem that)) return false;
-        return sortKey == that.sortKey && enqueuedAtMs == that.enqueuedAtMs
-                && Objects.equals(ctx, that.ctx) && Objects.equals(future, that.future)
-                && Objects.equals(routeResponse, that.routeResponse)
-                && Objects.equals(prefill, that.prefill)
-                && Objects.equals(decode, that.decode)
-                && Objects.equals(prefillEp, that.prefillEp)
-                && Objects.equals(decodeEp, that.decodeEp);
-    }
-
-    @Override
-    public int hashCode() {
-        return Objects.hash(ctx, future, routeResponse, prefill, decode,
-                prefillEp, decodeEp, sortKey, enqueuedAtMs);
-    }
-
-    @Override
-    public String toString() {
-        return "BatchItem{requestId=" + requestId() + ", seqLen=" + seqLen()
-                + ", sortKey=" + sortKey + ", enqueuedAtMs=" + enqueuedAtMs + '}';
-    }
 }

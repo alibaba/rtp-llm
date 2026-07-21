@@ -2,7 +2,6 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
@@ -10,7 +9,6 @@ import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -29,8 +27,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.*;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 
 class CostBasedPrefillStrategyTest {
 
@@ -56,7 +60,7 @@ class CostBasedPrefillStrategyTest {
         // Create registry first to break circular dependency
         endpointRegistry = new EndpointRegistry(configService, () -> batchScheduler,
                 Mockito.mock(BatchSchedulerReporter.class));
-        engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), endpointRegistry);
+        engineWorkerStatus = new EngineWorkerStatus(endpointRegistry);
 
         PrefillResourceMeasure prefillResourceMeasure = Mockito.mock(PrefillResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(any())).thenReturn(prefillResourceMeasure);
@@ -73,7 +77,7 @@ class CostBasedPrefillStrategyTest {
         for (Map.Entry<String, WorkerStatus> entry : workerMap.entrySet()) {
             WorkerStatus ws = entry.getValue();
             ws.setGrpcPort(9090);
-            endpointRegistry.ensurePrefillEndpoint(entry.getKey(), ws);
+            endpointRegistry.ensureEndpoint(RoleType.PREFILL, entry.getKey(), ws);
         }
     }
 
@@ -241,7 +245,8 @@ class CostBasedPrefillStrategyTest {
         ServerStatus result = strategy.select(buildContext(500, 9L), RoleType.PREFILL, null);
         assertTrue(result.isSuccess());
 
-        assertDoesNotThrow(() -> strategy.rollBack(endpointRegistry.get("10.0.0.1:8080"), 9L));
+        assertDoesNotThrow(() -> strategy.rollBack(
+                endpointRegistry.get(RoleType.PREFILL, "10.0.0.1:8080"), 9L));
     }
 
     @Test
@@ -255,8 +260,9 @@ class CostBasedPrefillStrategyTest {
         prefillMap.put("10.0.0.1:8080", w1);
         prefillMap.put("10.0.0.2:8080", w2);
 
-        PrefillEndpoint ep1 = endpointRegistry.ensurePrefillEndpoint("10.0.0.1:8080", w1);
-        endpointRegistry.ensurePrefillEndpoint("10.0.0.2:8080", w2);
+        PrefillEndpoint ep1 = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
+                RoleType.PREFILL, "10.0.0.1:8080", w1);
+        endpointRegistry.ensureEndpoint(RoleType.PREFILL, "10.0.0.2:8080", w2);
         ep1.commitBatch(1L, 4000, List.of(batchItem(1L, 1000, 0)));
 
         ServerStatus result = strategy.select(buildContext(500, 10L), RoleType.PREFILL, null);
@@ -301,7 +307,7 @@ class CostBasedPrefillStrategyTest {
         worker.setRole(RoleType.PDFUSION);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put(ipPort, worker);
-        endpointRegistry.ensurePdFusionEndpoint(ipPort, worker);
+        endpointRegistry.ensureEndpoint(RoleType.PDFUSION, ipPort, worker);
 
         ServerStatus result = strategy.select(
                 buildContext(500, 41L), RoleType.PDFUSION, null);
@@ -332,7 +338,8 @@ class CostBasedPrefillStrategyTest {
 
         String ipPort = ip + ":8080";
         w.setGrpcPort(8081);
-        PrefillEndpoint ep = endpointRegistry.ensurePrefillEndpoint(ipPort, w);
+        PrefillEndpoint ep = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
+                RoleType.PREFILL, ipPort, w);
         if (estimatedWaitMs > 0) {
             ep.commitBatch(900000L + ip.hashCode(), estimatedWaitMs,
                     List.of(batchItem(900000L + ip.hashCode(), estimatedWaitMs, 0)));
@@ -370,9 +377,9 @@ class CostBasedPrefillStrategyTest {
             di.setHitCacheLen(hitCache);
             org.flexlb.dao.loadbalance.ServerStatus ss = new org.flexlb.dao.loadbalance.ServerStatus();
             ss.setDebugInfo(di);
-            return new BatchItem(ctx, null, null, ss, null, null, null, 0, 0);
+            return new BatchItem(ctx, null, null, ss, null, null, null, 0);
         }
-        return new BatchItem(ctx, null, null, null, null, null, null, 0, 0);
+        return new BatchItem(ctx, null, null, null, null, null, null, 0);
     }
 
     private BalanceContext buildContext(long seqLen, long requestId) {

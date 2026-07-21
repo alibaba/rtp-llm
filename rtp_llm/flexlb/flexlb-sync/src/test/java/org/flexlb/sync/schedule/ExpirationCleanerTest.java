@@ -28,7 +28,7 @@ class ExpirationCleanerTest {
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         registry = new EndpointRegistry(
-                configService, null, Mockito.mock(BatchSchedulerReporter.class));
+                configService, () -> null, Mockito.mock(BatchSchedulerReporter.class));
     }
 
     @AfterEach

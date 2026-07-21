@@ -14,11 +14,6 @@ public class SimpleWorkerEndpoint extends WorkerEndpoint {
 
     @Override
     public long getLoadMetric() {
-        return getLocalTaskCount();
-    }
-
-    @Override
-    public int getLocalTaskCount() {
         return status.getRunningTaskList() == null ? 0 : status.getRunningTaskList().size();
     }
 }

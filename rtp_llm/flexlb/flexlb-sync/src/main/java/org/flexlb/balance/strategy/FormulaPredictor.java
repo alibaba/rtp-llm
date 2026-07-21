@@ -8,7 +8,6 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Prefill-time predictor driven by a user-configurable formula.
@@ -36,17 +35,7 @@ public class FormulaPredictor implements PrefillTimePredictor {
     private final PrefillTimeFormula formula;
     private final String sourceFormula;
 
-    /**
-     * Monotonic version counter incremented on every {@link #setParameter}.
-     * Folded into the cache key so that a stale write racing with a clear
-     * can never be observed by a post-invalidation query (TOCTOU fix).
-     */
-    private volatile long cacheVersion = 0;
-
-    /**
-     * LRU cache for {@link #predictBatchMs} results, keyed by a hash of batch item token stats.
-     * Invalidated on {@link #setParameter}.
-     */
+    /** LRU cache for {@link #predictBatchMs} results, keyed by a hash of batch item token stats. */
     private final Map<Long, Double> resultCache = Collections.synchronizedMap(
             new LinkedHashMap<>(64, 0.75f, true) {
                 @Override
@@ -105,8 +94,7 @@ public class FormulaPredictor implements PrefillTimePredictor {
      * {@code hitCacheTokens}, {@code computeTokens}, batch totals/maxima, and {@code batchSize}).
      */
     private long computeCacheKey(List<BatchItem> items) {
-        long hash = cacheVersion;          // 纳入版本号
-        hash = hash * 31 + items.size();
+        long hash = items.size();
         for (BatchItem item : items) {
             hash = hash * 31 + item.seqLen();
             hash = hash * 31 + item.hitCache();
@@ -120,36 +108,7 @@ public class FormulaPredictor implements PrefillTimePredictor {
                 items != null ? items.size() : 0, predictedMs, actualMs);
     }
 
-    // ---- parameter management (delegates to formula) ----
-
-    public double getParameter(String name) {
-        return formula.getParameter(name);
-    }
-
-    public void setParameter(String name, double value) {
-        formula.setParameter(name, value);
-        cacheVersion++;        // 使旧版本写入的条目无法被新版本查询命中
-        resultCache.clear();
-    }
-
-    public Set<String> parameterNames() {
-        return formula.parameterNames();
-    }
-
-    public Map<String, Double> getParameters() {
-        return formula.getParameters();
-    }
-
-    public boolean hasParameters() {
-        return formula.hasParameters();
-    }
-
     String immutableFormulaKey() {
-        return hasParameters() ? null : sourceFormula;
-    }
-
-    /** The parsed formula, for inspection. */
-    public String formulaString() {
-        return formula.toString();
+        return sourceFormula;
     }
 }

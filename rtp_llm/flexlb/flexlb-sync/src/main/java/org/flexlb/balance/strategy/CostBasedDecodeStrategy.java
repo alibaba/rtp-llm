@@ -11,7 +11,6 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
@@ -24,7 +23,6 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 
 @Component("costBasedDecodeStrategy")
@@ -42,9 +40,6 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         this.decayFactor = config.getWeightedCacheDecayFactor();
         this.resourceMeasureFactory = resourceMeasureFactory;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_DECODE, this);
-    }
-
-    private record WeightedWorker(DecodeEndpoint endpoint, long normalizedCacheUsed, double weight) {
     }
 
     @Override
@@ -67,8 +62,8 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         DecodeEndpoint selectedEndpoint = weightedRandomSelection(survivors);
 
         if (selectedEndpoint != null) {
-            long prefixLength = calcPrefixMatchLength(selectedEndpoint.getStatus().getCacheStatus(), balanceContext.getRequest().getBlockCacheKeys());
-            return buildServerStatus(selectedEndpoint, seqLen, prefixLength, roleType, balanceContext.getRequestId(), balanceContext.getScheduleMode());
+            return buildServerStatus(selectedEndpoint, seqLen, roleType, balanceContext.getRequestId(),
+                    balanceContext.getScheduleMode());
         }
 
         Map<String, Integer> merged = new java.util.HashMap<>(filterResult.rejections());
@@ -163,27 +158,6 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         return new FilterResult(survivors, rejections);
     }
 
-    private long calcPrefixMatchLength(CacheStatus cacheStatus, List<Long> promptCacheKeys) {
-
-        if (cacheStatus == null || promptCacheKeys == null) {
-            return 0;
-        }
-        long blockSize = cacheStatus.getBlockSize();
-        Set<Long> cachePrefixHash = cacheStatus.getCachedKeys();
-        if (cachePrefixHash == null) {
-            return 0;
-        }
-
-        for (int index = 0; index < promptCacheKeys.size(); index++) {
-            long hash = promptCacheKeys.get(index);
-            if (!cachePrefixHash.contains(hash)) {
-                return blockSize * index;
-            }
-        }
-
-        return blockSize * promptCacheKeys.size();
-    }
-
     private DecodeEndpoint weightedRandomSelection(List<DecodeEndpoint> candidateEndpoints) {
         if (candidateEndpoints.isEmpty()) {
             return null;
@@ -237,7 +211,8 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         return candidateEndpoints.get(minIdx);
     }
 
-    private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen, long prefixLength, RoleType roleType, long requestId, ScheduleModeEnum scheduleMode) {
+    private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen, RoleType roleType,
+                                           long requestId, ScheduleModeEnum scheduleMode) {
         ServerStatus result = new ServerStatus();
         try {
             // DIRECT/QUEUE: no lifecycle tracking after routing — skip reserve entirely.

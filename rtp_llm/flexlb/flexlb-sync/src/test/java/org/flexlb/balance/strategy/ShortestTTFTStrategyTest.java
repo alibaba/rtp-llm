@@ -2,7 +2,6 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
@@ -10,7 +9,6 @@ import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -29,8 +27,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 
 class ShortestTTFTStrategyTest {
 
@@ -55,7 +56,7 @@ class ShortestTTFTStrategyTest {
         // Create registry first to break circular dependency
         endpointRegistry = new EndpointRegistry(configService, () -> batchScheduler,
                 Mockito.mock(BatchSchedulerReporter.class));
-        engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), endpointRegistry);
+        engineWorkerStatus = new EngineWorkerStatus(endpointRegistry);
 
         PrefillResourceMeasure prefillResourceMeasure = Mockito.mock(PrefillResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(any())).thenReturn(prefillResourceMeasure);
@@ -248,7 +249,8 @@ class ShortestTTFTStrategyTest {
 
         String ipPort = ip + ":8080";
         w.setGrpcPort(8081);
-        PrefillEndpoint ep = endpointRegistry.ensurePrefillEndpoint(ipPort, w);
+        PrefillEndpoint ep = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
+                RoleType.PREFILL, ipPort, w);
         if (estimatedWaitMs > 0) {
             ep.commitBatch(900000L + ip.hashCode(), estimatedWaitMs,
                     List.of(batchItem(900000L + ip.hashCode(), estimatedWaitMs, 0)));
@@ -267,9 +269,9 @@ class ShortestTTFTStrategyTest {
             di.setHitCacheLen(hitCache);
             org.flexlb.dao.loadbalance.ServerStatus ss = new org.flexlb.dao.loadbalance.ServerStatus();
             ss.setDebugInfo(di);
-            return new BatchItem(ctx, null, null, ss, null, null, null, 0, 0);
+            return new BatchItem(ctx, null, null, ss, null, null, null, 0);
         }
-        return new BatchItem(ctx, null, null, null, null, null, null, 0, 0);
+        return new BatchItem(ctx, null, null, null, null, null, null, 0);
     }
 
     private BalanceContext buildContext(long seqLen, long requestId) {

@@ -5,7 +5,6 @@ import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.springframework.stereotype.Service;
 
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
@@ -36,9 +35,6 @@ public class DefaultDynamicCacheIntervalService implements DynamicCacheIntervalS
     private int historyIndex;
     private int historySize;
     private double rollingAverage = 0.0;
-    
-    // Statistics
-    private final AtomicLong adjustmentCount = new AtomicLong(0);
     
     public DefaultDynamicCacheIntervalService() {
         
@@ -124,7 +120,6 @@ public class DefaultDynamicCacheIntervalService implements DynamicCacheIntervalS
             
             if (newInterval != currentInterval) {
                 currentIntervalMs.set(newInterval);
-                adjustmentCount.incrementAndGet();
             }
             
         } finally {

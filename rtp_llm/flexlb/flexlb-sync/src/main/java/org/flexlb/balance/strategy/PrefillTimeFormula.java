@@ -1,13 +1,11 @@
 package org.flexlb.balance.strategy;
 
-import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.DoubleBinaryOperator;
 import java.util.function.DoubleUnaryOperator;
-import java.util.function.Predicate;
 
 /**
  * Configurable prefill-time formula engine.
@@ -93,14 +91,10 @@ public final class PrefillTimeFormula {
             "maxComputeTokens", IDX_MAX_COMPUTE_TOKENS
     );
 
-    private final String source;
     private final Node root;
-    private final Map<String, ParameterNode> parameters;
 
-    private PrefillTimeFormula(String source, Node root, Map<String, ParameterNode> parameters) {
-        this.source = source;
+    private PrefillTimeFormula(Node root) {
         this.root = root;
-        this.parameters = parameters;
     }
 
     /**
@@ -109,23 +103,11 @@ public final class PrefillTimeFormula {
      * @throws IllegalArgumentException if the formula is malformed or references unknown variables.
      */
     public static PrefillTimeFormula parse(String formula) {
-        return parse(formula, PrefillTimeVariableBindings::supports);
-    }
-
-    static PrefillTimeFormula parse(String formula, Predicate<String> supportedVariable) {
         Map<String, ParameterNode> parameters = new LinkedHashMap<>();
-        Parser parser = new Parser(formula, supportedVariable, parameters);
+        Parser parser = new Parser(formula, parameters);
         Node root = parser.parseExpression();
         parser.expectEnd();
-        return new PrefillTimeFormula(formula, root, parameters);
-    }
-
-    /**
-     * Evaluate the formula with the given variable bindings.
-     * Array slots not set default to 0.0.
-     */
-    public long evaluate(double[] vars) {
-        return evaluate(vars, null);
+        return new PrefillTimeFormula(root);
     }
 
     /**
@@ -134,43 +116,6 @@ public final class PrefillTimeFormula {
      */
     public long evaluate(double[] vars, List<double[]> itemVars) {
         return (long) root.evaluate(new EvalContext(vars, itemVars));
-    }
-
-    @Override
-    public String toString() {
-        return source;
-    }
-
-    // ---- parameter management ----
-
-    public double getParameter(String name) {
-        ParameterNode node = parameters.get(name);
-        if (node == null) {
-            throw new IllegalArgumentException("Unknown parameter: " + name);
-        }
-        return node.value();
-    }
-
-    public void setParameter(String name, double value) {
-        ParameterNode node = parameters.get(name);
-        if (node == null) {
-            throw new IllegalArgumentException("Unknown parameter: " + name);
-        }
-        node.setValue(value);
-    }
-
-    public Set<String> parameterNames() {
-        return Collections.unmodifiableSet(parameters.keySet());
-    }
-
-    public Map<String, Double> getParameters() {
-        Map<String, Double> result = new LinkedHashMap<>();
-        parameters.forEach((name, node) -> result.put(name, node.value()));
-        return result;
-    }
-
-    public boolean hasParameters() {
-        return !parameters.isEmpty();
     }
 
     // ---- AST nodes ----
@@ -273,11 +218,9 @@ public final class PrefillTimeFormula {
     }
 
     private static final class ParameterNode implements Node {
-        private final String name;
-        private volatile double value;
+        private final double value;
 
-        ParameterNode(String name, double initialValue) {
-            this.name = name;
+        ParameterNode(double initialValue) {
             this.value = initialValue;
         }
 
@@ -286,21 +229,8 @@ public final class PrefillTimeFormula {
             return value;
         }
 
-        public String name() {
-            return name;
-        }
-
-        public double value() {
+        double value() {
             return value;
-        }
-
-        public void setValue(double value) {
-            this.value = value;
-        }
-
-        @Override
-        public String toString() {
-            return "param(" + name + ", " + value + ")";
         }
     }
 
@@ -308,14 +238,12 @@ public final class PrefillTimeFormula {
 
     private static final class Parser {
         private final String input;
-        private final Predicate<String> supportedVariable;
         private final Map<String, ParameterNode> parameters;
         private int pos;
         private int aggregateDepth;
 
-        Parser(String input, Predicate<String> supportedVariable, Map<String, ParameterNode> parameters) {
+        Parser(String input, Map<String, ParameterNode> parameters) {
             this.input = input;
-            this.supportedVariable = supportedVariable;
             this.parameters = parameters;
         }
 
@@ -398,15 +326,12 @@ public final class PrefillTimeFormula {
                 if (name.equals("param")) {
                     throw error("'param' must be used as param(name, initialValue)");
                 }
-                if (!supportedVariable.test(name)) {
-                    throw error("Unknown variable: " + name);
-                }
                 if (aggregateDepth > 0 && PrefillTimeVariableBindings.isBatchScoped(name)) {
                     throw error("Batch-scoped variable cannot be used inside sum(): " + name);
                 }
                 Integer idx = VAR_INDEX_MAP.get(name);
                 if (idx == null) {
-                    throw error("Variable not in index map: " + name);
+                    throw error("Unknown variable: " + name);
                 }
                 return new VariableNode(idx);
             }
@@ -442,7 +367,7 @@ public final class PrefillTimeFormula {
                 }
                 return existing;
             }
-            ParameterNode node = new ParameterNode(paramName, initialValue);
+            ParameterNode node = new ParameterNode(initialValue);
             parameters.put(paramName, node);
             return node;
         }

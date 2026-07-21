@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import lombok.Getter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.QueueSnapshot;
@@ -37,7 +36,6 @@ import java.util.concurrent.atomic.AtomicLong;
  * @author saichen.sm
  * @since 2025/12/22
  */
-@Getter
 @Component
 public class QueueManager {
 
@@ -103,15 +101,17 @@ public class QueueManager {
         }
     }
 
+    public int queueSize() {
+        return queue.size();
+    }
+
     /**
-     * Take request from queue (blocking/non-blocking)
+     * Take request from the queue, waiting up to {@code blockTimeoutMs}.
      *
-     * @param isBlock          Whether to block and wait
-     * @param blockTimeoutMs   Block timeout in milliseconds
-     * @return Request context, null if queue is empty
+     * @return request context, or null when no request arrives before the timeout
      */
-    public BalanceContext takeRequest(boolean isBlock, long blockTimeoutMs) {
-        return takeValidRequest(queue, isBlock, blockTimeoutMs);
+    public BalanceContext takeRequest(long blockTimeoutMs) {
+        return takeValidRequest(queue, blockTimeoutMs);
     }
 
     /**
@@ -122,10 +122,10 @@ public class QueueManager {
      * @param sourceQueue Source queue
      * @return Request context, null if queue is empty
      */
-    private BalanceContext takeValidRequest(BlockingQueue<BalanceContext> sourceQueue, boolean isBlock, long blockTimeoutMs) {
+    private BalanceContext takeValidRequest(BlockingQueue<BalanceContext> sourceQueue, long blockTimeoutMs) {
         try {
             while (true) {
-                BalanceContext ctx = isBlock ? sourceQueue.poll(blockTimeoutMs, TimeUnit.MILLISECONDS) : sourceQueue.poll();
+                BalanceContext ctx = sourceQueue.poll(blockTimeoutMs, TimeUnit.MILLISECONDS);
                 if (ctx == null) {
                     return null;
                 }

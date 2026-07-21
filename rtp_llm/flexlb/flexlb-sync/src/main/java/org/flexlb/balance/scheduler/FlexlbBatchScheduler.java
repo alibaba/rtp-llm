@@ -12,12 +12,10 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.TaskInfo;
-import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
-import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.env.Environment;
@@ -55,22 +53,20 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @Component
 public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallback {
 
-    public final ConfigService configService;
+    private final ConfigService configService;
     private final Router router;
-    final EngineGrpcClient grpcClient;
-    final EngineWorkerStatus engineWorkerStatus;
-    final EndpointRegistry endpointRegistry;
-    final BatchDispatcher dispatcher;
-    final BatchSchedulerReporter reporter;
-    final Map<Long, InflightEntry> inflight = new ConcurrentHashMap<>();
+    private final EngineGrpcClient grpcClient;
+    private final EndpointRegistry endpointRegistry;
+    private final BatchDispatcher dispatcher;
+    private final BatchSchedulerReporter reporter;
+    private final Map<Long, InflightEntry> inflight = new ConcurrentHashMap<>();
     private final Map<Long, RequestLifecycleSnapshot> terminalStates = new ConcurrentHashMap<>();
-    final BatchIdGenerator batchIdGenerator;
+    private final BatchIdGenerator batchIdGenerator;
 
     @Autowired
     public FlexlbBatchScheduler(ConfigService configService,
                                 Router router,
                                 EngineGrpcClient grpcClient,
-                                EngineWorkerStatus engineWorkerStatus,
                                 EndpointRegistry endpointRegistry,
                                 BatchDispatcher dispatcher,
                                 BatchSchedulerReporter reporter,
@@ -78,7 +74,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         this.configService = configService;
         this.router = router;
         this.grpcClient = grpcClient;
-        this.engineWorkerStatus = engineWorkerStatus;
         this.endpointRegistry = endpointRegistry;
         this.dispatcher = dispatcher;
         this.reporter = reporter;
@@ -162,7 +157,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             }
 
             BatchItem item = new BatchItem(ctx, future, routeResponse, copyOf(prefill), copyOf(decode),
-                    prefillEp, decodeEp, /* sortKey set by batcher */ 0, System.currentTimeMillis());
+                    prefillEp, decodeEp, System.currentTimeMillis());
             InflightEntry entry = new InflightEntry(item);
             InflightEntry existing = inflight.putIfAbsent(ctx.getRequestId(), entry);
             if (existing != null || terminalStates.containsKey(ctx.getRequestId())) {
@@ -197,10 +192,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     }
 
     // ==================== Cancellation ====================
-
-    public void cancel(long requestId) {
-        cancel(requestId, CancelReason.CLIENT_CANCELLED, 0);
-    }
 
     public RequestLifecycleSnapshot cancel(long requestId,
                                            CancelReason reason,
@@ -260,7 +251,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     // ==================== Completion from worker status ====================
 
-    public void onWorkerStatusUpdate(WorkerStatus ws, WorkerStatusResponse response) {
+    public void onWorkerStatusUpdate(WorkerStatusResponse response) {
         if (response == null) {
             return;
         }
@@ -352,11 +343,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         } else if (!head.future().isDone() && !terminalStates.containsKey(head.requestId())) {
             rollback(head);
         }
-    }
-
-    @Override
-    public void onUrgent(BatchItem head, DispatchMeta meta) {
-        flushItems(List.of(head), meta);
     }
 
     @Override
@@ -822,10 +808,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     // ==================== Lifecycle ====================
 
-    public BatchSchedulerReporter getReporter() {
-        return reporter;
-    }
-
     @Scheduled(fixedRateString = "${report.interval.ms:2000}")
     public void reportBatchMetrics() {
         reporter.reportSchedulerInflightSize(inflight.size());
@@ -848,7 +830,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     // ==================== Inflight entry ====================
 
-    static final class InflightEntry {
+    private static final class InflightEntry {
         final BatchItem item;
         final RequestLifecycle lifecycle;
         final AtomicBoolean rolledBack = new AtomicBoolean(false);

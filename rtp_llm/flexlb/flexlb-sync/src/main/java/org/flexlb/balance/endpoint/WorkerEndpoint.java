@@ -96,11 +96,4 @@ public abstract class WorkerEndpoint {
      */
     public abstract long getLoadMetric();
 
-    /**
-     * EP-authoritative local task count, replacing raw gRPC fields.
-     * @deprecated No longer reported after the former per-engine local inflight size metric removal.
-     *             Retained for potential future use.
-     */
-    @Deprecated
-    public abstract int getLocalTaskCount();
 }

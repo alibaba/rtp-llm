@@ -2,13 +2,14 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class DecodeEndpointTest {
 
@@ -26,7 +27,7 @@ class DecodeEndpointTest {
 
     @Test
     void reserve_updatesSnapshotAndInflight() {
-        endpoint.calibrate(null, null, 10000);
+        updateStatus(null, null, 10000);
         endpoint.reserve(100L, 500);
         assertEquals(1, endpoint.getInflightCount());
         assertEquals(9500, endpoint.realKvAvailable());
@@ -63,7 +64,7 @@ class DecodeEndpointTest {
 
         TaskInfo running = task(100L);
         running.setPhase(TaskPhase.KV_ALLOCATED);
-        endpoint.calibrate(Map.of("100", running), null, 10000);
+        updateStatus(Map.of("100", running), null, 10000);
 
         assertEquals(0, endpoint.getInflightCount());
         assertEquals(10000, endpoint.realKvAvailable());
@@ -76,7 +77,7 @@ class DecodeEndpointTest {
         TaskInfo failed = task(100L);
         failed.setErrorCode(1);
         failed.setErrorMessage("timeout");
-        endpoint.calibrate(null, Map.of("100", failed), 10000);
+        updateStatus(null, Map.of("100", failed), 10000);
 
         assertEquals(0, endpoint.getInflightCount());
     }
@@ -87,7 +88,7 @@ class DecodeEndpointTest {
 
         TaskInfo success = task(100L);
         success.setErrorCode(0);
-        endpoint.calibrate(null, Map.of("100", success), 10000);
+        updateStatus(null, Map.of("100", success), 10000);
 
         assertEquals(0, endpoint.getInflightCount());
     }
@@ -95,14 +96,14 @@ class DecodeEndpointTest {
     @Test
     void calibrate_updatesReportedKvAvailable() {
         endpoint.reserve(100L, 500);
-        endpoint.calibrate(null, null, 10000);
+        updateStatus(null, null, 10000);
 
         assertEquals(9500, endpoint.realKvAvailable());
     }
 
     @Test
     void availableKvTokens_accountsForReservations() {
-        endpoint.calibrate(null, null, 10000);
+        updateStatus(null, null, 10000);
 
         endpoint.reserve(100L, 3000);
         endpoint.reserve(101L, 2000);
@@ -113,6 +114,15 @@ class DecodeEndpointTest {
     @Test
     void ipPort_format() {
         assertEquals("10.0.0.1:8080", endpoint.ipPort());
+    }
+
+    private void updateStatus(Map<String, TaskInfo> running, Map<String, TaskInfo> finished,
+                              long availableKvCacheTokens) {
+        status.getAvailableKvCacheTokens().set(availableKvCacheTokens);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRunningTaskInfo(running);
+        response.setFinishedTaskInfo(finished);
+        endpoint.onWorkerStatusUpdate(status, response);
     }
 
     private TaskInfo task(long requestId) {

@@ -13,7 +13,6 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
@@ -121,7 +120,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         long bestCacheHit = survivors.cacheHit(selectedIndex);
         reportCacheHitMetrics(roleType, best.getIp(), best.ipPort(), bestCacheHit, seqLen);
 
-        return buildServerStatus(best, roleType, requestId, minScore, config, balanceContext, bestCacheHit);
+        return buildServerStatus(best, roleType, requestId, minScore, config, bestCacheHit);
     }
 
     private record EndpointFilterResult(CandidateSet endpoints, Map<String, Integer> rejections) {}
@@ -335,9 +334,6 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 return predictor.estimateMs(seqLen, cacheHit);
             }
             String key = formulaPredictor.immutableFormulaKey();
-            if (key == null) {
-                return predictor.estimateMs(seqLen, cacheHit);
-            }
             if (formulaKey == null) {
                 formulaKey = key;
                 estimates = new long[MAX_CACHE_HITS * 2];
@@ -388,11 +384,10 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     }
 
     private ServerStatus buildServerStatus(PrefillEndpoint ep, RoleType roleType, long requestId, long score,
-                                            FlexlbConfig config, BalanceContext balanceContext,
-                                            long bestCacheHit) {
+                                            FlexlbConfig config, long bestCacheHit) {
         // Non-batch path: reserve prefill inflight for load-aware scoring.
         // Batch path uses FlexlbBatchScheduler.commitBatch() instead — skip here to avoid double-counting.
-        if (isNonBatchPath(config, balanceContext)) {
+        if (isNonBatchPath(config)) {
             ep.commitBatch(requestId, score, Collections.emptyList());
         }
 
@@ -419,7 +414,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
      * <p>When batch is enabled, FlexlbBatchScheduler handles all inflight tracking;
      * placeholders are only needed when batch is fully off ({@code flexlbBatchEnabled=false}).
      */
-    private static boolean isNonBatchPath(FlexlbConfig config, BalanceContext ctx) {
+    private static boolean isNonBatchPath(FlexlbConfig config) {
         return !config.isFlexlbBatchEnabled();
     }
 }

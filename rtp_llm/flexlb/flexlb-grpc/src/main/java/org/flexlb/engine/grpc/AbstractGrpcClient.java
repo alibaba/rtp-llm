@@ -1,10 +1,6 @@
 package org.flexlb.engine.grpc;
 
-import com.google.common.util.concurrent.FutureCallback;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
 import io.grpc.ManagedChannel;
-import io.grpc.stub.AbstractBlockingStub;
 import lombok.Getter;
 import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.cache.core.EngineLocalView;
@@ -21,10 +17,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Function;
 
 /**
  * @author zjw

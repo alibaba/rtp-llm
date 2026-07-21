@@ -32,7 +32,6 @@ class MultiBatchCancelOneTest extends FlexLBMockTestBase {
         cfg.setFlexlbBatchWindowMs(300);
         cfg.setCostSloMs(50_000L);
         cfg.setCostSloRiskMarginMs(50L);
-        cfg.setFlexlbBatchFillThreshold(1.0);  // 3/3 = 1.0 → dispatch when full
         cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);
         return cfg;
     }

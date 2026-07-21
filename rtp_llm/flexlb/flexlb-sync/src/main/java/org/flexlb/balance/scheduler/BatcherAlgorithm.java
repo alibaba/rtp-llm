@@ -50,49 +50,6 @@ public interface BatcherAlgorithm {
     }
 
     /**
-     * Estimated remaining wait time of the head request in the batcher
-     * queue. Used by load-balancing strategies to compare workers without
-     * leaking sort-key semantics.
-     *
-     * <p>Each algorithm computes this according to its own dispatch model:
-     * <ul>
-     *   <li>SLO-budget: remaining SLO slack = {@code sortKey - now}</li>
-     *   <li>Fixed-window: remaining fixed window = {@code fixedWaitMs - elapsedMs}</li>
-     * </ul>
-     *
-     * <p>The default implementation treats {@link BatchItem#sortKey()} as
-     * a future deadline, which is correct for deadline-based algorithms.
-     */
-    default long headWaitMs(BatcherContext ctx) {
-        BatchItem head = ctx.peek();
-        if (head == null) {
-            return 0;
-        }
-        return Math.max(0, head.sortKey() - ctx.now());
-    }
-
-    /**
-     * Estimated time a new request would wait in the batcher queue before
-     * its batch is dispatched to the engine. Used by load-balancing
-     * strategies for worker selection scoring.
-     *
-     * <p>Unlike {@link #headWaitMs}, this accounts for the empty-queue
-     * case: when the queue is empty, a new request starts a fresh batch
-     * cycle and must wait for the dispatch trigger (e.g. fixed window
-     * timeout).
-     *
-     * <p>Each algorithm defines this according to its dispatch model:
-     * <ul>
-     *   <li>Fixed-window: queue non-empty → remaining window;
-     *       empty → full {@code fixedWaitMs} (new cycle).</li>
-     *   <li>SLO-budget: remaining SLO slack of the head request.</li>
-     * </ul>
-     */
-    default long queueWaitMs(BatcherContext ctx) {
-        return headWaitMs(ctx);
-    }
-
-    /**
      * Hook called by {@link WorkerBatcher#shutdown} before the queue is drained.
      * Gives the algorithm a chance to clean up internal state.
      */
