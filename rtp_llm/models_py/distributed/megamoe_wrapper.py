@@ -70,10 +70,12 @@ class MegaMoeWrapperConfig:
             f"got experts={experts}, world_size={world_size}"
         )
         topk = model_config.moe_k
-        assert topk <= world_size, (
-            f"MegaMoE requires topk <= world_size, "
-            f"got topk={topk}, world_size={world_size}"
-        )
+        # topk>world_size is supported: the fused combine buffer is sized
+        # mt*topk+1 and the GEMM2 scatter/Stage-3 read are parameterized by
+        # topk. The only hard limit is the warp-ballot lane budget (64).
+        assert (
+            topk <= 64
+        ), f"MegaMoE requires topk <= 64 (warp-ballot budget), got topk={topk}"
 
         # max tokens a single rank can see; FlyDSL requires a power-of-two cap.
         # FlyDSL JIT compile time scales strongly with this value, so we cap it
