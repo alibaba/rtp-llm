@@ -11,7 +11,6 @@ import java.util.List;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Per-worker request batcher that owns the queue and lifecycle, delegating
@@ -28,7 +27,6 @@ public class WorkerBatcher {
     private final PriorityBlockingQueue<BatchItem> queue =
             new PriorityBlockingQueue<>(11, Comparator.comparingLong(BatchItem::sortKey));
     private final AtomicInteger queueDepth = new AtomicInteger();
-    private final AtomicLong headSortKey = new AtomicLong();
     private final Thread workerThread;
     private volatile boolean stopped;
     private final BatcherAlgorithm algorithm;
@@ -42,7 +40,7 @@ public class WorkerBatcher {
         this.handler = handler;
         this.algorithm = createAlgorithm(cfg);
         this.ctx = new BatcherContext(
-                key, prefillEp, cfg, handler, queue, queueDepth, headSortKey, reporter);
+                key, prefillEp, cfg, handler, queue, queueDepth, reporter);
         this.workerThread = new Thread(this::runLoop, "flexlb-batcher-" + key);
         this.workerThread.setDaemon(true);
         this.workerThread.setUncaughtExceptionHandler((t, e) ->
@@ -78,33 +76,14 @@ public class WorkerBatcher {
             item.setSortKey(sortKey);
             algorithm.onOffer(ctx, item, System.currentTimeMillis());
             queue.add(item);
-            ctx.refreshHeadSortKey();
         } catch (RuntimeException | Error e) {
             queueDepth.decrementAndGet();
-            ctx.refreshHeadSortKey();
             throw e;
         }
     }
 
     public int queueSize() {
         return queueDepth.get();
-    }
-
-    /**
-     * Estimated remaining wait time of the head request.
-     * Uses deadline semantics for SLO batching and elapsed-window semantics for fixed-window batching.
-     */
-    public long headWaitMs() {
-        long currentHeadSortKey = headSortKey.get();
-        if (queueDepth.get() == 0 || currentHeadSortKey == 0) {
-            return 0;
-        }
-        long now = System.currentTimeMillis();
-        if (algorithm instanceof FixedWindowBatcherAlgorithm) {
-            long elapsedMs = now - currentHeadSortKey;
-            return Math.max(0, cfg.getFlexlbBatchFixedWaitMs() - elapsedMs);
-        }
-        return Math.max(0, currentHeadSortKey - now);
     }
 
     /**
