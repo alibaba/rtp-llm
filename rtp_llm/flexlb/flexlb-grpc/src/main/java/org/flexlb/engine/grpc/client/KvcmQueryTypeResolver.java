@@ -39,6 +39,8 @@ public class KvcmQueryTypeResolver {
     private final long requestTimeoutMs;
     private final ConcurrentMap<String, ConcurrentMap<RoleType, QueryType>> queryTypeByGroupAndRole =
             new ConcurrentHashMap<>();
+    private final ConcurrentMap<RoleType, QueryType> queryTypeByRoleForCrossGroupRouting =
+            new ConcurrentHashMap<>();
 
     public KvcmQueryTypeResolver(
             ModelMetaConfig modelMetaConfig,
@@ -53,8 +55,11 @@ public class KvcmQueryTypeResolver {
     }
 
     public QueryType resolve(RoleType roleType, String group) {
+        if (StringUtils.isBlank(group)) {
+            return queryTypeByRoleForCrossGroupRouting.getOrDefault(roleType, DEFAULT_QUERY_TYPE);
+        }
         ConcurrentMap<RoleType, QueryType> queryTypeByRole =
-                queryTypeByGroupAndRole.get(StringUtils.defaultString(group));
+                queryTypeByGroupAndRole.get(group);
         return queryTypeByRole == null
                 ? DEFAULT_QUERY_TYPE
                 : queryTypeByRole.getOrDefault(roleType, DEFAULT_QUERY_TYPE);
@@ -93,6 +98,36 @@ public class KvcmQueryTypeResolver {
                     queryTypeByRole.put(roleType, queryType);
                     log.info("Updated KVCM query type, group={}, role={}, endpoint={}, queryType={}",
                             group, roleType, endpointAddress, queryType);
+                }
+            }
+        }
+        refreshCrossGroupQueryTypes();
+    }
+
+    private void refreshCrossGroupQueryTypes() {
+        for (RoleType roleType : RoleType.values()) {
+            QueryType resolvedQueryType = null;
+            boolean conflictingQueryTypes = false;
+            for (ConcurrentMap<RoleType, QueryType> queryTypeByRole : queryTypeByGroupAndRole.values()) {
+                QueryType candidate = queryTypeByRole.get(roleType);
+                if (candidate == null) {
+                    continue;
+                }
+                if (resolvedQueryType == null) {
+                    resolvedQueryType = candidate;
+                } else if (resolvedQueryType != candidate) {
+                    conflictingQueryTypes = true;
+                    break;
+                }
+            }
+
+            if (resolvedQueryType != null && !conflictingQueryTypes) {
+                queryTypeByRoleForCrossGroupRouting.put(roleType, resolvedQueryType);
+            } else {
+                QueryType previous = queryTypeByRoleForCrossGroupRouting.remove(roleType);
+                if (conflictingQueryTypes && previous != null) {
+                    log.warn("KVCM query type differs across groups for role={}; "
+                            + "cross-group routing will use {}", roleType, DEFAULT_QUERY_TYPE);
                 }
             }
         }

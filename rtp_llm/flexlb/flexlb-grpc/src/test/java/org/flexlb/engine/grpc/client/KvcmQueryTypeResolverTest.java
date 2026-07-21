@@ -53,6 +53,16 @@ class KvcmQueryTypeResolverTest {
     }
 
     @Test
+    void usesResolvedTypeForCrossGroupFirstRoleRouting() {
+        TestContext context = context(metadata("mamba", "full_attention"));
+
+        context.resolver().refresh();
+
+        assertEquals(QueryType.QT_PREFIX_MATCH_WITH_MAMBA,
+                context.resolver().resolve(RoleType.PDFUSION, null));
+    }
+
+    @Test
     void defaultsToPrefixMatchWhenMetadataIsUnavailable() {
         EngineRpcService.KvCacheGroupListPB unavailable = EngineRpcService.KvCacheGroupListPB.newBuilder()
                 .setErrCode(EngineRpcService.KvCacheGroupMetadataErrorCode.KV_CACHE_GROUP_METADATA_UNAVAILABLE)
