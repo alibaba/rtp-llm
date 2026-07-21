@@ -6,5 +6,5 @@ package org.flexlb.balance.scheduler;
  * <p>Extracted from {@link FlexlbBatchScheduler} to reduce coupling
  * with {@link WorkerBatcher}.
  */
-public record DispatchMeta(String reason, double fillRatio, int queueDepth) {
+public record DispatchMeta(String reason, int queueDepth) {
 }

@@ -273,44 +273,6 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
     }
 
     /**
-     * Get worker status via gRPC
-     */
-    public EngineRpcService.WorkerStatusPB getWorkerStatus(String ip, int port, EngineRpcService.StatusVersionPB request, long requestTimeoutMs) {
-        return executeGrpcCall(ip, port, stub -> stub.getRpcServiceStub().getWorkerStatus(request), requestTimeoutMs, ServiceType.WORKER_STATUS);
-    }
-
-    /**
-     * Get cache status via gRPC
-     */
-    public EngineRpcService.CacheStatusPB getCacheStatus(String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
-        return executeGrpcCall(ip, port, stub -> stub.getRpcServiceStub().getCacheStatus(request), requestTimeoutMs, ServiceType.CACHE_STATUS);
-    }
-
-    /**
-     * Get multimodal worker status via gRPC
-     */
-    public EngineRpcService.WorkerStatusPB getMultimodalWorkerStatus(String ip, int port, EngineRpcService.StatusVersionPB request, long requestTimeoutMs) {
-        return executeGrpcCall(ip, port, stub -> stub.getMultimodalRpcServiceStub().getWorkerStatus(request), requestTimeoutMs, ServiceType.MULTIMODAL_WORKER_STATUS);
-    }
-
-    /**
-     * Get multimodal cache status via gRPC
-     */
-    public EngineRpcService.CacheStatusPB getMultimodalCacheStatus(String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
-        return executeGrpcCall(ip, port, stub -> stub.getMultimodalRpcServiceStub().getCacheStatus(request), requestTimeoutMs, ServiceType.MULTIMODAL_CACHE_STATUS);
-    }
-
-    /**
-     * Submit a batch of already-routed requests to a Prefill worker.
-     */
-    public EngineRpcService.EnqueueBatchResponsePB batchEnqueue(String ip,
-                                                                int port,
-                                                                EngineRpcService.EnqueueBatchRequestPB request,
-                                                                long requestTimeoutMs) {
-        return executeGrpcCall(ip, port, stub -> stub.getRpcServiceStub().enqueueBatch(request), requestTimeoutMs, ServiceType.BATCH_ENQUEUE);
-    }
-
-    /**
      * Cancel a request previously submitted through EnqueueBatch.
      */
     public EngineRpcService.EmptyPB cancel(String ip, int port, long requestId, long requestTimeoutMs) {

@@ -31,7 +31,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     public void reserve(long requestId, long kvTokens) {
-        RequestInflight newRi = new RequestInflight(requestId, kvTokens);
+        RequestInflight newRi = new RequestInflight(kvTokens);
         RequestInflight prev = inflightRequests.putIfAbsent(requestId, newRi);
         if (prev != null) {
             // requestId already exists — subtract the old kvTokens before overwriting,
@@ -52,16 +52,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
     @Override
     public void onWorkerStatusUpdate(WorkerStatus ws, WorkerStatusResponse resp) {
         super.onWorkerStatusUpdate(ws, resp);
-        calibrate(resp.getRunningTaskInfo(), resp.getFinishedTaskInfo(),
-                status.getAvailableKvCacheTokens().get());
+        calibrate(resp.getRunningTaskInfo(), resp.getFinishedTaskInfo());
     }
 
     /**
      * Full calibration against worker status report.
      */
-    public void calibrate(Map<String, TaskInfo> runningTaskInfo, Map<String, TaskInfo> finishedTaskInfo,
-                           long latestAvailableKvCacheTokens) {
-        this.reportedKvAvailable.set(latestAvailableKvCacheTokens);
+    private void calibrate(Map<String, TaskInfo> runningTaskInfo, Map<String, TaskInfo> finishedTaskInfo) {
+        this.reportedKvAvailable.set(status.getAvailableKvCacheTokens().get());
 
         // Phase 1: process running requests — KV_ALLOCATED or RUNNING means the engine
         // has taken ownership, so we can release our inflight reservation.
@@ -128,7 +126,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Maintained as an {@link AtomicLong} counter, updated incrementally on
      * {@link #reserve}, {@link #release}, {@link #calibrate}, and TTL eviction.
      */
-    public long inflightKvReserved() {
+    private long inflightKvReserved() {
         return inflightKvReservedTotal.get();
     }
 
@@ -193,15 +191,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
     @Override
     public long getLoadMetric() {
         return getTotalLoad();
-    }
-
-    @Override
-    public int getLocalTaskCount() {
-        return getInflightCount();
-    }
-
-    ConcurrentHashMap<Long, RequestInflight> getInflightRequests() {
-        return inflightRequests;
     }
 
     private static boolean isCancelError(TaskInfo task) {

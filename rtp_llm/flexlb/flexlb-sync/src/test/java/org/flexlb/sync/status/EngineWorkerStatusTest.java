@@ -3,7 +3,6 @@ package org.flexlb.sync.status;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -36,24 +35,11 @@ class EngineWorkerStatusTest {
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         registry = new EndpointRegistry(configService, () -> null,
                 Mockito.mock(BatchSchedulerReporter.class));
-        engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), registry);
+        engineWorkerStatus = new EngineWorkerStatus(registry);
         workerStatus1 = new WorkerStatus();
         workerStatus1.setGroup("group1");
         workerStatus2 = new WorkerStatus();
         workerStatus2.setGroup("group2");
-    }
-
-    @Test
-    void should_create_engine_worker_status_with_config_when_constructing_with_model_meta_config() {
-        // Given
-        ModelMetaConfig config = new ModelMetaConfig();
-
-        // When
-        EngineWorkerStatus status = new EngineWorkerStatus(config, registry);
-
-        // Then
-        assertNotNull(status);
-        assertSame(config, status.getModelMetaConfig());
     }
 
     @Test
@@ -73,8 +59,8 @@ class EngineWorkerStatusTest {
         workerStatus2.setIp("127.0.0.1");
         workerStatus2.setPort(8081);
         workerStatus2.setGrpcPort(9091);
-        registry.ensureDecodeEndpoint(ipPort1, workerStatus1);
-        registry.ensureDecodeEndpoint(ipPort2, workerStatus2);
+        registry.ensureEndpoint(RoleType.DECODE, ipPort1, workerStatus1);
+        registry.ensureEndpoint(RoleType.DECODE, ipPort2, workerStatus2);
 
         // When
         var result = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, "group1");
@@ -105,8 +91,8 @@ class EngineWorkerStatusTest {
         workerStatus2.setIp("127.0.0.1");
         workerStatus2.setPort(8081);
         workerStatus2.setGrpcPort(9091);
-        registry.ensurePrefillEndpoint(ipPort1, workerStatus1);
-        registry.ensurePrefillEndpoint(ipPort2, workerStatus2);
+        registry.ensureEndpoint(RoleType.PREFILL, ipPort1, workerStatus1);
+        registry.ensureEndpoint(RoleType.PREFILL, ipPort2, workerStatus2);
 
         // When
         var result = engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
@@ -173,8 +159,8 @@ class EngineWorkerStatusTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort1, ws1);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort2, ws2);
 
-        registry.ensureDecodeEndpoint(ipPort1, ws1);
-        registry.ensureDecodeEndpoint(ipPort2, ws2);
+        registry.ensureEndpoint(RoleType.DECODE, ipPort1, ws1);
+        registry.ensureEndpoint(RoleType.DECODE, ipPort2, ws2);
 
         // When - select with group "groupA"
         var result = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, "groupA");
@@ -210,8 +196,8 @@ class EngineWorkerStatusTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort1, ws1);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort2, ws2);
 
-        registry.ensureDecodeEndpoint(ipPort1, ws1);
-        registry.ensureDecodeEndpoint(ipPort2, ws2);
+        registry.ensureEndpoint(RoleType.DECODE, ipPort1, ws1);
+        registry.ensureEndpoint(RoleType.DECODE, ipPort2, ws2);
 
         // When - select with group null (no group constraint)
         var result = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, null);
@@ -236,8 +222,8 @@ class EngineWorkerStatusTest {
         workerStatus1.setPort(8080);
         workerStatus2.setIp("127.0.0.1");
         workerStatus2.setPort(8081);
-        registry.ensureDecodeEndpoint(matching, workerStatus1);
-        registry.ensureDecodeEndpoint(filtered, workerStatus2);
+        registry.ensureEndpoint(RoleType.DECODE, matching, workerStatus1);
+        registry.ensureEndpoint(RoleType.DECODE, filtered, workerStatus2);
         AtomicInteger visited = new AtomicInteger();
 
         int count = engineWorkerStatus.forEachModelWorkerEndpoint(

@@ -146,7 +146,7 @@ class EngineSyncRunnerTest {
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         EndpointRegistry registry = new EndpointRegistry(
-                configService, null, Mockito.mock(BatchSchedulerReporter.class));
+                configService, () -> null, Mockito.mock(BatchSchedulerReporter.class));
         Map<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
         String ipPort = "127.0.0.1:8080";
         WorkerStatus status = new WorkerStatus();

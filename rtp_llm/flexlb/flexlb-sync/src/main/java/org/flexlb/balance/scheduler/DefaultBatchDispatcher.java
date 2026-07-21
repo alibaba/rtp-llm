@@ -16,7 +16,6 @@ import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.util.Logger;
-
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -27,7 +26,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
@@ -340,7 +338,7 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         BatchItem head = items.get(0);
         long now = System.currentTimeMillis();
         long waitMs = now - head.enqueuedAtMs();
-        long budgetMs = head.deadlineMs() - now;
+        long budgetMs = head.sortKey() - now;
 
         Logger.info("flexlb_batch_dispatch batch_id={} batch_size={} total_tokens={} total_hit={} "
                         + "pred_ms={} reason={} wait_ms={} budget_ms={} "
