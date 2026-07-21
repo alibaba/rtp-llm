@@ -37,7 +37,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     metrics_reporter_(metrics_reporter),
     special_tokens_(model_config.special_tokens),
     mutex_(std::make_shared<std::mutex>()),
-    cv_(std::make_shared<std::condition_variable>()),
+    consumer_cv_(std::make_shared<std::condition_variable>()),
     mm_position_ids_style_(PositionIdsStyle(model_config.mm_model_config.mm_position_ids_style)),
     dtype_(model_config.data_type),
     hidden_size_(model_config.hidden_size) {
@@ -150,7 +150,7 @@ int GenerateStream::nextNeedBlockNums(int reserve_step) const {
 
 int GenerateStream::estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const {
     const int reserve_step   = complete_token_ids_->getReserveStep();
-    int common_seq_len = std::min(complete_token_ids_->commonSeqLength(), seqLength());
+    int       common_seq_len = std::min(complete_token_ids_->commonSeqLength(), seqLength());
     if (target_batch_size > 1) {
         common_seq_len = common_seq_len / seqSizePerBlock() * seqSizePerBlock();
     }
@@ -502,38 +502,34 @@ int64_t GenerateStream::getTimeoutMs() const {
     return generate_input_->generate_config->timeout_ms;
 }
 
-void GenerateStream::checkTimeout() {
+void GenerateStream::checkTimeoutWithoutLock() {
+    // Consumer-visible events and timeout publication share mutex_. Once a
+    // consumer-ready event has linearized, a later scheduler timeout must not
+    // replace it with the higher-precedence timeout error.
+    if (consumerReadyWithoutLock()) {
+        return;
+    }
+
     auto running_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
     auto timeout_ms      = getTimeoutMs();
     if (timeout_ms > 0 && timeout_ms < running_time_ms) {
-        reportEvent(StreamEvents::Error,
-                    ErrorCode::GENERATE_TIMEOUT,
-                    "query has been running " + std::to_string(running_time_ms) + " ms, "
-                        + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout");
+        reportTimeoutWithoutLock(running_time_ms, timeout_ms);
     }
 }
 
-// 统一的事件上报接口，替代原先所有 reportXX 方法。
-// 外部线程调用时自动加锁保护 error_info 和 events_ 的一致性。
-void GenerateStream::reportEvent(StreamEvents::EventType event, ErrorCode error_code, const std::string& error_msg) {
-    std::lock_guard<std::mutex> lock(*mutex_);
-    generate_status_->reportEvent(event, error_code, error_msg);
-}
-
-// 无锁版本，供已持有 mutex_ 的内部调用路径使用（如 update/specUpdate/moveToNext 链路）。
-void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
-                                            ErrorCode               error_code,
-                                            const std::string&      error_msg) {
-    generate_status_->reportEvent(event, error_code, error_msg);
-}
-
-void GenerateStream::reportError(ErrorCode error_code, const std::string& error_msg) {
-    std::lock_guard<std::mutex> lock(*mutex_);
-    generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
+void GenerateStream::reportTimeoutWithoutLock(int64_t running_time_ms, int64_t timeout_ms) {
+    reportEventWithoutLock(StreamEvents::Error,
+                           ErrorCode::GENERATE_TIMEOUT,
+                           "query has been running " + std::to_string(running_time_ms) + " ms, "
+                               + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout");
 }
 
 bool GenerateStream::hasEvent(StreamEvents::EventType event) const {
     std::lock_guard<std::mutex> lock(*mutex_);
+    return hasEventWithoutLock(event);
+}
+
+bool GenerateStream::hasEventWithoutLock(StreamEvents::EventType event) const {
     return generate_status_->hasEvent(event);
 }
 
@@ -546,7 +542,8 @@ bool GenerateStream::isFinished() const {
 }
 
 bool GenerateStream::isActive() const {
-    return !hasError() && getStatus() != StreamState::FINISHED;
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return !hasErrorWithoutLock() && getStatus() != StreamState::FINISHED;
 }
 
 void GenerateStream::setReserveStep(size_t reserve_step) {
@@ -557,24 +554,28 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
 }
 
 StreamState GenerateStream::moveToNext() {
-    checkTimeout();
     std::lock_guard<std::mutex> lock(*mutex_);
-    const auto                  old_status = getStatus();
-    StreamState                 state      = generate_status_->moveToNext();
-    const auto                  new_status = getStatus();
+    checkTimeoutWithoutLock();
+    const auto  old_status = getStatus();
+    StreamState state      = generate_status_->moveToNext();
+    const auto  new_status = getStatus();
 
     if (old_status == StreamState::WAITING && new_status != StreamState::WAITING) {
         wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
     }
 
-    // notify one thread waiting for stream completion
-    if (new_status == StreamState::FINISHED) {
-        cv_->notify_one();
+    if (new_status != old_status) {
+        consumer_cv_->notify_all();
     }
     return state;
 }
 
 bool GenerateStream::hasError() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return hasErrorWithoutLock();
+}
+
+bool GenerateStream::hasErrorWithoutLock() const {
     return generate_status_->error_info.hasError();
 }
 
@@ -584,12 +585,26 @@ bool GenerateStream::isSubGenerateDoneWithoutLock(int batch_id) const {
 
 ErrorInfo GenerateStream::statusInfo() {
     std::lock_guard<std::mutex> lock(*mutex_);
+    return statusInfoWithoutLock();
+}
+
+ErrorInfo GenerateStream::statusInfoWithoutLock() const {
     return generate_status_->error_info;
+}
+
+bool GenerateStream::consumerFinishedWithoutLock() const {
+    // Consumer completion includes pending GenerateDone, but lifecycle commit and
+    // resource release remain scheduler-owned through moveToNext().
+    return hasEventWithoutLock(StreamEvents::NeedRemoteGenerate) || generate_status_->checkFinished();
+}
+
+bool GenerateStream::consumerReadyWithoutLock() const {
+    return hasErrorWithoutLock() || consumerFinishedWithoutLock();
 }
 
 std::string GenerateStream::stopReason() {
     std::lock_guard<std::mutex> lock(*mutex_);
-    return generate_status_->error_info.ToString();
+    return statusInfoWithoutLock().ToString();
 }
 
 size_t GenerateStream::iterCount() const {
@@ -675,20 +690,6 @@ void GenerateStream::matchEosToken(int batch_id) {
     }
 }
 
-bool GenerateStream::waitForRemoteGenerate() {
-    std::unique_lock<std::mutex> lock(*mutex_);
-    // Wait until stream status -> NeedRemoteGenerate
-    cv_->wait(lock, [this] { return generate_status_->hasEvent(StreamEvents::NeedRemoteGenerate); });
-    // If stream status is abnormal, log the error info
-    if (hasError()) {
-        RTP_LLM_LOG_WARNING("waitForRemoteGenerate exits due to stream [%ld] error: %s",
-                            streamId(),
-                            generate_status_->error_info.ToString().c_str());
-    }
-
-    return !hasError();
-}
-
 std::vector<int> GenerateStream::getLatestTokens(size_t token_num) {
     return complete_token_ids_->getLatestTokens(token_num);
 }
@@ -726,7 +727,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%ld] spec update", streamId());
     *is_context_stream_ = false;
-    if (hasError() && !update_info.force_update_info) {
+    if (hasErrorWithoutLock() && !update_info.force_update_info) {
         return;
     }
 
@@ -815,7 +816,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());
     *is_context_stream_ = false;
-    if (hasError() && !update_info.force_update_info) {
+    if (hasErrorWithoutLock() && !update_info.force_update_info) {
         return;
     }
 
