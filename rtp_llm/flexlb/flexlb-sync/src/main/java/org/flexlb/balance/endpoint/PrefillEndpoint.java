@@ -110,14 +110,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return batcher.queueSize();
     }
 
-    public long getBatcherHeadSortKey() {
-        return batcher.headSortKey();
-    }
-
-    public long getBatcherHeadWaitMs() {
-        return batcher.headWaitMs();
-    }
-
     public long batcherWaitMs() {
         return batcher.queueWaitMs();
     }
@@ -453,7 +445,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 batchId, predictedMs, actualMs, gapMs, batch.requests().size(), getIp());
 
         // Feed the actual-vs-predicted timing back into the predictor for future learning.
-        batch.setActualTimeMs(actualMs);
         predictor.learn(batch.requests(), predictedMs, actualMs);
 
         if (reporter != null) {

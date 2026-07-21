@@ -63,16 +63,6 @@ public enum RoleType {
     }
 
     /**
-     * Check if string matches current role type.
-     *
-     * @deprecated Use {@code roleType == RoleType.PREFILL} or enum comparison instead.
-     */
-    @Deprecated
-    public boolean matches(String code) {
-        return this.code.equals(code);
-    }
-
-    /**
      * Get corresponding error type based on role type.
      *
      * @return Corresponding error type
@@ -85,16 +75,5 @@ public enum RoleType {
             case VIT -> StrategyErrorType.NO_VIT_WORKER;
             case FRONTEND -> StrategyErrorType.NO_FRONTEND_WORKER;
         };
-    }
-
-    /**
-     * Get the proto enum constant name (ROLE_TYPE_XXX).
-     *
-     * @deprecated Use {@link org.flexlb.engine.grpc.RoleTypeProtoConverter#toProto(RoleType)}
-     *             for direct proto enum mapping.
-     */
-    @Deprecated
-    public String getProtoName() {
-        return "ROLE_TYPE_" + this.name();
     }
 }

@@ -95,11 +95,6 @@ public final class BatchItem {
         return hitCacheOf(prefill);
     }
 
-    /** Compute tokens = seqLen - hitCache (floor at 0). */
-    public long computeTokens() {
-        return Math.max(0, seqLen() - hitCache());
-    }
-
     /** Extract cache-hit length from a {@link ServerStatus} debug info. */
     public static long hitCacheOf(ServerStatus ss) {
         return ss != null && ss.getDebugInfo() != null

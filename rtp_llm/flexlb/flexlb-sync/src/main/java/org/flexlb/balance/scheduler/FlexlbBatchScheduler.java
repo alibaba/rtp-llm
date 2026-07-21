@@ -826,10 +826,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     // ==================== Lifecycle ====================
 
-    public BatchSchedulerReporter getReporter() {
-        return reporter;
-    }
-
     @Scheduled(fixedRateString = "${report.interval.ms:2000}")
     public void reportBatchMetrics() {
         reporter.reportSchedulerInflightSize(inflight.size());

@@ -301,13 +301,6 @@ public class EndpointRegistry {
         }
     }
 
-    public void putPdFusion(String ipPort, PrefillEndpoint endpoint) {
-        PrefillEndpoint old = pdFusionEndpoints.put(ipPort, endpoint);
-        if (old != null && old != endpoint) {
-            old.close();
-        }
-    }
-
     public void putVit(String ipPort, SimpleWorkerEndpoint endpoint) {
         putSimple(vitEndpoints, ipPort, endpoint);
     }
@@ -339,14 +332,6 @@ public class EndpointRegistry {
      */
     public ConcurrentHashMap<String, DecodeEndpoint> getDecodeEndpoints() {
         return decodeEndpoints;
-    }
-
-    public ConcurrentHashMap<String, PrefillEndpoint> getPdFusionEndpoints() {
-        return pdFusionEndpoints;
-    }
-
-    public ConcurrentHashMap<String, SimpleWorkerEndpoint> getVitEndpoints() {
-        return vitEndpoints;
     }
 
     public int getEndpointCount(RoleType roleType) {
