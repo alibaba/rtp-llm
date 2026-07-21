@@ -17,6 +17,7 @@ from rtp_llm.models_py.modules import (
     FakeBalanceExpert,
     FMHAImplBase,
     FusedMoeFactory,
+    GroupTopK,
     LinearFactory,
     MlaAttention,
     RMSNorm,
@@ -27,6 +28,7 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.models_py.modules.factory.linear.fixed_m_linear import fixed_m_linear
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
@@ -104,18 +106,14 @@ class GenericMoeLayer(nn.Module):
             if getattr(config, "model_type", "") == "glm_5" and cp_prefill_enabled
             else 0
         )
-        # Keep the environment variable name for compatibility. The chunk
-        # boundary covers the complete MoE path (gate/top-k, routed experts,
-        # and shared expert), matching the DSV4 implementation.
-        configured_moe_chunk_rows = int(
+        self.gate_chunk_rows = int(
             os.environ.get("GLM5_MOE_GATE_CHUNK_ROWS", str(default_gate_chunk_rows))
         )
-        if configured_moe_chunk_rows < 0:
+        if self.gate_chunk_rows < 0:
             raise ValueError(
                 "GLM5_MOE_GATE_CHUNK_ROWS must be non-negative, got "
-                f"{configured_moe_chunk_rows}"
+                f"{self.gate_chunk_rows}"
             )
-        self.moe_chunk_rows = 0 if is_decode_role else configured_moe_chunk_rows
 
         # Get quant_config from model_config
         quant_config = config.quant_config
@@ -225,11 +223,8 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert_gate = None
             self.sigmoid_gate_scale_add = None
 
-        # GLM5/DeepSeek-style routing uses the correction bias only for expert
-        # selection. The routed weights come from the unbiased sigmoid scores.
+        # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
-        self.renormalize = self.config.has_moe_norm
-        self.routed_scaling_factor = self.config.routed_scaling_factor
 
     def clone_for_cuda_graph(self) -> "GenericMoeLayer":
         clone = object.__new__(type(self))
@@ -241,7 +236,7 @@ class GenericMoeLayer(nn.Module):
         clone.ffn_dim = self.ffn_dim
         clone.num_experts = self.num_experts
         clone.top_k = self.top_k
-        clone.moe_chunk_rows = self.moe_chunk_rows
+        clone.gate_chunk_rows = self.gate_chunk_rows
         clone.gate = self.gate
         clone.select_topk = self.select_topk
         clone.fake_balance_expert = self.fake_balance_expert
@@ -259,75 +254,63 @@ class GenericMoeLayer(nn.Module):
         clone.shared_expert_gate = self.shared_expert_gate
         clone.sigmoid_gate_scale_add = self.sigmoid_gate_scale_add
         clone.correction_bias = self.correction_bias
-        clone.renormalize = self.renormalize
-        clone.routed_scaling_factor = self.routed_scaling_factor
         clone._use_mega_moe_fused_shared = self._use_mega_moe_fused_shared
         return clone
 
-    def _select_topk(
-        self,
-        router_logits_fp32: torch.Tensor,
-        topk_ids_dtype: torch.dtype,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        num_tokens = router_logits_fp32.size(0)
-        if self.correction_bias is None:
-            topk_weights = torch.empty(
-                (num_tokens, self.top_k),
-                dtype=torch.float32,
-                device=router_logits_fp32.device,
-            )
-            topk_ids = torch.empty(
-                (num_tokens, self.top_k),
-                dtype=topk_ids_dtype,
-                device=router_logits_fp32.device,
-            )
-            self.select_topk(router_logits_fp32, topk_ids, topk_weights)
-            return topk_weights, topk_ids
-
-        scores = router_logits_fp32.sigmoid()
-        scores_for_choice = scores + self.correction_bias.unsqueeze(0)
-        topk_ids = torch.topk(scores_for_choice, self.top_k, dim=-1).indices
-        topk_weights = scores.gather(1, topk_ids)
-        if self.renormalize:
-            topk_weights = topk_weights / (
-                topk_weights.sum(dim=-1, keepdim=True) + 1e-12
-            )
-        if self.routed_scaling_factor != 1.0:
-            topk_weights = topk_weights * self.routed_scaling_factor
-        return topk_weights, topk_ids.to(topk_ids_dtype)
-
-    def _gate_and_select_topk(
+    def forward(
         self,
         hidden_states: torch.Tensor,
-        topk_ids_dtype: torch.dtype,
-        pad_to_rows: int = 0,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        valid_rows, hidden_size = hidden_states.shape
-        gate_input = hidden_states
-        if pad_to_rows > valid_rows:
-            gate_input = torch.zeros(
-                (pad_to_rows, hidden_size),
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
-            )
-            gate_input[:valid_rows].copy_(hidden_states)
-
-        router_logits_fp32 = self.gate(gate_input).float()
-        topk_weights, topk_ids = self._select_topk(router_logits_fp32, topk_ids_dtype)
-        return topk_weights[:valid_rows], topk_ids[:valid_rows]
-
-    def _forward_chunk(
-        self,
-        hidden_states: torch.Tensor,
-        x_fp8: Optional[torch.Tensor],
-        x_scale: Optional[torch.Tensor],
-        gate_padding_rows: int = 0,
+        x_fp8: "Optional[torch.Tensor]" = None,
+        x_scale: "Optional[torch.Tensor]" = None,
     ) -> torch.Tensor:
+        num_tokens, _ = hidden_states.shape
+        if self.gate_chunk_rows > 0 and num_tokens > 0:
+            router_logits = fixed_m_linear(
+                self.gate, hidden_states, self.gate_chunk_rows
+            )
+        else:
+            router_logits = self.gate(
+                hidden_states
+            )  # fuse kernel: nvjet_tst_64x8_64x16_2x4_h_bz_NNT (bf16 nn.Linear router, every layer)
+        router_logits_fp32 = (
+            router_logits.float()
+        )  # fuse kernel: at::native::unrolled_elementwise_kernel<direct_copy_kernel_cuda> (bf16 -> fp32 cast)
+
+        topk_weights = torch.empty(
+            (num_tokens, self.top_k),
+            dtype=torch.float32,
+            device=hidden_states.device,
+        )
         # different executor may need different topk_ids dtype
         topk_ids_dtype = self.fused_moe.topk_ids_dtype
-        topk_weights, topk_ids = self._gate_and_select_topk(
-            hidden_states, topk_ids_dtype, gate_padding_rows
+        topk_ids = torch.empty(
+            (num_tokens, self.top_k),
+            dtype=topk_ids_dtype,
+            device=hidden_states.device,
         )
+
+        if self.correction_bias is not None:
+            self.group_topk = GroupTopK()
+            self.renormalize = self.config.has_moe_norm
+            self.num_expert_group = self.config.moe_n_group
+
+            self.topk_group = self.config.moe_topk_group
+            self.n_routed_experts = self.config.expert_num  # config.n_routed_experts
+            self.routed_scaling_factor = self.config.routed_scaling_factor
+            self.group_topk(
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                scores=router_logits_fp32,
+                correction_bias=self.correction_bias,
+                n_group=self.num_expert_group,
+                topk_group=self.topk_group,
+                topk=self.top_k,
+                renormalize=self.renormalize,
+                routed_scaling_factor=self.routed_scaling_factor,
+            )
+        else:
+            # Top-K selection using C++ SelectTopkOp
+            self.select_topk(router_logits_fp32, topk_ids, topk_weights)
 
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
@@ -381,56 +364,6 @@ class GenericMoeLayer(nn.Module):
                 else:
                     experts_output = experts_output + shared_expert_output
         return experts_output
-
-    @staticmethod
-    def _slice_x_scale(
-        x_scale: Optional[torch.Tensor], begin: int, end: int
-    ) -> Optional[torch.Tensor]:
-        if x_scale is None:
-            return None
-
-        scale_chunk = x_scale[begin:end]
-        if x_scale.dim() != 2 or x_scale.stride(0) != 1:
-            return scale_chunk
-
-        # DeepGEMM scales are logically [M, K // group_size], but physically
-        # column-major with stride(-1) equal to align(M, 4). A row slice keeps
-        # the full tensor's stride and is rejected by the chunk-sized GEMM.
-        rows = end - begin
-        aligned_rows = (rows + 3) // 4 * 4
-        storage = torch.empty(
-            (x_scale.size(1), aligned_rows),
-            dtype=x_scale.dtype,
-            device=x_scale.device,
-        )
-        repacked = storage.transpose(0, 1)[:rows, :]
-        repacked.copy_(scale_chunk)
-        return repacked
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        x_fp8: "Optional[torch.Tensor]" = None,
-        x_scale: "Optional[torch.Tensor]" = None,
-    ) -> torch.Tensor:
-        num_tokens = hidden_states.size(0)
-        if self.moe_chunk_rows <= 0 or num_tokens == 0:
-            return self._forward_chunk(hidden_states, x_fp8, x_scale)
-
-        outputs: list[torch.Tensor] = []
-        for begin in range(0, num_tokens, self.moe_chunk_rows):
-            end = min(begin + self.moe_chunk_rows, num_tokens)
-            chunk_x_fp8 = x_fp8[begin:end] if x_fp8 is not None else None
-            chunk_x_scale = self._slice_x_scale(x_scale, begin, end)
-            outputs.append(
-                self._forward_chunk(
-                    hidden_states[begin:end],
-                    chunk_x_fp8,
-                    chunk_x_scale,
-                    gate_padding_rows=self.moe_chunk_rows,
-                )
-            )
-        return torch.cat(outputs, dim=0)
 
 
 class DecodeLayerOutput:
