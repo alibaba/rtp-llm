@@ -19,6 +19,7 @@ from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
 from rtp_llm.ops import TaskType, VitSeparation
 from rtp_llm.utils.concurrency_controller import get_global_controller
+from rtp_llm.utils.gpu_mem_probe import log_gpu_mem
 
 if TYPE_CHECKING:
     from rtp_llm.async_decoder_engine.base_engine import BaseEngine
@@ -46,6 +47,9 @@ class BackendManager(object):
 
     def start(self):
         """Initialize backend server without entering service loop"""
+        # [InitMem] baseline: CUDA context + torch runtime only, before NCCL /
+        # symm / weights. Anchors the sleep-residual decomposition.
+        log_gpu_mem("start/baseline")
         self._distributed_server.start(self.py_env_configs)
         # Create EngineConfig from py_env_configs (server/distribute config already adjusted for this rank)
         engine_config = EngineConfig.create(
@@ -88,6 +92,7 @@ class BackendManager(object):
         )
 
         if engine_config.parallelism_config.world_size > 1:
+            log_gpu_mem("before_nccl_init")
             init_distributed_environment(
                 engine_config.parallelism_config,
                 nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
@@ -95,6 +100,8 @@ class BackendManager(object):
                 backend="nccl",
                 timeout=self.py_env_configs.distribute_config.dist_comm_timeout,
             )
+            # delta vs before = NCCL comm buffers (non-torch cudaMalloc)
+            log_gpu_mem("after_nccl_init")
         world_info = get_world_info(
             self.py_env_configs.server_config,
             self.py_env_configs.distribute_config,
@@ -131,6 +138,9 @@ class BackendManager(object):
             model_args=self.py_env_configs.model_args,
         )
 
+        # delta vs after_nccl = symm buffer + weights (torch) + KV (torch) +
+        # JIT cubins + plugin/cuBLAS workspaces bound during warmup.
+        log_gpu_mem("before_engine_create")
         # Finally create engine using the new API
         self.engine = ModelFactory.from_model_configs(
             model_config=model_config,
@@ -140,6 +150,10 @@ class BackendManager(object):
             merge_lora=self.py_env_configs.lora_config.merge_lora,
             propose_model_config=propose_model_config,
         )
+        # Full steady-state footprint (context + NCCL + symm + weights + KV +
+        # JIT + workspaces). Compare against [SleepMem][sleep/SLEEPING] to see
+        # exactly which buckets the VMM pause did and did not reclaim.
+        log_gpu_mem("after_engine_create")
         logging.info(
             "engine created successfully: self.engine.task_type=%s",
             self.engine.task_type,

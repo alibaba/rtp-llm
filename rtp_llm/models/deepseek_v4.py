@@ -339,6 +339,14 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
             (W.v4_routed_w2_w, W.v4_routed_w2_s, "w2"),
             (W.v4_routed_w3_w, W.v4_routed_w3_s, "w3"),
         ]:
+            # Routed-expert weights are transient at load: the mega-MoE strategy
+            # (models_py/.../moe/strategies/*.py setup_weights) pops each stack,
+            # copies it into fresh fused kernel buffers, then `del`s the loaded
+            # original. So they never become resident/pausable weights -- keep
+            # them OUT of the sleep-mode weights region (skip_weights_region) so
+            # their freed blocks land in the default pool and the strategy's
+            # post-rebuild empty_cache() can actually return them to the driver,
+            # instead of stranding ~tens of GB in the region's private MemPool.
             out.append(
                 MoeAtomicWeight(
                     sub_w_name,
@@ -351,6 +359,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                     stack_,
                     config=moe_cfg,
                     data_type=torch.int8,
+                    skip_weights_region=True,
                 )
             )
             out.append(
@@ -365,6 +374,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                     stack_,
                     config=moe_cfg,
                     data_type=torch.float8_e8m0fnu,
+                    skip_weights_region=True,
                 )
             )
         return out

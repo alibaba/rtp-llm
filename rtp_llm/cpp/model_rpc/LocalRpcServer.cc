@@ -287,6 +287,21 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     return grpc::Status::OK;
 }
 
+bool LocalRpcServer::validateKvMemoryControllerForWake(const KVCachePhysicalMemoryControllerPtr& controller) {
+    if (!controller) {
+        return true;
+    }
+    if (controller->isPaused()) {
+        RTP_LLM_LOG_ERROR("sleep warmup/self-check failed: kv memory controller is still paused");
+        return false;
+    }
+    if (controller->basePtr() == nullptr || controller->totalSizeBytes() == 0) {
+        RTP_LLM_LOG_ERROR("sleep warmup/self-check failed: kv memory controller has no attached buffer");
+        return false;
+    }
+    return true;
+}
+
 void LocalRpcServer::installSleepHooks() {
     // --- M3: drain counters. ---
     drain_manager_ = std::make_shared<DrainManager>();
@@ -335,7 +350,14 @@ void LocalRpcServer::installSleepHooks() {
     drain_manager_->installHooks(hooks);  // drain + activeRequestCount + activeCacheTransferCount
     const auto local_rank  = maga_init_params_.parallelism_config.local_rank;
     auto       vmm_backend = vmm_backend_;
-    hooks.quiesceEngine    = [engine, local_rank](const SleepOptions& opt) {
+    hooks.armEngineQuiesce = [engine, local_rank](const SleepOptions&) {
+        OptionalSleepDeviceGuard device_guard(local_rank);
+        // Arm the collective sleep-quiesce consensus at DRAINING, before the rank-asymmetric
+        // drain, symmetrically on every rank. Multi-rank DP/EP only; single-rank no-op.
+        engine->armCollectiveSleepQuiesce();
+        return true;
+    };
+    hooks.quiesceEngine = [engine, local_rank](const SleepOptions& opt) {
         OptionalSleepDeviceGuard device_guard(local_rank);
         // Stall the engine at a TP/DP/EP-safe point before any rank drops GPU memory.
         auto pause_status = engine->pauseAndWaitQuiesced(opt.timeout_ms);
@@ -408,6 +430,23 @@ void LocalRpcServer::installSleepHooks() {
         // best-effort emptyCache() below can never leave the regions mapped.
         bool ok = pause_tag("cuda_graph");
         ok      = pause_tag("weights") && ok;
+        // Python-side reclaim: drop long-lived Python-held device caches (e.g. the MegaMoE
+        // per-token output staging buffer) so segments they co-tenanted with freed
+        // per-forward workspaces become 100%-free, then empty_cache hands them back to the
+        // driver -- this is what actually frees physical GPU for other processes during
+        // sleep, and it logs a [SleepReclaim] segment breakdown attributing any residual.
+        // The bare C++ emptyCache below stays as the no-python-model fallback. GIL-guarded,
+        // best-effort: a throw here must NOT fail the sleep (regions already released above).
+        if (!weight_manager_.is_none()) {
+            try {
+                py::gil_scoped_acquire acquire;
+                weight_manager_.attr("release_runtime_gpu_caches")("sleep");
+            } catch (const py::error_already_set& e) {
+                RTP_LLM_LOG_WARNING("releaseRestorableGpuMemory: python release_runtime_gpu_caches "
+                                    "failed (ignored): %s",
+                                    e.what());
+            }
+        }
         // The engine is only paused (not torn down): the still-alive executor's transient
         // buffers (activations, attention/cuBLAS workspaces, sampler) can linger in the torch
         // device caching allocator as reserved-but-free blocks, which cudaMemGetInfo still
@@ -532,14 +571,8 @@ void LocalRpcServer::installSleepHooks() {
             return false;
         }
         if (auto cache_manager = engine->getCacheManager()) {
-            if (auto controller = cache_manager->kvMemoryController()) {
-                if (controller->isPaused()) {
-                    RTP_LLM_LOG_ERROR("sleep warmup/self-check failed: kv memory controller is still paused");
-                    return false;
-                }
-                if (controller->basePtr() == nullptr || controller->totalSizeBytes() == 0) {
-                    RTP_LLM_LOG_WARNING("sleep warmup/self-check: kv memory controller has no attached buffer");
-                }
+            if (!validateKvMemoryControllerForWake(cache_manager->kvMemoryController())) {
+                return false;
             }
         }
         if (!synchronizeSleepDevice("after_warmup_health_check")) {

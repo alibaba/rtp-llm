@@ -189,6 +189,15 @@ bool NormalExecutor::consumeLastPauseSignal() {
     return last_pause_signal_.exchange(false, std::memory_order_acq_rel);
 }
 
+void NormalExecutor::drainAsyncRunners() {
+    // Flush the stream-async output-dispatch worker (D2H/KV release/update). sync() is a
+    // no-op when nothing is in flight (task_done_ starts true). Only meaningful when
+    // stream-async is enabled; unconditionally safe otherwise.
+    if (useStreamAsync()) {
+        dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+    }
+}
+
 absl::Status
 NormalExecutor::processImpl(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us, bool pause_signal) {
     const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();

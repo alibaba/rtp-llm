@@ -25,6 +25,7 @@
 
 #if USING_CUDA
 #include "c10/cuda/CUDACachingAllocator.h"
+#include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
 #endif
 
 #ifdef __linux__
@@ -353,8 +354,29 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
+    // Under engine-sleep (torch_memory_saver preload) the throwaway warmup
+    // executor must NOT capture CUDA graphs. decodeWarmUp builds a real
+    // cache_manager for valid block geometry, so PyWrappedModel's
+    // "DeepSeekV4 warmup" guard (keyed on !kv_cache_layer_layout.has_value())
+    // does not fire and the executor would capture graphs under the
+    // 'cuda_graph' VMM tag. Those graphs are discarded immediately and the
+    // post-warmup emptyCache() then faults releasing the tagged-but-unmapped
+    // VMM ranges. The persistent graphs are (re)captured by the real executor
+    // in initExecutor() after CacheManager init. Only skip capture when VMM is
+    // active so the non-sleep path (accurate warmup memory accounting) is
+    // unchanged. Restored right after so initExecutor still captures normally.
+    const bool skip_warmup_graph = VmmBackend().isAvailable() && params.hw_kernel_config.enable_cuda_graph;
+    auto&      mutable_hw_kernel = const_cast<HWKernelConfig&>(params.hw_kernel_config);
+    if (skip_warmup_graph) {
+        RTP_LLM_LOG_INFO("decodeWarmUp: VMM active, disabling CUDA graph capture for the throwaway warmup "
+                         "executor; real executor captures after CacheManager init");
+        mutable_hw_kernel.enable_cuda_graph = false;
+    }
     executor_.reset(new NormalExecutor(
         params, cache_manager, true, false, 0, mla_ops_type_, kv_cache_group_num_, kv_cache_layer_to_group_));
+    if (skip_warmup_graph) {
+        mutable_hw_kernel.enable_cuda_graph = true;
+    }
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
@@ -651,6 +673,17 @@ absl::Status NormalEngine::maybeReachCollectiveSleepQuiesce() {
     // First observation of pause_ arms this rank. Once engaged we stay engaged (still issuing
     // rounds) even if pause_ later clears via wake, so a cancel converges to a shared CANCELLED
     // verdict rather than leaving peers waiting on a round this rank stopped issuing.
+    if (pending && !collective_quiesce_engaged_) {
+        // Arm transition (once per sleep). Flush any outstanding stream-async work BEFORE we
+        // stop issuing forwards and start the consensus rounds. With MTP the last pre-pause
+        // step leaves cross-step prepare/verify runners in flight; left un-drained across a
+        // torch_memory_saver release/restore they corrupt NCCL/CUDA state so the NEXT sleep's
+        // SLEEP_QUIESCE all-reduce never completes (repeat-sleep hang, MTP-only). Draining here
+        // is on the engine loop thread, exactly like process()'s own start-of-step sync.
+        if (executor_) {
+            executor_->drainAsyncRunners();
+        }
+    }
     if (pending) {
         collective_quiesce_engaged_ = true;
     }
@@ -661,15 +694,32 @@ absl::Status NormalEngine::maybeReachCollectiveSleepQuiesce() {
         // reduces IN-PLACE on collective_quiesce_state_; because we never refill or read the
         // buffer until the in-flight round completes, its contents are stable while in flight.
         std::lock_guard<std::mutex> lock(collective_quiesce_state_mutex_);
-        c10::DeviceGuard            device_guard(c10::Device(c10::kCUDA, static_cast<c10::DeviceIndex>(getDeviceId())));
         if (!collective_quiesce_state_.defined()) {
-            const auto options = torch::TensorOptions()
-                                     .dtype(torch::kInt64)
-                                     .device(torch::Device(torch::kCUDA, static_cast<c10::DeviceIndex>(getDeviceId())));
+            // CPU-resident on purpose: the SLEEP_QUIESCE consensus runs on the gloo (host)
+            // group, so the reduce executes on the CPU and never competes with the co-stepped
+            // fake-decode's DeepEP kernels for SMs (a GPU/NCCL reduce here starves behind the
+            // full-grid DeepEP low-latency kernels and never completes -> /sleep hangs). A CPU
+            // buffer also means no device->host copy before reading the verdict below.
+            const auto options        = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
             collective_quiesce_state_ = torch::empty({2}, options);
         }
 
         if (collective_quiesce_handle_ == 0) {
+            // Drain the just-completed co-step forward NOW, before issuing the round, while
+            // every rank is still active and co-stepping so their matched DeepEP all-to-all
+            // retires together. If this drain were deferred to the reached branch, the rank
+            // that wins the (async) consensus race parks first; the loser's park-time
+            // cudaDeviceSynchronize would then block on a DeepEP low-latency kernel from the
+            // last MTP fake-decode forward whose peer has already left the EP group -> GPU
+            // spins at 100% and /sleep times out (observed: MTP tp1/dp2, winner/loser role
+            // flips per run). Synchronizing here makes the device idle before the round is
+            // even enqueued, so once the round resolves the park touches no in-flight EP.
+            // Armed-only (handle==0 && pending/engaged), so steady serving never reaches this.
+#if USING_CUDA
+            if (pending || collective_quiesce_engaged_) {
+                cudaDeviceSynchronize();
+            }
+#endif
             // No round in flight: fill this rank's contribution and enqueue an async round.
             //   data[0] = 1 if this rank currently holds the pause request, else 0.
             //   data[1] = unfinished streams on this rank (only tp_rank 0 can observe them).
@@ -710,6 +760,9 @@ absl::Status NormalEngine::maybeReachCollectiveSleepQuiesce() {
             // Every rank has left the pause window (sleep cancelled / woken before quiesce):
             // disengage together on this shared verdict and resume normal serving at zero cost.
             collective_quiesce_engaged_ = false;
+            if (scheduler_) {
+                scheduler_->setForcePoll(false);  // stop the arm-time poll; back to blocking schedule()
+            }
             RTP_LLM_LOG_INFO("normal engine collective sleep quiesce cancelled before reaching, world_size=%ld",
                              parallelism_config.world_size);
         }
@@ -720,7 +773,10 @@ absl::Status NormalEngine::maybeReachCollectiveSleepQuiesce() {
     if (reached) {
         // Disengage before parking so a subsequent wake resumes at the steady zero-cost path.
         collective_quiesce_engaged_ = false;
-        const auto pause_epoch      = pause_epoch_.load(std::memory_order_acquire);
+        if (scheduler_) {
+            scheduler_->setForcePoll(false);  // consensus done; the loop parks next in enterPausedState
+        }
+        const auto pause_epoch = pause_epoch_.load(std::memory_order_acquire);
         processed_pause_epoch_.store(pause_epoch, std::memory_order_release);
         RTP_LLM_LOG_INFO("normal engine collective sleep quiesce reached, epoch=%lu, world_size=%ld",
                          pause_epoch,
@@ -802,6 +858,43 @@ absl::Status NormalEngine::pauseAndWaitQuiesced(int64_t timeout_ms) {
     return absl::OkStatus();
 }
 
+void NormalEngine::armCollectiveSleepQuiesce() {
+    // DP/EP: the sleep-quiesce consensus (maybeReachCollectiveSleepQuiesce) must be armed on
+    // EVERY rank when it enters DRAINING -- i.e. BEFORE the per-rank drain wait, not after it
+    // (as the quiesceEngine hook / pauseAndWaitQuiesced does). Drain is rank-asymmetric: only
+    // the rank holding the in-flight request blocks in DrainManager.waitDrained, so if arming
+    // waited for local drain the busy rank would keep pause_=false and never arm, while its
+    // idle peers (already drained, pause_=true) would issue unmatched SLEEP_QUIESCE all-reduce
+    // rounds. Those never-matched collective rounds pin GPU collective resources indefinitely
+    // and desync the EP all-to-all until the busy rank's real forward hits a DeepEP CPU recv
+    // timeout -- the request errors, drain never completes, and the worker rank dies.
+    //
+    // Arming here calls pause() (single CAS: sets pause_ + bumps pause_epoch_), so the busy
+    // rank co-steps the consensus while it drains and data[1]=onflightStreams carries its drain
+    // progress into the shared verdict; all ranks reach REACHED together once the global
+    // on-flight count is zero. The drain-time quiesceEngine hook's pause() then becomes a no-op
+    // CAS (epoch unchanged) and simply waits for the consensus to record that epoch.
+    //
+    // No-op unless the collective quiesce path is enabled (multi-rank DP/EP): for single-rank
+    // pause() belongs AFTER drain (inside pauseAndWaitQuiesced), because setting pause_ early
+    // would park the loop (step()) before the in-flight request completes, stranding drain.
+    if (collectiveSleepQuiesceEnabled()) {
+        pause();
+        // Keep the scheduler polling (not blocking on an empty queue) for the duration of the
+        // consensus. The async SLEEP_QUIESCE rounds only advance when the engine loop cycles; once
+        // the rank's own work has drained, schedule() would otherwise block indefinitely (the
+        // fake-stream 10ms poll is need_fill_fake_stream_ = dp_size>1 && tp_rank==0 only, so a
+        // dp_size==1 EP deployment has no such poll), stalling the empty co-steps its peers need to
+        // reach the terminal round. Cleared at the consensus verdict in maybeReachCollectiveSleepQuiesce
+        // (REACHED or CANCELLED), NOT in restart(): during a cancel, restart() runs WHILE the consensus
+        // is still converging to CANCELLED, so clearing the flag there would stop the very polling that
+        // carries the cancel to its shared verdict and strand peers.
+        if (scheduler_) {
+            scheduler_->setForcePoll(true);
+        }
+    }
+}
+
 void NormalEngine::loop() {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
@@ -868,6 +961,22 @@ absl::Status NormalEngine::step() {
         return absl::OkStatus();
     }
 
+    // Sleep-quiesce, decode (tp1) DP/EP path: DO NOT skip the fake-decode forward while a
+    // consensus round is in flight. This model's MoE is DeepGEMM ``fp8_fp4_mega_moe`` -- a
+    // peer-symmetric NVLink-barrier collective (symm-mem), NOT DeepEP low-latency. Every rank
+    // in the group MUST enter the mega kernel together every forward, or the surviving peers
+    // hit an NVLink barrier timeout (deep_gemm/comm/barrier.cuh) -> asm("trap") after 30 s ->
+    // CUDA_ERROR_LAUNCH_FAILED. That hard per-forward barrier is exactly what keeps the ranks'
+    // fake-decode forwards ALIGNED: as long as every rank keeps co-stepping, forward index N is
+    // reached simultaneously on all ranks. A forward-skip here (the earlier "DeepEP" fix) breaks
+    // that: the first-armed rank starts skipping while a not-yet-armed peer still runs its fake
+    // forward -> the peer's mega kernel strands with no partner -> NVLink-barrier trap (this is
+    // the repeated-sleep arm-skew hang). So we keep co-stepping through the whole drain; the
+    // async SLEEP_QUIESCE consensus (maybeReachCollectiveSleepQuiesce, run at the end of step())
+    // only tells every rank when ALL are armed+drained, and because the mega barrier holds the
+    // forwards in lockstep the shared verdict is observed on the same forward -> all ranks park
+    // together after the same forward, none stranded. Armed-only path; steady serving is
+    // untouched.
     int64_t                 tps_schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     list<GenerateStreamPtr> streams;
     if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {

@@ -29,9 +29,15 @@ public:
     }
     virtual absl::Status stop() = 0;
     virtual void         wake() {}
-    virtual bool         empty()            = 0;
-    virtual int64_t      lastScheduleTime() = 0;
-    virtual int64_t      onflightStreams()  = 0;
+    // When enabled, schedule() must NOT block indefinitely on an empty queue: it polls with a
+    // short timeout so the engine loop keeps cycling even with no work. Needed only while the
+    // collective sleep-quiesce consensus is armed on a rank whose local work has fully drained --
+    // tp0 must keep issuing empty co-steps (tpSyncModelInputs) so the async SLEEP_QUIESCE rounds
+    // advance to the terminal verdict. No-op by default.
+    virtual void    setForcePoll(bool /*enable*/) {}
+    virtual bool    empty()            = 0;
+    virtual int64_t lastScheduleTime() = 0;
+    virtual int64_t onflightStreams()  = 0;
 
     virtual std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList() {
         return {};

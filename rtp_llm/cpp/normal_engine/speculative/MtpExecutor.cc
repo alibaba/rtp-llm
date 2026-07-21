@@ -1816,6 +1816,21 @@ bool MtpExecutor::consumeLastPauseSignal() {
     return last_pause_signal_.exchange(false, std::memory_order_acq_rel);
 }
 
+void MtpExecutor::drainAsyncRunners() {
+    // MTP launches cross-step async prepare/verify/bookkeeping work (target-verify prepare,
+    // draft-prefill prepare, spec-logits verify, bookkeeping) whose sync() normally lands at
+    // the START of the next process() step. When the engine arms a sleep-quiesce it stops
+    // issuing forwards, so those pending tasks would otherwise never be synced and their
+    // stream work would still reference weights/KV when torch_memory_saver releases them at
+    // sleep -- corrupting NCCL/CUDA state so the next sleep's SLEEP_QUIESCE all-reduce hangs.
+    // Drain them all here. sync() is a no-op for a runner with nothing in flight.
+    const auto stream = cuda_graph::graphGetCurrentStream();
+    target_verify_prepare_runner_.sync(stream);
+    draft_prefill_prepare_runner_.sync(stream);
+    spec_logits_verify_async_runner_.sync(stream);
+    spec_bookkeeping_runner_.sync(stream);
+}
+
 absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.process(stream_size=%zu,mtp_step=%zu)", streams.size(), propose_step_);
 

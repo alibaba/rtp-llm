@@ -39,6 +39,7 @@ public:
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     absl::Status processForPause() override;
     bool         consumeLastPauseSignal() override;
+    void         drainAsyncRunners() override;
     void         reportMetrics(const StreamGroups&             stream_groups,
                                RtpLLMExecutorMetricsCollector& executor_collector,
                                RtpLLMTokenPSMetricsCollector&  tps_collector,

@@ -5,6 +5,7 @@ import time
 import traceback
 import weakref
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional, Type, Union
 
 import torch
@@ -42,6 +43,17 @@ class WeightModule(ABC):
         self.lora_a: Optional["WeightModule"] = None
         self.lora_b: Optional["WeightModule"] = None
         self.is_lora = kwargs.pop("is_lora", False)
+        # When True, this weight's `.to(device)` landings are kept OUT of the
+        # torch_memory_saver "weights" region (see weights_region()). Set for
+        # weights the Python model *rebuilds* on init and then drops (e.g. DSV4
+        # mega-MoE routed experts: mega.py setup_weights() pops + copies them
+        # into fresh fused buffers, then `del`s the loaded originals). Those
+        # originals are pure transients -- they never become resident, pausable
+        # weights, so scoping them into the region's private MemPool only strands
+        # their freed blocks there (empty_cache cannot drain a live private pool,
+        # pause skips non-live blocks). Loading them in the default pool instead
+        # lets the model's post-rebuild empty_cache() actually return them.
+        self.skip_weights_region = bool(kwargs.pop("skip_weights_region", False))
 
     def __init_subclass__(cls, **kwargs: Any):
         super().__init_subclass__(**kwargs)
@@ -161,8 +173,11 @@ class WeightModule(ABC):
     ):
         # This is the final `.to(device)` landing point for every weight tensor
         # (incl. quant scale/zeros); register the GPU allocations as pausable
-        # weight memory (no-op unless sleep mode is enabled).
-        with weights_region():
+        # weight memory (no-op unless sleep mode is enabled). Weights the Python
+        # model rebuilds+drops on init (skip_weights_region) stay in the default
+        # pool so their freed blocks are reclaimable -- see the attr's comment.
+        region_ctx = nullcontext() if self.skip_weights_region else weights_region()
+        with region_ctx:
             raw_tensors = self._load_raw_tensor(
                 tensor_source, layer_id, device, load_config
             )
@@ -195,8 +210,10 @@ class WeightModule(ABC):
         self, tensor: torch.Tensor, device: str, load_config: LoadConfig, **kwargs
     ):
         # Dynamic weight update also lands on GPU via `.to(device)`; register it
-        # as pausable weight memory too.
-        with weights_region():
+        # as pausable weight memory too (unless this weight is rebuilt+dropped by
+        # the Python model, in which case keep it in the default pool).
+        region_ctx = nullcontext() if self.skip_weights_region else weights_region()
+        with region_ctx:
             split_tensors = self._split(tensor, load_config)
             processed_tensors = self._postprocess(split_tensors, device, load_config)
             flat_res = {}

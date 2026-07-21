@@ -38,7 +38,10 @@ public:
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
     absl::Status                                 stop() override;
     void                                         wake() override;
-    bool                                         empty() override;
+    void                                         setForcePoll(bool enable) override {
+        force_poll_.store(enable, std::memory_order_relaxed);
+    }
+    bool empty() override;
 
     void reportMetrics();
 
@@ -81,9 +84,13 @@ protected:
     // Optional guard for Context-Parallel prefill: when enabled, force prefill
     // to one stream per round. This remains the conservative default while
     // newer dsv4 CP paths can opt in to batched prefill through runtime config.
-    const bool                   cp_force_single_prefill_ = false;
-    std::atomic<bool>            stop_                    = false;
-    bool                         schedule_trigger_        = false;
+    const bool cp_force_single_prefill_ = false;
+    // Set by the engine only while the collective sleep-quiesce consensus is armed (see
+    // setForcePoll). Makes schedule() poll with a short timeout instead of blocking on an empty
+    // queue, so a drained rank keeps co-stepping until the consensus reaches its verdict.
+    std::atomic<bool>            force_poll_       = false;
+    std::atomic<bool>            stop_             = false;
+    bool                         schedule_trigger_ = false;
     std::mutex                   lock_;
     std::condition_variable      cond_;
     kmonitor::MetricsReporterPtr metrics_reporter_                 = nullptr;

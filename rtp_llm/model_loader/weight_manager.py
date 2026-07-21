@@ -324,6 +324,20 @@ class WeightManager:
             keys.add((None, name))
         return keys
 
+    def release_runtime_gpu_caches(self, reason: str = "sleep") -> None:
+        """Sleep-hook entry: hand freeable GPU memory back to the driver.
+
+        Called from the C++ sleep release hook (after the weights/cuda_graph VMM
+        pauses and KV release) via the ``weight_manager`` py::object seam. Drops
+        long-lived Python-held device caches, then empties the torch caching
+        allocator so segments they co-tenanted are returned to the driver, and logs
+        a ``[SleepReclaim]`` segment breakdown attributing any physical residual.
+        Best-effort; never raises into the hook.
+        """
+        from rtp_llm.utils.sleep_gpu_reclaim import release_and_trim
+
+        release_and_trim(self._device, reason=reason)
+
     def reload_weights_from_loader(self) -> None:
         """Reload weights in place from the model loader (level-2 wake).
 
@@ -368,14 +382,67 @@ class WeightManager:
             # the end-of-reload empty_cache return every transient shard/dequant
             # buffer to the driver, so the following KV-cache resume has full
             # headroom (region-scoped transients were stuck and OOM'd cu_mem_create).
+            #
+            # force_nogds=True: the default 'shm' copier's LoadWithShm C++ ext
+            # faults in cuMemcpyHtoDAsync_v2 when it runs after a
+            # torch_memory_saver pause/resume (its /dev/shm bounce buffer's host
+            # registration goes stale across the VMM remap). The nogds copier
+            # reads the same safetensors shards via pread and survives, so the
+            # wake reload stays on the fast bulk safetensors path (not scratch).
             source = self._weights_loader.prepare_weights_fastsafetensor(
-                device, in_weights_region=False
+                device, in_weights_region=False, force_nogds=True
             )
             method = "fastsafetensors"
         else:
             source = self._weights_loader.prepare_weights(device)
             method = "scratch"
+        # Both checkpoint-replay paths omit computed dynamic weights (e.g.
+        # rotary_embedding.cos_sin_cache), which are generated at cold load by
+        # ModelLoader._load_dynamic_weights, not read from the checkpoint. Chain
+        # the dynamic-weight regenerator so the wake reload covers them too;
+        # otherwise the coverage assertion below fires on those blank pages.
+        import itertools
+
+        source = itertools.chain(
+            source, self._weights_loader.prepare_dynamic_weights(device)
+        )
         logging.info("reload_weights_from_loader: reloading via %s path", method)
+
+        # Level-2 wake also blanked py-model *computed* weights that are neither
+        # streamed from the checkpoint nor reloadable in place: the DSV4 Mega-MoE
+        # kernel weights (derived from raw routed weights that are POPPED at cold
+        # load -> not in ModelWeights) and each attention compressor's fused
+        # wkv/wgate. Reach the live modules via their registries and re-derive
+        # them after the stream loop (see _rederive_dsv4_computed_weights). The
+        # raw routed weights are re-streamed but hit the "no live tensor" branch
+        # below, so capture them per MoE layer here. Guarded: non-DSV4 models have
+        # empty/absent registries and are unaffected.
+        mega_by_layer: dict = {}
+        mega_routed_keys: set = set()
+        mega_acc: dict = {}
+        compressors: list = []
+        try:
+            from rtp_llm.models_py.modules.dsv4.fp8.compressor import iter_compressors
+            from rtp_llm.models_py.modules.dsv4.moe.mega_buf import iter_mega_strategies
+            from rtp_llm.utils.model_weight import W
+
+            mega_routed_keys = {
+                W.v4_routed_w1_w,
+                W.v4_routed_w1_s,
+                W.v4_routed_w2_w,
+                W.v4_routed_w2_s,
+                W.v4_routed_w3_w,
+                W.v4_routed_w3_s,
+            }
+            for strat in iter_mega_strategies():
+                mega_by_layer[strat.cfg.layer_id] = strat
+            compressors = iter_compressors()
+        except Exception:
+            logging.info(
+                "reload_weights_from_loader: DSV4 computed-weight registries "
+                "unavailable; skipping mega/compressor re-derivation",
+                exc_info=True,
+            )
 
         # suppress_weights_region: the resident weights already occupy their VA;
         # keep every reload transient (scratch WeightModule.load intermediates and
@@ -398,6 +465,26 @@ class WeightManager:
                     else:
                         ori = self._weights.global_weights.get(name)
                     if ori is None:
+                        # DSV4 Mega-MoE raw routed weights are popped at cold load
+                        # (their transform outputs are the resident kernel weights),
+                        # so they have no live ModelWeights tensor to copy into.
+                        # Stash them per MoE layer for the post-loop re-transform.
+                        # Stage to HOST, not GPU: after resume("weights") the full
+                        # resident weight set (incl the blank Mega kernel buffers)
+                        # already occupies its private weights MemPool, and these
+                        # raws are allocated in the DEFAULT pool (needing fresh
+                        # driver physical). The stream is shard-ordered (not layer
+                        # grouped), so keeping raws resident on GPU piles many
+                        # layers' worth on top of the resident set and OOMs near
+                        # capacity. Moving each raw to host as it arrives keeps the
+                        # GPU default-pool footprint ~0; _rederive brings back one
+                        # layer at a time to transform (peak ~1 layer of raws).
+                        if layer_id in mega_by_layer and name in mega_routed_keys:
+                            mega_acc.setdefault(layer_id, {})[name] = tensor.to(
+                                "cpu", copy=True
+                            )
+                            del tensor
+                            continue
                         # The loader can yield tensors not tracked in the live
                         # ModelWeights (e.g. misc weights); nothing to reload in
                         # place for those. Live-weight coverage is asserted below.
@@ -508,6 +595,13 @@ class WeightManager:
                 _sys.stderr.flush()
             except Exception:
                 pass
+        # Re-derive DSV4 computed weights blanked by the level-2 resume (Mega-MoE
+        # kernel weights + compressor fused wkv/wgate). Runs OUTSIDE
+        # suppress_weights_region (so the fresh buffers are re-tagged `weights` for
+        # the next sleep) and before the KV-cache resume (so it has full headroom).
+        self._rederive_dsv4_computed_weights(
+            mega_by_layer, mega_acc, mega_routed_keys, compressors
+        )
         if pending:
             sample = sorted(str(k) for k in pending)[:10]
             raise RuntimeError(
@@ -521,4 +615,128 @@ class WeightManager:
             expected,
             method,
             seen,
+        )
+
+    def _rederive_dsv4_computed_weights(
+        self, mega_by_layer, mega_acc, mega_routed_keys, compressors
+    ) -> None:
+        """Rebuild DSV4 py-model computed weights blanked by the level-2 resume.
+
+        Two classes of resident weight are ``weights``-tagged (blank-remapped by
+        ``resume("weights")``) yet not reloadable in place from the checkpoint:
+
+        * Mega-MoE kernel weights (``_mega_l1_w`` / ``_l1_sf`` / ``_l2_w`` /
+          ``_l2_sf``) — derived by ``transform_weights_for_mega_moe`` from the raw
+          routed stacks, which are popped at cold load (so absent from
+          ModelWeights). Re-derived per MoE layer from the raws captured during the
+          reload stream (``mega_acc``).
+        * Each attention compressor's fused wkv/wgate — a ``cat`` of the raw
+          wkv/wgate, which stay in ModelWeights and were reloaded in place, so the
+          compressor rebuilds ``_wkv_wgate_fused`` from its retained raw refs.
+
+        Runs with the weights_region NOT suppressed so the fresh buffers are
+        re-tagged for the next sleep, and before the KV-cache resume so headroom is
+        ample for the held raws + transform transients. Raises if any registered
+        consumer was not fully covered (surfaces to the C++ wake hook as an ERROR
+        rather than leaving blank-page garbage)."""
+        if not mega_by_layer and not compressors:
+            return
+        import gc
+
+        device = self._device
+        mib = 1024.0**2
+        # Per-phase memory probe is diagnostic only (used to root-cause the
+        # private-weights-MemPool fragmentation OOM); off by default to keep the
+        # wake path quiet. Set RTP_LLM_SLEEP_MEM_DEBUG=1 to re-enable.
+        import os as _os
+
+        _probe_enabled = _os.environ.get("RTP_LLM_SLEEP_MEM_DEBUG", "0") == "1"
+
+        def _rd_probe(tag: str) -> None:
+            # High-signal per-phase memory probe for the L2 wake re-derive. Logs
+            # physical driver-free (truthful) alongside torch's caching-allocator
+            # reserved/allocated so we can attribute any residual to the private
+            # weights MemPool (reserved>>allocated, not returnable) vs the default
+            # pool (returnable). Best-effort; never aborts the wake.
+            if not _probe_enabled:
+                return
+            try:
+                free_b, total_b = torch.cuda.mem_get_info(device)
+                reserved = torch.cuda.memory_reserved(device)
+                allocated = torch.cuda.memory_allocated(device)
+                logging.info(
+                    "[L2Rederive][%s] driver phys used %.0f MiB (free %.0f) | "
+                    "torch reserved %.0f MiB allocated %.0f MiB (reserved-alloc "
+                    "gap %.0f MiB)",
+                    tag,
+                    (total_b - free_b) / mib,
+                    free_b / mib,
+                    reserved / mib,
+                    allocated / mib,
+                    (reserved - allocated) / mib,
+                )
+            except Exception:  # noqa: BLE001 - probe must never break wake
+                pass
+
+        _rd_probe("start")
+        with self._lock:
+            with torch.cuda.stream(self._working_stream), torch.inference_mode():
+                for layer_id, strat in mega_by_layer.items():
+                    acc = mega_acc.get(layer_id)
+                    have = set(acc) if acc else set()
+                    if have != mega_routed_keys:
+                        missing = sorted(str(k) for k in (mega_routed_keys - have))
+                        raise RuntimeError(
+                            f"reload_weights_from_loader: mega layer {layer_id} "
+                            f"missing routed weights for re-transform: {missing}"
+                        )
+                    # Bring THIS layer's host-staged raws back to GPU just before
+                    # transforming, so at most one layer of raws is GPU-resident.
+                    # reload_routed_weights recomputes the kernel weights in the
+                    # DEFAULT pool and copies them IN PLACE into the existing
+                    # blank-remapped tagged buffers (no free + realloc of the
+                    # private weights MemPool, which would fragment and leak ~35 GiB
+                    # of unreturnable reserved segments), so the only fresh GPU
+                    # demand is this one layer's raws + transform scratch in the
+                    # returnable default pool -- well within headroom. Drop the host
+                    # + GPU refs immediately so neither accumulates across layers.
+                    gpu_acc = {
+                        k: v.to(device, non_blocking=False) for k, v in acc.items()
+                    }
+                    mega_acc.pop(layer_id, None)
+                    del acc
+                    strat.reload_routed_weights(gpu_acc)
+                    del gpu_acc
+                    self._working_stream.synchronize()
+                    # Return this layer's default-pool transients (raws + transform
+                    # scratch) to the driver before the next layer. Guarded: under
+                    # torch_memory_saver the private weights MemPool walk can raise
+                    # (invalid-argument), and default-pool blocks are reused across
+                    # layers anyway, so a failure must not abort the wake.
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:  # noqa: BLE001 - best-effort per-layer reclaim
+                        pass
+                self._working_stream.synchronize()
+                _rd_probe("after_mega")
+                for cmp in compressors:
+                    cmp.reload_fused_weights()
+                self._working_stream.synchronize()
+                _rd_probe("after_compressors")
+            mega_acc.clear()
+            gc.collect()
+            try:
+                torch.cuda.empty_cache()
+            except Exception as e:  # noqa: BLE001 - best-effort transient reclaim
+                logging.warning(
+                    "reload_weights_from_loader: re-derive empty_cache() failed "
+                    "(%s); continuing, computed weights already rebuilt",
+                    e,
+                )
+            _rd_probe("after_reclaim")
+        logging.info(
+            "reload_weights_from_loader: re-derived level-2 computed weights "
+            "(%d Mega-MoE layer(s) + %d compressor(s))",
+            len(mega_by_layer),
+            len(compressors),
         )

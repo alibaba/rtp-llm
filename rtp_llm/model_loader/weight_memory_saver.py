@@ -258,6 +258,27 @@ def weights_region() -> Iterator[None]:
         _region_depth.value = 0
 
 
+def pausable_empty(*args, **kwargs):
+    """``torch.empty`` whose result joins the pausable weights region.
+
+    The returned tensor is VMM-unmapped on sleep (``pause("weights")``) and
+    remapped at the same VA on wake, exactly like a model weight -- so a
+    persistent runtime workspace can be reclaimed at sleep without any
+    destroy/recreate, registry, or hot-path ``None`` juggling.
+
+    Use for PERSISTENT buffers only, and call it ONLY on the allocation
+    (cache-miss) path -- never per-forward. ``weights_region()`` runs
+    ``empty_cache()`` on entry, so wrapping a per-call fast path would empty the
+    caching allocator on every forward. A throwaway temporary allocated here
+    would also be trapped in the private weights MemPool (which ``empty_cache``
+    cannot return to the driver), so keep the scope to the buffer itself.
+    """
+    import torch
+
+    with weights_region():
+        return torch.empty(*args, **kwargs)
+
+
 @contextmanager
 def suppress_weights_region() -> Iterator[None]:
     """Force every ``weights_region()`` on this thread to become a nullcontext.

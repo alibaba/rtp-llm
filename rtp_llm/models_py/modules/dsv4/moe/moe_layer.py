@@ -25,6 +25,7 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.model_loader.weight_memory_saver import pausable_empty
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DEFAULT_DSV4_CHUNK_TOKENS,
@@ -130,7 +131,7 @@ def _get_or_create_final_out(
     cached = _FINAL_OUT_CACHE.get(key)
     if cached is not None and cached.size(0) >= capacity:
         return cached
-    cached = torch.empty((max(capacity, 1), dim), dtype=dtype, device=device)
+    cached = pausable_empty((max(capacity, 1), dim), dtype=dtype, device=device)
     _FINAL_OUT_CACHE[key] = cached
     return cached
 
@@ -263,10 +264,9 @@ class MoE(nn.Module):
         # (e.g. LocalLoopStrategy.experts ModuleList) propagate through
         # ``MoE.to(device)``.
         self._strategy = strategy_cls(cfg)
-        self._gate_pack_static = (
-            os.environ.get("MOEDBG", "0") == "0"
-            and self._strategy.can_use_gate_pack_static(self.gate)
-        )
+        self._gate_pack_static = os.environ.get(
+            "MOEDBG", "0"
+        ) == "0" and self._strategy.can_use_gate_pack_static(self.gate)
         self._strategy._gate_pack_warmup_enabled = self._gate_pack_static
         self._strategy._gate_pack_route_scale = float(self.gate.route_scale)
         self._strategy.setup_weights(layer_weights)

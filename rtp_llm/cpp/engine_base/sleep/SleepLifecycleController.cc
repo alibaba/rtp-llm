@@ -141,6 +141,11 @@ void SleepLifecycleController::setLastError(const std::string& msg) {
     }
 }
 
+std::string SleepLifecycleController::lastError() const {
+    std::lock_guard<std::mutex> lock(status_mutex_);
+    return last_error_;
+}
+
 void SleepLifecycleController::setEnabled(bool enabled) {
     enabled_.store(enabled, std::memory_order_release);
 }
@@ -254,8 +259,20 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
         // whether to reload discarded weights (level 2) or not (level 1).
         active_sleep_level_.store(opt.level, std::memory_order_release);
         if (!transitionLocked(SleepState::RUNNING, SleepState::DRAINING)) {
-            return SleepResult::failedPrecondition(status().last_error);
+            return SleepResult::failedPrecondition(lastError());
         }
+    }
+
+    // Arm the collective sleep-quiesce consensus BEFORE the (rank-asymmetric) drain, on
+    // every rank symmetrically. Only the rank holding an in-flight request blocks in the
+    // drain hook below; if arming waited until after that block, the busy rank would never
+    // arm while its idle peers issue unmatched consensus rounds -> forward/EP desync ->
+    // DeepEP timeout / worker death. Best-effort: a failure here does not abort the sleep
+    // (drain + quiesceEngine still run and arm as a fallback). No-op for single-rank.
+    // Placed before the drain block so it also runs on an idempotent DRAINING retry (where
+    // the underlying pause() is a no-op CAS).
+    if (!opt.commit_only && hooks_.armEngineQuiesce) {
+        invokeHookNoThrow("armEngineQuiesce", hooks_.armEngineQuiesce, opt);
     }
 
     // --- DRAINING: wait for in-flight requests and cache transfers. ---
@@ -277,7 +294,7 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
         if (hooks_.quiesceEngine) {
             if (!invokeHookNoThrow("quiesceEngine", hooks_.quiesceEngine, opt)) {
                 setLastError("quiesceEngine failed, staying in DRAINING");
-                return SleepResult::failedPrecondition(status().last_error);
+                return SleepResult::failedPrecondition(lastError());
             }
         }
         engine_quiesced_.store(true, std::memory_order_release);
@@ -290,11 +307,11 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
 
     if (!engine_quiesced_.load(std::memory_order_acquire)) {
         setLastError("sleep commit rejected: engine is not quiesced");
-        return SleepResult::failedPrecondition(status().last_error);
+        return SleepResult::failedPrecondition(lastError());
     }
 
     if (!transitionLocked(SleepState::DRAINING, SleepState::SUSPENDING)) {
-        return SleepResult::failedPrecondition(status().last_error);
+        return SleepResult::failedPrecondition(lastError());
     }
 
     // --- SUSPENDING: dereg MR, release memory backing. ---
@@ -327,11 +344,11 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
 
     if (!ok) {
         transitionLocked(SleepState::SUSPENDING, SleepState::ERROR);
-        return SleepResult::failedPrecondition(status().last_error);
+        return SleepResult::failedPrecondition(lastError());
     }
 
     if (!transitionLocked(SleepState::SUSPENDING, SleepState::SLEEPING)) {
-        return SleepResult::failedPrecondition(status().last_error);
+        return SleepResult::failedPrecondition(lastError());
     }
     return SleepResult::success();
 }
@@ -359,18 +376,18 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
             if (!invokeHookNoThrow("cancelQuiesceAndRestartEngine", hooks_.cancelQuiesceAndRestartEngine)) {
                 setLastError("cancelQuiesceAndRestartEngine failed");
                 transitionLocked(SleepState::DRAINING, SleepState::ERROR);
-                return SleepResult::failedPrecondition(status().last_error);
+                return SleepResult::failedPrecondition(lastError());
             }
         } else if (hooks_.restartEngine) {
             if (!invokeHookNoThrow("restartEngine", hooks_.restartEngine)) {
                 setLastError("restartEngine failed");
                 transitionLocked(SleepState::DRAINING, SleepState::ERROR);
-                return SleepResult::failedPrecondition(status().last_error);
+                return SleepResult::failedPrecondition(lastError());
             }
         }
         engine_quiesced_.store(false, std::memory_order_release);
         if (!transitionLocked(SleepState::DRAINING, SleepState::RUNNING)) {
-            return SleepResult::failedPrecondition(status().last_error);
+            return SleepResult::failedPrecondition(lastError());
         }
         return SleepResult::success();
     }
@@ -386,7 +403,7 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
 
     setLastError("");
     if (current != SleepState::WAKING_UP && !transitionLocked(current, SleepState::WAKING_UP)) {
-        return SleepResult::failedPrecondition(status().last_error);
+        return SleepResult::failedPrecondition(lastError());
     }
 
     // --- WAKING_UP: restore memory backing, reset metadata, reg MR, warmup. ---
@@ -427,7 +444,7 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
         // Admission remains closed in ERROR. Control plane only observes wake_up
         // failure; recovery is an explicit retry or operator action.
         transitionLocked(SleepState::WAKING_UP, SleepState::ERROR);
-        return SleepResult::failedPrecondition(status().last_error);
+        return SleepResult::failedPrecondition(lastError());
     }
 
     if (opt.prepare_only) {
@@ -452,13 +469,13 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
         // Admission remains closed in ERROR. Control plane only observes wake_up
         // failure; recovery is an explicit retry or operator action.
         transitionLocked(SleepState::WAKING_UP, SleepState::ERROR);
-        return SleepResult::failedPrecondition(status().last_error);
+        return SleepResult::failedPrecondition(lastError());
     }
 
     device_kv_cache_valid_.store(true, std::memory_order_release);
     engine_quiesced_.store(false, std::memory_order_release);
     if (!transitionLocked(SleepState::WAKING_UP, SleepState::RUNNING)) {
-        return SleepResult::failedPrecondition(status().last_error);
+        return SleepResult::failedPrecondition(lastError());
     }
     return SleepResult::success();
 }

@@ -130,6 +130,11 @@ protected:
     // M6 weights, engine quiesce) into engine_->sleepController().
     void installSleepHooks();
 
+    // Wake self-check: the KV memory controller must be resumed (not paused) and
+    // have an attached buffer before serving resumes. Returns false so the wake
+    // fails cleanly instead of the first post-wake forward faulting on unmapped KV.
+    static bool validateKvMemoryControllerForWake(const KVCachePhysicalMemoryControllerPtr& controller);
+
     grpc::Status serializeErrorMsg(const std::string& request_key, ErrorInfo error_info);
     grpc::Status
          serializeErrorMsg(const std::string& request_key, const RequestInfo& request_info, ErrorInfo error_info);

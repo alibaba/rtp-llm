@@ -311,11 +311,26 @@ class ModelLoader:
 
     def _load_from_fastsafetensor(self, device: str):
         model_weights = self._create_model_weights(device)
-        # Thin consumer over the shared fastsafetensors generator: for the cold
-        # load we materialize new GPU storage via set_*_weight. The yield
-        # boundary does not change tensor ref lifetimes vs the previous inline
-        # body, so cold-load memory behavior is unchanged.
-        for layer_id, name, tensor in self.prepare_weights_fastsafetensor(device):
+        # Sleep-mode residual fix: keep the raw fastsafetensors shard reads OUT
+        # of the torch_memory_saver "weights" region when the loader always
+        # re-materializes each resident weight via a TP/EP/DP split-clone
+        # (WeightModule._split -> __split_tensor().contiguous().clone()). The
+        # raw shards are allocated by the *iterator* (database.py) under
+        # ``allocation_context``, separately from WeightModule.load()'s region;
+        # they are pure transients consumed by _split and freed. Routing them
+        # through the region's private MemPool strands their freed blocks there
+        # forever (empty_cache cannot drain a live private pool, pause skips
+        # non-live blocks) -- this is the bulk of the sleep residual. The
+        # resident split-clones are still allocated INSIDE weight.load()'s
+        # weights_region, so they stay tagged/pausable. Only when every
+        # parallelism degree is 1 does _split pass the raw tensor through
+        # unchanged (it would then BE the resident weight and must keep the
+        # region tag), so fall back to region-scoped raw reads in that case.
+        lc = self._load_config
+        raw_in_region = lc.tp_size <= 1 and lc.dp_size <= 1 and lc.ep_size <= 1
+        for layer_id, name, tensor in self.prepare_weights_fastsafetensor(
+            device, in_weights_region=raw_in_region
+        ):
             if layer_id is not None:
                 model_weights.set_layer_weight(layer_id, name, tensor)
             else:
@@ -323,7 +338,7 @@ class ModelLoader:
         return model_weights
 
     def prepare_weights_fastsafetensor(
-        self, device: str, in_weights_region: bool = True
+        self, device: str, in_weights_region: bool = True, force_nogds: bool = False
     ):
         """Bulk fastsafetensors weight generator: yields ``(layer_id, name, tensor)``.
 
@@ -355,6 +370,14 @@ class ModelLoader:
           scales. Fully draining that last residual would need per-reload segment
           isolation (a private ``MemPool``), which aborts under
           torch_memory_saver — see ``mempool-destroy-crashes-under-tms``.
+
+        ``force_nogds`` selects the fastsafetensors 'nogds' copier (pread into a
+        framework host buffer) over the default 'shm' copier. The level-2 wake
+        reload sets it: the 'shm' copier's ``LoadWithShm`` C++ ext faults in
+        ``cuMemcpyHtoDAsync_v2`` when it runs after a torch_memory_saver
+        pause/resume (its /dev/shm bounce buffer's host registration goes stale
+        across the VMM remap). Cold load leaves it ``False`` (shm is faster and
+        unaffected).
         """
         logging.info(f"load weight by device: {device}")
         tensor_to_weight_map, weight_info_list = self._generate_weight_info()
@@ -370,6 +393,7 @@ class ModelLoader:
             True,
             stacked_key_config=stacked_key_config,
             allocation_context=weights_region if in_weights_region else None,
+            force_nogds=force_nogds,
         )
 
         for key, loaded_tensor in all_tensors:
@@ -710,6 +734,38 @@ class ModelLoader:
                     weight.set_global_weight(
                         dynamic_weight.name, dynamic_w.get(dynamic_weight.name)
                     )
+
+    def prepare_dynamic_weights(self, device: str):
+        """Regenerate computed dynamic weights as a ``(layer_id, name, tensor)`` stream.
+
+        The checkpoint-replay generators (:meth:`prepare_weights_fastsafetensor`
+        / :meth:`prepare_weights`) only emit tensors that physically exist in the
+        checkpoint. A few weights are *computed* at cold load by
+        :meth:`_load_dynamic_weights` — e.g. ``rotary_embedding.cos_sin_cache`` —
+        and are never read from disk. The level-2 wake reload must regenerate
+        them too: after ``resume("weights")`` remaps blank pages at the original
+        VA, an uncovered computed weight would stay blank and trip the coverage
+        assertion in :meth:`WeightManager.reload_weights_from_loader`. This
+        mirrors the ``create_dynamic_weights()`` branch of
+        :meth:`_load_dynamic_weights` but yields the tensors (as global weights,
+        ``layer_id=None``) instead of writing them into a ``ModelWeights``;
+        lm_head / positional_embedding come back through the checkpoint stream.
+        """
+        if self._load_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
+            return
+        if self._task_type != TaskType.LANGUAGE_MODEL:
+            return
+        dynamic_weights = self._weights_info.create_dynamic_weights()
+        if not dynamic_weights:
+            return
+        for dynamic_weight in dynamic_weights:
+            dynamic_w = dynamic_weight.load(
+                DatabaseTensorSource(self._load_config.database),
+                None,
+                device,
+                self._load_config,
+            )
+            yield (None, dynamic_weight.name, dynamic_w.get(dynamic_weight.name))
 
     def create_eplb(self):
         weights_info = self._weights_info

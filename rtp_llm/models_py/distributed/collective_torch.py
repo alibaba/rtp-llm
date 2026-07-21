@@ -327,13 +327,24 @@ def _sleep_quiesce_group_needed(parallelism_config: ParallelismConfig) -> bool:
 def _maybe_create_sleep_quiesce_group(
     parallelism_config: ParallelismConfig, backend: str
 ) -> None:
-    """Create a dedicated NCCL group (all world ranks) for the sleep-quiesce consensus.
+    """Create a dedicated CPU (gloo) group (all world ranks) for the sleep-quiesce consensus.
 
     new_group() is a collective, so every rank must call it; we gate on a launch-time
     condition (_sleep_quiesce_group_needed) that is identical on every rank, keeping the
     call rank-symmetric. The group spans the full world (same membership as DP_AND_TP)
-    because the consensus needs every rank, but it is a separate communicator so the
-    async arm-on-demand all-reduce never interleaves with forward / EPLB traffic.
+    because the consensus needs every rank.
+
+    The backend is GLOO (host), NOT nccl, on purpose. The consensus is a tiny 2-int
+    control-plane all-reduce issued once per step during the sleep drain while the engine
+    still co-steps a fake-decode forward to hold EP lockstep. If it ran on NCCL it would
+    execute on a GPU stream concurrently with the fake-decode's DeepEP low-latency kernels,
+    which launch full-grid persistent kernels that occupy every SM -- the tiny NCCL
+    all-reduce then never gets an SM, never completes, and the next forward's process()
+    blocks forever (observed: MTP tp1/dp2 decode /sleep hangs at "round in flight, poll not
+    done", non-MTP escaped only because its single short forward left GPU gaps). Running the
+    reduce on the host removes the SM contention entirely: it completes regardless of GPU
+    occupancy, and stays async (async_op + is_completed poll) so an arm-skew of up to a step
+    between ranks is tolerated without blocking the engine loop.
     """
     global _group_map
     if Group.SLEEP_QUIESCE in _group_map:
@@ -344,14 +355,29 @@ def _maybe_create_sleep_quiesce_group(
     world_rank = parallelism_config.world_rank
     quiesce_group = torch.distributed.new_group(
         ranks=list(range(world_size)),
-        backend=backend,
+        backend="gloo",
         timeout=timedelta(days=36500),
     )
     _group_map[Group.SLEEP_QUIESCE] = quiesce_group
     logging.info(
-        f"[rank: {world_rank}] Created SLEEP_QUIESCE group {quiesce_group} with ranks: "
+        f"[rank: {world_rank}] Created SLEEP_QUIESCE gloo group {quiesce_group} with ranks: "
         f"{list(range(world_size))}"
     )
+
+    # Warm the gloo group's lazy TCP rendezvous once at startup so the first arm-time
+    # all-reduce during a sleep enqueues onto an already-connected group. This is a host
+    # collective (CPU tensor), so unlike the old NCCL warmup it neither touches the GPU nor
+    # collides with EP traffic; it is pure insurance against first-collective latency.
+    # Rank-symmetric: every rank that created the group reaches this call.
+    try:
+        _warm = torch.zeros(1, dtype=torch.int64)  # CPU tensor for the gloo group
+        torch.distributed.all_reduce(_warm, group=quiesce_group)
+        logging.info(f"[rank: {world_rank}] warmed up SLEEP_QUIESCE gloo group")
+    except Exception as e:  # pragma: no cover - never block startup on the warmup
+        logging.warning(
+            f"[rank: {world_rank}] SLEEP_QUIESCE group warmup failed "
+            f"(lazy init will run on first sleep): {e}"
+        )
 
 
 def _register_process_groups_to_cpp():
@@ -564,14 +590,14 @@ def _register_process_groups_to_cpp():
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
             return 0
-        device_id = torch.cuda.current_device()
-        gpu_t, was_cpu = _ensure_cuda(tensor, device_id)
-        # The consensus buffer is always a CUDA tensor, so was_cpu is expected False here;
-        # guard anyway so a CPU buffer cannot silently drop its reduced result.
-        if was_cpu:
-            raise ValueError("cpp_allreduce_async requires a CUDA tensor")
+        # The sleep-quiesce consensus runs on the gloo (CPU/host) group, so the buffer is
+        # CPU-resident and the reduce executes on the host -- never competing with GPU
+        # forward/DeepEP kernels for SMs. Pass the tensor through unchanged: do NOT promote
+        # it to CUDA (gloo cannot reduce a CUDA tensor, and a GPU reduce is exactly the SM
+        # contention we are avoiding). The reduce is in place, so the C++ caller reads the
+        # summed verdict straight out of its CPU buffer once cpp_comm_poll reports complete.
         work = torch.distributed.all_reduce(
-            gpu_t,
+            tensor,
             op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM),
             group=pg,
             async_op=True,

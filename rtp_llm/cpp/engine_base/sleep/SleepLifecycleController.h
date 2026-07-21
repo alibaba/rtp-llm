@@ -147,6 +147,11 @@ struct SleepResult {
 // restorable GPU memory, MR/engine quiesce). Hooks left empty are treated as
 // no-op success so the core state machine remains unit-testable.
 struct SleepHooks {
+    // Arm the engine's collective sleep-quiesce consensus at the DRAINING transition,
+    // BEFORE drain, symmetrically on every rank. Needed for any multi-rank DP/EP deployment
+    // where drain is rank-asymmetric: a rank that armed only after its local drain would
+    // leave the busy rank unarmed and desync the forward/EP collective. No-op for single-rank.
+    std::function<bool(const SleepOptions&)> armEngineQuiesce;
     // Block until drained (or timeout). Return true when drained.
     std::function<bool(const SleepOptions&)> drain;
     // Stop scheduler loop at a collective-safe point. No memory/MR release here.
@@ -258,8 +263,13 @@ private:
     // illegal transition.
     bool transitionLocked(SleepState expected_from, SleepState to);
 
-    void        releaseAdmission();
-    void        setLastError(const std::string& msg);
+    void releaseAdmission();
+    void setLastError(const std::string& msg);
+    // Read last_error_ under status_mutex_ only. Error paths use this instead of
+    // status().last_error so they do not fire the activeRequestCount /
+    // activeCacheTransferCount engine hooks as a side effect (those reach into
+    // engine internals and could throw while transition_mutex_ is held).
+    std::string lastError() const;
     std::string disabledReason() const;
 
     std::atomic<SleepState> state_{SleepState::RUNNING};

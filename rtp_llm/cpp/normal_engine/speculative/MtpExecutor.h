@@ -51,6 +51,7 @@ public:
     // no pause marker, leaving the TP-only sleep quiesce path racy.
     absl::Status processForPause() override;
     bool         consumeLastPauseSignal() override;
+    void         drainAsyncRunners() override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
 
     void setTargetModel(std::unique_ptr<ModelBase> model) {

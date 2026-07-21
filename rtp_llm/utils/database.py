@@ -267,6 +267,7 @@ class CkptDatabase(BaseDatabase):
         use_tqdm_on_load: bool,
         stacked_key_config: Optional[Dict[str, str]] = None,
         allocation_context: Optional[Callable[[], ContextManager[Any]]] = None,
+        force_nogds: bool = False,
     ):
         from fastsafetensors import ParallelLoader, SingleGroup
 
@@ -292,7 +293,17 @@ class CkptDatabase(BaseDatabase):
             # 0.1.20+ali wheel is installed without the underscore-named
             # native helper (e.g. dev environments where torch ABI does not
             # match the prebuilt fast_safetensors).
-            use_nogds = os.environ.get("FASTSAFETENSORS_NOGDS", "0") == "1"
+            #
+            # force_nogds is set by the level-2 wake reload: the 'shm' copier's
+            # LoadWithShm C++ extension faults in cuMemcpyHtoDAsync_v2 when run
+            # after a torch_memory_saver pause/resume (its /dev/shm bounce
+            # buffer's host registration goes stale across the remap), whereas
+            # the nogds copier reads the same safetensors shards via pread into
+            # a framework host buffer and survives. Cold load keeps use_shm
+            # (faster, unaffected); only the wake reload forces nogds.
+            use_nogds = (
+                force_nogds or os.environ.get("FASTSAFETENSORS_NOGDS", "0") == "1"
+            )
             loader_kwargs: Dict[str, Any] = dict(
                 pg=pg,
                 hf_weights_files=hf_weights_files,
