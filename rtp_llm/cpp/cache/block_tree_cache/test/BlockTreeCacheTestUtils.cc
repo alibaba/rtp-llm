@@ -328,6 +328,25 @@ void expectBytes(const uint8_t* data, size_t bytes, uint8_t pattern) {
 
 }  // namespace
 
+namespace {
+
+std::vector<TreeNode*> topologyPath(BlockTree& tree, const CacheKeysType& keys) {
+    std::vector<TreeNode*> path;
+    TreeNode*              current = tree.root();
+    path.reserve(keys.size());
+    for (CacheKeyType key : keys) {
+        const auto child = current->children.find(key);
+        if (child == current->children.end() || child->second == nullptr) {
+            break;
+        }
+        current = child->second;
+        path.push_back(current);
+    }
+    return path;
+}
+
+}  // namespace
+
 FullSWAEnvironment::FullSWAEnvironment(FullSWAEnvironmentOptions options): options_(std::move(options)) {}
 
 std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvironmentOptions& options) {
@@ -430,10 +449,10 @@ void FullSWAEnvironment::releaseRequestRefsForGroup(int group_id) {
     if (request_refs_released_[static_cast<size_t>(group_id)]) {
         return;
     }
-    BlockTreeFindResult find = cache->tree()->findNode(keys);
-    ASSERT_EQ(find.path.size(), options_.path_length);
+    const std::vector<TreeNode*> path = topologyPath(*cache->tree(), keys);
+    ASSERT_EQ(path.size(), options_.path_length);
     GroupBlockSet released_blocks = request_blocks[static_cast<size_t>(group_id)];
-    released_blocks.nodes         = find.path;
+    released_blocks.nodes         = path;
     cache->releaseMatchedBlocks({released_blocks});
     request_refs_released_[static_cast<size_t>(group_id)] = true;
 }
@@ -512,12 +531,11 @@ std::vector<GroupSlot> FullSWAEnvironment::slotsForPathNode(size_t path_index) c
     if (path_index >= keys.size()) {
         return {};
     }
-    CacheKeysType       prefix(keys.begin(), keys.begin() + static_cast<ptrdiff_t>(path_index + 1));
-    BlockTreeFindResult find = cache->tree()->findNode(prefix);
-    if (find.matched_node == nullptr) {
+    const std::vector<TreeNode*> path = topologyPath(*cache->tree(), keys);
+    if (path_index >= path.size()) {
         return {};
     }
-    return find.matched_node->group_slots;
+    return path[path_index]->group_slots;
 }
 
 void FullSWAEnvironment::fillRequestPayloads() {

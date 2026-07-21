@@ -83,9 +83,16 @@ public:
     static bool buildTransferDescriptor(const EvictionMove& eviction_move, TransferDescriptor& descriptor);
 
     // ---- Load-back state transitions (owned here; driven by BlockTreeCache) ----
-    // Returns false when a transfer is already in flight (in-flight protection).
+    bool reserveLoadBack(TreeNode*                       node,
+                         int                             group_id,
+                         Tier                            source,
+                         const std::vector<BlockIdxType>& source_blocks);
+    bool abortPendingLoadBack(TreeNode*                       node,
+                              int                             group_id,
+                              Tier                            source,
+                              const std::vector<BlockIdxType>& source_blocks);
     bool beginLoadBack(TreeNode* node, int group_id, Tier source);
-    void finishLoadBack(TreeNode* node, int group_id, Tier source, bool copy_ok);
+    bool finishLoadBack(TreeNode* node, int group_id, Tier source, bool copy_ok);
 
 private:
     struct GroupTierHeaps {
@@ -109,9 +116,9 @@ private:
     bool executeTierCopy(const EvictionMove& eviction_move);
     bool prepareMove(EvictionMove& eviction_move);
     void reserveSource(const EvictionMove& eviction_move);
-    void restoreSource(const EvictionMove& eviction_move);
+    bool restoreSource(const EvictionMove& eviction_move);
     void releaseTargetBlocks(const EvictionMove& eviction_move);
-    void applyMoveCompletion(ComponentGroupPtr& group, const EvictionMove& move);
+    bool applyMoveCompletion(ComponentGroupPtr& group, const EvictionMove& move);
     void finalizeEviction(BlockTree& tree, TreeNode* node);
     bool shouldDeleteNode(const BlockTree& tree, const TreeNode* node) const;
     std::vector<int> reusableGroupIds() const;

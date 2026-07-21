@@ -52,10 +52,13 @@ public:
 
     // Insert nodes along the cache_keys path starting from parent (nullptr = root).
     // Existing nodes are reused, new nodes are created for unmatched suffix.
-    // slots[i] provides the GroupSlot for the i-th node (cache_keys[i]).
-    // Returns the deepest node plus which input slots were consumed by new nodes.
-    BlockTreeInsertResult
-    insertNode(TreeNode* parent, const CacheKeysType& cache_keys, const std::vector<std::vector<GroupSlot>>& slots);
+    // slots[i] provides sanitized ComponentGroup slots for cache_keys[i]. An
+    // existing IDLE, empty group adopts only a complete DEVICE vector (the
+    // caller validates pool cardinality). Returns new nodes and groups actually
+    // filled on existing nodes so callers can add cache holds exactly once.
+    BlockTreeInsertResult insertNode(TreeNode*                                  parent,
+                                     const CacheKeysType&                       cache_keys,
+                                     const std::vector<std::vector<GroupSlot>>& slots);
 
     // Remove a node from the tree. The node must have no children.
     // The node's parent link is updated accordingly.
@@ -86,6 +89,7 @@ public:
     }
 
 private:
+    bool      isNodeMatchReady(const TreeNode& node) const;
     TreeNode* createNode(CacheKeyType key, TreeNode* parent);
 
     std::unique_ptr<TreeNode>              root_;

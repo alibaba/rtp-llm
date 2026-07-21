@@ -95,6 +95,36 @@ TEST(BlockTreeTest, FindPartialMatch) {
     EXPECT_EQ(result.matched_node->cache_key, 200);
 }
 
+TEST(BlockTreeTest, FindStopsBeforeBusyNodeAndItsDescendants) {
+    for (SlotTransferState state : {SlotTransferState::DEMOTING,
+                                    SlotTransferState::LOAD_BACK_PENDING,
+                                    SlotTransferState::LOADING_BACK}) {
+        BlockTree tree(1);
+        tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 42));
+
+        TreeNode* busy_node                 = tree.root()->children.at(100)->children.at(200);
+        busy_node->group_slots[0].transfer_state = state;
+
+        const BlockTreeFindResult result = tree.findNode({100, 200, 300});
+        ASSERT_EQ(result.path.size(), 1u);
+        EXPECT_EQ(result.matched_blocks, 1u);
+        EXPECT_EQ(result.matched_node, tree.root()->children.at(100));
+    }
+}
+
+TEST(BlockTreeTest, FindStopsBeforeNodeWithMalformedGroupSlotCount) {
+    BlockTree tree(2);
+    tree.insertNode(nullptr, {100, 200}, make2DSlots(2, 2, 42));
+
+    TreeNode* malformed_node = tree.root()->children.at(100)->children.at(200);
+    malformed_node->group_slots.pop_back();
+
+    const BlockTreeFindResult result = tree.findNode({100, 200});
+    ASSERT_EQ(result.path.size(), 1u);
+    EXPECT_EQ(result.matched_blocks, 1u);
+    EXPECT_EQ(result.matched_node, tree.root()->children.at(100));
+}
+
 TEST(BlockTreeTest, FindEmptyKeys) {
     BlockTree tree(1);
     tree.insertNode(nullptr, {100}, make2DSlots(1, 1, 1));
@@ -260,6 +290,107 @@ TEST(BlockTreeTest, InsertDoesNotOverwriteExistingNodeSlots) {
     EXPECT_EQ(result.path[0]->group_slots[0].device_blocks[0], 42);   // 100 unchanged
     EXPECT_EQ(result.path[1]->group_slots[0].device_blocks[0], 43);   // 200 unchanged
     EXPECT_EQ(result.path[2]->group_slots[0].device_blocks[0], 101);  // 300 new (99+2)
+}
+
+TEST(BlockTreeTest, InsertFillsOnlyCompleteEmptyIdleGroupsOnExistingNode) {
+    BlockTree tree(2);
+    std::vector<std::vector<GroupSlot>> original(1, std::vector<GroupSlot>(2));
+    original[0][0].device_blocks = {10};
+    original[0][1].device_blocks = {NULL_BLOCK_IDX};
+    TreeNode* node = tree.insertNode(nullptr, {100}, original).leaf;
+    ASSERT_NE(node, nullptr);
+
+    std::vector<std::vector<GroupSlot>> replacement(1, std::vector<GroupSlot>(2));
+    replacement[0][0].device_blocks = {20};
+    replacement[0][1].device_blocks = {30};
+
+    const BlockTreeInsertResult result = tree.insertNode(nullptr, {100}, replacement);
+    EXPECT_TRUE(result.inserted_nodes.empty());
+    ASSERT_EQ(result.adopted_slots.size(), 1u);
+    EXPECT_EQ(result.adopted_slots[0].node, node);
+    EXPECT_EQ(result.adopted_slots[0].input_index, 0u);
+    EXPECT_EQ(result.adopted_slots[0].component_group_id, 1);
+    EXPECT_EQ(node->group_slots[0].device_blocks, (BlockIndicesType{10}));
+    EXPECT_EQ(node->group_slots[1].device_blocks, (BlockIndicesType{30}));
+}
+
+TEST(BlockTreeTest, InsertSkipsBusyEmptyGroupOnExistingNode) {
+    BlockTree tree(1);
+    std::vector<std::vector<GroupSlot>> original(1, std::vector<GroupSlot>(1));
+    original[0][0].device_blocks = {NULL_BLOCK_IDX};
+    TreeNode* node                = tree.insertNode(nullptr, {100}, original).leaf;
+    ASSERT_NE(node, nullptr);
+    node->group_slots[0].transfer_state = SlotTransferState::DEMOTING;
+
+    const BlockTreeInsertResult result = tree.insertNode(nullptr, {100}, make2DSlots(1, 1, 20));
+    EXPECT_TRUE(result.adopted_slots.empty());
+    EXPECT_EQ(node->group_slots[0].device_blocks, (BlockIndicesType{NULL_BLOCK_IDX}));
+    EXPECT_EQ(node->group_slots[0].transfer_state, SlotTransferState::DEMOTING);
+}
+
+TEST(BlockTreeTest, InsertSkipsBusyGroupButFillsOtherIdleGroupAndAddsSuffix) {
+    BlockTree tree(2);
+    std::vector<std::vector<GroupSlot>> original(1, std::vector<GroupSlot>(2));
+    original[0][0].device_blocks = {NULL_BLOCK_IDX};
+    original[0][1].device_blocks = {NULL_BLOCK_IDX};
+    TreeNode* node = tree.insertNode(nullptr, {100}, original).leaf;
+    ASSERT_NE(node, nullptr);
+    node->group_slots[0].transfer_state = SlotTransferState::LOADING_BACK;
+
+    std::vector<std::vector<GroupSlot>> replacement(2, std::vector<GroupSlot>(2));
+    replacement[0][0].device_blocks = {20};
+    replacement[0][1].device_blocks = {30};
+    replacement[1][0].device_blocks = {21};
+    replacement[1][1].device_blocks = {31};
+    const BlockTreeInsertResult result = tree.insertNode(nullptr, {100, 200}, replacement);
+
+    ASSERT_EQ(result.adopted_slots.size(), 1u);
+    EXPECT_EQ(result.adopted_slots[0].component_group_id, 1);
+    ASSERT_EQ(result.inserted_nodes.size(), 1u);
+    EXPECT_EQ(result.inserted_nodes[0].node->cache_key, 200);
+    EXPECT_EQ(node->group_slots[0].transfer_state, SlotTransferState::LOADING_BACK);
+    EXPECT_EQ(node->group_slots[0].device_blocks, (BlockIndicesType{NULL_BLOCK_IDX}));
+    EXPECT_EQ(node->group_slots[1].device_blocks, (BlockIndicesType{30}));
+    EXPECT_EQ(result.inserted_nodes[0].node->group_slots[0].device_blocks, (BlockIndicesType{21}));
+    EXPECT_EQ(result.inserted_nodes[0].node->group_slots[1].device_blocks, (BlockIndicesType{31}));
+}
+
+TEST(BlockTreeTest, InsertAdoptsCompleteDeviceValueWithoutPoolTopologyKnowledge) {
+    BlockTree tree(1);
+    std::vector<std::vector<GroupSlot>> original(1, std::vector<GroupSlot>(1));
+    original[0][0].device_blocks = {NULL_BLOCK_IDX, NULL_BLOCK_IDX};
+    TreeNode* node = tree.insertNode(nullptr, {100}, original).leaf;
+    ASSERT_NE(node, nullptr);
+
+    std::vector<std::vector<GroupSlot>> replacement(1, std::vector<GroupSlot>(1));
+    replacement[0][0].device_blocks = {20};
+    const BlockTreeInsertResult result = tree.insertNode(nullptr, {100}, replacement);
+
+    ASSERT_EQ(result.adopted_slots.size(), 1u);
+    EXPECT_EQ(node->group_slots[0].device_blocks, (BlockIndicesType{20}));
+}
+
+TEST(BlockTreeTest, InsertMalformedNewNodeSlotsKeepsExactTreeCardinality) {
+    BlockTree tree(2);
+    std::vector<std::vector<GroupSlot>> malformed(1, std::vector<GroupSlot>(1));
+    malformed[0][0].device_blocks = {10};
+
+    TreeNode* node = tree.insertNode(nullptr, {100}, malformed).leaf;
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->group_slots.size(), 2u);
+    EXPECT_TRUE(node->group_slots[0].is_empty());
+    EXPECT_TRUE(node->group_slots[1].is_empty());
+}
+
+TEST(BlockTreeTest, RemoveEmptyAncestorsStopsAtBusyEmptyNode) {
+    BlockTree tree(1);
+    TreeNode* node = tree.insertNode(nullptr, {100}, makeEmpty2DSlots(1)).leaf;
+    ASSERT_NE(node, nullptr);
+    node->group_slots[0].transfer_state = SlotTransferState::LOAD_BACK_PENDING;
+
+    EXPECT_EQ(tree.removeEmptyAncestors(node, {0}), node);
+    EXPECT_EQ(tree.nodeCount(), 1u);
+    EXPECT_EQ(node->parent, tree.root());
 }
 
 }  // namespace

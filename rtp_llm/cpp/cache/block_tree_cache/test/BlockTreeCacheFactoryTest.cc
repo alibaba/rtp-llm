@@ -1000,7 +1000,7 @@ TEST_F(BlockTreeCacheFactoryTest, IndependentReinsertRefillsOnlyEmptyIdleCompone
     allocator->setBlockTreeCache(nullptr);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongComponentShapeAndNullBlocksBeforeMutation) {
+TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongComponentShapeAndSanitizesInvalidGroupPayloads) {
     const auto config    = makeCompatibleFullGroupsConfig(CacheEvictPolicy::CHAIN);
     auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
@@ -1033,17 +1033,38 @@ TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongComponentShapeAndNullBlocksB
     valid.device_blocks = {first->front(), second->front()};
     expect_rejected_without_mutation(/*key=*/711, {{valid, valid}});
 
+    size_t sanitized_node_count = 0;
+    auto   expect_sanitized_without_cache_hold = [&](CacheKeyType key, std::vector<std::vector<GroupSlot>> slots) {
+        const auto before          = cache->getKeySnapshot(/*limit=*/32);
+        const auto first_refcount  = groups[0]->blockPool()->refCount(first->front());
+        const auto second_refcount = groups[1]->blockPool()->refCount(second->front());
+        cache->insert(nullptr, CacheKeysType{key}, slots);
+        const auto after = cache->getKeySnapshot(/*limit=*/32);
+        ++sanitized_node_count;
+        EXPECT_EQ(after.version, before.version + 1);
+        EXPECT_EQ(cache->getStats().tree_node_count, sanitized_node_count);
+        EXPECT_EQ(groups[0]->blockPool()->refCount(first->front()), first_refcount);
+        EXPECT_EQ(groups[1]->blockPool()->refCount(second->front()), second_refcount);
+
+        const auto node_it = cache->tree()->root()->children.find(key);
+        ASSERT_NE(node_it, cache->tree()->root()->children.end());
+        ASSERT_NE(node_it->second, nullptr);
+        ASSERT_EQ(node_it->second->group_slots.size(), 1u);
+        EXPECT_EQ(node_it->second->group_slots[0].device_blocks,
+                  (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX}));
+    };
+
     GroupSlot wrong_cardinality;
     wrong_cardinality.device_blocks = {first->front()};
-    expect_rejected_without_mutation(/*key=*/712, {{wrong_cardinality}});
+    expect_sanitized_without_cache_hold(/*key=*/712, {{wrong_cardinality}});
 
     GroupSlot partially_null;
     partially_null.device_blocks = {first->front(), NULL_BLOCK_IDX};
-    expect_rejected_without_mutation(/*key=*/713, {{partially_null}});
+    expect_sanitized_without_cache_hold(/*key=*/713, {{partially_null}});
 
     GroupSlot null_only;
     null_only.device_blocks = {NULL_BLOCK_IDX, NULL_BLOCK_IDX};
-    expect_rejected_without_mutation(/*key=*/714, {{null_only}});
+    expect_sanitized_without_cache_hold(/*key=*/714, {{null_only}});
 
     groups[0]->blockPool()->decRef(*first);
     groups[1]->blockPool()->decRef(*second);

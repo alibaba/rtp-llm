@@ -178,14 +178,14 @@ TransferDescriptor ComponentGroup::buildTransfer(TreeNode* node, TransferType ty
 }
 
 bool ComponentGroup::isLeafAtTier(const TreeNode* node, int group_id, Tier tier) const {
-    if (node == nullptr)
+    if (node == nullptr || group_id < 0 || static_cast<size_t>(group_id) >= node->group_slots.size())
         return false;
     auto& slot = node->group_slots[static_cast<size_t>(group_id)];
 
     bool has_value = false;
     switch (tier) {
         case Tier::DEVICE:
-            has_value = slot.has_value(Tier::DEVICE);
+            has_value = hasCompleteDeviceValue(slot);
             break;
         case Tier::HOST:
             has_value = slot.has_value(Tier::HOST);
@@ -200,25 +200,23 @@ bool ComponentGroup::isLeafAtTier(const TreeNode* node, int group_id, Tier tier)
         return false;
 
     for (const auto& [key, child] : node->children) {
+        (void)key;
+        if (child == nullptr || static_cast<size_t>(group_id) >= child->group_slots.size()) {
+            return false;
+        }
         auto& child_slot = child->group_slots[static_cast<size_t>(group_id)];
-        switch (tier) {
-            case Tier::DEVICE:
-                if (child_slot.has_value(Tier::DEVICE))
-                    return false;
-                break;
-            case Tier::HOST:
-                if (child_slot.has_value(Tier::HOST))
-                    return false;
-                break;
-            case Tier::DISK:
-                if (child_slot.has_value(Tier::DISK))
-                    return false;
-                break;
-            default:
-                break;
+        if (child_slot.has_value(tier)) {
+            return false;
         }
     }
     return true;
+}
+
+bool ComponentGroup::hasCompleteDeviceValue(const GroupSlot& slot) const {
+    return !device_pools_.empty() && slot.device_blocks.size() == device_pools_.size()
+           && std::all_of(slot.device_blocks.begin(), slot.device_blocks.end(), [](BlockIdxType block) {
+                  return !isNullBlockIdx(block);
+              });
 }
 
 // ---- Unified structured block lifecycle ----
@@ -351,14 +349,16 @@ void ComponentGroup::releaseSingleBlock(Tier tier, BlockIdxType block) const {
 }
 
 std::vector<BlockIdxType> ComponentGroup::getBlocks(const GroupSlot& slot, Tier tier) const {
+    if (!slot.has_value(tier)) {
+        return {};
+    }
     switch (tier) {
         case Tier::DEVICE:
-            return slot.has_value(Tier::DEVICE) ? slot.device_blocks : std::vector<BlockIdxType>{};
+            return slot.device_blocks;
         case Tier::HOST:
-            return slot.has_value(Tier::HOST) ? std::vector<BlockIdxType>{slot.host_block} :
-                                                std::vector<BlockIdxType>{};
+            return {slot.host_block};
         case Tier::DISK:
-            return slot.has_value(Tier::DISK) ? std::vector<BlockIdxType>{slot.disk_slot} : std::vector<BlockIdxType>{};
+            return {slot.disk_slot};
         default:
             return {};
     }
@@ -410,7 +410,7 @@ bool ComponentGroup::isSlotEvictable(const TreeNode& node, Tier tier) const {
 
     switch (tier) {
         case Tier::DEVICE:
-            if (!slot.has_value(Tier::DEVICE)) {
+            if (!hasCompleteDeviceValue(slot)) {
                 return false;
             }
             for (size_t i = 0; i < slot.device_blocks.size(); ++i) {

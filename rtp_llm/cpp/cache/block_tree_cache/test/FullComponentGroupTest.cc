@@ -260,5 +260,28 @@ TEST_F(FullComponentGroupTest, NoDataNotEligible) {
     delete a;
 }
 
+TEST_F(FullComponentGroupTest, CompleteDeviceValueRequiresExactPoolCardinalityAndNoNullBlocks) {
+    auto second_pool = block_tree_cache_test::makeDevicePool({{1, 0}}, 128, "full_component_group_test_second");
+    ASSERT_NE(second_pool, nullptr);
+    auto two_pool_group                     = std::make_shared<FullComponentGroup>();
+    two_pool_group->component_group_id      = 0;
+    two_pool_group->setDevicePools({pool_, second_pool}, {"tag_0", "tag_1"});
+
+    GroupSlot slot;
+    EXPECT_FALSE(two_pool_group->hasCompleteDeviceValue(slot));
+
+    slot.device_blocks = {10};
+    EXPECT_FALSE(two_pool_group->hasCompleteDeviceValue(slot));
+
+    slot.device_blocks = {10, NULL_BLOCK_IDX};
+    EXPECT_FALSE(two_pool_group->hasCompleteDeviceValue(slot));
+
+    slot.device_blocks = {10, 20};
+    EXPECT_TRUE(two_pool_group->hasCompleteDeviceValue(slot));
+
+    slot.device_blocks = {10, 20, 30};
+    EXPECT_FALSE(two_pool_group->hasCompleteDeviceValue(slot));
+}
+
 }  // namespace
 }  // namespace rtp_llm

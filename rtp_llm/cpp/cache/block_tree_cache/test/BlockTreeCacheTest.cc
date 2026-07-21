@@ -262,6 +262,40 @@ TEST_F(BlockTreeCacheTest, MatchPartialPath) {
     cache_->releaseMatchedBlocks(result.matched_block_sets);
 }
 
+TEST_F(BlockTreeCacheTest, MatchHardStopsAtPartialDeviceSlot) {
+    std::vector<std::vector<GroupSlot>> slots(2, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {10};
+    slots[1][0].device_blocks = {11};
+    cache_->insert(nullptr, {100, 200}, slots);
+
+    TreeNode* first_node = cache_->tree()->root()->children.at(100);
+    first_node->group_slots[0].device_blocks = {10, NULL_BLOCK_IDX};
+
+    const BlockTreeMatchResult result = cache_->match({100, 200});
+    EXPECT_EQ(result.matched_node, nullptr);
+    EXPECT_EQ(result.matched_blocks, 0u);
+    EXPECT_TRUE(result.group_block_indices.empty());
+
+    // Restore the production slot-shape invariant before the fixture drains
+    // synthetic tree holds during teardown.
+    first_node->group_slots[0].device_blocks = {10};
+}
+
+TEST_F(BlockTreeCacheTest, MatchHardStopsAtSlotWithMultipleServingTiers) {
+    std::vector<std::vector<GroupSlot>> slots(2, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {10};
+    slots[1][0].device_blocks = {11};
+    cache_->insert(nullptr, {100, 200}, slots);
+
+    TreeNode* first_node                  = cache_->tree()->root()->children.at(100);
+    first_node->group_slots[0].host_block = 7;
+
+    const BlockTreeMatchResult result = cache_->match({100, 200});
+    EXPECT_EQ(result.matched_node, nullptr);
+    EXPECT_EQ(result.matched_blocks, 0u);
+    EXPECT_TRUE(result.group_block_indices.empty());
+}
+
 TEST_F(BlockTreeCacheTest, DuplicateInsertDoesNotCreateNodes) {
     CacheStats stats = cache_->getStats();
     EXPECT_EQ(stats.tree_node_count, 0u);
@@ -609,6 +643,88 @@ TEST_F(BlockTreeCacheTest, DuplicateInsert_KeepsExistingSlotAndCallerOwnsLoser) 
     cache->waitForPendingTasks();
     EXPECT_FALSE(pool->isAllocated(existing_block));
     EXPECT_EQ(pool->freeBlocksNum(), kUsableBlocks);
+}
+
+TEST_F(BlockTreeCacheTest, DuplicateInsert_FillsExistingEmptyGroupAndAddsOneCacheHold) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    constexpr size_t kUsableBlocks = 4;
+    auto             pool          = makeDevicePool({{64, 0}}, kUsableBlocks, "existing_group_fill_pool");
+
+    auto full                = std::make_shared<FullComponentGroup>();
+    full->component_group_id = 0;
+    full->setDevicePools({pool});
+    std::vector<ComponentGroupPtr> groups = {full};
+    auto                           cache  = BlockTreeCacheTestUtil::makeBlockTreeCache(
+        std::make_unique<BlockTree>(1), std::move(groups), std::vector<Component>{});
+
+    std::vector<std::vector<GroupSlot>> empty_slots(1, std::vector<GroupSlot>(1));
+    empty_slots[0][0].device_blocks = {NULL_BLOCK_IDX};
+    ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, empty_slots));
+    TreeNode* existing_node = cache->tree()->nodes().front().get();
+    ASSERT_NE(existing_node, nullptr);
+
+    GroupBlockSet request_blocks = full->allocateBlocks(Tier::DEVICE, 1);
+    ASSERT_EQ(request_blocks.per_node.size(), 1u);
+    ASSERT_EQ(request_blocks.per_node[0].size(), 1u);
+    const BlockIdxType block = request_blocks.per_node[0][0];
+    ASSERT_EQ(pool->refCount(block), 1u);
+
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = request_blocks.per_node[0];
+    cache->insert(nullptr, {100}, slots);
+
+    EXPECT_EQ(cache->getStats().tree_node_count, 1u);
+    EXPECT_EQ(existing_node->group_slots[0].device_blocks, request_blocks.per_node[0]);
+    EXPECT_EQ(pool->refCount(block), 2u);
+
+    request_blocks.nodes = {existing_node};
+    cache->releaseMatchedBlocks({request_blocks});
+    EXPECT_EQ(pool->refCount(block), 1u);
+
+    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
+    cache->waitForPendingTasks();
+    EXPECT_FALSE(pool->isAllocated(block));
+    EXPECT_EQ(cache->getStats().tree_node_count, 0u);
+}
+
+TEST_F(BlockTreeCacheTest, InsertRejectsPartialMultiPoolGroupWithoutAddingCacheHold) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    constexpr size_t kUsableBlocks = 4;
+    auto             pool0         = makeDevicePool({{64, 0}}, kUsableBlocks, "partial_group_pool_0");
+    auto             pool1         = makeDevicePool({{64, 0}}, kUsableBlocks, "partial_group_pool_1");
+
+    auto full                = std::make_shared<FullComponentGroup>();
+    full->component_group_id = 0;
+    full->setDevicePools({pool0, pool1});
+    std::vector<ComponentGroupPtr> groups = {full};
+    auto                           cache  = BlockTreeCacheTestUtil::makeBlockTreeCache(
+        std::make_unique<BlockTree>(1), std::move(groups), std::vector<Component>{});
+
+    GroupBlockSet request_blocks = full->allocateBlocks(Tier::DEVICE, 1);
+    ASSERT_EQ(request_blocks.per_node.size(), 1u);
+    ASSERT_EQ(request_blocks.per_node[0].size(), 2u);
+    const BlockIdxType block0 = request_blocks.per_node[0][0];
+    const BlockIdxType block1 = request_blocks.per_node[0][1];
+
+    std::vector<std::vector<GroupSlot>> partial_slots(1, std::vector<GroupSlot>(1));
+    partial_slots[0][0].device_blocks = {block0, NULL_BLOCK_IDX};
+    cache->insert(nullptr, {100}, partial_slots);
+
+    ASSERT_EQ(cache->tree()->nodes().size(), 1u);
+    const GroupSlot& cached_slot = cache->tree()->nodes().front()->group_slots[0];
+    EXPECT_EQ(cached_slot.device_blocks, (std::vector<BlockIdxType>{NULL_BLOCK_IDX, NULL_BLOCK_IDX}));
+    EXPECT_EQ(pool0->refCount(block0), 1u);
+    EXPECT_EQ(pool1->refCount(block1), 1u);
+
+    full->unreferenceBlocks(request_blocks);
+    EXPECT_FALSE(pool0->isAllocated(block0));
+    EXPECT_FALSE(pool1->isAllocated(block1));
 }
 
 TEST_F(BlockTreeCacheTest, InsertMatchReleaseReclaim_RefcountLifecycle) {
@@ -1387,6 +1503,39 @@ TEST_F(BlockTreeCacheTest, LoadBackGroupMappingUsesLocalPoolIndexOrderAndLeavesT
     EXPECT_EQ(host_pool->freeBlocksNum(), free_before);
 }
 
+TEST_F(BlockTreeCacheTest, PendingLoadBackTicketHardStopsSecondMatchUntilAbort) {
+    std::shared_ptr<HostBlockPool> host_pool = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/2);
+    ASSERT_NE(host_pool, nullptr);
+
+    std::unique_ptr<BlockTreeCache> cache = makeMappingValidationCache(
+        {{/*component_group_id=*/0, /*local_pool_index=*/0}}, /*device_pool_count=*/1, host_pool, /*initialize=*/true);
+    ASSERT_NE(cache, nullptr);
+
+    const ComponentGroupPtr& group        = cache->componentGroups().front();
+    const BlockIdxType       source_block = group->allocateSingleBlock(Tier::HOST);
+    ASSERT_NE(source_block, NULL_BLOCK_IDX);
+
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    slots[0][0].host_block = source_block;
+    TreeNode* source_node  = cache->tree()->insertNode(nullptr, {100}, slots).leaf;
+    ASSERT_NE(source_node, nullptr);
+
+    BlockTreeMatchResult first_match = cache->match({100});
+    ASSERT_NE(first_match.load_back_ticket, nullptr);
+    EXPECT_EQ(source_node->group_slots[0].transfer_state, SlotTransferState::LOAD_BACK_PENDING);
+    EXPECT_EQ(host_pool->refCount(source_block), 2u);
+
+    BlockTreeMatchResult second_match = cache->match({100});
+    EXPECT_EQ(second_match.matched_node, nullptr);
+    EXPECT_EQ(second_match.matched_blocks, 0u);
+    EXPECT_EQ(second_match.load_back_ticket, nullptr);
+    EXPECT_EQ(host_pool->refCount(source_block), 2u);
+
+    first_match.load_back_ticket.reset();
+    EXPECT_EQ(source_node->group_slots[0].transfer_state, SlotTransferState::IDLE);
+    EXPECT_EQ(host_pool->refCount(source_block), 1u);
+}
+
 TEST_F(BlockTreeCacheTest, LoadBackGroupMappingInitRejectsOutOfRangeDuplicateAndHoleMetadata) {
     const auto make_uninitialized = [](std::vector<BlockTreeCache::PerTagMapping> mapping, size_t pool_count) {
         return makeMappingValidationCache(std::move(mapping), pool_count, nullptr, /*initialize=*/false);
@@ -1617,6 +1766,93 @@ TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackCoreHoldersAndRetainsR
     EXPECT_EQ(host_pool->refCount(source_block), source_ref_before) << "committed ticket must not release source twice";
     cache->waitForPendingTasks();
     device_pool->decRef(request_targets);
+}
+
+TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackMixedDeviceAndHostItems) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    DeviceBlockPoolPtr resident_device_pool = makeDevicePool({{1, 0}}, 1, "load_back_mixed_resident");
+    DeviceBlockPoolPtr target_device_pool   = makeDevicePool({{1, 0}}, 2, "load_back_mixed_target");
+    std::shared_ptr<HostBlockPool> resident_host_pool = makeHostPool(1, 1);
+    std::shared_ptr<HostBlockPool> host_pool          = makeHostPool(1, 2);
+    ASSERT_NE(resident_device_pool, nullptr);
+    ASSERT_NE(target_device_pool, nullptr);
+    ASSERT_NE(resident_host_pool, nullptr);
+    ASSERT_NE(host_pool, nullptr);
+
+    auto resident_group                = std::make_shared<FullComponentGroup>();
+    resident_group->component_group_id = 0;
+    resident_group->setDevicePools({resident_device_pool});
+    resident_group->setHostPool(resident_host_pool);
+    auto loading_group                = std::make_shared<FullComponentGroup>();
+    loading_group->component_group_id = 1;
+    loading_group->setDevicePools({target_device_pool});
+    loading_group->setHostPool(host_pool);
+
+    BlockTreeCacheConfig config;
+    config.enable_memory_cache            = true;
+    config.enable_load_back               = true;
+    std::vector<ComponentGroupPtr> groups = {resident_group, loading_group};
+    std::unique_ptr<BlockTreeCache> cache = BlockTreeCacheTestUtil::makeBlockTreeCache(
+        std::make_unique<BlockTree>(2), std::move(groups), std::vector<Component>{}, std::move(config));
+    ASSERT_NE(cache, nullptr);
+
+    auto copy_engine = std::make_shared<ScriptedCopyEngine>(cache->componentGroups(), cache->components());
+    BlockTreeCacheTestPeer::setCopyEngineForTest(*cache, copy_engine);
+
+    GroupBlockSet resident_holder = resident_group->allocateBlocks(Tier::DEVICE, 1);
+    ASSERT_EQ(resident_holder.per_node.size(), 1u);
+    ASSERT_EQ(resident_holder.per_node.front().size(), 1u);
+    const BlockIdxType resident_block = resident_holder.per_node.front().front();
+    const BlockIdxType host_block     = loading_group->allocateSingleBlock(Tier::HOST);
+    ASSERT_NE(host_block, NULL_BLOCK_IDX);
+
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(2));
+    slots[0][0].device_blocks = {resident_block};
+    slots[0][1].host_block    = host_block;
+    ASSERT_NE(cache->tree()->insertNode(nullptr, {100}, slots).leaf, nullptr);
+    ASSERT_EQ(resident_device_pool->refCount(resident_block), 1u);
+    ASSERT_EQ(host_pool->refCount(host_block), 1u);
+
+    BlockTreeMatchResult result = cache->match({100});
+    ASSERT_NE(result.load_back_ticket, nullptr);
+    ASSERT_EQ(result.load_back_ticket->itemCount(), 2u);
+    EXPECT_EQ(result.load_back_ticket->sourceTier(0), Tier::DEVICE);
+    EXPECT_EQ(result.load_back_ticket->sourceTier(1), Tier::HOST);
+    EXPECT_EQ(resident_device_pool->refCount(resident_block), 2u);
+    EXPECT_EQ(host_pool->refCount(host_block), 2u);
+
+    const BlockIdxType request_target = poolMalloc(*target_device_pool);
+    ASSERT_NE(request_target, NULL_BLOCK_IDX);
+    target_device_pool->incRef(request_target);
+    ASSERT_EQ(target_device_pool->refCount(request_target), 1u);
+    ASSERT_TRUE(result.load_back_ticket->bindTargetDeviceBlocks(0, {resident_block}));
+    ASSERT_TRUE(result.load_back_ticket->bindTargetDeviceBlocks(1, {request_target}));
+
+    BlockTreeCacheTestPeer::ScopedQueueRejectionGuard rejection_guard(*cache);
+    ASSERT_TRUE(rejection_guard.armed());
+    std::shared_ptr<AsyncContext> context = result.load_back_ticket->commit();
+    ASSERT_NE(context, nullptr);
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(copy_engine->submitCount(), 0u);
+    EXPECT_EQ(resident_device_pool->refCount(resident_block), 1u);
+    EXPECT_EQ(host_pool->refCount(host_block), 1u);
+    EXPECT_EQ(target_device_pool->refCount(request_target), 1u);
+
+    BlockTreeFindResult find = cache->tree()->findNode({100});
+    ASSERT_NE(find.matched_node, nullptr);
+    ASSERT_EQ(find.matched_node->group_slots.size(), 2u);
+    EXPECT_EQ(find.matched_node->group_slots[0].transfer_state, SlotTransferState::IDLE);
+    EXPECT_EQ(find.matched_node->group_slots[1].transfer_state, SlotTransferState::IDLE);
+
+    EXPECT_TRUE(rejection_guard.restore());
+    result.load_back_ticket.reset();
+    EXPECT_EQ(resident_device_pool->refCount(resident_block), 1u);
+    EXPECT_EQ(host_pool->refCount(host_block), 1u);
+    target_device_pool->decRef(request_target);
 }
 
 // Deferred load_back: match() plans (references the source blocks) but does NOT execute

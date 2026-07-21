@@ -46,8 +46,9 @@ struct CandidateMeta {
 // Real data-transfer state; a slot is excluded from all heaps while != IDLE.
 enum class SlotTransferState : uint8_t {
     IDLE,
-    DEMOTING,     // Device -> Host, or Host -> Disk
-    LOADING_BACK  // Host/Disk -> Device
+    DEMOTING,          // Device -> Host, or Host -> Disk
+    LOAD_BACK_PENDING, // Host/Disk source reserved by a deferred load-back ticket
+    LOADING_BACK       // Host/Disk -> Device
 };
 
 // Per-ComponentGroup data location across storage tiers.
@@ -79,6 +80,9 @@ struct GroupSlot {
     }
     bool is_empty() const {
         return !has_value(Tier::DEVICE) && !has_value(Tier::HOST) && !has_value(Tier::DISK);
+    }
+    bool is_removable() const {
+        return transfer_state == SlotTransferState::IDLE && is_empty();
     }
 };
 

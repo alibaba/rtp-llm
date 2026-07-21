@@ -274,19 +274,21 @@ private:
         std::vector<BlockIdxType> source_blocks;
         std::vector<BlockIdxType> target_device_blocks;
     };
+    bool   isNodeStructurallyMatchable(const TreeNode* node) const;
     void   prepareMatchedBlocks(const std::vector<TreeNode*>&                 matched_path,
                                 const std::vector<bool>&                      candidate_logically_valid,
                                 BlockTreeMatchResult&                         result,
-                                LoadBackTicket::PendingLoadBackItems& pending_load_back_items);
+                                LoadBackTicket::PendingLoadBackItems&         pending_load_back_items);
     size_t computeReadyMatchedBlockCount(const std::vector<TreeNode*>& matched_path,
                                          const std::vector<bool>&      candidate_logically_valid) const;
-    void   prepareMatchedLoadBackItem(TreeNode*                         path_node,
-                                      const ComponentGroupPtr&          component_group,
-                                      const GroupSlot&                  group_slot,
-                                      size_t                            path_index,
-                                      const std::vector<std::string>&   device_group_tags,
-                                      BlockTreeMatchResult&             result,
-                                      LoadBackTicket::PendingLoadBackItems& pending_load_back_items);
+    void   prepareMatchedLoadBackItem(TreeNode*                                 path_node,
+                                      const ComponentGroupPtr&                  component_group,
+                                      const GroupSlot&                          group_slot,
+                                      size_t                                    path_index,
+                                      const std::vector<std::string>&           device_group_tags,
+                                      BlockTreeMatchResult&                     result,
+                                      LoadBackTicket::PendingLoadBackItems&     pending_load_back_items);
+    bool   reserveLoadBackItems(const LoadBackTicket::PendingLoadBackItems& items);
 
     std::shared_ptr<AsyncContext> commitLoadBack(const LoadBackTicket& ticket);
     void                          abortLoadBack(const LoadBackTicket& ticket);

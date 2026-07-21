@@ -43,13 +43,34 @@ BlockTreeFindResult BlockTree::findNode(const CacheKeysType& cache_keys) const {
         if (it == current->children.end()) {
             break;
         }
-        current               = it->second;
+        TreeNode* candidate = it->second;
+        if (candidate == nullptr || !isNodeMatchReady(*candidate)) {
+            RTP_LLM_LOG_DEBUG("BlockTree::findNode: stop matching at depth=%zu, cache_key=%ld, reason=%s",
+                              i,
+                              cache_keys[i],
+                              candidate == nullptr ? "null candidate" : "node not match ready");
+            break;
+        }
+        current               = candidate;
         result.matched_blocks = i + 1;
         result.matched_node   = current;
         result.path.push_back(current);
     }
 
     return result;
+}
+
+bool BlockTree::isNodeMatchReady(const TreeNode& node) const {
+    if (node.group_slots.size() != static_cast<size_t>(group_slot_count_)) {
+        RTP_LLM_LOG_WARNING("BlockTree::findNode: malformed group slot count, node_key=%ld expected=%d actual=%zu",
+                            node.cache_key,
+                            group_slot_count_,
+                            node.group_slots.size());
+        return false;
+    }
+    return std::all_of(node.group_slots.begin(), node.group_slots.end(), [](const GroupSlot& slot) {
+        return slot.transfer_state == SlotTransferState::IDLE;
+    });
 }
 
 BlockTreeInsertResult BlockTree::insertNode(TreeNode*                                  parent,
@@ -70,14 +91,44 @@ BlockTreeInsertResult BlockTree::insertNode(TreeNode*                           
         CacheKeyType key = cache_keys[i];
         auto         it  = current->children.find(key);
         if (it != current->children.end()) {
-            current                     = it->second;
+            TreeNode* existing_node = it->second;
+            if (existing_node == nullptr) {
+                RTP_LLM_LOG_WARNING("BlockTree::insertNode: null child, key=%ld", key);
+                break;
+            }
+            current = existing_node;
+            if (current->group_slots.size() != static_cast<size_t>(group_slot_count_)) {
+                RTP_LLM_LOG_WARNING("BlockTree::insertNode: malformed existing node, key=%ld expected=%d actual=%zu",
+                                    key,
+                                    group_slot_count_,
+                                    current->group_slots.size());
+                break;
+            }
+            // An empty per-node input means this topology position carries no
+            // group payload. Keep traversing so callers can append a suffix
+            // without manufacturing placeholder GroupSlots for every existing
+            // prefix node.
+            if (slots[i].empty()) {
+                continue;
+            }
+            if (slots[i].size() != static_cast<size_t>(group_slot_count_)) {
+                RTP_LLM_LOG_WARNING("BlockTree::insertNode: malformed input slots, key=%ld expected=%d actual=%zu",
+                                    key,
+                                    group_slot_count_,
+                                    slots[i].size());
+                continue;
+            }
             const auto&  incoming_slots = slots[i];
-            const size_t slot_count     = std::min(current->group_slots.size(), incoming_slots.size());
-            for (size_t gid = 0; gid < slot_count; ++gid) {
+            for (size_t gid = 0; gid < static_cast<size_t>(group_slot_count_); ++gid) {
                 GroupSlot&       existing = current->group_slots[gid];
                 const GroupSlot& incoming = incoming_slots[gid];
+                const bool       source_valid =
+                    !incoming.device_blocks.empty()
+                    && std::all_of(incoming.device_blocks.begin(), incoming.device_blocks.end(), [](BlockIdxType block) {
+                           return !isNullBlockIdx(block);
+                       });
                 if (!existing.is_empty() || existing.transfer_state != SlotTransferState::IDLE
-                    || !incoming.has_value(Tier::DEVICE)) {
+                    || !source_valid) {
                     continue;
                 }
                 existing.device_blocks  = incoming.device_blocks;
@@ -88,12 +139,16 @@ BlockTreeInsertResult BlockTree::insertNode(TreeNode*                           
                 result.adopted_slots.push_back(BlockTreeAdoptedSlot{current, i, static_cast<int>(gid)});
             }
         } else {
-            // Create new child and assign group_slots[i]
             TreeNode* child        = createNode(key, current);
             current->children[key] = child;
             current                = child;
-            if (!slots[i].empty()) {
+            if (slots[i].size() == static_cast<size_t>(group_slot_count_)) {
                 current->group_slots = slots[i];
+            } else if (!slots[i].empty()) {
+                RTP_LLM_LOG_WARNING("BlockTree::insertNode: malformed slot count, key=%ld expected=%d actual=%zu",
+                                    key,
+                                    group_slot_count_,
+                                    slots[i].size());
             }
             result.inserted_mask[i] = true;
             result.inserted_nodes.push_back(BlockTreeInsertedNode{current, i});
@@ -140,18 +195,16 @@ TreeNode* BlockTree::removeEmptyAncestors(TreeNode* start_node, const std::vecto
             break;
         }
 
-        // Check if any REUSABLE group has data
-        bool has_reusable_data = false;
+        bool removable = true;
         for (int gid : reusable_group_ids) {
-            if (gid >= 0 && static_cast<size_t>(gid) < current->group_slots.size()) {
-                if (!current->group_slots[static_cast<size_t>(gid)].is_empty()) {
-                    has_reusable_data = true;
-                    break;
-                }
+            if (gid < 0 || static_cast<size_t>(gid) >= current->group_slots.size()
+                || !current->group_slots[static_cast<size_t>(gid)].is_removable()) {
+                removable = false;
+                break;
             }
         }
 
-        if (has_reusable_data) {
+        if (!removable) {
             break;
         }
 
