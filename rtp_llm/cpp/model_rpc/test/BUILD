@@ -124,6 +124,19 @@ cc_test(
 )
 
 cc_test(
+    name = "query_converter_logprobs_test",
+    srcs = [
+        "QueryConverterLogprobsTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps + cuda13_torch_link_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
     name = "broadcast_manager_test",
     srcs = [
         "BroadcastManagerTest.cc",

@@ -161,17 +161,25 @@ protected:
                                       int64_t&                                         model_forward_us);
     GptModelOutputs runDraftPrefillForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
-                 buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
-                                             const torch::Tensor&                draft_tokens,
-                                             std::shared_ptr<torch::Event>       draft_tokens_ready_event);
-    void         collectDecodeMetrics(const StreamGroups&                          stream_groups,
-                                      torch::Event&                                accept_len_ready_event,
-                                      const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                                      MtpMetricsCollector&                         metrics_collector,
-                                      int64_t                                      model_forward_us);
+         buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
+                                     const torch::Tensor&                draft_tokens,
+                                     std::shared_ptr<torch::Event>       draft_tokens_ready_event);
+    void collectDecodeMetrics(const StreamGroups&                          stream_groups,
+                              torch::Event&                                accept_len_ready_event,
+                              const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
+                              MtpMetricsCollector&                         metrics_collector,
+                              int64_t                                      model_forward_us);
+    std::shared_ptr<MtpTargetLogprobs>
+                 launchEarlyMtpTargetLogprobsFinalize(const StreamGroups&                          stream_groups,
+                                                      const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
+                                                      MtpTargetLogprobs                            target_logprobs,
+                                                      std::shared_ptr<torch::Event>                rejection_event);
+    void         finishEarlyMtpTargetLogprobsFinalize(std::shared_ptr<MtpTargetLogprobs>& early_finalize_state,
+                                                      MtpTargetLogprobs&                  target_logprobs);
     absl::Status dispatchDecodeOutput(const StreamGroups&                          stream_groups,
                                       const std::list<GenerateStreamPtr>&          streams,
                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
+                                      MtpTargetLogprobs                            target_logprobs,
                                       const torch::Tensor&                         verify_position_ids,
                                       const torch::Tensor&                         kv_cache_block_id,
                                       const torch::Tensor&                         kv_cache_kernel_block_id,
@@ -221,6 +229,7 @@ protected:
     // the main thread.
     absl::Status dispatchDecodeAsync(const StreamGroups&                          stream_groups,
                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
+                                     MtpTargetLogprobs                            target_logprobs,
                                      const torch::Tensor&                         verify_position_ids,
                                      const torch::Tensor&                         kv_cache_block_id,
                                      const torch::Tensor&                         kv_cache_kernel_block_id,

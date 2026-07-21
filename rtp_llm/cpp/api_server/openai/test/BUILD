@@ -6,6 +6,18 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
+
+cuda13_torch_link_deps = select({
+    "@//:using_cuda13_x86": [
+        ":cuda13_torch_nvshmem",
+    ],
+    "//conditions:default": [],
+})
+
 test_deps = [
     "//rtp_llm/cpp/config:config_modules",
     "@com_google_googletest//:gtest",
@@ -58,6 +70,7 @@ cc_library(
     name = "openai_unittest_lib",
     srcs = [
         "APIDataTypeTest.cc",
+        "ChatRenderTest.cc",
         "OpenaiEndpointTest.cc",
         "TestMain.cc",
     ] + [
@@ -67,7 +80,7 @@ cc_library(
         "//rtp_llm/cpp/api_server:openai",
         "//rtp_llm/cpp/api_server:tokenizer",
         "//rtp_llm/cpp/pybind:th_compute_lib",
-    ],
+    ] + cuda13_torch_link_deps,
     data = [],
     copts = test_copts,
     alwayslink = 1,

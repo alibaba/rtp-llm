@@ -645,7 +645,18 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                              torch::Tensor(),
                              torch::Tensor(),
                              torch::Tensor(),
-                             torch::Tensor()});
+                             torch::Tensor(),
+                             true,
+                             false,
+                             std::nullopt,
+                             std::nullopt,
+                             GenerationPrefillCudaGraphStatus::NOT_REQUESTED,
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             -1,
+                             generate_stream->generateConfig()->return_logprobs ? 1 : 0});
     if (generate_request.position_ids_size() > 0) {
         auto context_position_ids = torch::from_blob(const_cast<int32_t*>(generate_request.position_ids().data()),
                                                      {(int64_t)generate_request.position_ids_size()},

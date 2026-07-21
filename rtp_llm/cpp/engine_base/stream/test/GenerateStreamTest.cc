@@ -103,10 +103,13 @@ public:
             /*layer_num=*/3, /*block_num=*/9, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
     }
 
-    GenerateStreamPtr createContextStream(std::vector<int> input_ids) {
-        std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
-        std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
-        ResourceContext                 resource_context;
+    GenerateStreamPtr createContextStream(std::vector<int>                input_ids,
+                                          std::shared_ptr<GenerateConfig> generate_config = nullptr) {
+        std::shared_ptr<GenerateInput> generate_input(new GenerateInput());
+        if (!generate_config) {
+            generate_config = std::make_shared<GenerateConfig>();
+        }
+        ResourceContext resource_context;
         generate_input->generate_config = generate_config;
         generate_input->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
         generate_input->input_ids =
@@ -380,6 +383,7 @@ TEST_F(GenerateStreamTest, prefillOnlyValidationRejectsUnsupportedConfigWithoutM
         {"variable_num_beams", +[](GenerateConfig& config) { config.variable_num_beams = {1}; }},
         {"num_return_sequences", +[](GenerateConfig& config) { config.num_return_sequences = 2; }},
         {"return_logits", +[](GenerateConfig& config) { config.return_logits = true; }},
+        {"return_logprobs", +[](GenerateConfig& config) { config.return_logprobs = true; }},
         {"calculate_loss", +[](GenerateConfig& config) { config.calculate_loss = 1; }},
         {"return_softmax_probs", +[](GenerateConfig& config) { config.return_softmax_probs = true; }},
         {"return_all_probs", +[](GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::DEFAULT; }},
@@ -1355,6 +1359,116 @@ TEST_F(GenerateStreamTest, timeInfoSnapshotIsCoherentDuringLifecyclePublication)
     EXPECT_TRUE(final_info.running_started);
     EXPECT_TRUE(final_info.first_token_committed);
     EXPECT_TRUE(final_info.generation_done);
+}
+
+TEST_F(GenerateStreamTest, testLogprobsHistoryUsesBoundedGeometricGrowth) {
+    auto generate_config             = std::make_shared<GenerateConfig>();
+    generate_config->return_logprobs = true;
+    generate_config->top_logprobs    = 20;
+    generate_config->max_new_tokens  = 2000;
+    auto stream                      = GenerateStreamBuilder().createContextStream({1}, generate_config);
+
+    EXPECT_FALSE(stream->getTokenLogProbs().defined());
+    EXPECT_FALSE(stream->getTopLogprobTokenIds().defined());
+    EXPECT_FALSE(stream->getTopLogProbs().defined());
+
+    auto selected_first = torch::arange(64, torch::kFloat32).reshape({1, 64});
+    auto top_ids_first  = torch::arange(64 * 20, torch::kInt32).reshape({1, 64, 20});
+    auto top_first      = torch::arange(64 * 20, torch::kFloat32).reshape({1, 64, 20});
+    stream->setLogProbs(selected_first, top_ids_first, top_first, torch::Tensor(), stream->inputLength());
+
+    ASSERT_EQ(stream->getTokenLogProbs().sizes(), (torch::IntArrayRef{1, 64}));
+    ASSERT_EQ(stream->getTopLogprobTokenIds().sizes(), (torch::IntArrayRef{1, 64, 20}));
+    ASSERT_EQ(stream->getTopLogProbs().sizes(), (torch::IntArrayRef{1, 64, 20}));
+    EXPECT_LT(stream->getTokenLogProbs().size(1), generate_config->max_new_tokens);
+
+    auto selected_last = torch::tensor({64.0f}, torch::kFloat32).reshape({1, 1});
+    auto top_ids_last  = torch::arange(64 * 20, 65 * 20, torch::kInt32).reshape({1, 1, 20});
+    auto top_last      = torch::arange(64 * 20, 65 * 20, torch::kFloat32).reshape({1, 1, 20});
+    stream->setLogProbs(selected_last, top_ids_last, top_last, torch::Tensor(), stream->inputLength() + 64);
+
+    ASSERT_EQ(stream->getTokenLogProbs().size(1), 128);
+    EXPECT_TRUE(
+        torch::equal(stream->getTokenLogProbs().narrow(1, 0, 65), torch::arange(65, torch::kFloat32).reshape({1, 65})));
+    EXPECT_TRUE(torch::equal(stream->getTopLogprobTokenIds().narrow(1, 0, 65),
+                             torch::arange(65 * 20, torch::kInt32).reshape({1, 65, 20})));
+    EXPECT_TRUE(torch::equal(stream->getTopLogProbs().narrow(1, 0, 65),
+                             torch::arange(65 * 20, torch::kFloat32).reshape({1, 65, 20})));
+}
+
+TEST_F(GenerateStreamTest, testThinkingLogprobsContentBoundaryUsesFirstCloseToken) {
+    auto config                 = std::make_shared<GenerateConfig>();
+    config->return_logprobs     = true;
+    config->top_logprobs        = 1;
+    config->max_new_tokens      = 10;
+    config->in_think_mode       = true;
+    config->end_think_token_ids = {8, 9};
+    config->ignore_eos          = true;
+    auto stream                 = GenerateStreamBuilder().createContextStream({1}, config);
+
+    EXPECT_FALSE(stream->hasLogprobsContentStarted());
+    EXPECT_FALSE(stream->getTokenLogProbs().defined());
+    EXPECT_EQ(stream->logprobsContentOffset(torch::tensor({{10, 11}}, torch::kInt32), 2), 2);
+    // The first close token remains reasoning. The delimiter tail and answer
+    // that follow it are already content-logprob positions.
+    EXPECT_EQ(stream->logprobsContentOffset(torch::tensor({{10, 8, 9, 11}}, torch::kInt32), 4), 2);
+
+    stream->update({.new_tokens             = torch::tensor({{10}}, torch::kInt32),
+                    .num_new_tokens         = 1,
+                    .update_remote_generate = true,
+                    .force_update_info      = false,
+                    .output_start_pos       = -1,
+                    .logprobs_offset        = 1});
+    EXPECT_FALSE(stream->hasLogprobsContentStarted());
+
+    stream->update({.new_tokens             = torch::tensor({{8}}, torch::kInt32),
+                    .num_new_tokens         = 1,
+                    .update_remote_generate = true,
+                    .force_update_info      = false,
+                    .output_start_pos       = -1,
+                    .logprobs_offset        = 1});
+    EXPECT_TRUE(stream->hasLogprobsContentStarted());
+    EXPECT_EQ(stream->logprobsContentOffset(torch::tensor({{9}}, torch::kInt32), 1), 0);
+}
+
+TEST_F(GenerateStreamTest, testThinkingLogprobsPhaseIgnoresCloseTokenTrimmedAfterStop) {
+    auto config                 = std::make_shared<GenerateConfig>();
+    config->return_logprobs     = true;
+    config->top_logprobs        = 1;
+    config->max_new_tokens      = 10;
+    config->in_think_mode       = true;
+    config->end_think_token_ids = {8, 9};
+    config->stop_words_list     = {{7}};
+    auto stream                 = GenerateStreamBuilder().createContextStream({1}, config);
+
+    stream->update({.new_tokens             = torch::tensor({{7, 8}}, torch::kInt32),
+                    .num_new_tokens         = 2,
+                    .update_remote_generate = true,
+                    .force_update_info      = false,
+                    .output_start_pos       = -1,
+                    .logprobs_offset        = 2});
+
+    EXPECT_EQ(stream->completeTokenIdsVec(), (std::vector<int>{1, 7}));
+    EXPECT_FALSE(stream->hasLogprobsContentStarted());
+}
+
+TEST_F(GenerateStreamTest, logprobsAcceptDefaultSingleSequenceSentinel) {
+    for (int count : {0, 1}) {
+        auto config                  = std::make_shared<GenerateConfig>();
+        config->num_return_sequences = count;
+        config->return_logprobs      = true;
+        config->top_logprobs         = 3;
+        config->max_new_tokens       = 8;
+        auto stream                  = GenerateStreamBuilder().createContextStream({1}, config);
+        EXPECT_TRUE(stream->shouldComputeLogprobs());
+        EXPECT_EQ(stream->nextBatchSize(), 1);
+        stream->setLogProbs(torch::tensor({{-0.5f}}, torch::kFloat32),
+                            torch::tensor({{{1, 2, 3}}}, torch::kInt32),
+                            torch::tensor({{{-0.5f, -1.5f, -2.5f}}}, torch::kFloat32),
+                            torch::Tensor(),
+                            stream->inputLength());
+        EXPECT_FLOAT_EQ(stream->getTokenLogProbs().index({0, 0}).item<float>(), -0.5f);
+    }
 }
 
 }  // namespace rtp_llm

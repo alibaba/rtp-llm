@@ -385,6 +385,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     // all_probs is a one-hot at token_ids and was never materialized, so
     // rejection sampling must synthesize q from token_ids instead of reading it.
     output.token_ids_are_point_mass = all_probs_point_mass;
+    output.raw_logprobs_logits      = inputs.raw_logprobs_logits;
+    output.raw_logprobs_row_indices = inputs.raw_logprobs_row_indices;
     return output;
 }
 
