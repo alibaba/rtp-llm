@@ -5,20 +5,13 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.metric.MetricLease;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
 import org.mockito.Mockito;
 
 import java.util.Map;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -26,7 +19,6 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -125,72 +117,6 @@ class EndpointRegistryRoleTest {
 
         assertTrue(registry.remove(RoleType.PREFILL, ipPort, status));
         verify(endpoint).close();
-    }
-
-    @Test
-    @Timeout(value = 30, unit = TimeUnit.SECONDS)
-    void concurrent_candidates_release_only_losing_metric_leases() throws Exception {
-        int threadCount = 16;
-        AtomicInteger acquired = new AtomicInteger();
-        AtomicInteger released = new AtomicInteger();
-        CountDownLatch allCandidatesCreated = new CountDownLatch(threadCount);
-        BatchSchedulerReporter trackedReporter = Mockito.mock(BatchSchedulerReporter.class);
-        when(trackedReporter.acquireEndpointMetrics(
-                Mockito.eq("PREFILL"), Mockito.eq("127.0.0.1"),
-                Mockito.eq("127.0.0.1:8080"), Mockito.anyLong()))
-                .thenAnswer(ignored -> {
-                    acquired.incrementAndGet();
-                    allCandidatesCreated.countDown();
-                    assertTrue(allCandidatesCreated.await(10, TimeUnit.SECONDS));
-                    AtomicInteger closed = new AtomicInteger();
-                    return (MetricLease) () -> {
-                        if (closed.compareAndSet(0, 1)) {
-                            released.incrementAndGet();
-                        }
-                    };
-                });
-        ConfigService configService = Mockito.mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
-        EndpointRegistry concurrentRegistry = new EndpointRegistry(configService, null, trackedReporter);
-        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
-        WorkerStatus sharedStatus = status(RoleType.PREFILL, 8080);
-        try {
-            var futures = java.util.stream.IntStream.range(0, threadCount)
-                    .mapToObj(ignored -> executor.submit(() -> concurrentRegistry.ensurePrefillEndpoint(
-                            "127.0.0.1:8080", sharedStatus)))
-                    .toList();
-            for (var future : futures) {
-                assertSame(futures.get(0).get(), future.get());
-            }
-
-            assertEquals(threadCount, acquired.get());
-            assertEquals(threadCount - 1, released.get());
-            assertTrue(concurrentRegistry.remove(
-                    RoleType.PREFILL, "127.0.0.1:8080", sharedStatus));
-            assertEquals(threadCount, released.get());
-        } finally {
-            concurrentRegistry.close();
-            executor.shutdownNow();
-            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
-        }
-    }
-
-    @Test
-    void endpoint_construction_failure_releases_metric_lease() {
-        AtomicInteger released = new AtomicInteger();
-        BatchSchedulerReporter trackedReporter = Mockito.mock(BatchSchedulerReporter.class);
-        when(trackedReporter.acquireEndpointMetrics(
-                Mockito.anyString(), Mockito.anyString(), Mockito.anyString(), Mockito.anyLong()))
-                .thenReturn((MetricLease) released::incrementAndGet);
-        FlexlbConfig invalidConfig = new FlexlbConfig();
-        invalidConfig.setCostFormula("(");
-        ConfigService configService = Mockito.mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(invalidConfig);
-        EndpointRegistry failingRegistry = new EndpointRegistry(configService, null, trackedReporter);
-
-        assertThrows(IllegalArgumentException.class, () -> failingRegistry.ensurePrefillEndpoint(
-                "127.0.0.1:8080", status(RoleType.PREFILL, 8080)));
-        assertEquals(1, released.get());
     }
 
     private static WorkerStatus status(RoleType roleType, int port) {

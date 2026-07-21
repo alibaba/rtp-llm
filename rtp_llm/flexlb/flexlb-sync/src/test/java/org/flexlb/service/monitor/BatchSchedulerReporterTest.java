@@ -4,7 +4,6 @@ import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
-import org.flexlb.metric.MetricLease;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -20,10 +19,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @ExtendWith(MockitoExtension.class)
 class BatchSchedulerReporterTest {
@@ -66,14 +62,13 @@ class BatchSchedulerReporterTest {
     }
 
     @Test
-    void should_acquire_scope_and_prepare_all_fixed_window_endpoint_metrics() {
-        reporter.acquireEndpointMetrics("PREFILL", "10.0.0.1", "10.0.0.1:8080", 10_000L);
+    void should_prepare_all_fixed_window_endpoint_metrics() {
+        reporter.prepareEndpointMetrics("PREFILL", "10.0.0.1", "10.0.0.1:8080");
 
         FlexMetricTags endpointTags = FlexMetricTags.of(
                 "role", "PREFILL",
                 "engineIp", "10.0.0.1",
                 "engineIpPort", "10.0.0.1:8080");
-        verify(monitor).acquireEndpointScope(endpointTags, 10_000L);
         verify(monitor).prepare(DISPATCH_ACK_TIME_MS, endpointTags);
         verify(monitor).prepare(ROUTE_SUBMIT_TIME_MS, endpointTags);
         verify(monitor).prepare(BATCHER_QUEUE_WAIT_TIME_MS, endpointTags);
@@ -89,29 +84,8 @@ class BatchSchedulerReporterTest {
 
     @Test
     void should_not_prepare_prefill_batch_metrics_for_decode_endpoint() {
-        reporter.acquireEndpointMetrics("DECODE", "10.0.0.2", "10.0.0.2:8080", 10_000L);
+        reporter.prepareEndpointMetrics("DECODE", "10.0.0.2", "10.0.0.2:8080");
 
-        FlexMetricTags endpointTags = FlexMetricTags.of(
-                "role", "DECODE",
-                "engineIp", "10.0.0.2",
-                "engineIpPort", "10.0.0.2:8080");
-        verify(monitor).acquireEndpointScope(endpointTags, 10_000L);
         verify(monitor, never()).prepare(any(), any());
-    }
-
-    @Test
-    void should_release_scope_when_endpoint_metric_preparation_fails() {
-        FlexMetricTags endpointTags = FlexMetricTags.of(
-                "role", "PREFILL",
-                "engineIp", "10.0.0.3",
-                "engineIpPort", "10.0.0.3:8080");
-        MetricLease lease = org.mockito.Mockito.mock(MetricLease.class);
-        when(monitor.acquireEndpointScope(endpointTags, 10_000L)).thenReturn(lease);
-        doThrow(new IllegalStateException("registration failed"))
-                .when(monitor).prepare(DISPATCH_ACK_TIME_MS, endpointTags);
-
-        assertThrows(IllegalStateException.class, () -> reporter.acquireEndpointMetrics(
-                "PREFILL", "10.0.0.3", "10.0.0.3:8080", 10_000L));
-        verify(lease).close();
     }
 }

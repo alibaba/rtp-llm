@@ -5,7 +5,6 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.metric.MetricLease;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.springframework.beans.factory.ObjectFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -13,12 +12,12 @@ import org.springframework.stereotype.Component;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
+import java.util.function.BiPredicate;
 import java.util.function.Function;
 
 @Component
 public class EndpointRegistry {
-
-    private static final long MIN_ENDPOINT_METRIC_RETIREMENT_GRACE_MS = 10_000L;
 
     private final ConcurrentHashMap<String, PrefillEndpoint> prefillEndpoints = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, DecodeEndpoint> decodeEndpoints = new ConcurrentHashMap<>();
@@ -82,6 +81,31 @@ public class EndpointRegistry {
             return vitEndpoints;
         }
         return Map.of();
+    }
+
+    public int visitEndpoints(RoleType roleType,
+                              BiPredicate<String, WorkerEndpoint> visitor) {
+        if (roleType == RoleType.PREFILL) {
+            return visit(prefillEndpoints, visitor);
+        }
+        if (roleType == RoleType.DECODE) {
+            return visit(decodeEndpoints, visitor);
+        }
+        if (roleType == RoleType.PDFUSION) {
+            return visit(pdFusionEndpoints, visitor);
+        }
+        if (roleType == RoleType.VIT) {
+            return visit(vitEndpoints, visitor);
+        }
+        return 0;
+    }
+
+    public void forEachPrefillEndpoint(BiConsumer<String, PrefillEndpoint> action) {
+        prefillEndpoints.forEach(action);
+    }
+
+    public void forEachDecodeEndpoint(BiConsumer<String, DecodeEndpoint> action) {
+        decodeEndpoints.forEach(action);
     }
 
     public PrefillEndpoint getPrefill(String ipPort) {
@@ -222,60 +246,27 @@ public class EndpointRegistry {
         return batchSchedulerFactory == null ? null : batchSchedulerFactory.getObject();
     }
 
-    private MetricLease acquireEndpointMetrics(RoleType roleType, WorkerStatus status, String ipPort) {
-        if (reporter == null || roleType == null || status == null) {
-            return MetricLease.noop();
-        }
-        return acquireEndpointMetrics(
-                roleType, status, ipPort, configService.loadBalanceConfig());
-    }
-
-    private MetricLease acquireEndpointMetrics(RoleType roleType, WorkerStatus status, String ipPort,
-                                               FlexlbConfig config) {
-        if (reporter == null || roleType == null || status == null) {
-            return MetricLease.noop();
-        }
-        long enqueueDeadlineMs = Math.max(0L, config.getFlexlbBatchEnqueueDeadlineMs());
-        long retirementGraceMs = Math.max(
-                MIN_ENDPOINT_METRIC_RETIREMENT_GRACE_MS,
-                enqueueDeadlineMs >= Long.MAX_VALUE / 2L
-                        ? Long.MAX_VALUE
-                        : enqueueDeadlineMs * 2L);
-        MetricLease lease = reporter.acquireEndpointMetrics(
-                roleType.name(), status.getIp(), ipPort, retirementGraceMs);
-        return lease == null ? MetricLease.noop() : lease;
-    }
-
     private PrefillEndpoint createPrefillEndpoint(WorkerStatus status, RoleType roleType,
                                                   String ipPort) {
         FlexlbConfig config = configService.loadBalanceConfig();
-        MetricLease lease = acquireEndpointMetrics(roleType, status, ipPort, config);
-        try {
-            return new PrefillEndpoint(status, config, batchScheduler(), reporter, lease);
-        } catch (RuntimeException | Error e) {
-            lease.close();
-            throw e;
-        }
+        prepareEndpointMetrics(roleType, status, ipPort);
+        return new PrefillEndpoint(status, config, batchScheduler(), reporter);
     }
 
     private DecodeEndpoint createDecodeEndpoint(WorkerStatus status, String ipPort) {
-        MetricLease lease = acquireEndpointMetrics(RoleType.DECODE, status, ipPort);
-        try {
-            return new DecodeEndpoint(status, lease);
-        } catch (RuntimeException | Error e) {
-            lease.close();
-            throw e;
-        }
+        prepareEndpointMetrics(RoleType.DECODE, status, ipPort);
+        return new DecodeEndpoint(status);
     }
 
     private SimpleWorkerEndpoint createSimpleEndpoint(WorkerStatus status, RoleType roleType,
                                                       String ipPort) {
-        MetricLease lease = acquireEndpointMetrics(roleType, status, ipPort);
-        try {
-            return new SimpleWorkerEndpoint(status, lease);
-        } catch (RuntimeException | Error e) {
-            lease.close();
-            throw e;
+        prepareEndpointMetrics(roleType, status, ipPort);
+        return new SimpleWorkerEndpoint(status);
+    }
+
+    private void prepareEndpointMetrics(RoleType roleType, WorkerStatus status, String ipPort) {
+        if (reporter != null && roleType != null && status != null) {
+            reporter.prepareEndpointMetrics(roleType.name(), status.getIp(), ipPort);
         }
     }
 
@@ -336,6 +327,18 @@ public class EndpointRegistry {
 
     public int getEndpointCount(RoleType roleType) {
         return getEndpoints(roleType).size();
+    }
+
+    private static <T extends WorkerEndpoint> int visit(
+            ConcurrentHashMap<String, T> endpoints,
+            BiPredicate<String, WorkerEndpoint> visitor) {
+        int visited = 0;
+        for (Map.Entry<String, T> entry : endpoints.entrySet()) {
+            if (visitor.test(entry.getKey(), entry.getValue())) {
+                visited++;
+            }
+        }
+        return visited;
     }
 
     /**

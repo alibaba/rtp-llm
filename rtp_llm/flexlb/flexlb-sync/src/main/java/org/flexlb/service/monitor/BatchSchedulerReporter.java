@@ -6,7 +6,6 @@ import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
-import org.flexlb.metric.MetricLease;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -327,32 +326,20 @@ public class BatchSchedulerReporter {
         monitor.report(DISPATCH_ACK_TIME_MS, tags, ackTimeMs);
     }
 
-    /**
-     * Own the metrics associated with one dynamic endpoint. Prefill-capable roles
-     * also prepare their schedule-path meters before traffic starts.
-     */
-    public MetricLease acquireEndpointMetrics(String role, String engineIp, String engineIpPort,
-                                              long retirementGraceMs) {
+    /** Prepare schedule-path meters before an endpoint receives traffic. */
+    public void prepareEndpointMetrics(String role, String engineIp, String engineIpPort) {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
                 "role", role);
-        MetricLease lease = monitor.acquireEndpointScope(tags, retirementGraceMs);
-        lease = lease == null ? MetricLease.noop() : lease;
-        try {
-            if (RoleType.PREFILL.name().equals(role) || RoleType.PDFUSION.name().equals(role)) {
-                monitor.prepare(DISPATCH_ACK_TIME_MS, tags);
-                monitor.prepare(ROUTE_SUBMIT_TIME_MS, tags);
-                monitor.prepare(BATCHER_QUEUE_WAIT_TIME_MS, tags);
-                for (String reason : FIXED_WINDOW_DISPATCH_REASONS) {
-                    FlexMetricTags reasonTags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
-                            "role", role,
-                            "reason", reason);
-                    monitor.prepare(ENGINE_BALANCING_MASTER_DISPATCH_REASON, reasonTags);
-                }
+        if (RoleType.PREFILL.name().equals(role) || RoleType.PDFUSION.name().equals(role)) {
+            monitor.prepare(DISPATCH_ACK_TIME_MS, tags);
+            monitor.prepare(ROUTE_SUBMIT_TIME_MS, tags);
+            monitor.prepare(BATCHER_QUEUE_WAIT_TIME_MS, tags);
+            for (String reason : FIXED_WINDOW_DISPATCH_REASONS) {
+                FlexMetricTags reasonTags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+                        "role", role,
+                        "reason", reason);
+                monitor.prepare(ENGINE_BALANCING_MASTER_DISPATCH_REASON, reasonTags);
             }
-            return lease;
-        } catch (RuntimeException | Error e) {
-            lease.close();
-            throw e;
         }
     }
 
