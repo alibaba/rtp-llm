@@ -412,6 +412,10 @@ def h20_oss_suites():
             smoke_test(
                 name="next_pd",
                 task_info="data/model/qwen3_next/q_r_next_fp8_tp2_pd_sep.json",
+                envs={
+                    "prefill": ["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                    "decode": ["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                },
                 smoke_args={
                     "prefill": "--load_cache_timeout_ms 120000 --seq_size_per_block 2048 --act_type BF16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --reserver_runtime_mem_mb 9861 --ssm_state_dtype fp32",
                     "decode": "--load_cache_timeout_ms 120000 --seq_size_per_block 2048 --act_type BF16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --reserver_runtime_mem_mb 9861 --ssm_state_dtype fp32"
