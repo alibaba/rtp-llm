@@ -421,6 +421,11 @@ class ModelRpcClient(object):
         self._options = []
         for key, value in client_config.items():
             self._options.append((key, value))
+
+        # Explicitly set max message size to 1GB
+        self._options.append(("grpc.max_send_message_length", 1024 * 1024 * 1024))
+        self._options.append(("grpc.max_receive_message_length", 1024 * 1024 * 1024))
+
         logging.info(f"client options: {self._options}")
 
         # Initialize the channel pool

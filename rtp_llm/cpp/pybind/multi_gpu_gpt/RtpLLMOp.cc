@@ -306,18 +306,17 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                              py::object                                    token_processor) {
     std::string server_address;
-    int64_t     http_port                 = 0;
-    int64_t     model_rpc_port            = 0;
-    bool        start_grpc_before_init    = false;
+    int64_t     http_port              = 0;
+    int64_t     model_rpc_port         = 0;
+    bool        start_grpc_before_init = false;
     {
         pybind11::gil_scoped_acquire acquire;
-        http_port                          = maga_init_params.server_config.attr("http_port").cast<int64_t>();
-        model_rpc_port                     = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
-        auto role_type                     = maga_init_params.pd_sep_config.role_type;
-        start_grpc_before_init             = model_rpc_port >= 0
-                                 && autil::EnvUtil::getEnv("RTP_LLM_CROSS_NODE_CPU_TP_BROADCAST", false)
-                                 && maga_init_params.parallelism_config.tp_size
-                                        > maga_init_params.parallelism_config.local_world_size;
+        http_port      = maga_init_params.server_config.attr("http_port").cast<int64_t>();
+        model_rpc_port = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
+        auto role_type = maga_init_params.pd_sep_config.role_type;
+        start_grpc_before_init =
+            model_rpc_port >= 0 && autil::EnvUtil::getEnv("RTP_LLM_CROSS_NODE_CPU_TP_BROADCAST", false)
+            && maga_init_params.parallelism_config.tp_size > maga_init_params.parallelism_config.local_world_size;
         // NOTE: ip/ip段可自定义为所需范围。
         server_address = "0.0.0.0:" + std::to_string(model_rpc_port);
         if (role_type == RoleType::PREFILL || role_type == RoleType::DECODE) {
@@ -358,6 +357,9 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         builder.SetSyncServerOption(grpc::ServerBuilder::MAX_POLLERS, grpc_config.max_server_pollers);
         RTP_LLM_LOG_INFO("grpc sync server MAX_POLLERS: %d", grpc_config.max_server_pollers);
     }
+    // Fix: Increase max message size to 1GB to support large embedding inputs
+    builder.AddChannelArgument(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, 1024 * 1024 * 1024);
+    builder.AddChannelArgument(GRPC_ARG_MAX_SEND_MESSAGE_LENGTH, 1024 * 1024 * 1024);
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(model_rpc_service_.get());
 
@@ -367,7 +369,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
     RTP_LLM_LOG_INFO("Server listening on %s", server_address.c_str());
     if (start_grpc_before_init) {
         pybind11::gil_scoped_acquire acquire;
-        grpc::Status grpc_status =
+        grpc::Status                 grpc_status =
             model_rpc_service_->init(maga_init_params, std::move(mm_process_engine), std::move(propose_params));
         if (!grpc_status.ok()) {
             RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
