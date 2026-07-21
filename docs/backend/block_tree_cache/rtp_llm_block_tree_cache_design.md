@@ -5,7 +5,7 @@
 ---
 
 📚 **BlockTreeCache 设计文档系列**
-| **设计文档（主）** | [C++ 代码参考](rtp_llm_block_tree_cache_code_reference.md) | [示例与详细图示](rtp_llm_block_tree_cache_examples.md) |
+| **设计文档（主）** | [C++ 代码参考](rtp_llm_block_tree_cache_code_reference.md) | [示例与详细图示](rtp_llm_block_tree_cache_examples.md) | [验收场景](rtp_llm_block_tree_cache_acceptance.md) |
 
 ---
 
