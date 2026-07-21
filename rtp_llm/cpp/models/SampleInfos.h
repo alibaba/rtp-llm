@@ -81,6 +81,14 @@ public:
     mutable torch::Tensor cum_log_probs;  // shape: [batch_size]
     mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size]
 
+    // Raw LM-head rows needed by return_logprobs requests. The gatherer snapshots
+    // only those rows before logits processors/sampling can mutate logits, and
+    // crops the columns to the model's real (unpadded) vocabulary. Row indices
+    // refer to the untiled model-output batch and make the compact mapping
+    // explicit across the sampler/async-dispatch boundary.
+    torch::Tensor raw_logprobs_logits;       // [logprobs_batch_size, real_vocab_size]
+    torch::Tensor raw_logprobs_row_indices;  // CPU int64 [logprobs_batch_size]
+
     std::vector<at::Generator> generator;
 };
 
@@ -94,7 +102,9 @@ public:
     std::vector<std::optional<ErrorInfo>> processor_errors;
     // The draft distribution is a one-hot at token_ids and need not be
     // materialized as [batch, speculative_steps, vocab].
-    bool token_ids_are_point_mass = false;
+    bool          token_ids_are_point_mass = false;
+    torch::Tensor raw_logprobs_logits;
+    torch::Tensor raw_logprobs_row_indices;
 };
 
 struct MergedOutput {

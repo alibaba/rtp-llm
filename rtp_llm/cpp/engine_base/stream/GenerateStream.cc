@@ -26,6 +26,8 @@ namespace rtp_llm {
 
 namespace {
 
+constexpr int64_t kInitialLogprobsHistoryCapacity = 64;
+
 std::optional<std::string> validateOutputVocabRequest(GenerateConfig& config, size_t output_vocab_size) {
     if (config.repetition_penalty != 1.0f || config.presence_penalty != 0.0f || config.frequency_penalty != 0.0f) {
         return "output vocabulary pruning does not support active repetition, presence, or frequency penalties";
@@ -36,8 +38,9 @@ std::optional<std::string> validateOutputVocabRequest(GenerateConfig& config, si
     if (config.in_think_mode) {
         return "output vocabulary pruning does not support think mode";
     }
-    if (config.return_logits || config.return_prompt_logits || config.return_all_probs != ReturnAllProbsMode::NONE
-        || config.calculate_loss != 0 || !config.select_tokens_id.empty() || !config.select_tokens_str.empty()) {
+    if (config.return_logits || config.return_logprobs || config.return_prompt_logits
+        || config.return_all_probs != ReturnAllProbsMode::NONE || config.calculate_loss != 0
+        || !config.select_tokens_id.empty() || !config.select_tokens_str.empty()) {
         return "output vocabulary pruning does not support full-vocabulary logits, probabilities, labels, or loss";
     }
     if (config.hasNumBeams() && output_vocab_size <= 2 * static_cast<size_t>(config.maxNumBeams())) {
@@ -83,6 +86,11 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     // batch size depends on perf_test_, initialize it first
     perf_test_ = perf_test || autil::EnvUtil::getEnv("PERF_TEST", false);
+    RTP_LLM_CHECK_WITH_INFO(!generate_input_->generate_config->return_logprobs
+                                || (!generate_input_->generate_config->hasNumBeams()
+                                    && generate_input_->generate_config->num_return_sequences <= 1),
+                            "return_logprobs does not support beam search or num_return_sequences > 1");
+    logprobs_content_started_->store(!generate_input_->generate_config->in_think_mode, std::memory_order_relaxed);
     if (perf_test_ && hasNumBeams()) {
         // TODO(zhangjianning.zjn): support perf test for beam search
         RTP_LLM_LOG_WARNING("beam search does not support PERF_TEST for now");
@@ -584,6 +592,69 @@ torch::Tensor GenerateStream::completeTokenIds() {
 std::vector<int> GenerateStream::completeTokenIdsVec(int batch_idx) {
     RTP_LLM_CHECK(batch_idx < currentBatchSize());
     return complete_token_ids_->completeTokenIdsVec(batch_idx);
+}
+
+bool GenerateStream::hasLogprobsContentStarted() const {
+    return logprobs_content_started_->load(std::memory_order_acquire);
+}
+
+void GenerateStream::updateLogprobsContentStarted(int old_seq_length) {
+    if (hasLogprobsContentStarted()) {
+        return;
+    }
+    const auto& config = *generate_input_->generate_config;
+    if (!config.return_logprobs || !config.in_think_mode || config.end_think_token_ids.empty()) {
+        return;
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(currentBatchSize() == 1,
+                            "content logprob phase tracking only supports single-sequence generation");
+    const int32_t  close_token_id = config.end_think_token_ids.front();
+    const int32_t* token_ids      = complete_token_ids_->data(0);
+    for (int32_t pos = std::max(old_seq_length, inputLength()); pos < seqLength(); ++pos) {
+        if (token_ids[pos] == close_token_id) {
+            logprobs_content_started_->store(true, std::memory_order_release);
+            return;
+        }
+    }
+}
+
+int32_t GenerateStream::logprobsContentOffset(const torch::Tensor& candidate_tokens, int32_t num_new_tokens) const {
+    RTP_LLM_CHECK(num_new_tokens >= 0);
+    if (num_new_tokens == 0 || hasLogprobsContentStarted()) {
+        return 0;
+    }
+
+    const auto& config = *generate_input_->generate_config;
+    if (!config.in_think_mode || config.end_think_token_ids.empty()) {
+        return num_new_tokens;
+    }
+    RTP_LLM_CHECK(candidate_tokens.defined());
+    RTP_LLM_CHECK_WITH_INFO(currentBatchSize() == 1 && nextBatchSize() == 1,
+                            "content logprob offset only supports single-sequence generation");
+
+    auto tokens_cpu          = candidate_tokens.is_cuda() ? candidate_tokens.cpu() : candidate_tokens;
+    tokens_cpu               = tokens_cpu.to(torch::kInt32).contiguous();
+    const int32_t* token_ptr = nullptr;
+    if (tokens_cpu.dim() == 1) {
+        RTP_LLM_CHECK(num_new_tokens <= tokens_cpu.size(0));
+        token_ptr = tokens_cpu.data_ptr<int32_t>();
+    } else {
+        RTP_LLM_CHECK(tokens_cpu.dim() == 2);
+        RTP_LLM_CHECK(tokens_cpu.size(0) == 1);
+        RTP_LLM_CHECK(num_new_tokens <= tokens_cpu.size(1));
+        token_ptr = tokens_cpu.data_ptr<int32_t>();
+    }
+
+    const int32_t close_token_id = config.end_think_token_ids.front();
+    for (int32_t offset = 0; offset < num_new_tokens; ++offset) {
+        if (token_ptr[offset] == close_token_id) {
+            // The close token itself is reasoning. The next token, including a
+            // textual delimiter tail, is the first content-logprob position.
+            return offset + 1;
+        }
+    }
+    return num_new_tokens;
 }
 
 int GenerateStream::currentExecuteTokenSize() {
@@ -1173,8 +1244,9 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
         const_cast<torch::Tensor&>(new_tokens).zero_();
     }
 
-    auto num_new_tokens = update_info.num_new_tokens;
-    int  cur_cached_len = seqLength() - 1;
+    const int old_seq_length = seqLength();
+    auto      num_new_tokens = update_info.num_new_tokens;
+    int       cur_cached_len = seqLength() - 1;
 
     int error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,
@@ -1192,6 +1264,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                                    + " out of vocab size: " + std::to_string(vocab_size_));
         return;
     }
+    num_new_tokens = std::max(0, seqLength() - old_seq_length);
 
     int nxt_cached_len   = seqLength() - 1;
     int accept_token_num = nxt_cached_len - cur_cached_len;
@@ -1213,73 +1286,91 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
         }
     }
 
-    // update speculative output buffer
-    int  target_last_token = new_tokens.data_ptr<int>()[num_new_tokens - 1];
-    int* spec_tokens       = sp_output_buffer_->tokens.data_ptr<int>();
-    spec_tokens[0]         = target_last_token;
-    if (update_info.draft_token >= 0) {
-        RTP_LLM_CHECK_WITH_INFO(sp_output_buffer_->tokens.numel() >= 2,
-                                "speculative token buffer must contain target and draft slots");
-        spec_tokens[1] = update_info.draft_token;
-        propose_token_ = {target_last_token, update_info.draft_token};
-    } else {
-        // The legacy CPU side channel has no proposal. This covers both
-        // commit-only steps and GPU-only fast paths, so GPU proposal lifetime
-        // is controlled independently by draft_token_gpu below.
-        propose_token_.clear();
+    if (num_new_tokens > 0) {
+        // update speculative output buffer
+        int  target_last_token = new_tokens.data_ptr<int>()[num_new_tokens - 1];
+        int* spec_tokens       = sp_output_buffer_->tokens.data_ptr<int>();
+        spec_tokens[0]         = target_last_token;
+        if (update_info.draft_token >= 0) {
+            RTP_LLM_CHECK_WITH_INFO(sp_output_buffer_->tokens.numel() >= 2,
+                                    "speculative token buffer must contain target and draft slots");
+            spec_tokens[1] = update_info.draft_token;
+            propose_token_ = {target_last_token, update_info.draft_token};
+        } else {
+            // The legacy CPU side channel has no proposal. This covers both
+            // commit-only steps and GPU-only fast paths, so GPU proposal lifetime
+            // is controlled independently by draft_token_gpu below.
+            propose_token_.clear();
+        }
+
+        sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
+        sp_output_buffer_->all_probs     = update_info.draft_token_probs;
+        // Apply the explicit tri-state proposal update. PD partial updates use
+        // nullopt to preserve the handoff proposal; GPU/CPU proposal producers use
+        // a defined/undefined Tensor respectively to replace or clear the mirror.
+        if (update_info.draft_token_gpu.has_value()) {
+            sp_output_buffer_->propose_tokens_gpu = *update_info.draft_token_gpu;
+        }
+
+        // for spec-decode linear attention, we need to adjust cache blocks
+        if (accept_token_num > 1 && stream_cache_resource_) {
+            int seq_size_per_block = seqSizePerBlock();
+
+            // 1. swap cache blocks of accept tokens to corresponding blocks
+            auto [cached_src_block_idx, cached_des_block_idx] =
+                getCachedTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
+            stream_cache_resource_->swapLinearBlocks(0, cached_src_block_idx, cached_des_block_idx);
+
+            // 2. swap final block of accept tokens to the next sequence block
+            auto [src_block_idx, des_block_idx] =
+                getFinalTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
+            stream_cache_resource_->swapLinearBlocks(0, src_block_idx, des_block_idx);
+
+            RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] swap cache blocks: %d -> %d, %d -> %d",
+                              streamLogTag().c_str(),
+                              cur_cached_len + 1,
+                              nxt_cached_len + 1,
+                              cached_src_block_idx,
+                              cached_des_block_idx,
+                              src_block_idx,
+                              des_block_idx);
+        } else {
+            RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] no swap cache blocks",
+                              streamLogTag().c_str(),
+                              cur_cached_len + 1,
+                              nxt_cached_len + 1);
+        }
     }
 
-    sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
-    sp_output_buffer_->all_probs     = update_info.draft_token_probs;
-    // Apply the explicit tri-state proposal update. PD partial updates use
-    // nullopt to preserve the handoff proposal; GPU/CPU proposal producers use
-    // a defined/undefined Tensor respectively to replace or clear the mirror.
-    if (update_info.draft_token_gpu.has_value()) {
-        sp_output_buffer_->propose_tokens_gpu = *update_info.draft_token_gpu;
-    }
-
-    // for spec-decode linear attention, we need to adjust cache blocks
-    if (accept_token_num > 1 && stream_cache_resource_) {
-        int seq_size_per_block = seqSizePerBlock();
-
-        // 1. swap cache blocks of accept tokens to corresponding blocks
-        auto [cached_src_block_idx, cached_des_block_idx] =
-            getCachedTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
-        stream_cache_resource_->swapLinearBlocks(0, cached_src_block_idx, cached_des_block_idx);
-
-        // 2. swap final block of accept tokens to the next sequence block
-        auto [src_block_idx, des_block_idx] =
-            getFinalTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
-        stream_cache_resource_->swapLinearBlocks(0, src_block_idx, des_block_idx);
-
-        RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] swap cache blocks: %d -> %d, %d -> %d",
-                          streamLogTag().c_str(),
-                          cur_cached_len + 1,
-                          nxt_cached_len + 1,
-                          cached_src_block_idx,
-                          cached_des_block_idx,
-                          src_block_idx,
-                          des_block_idx);
-    } else {
-        RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] no swap cache blocks",
-                          streamLogTag().c_str(),
-                          cur_cached_len + 1,
-                          nxt_cached_len + 1);
-    }
+    // CompleteTokenIds may truncate the speculative window at max-token or
+    // stop-word boundaries.  The logprob tensors contain only the content
+    // suffix, so truncate them by the committed portion after that suffix's
+    // packet-local offset rather than by the full token count.
+    const int32_t logprobs_offset         = std::min<int32_t>(update_info.logprobs_offset, num_new_tokens);
+    const int32_t committed_logprob_count = std::max<int32_t>(num_new_tokens - logprobs_offset, 0);
+    auto          narrow_logprobs         = [committed_logprob_count](const torch::Tensor& tensor) {
+        if (!tensor.defined()) {
+            return torch::Tensor();
+        }
+        RTP_LLM_CHECK(tensor.dim() >= 2);
+        RTP_LLM_CHECK(committed_logprob_count <= tensor.size(1));
+        return tensor.narrow(/*dim=*/1, /*start=*/0, committed_logprob_count);
+    };
+    auto token_logprobs        = narrow_logprobs(update_info.token_logprobs);
+    auto top_logprob_token_ids = narrow_logprobs(update_info.top_logprob_token_ids);
+    auto top_logprobs          = narrow_logprobs(update_info.top_logprobs);
 
     // update normal output buffer
-    updateOutput({new_tokens,
-                  num_new_tokens,
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  update_info.update_remote_generate,
-                  update_info.force_update_info});
+    updateOutput({.new_tokens             = new_tokens,
+                  .num_new_tokens         = num_new_tokens,
+                  .update_remote_generate = update_info.update_remote_generate,
+                  .force_update_info      = update_info.force_update_info,
+                  .token_logprobs         = token_logprobs,
+                  .top_logprob_token_ids  = top_logprob_token_ids,
+                  .top_logprobs           = top_logprobs,
+                  .output_start_pos       = old_seq_length,
+                  .logprobs_offset        = logprobs_offset});
+    updateLogprobsContentStarted(old_seq_length);
 }
 
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
@@ -1299,6 +1390,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         return;
     }
 
+    const int   old_seq_length      = seqLength();
     const auto& new_tokens          = update_info.new_tokens;
     auto        num_new_tokens      = update_info.num_new_tokens;
     const bool  prefill_only_update = num_new_tokens == 0 && generate_input_->generate_config->isPrefillOnly();
@@ -1340,7 +1432,34 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     }
 
     // TODO(xinfei.sxf) fix this (update_queue)
-    updateOutput(update_info);
+    // Preserve the pre-update sequence position. CompleteTokenIds::update may
+    // clamp requested tokens to maxTokenNum, and needFinish() may later trim a
+    // multi-token window at EOS/stop words.
+    updateOutput({update_info.new_tokens,
+                  update_info.num_new_tokens,
+                  update_info.hidden_states,
+                  update_info.logits,
+                  update_info.softmax_probs,
+                  update_info.cum_log_probs,
+                  update_info.all_probs,
+                  update_info.loss,
+                  update_info.src_batch_indices,
+                  update_info.all_hidden_states,
+                  update_info.update_remote_generate,
+                  update_info.force_update_info,
+                  update_info.prompt_logits,
+                  update_info.error_info,
+                  update_info.generation_prefill_cuda_graph_status,
+                  update_info.custom_output,
+                  update_info.token_logprobs,
+                  update_info.top_logprob_token_ids,
+                  update_info.top_logprobs,
+                  old_seq_length,
+                  update_info.logprobs_offset});
+
+    // needFinish(), called by updateOutput(), can trim this packet at EOS/stop
+    // words. Advance the cached phase only from tokens that were committed.
+    updateLogprobsContentStarted(old_seq_length);
 
     // checkFinished() 已将本轮 updateOutput 中上报的 GenerateDone/Error 事件应用到状态上，
     // 即使 moveToNext() 还未被调度器轮询，这里也能拿到与事件一致的"已完成"判断。
@@ -1470,6 +1589,91 @@ void GenerateStream::setSoftmaxProbs(const torch::Tensor& softmax_probs,
     softmax_probs_.narrow(0, 0, currentBatchSize()).narrow(1, start_pos, num_probs).copy_(probs_cpu);
 }
 
+void GenerateStream::setLogProbs(const torch::Tensor& token_logprobs,
+                                 const torch::Tensor& top_logprob_token_ids,
+                                 const torch::Tensor& top_logprobs,
+                                 const torch::Tensor& src_batch_indices,
+                                 int                  start_pos) {
+    RTP_LLM_PROFILE_FUNCTION();
+    // D2H belongs at the batch executor/dispatcher boundary. Doing it here
+    // would serialize three blocking copies for every stream and every step.
+    RTP_LLM_CHECK(!token_logprobs.is_cuda());
+    RTP_LLM_CHECK(!top_logprob_token_ids.is_cuda());
+    RTP_LLM_CHECK(!top_logprobs.is_cuda());
+    RTP_LLM_CHECK(!src_batch_indices.defined() || !src_batch_indices.is_cuda());
+
+    auto token_logprobs_cpu = token_logprobs.contiguous();
+    auto top_token_ids_cpu  = top_logprob_token_ids.contiguous();
+    auto top_logprobs_cpu   = top_logprobs.contiguous();
+
+    RTP_LLM_CHECK(token_logprobs_cpu.dim() == 2);
+    RTP_LLM_CHECK(top_token_ids_cpu.dim() == 3);
+    RTP_LLM_CHECK(top_logprobs_cpu.dim() == 3);
+    RTP_LLM_CHECK(token_logprobs_cpu.scalar_type() == torch::kFloat32);
+    RTP_LLM_CHECK(top_token_ids_cpu.scalar_type() == torch::kInt32);
+    RTP_LLM_CHECK(top_logprobs_cpu.scalar_type() == torch::kFloat32);
+    RTP_LLM_CHECK(token_logprobs_cpu.size(0) == currentBatchSize());
+    RTP_LLM_CHECK(top_token_ids_cpu.size(0) == token_logprobs_cpu.size(0));
+    RTP_LLM_CHECK(top_logprobs_cpu.size(0) == token_logprobs_cpu.size(0));
+    RTP_LLM_CHECK(top_token_ids_cpu.size(1) == token_logprobs_cpu.size(1));
+    RTP_LLM_CHECK(top_logprobs_cpu.size(1) == token_logprobs_cpu.size(1));
+    const int64_t configured_top_logprobs =
+        std::min<int64_t>(std::max<int64_t>(generate_input_->generate_config->top_logprobs, 0), vocab_size_);
+    RTP_LLM_CHECK(top_token_ids_cpu.size(2) == configured_top_logprobs);
+    RTP_LLM_CHECK(top_logprobs_cpu.size(2) == configured_top_logprobs);
+    RTP_LLM_CHECK(start_pos >= inputLength());
+    RTP_LLM_CHECK_WITH_INFO(!hasNumBeams() && numReturnSequences() <= 1,
+                            "content logprob history only supports single-sequence generation");
+    RTP_LLM_CHECK(!src_batch_indices.defined());
+
+    const int64_t num_new_tokens           = token_logprobs_cpu.size(1);
+    const int64_t history_start_pos        = logprobs_history_size_;
+    const int64_t required_capacity        = history_start_pos + num_new_tokens;
+    const int64_t physical_output_capacity = std::max<int64_t>(max_seq_len_ - inputLength(), 0);
+    RTP_LLM_CHECK(required_capacity <= physical_output_capacity);
+
+    if (!token_logprobs_.defined()) {
+        const int64_t requested_output_capacity = std::min<int64_t>(
+            std::max<int64_t>(generate_input_->generate_config->max_new_tokens, 0), physical_output_capacity);
+        const int64_t initial_capacity = std::min<int64_t>(
+            physical_output_capacity,
+            std::max<int64_t>(required_capacity,
+                              std::min<int64_t>(requested_output_capacity, kInitialLogprobsHistoryCapacity)));
+        token_logprobs_        = torch::zeros({1, initial_capacity}, torch::kFloat32);
+        top_logprob_token_ids_ = torch::zeros({1, initial_capacity, configured_top_logprobs}, torch::kInt32);
+        top_logprobs_          = torch::zeros({1, initial_capacity, configured_top_logprobs}, torch::kFloat32);
+    }
+
+    RTP_LLM_CHECK(top_logprob_token_ids_.defined());
+    RTP_LLM_CHECK(top_logprobs_.defined());
+    // Once content starts, history grows geometrically in content-relative
+    // coordinates; reasoning tokens consume no slots.
+    if (required_capacity > token_logprobs_.size(1)) {
+        const int64_t old_capacity = token_logprobs_.size(1);
+        const int64_t new_capacity = std::min<int64_t>(
+            physical_output_capacity, std::max<int64_t>(required_capacity, std::max<int64_t>(old_capacity * 2, 1)));
+        auto new_token_logprobs = torch::zeros({token_logprobs_.size(0), new_capacity}, token_logprobs_.options());
+        auto new_top_logprob_token_ids =
+            torch::zeros({top_logprob_token_ids_.size(0), new_capacity, top_logprob_token_ids_.size(2)},
+                         top_logprob_token_ids_.options());
+        auto new_top_logprobs =
+            torch::zeros({top_logprobs_.size(0), new_capacity, top_logprobs_.size(2)}, top_logprobs_.options());
+        if (old_capacity > 0) {
+            new_token_logprobs.narrow(1, 0, old_capacity).copy_(token_logprobs_);
+            new_top_logprob_token_ids.narrow(1, 0, old_capacity).copy_(top_logprob_token_ids_);
+            new_top_logprobs.narrow(1, 0, old_capacity).copy_(top_logprobs_);
+        }
+        token_logprobs_        = std::move(new_token_logprobs);
+        top_logprob_token_ids_ = std::move(new_top_logprob_token_ids);
+        top_logprobs_          = std::move(new_top_logprobs);
+    }
+
+    token_logprobs_.narrow(1, history_start_pos, num_new_tokens).copy_(token_logprobs_cpu);
+    top_logprob_token_ids_.narrow(1, history_start_pos, num_new_tokens).copy_(top_token_ids_cpu);
+    top_logprobs_.narrow(1, history_start_pos, num_new_tokens).copy_(top_logprobs_cpu);
+    logprobs_history_size_ += num_new_tokens;
+}
+
 torch::Tensor GenerateStream::getLoss() {
     return loss_;
 }
@@ -1480,6 +1684,18 @@ torch::Tensor GenerateStream::getLastHiddenStates() const {
 
 torch::Tensor GenerateStream::getSoftmaxProbs() {
     return softmax_probs_;
+}
+
+torch::Tensor GenerateStream::getTokenLogProbs() const {
+    return token_logprobs_;
+}
+
+torch::Tensor GenerateStream::getTopLogprobTokenIds() const {
+    return top_logprob_token_ids_;
+}
+
+torch::Tensor GenerateStream::getTopLogProbs() const {
+    return top_logprobs_;
 }
 
 void GenerateStream::setMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter) {
@@ -1615,7 +1831,13 @@ void GenerateStream::CopyOnWrite(const GenerateStream& other_stream, bool copy_l
     complete_token_ids_ = make_shared<CompleteTokenIds>(*other_stream.complete_token_ids_, share);
     grpc_normal_device_state_pending_ =
         std::make_shared<std::atomic<bool>>(other_stream.hasGrpcNormalDeviceStatePending());
-    cum_log_probs_ = other_stream.cum_log_probs_.clone();
+    cum_log_probs_  = other_stream.cum_log_probs_.clone();
+    token_logprobs_ = other_stream.token_logprobs_.defined() ? other_stream.token_logprobs_.clone() : torch::Tensor();
+    top_logprob_token_ids_ =
+        other_stream.top_logprob_token_ids_.defined() ? other_stream.top_logprob_token_ids_.clone() : torch::Tensor();
+    top_logprobs_ = other_stream.top_logprobs_.defined() ? other_stream.top_logprobs_.clone() : torch::Tensor();
+    logprobs_history_size_    = other_stream.logprobs_history_size_;
+    logprobs_content_started_ = std::make_shared<std::atomic<bool>>(other_stream.hasLogprobsContentStarted());
     if (other_stream.calculateLoss() && copy_loss) {
         loss_ = other_stream.loss_.clone();
     } else {

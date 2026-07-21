@@ -96,6 +96,8 @@ public:
     bool                          force_disable_sp_run     = false;
     bool                          force_sp_accept          = false;
     ReturnAllProbsMode            return_all_probs         = ReturnAllProbsMode::NONE;
+    bool                          return_logprobs          = false;
+    int                           top_logprobs             = 0;
     bool                          return_softmax_probs     = false;
     bool                          aux_info                 = true;
     std::vector<std::vector<int>> stop_words_list;
@@ -188,6 +190,9 @@ public:
         if (return_all_probs != ReturnAllProbsMode::NONE) {
             throw std::invalid_argument("max_new_tokens == 0 does not support return_all_probs");
         }
+        if (return_logprobs) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_logprobs");
+        }
         if (return_cum_log_probs) {
             throw std::invalid_argument("max_new_tokens == 0 does not support return_cum_log_probs");
         }
@@ -260,6 +265,7 @@ public:
                      << ", json_schema: " << summarize_optional_string(json_schema)
                      << ", regex: " << summarize_optional_string(regex) << ", ebnf: " << summarize_optional_string(ebnf)
                      << ", structural_tag: " << summarize_optional_string(structural_tag)
+                     << ", return_logprobs: " << return_logprobs << ", top_logprobs: " << top_logprobs
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
                      << ", grammar_terminate_without_stop_token: " << grammar_terminate_without_stop_token
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
@@ -376,6 +382,8 @@ public:
                 // field absent or other parse error — keep prior value
             }
         }
+        JSONIZE(return_logprobs);
+        JSONIZE(top_logprobs);
         JSONIZE(sp_advice_prompt);
         JSONIZE(sp_advice_prompt_token_ids);
         JSONIZE(in_think_mode);

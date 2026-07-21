@@ -165,6 +165,14 @@ class GenerateOutput:
     prompt_logits: Optional[Dict[str, Any]] = None
     # output of the deployment-registered post-layers CustomHandler
     custom_output: Optional[torch.Tensor] = None
+    token_logprobs: Optional[torch.Tensor] = None
+    top_logprob_token_ids: Optional[torch.Tensor] = None
+    top_logprobs: Optional[torch.Tensor] = None
+    # Compact logprob tensors cover
+    # output_ids[logprobs_offset:logprobs_offset + logprobs_count].  ``None``
+    # denotes the legacy one-row-per-output-token contract.
+    logprobs_offset: Optional[int] = None
+    logprobs_count: Optional[int] = None
 
     class Config:
         arbitrary_types_allowed = True

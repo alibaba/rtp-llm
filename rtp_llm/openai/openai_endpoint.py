@@ -304,18 +304,12 @@ class OpenaiEndpoint(object):
             config.chat_id = request.chat_id
         if request.seed != None:
             config.random_seed = request.seed
-        if request.logprobs != None:
-            if not request.logprobs:
-                config.return_all_probs = ReturnAllProbsMode.NONE
-            # Priority: if extra_configs.return_all_probs is already set to
-            # something non-NONE (typically ORIGINAL), honor that — caller has
-            # explicitly opted into a specific mode. Only fall through to
-            # logprobs_mode when no extra_configs override is present.
-            elif config.return_all_probs == ReturnAllProbsMode.NONE:
-                if request.logprobs_mode == "original":
-                    config.return_all_probs = ReturnAllProbsMode.ORIGINAL
-                else:
-                    config.return_all_probs = ReturnAllProbsMode.DEFAULT
+        if request.logprobs is not None:
+            config.return_logprobs = request.logprobs
+            if request.top_logprobs is not None:
+                config.top_logprobs = request.top_logprobs
+            elif not request.logprobs:
+                config.top_logprobs = 0
         if request.logprobs or request.functions:
             config.is_streaming = True
         if request.prompt_logprobs is not None:
