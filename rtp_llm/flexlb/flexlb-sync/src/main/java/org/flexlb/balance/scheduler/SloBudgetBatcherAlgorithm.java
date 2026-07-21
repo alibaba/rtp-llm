@@ -47,7 +47,7 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
         int minBatchSize = ctx.cfg().getFlexlbBatchMinSize();
         long emergencyBudgetMs = ctx.cfg().getFlexlbBatchEmergencyBudgetMs();
         int maxScan = ctx.cfg().getFlexlbBatchScanAhead();
-        int batchMaxTokens = ctx.cfg().getFlexlbBatchMaxCapacity();
+        long batchMaxTokens = ctx.batchTokenCapacity();
         int batchMaxCount = Math.max(1, ctx.cfg().getFlexlbBatchSizeMax());
 
         BatchItem head = ctx.peek();
@@ -60,6 +60,12 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
         // 1. expired → drop
         if (budgetMs < 0) {
             dropHead(ctx, head, now, budgetMs, "deadline_expired");
+            return;
+        }
+
+        if (!BatcherContext.fitsBatchTokenCapacity(0, head.seqLen(), batchMaxTokens)) {
+            lastParkByRequest.remove(head.requestId());
+            ctx.rejectForBatchTokenCapacity(head, batchMaxTokens);
             return;
         }
 
@@ -76,10 +82,9 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
         }
 
         PrefillTimePredictor predictor = ctx.prefillEp().getPredictor();
-        long effectiveTokens = Math.max(head.seqLen(), batchMaxTokens);
         long baseGuardMs = dispatchGuardMs(ctx, emergencyBudgetMs);
         BatchPick pick = pickWithinIncrementalBudget(
-                ctx, head, predictor, Math.max(0, budgetMs - baseGuardMs), maxScan, batchMaxCount, effectiveTokens);
+                ctx, head, predictor, Math.max(0, budgetMs - baseGuardMs), maxScan, batchMaxCount, batchMaxTokens);
         List<BatchItem> picked = pick.items();
         long incrementalCostMs = Math.max(0, pick.predMs() - pick.headPredMs());
         long latestDispatchBudgetMs = latestDispatchBudgetMs(baseGuardMs, emergencyBudgetMs, incrementalCostMs);
@@ -108,13 +113,13 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
         // protection; request count and arrival rate decide whether to keep
         // waiting for a more efficient batch.
         if (reachesMaxSize) {
-            dispatchBatch(ctx, picked, "batch_size_max", fillRatio, batchMaxTokens, trace);
+            dispatchBatch(ctx, picked, "batch_size_max", fillRatio, trace);
         } else if (mustDispatch) {
-            dispatchBatch(ctx, picked, "deadline_guard", fillRatio, batchMaxTokens, trace);
+            dispatchBatch(ctx, picked, "deadline_guard", fillRatio, trace);
         } else if (insideWindow && reachesTarget && !shouldWaitForMore) {
-            dispatchBatch(ctx, picked, "target_batch_size", fillRatio, batchMaxTokens, trace);
+            dispatchBatch(ctx, picked, "target_batch_size", fillRatio, trace);
         } else if (insideWindow && !shouldWaitForMore) {
-            dispatchBatch(ctx, picked, "arrival_guard", fillRatio, batchMaxTokens, trace);
+            dispatchBatch(ctx, picked, "arrival_guard", fillRatio, trace);
         } else {
             recordPark(ctx, head, parkReason(insideWindow, picked.size(), minBatchSize, batchMaxCount,
                     targetBatchSize, shouldWaitForMore), budgetMs, now);
@@ -158,10 +163,10 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
             }
             scanned++;
 
-            long nextTokens = sumTokens + c.seqLen();
-            if (nextTokens > batchMaxTokens) {
+            if (!BatcherContext.fitsBatchTokenCapacity(sumTokens, c.seqLen(), batchMaxTokens)) {
                 continue;
             }
+            long nextTokens = sumTokens + c.seqLen();
 
             List<BatchItem> trial = new ArrayList<>(picked.size() + 1);
             trial.addAll(picked);
@@ -345,7 +350,6 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
                                List<BatchItem> picked,
                                String reason,
                                double fillRatio,
-                               long batchMaxTokens,
                                DecisionTrace trace) {
         BatchItem head = picked.get(0);
         Logger.info("flexlb_batch_decision reason={} picked_size={} target_batch_size={} "
@@ -361,7 +365,7 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
             lastParkByRequest.remove(item.requestId());
         }
         ctx.dispatch(picked,
-                new DispatchMeta(reason, fillRatio, batchMaxTokens, ctx.size() - picked.size()));
+                new DispatchMeta(reason, fillRatio, ctx.size() - picked.size()));
     }
 
     // ==================== Park ====================

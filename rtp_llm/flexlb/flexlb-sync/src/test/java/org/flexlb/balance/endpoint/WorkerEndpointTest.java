@@ -187,6 +187,8 @@ class WorkerEndpointTest {
         resp.setDpSize(4);
         resp.setTpSize(2);
         resp.setDpRank(1);
+        resp.setMaxSeqLen(131072L);
+        resp.setMaxBatchTokensSize(262144L);
         resp.setAvailableKvCacheTokens(10000L);
         resp.setStatusVersion(5L);
         resp.setLatestFinishedVersion(3L);
@@ -201,6 +203,8 @@ class WorkerEndpointTest {
         assertEquals(4L, status.getDpSize());
         assertEquals(2L, status.getTpSize());
         assertEquals(1L, status.getDpRank());
+        assertEquals(131072L, status.getMaxSeqLen());
+        assertEquals(262144L, status.getMaxBatchTokensSize());
         assertEquals(10000L, status.getAvailableKvCacheTokens().get());
         assertEquals(5L, status.getStatusVersion().get());
         // latestFinishedTaskVersion is intentionally NOT set by updateFromResponse();
