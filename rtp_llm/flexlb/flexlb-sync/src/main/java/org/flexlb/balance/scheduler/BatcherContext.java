@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 
 import java.util.ArrayList;
@@ -137,6 +138,49 @@ public class BatcherContext {
         List<BatchItem> candidates = new ArrayList<>(queue);
         candidates.sort(Comparator.comparingLong(BatchItem::sortKey));
         return candidates;
+    }
+
+    /**
+     * Effective strict token limit for one FlexLB batch.
+     *
+     * <p>The Engine's FIFO scheduler rejects a group when the aggregate context
+     * length is greater than or equal to {@code max_batch_tokens_size}. Prefer
+     * that exact worker-reported limit; {@code max_seq_len} is a conservative
+     * fallback for workers that have not populated the newer field yet. The
+     * FlexLB setting remains an operator-controlled upper bound.
+     */
+    long batchTokenCapacity() {
+        long capacity = positiveOrUnlimited(cfg.getFlexlbBatchMaxCapacity());
+        WorkerStatus status = prefillEp != null ? prefillEp.getStatus() : null;
+        if (status == null) {
+            return capacity;
+        }
+
+        long engineCapacity = status.getMaxBatchTokensSize();
+        if (engineCapacity <= 0) {
+            engineCapacity = status.getMaxSeqLen();
+        }
+        return Math.min(capacity, positiveOrUnlimited(engineCapacity));
+    }
+
+    /** Engine admission uses a strict {@code total < capacity} comparison. */
+    static boolean fitsBatchTokenCapacity(long currentTokens, long itemTokens, long capacity) {
+        if (currentTokens < 0 || itemTokens < 0 || capacity <= 0 || currentTokens >= capacity) {
+            return false;
+        }
+        return itemTokens < capacity - currentTokens;
+    }
+
+    void rejectForBatchTokenCapacity(BatchItem item, long capacity) {
+        if (remove(item)) {
+            handler.onOfferFailure(item, new IllegalArgumentException(
+                    "request seq_len=" + item.seqLen()
+                            + " cannot fit strict batch token capacity=" + capacity));
+        }
+    }
+
+    private static long positiveOrUnlimited(long value) {
+        return value > 0 ? value : Long.MAX_VALUE;
     }
 
     // ---- dispatch helpers (shared infrastructure) ----
