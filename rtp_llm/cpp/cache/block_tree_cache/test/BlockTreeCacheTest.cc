@@ -5,9 +5,10 @@
 #include <condition_variable>
 #include <functional>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 
-#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
@@ -68,15 +69,15 @@ std::vector<DeviceBlockPoolPtr> makeStructuralDevicePools(size_t count, const st
         layout.seq_size_per_block         = 1;
         layout.kernel_blocks_per_kv_block = 1;
 
-        BlockPoolConfig config;
-        config.pool_name        = pool_name_prefix + "_" + std::to_string(next_pool_id.fetch_add(1));
-        config.block_num        = static_cast<uint32_t>(physical_block_count);
-        config.total_size_bytes = layout.total_size_bytes;
-        config.memory_layouts   = {layout};
+        auto config                     = std::make_shared<DeviceBlockPoolConfig>();
+        config->pool_type               = BlockPoolType::DEVICE;
+        config->pool_name               = pool_name_prefix + "_" + std::to_string(next_pool_id.fetch_add(1));
+        config->physical_block_count    = physical_block_count;
+        config->total_size_bytes        = layout.total_size_bytes;
+        config->memory_layouts          = {layout};
+        config->use_cuda_malloc_backing = false;
 
-        auto backing_pool = std::make_shared<BlockPool>(config, AllocationType::HOST);
-        RTP_LLM_CHECK(backing_pool->init());
-        auto device_pool = std::make_shared<DeviceBlockPool>(std::move(backing_pool));
+        auto device_pool = std::make_shared<DeviceBlockPool>(config);
         RTP_LLM_CHECK(device_pool->init());
         pools.push_back(std::move(device_pool));
     }
@@ -108,6 +109,22 @@ private:
     std::condition_variable cv_;
     bool                    entered_{false};
     bool                    released_{false};
+};
+
+class BarrierThrowingCopyEngine final: public CopyEngine {
+public:
+    BarrierThrowingCopyEngine(const std::vector<ComponentGroupPtr>& groups,
+                              const std::vector<Component>&         components,
+                              std::shared_ptr<CallbackBarrier>      barrier):
+        CopyEngine(groups, components), barrier_(std::move(barrier)) {}
+
+    TransferHandle submit(const TransferDescriptor&) override {
+        barrier_->enterAndWait();
+        throw std::runtime_error("injected copy failure");
+    }
+
+private:
+    std::shared_ptr<CallbackBarrier> barrier_;
 };
 
 class ThreadCompletion {
@@ -403,6 +420,72 @@ TEST_F(BlockTreeCacheTest, ThreadSafety) {
 
     auto stats = cache_->getStats();
     EXPECT_EQ(stats.tree_node_count, 4u);
+}
+
+TEST(BlockTreeCacheFinalizationTest, CopyExceptionSettlesCreditsBeforePendingTaskCompletion) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    FullSWAEnvironmentOptions options;
+    options.path_length             = 1;
+    options.usable_device_blocks    = 4;
+    options.usable_host_blocks      = 4;
+    options.enable_disk             = false;
+    options.enable_reverse_eviction = false;
+    auto environment                = FullSWAEnvironment::create(options);
+    ASSERT_NE(environment, nullptr);
+    ASSERT_NE(environment->cache, nullptr);
+
+    auto barrier = std::make_shared<CallbackBarrier>();
+    auto copy_engine =
+        std::make_shared<BarrierThrowingCopyEngine>(environment->groups, environment->components, barrier);
+    BlockTreeCacheTestPeer::setCopyEngineForTest(*environment->cache, copy_engine);
+
+    environment->insertRequestPath();
+    environment->releaseRequestRefs();
+    ASSERT_TRUE(environment->allSlotsAtTier(Tier::DEVICE));
+
+    std::vector<BlockIdxType> source_blocks;
+    std::vector<size_t>       source_free_before;
+    std::vector<size_t>       source_refs_before;
+    source_blocks.reserve(environment->device_pools.size());
+    source_free_before.reserve(environment->device_pools.size());
+    source_refs_before.reserve(environment->device_pools.size());
+    for (size_t tag_id = 0; tag_id < environment->device_pools.size(); ++tag_id) {
+        const auto blocks = environment->blocksForTag(tag_id);
+        ASSERT_EQ(blocks.size(), 1u);
+        source_blocks.push_back(blocks.front());
+        source_free_before.push_back(environment->device_pools[tag_id]->freeBlocksNum());
+        source_refs_before.push_back(environment->device_pools[tag_id]->refCount(blocks.front()));
+        ASSERT_EQ(source_refs_before.back(), 1u);
+    }
+
+    environment->cache->setTierWatermark(Tier::DEVICE, 0.01, 0);
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*environment->cache);
+    ASSERT_GT(BlockTreeCacheTestPeer::pendingTasksForTest(*environment->cache), 0);
+    barrier->waitUntilEntered();
+
+    {
+        std::lock_guard<std::mutex> lock(environment->cache->mutex_);
+        EXPECT_FALSE(environment->cache->in_flight_device_release_credits_.empty());
+        environment->cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+    }
+    barrier->release();
+    environment->cache->waitForPendingTasks();
+
+    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*environment->cache), 0);
+    {
+        std::lock_guard<std::mutex> lock(environment->cache->mutex_);
+        EXPECT_TRUE(environment->cache->in_flight_device_release_credits_.empty());
+    }
+    EXPECT_TRUE(environment->allSlotsAtTier(Tier::DEVICE));
+    for (size_t tag_id = 0; tag_id < environment->device_pools.size(); ++tag_id) {
+        EXPECT_EQ(environment->device_pools[tag_id]->freeBlocksNum(), source_free_before[tag_id]);
+        EXPECT_EQ(environment->device_pools[tag_id]->refCount(source_blocks[tag_id]), source_refs_before[tag_id]);
+    }
+
+    EXPECT_NO_THROW(environment->cache.reset());
 }
 
 TEST_F(BlockTreeCacheTest, FullMatch_PreservesPathAndPoolOrder) {
@@ -955,7 +1038,7 @@ TEST_F(BlockTreeCacheTest, EmptyDevicePoolsFailBeforeGroupMutation) {
 static DeviceKVCacheGroupPtr makeInjectedDeviceGroupMarker(int group_id) {
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 1;
-    return std::make_shared<FullKVCacheGroup>(LayerIdsType{2}, std::move(spec), BlockPoolPtr{}, group_id);
+    return std::make_shared<FullKVCacheGroup>(LayerIdsType{2}, std::move(spec), DeviceBlockPoolPtr{}, group_id);
 }
 
 static std::unique_ptr<BlockTreeCache>
@@ -1230,17 +1313,26 @@ TEST_F(BlockTreeCacheTest, LoadBackDetectsHostData) {
 }
 
 static std::unique_ptr<BlockTreeCache> makeHostOnlyLoadBackCache(DeviceBlockPoolPtr device_pool = nullptr) {
+    if (device_pool == nullptr) {
+        device_pool = makeDevicePool({{1, 0}}, 1, "load_back_ticket_abort");
+    }
+    RTP_LLM_CHECK(device_pool != nullptr);
+    std::shared_ptr<HostBlockPool> host_pool = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/1);
+    RTP_LLM_CHECK(host_pool != nullptr);
+
     std::unique_ptr<BlockTree>          tree = std::make_unique<BlockTree>(1);
     std::shared_ptr<FullComponentGroup> full = std::make_shared<FullComponentGroup>();
     full->component_group_id                 = 0;
-    if (device_pool != nullptr) {
-        full->setDevicePools({device_pool}, makeTestTags(1));
-    }
+    full->setDevicePools({device_pool}, makeTestTags(1));
+    full->setHostPool(host_pool);
     std::vector<ComponentGroupPtr> groups = {full};
 
-    std::unique_ptr<BlockTreeCache> cache =
-        BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree), std::move(groups), std::vector<Component>{});
-    cache->setEnableLoadBack(true);
+    BlockTreeCacheConfig config;
+    config.enable_memory_cache            = true;
+    config.enable_load_back               = true;
+    std::unique_ptr<BlockTreeCache> cache = BlockTreeCacheTestUtil::makeBlockTreeCache(
+        std::move(tree), std::move(groups), std::vector<Component>{}, std::move(config));
+    RTP_LLM_CHECK(cache != nullptr);
 
     GroupBlockSet request_holder = full->allocateBlocks(Tier::DEVICE, 1);
     RTP_LLM_CHECK(request_holder.per_node.size() == 1);
@@ -1254,8 +1346,9 @@ static std::unique_ptr<BlockTreeCache> makeHostOnlyLoadBackCache(DeviceBlockPool
 
     BlockTreeFindResult find = cache->tree()->findNode({200});
     RTP_LLM_CHECK(find.matched_node != nullptr);
-    GroupSlot& slot          = find.matched_node->group_slots[0];
-    slot.host_block          = 7;
+    GroupSlot& slot = find.matched_node->group_slots[0];
+    slot.host_block = full->allocateSingleBlock(Tier::HOST);
+    RTP_LLM_CHECK(slot.host_block != NULL_BLOCK_IDX);
     const auto device_blocks = full->getBlocks(slot, Tier::DEVICE);
     RTP_LLM_CHECK(device_blocks == BlockIndicesType{device_block});
     full->unreferenceBlocks(GroupBlockSet{full->component_group_id, Tier::DEVICE, {device_blocks}});
@@ -1443,12 +1536,13 @@ TEST_F(BlockTreeCacheTest, LoadBackWholeBatchMappingPreflightIsAtomicForLaterInv
     ASSERT_EQ(host_pool->refCount(first_source), 2u);
     ASSERT_EQ(host_pool->refCount(second_source), 2u);
 
-    const BlockIdList request_targets = device_pool->backingPool()->malloc(2);
+    const BlockIdList request_targets = device_pool->malloc(2).value();
     ASSERT_EQ(request_targets.size(), 2u);
+    device_pool->incRef(request_targets);
     const BlockIdxType first_target  = request_targets[0];
     const BlockIdxType second_target = request_targets[1];
-    EXPECT_TRUE(device_pool->hasRequestHold(first_target));
-    EXPECT_TRUE(device_pool->hasRequestHold(second_target));
+    EXPECT_EQ(device_pool->refCount(first_target), 1u);
+    EXPECT_EQ(device_pool->refCount(second_target), 1u);
     result.load_back_ticket->items()[0].target_device_blocks = {first_target};
     result.load_back_ticket->items()[1].target_device_blocks = {second_target};
     result.load_back_ticket->items()[1].device_group_tags    = {"invalid"};
@@ -1457,8 +1551,8 @@ TEST_F(BlockTreeCacheTest, LoadBackWholeBatchMappingPreflightIsAtomicForLaterInv
     EXPECT_EQ(copy_engine->submitCount(), 0u);
     EXPECT_EQ(host_pool->refCount(first_source), 1u);
     EXPECT_EQ(host_pool->refCount(second_source), 1u);
-    EXPECT_TRUE(device_pool->hasRequestHold(first_target));
-    EXPECT_TRUE(device_pool->hasRequestHold(second_target));
+    EXPECT_EQ(device_pool->refCount(first_target), 1u);
+    EXPECT_EQ(device_pool->refCount(second_target), 1u);
 
     BlockTreeFindResult find = cache->tree()->findNode({100, 200});
     ASSERT_EQ(find.path.size(), 2u);
@@ -1469,7 +1563,7 @@ TEST_F(BlockTreeCacheTest, LoadBackWholeBatchMappingPreflightIsAtomicForLaterInv
     EXPECT_EQ(host_pool->refCount(first_source), 1u) << "committed ticket cleanup must execute exactly once";
     EXPECT_EQ(host_pool->refCount(second_source), 1u) << "committed ticket cleanup must execute exactly once";
     cache->waitForPendingTasks();
-    device_pool->backingPool()->requestFree(request_targets);
+    device_pool->decRef(request_targets);
 }
 
 TEST_F(BlockTreeCacheTest, LoadBackPreparedPrefixFailureRollsBackAllSourceAndTargetHolders) {
@@ -1538,26 +1632,24 @@ TEST_F(BlockTreeCacheTest, LoadBackPreparedPrefixFailureRollsBackAllSourceAndTar
     EXPECT_EQ(first_host_pool->refCount(first_source), 3u);
     EXPECT_EQ(second_host_pool->refCount(second_source), 2u);
 
-    const BlockIdList first_request_targets  = first_device_pool->backingPool()->malloc(1);
-    const BlockIdList second_request_targets = second_device_pool->backingPool()->malloc(1);
+    const BlockIdList first_request_targets  = first_device_pool->malloc(1).value();
+    const BlockIdList second_request_targets = second_device_pool->malloc(1).value();
     ASSERT_EQ(first_request_targets.size(), 1u);
     ASSERT_EQ(second_request_targets.size(), 1u);
+    first_device_pool->incRef(first_request_targets);
+    second_device_pool->incRef(second_request_targets);
     const BlockIdxType first_target  = first_request_targets.front();
     const BlockIdxType second_target = second_request_targets.front();
     items[0].target_device_blocks    = {first_target};
     items[1].target_device_blocks    = {first_target};
     items[2].target_device_blocks    = {second_target};
 
-    const BlockHolderRefCounts first_holders_before =
-        first_device_pool->backingPool()->blockHolderRefCounts(first_target);
-    const BlockHolderRefCounts second_holders_before =
-        second_device_pool->backingPool()->blockHolderRefCounts(second_target);
-    ASSERT_EQ(first_holders_before.request_connector, 1);
-    ASSERT_EQ(first_holders_before.block_cache, 0);
-    ASSERT_EQ(second_holders_before.request_connector, 1);
-    ASSERT_EQ(second_holders_before.block_cache, 0);
-    ASSERT_FALSE(first_device_pool->isAllocated(first_target));
-    ASSERT_FALSE(second_device_pool->isAllocated(second_target));
+    const size_t first_refs_before  = first_device_pool->refCount(first_target);
+    const size_t second_refs_before = second_device_pool->refCount(second_target);
+    ASSERT_EQ(first_refs_before, 1u);
+    ASSERT_EQ(second_refs_before, 1u);
+    ASSERT_TRUE(first_device_pool->isAllocated(first_target));
+    ASSERT_TRUE(second_device_pool->isAllocated(second_target));
 
     EXPECT_EQ(result.load_back_ticket->commit(), nullptr);
     EXPECT_EQ(copy_engine->submitCount(), 0u);
@@ -1567,18 +1659,10 @@ TEST_F(BlockTreeCacheTest, LoadBackPreparedPrefixFailureRollsBackAllSourceAndTar
     // Request ownership remains untouched for both target blocks.
     EXPECT_EQ(first_host_pool->refCount(first_source), 1u);
     EXPECT_EQ(second_host_pool->refCount(second_source), 1u);
-    EXPECT_FALSE(first_device_pool->isAllocated(first_target));
-    EXPECT_FALSE(second_device_pool->isAllocated(second_target));
-    EXPECT_TRUE(first_device_pool->hasRequestHold(first_target));
-    EXPECT_TRUE(second_device_pool->hasRequestHold(second_target));
-    const BlockHolderRefCounts first_holders_after =
-        first_device_pool->backingPool()->blockHolderRefCounts(first_target);
-    const BlockHolderRefCounts second_holders_after =
-        second_device_pool->backingPool()->blockHolderRefCounts(second_target);
-    EXPECT_EQ(first_holders_after.request_connector, first_holders_before.request_connector);
-    EXPECT_EQ(first_holders_after.block_cache, first_holders_before.block_cache);
-    EXPECT_EQ(second_holders_after.request_connector, second_holders_before.request_connector);
-    EXPECT_EQ(second_holders_after.block_cache, second_holders_before.block_cache);
+    EXPECT_TRUE(first_device_pool->isAllocated(first_target));
+    EXPECT_TRUE(second_device_pool->isAllocated(second_target));
+    EXPECT_EQ(first_device_pool->refCount(first_target), first_refs_before);
+    EXPECT_EQ(second_device_pool->refCount(second_target), second_refs_before);
 
     BlockTreeFindResult find = cache->tree()->findNode({100});
     ASSERT_NE(find.matched_node, nullptr);
@@ -1593,8 +1677,8 @@ TEST_F(BlockTreeCacheTest, LoadBackPreparedPrefixFailureRollsBackAllSourceAndTar
     result.load_back_ticket.reset();
     EXPECT_EQ(first_host_pool->refCount(first_source), 1u) << "committed ticket must not release source twice";
     EXPECT_EQ(second_host_pool->refCount(second_source), 1u) << "committed ticket must not release source twice";
-    first_device_pool->backingPool()->requestFree(first_request_targets);
-    second_device_pool->backingPool()->requestFree(second_request_targets);
+    first_device_pool->decRef(first_request_targets);
+    second_device_pool->decRef(second_request_targets);
 }
 
 TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackCoreHoldersAndRetainsRequestTarget) {
@@ -1636,12 +1720,13 @@ TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackCoreHoldersAndRetainsR
     EXPECT_EQ(result.load_back_ticket->items().front().device_group_tags, (std::vector<std::string>{"tag_0"}));
     EXPECT_EQ(host_pool->refCount(source_block), source_ref_before + 1);
 
-    const BlockIdList request_targets = device_pool->backingPool()->malloc(1);
+    const BlockIdList request_targets = device_pool->malloc(1).value();
     ASSERT_EQ(request_targets.size(), 1u);
+    device_pool->incRef(request_targets);
     const BlockIdxType request_target = request_targets.front();
-    EXPECT_TRUE(device_pool->hasRequestHold(request_target));
+    EXPECT_EQ(device_pool->refCount(request_target), 1u);
     result.load_back_ticket->items().front().target_device_blocks = {request_target};
-    ASSERT_TRUE(device_pool->hasRequestHold(request_target));
+    ASSERT_EQ(device_pool->refCount(request_target), 1u);
 
     BlockTreeCacheTestPeer::ScopedQueueRejectionGuard rejection_guard(*cache);
     ASSERT_TRUE(rejection_guard.armed());
@@ -1654,7 +1739,7 @@ TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackCoreHoldersAndRetainsR
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     EXPECT_EQ(copy_engine->submitCount(), 0u);
     EXPECT_EQ(host_pool->refCount(source_block), source_ref_before);
-    EXPECT_TRUE(device_pool->hasRequestHold(request_target));
+    EXPECT_EQ(device_pool->refCount(request_target), 1u);
 
     BlockTreeFindResult find = cache->tree()->findNode({100});
     ASSERT_NE(find.matched_node, nullptr);
@@ -1667,7 +1752,7 @@ TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackCoreHoldersAndRetainsR
     result.load_back_ticket.reset();
     EXPECT_EQ(host_pool->refCount(source_block), source_ref_before) << "committed ticket must not release source twice";
     cache->waitForPendingTasks();
-    device_pool->backingPool()->requestFree(request_targets);
+    device_pool->decRef(request_targets);
 }
 
 TEST_F(BlockTreeCacheTest, LoadBackTargetValidationFailureRollsBackAllTreeHolders) {
@@ -1799,10 +1884,11 @@ TEST_F(BlockTreeCacheTest, LoadBackTicketCommitTriggersLoadBack) {
     EXPECT_EQ(result.host_load_back_blocks, 1u);
     EXPECT_EQ(result.load_back_blocks, 1u);
 
-    const BlockIdList request_targets = device_pool->backingPool()->malloc(1);
+    const BlockIdList request_targets = device_pool->malloc(1).value();
     ASSERT_EQ(request_targets.size(), 1u);
+    device_pool->incRef(request_targets);
     const BlockIdxType request_target = request_targets.front();
-    EXPECT_TRUE(device_pool->hasRequestHold(request_target));
+    EXPECT_EQ(device_pool->refCount(request_target), 1u);
     ASSERT_EQ(result.load_back_ticket->items().size(), 1u);
     result.load_back_ticket->items()[0].target_device_blocks = {request_target};
 
@@ -1811,7 +1897,7 @@ TEST_F(BlockTreeCacheTest, LoadBackTicketCommitTriggersLoadBack) {
 
     cache->releaseMatchedBlocks(result.matched_block_sets);
     cache->waitForPendingTasks();
-    device_pool->backingPool()->requestFree(request_targets);
+    device_pool->decRef(request_targets);
 }
 
 // C006-T01: destructor drains real root/live-node holds across Device, Host, and Disk.

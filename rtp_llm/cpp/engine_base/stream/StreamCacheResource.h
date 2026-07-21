@@ -1,6 +1,5 @@
 #pragma once
 
-#include <atomic>
 #include <memory>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -135,16 +134,6 @@ public:
     }
 
 private:
-    void loadCacheSync();
-    bool launchConnectorLoad();
-    void waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context);
-    void updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context);
-    std::shared_ptr<AsyncContext> storeCacheAsync(const std::shared_ptr<BatchKVCacheResource>& batch_resource,
-                                                  bool                                         enable_memory_cache,
-                                                  bool                                         enable_remote_cache);
-    void                          waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context);
-
-private:
     GenerateStream*                stream_;
     BatchKVCacheResourcePtr        batch_kv_cache_resource_;
     ResourceContext                resource_context_;
@@ -156,15 +145,9 @@ private:
     bool                          fake_inited_           = false;
     bool                          resource_released_     = false;
     std::shared_ptr<AsyncContext> allocator_load_context_;
-    std::shared_ptr<AsyncContext> load_cache_context_;
-    int                           load_cache_retry_count_ = 0;
 
     // Connector reference counting for PD separation (RAII auto-release)
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;
-    /// Async connector load is gated to once per cache lifecycle: duplicate `initKVBlock` must
-    /// not re-issue async read (see tests). Reset in `releaseResource()` when blocks are cleared
-    /// so any future reuse of this resource can load again. Concurrent callers use `exchange`.
-    std::atomic<bool> load_cache_once_{false};
 };
 
 }  // namespace rtp_llm

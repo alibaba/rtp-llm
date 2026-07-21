@@ -65,34 +65,11 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
             }
         }
 
-        if (!shared_cache_) {
-            RTP_LLM_LOG_WARNING(
-                "ensure free blocks failed, no shared cache, free blocks: %zu, need: %d", free_blocks, required_blocks);
-            return false;
-        }
-
-        SharedBlockCache::EvictResult evict_result;
-        size_t                        freed = shared_cache_->evictAndFreeForGroup(group_id_, need_evict, &evict_result);
-
-        if (metrics_reporter_) {
-            for (const auto& [cache_key, lifetime_ms] : evict_result.evicted_lifetime_ms) {
-                RtpLLMCacheEvictionMetricsCollector collector;
-                collector.lifetime_ms = lifetime_ms;
-                kmonitor::MetricsTags tags("scope", "gpu");
-                tags.AddTag("evict_policy",
-                            evict_result.evicted_independent_group.count(cache_key) ? "independent" : "chain");
-                tags.AddTag("backing", "device");
-                metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags,
-                                                                                                           &collector);
-            }
-        }
-
-        if (freed == 0) {
-            RTP_LLM_LOG_WARNING("ensure free blocks failed, free blocks: %zu, need evict blocks: %zu",
-                                block_pool_->freeBlocksNum(),
-                                need_evict);
-            return false;
-        }
+        RTP_LLM_LOG_WARNING("ensure free blocks failed, no BlockTree eviction callback for tag=%s, free=%zu, need=%d",
+                            tag().c_str(),
+                            free_blocks,
+                            required_blocks);
+        return false;
     }
 
     return true;
@@ -115,19 +92,9 @@ MatchResult KVCacheGroup::matchSingleKey(CacheKeyType /*cache_key*/) const {
 void KVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
                                    const BlockIndicesType& block_indices,
                                    bool                    is_resident) {
-    if (!shared_cache_) {
-        return;
-    }
-
-    const size_t block_num = std::min(cache_keys.size(), block_indices.size());
-    for (size_t i = 0; i < block_num; ++i) {
-        if (isNullBlockIdx(block_indices[i])) {
-            continue;
-        }
-        std::vector<BlockIdxType> group_block_ids(static_cast<size_t>(group_id_ + 1), NULL_BLOCK_IDX);
-        group_block_ids[static_cast<size_t>(group_id_)] = block_indices[i];
-        shared_cache_->put(cache_keys[i], group_block_ids, is_resident);
-    }
+    (void)cache_keys;
+    (void)block_indices;
+    (void)is_resident;
 }
 
 bool KVCacheGroup::materializePositions(BlockIds& block_ids, const std::vector<size_t>& positions) {
@@ -155,15 +122,13 @@ bool KVCacheGroup::materializePositions(BlockIds& block_ids, const std::vector<s
     if (!ensureFreeBlocks(static_cast<int>(missing_positions.size()))) {
         return false;
     }
-    auto allocated = block_pool_->malloc(static_cast<int>(missing_positions.size()));
-    if (allocated.size() != missing_positions.size()) {
-        if (!allocated.empty()) {
-            block_pool_->requestFree(allocated);
-        }
+    auto allocated = block_pool_->malloc(missing_positions.size());
+    if (!allocated.has_value() || allocated->size() != missing_positions.size()) {
         return false;
     }
+    block_pool_->incRef(*allocated);
     for (size_t i = 0; i < missing_positions.size(); ++i) {
-        block_ids.setAt(missing_positions[i], allocated[i]);
+        block_ids.setAt(missing_positions[i], (*allocated)[i]);
     }
     return true;
 }
@@ -239,7 +204,7 @@ KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id, int partition_cou
 }
 
 void KVCacheGroup::reference(const BlockIndicesType& new_block_indices) {
-    block_pool_->requestReference(new_block_indices);
+    block_pool_->incRef(new_block_indices);
 }
 
 bool KVCacheGroup::prefixReusable() const {

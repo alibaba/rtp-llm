@@ -107,6 +107,9 @@ size_t FIFOSchedulerBase::evaluateAndUpdateStreams(list<GenerateStreamPtr>& stre
         auto state     = (*it)->getStatus();
         auto new_state = (*it)->moveToNext();
         if (new_state != state) {
+            if (state == StreamState::LOADING_CACHE && new_state == StreamState::WAITING) {
+                (*it)->clearCanRun();
+            }
             addStreamToNewState(*it, new_state);
             it = streams.erase(it);
             ++moved_count;

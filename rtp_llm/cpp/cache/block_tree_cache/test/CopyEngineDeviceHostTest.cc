@@ -38,9 +38,11 @@ static DeviceBlockPoolPtr
 makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs, size_t usable_count, const std::string& pool_name) {
     const auto physical_block_count = usable_count + 1;
 
-    BlockPoolConfig config;
-    config.pool_name = pool_name;
-    config.block_num = physical_block_count;
+    auto config                     = std::make_shared<DeviceBlockPoolConfig>();
+    config->pool_type               = BlockPoolType::DEVICE;
+    config->pool_name               = pool_name;
+    config->physical_block_count    = physical_block_count;
+    config->use_cuda_malloc_backing = false;
 
     size_t offset = 0;
     for (const auto& spec : specs) {
@@ -67,13 +69,11 @@ makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs, size_t usable_co
         layout.local_head_num_kv          = 1;
         layout.seq_size_per_block         = 1;
         layout.kernel_blocks_per_kv_block = 1;
-        config.memory_layouts.push_back(layout);
+        config->memory_layouts.push_back(layout);
     }
-    config.total_size_bytes = offset;
+    config->total_size_bytes = offset;
 
-    auto backing_pool = std::make_shared<BlockPool>(config);
-    RTP_LLM_CHECK(backing_pool->init());
-    auto pool = std::make_shared<DeviceBlockPool>(backing_pool);
+    auto pool = std::make_shared<DeviceBlockPool>(config);
     RTP_LLM_CHECK(pool->init());
     return pool;
 }
@@ -507,7 +507,7 @@ TEST_F(CopyEngineTest, UnusableCopyBufferReturnsDeviceIoError) {
     BlockIdxType host_block = poolMalloc(*host_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
-    device_pool_->backingPool()->layout_strategies_[0]->config_.kv_block_stride_bytes = 0;
+    device_pool_->layout_strategies_[0]->config_.kv_block_stride_bytes = 0;
     expectStatus(copy_engine_,
                  makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block),
                  CopyStatus::DEVICE_IO_ERROR);

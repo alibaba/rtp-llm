@@ -73,14 +73,14 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
 
     const auto&                         component_groups = cache->componentGroups();
     std::vector<std::vector<GroupSlot>> slots(keys.size(), std::vector<GroupSlot>(component_groups.size()));
-    std::vector<std::pair<BlockPoolPtr, BlockIndicesType>> request_holds;
+    std::vector<std::pair<DeviceBlockPoolPtr, BlockIndicesType>> request_holds;
 
     for (const auto& component_group : component_groups) {
         if (!component_group || component_group->component_group_id < 0
             || static_cast<size_t>(component_group->component_group_id) >= component_groups.size()
             || component_group->tags().size() != component_group->devicePools().size()) {
             for (const auto& [pool, blocks] : request_holds) {
-                pool->requestFree(blocks);
+                pool->decRef(blocks);
             }
             return result;
         }
@@ -88,22 +88,25 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
         const size_t component_group_id = static_cast<size_t>(component_group->component_group_id);
         for (size_t pool_index = 0; pool_index < component_group->devicePools().size(); ++pool_index) {
             const auto& device_pool = component_group->devicePools()[pool_index];
-            if (!device_pool || !device_pool->backingPool()) {
+            if (!device_pool) {
                 for (const auto& [pool, blocks] : request_holds) {
-                    pool->requestFree(blocks);
+                    pool->decRef(blocks);
                 }
                 return result;
             }
 
-            const BlockPoolPtr& backing_pool = device_pool->backingPool();
-            BlockIndicesType    blocks       = backing_pool->malloc(static_cast<int>(keys.size()));
-            if (blocks.size() != keys.size()) {
-                backing_pool->requestFree(blocks);
+            auto allocated = device_pool->malloc(keys.size());
+            if (!allocated.has_value() || allocated->size() != keys.size()) {
+                if (allocated.has_value()) {
+                    device_pool->free(*allocated);
+                }
                 for (const auto& [pool, held_blocks] : request_holds) {
-                    pool->requestFree(held_blocks);
+                    pool->decRef(held_blocks);
                 }
                 return result;
             }
+            BlockIndicesType blocks = std::move(*allocated);
+            device_pool->incRef(blocks);
 
             for (size_t path_index = 0; path_index < keys.size(); ++path_index) {
                 auto& device_blocks = slots[path_index][component_group_id].device_blocks;
@@ -111,13 +114,13 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
                 device_blocks[pool_index] = blocks[path_index];
             }
             result.blocks_by_tag.emplace(component_group->tags()[pool_index], blocks);
-            request_holds.emplace_back(backing_pool, std::move(blocks));
+            request_holds.emplace_back(device_pool, std::move(blocks));
         }
     }
 
     cache->insert(nullptr, keys, slots);
     for (const auto& [pool, blocks] : request_holds) {
-        pool->requestFree(blocks);
+        pool->decRef(blocks);
     }
     cache->onBlocksReleased();
 

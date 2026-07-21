@@ -18,6 +18,12 @@ protected:
         group_->setDevicePools({pool_}, {"tag_0"});
     }
 
+    void TearDown() override {
+        for (const auto block : held_blocks_) {
+            pool_->decRef(block);
+        }
+    }
+
     TreeNode* makeNode(CacheKeyType key, int group_count = 1) {
         auto* node      = new TreeNode();
         node->cache_key = key;
@@ -25,11 +31,20 @@ protected:
         return node;
     }
 
-    void setDeviceBlock(TreeNode* node, int gid, BlockIdxType block) {
-        if (!isNullBlockIdx(block) && held_blocks_.insert(block).second) {
-            pool_->incRef(block);
+    BlockIdxType setDeviceBlock(TreeNode* node, int gid) {
+        const auto block = pool_->malloc();
+        EXPECT_TRUE(block.has_value());
+        if (!block.has_value()) {
+            return NULL_BLOCK_IDX;
         }
-        node->group_slots[static_cast<size_t>(gid)].device_blocks = {block};
+        pool_->incRef(block.value());
+        held_blocks_.insert(block.value());
+        node->group_slots[static_cast<size_t>(gid)].device_blocks = {block.value()};
+        return block.value();
+    }
+
+    void clearDeviceBlock(TreeNode* node, int gid) {
+        node->group_slots[static_cast<size_t>(gid)].device_blocks = {NULL_BLOCK_IDX};
     }
 
     void setHostBlock(TreeNode* node, int gid, BlockIdxType block) {
@@ -55,9 +70,9 @@ TEST_F(FullComponentGroupTest, DeviceLeafDetection) {
     b->children[300] = c;
     c->parent        = b;
 
-    setDeviceBlock(a, 0, 10);
-    setDeviceBlock(b, 0, 20);
-    setDeviceBlock(c, 0, 30);
+    setDeviceBlock(a, 0);
+    setDeviceBlock(b, 0);
+    setDeviceBlock(c, 0);
 
     // C is DeviceLeaf (no children with device value)
     EXPECT_TRUE(group_->isLeafAtTier(c, 0, Tier::DEVICE));
@@ -77,13 +92,13 @@ TEST_F(FullComponentGroupTest, DeviceLeafAfterChildEviction) {
     a->children[200] = b;
     b->parent        = a;
 
-    setDeviceBlock(a, 0, 10);
-    setDeviceBlock(b, 0, 20);
+    setDeviceBlock(a, 0);
+    setDeviceBlock(b, 0);
 
     EXPECT_FALSE(group_->isLeafAtTier(a, 0, Tier::DEVICE));
 
     // Evict B's device data
-    setDeviceBlock(b, 0, NULL_BLOCK_IDX);
+    clearDeviceBlock(b, 0);
 
     // Now A should be DeviceLeaf
     EXPECT_TRUE(group_->isLeafAtTier(a, 0, Tier::DEVICE));
@@ -99,8 +114,8 @@ TEST_F(FullComponentGroupTest, DeviceCandidateEligibility) {
     auto* b          = makeNode(200);
     a->children[200] = b;
     b->parent        = a;
-    setDeviceBlock(a, 0, 10);
-    setDeviceBlock(b, 0, 20);
+    setDeviceBlock(a, 0);
+    setDeviceBlock(b, 0);
 
     EXPECT_TRUE(group_->isSlotEvictable(*b, Tier::DEVICE));
     EXPECT_FALSE(group_->isSlotEvictable(*a, Tier::DEVICE));
@@ -111,7 +126,7 @@ TEST_F(FullComponentGroupTest, DeviceCandidateEligibility) {
 
 TEST_F(FullComponentGroupTest, EvictFromTierDevice) {
     auto* a = makeNode(100);
-    setDeviceBlock(a, 0, 42);
+    setDeviceBlock(a, 0);
 
     group_->evictFromTier(a, a->group_slots[0], Tier::DEVICE);
 
@@ -147,7 +162,7 @@ TEST_F(FullComponentGroupTest, MatchValidatorFullPathValid) {
     auto validator = group_->createMatchValidator();
 
     auto* node = makeNode(100);
-    setDeviceBlock(node, 0, 42);
+    setDeviceBlock(node, 0);
 
     EXPECT_TRUE(validator->validate(node, node->group_slots[0]));
 
@@ -177,15 +192,16 @@ TEST_F(FullComponentGroupTest, MatchValidatorEmptyInvalid) {
 }
 
 TEST_F(FullComponentGroupTest, BuildTransferD2H) {
-    auto* node = makeNode(100);
-    setDeviceBlock(node, 0, 42);
+    auto*              node         = makeNode(100);
+    const BlockIdxType device_block = setDeviceBlock(node, 0);
+    ASSERT_NE(device_block, NULL_BLOCK_IDX);
 
     TransferDescriptor desc = group_->buildTransfer(node, TransferType::DEVICE_TO_HOST);
     EXPECT_EQ(desc.source_tier, Tier::DEVICE);
     EXPECT_EQ(desc.target_tier, Tier::HOST);
     EXPECT_EQ(desc.component_group_id, 0);
     ASSERT_EQ(desc.device_blocks.size(), 1u);
-    EXPECT_EQ(desc.device_blocks[0], 42);
+    EXPECT_EQ(desc.device_blocks[0], device_block);
 
     delete node;
 }

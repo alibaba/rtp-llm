@@ -7,7 +7,6 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
@@ -182,24 +181,6 @@ static int estimateBatchPeakForSingleSequence(const KVCacheAllocator&        all
                                                  /*target_batch_size=*/1);
 }
 
-static std::vector<BlockIdxType> allocateAndCacheKeepAllocated(BlockPoolPtr         block_pool,
-                                                               SharedBlockCachePtr  shared_cache,
-                                                               int                  group_nums,
-                                                               int                  group_id,
-                                                               const CacheKeysType& keys,
-                                                               bool                 is_resident = true) {
-    auto blocks = block_pool->malloc(static_cast<int>(keys.size()));
-    EXPECT_EQ(blocks.size(), keys.size());
-
-    for (size_t i = 0; i < keys.size(); ++i) {
-        std::vector<BlockIdxType> group_block_ids(static_cast<size_t>(group_nums), NULL_BLOCK_IDX);
-        group_block_ids[static_cast<size_t>(group_id)] = blocks[i];
-        shared_cache->put(keys[i], group_block_ids, is_resident);
-    }
-
-    return blocks;
-}
-
 static size_t countValidBlocks(const BlockIndicesType& blocks) {
     size_t n = 0;
     for (auto b : blocks) {
@@ -352,7 +333,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InitRejectsOnlyLinearGroupsBeforeCreating
 
     auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(cache_config, AllocationType::DEVICE);
     EXPECT_THROW(allocator->init(), std::runtime_error);
-    EXPECT_EQ(allocator->getBlockPool(), nullptr);
+    EXPECT_EQ(allocator->getDeviceBlockPool(), nullptr);
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, TopologyRejectsSpecPolicyTypeMismatch) {
@@ -595,10 +576,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReu
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly) {
-    auto config       = makeTinyHybridConfig();
-    auto allocator    = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    auto shared_cache = std::make_shared<SharedBlockCache>();
-    allocator->setSharedBlockCache(shared_cache);
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     // Config order: gid=0 linear, gid=1 full.
@@ -664,23 +643,23 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DisableReuseKeepsOnlyLinearTailOnInitMall
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, DisableDeviceCacheSkipsReuseMatchAndAllocatesOnlyLinearTail) {
-    auto config       = makeTinyHybridConfig();
-    auto allocator    = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    auto shared_cache = std::make_shared<SharedBlockCache>();
-    allocator->setSharedBlockCache(shared_cache);
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
     ASSERT_NE(block_pool, nullptr);
 
     // Config order: gid=0 linear, gid=1 full.
     const int gid_linear = 0;
     const int gid_full   = 1;
 
-    // Prepare cached blocks for full group; keep them allocated so allocator's malloc() cannot accidentally return same
-    // ids.
+    // Seed a complete tree path. Tree holds keep the cached blocks unavailable
+    // for fresh allocation while device-cache matching is disabled below.
     CacheKeysType full_keys = {100, 101, 102};
-    auto full_blocks = allocateAndCacheKeepAllocated(block_pool, shared_cache, config.groupNums(), gid_full, full_keys);
+    const auto    seeded    = seedCompleteBlockTreePath(allocator, full_keys);
+    ASSERT_TRUE(seeded.success);
+    const auto& full_blocks = seeded.blocks_by_tag.at(config.tagForGroup(gid_full));
     ASSERT_EQ(full_blocks.size(), 3u);
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102, 103});
@@ -716,17 +695,18 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DisableDeviceCacheSkipsReuseMatchAndAlloc
     EXPECT_EQ(countValidBlocks(linear_out), 1u);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockForksSharedBlocksAcrossGroups) {
+TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockForksAliasedBlocksAcrossGroups) {
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
     ASSERT_NE(block_pool, nullptr);
 
     const size_t free_before = allocator->freeBlocksNum();
-    auto         blocks      = block_pool->malloc(6);
+    auto         blocks      = block_pool->malloc(6).value();
     ASSERT_EQ(blocks.size(), 6u);
+    block_pool->incRef(blocks);
     ASSERT_EQ(allocator->freeBlocksNum(), free_before - 6);
 
     auto batch_res = makeBatchResource(/*batch_size=*/2, config, CacheKeysType{100, 101});
@@ -760,12 +740,13 @@ TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockCopyLastBlockAcrossGroups) {
     auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
     ASSERT_NE(block_pool, nullptr);
 
     const size_t free_before = allocator->freeBlocksNum();
-    auto         blocks      = block_pool->malloc(6);
+    auto         blocks      = block_pool->malloc(6).value();
     ASSERT_EQ(blocks.size(), 6u);
+    block_pool->incRef(blocks);
     ASSERT_EQ(allocator->freeBlocksNum(), free_before - 6);
 
     auto batch_res = makeBatchResource(/*batch_size=*/2, config, CacheKeysType{100, 101});
@@ -813,22 +794,27 @@ TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockReservationFailureLeavesReso
     auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
     ASSERT_NE(block_pool, nullptr);
 
     const size_t free_before = allocator->freeBlocksNum();
-    auto         blocks      = block_pool->malloc(free_before - 1);
+    auto         blocks      = block_pool->malloc(free_before - 1).value();
     ASSERT_EQ(blocks.size(), free_before - 1);
+    block_pool->incRef(blocks);
     ASSERT_EQ(allocator->freeBlocksNum(), 1u);
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100});
     batch_res->mutableBlockIds(/*batch_id=*/0, /*gid=*/0).assign({blocks[0]});
     batch_res->mutableBlockIds(/*batch_id=*/0, /*gid=*/1).assign({blocks[1]});
 
-    const auto before_batch0_group0 = batch_res->blocks(0, 0);
-    const auto before_batch0_group1 = batch_res->blocks(0, 1);
-    const auto free_before_update   = block_pool->freeBlocksNum();
-    const auto refs_before_update   = block_pool->requestRefBlocksNum();
+    const auto          before_batch0_group0 = batch_res->blocks(0, 0);
+    const auto          before_batch0_group1 = batch_res->blocks(0, 1);
+    const auto          free_before_update   = block_pool->freeBlocksNum();
+    std::vector<size_t> refs_before_update;
+    refs_before_update.reserve(blocks.size());
+    for (const auto block : blocks) {
+        refs_before_update.push_back(block_pool->refCount(block));
+    }
 
     std::vector<TaggedBlockIdPair> update_mapping{{"stale", 1, 2}};
     EXPECT_FALSE(allocator->updateKVBlock(batch_res,
@@ -841,10 +827,12 @@ TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockReservationFailureLeavesReso
     EXPECT_EQ(batch_res->blocks(0, 0), before_batch0_group0);
     EXPECT_EQ(batch_res->blocks(0, 1), before_batch0_group1);
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before_update);
-    EXPECT_EQ(block_pool->requestRefBlocksNum(), refs_before_update);
+    for (size_t index = 0; index < blocks.size(); ++index) {
+        EXPECT_EQ(block_pool->refCount(blocks[index]), refs_before_update[index]);
+    }
 
     allocator->free(FreeInfo{batch_res, nullptr});
-    block_pool->requestFree(BlockIndicesType(blocks.begin() + 2, blocks.end()));
+    block_pool->decRef(BlockIndicesType(blocks.begin() + 2, blocks.end()));
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
@@ -853,12 +841,13 @@ TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockReusesDroppedBatchCapacityTr
     auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
     ASSERT_NE(block_pool, nullptr);
 
     const size_t free_before = allocator->freeBlocksNum();
-    auto         blocks      = block_pool->malloc(free_before);
+    auto         blocks      = block_pool->malloc(free_before).value();
     ASSERT_EQ(blocks.size(), free_before);
+    block_pool->incRef(blocks);
     ASSERT_EQ(block_pool->freeBlocksNum(), 0u);
 
     auto batch_res = makeBatchResource(/*batch_size=*/2, config, CacheKeysType{100});
@@ -883,7 +872,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockReusesDroppedBatchCapacityTr
     EXPECT_EQ(block_pool->freeBlocksNum(), 0u);
 
     allocator->free(FreeInfo{batch_res, nullptr});
-    block_pool->requestFree(BlockIndicesType(blocks.begin() + 4, blocks.end()));
+    block_pool->decRef(BlockIndicesType(blocks.begin() + 4, blocks.end()));
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
@@ -892,12 +881,13 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
     ASSERT_NE(block_pool, nullptr);
 
     const size_t free_before = allocator->freeBlocksNum();
-    auto         blocks      = block_pool->malloc(4);
+    auto         blocks      = block_pool->malloc(4).value();
     ASSERT_EQ(blocks.size(), 4u);
+    block_pool->incRef(blocks);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 4);
 
     KVCacheResource resource;
@@ -916,7 +906,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     ASSERT_EQ(ref->blocks(0).size(), 2u);
     ASSERT_EQ(ref->blocks(1).size(), 2u);
 
-    block_pool->requestFree(blocks);
+    block_pool->decRef(blocks);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 2) << "Only blocks[1] and blocks[3] should remain referenced";
 
     ref.reset();
@@ -924,10 +914,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
-    auto config       = makeTinyHybridConfig();
-    auto allocator    = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    auto shared_cache = std::make_shared<SharedBlockCache>();
-    allocator->setSharedBlockCache(shared_cache);
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     // gid=0 linear, gid=1 full.
@@ -937,7 +925,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102});
     // Disable device cache reuse.
 
-    // Non-CP SharedBlockCache insertion records the available group block ids for each cache key.
+    // BlockTree insertion records the available reusable group coordinates.
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/10, /*seq_size_per_block=*/4);
 
     MallocInfo malloc_info{batch_res, token_ids};
@@ -967,9 +955,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DefaultHybridLinearPrefixReuseSupportsIns
     ASSERT_EQ(config.groupNums(), 2);
     EXPECT_TRUE(config.policyForGroup(/*gid=*/0).enable_prefix_reuse);
 
-    auto allocator    = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    auto shared_cache = std::make_shared<SharedBlockCache>();
-    allocator->setSharedBlockCache(shared_cache);
+    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto seed_res    = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102});
@@ -1037,7 +1023,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     auto allocator   = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
     ASSERT_NE(block_pool, nullptr);
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102});
@@ -1058,7 +1044,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     // Leave exactly 1 free block in pool, so linear allocates 1 and full fails on the next allocation.
     const size_t free_before_incr = block_pool->freeBlocksNum();
     ASSERT_GE(free_before_incr, 1u);
-    auto keep = block_pool->malloc(static_cast<int>(free_before_incr - 1));
+    auto keep = block_pool->malloc(free_before_incr - 1).value();
+    block_pool->incRef(keep);
     ASSERT_EQ(block_pool->freeBlocksNum(), 1u);
 
     // Incr to seq_len=9 => 3 slots per group. Linear adds 2 slots but allocates only 1 real block; full needs 2.
@@ -1078,7 +1065,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     EXPECT_EQ(block_pool->freeBlocksNum(), 1u);
 
     // Cleanup.
-    block_pool->requestFree(keep);
+    block_pool->decRef(keep);
 }
 
 // Prefill init path (StreamCacheResource::initKVBlock sets enable_remove_skipped_blocks=false).
@@ -1086,11 +1073,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
 // a step hit ((2+1)%2==1). Without sparse cleanup, that slot must survive so that
 // causal_conv1d can still read it by prefix_length.
 TEST_F(HybridTypeKVCacheAllocatorTest, PrefillInitSkipsSparseCleanupAndPreservesReusedLinearTail) {
-    auto config       = makeTinyHybridConfig();
-    config.block_num  = 16;  // 6 cached (resident, non-evictable) + 4 new + 1 null reserved
-    auto allocator    = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    auto shared_cache = std::make_shared<SharedBlockCache>();
-    allocator->setSharedBlockCache(shared_cache);
+    auto config      = makeTinyHybridConfig();
+    config.block_num = 16;  // 6 cached (tree-held) + 4 new + 1 null reserved
+    auto allocator   = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     const int gid_linear = 0;
@@ -1134,16 +1119,18 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DecodeIncrMallocAppliesSparseCleanupOnLin
     auto allocator   = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool = allocator->getBlockPool();
+    auto block_pool = allocator->getDeviceBlockPool();
     ASSERT_NE(block_pool, nullptr);
 
     const int gid_linear = 0;
     const int gid_full   = 1;
 
-    auto linear_alloc = block_pool->malloc(6);
-    auto full_alloc   = block_pool->malloc(6);
+    auto linear_alloc = block_pool->malloc(6).value();
+    auto full_alloc   = block_pool->malloc(6).value();
     ASSERT_EQ(linear_alloc.size(), 6u);
     ASSERT_EQ(full_alloc.size(), 6u);
+    block_pool->incRef(linear_alloc);
+    block_pool->incRef(full_alloc);
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{});
     batch_res->mutableBlockIds(0, gid_linear).assign(linear_alloc);

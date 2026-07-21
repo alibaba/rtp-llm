@@ -150,7 +150,7 @@ int GenerateStream::nextNeedBlockNums(int reserve_step) const {
 
 int GenerateStream::estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const {
     const int reserve_step   = complete_token_ids_->getReserveStep();
-    int common_seq_len = std::min(complete_token_ids_->commonSeqLength(), seqLength());
+    int       common_seq_len = std::min(complete_token_ids_->commonSeqLength(), seqLength());
     if (target_batch_size > 1) {
         common_seq_len = common_seq_len / seqSizePerBlock() * seqSizePerBlock();
     }
@@ -535,6 +535,11 @@ void GenerateStream::reportError(ErrorCode error_code, const std::string& error_
 bool GenerateStream::hasEvent(StreamEvents::EventType event) const {
     std::lock_guard<std::mutex> lock(*mutex_);
     return generate_status_->hasEvent(event);
+}
+
+void GenerateStream::clearCanRun() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    generate_status_->clearCanRun();
 }
 
 StreamState GenerateStream::getStatus() const {

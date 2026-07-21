@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtil.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
-#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 
 namespace rtp_llm {
@@ -116,12 +116,13 @@ static std::unique_ptr<BlockTreeCache> makeBroadcastCache(const std::shared_ptr<
 static BlockIdxType prepareDeviceTarget(const std::shared_ptr<FullComponentGroup>& group,
                                         const std::string&                         pool_name) {
     DeviceBlockPoolPtr device_pool = makeDevicePool({{256, 0}}, 8, pool_name);
-    const auto         blocks      = device_pool->backingPool()->malloc(1);
-    if (blocks.size() != 1) {
+    const auto         block       = device_pool->malloc();
+    if (!block.has_value()) {
         return NULL_BLOCK_IDX;
     }
+    device_pool->incRef(*block);
     group->setDevicePools({device_pool}, {"tag_0"});
-    return blocks.front();
+    return *block;
 }
 
 static MemoryOperationRequestPB makeBroadcastRequest() {
@@ -291,7 +292,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastHostLoadBackCommitsDeviceSlot) {
     EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
     EXPECT_EQ(cache->getStats().host_heap_total_size, 0u);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
-    group->devicePools().front()->backingPool()->requestFree(device_block);
+    group->devicePools().front()->decRef(device_block);
     cache->onBlocksReleased();
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
 
@@ -369,7 +370,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastHostLoadBackFailureKeepsSourceSlot)
         EXPECT_EQ(worker_request.copy_items(0).mem_block(), host_block);
         expectSingleTaggedBlock(worker_request.copy_items(0), "tag_0", device_block);
     }
-    group->devicePools().front()->backingPool()->requestFree(device_block);
+    group->devicePools().front()->decRef(device_block);
 }
 
 TEST_F(BlockTreeCacheBroadcastTest, BroadcastDiskLoadBackUsesTwoTransferStages) {
@@ -430,7 +431,7 @@ TEST_F(BlockTreeCacheBroadcastTest, BroadcastDiskLoadBackUsesTwoTransferStages) 
     EXPECT_EQ(disk_pool->freeBlocksNum(), 4u);
     EXPECT_EQ(cache->getStats().disk_heap_total_size, 0u);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
-    group->devicePools().front()->backingPool()->requestFree(device_block);
+    group->devicePools().front()->decRef(device_block);
     cache->onBlocksReleased();
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
 

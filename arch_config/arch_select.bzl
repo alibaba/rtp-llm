@@ -33,18 +33,6 @@ def cache_store_deps():
         actual = "@rtp_llm//rtp_llm/cpp/disaggregate/cache_store:cache_store_base_impl"
     )
 
-def transfer_rdma_deps():
-    native.alias(
-        name = "transfer_rdma_impl",
-        actual = "@rtp_llm//rtp_llm/cpp/cache/connector/p2p/transfer:no_rdma_impl",
-    )
-
-def transfer_backend_deps():
-    native.alias(
-        name = "transfer_backend_arch_select_impl",
-        actual = "@rtp_llm//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_backend_base_impl",
-    )
-
 def embedding_arpc_deps():
     native.alias(
         name = "embedding_arpc_deps",

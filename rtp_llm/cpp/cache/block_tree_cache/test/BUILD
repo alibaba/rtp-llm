@@ -66,7 +66,7 @@ pool_test_copts = [
 ] + copts()
 
 pool_test_deps = [
-    "//rtp_llm/cpp/cache:block_pool",
+    "//rtp_llm/cpp/cache:device_block_pool_config_helper",
     "//rtp_llm/cpp/cache/block_tree_cache",
     "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
     "//rtp_llm/cpp/cache/test:cache_config_test_utils",
@@ -204,7 +204,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_tree_cache_test_utils",
-        "//rtp_llm/cpp/cache/connector:connector_base",
+        "//rtp_llm/cpp/cache:cache_async_context",
     ],
     env = {},
 )
@@ -225,7 +225,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_tree_cache_test_utils",
-        "//rtp_llm/cpp/cache/connector:connector_base",
+        "//rtp_llm/cpp/cache:cache_async_context",
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
     ],
     env = {},

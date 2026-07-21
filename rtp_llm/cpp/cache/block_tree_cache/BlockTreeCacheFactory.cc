@@ -98,7 +98,7 @@ std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&         cac
     by_tag.reserve(allocator_groups.size());
     for (const auto& group : allocator_groups) {
         if (!group || group->tag().empty() || !group->blockPool()) {
-            RTP_LLM_LOG_ERROR("createBlockTreeCache: allocator group/tag/backing pool must be non-null");
+            RTP_LLM_LOG_ERROR("createBlockTreeCache: allocator group/tag/direct pool must be non-null");
             return {};
         }
         if (!by_tag.emplace(group->tag(), group).second) {
@@ -283,6 +283,23 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     if (groups.size() != static_cast<size_t>(group_count)) {
         return nullptr;
     }
+    std::vector<DeviceBlockPoolPtr> per_tag_pools(static_cast<size_t>(group_count));
+    const auto&                     independent_pools = allocator->groupBlockPools();
+    if (!independent_pools.empty() && independent_pools.size() != static_cast<size_t>(group_count)) {
+        RTP_LLM_LOG_ERROR("createBlockTreeCache: independent pool/topology count mismatch, pools=%zu topology=%d",
+                          independent_pools.size(),
+                          group_count);
+        return nullptr;
+    }
+    for (int gid = 0; gid < group_count; ++gid) {
+        auto pool =
+            independent_pools.empty() ? allocator->getDeviceBlockPool() : independent_pools[static_cast<size_t>(gid)];
+        if (!pool || groups[static_cast<size_t>(gid)]->blockPool() != pool) {
+            RTP_LLM_LOG_ERROR("createBlockTreeCache: allocator/group direct pool mismatch for gid %d", gid);
+            return nullptr;
+        }
+        per_tag_pools[static_cast<size_t>(gid)] = std::move(pool);
+    }
 
     const bool host_enabled = kv_cache_config.enable_tiered_memory_cache && kv_cache_config.enable_memory_cache;
     const bool disk_enabled = host_enabled && kv_cache_config.enable_memory_cache_disk;
@@ -324,25 +341,18 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         const auto&                     first = cache_config.topology().groupById(static_cast<size_t>(members.front()));
         const int                       component_group_id = static_cast<int>(aggregate_index);
         auto                            component_group    = createComponentGroup(component_group_id, first);
-        std::vector<DeviceBlockPoolPtr> adapters;
+        std::vector<DeviceBlockPoolPtr> device_pools;
         std::vector<std::string>        member_tags;
         std::vector<int>                component_indices;
         size_t                          aggregate_payload = 0;
-        adapters.reserve(members.size());
+        device_pools.reserve(members.size());
         member_tags.reserve(members.size());
         component_indices.reserve(members.size());
 
         for (size_t local_pool = 0; local_pool < members.size(); ++local_pool) {
             const int   gid      = members[local_pool];
             const auto& declared = cache_config.topology().groupById(static_cast<size_t>(gid));
-            const auto& group    = groups[static_cast<size_t>(gid)];
-            auto        adapter  = std::make_shared<DeviceBlockPool>(group->blockPool(), group);
-            if (!adapter->init() || adapter->backingPool() != group->blockPool() || adapter->addressView() != group
-                || adapter->addressView()->tag() != declared.tag) {
-                RTP_LLM_LOG_ERROR("createBlockTreeCache: invalid device adapter for tag %s", declared.tag.c_str());
-                return nullptr;
-            }
-            adapters.push_back(std::move(adapter));
+            device_pools.push_back(per_tag_pools[static_cast<size_t>(gid)]);
             member_tags.push_back(declared.tag);
 
             Component component;
@@ -386,7 +396,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
             mappings[static_cast<size_t>(gid)] = {component_group_id, static_cast<int>(local_pool)};
         }
 
-        component_group->setDevicePools(std::move(adapters), std::move(member_tags));
+        component_group->setDevicePools(std::move(device_pools), std::move(member_tags));
         component_group->component_indices = std::move(component_indices);
         component_group->host_block_size   = aggregate_payload;
         component_groups.push_back(std::move(component_group));

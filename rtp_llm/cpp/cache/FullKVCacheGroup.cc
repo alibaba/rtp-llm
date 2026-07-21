@@ -52,7 +52,19 @@ bool FullKVCacheGroup::malloc(BlockIds&            block_ids,
         backfilled_positions->clear();
     }
     (void)enable_reuse_cache;
-    int need_blocks_num = needBlocksNum(seq_len, static_cast<int>(block_ids.blocksNum()), reserve_step);
+    const int total_slots = needBlocksNum(seq_len, /*current_blocks=*/0, reserve_step);
+
+    std::vector<size_t> positions_to_backfill;
+    const auto&         existing_blocks = block_ids.blocks();
+    const size_t        existing_scan   = std::min(existing_blocks.size(), static_cast<size_t>(total_slots));
+    for (size_t i = 0; i < existing_scan; ++i) {
+        if (isNullBlockIdx(existing_blocks[i])) {
+            positions_to_backfill.push_back(i);
+        }
+    }
+
+    const int new_slots       = std::max(total_slots - static_cast<int>(block_ids.blocksNum()), 0);
+    const int need_blocks_num = static_cast<int>(positions_to_backfill.size()) + new_slots;
     if (need_blocks_num == 0) {
         return true;
     }
@@ -65,33 +77,38 @@ bool FullKVCacheGroup::malloc(BlockIds&            block_ids,
         }
     }
 
-    auto result = block_pool_->malloc(need_blocks_num);
-    if (result.empty()) {
+    auto result = block_pool_->malloc(static_cast<size_t>(need_blocks_num));
+    if (!result.has_value() || result->size() != static_cast<size_t>(need_blocks_num)) {
         return false;
     }
-    block_ids.add(result);
+    block_pool_->incRef(*result);
+
+    size_t allocated_index = 0;
+    for (const size_t position : positions_to_backfill) {
+        block_ids.setAt(position, (*result)[allocated_index++]);
+    }
+    if (backfilled_positions != nullptr) {
+        *backfilled_positions = positions_to_backfill;
+    }
+
+    BlockIndicesType new_blocks;
+    new_blocks.reserve(static_cast<size_t>(new_slots));
+    for (int i = 0; i < new_slots; ++i) {
+        new_blocks.push_back((*result)[allocated_index++]);
+    }
+    if (!new_blocks.empty()) {
+        block_ids.add(new_blocks);
+    }
+    RTP_LLM_CHECK_WITH_INFO(allocated_index == result->size(),
+                            "full kv allocation accounting mismatch, used=%zu allocated=%zu",
+                            allocated_index,
+                            result->size());
     return true;
 }
 
 MatchResult FullKVCacheGroup::matchPrefix(const CacheKeysType& cache_keys) const {
-    MatchResult final_result;
-
-    if (!shared_cache_) {
-        return final_result;
-    }
-
-    for (const auto& cache_key : cache_keys) {
-        auto block_idx = shared_cache_->matchGroup(cache_key, group_id());
-        if (isNullBlockIdx(block_idx)) {
-            break;
-        }
-        final_result.reuse_blocks++;
-        final_result.block_indices.push_back(block_idx);
-    }
-
-    final_result.reuse_length = final_result.reuse_blocks * seqSizePerBlock();
-
-    return final_result;
+    (void)cache_keys;
+    return {};
 }
 
 void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
@@ -105,13 +122,31 @@ void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
         return;
     }
 
-    block_pool_->requestFree(block_indices);
-    RTP_LLM_LOG_DEBUG("Freed %zu blocks", block_indices.size());
+    BlockIndicesType valid_blocks;
+    valid_blocks.reserve(block_indices.size());
+    for (const BlockIdxType block : block_indices) {
+        if (!isNullBlockIdx(block)) {
+            valid_blocks.push_back(block);
+        }
+    }
+    if (!valid_blocks.empty()) {
+        block_pool_->decRef(valid_blocks);
+    }
+    RTP_LLM_LOG_DEBUG("Freed %zu blocks", valid_blocks.size());
 }
 
 void FullKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
     block_ids.add(new_block_indices);
-    block_pool_->requestReference(new_block_indices);
+    BlockIndicesType valid_blocks;
+    valid_blocks.reserve(new_block_indices.size());
+    for (const BlockIdxType block : new_block_indices) {
+        if (!isNullBlockIdx(block)) {
+            valid_blocks.push_back(block);
+        }
+    }
+    if (!valid_blocks.empty()) {
+        block_pool_->incRef(valid_blocks);
+    }
 }
 
 void FullKVCacheGroup::removeSkippedBlocks(BlockIds& /*block_ids*/, bool /*enable_reuse_cache*/, int /*reserve_step*/) {

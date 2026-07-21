@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/connector/test/mock/MockAsyncContext.h"
+#include "rtp_llm/cpp/cache/test/MockAsyncContext.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -345,16 +345,16 @@ TEST_F(GenerateStreamStateTest, testLoadInitiatedSkipsAsyncLoadCache) {
     ASSERT_TRUE(resource.initKVBlock().ok());
     stream->reportEvent(StreamEvents::LoadInitiated);
 
-    // Verify load_cache_context_ is null (no asyncLoadCache was called)
-    ASSERT_FALSE(resource.load_cache_context_);
+    // No allocator-owned load-back is in flight.
+    ASSERT_FALSE(resource.allocator_load_context_);
 
     // moveToNext should not trigger asyncLoadCache because LoadInitiated is set
     stream->reportEvent(StreamEvents::CanRun);
     auto new_state = stream->moveToNext();
     ASSERT_EQ(new_state, StreamState::RUNNING);
 
-    // Still no asyncLoadCache context
-    ASSERT_FALSE(resource.load_cache_context_);
+    // Still no allocator load-back context.
+    ASSERT_FALSE(resource.allocator_load_context_);
 }
 
 TEST_F(GenerateStreamStateTest, testPrefillFallbackDecodeGrowsBlocksAfterContext) {
@@ -384,7 +384,13 @@ TEST_F(GenerateStreamStateTest, testIncrementalAsyncAllocationTerminatesBeforeMo
     ASSERT_EQ(stream->curBlocksNum(), 1u);
 
     const auto real_allocator = cache_manager_->allocator_;
-    ASSERT_EQ(real_allocator->requestRefBlocksNum(), 1u);
+    const auto device_pool    = real_allocator->getDeviceBlockPool();
+    ASSERT_NE(device_pool, nullptr);
+    const auto& request_blocks = stream->streamCacheResource().kvCache().blocks(/*batch_id=*/0, /*group_id=*/0);
+    ASSERT_EQ(request_blocks.size(), 1u);
+    const BlockIdxType request_block = request_blocks.front();
+    ASSERT_EQ(device_pool->refCount(request_block), 1u);
+    const size_t free_after_request_alloc = device_pool->freeBlocksNum();
 
     auto   async_context  = std::make_shared<MockAsyncContext>();
     auto   mock_allocator = std::make_shared<MockKVCacheAllocator>(init_config());
@@ -424,7 +430,8 @@ TEST_F(GenerateStreamStateTest, testIncrementalAsyncAllocationTerminatesBeforeMo
     EXPECT_EQ(tracked_cancel_count, 1u);
     EXPECT_EQ(free_count, 1u);
     EXPECT_EQ(stream->curBlocksNum(), 0u);
-    EXPECT_EQ(real_allocator->requestRefBlocksNum(), 0u);
+    EXPECT_FALSE(device_pool->isAllocated(request_block));
+    EXPECT_EQ(device_pool->freeBlocksNum(), free_after_request_alloc + 1);
     EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
 
     // Re-entering the terminal state and an explicit stream release are both
@@ -433,7 +440,8 @@ TEST_F(GenerateStreamStateTest, testIncrementalAsyncAllocationTerminatesBeforeMo
     stream->releaseResource();
     EXPECT_EQ(tracked_cancel_count, 1u);
     EXPECT_EQ(free_count, 1u);
-    EXPECT_EQ(real_allocator->requestRefBlocksNum(), 0u);
+    EXPECT_FALSE(device_pool->isAllocated(request_block));
+    EXPECT_EQ(device_pool->freeBlocksNum(), free_after_request_alloc + 1);
 
     tracked_cancel_context = nullptr;
     tracked_cancel_count   = 0;

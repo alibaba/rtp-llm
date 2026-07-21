@@ -436,10 +436,7 @@ bool ComponentGroup::isSlotEvictable(const TreeNode& node, Tier tier) const {
             }
             for (size_t i = 0; i < slot.device_blocks.size(); ++i) {
                 const auto& pool = i < device_pools_.size() ? device_pools_[i] : nullptr;
-                if (isNullBlockIdx(slot.device_blocks[i])) {
-                    continue;
-                }
-                if (!pool || !pool->isCacheOnly(slot.device_blocks[i])) {
+                if (!pool_evictable(pool, slot.device_blocks[i])) {
                     return false;
                 }
             }

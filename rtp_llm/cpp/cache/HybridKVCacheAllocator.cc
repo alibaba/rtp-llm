@@ -4,7 +4,6 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -310,7 +309,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         if (reserve_blocks > 0) {
             const int    need_blocks = getNeedBlocks(malloc_info);
             const size_t required    = static_cast<size_t>(std::max(need_blocks, 0)) + pending_targets + reserve_blocks;
-            if (availableBlocksNum() < required) {
+            if (freeBlocksNum() < required) {
                 return rollback({});
             }
         }
@@ -882,7 +881,7 @@ bool HybridKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& mall
     if (need_blocks <= 0) {
         return true;
     }
-    const size_t available_blocks = availableBlocksNum();
+    const size_t available_blocks = freeBlocksNum();
     const bool   accepted         = available_blocks >= static_cast<size_t>(need_blocks) + reserve_blocks;
     if (!accepted && malloc_info.verbose) {
         RTP_LLM_LOG_INFO("Hybrid initMalloc rejected by reserve blocks: request_id=%ld "

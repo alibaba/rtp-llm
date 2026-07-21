@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <utility>
 
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -27,20 +27,13 @@ bool HybridTypeKVCacheAllocator::doInit() {
                                 "HybridTypeKVCacheAllocator requires at least one FULL MHA/MLA cache group");
     }
 
-    auto pool_config = BlockPoolConfigHelper::createConfig(config_);
-    block_pool_      = std::make_shared<BlockPool>(
-        pool_config, allocation_type_, /*use_pinned_cpu_backing=*/false, use_cuda_malloc_block_pool_);
+    auto pool_config = std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfig(config_));
+    pool_config->use_cuda_malloc_backing = use_cuda_malloc_block_pool_;
+    block_pool_ = std::make_shared<DeviceBlockPool>(std::shared_ptr<const DeviceBlockPoolConfig>(pool_config));
     RTP_LLM_CHECK_WITH_INFO(block_pool_->init(), "Failed to initialize block pool for HybridTypeKVCacheAllocator");
 
     const int group_nums = config_.groupNums();
     kv_cache_groups_.reserve(group_nums);
-
-    SharedBlockCache* shared_cache_raw = shared_block_cache_ ? shared_block_cache_.get() : nullptr;
-
-    if (shared_block_cache_) {
-        std::vector<BlockPoolPtr> group_pools(static_cast<size_t>(group_nums), block_pool_);
-        shared_block_cache_->init(group_nums, group_pools);
-    }
 
     for (int gid = 0; gid < group_nums; ++gid) {
         const auto& cache_group = config_.topology().groupById(static_cast<size_t>(gid));
@@ -49,15 +42,13 @@ bool HybridTypeKVCacheAllocator::doInit() {
         KVCacheGroupPtr group;
         const auto      group_type = cache_group.policy.group_type;
         if (group_type == CacheGroupType::SWA) {
-            group = std::make_shared<SWAKVCacheGroup>(
-                cache_group, block_pool_, gid, config_.linear_step, shared_cache_raw, nullptr);
+            group = std::make_shared<SWAKVCacheGroup>(cache_group, block_pool_, gid, config_.linear_step, nullptr);
             swa_group_ids_.push_back(gid);
         } else if (group_type == CacheGroupType::LINEAR || (spec && spec->type == KVCacheSpecType::LinearAttention)) {
-            group = std::make_shared<LinearKVCacheGroup>(
-                cache_group, block_pool_, gid, config_.linear_step, shared_cache_raw, nullptr);
+            group = std::make_shared<LinearKVCacheGroup>(cache_group, block_pool_, gid, config_.linear_step, nullptr);
             linear_group_ids_.push_back(gid);
         } else {
-            group = std::make_shared<FullKVCacheGroup>(cache_group, block_pool_, gid, shared_cache_raw, nullptr);
+            group = std::make_shared<FullKVCacheGroup>(cache_group, block_pool_, gid, nullptr);
             full_group_ids_.push_back(gid);
         }
 
@@ -84,20 +75,14 @@ void HybridTypeKVCacheAllocator::referenceBlocksInGroup(int                     
                                                         const BlockIndicesType& blocks,
                                                         bool                    is_connector) const {
     (void)gid;
-    if (is_connector) {
-        block_pool_->connectorReference(blocks);
-    } else {
-        block_pool_->requestReference(blocks);
-    }
+    (void)is_connector;
+    block_pool_->incRef(blocks);
 }
 
 void HybridTypeKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector) {
     (void)gid;
-    if (is_connector) {
-        block_pool_->connectorFree(blocks);
-    } else {
-        block_pool_->requestFree(blocks);
-    }
+    (void)is_connector;
+    block_pool_->decRef(blocks);
 }
 
 GroupedCacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {

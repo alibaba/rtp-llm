@@ -15,8 +15,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/BlockPool.h"
-#include "rtp_llm/cpp/cache/SharedBlockCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 
 namespace rtp_llm {
 
@@ -28,28 +27,24 @@ struct NeedBlocksInfo {
 class KVCacheGroup {
 public:
     KVCacheGroup(GroupBase                           cache_group,
-                 BlockPoolPtr                        block_pool,
+                 DeviceBlockPoolPtr                  block_pool,
                  int                                 group_id,
-                 SharedBlockCache*                   shared_cache     = nullptr,
                  const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
         cache_group_(std::move(cache_group)),
         block_pool_(std::move(block_pool)),
-        shared_cache_(shared_cache),
         metrics_reporter_(metrics_reporter),
         group_id_(group_id) {}
 
     // Transition-only constructor for HybridPool and existing focused tests.
     KVCacheGroup(const LayerIdsType&                 layer_ids,
                  KVCacheSpecPtr                      kvcache_spec,
-                 BlockPoolPtr                        block_pool,
+                 DeviceBlockPoolPtr                  block_pool,
                  int                                 group_id,
                  CacheGroupPolicy                    policy           = CacheGroupPolicy{},
-                 SharedBlockCache*                   shared_cache     = nullptr,
                  const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
         KVCacheGroup(makeLegacyCacheGroup(layer_ids, std::move(kvcache_spec), policy),
                      std::move(block_pool),
                      group_id,
-                     shared_cache,
                      metrics_reporter) {}
 
     virtual ~KVCacheGroup() = default;
@@ -106,7 +101,7 @@ public:
     const CacheGroupPolicy& policy() const;
     bool                    prefixReuseEnabled() const;
     CacheEvictPolicy        evictPolicy() const;
-    BlockPoolPtr            blockPool() const {
+    DeviceBlockPoolPtr      blockPool() const {
         return block_pool_;
     }
     uint32_t explicitBlockNum() const;
@@ -135,8 +130,7 @@ protected:
     }
 
     GroupBase                    cache_group_;
-    BlockPoolPtr                 block_pool_;
-    SharedBlockCache*            shared_cache_     = nullptr;
+    DeviceBlockPoolPtr           block_pool_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
     int                          group_id_         = -1;
     EvictCallback                evict_callback_;

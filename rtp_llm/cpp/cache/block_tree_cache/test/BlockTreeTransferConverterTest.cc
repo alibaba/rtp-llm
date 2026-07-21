@@ -17,11 +17,12 @@ std::vector<ComponentGroupPtr> makeComponentGroups() {
     memory_layout.block_num                = 128;
     memory_layout.kv_block_pool_size_bytes = 128;
 
-    BlockPoolConfig device_config;
-    device_config.pool_name        = "converter_device";
-    device_config.block_num        = 128;
-    device_config.memory_layouts   = {memory_layout};
-    DeviceBlockPoolPtr device_pool = std::make_shared<DeviceBlockPool>(std::make_shared<BlockPool>(device_config));
+    auto device_config                  = std::make_shared<DeviceBlockPoolConfig>();
+    device_config->pool_type            = BlockPoolType::DEVICE;
+    device_config->pool_name            = "converter_device";
+    device_config->physical_block_count = 128;
+    device_config->memory_layouts       = {memory_layout};
+    DeviceBlockPoolPtr device_pool      = std::make_shared<DeviceBlockPool>(device_config);
 
     std::shared_ptr<HostBlockPoolConfig> host_config = std::make_shared<HostBlockPoolConfig>();
     host_config->pool_type                           = BlockPoolType::HOST;

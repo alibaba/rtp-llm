@@ -256,11 +256,15 @@ private:
     void drainTreeHolds();
     void checkWatermark();
     bool reclaimOneForGroup(int component_group_id, Tier tier);
-    bool submitEvictionLocked(EvictionMove& eviction_move, std::vector<BlockPool*>* release_credits = nullptr);
-    void reserveInFlightDeviceReleaseCreditsLocked(const std::vector<BlockPool*>& release_credits);
-    void settleInFlightDeviceReleaseCreditsLocked(const std::vector<BlockPool*>& release_credits);
-    void performEvictionCopy(const BlockTreeEvictor::EvictionPlan& plan,
-                             const std::vector<BlockPool*>&        release_credits);
+    struct DeviceReleaseCredit {
+        DeviceBlockPoolPtr pool;
+        BlockIdxType       block{NULL_BLOCK_IDX};
+    };
+    bool submitEvictionLocked(EvictionMove& eviction_move, std::vector<DeviceReleaseCredit>* release_credits = nullptr);
+    void reserveInFlightDeviceReleaseCreditsLocked(const std::vector<DeviceReleaseCredit>& release_credits);
+    void settleInFlightDeviceReleaseCreditsLocked(const std::vector<DeviceReleaseCredit>& release_credits);
+    void performEvictionCopy(const BlockTreeEvictor::EvictionPlan&   plan,
+                             const std::vector<DeviceReleaseCredit>& release_credits);
     bool buildEvictionTransferRequest(const BlockTreeEvictor::EvictionPlan& plan,
                                       ::MemoryOperationRequestPB&           request) const;
     int  evictionTransferTimeoutMs(const BlockTreeEvictor::EvictionPlan& plan) const;
@@ -329,8 +333,8 @@ private:
     mutable std::mutex    mutex_;
     // Protected by mutex_. Credits remain reserved from async queue acceptance
     // until the matching plan completes or rolls back.
-    std::unordered_map<BlockPool*, size_t> in_flight_device_release_credits_;
-    int64_t                                mutation_version_{0};
+    std::unordered_map<DeviceBlockPoolPtr, size_t> in_flight_device_release_credits_;
+    int64_t                                        mutation_version_{0};
 };
 
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;

@@ -5,9 +5,7 @@
 #include <utility>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 
 namespace rtp_llm {
 
@@ -129,17 +127,21 @@ private:
         layout.seq_size_per_block         = 1;
         layout.kernel_blocks_per_kv_block = 1;
 
-        BlockPoolConfig config;
-        config.pool_name        = "block_tree_cache_test_" + tag;
-        config.block_num        = static_cast<uint32_t>(physical_block_count);
-        config.total_size_bytes = layout.total_size_bytes;
-        config.memory_layouts   = {layout};
+        auto config                     = std::make_shared<DeviceBlockPoolConfig>();
+        config->pool_type               = BlockPoolType::DEVICE;
+        config->pool_name               = "block_tree_cache_test_" + tag;
+        config->physical_block_count    = physical_block_count;
+        config->total_size_bytes        = layout.total_size_bytes;
+        config->memory_layouts          = {layout};
+        config->use_cuda_malloc_backing = false;
 
-        auto backing_pool = std::make_shared<BlockPool>(config, AllocationType::HOST);
-        RTP_LLM_CHECK(backing_pool->init());
-        auto device_pool = std::make_shared<DeviceBlockPool>(std::move(backing_pool));
-        RTP_LLM_CHECK(device_pool->init());
-        return device_pool;
+        auto pool = std::make_shared<DeviceBlockPool>(config);
+        RTP_LLM_CHECK(pool->init());
+        auto structural_blocks = pool->malloc(physical_block_count - 1);
+        RTP_LLM_CHECK(structural_blocks.has_value());
+        // Reserve every literal structural id as allocated at refCount 0. Tree
+        // insertion takes the sole cache hold, preserving refCount==1 eviction.
+        return pool;
     }
 
     static std::vector<BlockTreeCache::PerTagMapping>

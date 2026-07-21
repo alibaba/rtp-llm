@@ -11,24 +11,22 @@ namespace rtp_llm {
 class LinearKVCacheGroup: public KVCacheGroup {
 public:
     LinearKVCacheGroup(GroupBase                           cache_group,
-                       BlockPoolPtr                        block_pool,
+                       DeviceBlockPoolPtr                  block_pool,
                        int                                 group_id,
                        int                                 linear_step      = 0,
-                       SharedBlockCache*                   shared_cache     = nullptr,
                        const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(std::move(cache_group), std::move(block_pool), group_id, shared_cache, metrics_reporter),
+        KVCacheGroup(std::move(cache_group), std::move(block_pool), group_id, metrics_reporter),
         linear_step_(linear_step) {}
 
     // Transition-only overload.
     LinearKVCacheGroup(const LayerIdsType&                 layer_ids,
                        std::shared_ptr<KVCacheSpec>        kvcache_spec,
-                       BlockPoolPtr                        block_pool,
+                       DeviceBlockPoolPtr                  block_pool,
                        int                                 group_id,
                        int                                 linear_step      = 0,
-                       SharedBlockCache*                   shared_cache     = nullptr,
                        const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr,
                        CacheGroupPolicy                    policy = defaultCacheGroupPolicy(CacheGroupType::LINEAR)):
-        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, policy, shared_cache, metrics_reporter),
+        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, policy, metrics_reporter),
         linear_step_(linear_step) {}
 
     MatchResult matchSingleKey(CacheKeyType cache_key) const override;

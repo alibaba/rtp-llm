@@ -10,8 +10,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/BlockPool.h"
-#include "rtp_llm/cpp/cache/SharedBlockCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 
 namespace rtp_llm {
@@ -26,15 +25,13 @@ struct KVCacheTokenCapacity {
 };
 
 struct KVCachePoolMetricsSnapshot {
-    size_t      pool_index           = 0;
-    std::string pool_name            = "unnamed";
-    size_t      free_blocks          = 0;
-    size_t      available_blocks     = 0;
-    size_t      request_ref_blocks   = 0;
-    size_t      connector_ref_blocks = 0;
-    size_t      total_blocks         = 0;
-    size_t      reserve_blocks       = 0;
-    float       used_ratio           = 0.0f;
+    size_t      pool_index                = 0;
+    std::string pool_name                 = "unnamed";
+    size_t      free_blocks               = 0;
+    size_t      active_tree_cached_blocks = 0;
+    size_t      total_blocks              = 0;
+    size_t      reserve_blocks            = 0;
+    float       used_ratio                = 0.0f;
 };
 
 class KVCacheAllocator {
@@ -95,12 +92,13 @@ public:
     virtual void blockBatchCopy(const torch::Tensor& copy_mapping);
     virtual void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping);
 
-    BlockPoolPtr getBlockPool() const {
+    DeviceBlockPoolPtr getDeviceBlockPool() const {
         return block_pool_;
     }
 
-    SharedBlockCachePtr sharedBlockCache() const {
-        return shared_block_cache_;
+    virtual const std::vector<DeviceBlockPoolPtr>& groupBlockPools() const {
+        static const std::vector<DeviceBlockPoolPtr> empty;
+        return empty;
     }
 
     virtual std::vector<KVCacheGroupPtr> cacheGroups() const {
@@ -111,10 +109,6 @@ public:
 
     BlockTreeCache* blockTreeCache() const {
         return block_tree_cache_;
-    }
-
-    void setSharedBlockCache(SharedBlockCachePtr shared_block_cache) {
-        shared_block_cache_ = std::move(shared_block_cache);
     }
 
     void setUseCudaMallocBlockPool(bool use_cuda_malloc_block_pool) {
@@ -138,21 +132,15 @@ public:
         return reserve_block_num_;
     }
 
-    virtual void                    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
-    virtual int64_t                 getMrCostTimeMs() const;
-    virtual size_t                  freeBlocksNum() const;
-    virtual size_t                  availableBlocksNum() const;
-    virtual BatchKVCacheResourcePtr popBlocksFromCache(size_t min_blocks_to_free);
-    virtual void                    blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource);
-    virtual size_t                  requestRefBlocksNum() const;
-    virtual size_t                  connectorRefBlocksNum() const;
-    virtual size_t                  blockCacheRefBlocksNum() const;
-    virtual size_t                  notInUseBlocksNum() const;
-    virtual size_t                  availableTokensNum() const;
-    virtual size_t                  totalTokensNum() const;
-    virtual size_t                  totalBlocksNum() const;
-    virtual size_t                  maxAvailableTokensNum() const;
-    virtual KVCacheTokenCapacity    tokenCapacity(size_t default_seq_size_per_block) const;
+    virtual void                 regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
+    virtual int64_t              getMrCostTimeMs() const;
+    virtual size_t               freeBlocksNum() const;
+    virtual size_t               activeTreeCachedBlocksNum() const;
+    virtual size_t               availableTokensNum() const;
+    virtual size_t               totalTokensNum() const;
+    virtual size_t               totalBlocksNum() const;
+    virtual size_t               maxAvailableTokensNum() const;
+    virtual KVCacheTokenCapacity tokenCapacity(size_t default_seq_size_per_block) const;
     virtual std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const;
     virtual std::vector<int>                        independentEvictionGroupIds() const;
     /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
@@ -160,7 +148,7 @@ public:
 
 protected:
     virtual bool         doInit() = 0;
-    virtual size_t       reservableAvailableBlocksNum() const;
+    virtual size_t       reservableFreeBlocksNum() const;
     MallocResult         initMalloc(const MallocInfo& malloc_info);
     virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
     virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) = 0;
@@ -186,8 +174,7 @@ protected:
 
     CacheConfig                        config_;
     AllocationType                     allocation_type_;
-    BlockPoolPtr                       block_pool_;
-    SharedBlockCachePtr                shared_block_cache_;
+    DeviceBlockPoolPtr                 block_pool_;
     BlockTreeCache*                    block_tree_cache_ = nullptr;
     std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
     const kmonitor::MetricsReporterPtr metrics_reporter_           = nullptr;

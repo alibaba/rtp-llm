@@ -20,6 +20,12 @@ protected:
         group_->setDevicePools({pool_}, {"tag_0"});
     }
 
+    void TearDown() override {
+        for (const auto block : held_blocks_) {
+            pool_->decRef(block);
+        }
+    }
+
     TreeNode* makeNode(CacheKeyType key, int group_count = 1) {
         auto* node      = new TreeNode();
         node->cache_key = key;
@@ -27,11 +33,20 @@ protected:
         return node;
     }
 
-    void setDeviceBlock(TreeNode* node, int gid, BlockIdxType block) {
-        if (!isNullBlockIdx(block) && held_blocks_.insert(block).second) {
-            pool_->incRef(block);
+    BlockIdxType setDeviceBlock(TreeNode* node, int gid) {
+        const auto block = pool_->malloc();
+        EXPECT_TRUE(block.has_value());
+        if (!block.has_value()) {
+            return NULL_BLOCK_IDX;
         }
-        node->group_slots[static_cast<size_t>(gid)].device_blocks = {block};
+        pool_->incRef(block.value());
+        held_blocks_.insert(block.value());
+        node->group_slots[static_cast<size_t>(gid)].device_blocks = {block.value()};
+        return block.value();
+    }
+
+    void clearDeviceBlock(TreeNode* node, int gid) {
+        node->group_slots[static_cast<size_t>(gid)].device_blocks = {NULL_BLOCK_IDX};
     }
 
     void setHostBlock(TreeNode* node, int gid, BlockIdxType block) {
@@ -50,8 +65,8 @@ TEST_F(SWAComponentGroupTest, AnyNodeWithDataIsSlotEvictable) {
     a->children[200] = b;
     b->parent        = a;
 
-    setDeviceBlock(a, 0, 10);
-    setDeviceBlock(b, 0, 20);
+    setDeviceBlock(a, 0);
+    setDeviceBlock(b, 0);
 
     // Both A and B are candidate-eligible even though A has a child holding data.
     EXPECT_TRUE(group_->isSlotEvictable(*a, Tier::DEVICE));
@@ -69,9 +84,9 @@ TEST_F(SWAComponentGroupTest, WindowValidatorConnectedPath) {
     auto* a = makeNode(100);
     auto* b = makeNode(200);
     auto* c = makeNode(300);
-    setDeviceBlock(a, 0, 10);
-    setDeviceBlock(b, 0, 20);
-    setDeviceBlock(c, 0, 30);
+    setDeviceBlock(a, 0);
+    setDeviceBlock(b, 0);
+    setDeviceBlock(c, 0);
 
     EXPECT_TRUE(validator->validate(a, a->group_slots[0]));
     EXPECT_TRUE(validator->validate(b, b->group_slots[0]));
@@ -94,9 +109,9 @@ TEST_F(SWAComponentGroupTest, WindowValidatorGapRequiresEnoughWindowAfterReset) 
     TreeNode* b = makeNode(200);
     TreeNode* c = makeNode(300);
     TreeNode* d = makeNode(400);
-    setDeviceBlock(a, 0, 10);
-    setDeviceBlock(c, 0, 30);
-    setDeviceBlock(d, 0, 40);
+    setDeviceBlock(a, 0);
+    setDeviceBlock(c, 0);
+    setDeviceBlock(d, 0);
 
     EXPECT_TRUE(validator->validate(a, a->group_slots[0]));
     EXPECT_TRUE(swa_validator->connectedToRoot());
@@ -125,11 +140,11 @@ TEST_F(SWAComponentGroupTest, WindowValidatorMultitierNoReset) {
     auto* a = makeNode(100);
     auto* b = makeNode(200);
     auto* c = makeNode(300);
-    setDeviceBlock(a, 0, 10);
+    setDeviceBlock(a, 0);
     // B: host data only
-    setDeviceBlock(b, 0, NULL_BLOCK_IDX);
+    clearDeviceBlock(b, 0);
     b->group_slots[0].host_block = 15;
-    setDeviceBlock(c, 0, 30);
+    setDeviceBlock(c, 0);
 
     EXPECT_TRUE(validator->validate(a, a->group_slots[0]));
     // B has host data -> !is_empty() is true -> no reset
@@ -171,9 +186,9 @@ TEST_F(SWAComponentGroupTest, ComputeReferenceCountCountsHostAndDiskBlocks) {
 
 TEST_F(SWAComponentGroupTest, IndependentEvictionDoesNotAffectFull) {
     // SWA eviction only affects SWA group data, not Full group
-    auto* node = makeNode(100, 2);  // 2 groups: 0=Full, 1=SWA
-    setDeviceBlock(node, 0, 42);    // Full data
-    setDeviceBlock(node, 1, 99);    // SWA data
+    auto*              node       = makeNode(100, 2);         // 2 groups: 0=Full, 1=SWA
+    const BlockIdxType full_block = setDeviceBlock(node, 0);  // Full data
+    setDeviceBlock(node, 1);                                  // SWA data
 
     group_->component_group_id = 1;  // SWA group
     group_->evictFromTier(node, node->group_slots[1], Tier::DEVICE);
@@ -182,7 +197,7 @@ TEST_F(SWAComponentGroupTest, IndependentEvictionDoesNotAffectFull) {
     EXPECT_FALSE(node->group_slots[1].has_value(Tier::DEVICE));
     // Full data intact
     EXPECT_TRUE(node->group_slots[0].has_value(Tier::DEVICE));
-    EXPECT_EQ(node->group_slots[0].device_blocks[0], 42);
+    EXPECT_EQ(node->group_slots[0].device_blocks[0], full_block);
 
     delete node;
 }
@@ -192,7 +207,7 @@ TEST_F(SWAComponentGroupTest, SlotEvictabilityRequiresTierDataButNotLeafTopology
     auto* b          = makeNode(200);
     a->children[200] = b;
     b->parent        = a;
-    setDeviceBlock(a, 0, 10);
+    setDeviceBlock(a, 0);
 
     EXPECT_TRUE(group_->isSlotEvictable(*a, Tier::DEVICE));
     EXPECT_FALSE(group_->isSlotEvictable(*a, Tier::HOST));

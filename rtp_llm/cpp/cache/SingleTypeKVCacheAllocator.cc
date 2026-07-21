@@ -5,7 +5,7 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
@@ -47,21 +47,15 @@ bool SingleTypeKVCacheAllocator::doInit() {
                                        || spec->type == rtp_llm::KVCacheSpecType::MultiHeadLatentAttention);
     RTP_LLM_CHECK_WITH_INFO(is_full_attention, "SingleTypeKVCacheAllocator requires one FULL MHA/MLA cache group");
 
-    BlockPoolConfig pool_config;
-
-    pool_config = BlockPoolConfigHelper::createConfig(config_);
-    block_pool_ = std::make_shared<BlockPool>(pool_config, allocation_type_);
+    auto pool_config = std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfig(config_));
+    pool_config->use_cuda_malloc_backing = use_cuda_malloc_block_pool_;
+    block_pool_ = std::make_shared<DeviceBlockPool>(std::shared_ptr<const DeviceBlockPoolConfig>(pool_config));
     if (!block_pool_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize block pool for SingleTypeKVCacheAllocator");
         return false;
     }
 
-    SharedBlockCache* shared_cache_raw = shared_block_cache_ ? shared_block_cache_.get() : nullptr;
-    if (shared_block_cache_) {
-        shared_block_cache_->init(1, std::vector<BlockPoolPtr>{block_pool_});
-    }
-
-    full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(cache_group, block_pool_, 0, shared_cache_raw, nullptr);
+    full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(cache_group, block_pool_, 0, nullptr);
 
     if (!full_kv_cache_group_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize FullKVCacheGroup");
@@ -203,7 +197,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     if (reserve_blocks > 0) {
         const int    need_blocks = getNeedBlocks(malloc_info);
         const size_t required    = static_cast<size_t>(std::max(need_blocks, 0)) + missing_targets + reserve_blocks;
-        if (availableBlocksNum() < required) {
+        if (freeBlocksNum() < required) {
             return rollback();
         }
     }
@@ -442,11 +436,8 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
         return nullptr;
     }
 
-    if (is_connector) {
-        block_pool_->connectorReference(real_blocks);
-    } else {
-        block_pool_->requestReference(real_blocks);
-    }
+    (void)is_connector;
+    block_pool_->incRef(real_blocks);
     selected_resource->mutableBlockIds(0).assign(std::move(selected_blocks));
     selected_resource->cacheKeys() = std::move(selected_cache_keys);
 
@@ -464,11 +455,8 @@ void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_r
         }
     }
     if (!blocks_to_free.empty()) {
-        if (is_connector) {
-            block_pool_->connectorFree(blocks_to_free);
-        } else {
-            block_pool_->requestFree(blocks_to_free);
-        }
+        (void)is_connector;
+        block_pool_->decRef(blocks_to_free);
     }
 }
 

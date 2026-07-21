@@ -1,8 +1,9 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
 
-# Leaf adapter target. The target declarative BlockPool remains the only owner of
-# device backing; BlockTreeCache adds tree-cache holds through this narrow layer.
+# Leaf pool target: DeviceBlockPool owns its backing and inherits the common
+# IBlockPool lifecycle. Keeping this target below allocator/group targets avoids
+# a cycle with the full block_tree_cache library.
 cc_library(
     name = "device_block_pool",
     srcs = [
@@ -16,11 +17,19 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
-        "//rtp_llm/cpp/cache:block_pool",
-        "//rtp_llm/cpp/cache:kv_cache_group",
+        "//rtp_llm/cpp/cache:block_info",
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache:memory_layout_strategy",
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/utils:core_utils",
-    ] + torch_deps(),
+    ] + torch_deps() + select({
+        "@//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 cc_library(
@@ -80,8 +89,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:kv_cache_group",
         "//rtp_llm/cpp/cache:kv_cache_allocator_hdr",
-        "//rtp_llm/cpp/cache/connector:connector_base",
-        "//rtp_llm/cpp/cache/connector/memory:cache_block_kind",
+        "//rtp_llm/cpp/cache:cache_async_context",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",

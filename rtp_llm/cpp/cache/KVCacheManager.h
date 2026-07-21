@@ -11,11 +11,10 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
 
@@ -23,7 +22,6 @@ namespace rtp_llm {
 
 class CPSlotMapper;
 class CacheStore;
-class KVCacheConnectorCoordinator;
 class KVCacheConnectorReadWriteContext;
 class BroadcastManager;
 
@@ -100,16 +98,13 @@ public:
     GroupedCacheLayerLayout getMTPModuleCacheLayerLayout(int mtp_module_id) const;
 
     // 资源统计和信息查询
-    size_t                  freeBlocksNum() const;
-    size_t                  availableBlocksNum() const;
-    size_t                  reserveBlocksNum() const;
-    size_t                  notInUseBlocksNum() const;
-    BatchKVCacheResourcePtr popBlocksFromCache(size_t min_blocks_to_free);
-    void                    blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource);
-    size_t                  availableTokensNum() const;
-    size_t                  totalBlocksNum() const;
-    size_t                  maxAvailableTokensNum() const;
-    KVCacheInfo             getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    size_t      freeBlocksNum() const;
+    size_t      availableBlocksNum() const;
+    size_t      reserveBlocksNum() const;
+    size_t      availableTokensNum() const;
+    size_t      totalBlocksNum() const;
+    size_t      maxAvailableTokensNum() const;
+    KVCacheInfo getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
 
     // 系统资源管理
     void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
@@ -142,10 +137,6 @@ public:
         return block_tree_cache_;
     }
 
-    std::shared_ptr<KVCacheConnectorCoordinator> connectorCoordinator() const {
-        return coordinator_;
-    }
-
     // Increment KV cache reference count for PD separation (connector refcount)
     std::shared_ptr<KVCacheResource>
     incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector = true);
@@ -171,7 +162,6 @@ public:
     }
 
 private:
-    void                              initConnectorCoordinator();
     void                              allocateAndSync();
     void                              reportMetricsLoop();
     std::shared_ptr<BroadcastManager> createBlockTreeBroadcastManager() const;
@@ -194,8 +184,7 @@ private:
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
 
-    std::shared_ptr<KVCacheConnectorCoordinator> coordinator_;
-    BlockTreeCachePtr                            block_tree_cache_;
+    BlockTreeCachePtr block_tree_cache_;
 
     mutable std::mutex          cache_store_mutex_;
     std::shared_ptr<CacheStore> cache_store_;

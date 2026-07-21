@@ -107,17 +107,15 @@ DeviceBlockPoolPtr makeTestDevicePool(size_t usable_blocks, const std::string& n
     layout.seq_size_per_block         = 1;
     layout.kernel_blocks_per_kv_block = 1;
 
-    BlockPoolConfig config;
-    config.pool_name        = name;
-    config.block_num        = physical_blocks;
-    config.total_size_bytes = layout.total_size_bytes;
-    config.memory_layouts   = {layout};
+    auto config                     = std::make_shared<DeviceBlockPoolConfig>();
+    config->pool_type               = BlockPoolType::DEVICE;
+    config->pool_name               = name;
+    config->physical_block_count    = physical_blocks;
+    config->total_size_bytes        = layout.total_size_bytes;
+    config->memory_layouts          = {layout};
+    config->use_cuda_malloc_backing = false;
 
-    auto backing_pool = std::make_shared<BlockPool>(config);
-    if (!backing_pool->init()) {
-        return nullptr;
-    }
-    auto pool = std::make_shared<DeviceBlockPool>(backing_pool);
+    auto pool = std::make_shared<DeviceBlockPool>(config);
     if (!pool->init()) {
         return nullptr;
     }
@@ -461,8 +459,14 @@ TEST(BlockTreeEvictorPolicyTest, ReverseCascadeNeitherStartsFromNorTargetsNonCha
 }
 
 TEST_F(BlockTreeEvictorTest, MatchUpdatesIntermediateHistoryWithoutAdmittingIt) {
-    std::vector<std::vector<GroupSlot>> slots  = {{makeSlot(Tier::DEVICE, 10)}, {makeSlot(Tier::DEVICE, 11)}};
-    auto                                result = insert({100, 200}, slots);
+    const auto allocated = device_pool_->malloc(2);
+    ASSERT_TRUE(allocated.has_value());
+    ASSERT_EQ(allocated->size(), 2u);
+    const BlockIdxType                  parent_block = (*allocated)[0];
+    const BlockIdxType                  leaf_block   = (*allocated)[1];
+    std::vector<std::vector<GroupSlot>> slots        = {{makeSlot(Tier::DEVICE, parent_block)},
+                                                        {makeSlot(Tier::DEVICE, leaf_block)}};
+    auto                                result       = insert({100, 200}, slots);
     ASSERT_EQ(result.inserted_nodes.size(), 2u);
 
     TreeNode* parent = result.inserted_nodes[0].node;
@@ -481,6 +485,8 @@ TEST_F(BlockTreeEvictorTest, MatchUpdatesIntermediateHistoryWithoutAdmittingIt) 
     EXPECT_EQ(evictor_->candidateStats().device_candidates, 1u);
 
     evictor_->onNodeAboutToRemove(leaf);
+    group_->unreferenceBlocks(GroupBlockSet{0, Tier::DEVICE, {{leaf_block}}});
+    leaf->group_slots[0].device_blocks.clear();
     tree_->removeNode(leaf);
     evictor_->onTopologyChanged(parent);
 
@@ -490,6 +496,10 @@ TEST_F(BlockTreeEvictorTest, MatchUpdatesIntermediateHistoryWithoutAdmittingIt) 
     EXPECT_EQ(victim->node, parent);
     EXPECT_EQ(parent->group_slots[0].candidate_meta.last_access_seq, parent_meta.last_access_seq);
     EXPECT_EQ(parent->group_slots[0].candidate_meta.hit_count, parent_meta.hit_count);
+
+    evictor_->onNodeAboutToRemove(parent);
+    group_->unreferenceBlocks(GroupBlockSet{0, Tier::DEVICE, {{parent_block}}});
+    parent->group_slots[0].device_blocks.clear();
 }
 
 TEST_F(BlockTreeEvictorTest, LastReferenceReleaseReadmitsLazyDroppedCandidate) {
@@ -843,7 +853,11 @@ TEST_F(BlockTreeEvictorTest, DemotionExcludesSourceAndRollbackOrSuccessRestoresO
     ASSERT_NE(host_pool, nullptr);
     group_->setHostPool(host_pool);
 
-    auto result = insert({100}, {{makeSlot(Tier::DEVICE, 10)}});
+    const auto allocated = device_pool_->malloc(1);
+    ASSERT_TRUE(allocated.has_value());
+    ASSERT_EQ(allocated->size(), 1u);
+    const BlockIdxType source_block = allocated->front();
+    auto               result       = insert({100}, {{makeSlot(Tier::DEVICE, source_block)}});
     ASSERT_NE(result.leaf, nullptr);
     auto& slot = result.leaf->group_slots[0];
     ASSERT_EQ(evictor_->candidateStats().device_candidates, 1u);
@@ -860,7 +874,7 @@ TEST_F(BlockTreeEvictorTest, DemotionExcludesSourceAndRollbackOrSuccessRestoresO
 
     evictor_->rollbackPreparedPlan(*plan);
     EXPECT_EQ(slot.transfer_state, SlotTransferState::IDLE);
-    EXPECT_EQ(slot.device_blocks, (std::vector<BlockIdxType>{10}));
+    EXPECT_EQ(slot.device_blocks, (std::vector<BlockIdxType>{source_block}));
     EXPECT_FALSE(slot.has_value(Tier::HOST));
     EXPECT_EQ(evictor_->candidateStats().device_candidates, 1u);
     EXPECT_EQ(host_pool->freeBlocksNum(), 1u);

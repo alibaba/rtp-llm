@@ -127,15 +127,8 @@ NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
 }
 
 MatchResult SWAKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
-    MatchResult result;
-    if (!shared_cache_) {
-        return result;
-    }
-    auto block_idx = shared_cache_->matchGroup(cache_key, group_id());
-    if (!isNullBlockIdx(block_idx)) {
-        result.block_indices = {block_idx};
-    }
-    return result;
+    (void)cache_key;
+    return {};
 }
 
 bool SWAKVCacheGroup::malloc(BlockIds&            block_ids,
@@ -179,13 +172,12 @@ bool SWAKVCacheGroup::malloc(BlockIds&            block_ids,
 
     BlockIndicesType allocated_blocks;
     if (need_alloc_blocks > 0) {
-        allocated_blocks = block_pool_->malloc(need_alloc_blocks);
-        if (allocated_blocks.size() != static_cast<size_t>(need_alloc_blocks)) {
-            if (!allocated_blocks.empty()) {
-                block_pool_->requestFree(allocated_blocks);
-            }
+        auto allocated = block_pool_->malloc(static_cast<size_t>(need_alloc_blocks));
+        if (!allocated.has_value() || allocated->size() != static_cast<size_t>(need_alloc_blocks)) {
             return false;
         }
+        allocated_blocks = std::move(*allocated);
+        block_pool_->incRef(allocated_blocks);
     }
 
     BlockIndicesType new_ids;
@@ -233,7 +225,7 @@ void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse
         pos_to_remove.push_back(static_cast<size_t>(i));
     }
     if (!blocks_to_free.empty()) {
-        block_pool_->requestFree(blocks_to_free);
+        block_pool_->decRef(blocks_to_free);
         block_ids.remove(pos_to_remove);
     }
     checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");
@@ -246,7 +238,7 @@ void SWAKVCacheGroup::free(const BlockIndicesType& block_indices) {
     BlockIndicesType valid;
     filterValidBlocks(block_indices, valid);
     if (!valid.empty()) {
-        block_pool_->requestFree(valid);
+        block_pool_->decRef(valid);
     }
 }
 
@@ -255,7 +247,7 @@ void SWAKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new
     BlockIndicesType valid;
     filterValidBlocks(new_block_indices, valid);
     if (!valid.empty()) {
-        block_pool_->requestReference(valid);
+        block_pool_->incRef(valid);
     }
 }
 

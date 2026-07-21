@@ -18,6 +18,12 @@ protected:
         group_->setDevicePools({pool_}, {"tag_0"});
     }
 
+    void TearDown() override {
+        for (const auto block : held_blocks_) {
+            pool_->decRef(block);
+        }
+    }
+
     TreeNode* makeNode(CacheKeyType key, int group_count = 1) {
         auto* node      = new TreeNode();
         node->cache_key = key;
@@ -25,11 +31,16 @@ protected:
         return node;
     }
 
-    void setDeviceBlock(TreeNode* node, int gid, BlockIdxType block) {
-        if (!isNullBlockIdx(block) && held_blocks_.insert(block).second) {
-            pool_->incRef(block);
+    BlockIdxType setDeviceBlock(TreeNode* node, int gid) {
+        const auto block = pool_->malloc();
+        EXPECT_TRUE(block.has_value());
+        if (!block.has_value()) {
+            return NULL_BLOCK_IDX;
         }
-        node->group_slots[static_cast<size_t>(gid)].device_blocks = {block};
+        pool_->incRef(block.value());
+        held_blocks_.insert(block.value());
+        node->group_slots[static_cast<size_t>(gid)].device_blocks = {block.value()};
+        return block.value();
     }
 
     DeviceBlockPoolPtr                    pool_;
@@ -43,8 +54,8 @@ TEST_F(LinearComponentGroupTest, AnyNodeWithDataIsSlotEvictable) {
     a->children[200] = b;
     b->parent        = a;
 
-    setDeviceBlock(a, 0, 10);
-    setDeviceBlock(b, 0, 20);
+    setDeviceBlock(a, 0);
+    setDeviceBlock(b, 0);
 
     // LINEAR has no leaf/topology requirement; both nodes are eligible.
     EXPECT_TRUE(group_->isSlotEvictable(*a, Tier::DEVICE));
@@ -56,7 +67,7 @@ TEST_F(LinearComponentGroupTest, AnyNodeWithDataIsSlotEvictable) {
 
 TEST_F(LinearComponentGroupTest, EvictFromTierDevice) {
     auto* node = makeNode(100);
-    setDeviceBlock(node, 0, 42);
+    setDeviceBlock(node, 0);
 
     group_->evictFromTier(node, node->group_slots[0], Tier::DEVICE);
 
@@ -70,7 +81,7 @@ TEST_F(LinearComponentGroupTest, MatchValidatorHasData) {
     auto validator = group_->createMatchValidator();
 
     auto* node_with = makeNode(100);
-    setDeviceBlock(node_with, 0, 42);
+    setDeviceBlock(node_with, 0);
     EXPECT_TRUE(validator->validate(node_with, node_with->group_slots[0]));
 
     auto* node_empty = makeNode(200);
