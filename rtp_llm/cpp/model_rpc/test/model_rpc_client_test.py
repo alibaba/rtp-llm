@@ -377,6 +377,14 @@ class BatchEnqueueRoutingTest(TestCase):
         asyncio.run(visitor.batch_enqueue(inputs))
 
         self.assertEqual(1, len(route_calls))
+        # The single routing call must report the WHOLE batch's weight (24 = 3*8), not just the
+        # unrouted subset (16 = 2*8). The batch lands on one backend, so the master must account
+        # all of it; summing over `unrouted` instead would under-report load and mis-balance.
+        self.assertEqual(
+            sum(inp.prompt_length for inp in inputs),
+            route_calls[0][1],
+            "a mixed batch must report the full batch weight, not just the unrouted subset",
+        )
         client = ModelRpcClient.__new__(ModelRpcClient)
         client._addresses = []
         client._decode_entrance = False
