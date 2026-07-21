@@ -4,12 +4,15 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
+
+class CacheTopology;
 
 using CacheKeyType = int64_t;
 using BlockIdxType = int32_t;
@@ -82,22 +85,31 @@ using LayerAttnBlockIds = std::vector<std::vector<std::shared_ptr<BlockIds>>>;
 
 class KVCacheResource {
 public:
-    void initGroups(int                                  group_num,
-                    int                                  layer_num,
-                    const std::vector<std::vector<int>>& layer_group_ids                  = {},
-                    size_t                               kernel_blocks_per_kv_block       = 1,
-                    const std::vector<CacheGroupType>&   group_types                      = {},
-                    const std::vector<size_t>&           group_kernel_blocks_per_kv_block = {});
+    void initGroups(std::shared_ptr<const CacheTopology> topology);
     void resizeBlocks(int reserver_blocks, int value = 0);
 
-    int                     blocksNum(int group_id = 0) const;
-    const BlockIndicesType& blocks(int group_id = 0) const;
+    int                     blocksNum(int group_id) const;
+    int                     blocksNum(std::string_view tag) const;
+    const BlockIndicesType& blocks(int group_id) const;
+    const BlockIndicesType& blocks(std::string_view tag) const;
     const BlockIndicesType& blocks(int layer_id, int group_id) const;
-    const BlockIndicesType& kernelBlocks(int group_id = 0) const;
+    const BlockIndicesType& blocksForLayer(int layer_id, std::string_view tag) const;
+    const BlockIndicesType& kernelBlocks(int group_id) const;
+    const BlockIndicesType& kernelBlocks(std::string_view tag) const;
     const BlockIndicesType& kernelBlocks(int layer_id, int group_id) const;
-    BlockIds&               mutableBlockIds(int group_id = 0) const;
+    const BlockIndicesType& kernelBlocksForLayer(int layer_id, std::string_view tag) const;
+    BlockIds&               mutableBlockIds(int group_id) const;
+    BlockIds&               mutableBlockIds(std::string_view tag) const;
     BlockIds&               mutableBlockIds(int layer_id, int group_id) const;
+    BlockIds&               mutableBlockIdsForLayer(int layer_id, std::string_view tag) const;
 
+    const BlockIds& blockIds(std::string_view tag) const;
+    const BlockIds& blockIdsForLayer(int layer_id, std::string_view tag) const;
+
+    const std::vector<std::string>& groupTagsForLayer(int layer_id) const;
+    const std::string&              soleGroupTagForLayer(int layer_id) const;
+
+    int layerNum() const;
     int groupNums() const;
 
     GroupBlockIds&       groupBlocks();
@@ -158,6 +170,12 @@ public:
     std::string debugString() const;
 
 private:
+    int  groupIdForTag(std::string_view tag) const;
+    int  groupIdForLayerTag(int layer_id, std::string_view tag) const;
+    bool hasOneGroupPerLayer() const;
+
+    std::unordered_map<std::string, int>  tag_to_group_id_;
+    std::vector<std::vector<std::string>> layer_group_tags_;
     // layer_id -> group_id -> block_indices
     LayerAttnBlockIds layer_group_block_ids;
     // group_id -> block_indices

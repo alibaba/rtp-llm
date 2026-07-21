@@ -112,7 +112,7 @@ std::shared_ptr<const CacheTopology> projectTopology(const CacheTopology&       
         layer.layer_id   = static_cast<int>(local_layer_id);
         layer.group_tags = source_layer.group_tags;
         for (const auto& tag : layer.group_tags) {
-            groups[source.slotForTag(tag)].layer_ids.push_back(static_cast<int>(local_layer_id));
+            groups[source.groupIdForTag(tag)].layer_ids.push_back(static_cast<int>(local_layer_id));
         }
         layers.push_back(std::move(layer));
     }
@@ -336,10 +336,14 @@ void KVCacheManager::blockBatchCopy(const BlockIdPair* copy_mapping_begin, const
     return allocator_->blockBatchCopy(copy_mapping_begin, copy_mapping_end);
 }
 
-bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                   const std::vector<int>&        block_src_batch,
-                                   bool                           copy_last_block,
-                                   std::vector<BlockIdPair>&      block_update_mapping) {
+void KVCacheManager::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping) {
+    return allocator_->blockBatchCopyByTag(copy_mapping);
+}
+
+bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
+                                   const std::vector<int>&         block_src_batch,
+                                   bool                            copy_last_block,
+                                   std::vector<TaggedBlockIdPair>& block_update_mapping) {
     RTP_LLM_PROFILE_FUNCTION();
     return allocator_->updateKVBlock(batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
 }

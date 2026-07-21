@@ -16,7 +16,7 @@
 namespace rtp_llm {
 
 // Immutable cache-group configuration published by CacheConfig. The tag is
-// the semantic identity; numeric slots are private CacheTopology indices.
+// the semantic identity; numeric group ids are private CacheTopology indices.
 struct GroupBase {
     std::string                        tag;
     std::shared_ptr<const KVCacheSpec> spec;
@@ -52,13 +52,13 @@ public:
     }
 
     const GroupBase& group(std::string_view tag) const;
-    const GroupBase& groupBySlot(size_t slot) const;
+    const GroupBase& groupById(size_t group_id) const;
     const LayerBase& layer(int layer_id) const;
     GroupRefs        groupsForLayer(int layer_id) const;
     const GroupBase& groupForLayer(int layer_id, std::string_view tag) const;
     const GroupBase& soleGroupForLayer(int layer_id) const;
 
-    size_t slotForTag(std::string_view tag) const;
+    size_t groupIdForTag(std::string_view tag) const;
     bool   hasSingleGlobalGroup() const;
     bool   hasOneGroupPerLayer() const;
 
@@ -85,7 +85,7 @@ private:
 
     std::vector<GroupBase>                  groups_;
     std::vector<LayerBase>                  layers_;
-    std::unordered_map<std::string, size_t> tag_to_slot_;
+    std::unordered_map<std::string, size_t> tag_to_group_id_;
 
     mutable std::once_flag                       snapshot_once_;
     mutable std::shared_ptr<const SnapshotCache> snapshots_;

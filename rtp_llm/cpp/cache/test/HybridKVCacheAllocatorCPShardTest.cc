@@ -78,22 +78,22 @@ CompleteTokenIdsPtr makeTokens(int batch_size, int seq_length, int seq_size_per_
 BatchKVCacheResourcePtr makeBatchRes(int batch_size, const CacheConfig& config, CacheKeysType keys) {
     auto res = std::make_shared<BatchKVCacheResource>();
     res->resetBatchSize(batch_size);
-    res->initGroups(config.groupNums(), static_cast<int>(config.layer_all_num), config.layerGroupIdsSnapshot());
+    res->initGroups(config.topologyPtr());
     for (int b = 0; b < batch_size; ++b) {
         res->setBatchCacheKeys(b, keys);
     }
     return res;
 }
 
-// Cache (key, group-slot) pairs into SharedBlockCache and drop request refs so blocks are reusable.
+// Cache (key, group-block) pairs into SharedBlockCache and drop request refs so blocks are reusable.
 std::vector<BlockIdxType> seedCache(
     BlockPoolPtr block_pool, SharedBlockCachePtr shared_cache, int group_num, int group_id, const CacheKeysType& keys) {
     auto blocks = block_pool->malloc(static_cast<int>(keys.size()));
     EXPECT_EQ(blocks.size(), keys.size());
     for (size_t i = 0; i < keys.size(); ++i) {
-        std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_num), NULL_BLOCK_IDX);
-        group_slots[static_cast<size_t>(group_id)] = blocks[i];
-        shared_cache->put(keys[i], group_slots, true);
+        std::vector<BlockIdxType> group_block_ids(static_cast<size_t>(group_num), NULL_BLOCK_IDX);
+        group_block_ids[static_cast<size_t>(group_id)] = blocks[i];
+        shared_cache->put(keys[i], group_block_ids, true);
     }
     block_pool->requestFree(blocks);
     return blocks;

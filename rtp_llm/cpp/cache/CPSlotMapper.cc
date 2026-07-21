@@ -196,20 +196,8 @@ std::vector<BlockInfo> CPSlotMapper::sliceBlockForPeer(const CacheConfig&     co
 KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& source,
                                                        const CacheConfig&     config,
                                                        const CacheKeysType&   selected_keys) const {
-    std::vector<CacheGroupType> group_types;
-    group_types.reserve(static_cast<size_t>(source.groupNums()));
-    for (int gid = 0; gid < source.groupNums(); ++gid) {
-        group_types.push_back(gid < config.groupNums() ? config.typeForGroup(static_cast<size_t>(gid)) :
-                                                         CacheGroupType::FULL);
-    }
-
     KVCacheResource selected = source;
-    selected.initGroups(source.groupNums(),
-                        static_cast<int>(config.layer_all_num),
-                        config.layerGroupIdsSnapshot(),
-                        config.kernelBlocksPerKvBlockForGroup(0),
-                        group_types,
-                        config.groupKernelBlocksPerKvBlockSnapshot());
+    selected.initGroups(config.topologyPtr());
     selected.setCacheKeys(selected_keys);
     const bool selected_aligned = selectedLastRankKeysAreAligned(source, cp_size_);
     selected.setLastBlockAligned(selected_aligned);

@@ -19,7 +19,7 @@ protected:
     }
 
     std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id) {
-        return std::make_shared<LayerCacheBuffer>(layer_id);
+        return std::make_shared<LayerCacheBuffer>(layer_id, "default");
     }
 
     int64_t getDeadlineMs(int64_t offset_ms = 1000) {

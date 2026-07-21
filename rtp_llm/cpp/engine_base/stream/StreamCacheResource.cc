@@ -1,7 +1,10 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/cache/CacheTopology.h"
+#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
@@ -14,6 +17,29 @@
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+std::shared_ptr<const CacheTopology> warmupCacheTopology() {
+    static const auto topology = []() {
+        constexpr auto kWarmupCacheTag = "__warmup__";
+        auto           spec            = std::make_shared<MHAKVCacheSpec>();
+        spec->tag                      = kWarmupCacheTag;
+
+        GroupBase group;
+        group.tag                       = kWarmupCacheTag;
+        group.spec                      = std::move(spec);
+        group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        group.layer_ids                 = {0};
+        group.seq_size_per_block        = 1;
+        group.kernel_seq_size_per_block = 1;
+
+        return CacheTopology::create({std::move(group)}, {{0, {kWarmupCacheTag}}});
+    }();
+    return topology;
+}
+
+}  // namespace
 
 // ----------------------------- KVCacheConnectorReadWriteContextImpl -----------------------------
 
@@ -196,29 +222,10 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
 
 void StreamCacheResource::init(int batch_size) {
     batch_kv_cache_resource_->resetBatchSize(batch_size);
-    int                           group_nums      = 1;
-    int                           layer_all_num   = 0;
-    std::vector<std::vector<int>> layer_to_groups = {};
-    std::vector<CacheGroupType>   group_types     = {};
-
-    size_t              kernel_blocks_per_kv_block = 1;
-    std::vector<size_t> group_kernel_blocks_per_kv_block;
-    if (resource_context_.cache_manager) {  // cache manager is null when warmup
-        const auto& cache_config         = resource_context_.cache_manager->cacheConfig();
-        group_nums                       = cache_config.groupNums();
-        layer_all_num                    = static_cast<int>(cache_config.layer_all_num);
-        layer_to_groups                  = cache_config.layerGroupIdsSnapshot();
-        group_types                      = cache_config.groupTypesSnapshot();
-        kernel_blocks_per_kv_block       = cache_config.kernelBlocksPerKvBlock();
-        group_kernel_blocks_per_kv_block = cache_config.groupKernelBlocksPerKvBlockSnapshot();
-    }
-
-    batch_kv_cache_resource_->initGroups(group_nums,
-                                         layer_all_num,
-                                         layer_to_groups,
-                                         kernel_blocks_per_kv_block,
-                                         group_types,
-                                         group_kernel_blocks_per_kv_block);
+    const auto topology = resource_context_.cache_manager ?
+                              resource_context_.cache_manager->cacheConfig().topologyPtr() :
+                              warmupCacheTopology();
+    batch_kv_cache_resource_->initGroups(topology);
     resource_released_ = false;
 }
 
@@ -505,6 +512,11 @@ int StreamCacheResource::curBlocksNum() const {
     return batch_kv_cache_resource_->curBlocksNum();
 }
 
+bool StreamCacheResource::isContextStream() const {
+    RTP_LLM_CHECK_WITH_INFO(stream_ != nullptr, "StreamCacheResource::isContextStream called with null stream");
+    return stream_->isContextStream();
+}
+
 const BatchKVCacheResource& StreamCacheResource::kvCache() const {
     batch_kv_cache_resource_->check();
     return *batch_kv_cache_resource_;
@@ -535,28 +547,10 @@ const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
 void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
     fake_inited_ = true;
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
-    int                           group_nums                 = 1;
-    int                           layer_all_num              = 0;
-    size_t                        kernel_blocks_per_kv_block = 1;
-    std::vector<size_t>           group_kernel_blocks_per_kv_block;
-    std::vector<std::vector<int>> layer_to_groups = {};
-    std::vector<CacheGroupType>   group_types     = {};
-
-    if (resource_context_.cache_manager) {
-        const auto& cache_config         = resource_context_.cache_manager->cacheConfig();
-        group_nums                       = cache_config.groupNums();
-        layer_all_num                    = static_cast<int>(cache_config.layer_all_num);
-        layer_to_groups                  = cache_config.layerGroupIdsSnapshot();
-        group_types                      = cache_config.groupTypesSnapshot();
-        kernel_blocks_per_kv_block       = cache_config.kernelBlocksPerKvBlock();
-        group_kernel_blocks_per_kv_block = cache_config.groupKernelBlocksPerKvBlockSnapshot();
-    }
-    batch_kv_cache_resource_->initGroups(group_nums,
-                                         layer_all_num,
-                                         layer_to_groups,
-                                         kernel_blocks_per_kv_block,
-                                         group_types,
-                                         group_kernel_blocks_per_kv_block);
+    const auto topology = resource_context_.cache_manager ?
+                              resource_context_.cache_manager->cacheConfig().topologyPtr() :
+                              warmupCacheTopology();
+    batch_kv_cache_resource_->initGroups(topology);
 
     reserved_blocks = std::max(1ul, reserved_blocks);
     batch_kv_cache_resource_->resizeBlocks(reserved_blocks, 0);

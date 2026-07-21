@@ -149,7 +149,7 @@ protected:
         size_t    pos_idx = 0;
         for (size_t i = 0; i < cache_keys.size(); i++) {
             for (auto group_id : full_group_ids_) {
-                std::string full_group_name = "F" + std::to_string(group_id);
+                std::string full_group_name = "F" + cache_config_.tagForGroup(static_cast<size_t>(group_id));
                 for (int r = 0; r < tp_size_; r++) {
                     std::string uri = uri_prefix + "uri_" + full_group_name + "_" + std::to_string(r) + "_"
                                       + std::to_string(cache_keys[i]);
@@ -159,7 +159,7 @@ protected:
             if (!other_pos_vec.empty()) {
                 if (i == other_pos_vec[pos_idx]) {
                     for (auto group_id : other_group_ids_) {
-                        std::string other_group_name = "L" + std::to_string(group_id);
+                        std::string other_group_name = "L" + cache_config_.tagForGroup(static_cast<size_t>(group_id));
                         for (int r = 0; r < tp_size_; r++) {
                             std::string uri = uri_prefix + "uri_" + other_group_name + "_" + std::to_string(r) + "_"
                                               + std::to_string(cache_keys[i]);
@@ -180,7 +180,7 @@ protected:
         locations.resize(cache_keys.size(), {});
         for (size_t i = 0; i < cache_keys.size(); i++) {
             for (auto group_id : full_group_ids_) {
-                std::string full_group_name = "F" + std::to_string(group_id);
+                std::string full_group_name = "F" + cache_config_.tagForGroup(static_cast<size_t>(group_id));
                 for (int r = 0; r < tp_size_; r++) {
                     std::string uri = uri_prefix + "uri_" + full_group_name + "_" + std::to_string(r) + "_"
                                       + std::to_string(cache_keys[i]);
@@ -191,7 +191,7 @@ protected:
         }
         for (auto pos : other_pos_vec) {
             for (auto group_id : other_group_ids_) {
-                std::string other_group_name = "L" + std::to_string(group_id);
+                std::string other_group_name = "L" + cache_config_.tagForGroup(static_cast<size_t>(group_id));
                 for (int r = 0; r < tp_size_; r++) {
                     std::string uri = uri_prefix + "uri_" + other_group_name + "_" + std::to_string(r) + "_"
                                       + std::to_string(cache_keys[pos]);
@@ -231,15 +231,23 @@ protected:
 };
 
 struct BlockBuffersExpect {
-    size_t block_buffers_size = 0;
-    size_t iov_vec_size       = 0;
-    size_t iov_size           = 0;
+    size_t              block_buffers_size = 0;
+    size_t              iov_vec_size       = 0;
+    size_t              iov_size           = 0;
+    std::vector<size_t> iov_sizes;
 };
 
 MATCHER_P(BlockBuffersMatcher, block_buffers_expect, "") {
     if (block_buffers_expect.block_buffers_size != arg.size()) {
         *result_listener << "BlockBuffers size mismatch: expected " << block_buffers_expect.block_buffers_size
                          << ", actual " << arg.size();
+        return false;
+    }
+    if (!block_buffers_expect.iov_sizes.empty()
+        && block_buffers_expect.iov_sizes.size() != block_buffers_expect.block_buffers_size) {
+        *result_listener << "Expected per-block iov size count mismatch: expected "
+                         << block_buffers_expect.block_buffers_size << ", actual "
+                         << block_buffers_expect.iov_sizes.size();
         return false;
     }
     for (size_t i = 0; i < arg.size(); ++i) {
@@ -249,11 +257,13 @@ MATCHER_P(BlockBuffersMatcher, block_buffers_expect, "") {
                              << block_buffers_expect.iov_vec_size << ", actual " << block_buffer.iovs.size();
             return false;
         }
+        const size_t expected_iov_size =
+            block_buffers_expect.iov_sizes.empty() ? block_buffers_expect.iov_size : block_buffers_expect.iov_sizes[i];
         for (size_t j = 0; j < block_buffer.iovs.size(); ++j) {
             const auto& iov = block_buffer.iovs[j];
-            if (iov.size != block_buffers_expect.iov_size) {
+            if (iov.size != expected_iov_size) {
                 *result_listener << "At block buffer [" << i << "], iov [" << j << "]: iov.size mismatch: expected "
-                                 << block_buffers_expect.iov_size << ", actual " << iov.size;
+                                 << expected_iov_size << ", actual " << iov.size;
                 return false;
             }
         }

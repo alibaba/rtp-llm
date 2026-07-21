@@ -245,6 +245,19 @@ private:
         }
     }
 
+    void addTaggedGpuBlocks(MemoryOperationRequestPB::CopyItem& item,
+                            const std::vector<BlockIdxType>&    blocks_by_layer) const {
+        const auto slots = connector_->layerTagSlots();
+        for (const auto& slot : slots) {
+            ASSERT_GE(slot.layer_id, 0);
+            ASSERT_LT(static_cast<size_t>(slot.layer_id), blocks_by_layer.size());
+            auto* tagged_block = item.add_tagged_gpu_blocks();
+            tagged_block->set_layer_id(slot.layer_id);
+            tagged_block->set_tag(slot.tag);
+            tagged_block->set_block_id(blocks_by_layer[static_cast<size_t>(slot.layer_id)]);
+        }
+    }
+
     void verifyGpuBufferContent(const std::vector<LayerBlock>& gpu_layer_blocks) const {
         for (const auto& layer_block : gpu_layer_blocks) {
             if (isNullBlockIdx(layer_block.block_id)) {
@@ -370,17 +383,15 @@ private:
     void addOneCopyItemToPb(MemoryOperationRequestPB&      req,
                             const std::vector<LayerBlock>& gpu_layer_blocks,
                             BlockIdxType                   mem_block_index) const {
-        auto*            item      = req.add_copy_items();
-        const size_t     layer_num = static_cast<size_t>(cache_config_.layer_all_num);
-        std::vector<int> blocks(layer_num, static_cast<int>(NULL_BLOCK_IDX));
+        auto*                     item      = req.add_copy_items();
+        const size_t              layer_num = static_cast<size_t>(cache_config_.layer_all_num);
+        std::vector<BlockIdxType> blocks(layer_num, NULL_BLOCK_IDX);
         for (const auto& layer_block : gpu_layer_blocks) {
             ASSERT_GE(layer_block.layer_id, 0);
             ASSERT_LT(static_cast<size_t>(layer_block.layer_id), layer_num);
-            blocks[static_cast<size_t>(layer_block.layer_id)] = static_cast<int>(layer_block.block_id);
+            blocks[static_cast<size_t>(layer_block.layer_id)] = layer_block.block_id;
         }
-        for (size_t layer = 0; layer < layer_num; ++layer) {
-            item->add_gpu_blocks(blocks[layer]);
-        }
+        addTaggedGpuBlocks(*item, blocks);
         item->set_mem_block(static_cast<int>(mem_block_index));
     }
     BlockIndicesType makeGroupBlockIndices(const std::vector<std::vector<BlockIdxType>>& per_layer_block_indices,
@@ -398,11 +409,10 @@ private:
     makeCacheResource(const CacheKeysType&                          cache_keys,
                       const std::vector<std::vector<BlockIdxType>>& per_layer_block_indices,
                       size_t                                        reuse_len = 0) const {
-        auto res                                = std::make_shared<KVCacheResource>();
-        res->cacheKeys()                        = cache_keys;
-        const size_t                  layer_num = static_cast<size_t>(cache_config_.layer_all_num);
-        std::vector<std::vector<int>> layer_to_group_ids(layer_num, std::vector<int>{0});
-        res->initGroups(/*group_num=*/1, static_cast<int>(layer_num), layer_to_group_ids);
+        auto res               = std::make_shared<KVCacheResource>();
+        res->cacheKeys()       = cache_keys;
+        const size_t layer_num = static_cast<size_t>(cache_config_.layer_all_num);
+        res->initGroups(cache_config_.topologyPtr());
         const auto default_blocks = makeGroupBlockIndices(per_layer_block_indices, cache_keys.size());
         res->mutableBlockIds(0).assign(default_blocks);
         for (size_t layer = 0; layer < layer_num; ++layer) {
@@ -432,8 +442,7 @@ private:
         (void)group1_blocks;
         const size_t layer_num = static_cast<size_t>(cache_config_.layer_all_num);
         RTP_LLM_CHECK_WITH_INFO(layer_num == 4, "test helper expects 4 layers, got %zu", layer_num);
-        std::vector<std::vector<int>> layer_to_group_ids(layer_num, std::vector<int>{0});
-        res->initGroups(/*group_num=*/1, static_cast<int>(layer_num), layer_to_group_ids);
+        res->initGroups(cache_config_.topologyPtr());
         auto block_indices = group0_blocks;
         if (block_indices.size() < cache_keys.size()) {
             block_indices.resize(cache_keys.size(), NULL_BLOCK_IDX);
@@ -606,26 +615,6 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnTrue_WithWorkerAddrs) {
     ASSERT_NE(conn->block_cache_, nullptr);
     ASSERT_NE(conn->broadcast_manager_, nullptr);
     EXPECT_EQ(conn->broadcast_manager_->workerNum(), server_addrs_.size());
-}
-
-TEST_F(KVCacheMemoryConnectorTest, StagedCopyScratchPoolAllowsConcurrentCheckoutsPerDevice) {
-    auto first  = connector_->acquireStagedCopyScratchForDevice(/*device_index=*/0);
-    auto second = connector_->acquireStagedCopyScratchForDevice(/*device_index=*/0);
-    ASSERT_NE(first, nullptr);
-    ASSERT_NE(second, nullptr);
-    EXPECT_NE(first.get(), second.get());
-
-    auto* first_ptr  = first.get();
-    auto* second_ptr = second.get();
-    connector_->recycleStagedCopyScratchForDevice(/*device_index=*/0, std::move(first));
-    connector_->recycleStagedCopyScratchForDevice(/*device_index=*/0, std::move(second));
-
-    auto reused_first  = connector_->acquireStagedCopyScratchForDevice(/*device_index=*/0);
-    auto reused_second = connector_->acquireStagedCopyScratchForDevice(/*device_index=*/0);
-    EXPECT_TRUE((reused_first.get() == first_ptr && reused_second.get() == second_ptr)
-                || (reused_first.get() == second_ptr && reused_second.get() == first_ptr));
-    connector_->recycleStagedCopyScratchForDevice(/*device_index=*/0, std::move(reused_first));
-    connector_->recycleStagedCopyScratchForDevice(/*device_index=*/0, std::move(reused_second));
 }
 
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero) {
@@ -1643,11 +1632,10 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_RpcStatusError) {
     EXPECT_FALSE(result->success());
 }
 
-TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_CountMismatch) {
+TEST_F(KVCacheMemoryConnectorTest, copyCache_RejectsEmptyTaggedBlocks) {
     MemoryOperationRequestPB req;
-    auto*                    item = req.add_copy_items();
-    item->add_gpu_blocks(1);
-    // Intentionally do not set mem_block to trigger mismatch
+    req.add_copy_items();
+    // An empty tagged set cannot be normalized against the local topology.
     req.set_copy_direction(MemoryOperationRequestPB::H2D);
 
     MemoryOperationResponsePB resp;
@@ -1663,7 +1651,8 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_InvalidMemBlock) {
 
     MemoryOperationRequestPB req;
     auto*                    item = req.add_copy_items();
-    item->add_gpu_blocks(gpu_block_idx);
+    addTaggedGpuBlocks(*item,
+                       std::vector<BlockIdxType>(static_cast<size_t>(cache_config_.layer_all_num), gpu_block_idx));
     // invalid mem_block index for block_pool_
     item->set_mem_block(NULL_BLOCK_IDX);
     req.set_copy_direction(MemoryOperationRequestPB::H2D);
@@ -1687,10 +1676,14 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_InvalidLayerId_BuildCop
 
     MemoryOperationRequestPB req;
     auto*                    item = req.add_copy_items();
-    // gpu_blocks size > layer_num => invalid "layer index"
-    for (int l = 0; l < cache_config_.layer_num + 1; ++l) {
-        item->add_gpu_blocks(gpu_block_idx);
-    }
+    addTaggedGpuBlocks(*item,
+                       std::vector<BlockIdxType>(static_cast<size_t>(cache_config_.layer_all_num), gpu_block_idx));
+    const auto slots = connector_->layerTagSlots();
+    ASSERT_FALSE(slots.empty());
+    auto* invalid_block = item->add_tagged_gpu_blocks();
+    invalid_block->set_layer_id(cache_config_.layer_num);
+    invalid_block->set_tag(slots.front().tag);
+    invalid_block->set_block_id(gpu_block_idx);
     item->set_mem_block(mem_block_index);
     req.set_copy_direction(MemoryOperationRequestPB::H2D);
 
@@ -1720,11 +1713,11 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SingleLayer) {
     // 给mem_buffer填充数据
     setBlockBytes(mem_buffer, /*byte_offset=*/0, total, 'a');
 
-    MemoryOperationRequestPB req;
-    auto*                    item = req.add_copy_items();
-    for (int l = 0; l < cache_config_.layer_num; ++l) {
-        item->add_gpu_blocks(l == layer_id ? gpu_block_idx : NULL_BLOCK_IDX);
-    }
+    MemoryOperationRequestPB  req;
+    auto*                     item = req.add_copy_items();
+    std::vector<BlockIdxType> blocks_by_layer(cache_config_.layer_num, NULL_BLOCK_IDX);
+    blocks_by_layer[static_cast<size_t>(layer_id)] = gpu_block_idx;
+    addTaggedGpuBlocks(*item, blocks_by_layer);
     item->set_mem_block(mem_block_index);
     req.set_copy_direction(MemoryOperationRequestPB::H2D);
 
@@ -1823,9 +1816,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     req.set_copy_direction(MemoryOperationRequestPB::H2D);
     for (int i = 0; i < kCopyBlockCount; ++i) {
         auto* item = req.add_copy_items();
-        for (int l = 0; l < kLayerNum; ++l) {
-            item->add_gpu_blocks(kGpuBlockBase + i);
-        }
+        addTaggedGpuBlocks(*item, std::vector<BlockIdxType>(kLayerNum, kGpuBlockBase + i));
         item->set_mem_block(mem_block_indices[static_cast<size_t>(i)]);
     }
     MemoryOperationResponsePB resp;
@@ -1902,11 +1893,11 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_D2H_SingleLayer) {
     ASSERT_NE(mem_buffer.addr, nullptr);
     EXPECT_GE(mem_buffer.size_bytes, total);
 
-    MemoryOperationRequestPB req;
-    auto*                    item = req.add_copy_items();
-    for (int l = 0; l < cache_config_.layer_num; ++l) {
-        item->add_gpu_blocks(l == layer_id ? gpu_block_idx : NULL_BLOCK_IDX);
-    }
+    MemoryOperationRequestPB  req;
+    auto*                     item = req.add_copy_items();
+    std::vector<BlockIdxType> blocks_by_layer(cache_config_.layer_num, NULL_BLOCK_IDX);
+    blocks_by_layer[static_cast<size_t>(layer_id)] = gpu_block_idx;
+    addTaggedGpuBlocks(*item, blocks_by_layer);
     item->set_mem_block(mem_block_index);
     req.set_copy_direction(MemoryOperationRequestPB::D2H);
 

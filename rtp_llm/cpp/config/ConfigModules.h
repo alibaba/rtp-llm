@@ -173,8 +173,8 @@ struct KVCacheConfig {
     bool    enable_remote_cache                     = false;
     bool    write_cache_sync                        = false;
     bool    enable_tiered_memory_cache              = false;
-    bool    enable_gpu_prefix_tree                  = true;
-    bool    enable_prefix_tree_memory_cache         = true;
+    bool    enable_gpu_prefix_tree                  = false;
+    bool    enable_prefix_tree_memory_cache         = false;
     bool    enable_legacy_memory_connector_fallback = true;
     int64_t prefix_tree_memory_state_swa_pool_ratio = 0;
     bool    enable_independent_group_eviction       = false;

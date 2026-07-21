@@ -179,11 +179,7 @@ static CompleteTokenIdsPtr makeCompleteTokenIds(int batch_size, int seq_length, 
 static BatchKVCacheResourcePtr makeBatchResource(int batch_size, const CacheConfig& config) {
     auto res = std::make_shared<BatchKVCacheResource>();
     res->resetBatchSize(batch_size);
-    res->initGroups(config.groupNums(),
-                    static_cast<int>(config.layer_all_num),
-                    config.layerGroupIdsSnapshot(),
-                    config.kernelBlocksPerKvBlock(),
-                    config.groupTypesSnapshot());
+    res->initGroups(config.topologyPtr());
     return res;
 }
 
@@ -325,9 +321,9 @@ seedNonResidentCacheItem(const HybridPoolKVCacheAllocatorPtr& allocator, int gid
     auto blocks = pool->malloc(1);
     EXPECT_EQ(blocks.size(), 1u);
     auto                      shared_cache = allocator->sharedBlockCache();
-    std::vector<BlockIdxType> group_slots(allocator->groupBlockPools().size(), NULL_BLOCK_IDX);
-    group_slots[static_cast<size_t>(gid)] = blocks[0];
-    shared_cache->put(key, group_slots, false);
+    std::vector<BlockIdxType> group_block_ids(allocator->groupBlockPools().size(), NULL_BLOCK_IDX);
+    group_block_ids[static_cast<size_t>(gid)] = blocks[0];
+    shared_cache->put(key, group_block_ids, false);
     // SharedBlockCache::put() internally calls pool->blockCacheReference()
     pool->requestFree(blocks);
     return blocks[0];
@@ -635,7 +631,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PopBlocksFromCacheReturnsEvictedBatchAcro
     EXPECT_TRUE(key_set.count(100));
     EXPECT_TRUE(key_set.count(200));
 
-    // Per-group block ids: each group's blocks should be set only at the slot
+    // Per-group block ids: each group's block should be set only at the matching position.
     // matching the key it owned, and NULL elsewhere.
     const auto& g0_blocks = evicted->blocks(/*batch_id=*/0, /*gid=*/0);
     const auto& g1_blocks = evicted->blocks(/*batch_id=*/0, /*gid=*/1);
@@ -712,7 +708,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, BlockCacheFreeIgnoresDuplicateAndNullBloc
 
     auto batch = std::make_shared<BatchKVCacheResource>();
     batch->resetBatchSize(1);
-    batch->initGroups(config.groupNums(), static_cast<int>(config.layer_all_num), config.layerGroupIdsSnapshot());
+    batch->initGroups(config.topologyPtr());
     // Same block listed twice in the same group should only be released once;
     // NULL_BLOCK_IDX entries should be skipped.
     batch->mutableBlockIds(0, /*gid=*/1).assign(BlockIndicesType{seeded, seeded, NULL_BLOCK_IDX});
@@ -1298,9 +1294,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4SharedBlockCacheIsUnifiedAcrossGroups
     auto pool0  = allocator->groupBlockPools()[0];
     auto blocks = pool0->malloc(1);
     ASSERT_EQ(blocks.size(), 1u);
-    std::vector<BlockIdxType> group_slots(allocator->groupBlockPools().size(), NULL_BLOCK_IDX);
-    group_slots[0] = blocks[0];
-    shared_cache->put(/*cache_key=*/42, group_slots, /*is_resident=*/false);
+    std::vector<BlockIdxType> group_block_ids(allocator->groupBlockPools().size(), NULL_BLOCK_IDX);
+    group_block_ids[0] = blocks[0];
+    shared_cache->put(/*cache_key=*/42, group_block_ids, /*is_resident=*/false);
     EXPECT_TRUE(shared_cache->contains(42));
 
     // The same cache is returned by the allocator accessor.

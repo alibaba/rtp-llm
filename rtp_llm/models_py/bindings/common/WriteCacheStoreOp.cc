@@ -50,71 +50,35 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 "cache-store tokens_per_block must be positive for tag=%s",
                                 captured_kv_cache.tag.c_str());
 
-        auto resolve_store_stride = [&](const torch::Tensor& tensor, size_t fallback_stride, const char* name) {
-            if (!tensor.defined() || tensor.dim() != 2) {
-                return fallback_stride;
-            }
-            const size_t row_stride_bytes = static_cast<size_t>(tensor.stride(0)) * tensor.element_size();
-            if (store_tokens_per_block >= layer_tokens_per_block) {
-                RTP_LLM_CHECK_WITH_INFO(
-                    store_tokens_per_block % layer_tokens_per_block == 0,
-                    "cache-store tokens_per_block=%zu must be divisible by layer tokens_per_block=%zu "
-                    "for tag=%s %s write",
-                    store_tokens_per_block,
-                    layer_tokens_per_block,
-                    captured_kv_cache.tag.c_str(),
-                    name);
-                return row_stride_bytes * (store_tokens_per_block / layer_tokens_per_block);
-            }
-
-            // A CP-compact STATE/SWA row can cover multiple canonical cache
-            // keys.  Register the physical row itself; the tag-local store
-            // plan below keeps the canonical key namespace.
-            RTP_LLM_CHECK_WITH_INFO(
-                layer_tokens_per_block % store_tokens_per_block == 0,
-                "LayerKVCache.seq_size_per_block=%zu must be divisible by cache-store tokens_per_block=%zu "
-                "for tag=%s %s write",
-                layer_tokens_per_block,
-                store_tokens_per_block,
-                captured_kv_cache.tag.c_str(),
-                name);
-            return row_stride_bytes;
-        };
-
-        const size_t kv_block_stride_bytes =
-            resolve_store_stride(captured_kv_cache.kv_cache_base, captured_cache_store.kv_block_stride_bytes, "kv");
-        const size_t kv_scale_stride_bytes =
-            resolve_store_stride(captured_kv_cache.kv_scale_base, captured_cache_store.kv_scale_stride_bytes, "scale");
-
         CacheStoreInputs inputs;
-        inputs.input_lengths_host                                  = captured_input_lengths;
-        inputs.prefix_lengths_host                                 = captured_prefix_lengths;
-        inputs.host_kv_cache_offset                                = captured_kv_cache_block_id_host;
-        inputs.kv_cache_group_policies                             = captured_cache_store.kv_cache_group_policies;
-        inputs.tokens_per_block_by_tag                             = captured_cache_store.tokens_per_block_by_tag;
-        inputs.kv_block_stride_bytes_by_tag                        = captured_cache_store.kv_block_stride_bytes_by_tag;
-        inputs.kv_scale_stride_bytes_by_tag                        = captured_cache_store.kv_scale_stride_bytes_by_tag;
-        inputs.context_batch_size                                  = captured_cache_store.context_batch_size;
-        inputs.decoder_batch_size                                  = captured_cache_store.decoder_batch_size;
-        inputs.request_id                                          = captured_cache_store.request_id;
-        inputs.request_pd_separation                               = captured_cache_store.request_pd_separation;
-        inputs.cache_keys                                          = captured_cache_store.cache_keys;
-        inputs.tokens_per_block                                    = captured_cache_store.tokens_per_block;
-        inputs.kv_block_stride_bytes                               = captured_cache_store.kv_block_stride_bytes;
-        inputs.kv_scale_stride_bytes                               = captured_cache_store.kv_scale_stride_bytes;
-        inputs.pd_separation                                       = captured_cache_store.pd_separation;
-        inputs.model_id                                            = captured_cache_store.model_id;
-        inputs.decode_entrance                                     = captured_cache_store.decode_entrance;
-        inputs.warmup                                              = captured_cache_store.warmup;
-        inputs.use_opaque_kv_cache_store                           = captured_cache_store.use_opaque_kv_cache_store;
-        inputs.layer_id                                            = captured_kv_cache.layer_id;
-        inputs.tag                                                 = captured_kv_cache.tag;
-        inputs.cp_rank                                             = captured_cache_store.cp_rank;
-        inputs.cp_size                                             = captured_cache_store.cp_size;
-        inputs.pre_created_event                                   = std::move(event);
-        inputs.tokens_per_block_by_tag[captured_kv_cache.tag]      = layer_tokens_per_block;
-        inputs.kv_block_stride_bytes_by_tag[captured_kv_cache.tag] = kv_block_stride_bytes;
-        inputs.kv_scale_stride_bytes_by_tag[captured_kv_cache.tag] = kv_scale_stride_bytes;
+        inputs.input_lengths_host                             = captured_input_lengths;
+        inputs.prefix_lengths_host                            = captured_prefix_lengths;
+        inputs.host_kv_cache_offset                           = captured_kv_cache_block_id_host;
+        inputs.kv_cache_group_policies                        = captured_cache_store.kv_cache_group_policies;
+        inputs.tokens_per_block_by_tag                        = captured_cache_store.tokens_per_block_by_tag;
+        inputs.kv_block_stride_bytes_by_tag                   = captured_cache_store.kv_block_stride_bytes_by_tag;
+        inputs.kv_scale_stride_bytes_by_tag                   = captured_cache_store.kv_scale_stride_bytes_by_tag;
+        inputs.kv_block_transfer_bytes_by_tag                 = captured_cache_store.kv_block_transfer_bytes_by_tag;
+        inputs.kv_scale_transfer_bytes_by_tag                 = captured_cache_store.kv_scale_transfer_bytes_by_tag;
+        inputs.context_batch_size                             = captured_cache_store.context_batch_size;
+        inputs.decoder_batch_size                             = captured_cache_store.decoder_batch_size;
+        inputs.request_id                                     = captured_cache_store.request_id;
+        inputs.request_pd_separation                          = captured_cache_store.request_pd_separation;
+        inputs.cache_keys                                     = captured_cache_store.cache_keys;
+        inputs.tokens_per_block                               = captured_cache_store.tokens_per_block;
+        inputs.kv_block_stride_bytes                          = captured_cache_store.kv_block_stride_bytes;
+        inputs.kv_scale_stride_bytes                          = captured_cache_store.kv_scale_stride_bytes;
+        inputs.pd_separation                                  = captured_cache_store.pd_separation;
+        inputs.model_id                                       = captured_cache_store.model_id;
+        inputs.decode_entrance                                = captured_cache_store.decode_entrance;
+        inputs.warmup                                         = captured_cache_store.warmup;
+        inputs.use_opaque_kv_cache_store                      = captured_cache_store.use_opaque_kv_cache_store;
+        inputs.layer_id                                       = captured_kv_cache.layer_id;
+        inputs.tag                                            = captured_kv_cache.tag;
+        inputs.cp_rank                                        = captured_cache_store.cp_rank;
+        inputs.cp_size                                        = captured_cache_store.cp_size;
+        inputs.pre_created_event                              = std::move(event);
+        inputs.tokens_per_block_by_tag[captured_kv_cache.tag] = layer_tokens_per_block;
 
         KvCacheInfo kv_cache_info;
         kv_cache_info.kv_cache_buffer = captured_kv_cache.kv_cache_base;

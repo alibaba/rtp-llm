@@ -152,14 +152,16 @@ static torch_ext::PyCacheStoreInputs makePyCacheStoreInputs(const std::shared_pt
                                                             size_t                                 block_num,
                                                             bool                                   mla_kvcache) {
     torch_ext::PyCacheStoreInputs inputs;
-    inputs.context_batch_size           = 1;
-    inputs.decoder_batch_size           = 0;
-    inputs.request_id                   = torch::tensor({int64_t(42)}, torch::kInt64);
-    inputs.request_pd_separation        = torch::tensor({true}, torch::kBool);
-    inputs.kv_cache_group_policies      = {{"default", defaultCacheGroupPolicy(CacheGroupType::FULL)}};
-    inputs.tokens_per_block_by_tag      = {{"default", tokens_per_block}};
-    inputs.kv_block_stride_bytes_by_tag = {{"default", kv_stride}};
-    inputs.kv_scale_stride_bytes_by_tag = {{"default", scale_stride}};
+    inputs.context_batch_size             = 1;
+    inputs.decoder_batch_size             = 0;
+    inputs.request_id                     = torch::tensor({int64_t(42)}, torch::kInt64);
+    inputs.request_pd_separation          = torch::tensor({true}, torch::kBool);
+    inputs.kv_cache_group_policies        = {{"default", defaultCacheGroupPolicy(CacheGroupType::FULL)}};
+    inputs.tokens_per_block_by_tag        = {{"default", tokens_per_block}};
+    inputs.kv_block_stride_bytes_by_tag   = {{"default", kv_stride}};
+    inputs.kv_scale_stride_bytes_by_tag   = {{"default", scale_stride}};
+    inputs.kv_block_transfer_bytes_by_tag = {{"default", kv_stride}};
+    inputs.kv_scale_transfer_bytes_by_tag = {{"default", scale_stride}};
     for (size_t i = 0; i < block_num; ++i) {
         inputs.cache_keys.push_back("block_" + std::to_string(i));
     }
@@ -431,24 +433,30 @@ TEST_F(ExecOpsTest, testWriteCacheStoreMhaKernelViewKeepsExplicitKvAndScaleStrid
     }
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreLinearGroupKeepsPaddedPhysicalStride) {
+TEST_F(ExecOpsTest, testWriteCacheStoreSharedPoolUsesPhysicalBlockStrideInsteadOfLayerViewStride) {
     constexpr size_t physical_block_num        = 4;
     constexpr size_t physical_tokens_per_block = 8;
-    constexpr size_t padded_stride             = 256;
-    auto             kv_cache_base =
-        torch::zeros({static_cast<int64_t>(physical_block_num), static_cast<int64_t>(padded_stride)}, torch::kUInt8);
+    constexpr size_t pool_block_stride         = 256;
+    constexpr size_t layer_view_stride         = 64;
+    auto physical_kv = torch::zeros({static_cast<int64_t>(physical_block_num), static_cast<int64_t>(pool_block_stride)},
+                                    torch::kUInt8);
+    auto kv_cache_base =
+        physical_kv.as_strided({static_cast<int64_t>(physical_block_num), static_cast<int64_t>(layer_view_stride)},
+                               {static_cast<int64_t>(layer_view_stride), 1});
     auto cache_store                    = std::make_shared<MockCacheStore>();
     auto inputs                         = makePyCacheStoreInputs(cache_store,
                                          physical_tokens_per_block,
-                                         padded_stride,
+                                         pool_block_stride,
                                          /*scale_stride=*/0,
                                          physical_block_num,
                                          /*mla_kvcache=*/false);
     inputs.kv_cache_group_policies      = {{"full", defaultCacheGroupPolicy(CacheGroupType::FULL)},
                                            {"linear", defaultCacheGroupPolicy(CacheGroupType::LINEAR)}};
     inputs.tokens_per_block_by_tag      = {{"full", physical_tokens_per_block}, {"linear", physical_tokens_per_block}};
-    inputs.kv_block_stride_bytes_by_tag = {{"full", padded_stride}, {"linear", padded_stride}};
+    inputs.kv_block_stride_bytes_by_tag = {{"full", pool_block_stride}, {"linear", pool_block_stride}};
     inputs.kv_scale_stride_bytes_by_tag = {{"full", 0}, {"linear", 0}};
+    inputs.kv_block_transfer_bytes_by_tag = {{"full", pool_block_stride}, {"linear", layer_view_stride}};
+    inputs.kv_scale_transfer_bytes_by_tag = {{"full", 0}, {"linear", 0}};
 
     torch_ext::LayerKVCache layer_cache;
     layer_cache.kv_cache_base      = kv_cache_base;
@@ -472,8 +480,10 @@ TEST_F(ExecOpsTest, testWriteCacheStoreLinearGroupKeepsPaddedPhysicalStride) {
     const auto        it  = record.blocks.find(key);
     ASSERT_NE(it, record.blocks.end());
     EXPECT_EQ(reinterpret_cast<uintptr_t>(it->second.addr),
-              reinterpret_cast<uintptr_t>(kv_cache_base.data_ptr()) + (physical_block_num - 1) * padded_stride);
-    EXPECT_EQ(it->second.len, padded_stride);
+              reinterpret_cast<uintptr_t>(kv_cache_base.data_ptr()) + (physical_block_num - 1) * pool_block_stride);
+    EXPECT_EQ(it->second.len, layer_view_stride);
+    EXPECT_LE(reinterpret_cast<uintptr_t>(it->second.addr) + it->second.len,
+              reinterpret_cast<uintptr_t>(physical_kv.data_ptr()) + physical_kv.nbytes());
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreCpStateSendsCompleteRankLocalRow) {
@@ -619,6 +629,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSuccessDoesNotLogBlockKeys) {
     layer_cache.seq_size_per_block = tokens_per_block;
     layer_cache.layer_id           = 0;
     layer_cache.group_id           = 0;
+    layer_cache.tag                = "default";
 
     ASSERT_NO_THROW(WriteCacheStoreOp(torch::tensor({8}, torch::kInt32),
                                       torch::tensor({0}, torch::kInt32),

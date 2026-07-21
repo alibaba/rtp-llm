@@ -26,8 +26,30 @@ bool GroupPolicy::addSpecInfo(const std::string& spec_name, int32_t group_id, in
         RTP_LLM_LOG_ERROR("spec_name [%s] already exist", spec_name.c_str());
         return false;
     }
-    spec_name_to_info_[spec_name] = {group_id, tp_rank};
+    const auto group_it = groups_.find(group_id);
+    if (group_it == groups_.end()) {
+        RTP_LLM_LOG_ERROR("not find group_id [%d], spec_name [%s]", group_id, spec_name.c_str());
+        return false;
+    }
+    spec_name_to_info_[spec_name] = {group_id, tp_rank, group_it->second.tag};
     return true;
+}
+
+bool GroupPolicy::genBlockBuffersByTag(const std::vector<std::string>& tags,
+                                       const std::vector<int32_t>&     block_ids,
+                                       kv_cache_manager::BlockBuffers& block_buffers) const {
+    RTP_LLM_CHECK_WITH_INFO(tags.size() == block_ids.size(),
+                            "remote cache tag/block count mismatch: tags=%zu blocks=%zu",
+                            tags.size(),
+                            block_ids.size());
+    std::vector<int32_t> group_ids;
+    group_ids.reserve(tags.size());
+    for (const auto& tag : tags) {
+        const auto group_it = tag_to_group_id_.find(tag);
+        RTP_LLM_CHECK_WITH_INFO(group_it != tag_to_group_id_.end(), "remote cache policy missing tag=%s", tag.c_str());
+        group_ids.push_back(group_it->second);
+    }
+    return genBlockBuffers(group_ids, block_ids, block_buffers);
 }
 
 std::string GroupPolicy::debugString() const {
@@ -48,7 +70,8 @@ std::string GroupPolicy::debugString() const {
     debug_ss << "\nspec_name_to_info :\n";
     for (const auto& entry : spec_name_to_info_) {
         const auto& spec_info = entry.second;
-        debug_ss << '\t' << entry.first << ":[" << spec_info.group_id << "|" << spec_info.tp_rank << "]\n";
+        debug_ss << '\t' << entry.first << ":[" << spec_info.tag << "|" << spec_info.group_id << "|"
+                 << spec_info.tp_rank << "]\n";
     }
     return debug_ss.str();
 }
@@ -70,8 +93,9 @@ bool DefaultLayerGroupPolicy::init() {
         return false;
     }
     const auto  layer_layout       = allocator_->allLayerCacheBase();
+    const auto& topology           = layer_layout.topology();
     uint64_t    group_name_bithash = 1;
-    const auto& layer_group_ids    = layer_layout.topology().layerGroupIdsSnapshot();
+    const auto& layer_group_ids    = topology.layerGroupIdsSnapshot();
     for (int layer = 0; layer < static_cast<int>(layer_group_ids.size()); ++layer) {
         if (layer_group_ids.at(layer).empty()) {
             RTP_LLM_LOG_ERROR("layer [%d] has no cache group id", layer);
@@ -93,9 +117,23 @@ bool DefaultLayerGroupPolicy::init() {
                     RTP_LLM_LOG_ERROR("not support bigger than 64 groups");
                     return false;
                 }
-                std::string group_name         = is_full_group ? ("F" + std::to_string(group_idx)) :
-                                                                 (GetOtherGroupPrefixName() + std::to_string(group_idx));
-                groups_[group_idx]             = Group{is_full_group, group_name_bithash, group_name};
+                RTP_LLM_CHECK_WITH_INFO(group_idx >= 0, "invalid remote cache group id=%d", group_idx);
+                const auto& topology_group    = topology.groupById(static_cast<size_t>(group_idx));
+                const auto& cache_tag         = topology_group.tag;
+                const auto [tag_it, inserted] = tag_to_group_id_.emplace(cache_tag, group_idx);
+                if (!inserted && tag_it->second != group_idx) {
+                    RTP_LLM_LOG_ERROR("duplicate remote cache tag [%s] for group ids [%d] and [%d]",
+                                      cache_tag.c_str(),
+                                      tag_it->second,
+                                      group_idx);
+                    return false;
+                }
+                const std::string prefix     = is_full_group ? "F" : GetOtherGroupPrefixName();
+                std::string       group_name = prefix + cache_tag;
+                const size_t      block_size_bytes =
+                    topology_group.layer_ids.size()
+                    * (topology_group.kv_block_stride_bytes + topology_group.kv_scale_stride_bytes);
+                groups_[group_idx] = Group{is_full_group, group_name_bithash, group_name, cache_tag, block_size_bytes};
                 group_to_layer_ids_[group_idx] = {};
                 if (groups_.size() < 64) {
                     group_name_bithash <<= 1;
@@ -158,15 +196,22 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<int32_t>&     gr
     static auto push_iov = [](std::vector<kv_cache_manager::Iov>& iovs, const BlockInfo& block_info) {
         iovs.push_back({kv_cache_manager::MemoryType::GPU, block_info.addr, block_info.size_bytes, false});
     };
+    RTP_LLM_CHECK_WITH_INFO(group_ids.size() == block_ids.size(),
+                            "remote cache group/block count mismatch: groups=%zu blocks=%zu",
+                            group_ids.size(),
+                            block_ids.size());
     block_buffers.reserve(block_ids.size());
     for (size_t i = 0; i < block_ids.size(); ++i) {
+        RTP_LLM_CHECK_WITH_INFO(group_ids[i] >= 0, "invalid remote cache group id=%d", group_ids[i]);
         block_buffers.push_back({});
-        const auto& layer_ids = group_to_layer_ids_.at(group_ids[i]);
-        auto&       iovs      = block_buffers.back().iovs;
+        const auto& layer_ids          = group_to_layer_ids_.at(group_ids[i]);
+        const auto& tag                = groups_.at(group_ids[i]).tag;
+        auto&       iovs               = block_buffers.back().iovs;
+        size_t      actual_block_bytes = 0;
         iovs.reserve(layer_ids.size() * 2);
         for (size_t j = 0; j < layer_ids.size(); ++j) {
             // if support scale, block_infos: {kv_info, scale_info}
-            const auto& block_infos = allocator_->convertIndexToBuffer(layer_ids[j], group_ids[i], block_ids[i]);
+            const auto& block_infos = allocator_->convertIndexToBufferByTag(layer_ids[j], tag, block_ids[i]);
             if (block_infos.empty()) {
                 RTP_LLM_LOG_WARNING("convertIndexToBuffer returned empty for layer_id [%d] group_id [%d] block_id[%d]",
                                     layer_ids[j],
@@ -180,8 +225,21 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<int32_t>&     gr
                     layer_ids[j],
                     group_ids[i],
                     block_ids[i]);
+                actual_block_bytes += block_infos[idx].size_bytes;
                 push_iov(iovs, block_infos[idx]);
             }
+        }
+        const size_t expected_block_bytes = groups_.at(group_ids[i]).block_size_bytes;
+        if (actual_block_bytes != expected_block_bytes) {
+            RTP_LLM_LOG_WARNING(
+                "remote cache block size mismatch tag [%s] group_id [%d] block_id [%d], expected [%zu] actual [%zu]",
+                tag.c_str(),
+                group_ids[i],
+                block_ids[i],
+                expected_block_bytes,
+                actual_block_bytes);
+            block_buffers.pop_back();
+            return false;
         }
     }
     return true;
@@ -202,9 +260,8 @@ std::string DefaultLayerGroupPolicy::debugString() const {
 }
 
 bool FullLayerGroupPolicy::init() {
-    if (full_group_ids_.size() != 1) {
-        RTP_LLM_LOG_ERROR("FullLayerGroupPolicy only support one full group, real group size [%lu]",
-                          full_group_ids_.size());
+    if (full_group_ids_.empty()) {
+        RTP_LLM_LOG_ERROR("FullLayerGroupPolicy requires at least one full group");
         return false;
     }
     if (!other_group_ids_.empty()) {
@@ -216,14 +273,20 @@ bool FullLayerGroupPolicy::init() {
 
 bool FullLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                                               std::vector<std::string>&               location_spec_group_names) const {
-
-    // do nothing
-    return true;
+    if (groups_.size() == 1) {
+        return true;
+    }
+    return DefaultLayerGroupPolicy::getNeedWriteGroups(resource, location_spec_group_names);
 }
 
 std::vector<uint64_t> FullLayerGroupPolicy::reachableAggregateMasks() const {
-    RTP_LLM_CHECK_WITH_INFO(groups_.size() == 1, "FullLayerGroupPolicy must be initialized before reading masks");
-    return {groups_.begin()->second.group_name_bithash};
+    RTP_LLM_CHECK_WITH_INFO(!groups_.empty(), "FullLayerGroupPolicy must be initialized before reading masks");
+    uint64_t all_full_mask = 0;
+    for (const auto& [group_id, group] : groups_) {
+        (void)group_id;
+        all_full_mask |= group.group_name_bithash;
+    }
+    return {all_full_mask};
 }
 
 bool FullOtherGroupPolicy::init() {

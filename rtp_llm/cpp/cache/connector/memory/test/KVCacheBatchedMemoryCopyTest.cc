@@ -38,6 +38,49 @@ BlockDependency rootDep(uint32_t ordinal = 0) {
     return dep;
 }
 
+void addTaggedGpuBlocks(MemoryOperationRequestPB::CopyItem&                      item,
+                        const std::vector<KVCacheMemoryConnector::LayerTagSlot>& slots,
+                        const std::vector<BlockIdxType>&                         block_ids) {
+    ASSERT_EQ(block_ids.size(), slots.size());
+    for (size_t i = 0; i < slots.size(); ++i) {
+        auto* tagged_block = item.add_tagged_gpu_blocks();
+        tagged_block->set_layer_id(slots[i].layer_id);
+        tagged_block->set_tag(slots[i].tag);
+        tagged_block->set_block_id(block_ids[i]);
+    }
+}
+
+TEST(KVCacheMemoryProtocolTest, TaggedBlocksAreReorderedByLocalLayerAndTag) {
+    std::vector<KVCacheMemoryConnector::LayerTagSlot> slots = {
+        {0, "linear", 0, 16},
+        {0, "full", 1, 32},
+    };
+    MemoryOperationRequestPB::CopyItem item;
+    auto*                              full = item.add_tagged_gpu_blocks();
+    full->set_layer_id(0);
+    full->set_tag("full");
+    full->set_block_id(7);
+    auto* linear = item.add_tagged_gpu_blocks();
+    linear->set_layer_id(0);
+    linear->set_tag("linear");
+    linear->set_block_id(3);
+
+    const auto gpu_blocks = KVCacheMemoryConnector::normalizeCopyItemGpuBlocks(item, slots);
+    ASSERT_EQ(gpu_blocks.size(), 2u);
+    EXPECT_EQ(gpu_blocks[0], 3);
+    EXPECT_EQ(gpu_blocks[1], 7);
+}
+
+TEST(KVCacheMemoryProtocolTest, TaglessBlocksAreAlwaysRejected) {
+    std::vector<KVCacheMemoryConnector::LayerTagSlot> slots = {
+        {0, "linear", 0, 16},
+        {0, "full", 1, 32},
+    };
+    MemoryOperationRequestPB::CopyItem item;
+
+    EXPECT_ANY_THROW(KVCacheMemoryConnector::normalizeCopyItemGpuBlocks(item, slots));
+}
+
 CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     CacheConfig config;
     config.dtype                       = rtp_llm::DataType::TYPE_UINT8;
@@ -121,11 +164,7 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
 }
 
 void initResourceGroupsForConfig(KVCacheResource& resource, const CacheConfig& config) {
-    resource.initGroups(config.groupNums(),
-                        static_cast<int>(config.layer_all_num),
-                        config.layerGroupIdsSnapshot(),
-                        /*kernel_blocks_per_kv_block=*/1,
-                        config.groupTypesSnapshot());
+    resource.initGroups(config.topologyPtr());
 }
 
 void setGroupStridesForConfig(CacheConfig&               config,
@@ -275,6 +314,21 @@ public:
         return convertIndexToBuffer(layer_id, group_id, block_id);
     }
 
+    BlockAddrInfo convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const override {
+        return convertIndexToAddr(layer_id, config_.groupIdForLayerTag(layer_id, tag), block_id);
+    }
+
+    std::vector<BlockInfo>
+    convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const override {
+        return convertIndexToBuffer(layer_id, config_.groupIdForLayerTag(layer_id, tag), block_id);
+    }
+
+    std::vector<BlockInfo> convertIndexToBufferByTag(
+        int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override {
+        return convertIndexToBuffer(
+            layer_id, config_.groupIdForLayerTag(layer_id, tag), block_id, partition_count, partition_id);
+    }
+
     std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource&, const CacheKeysType&, bool) override {
         return nullptr;
     }
@@ -283,8 +337,10 @@ public:
         return {};
     }
 
-    bool
-    updateKVBlock(const BatchKVCacheResourcePtr&, const std::vector<int>&, bool, std::vector<BlockIdPair>&) override {
+    bool updateKVBlock(const BatchKVCacheResourcePtr&,
+                       const std::vector<int>&,
+                       bool,
+                       std::vector<TaggedBlockIdPair>&) override {
         return false;
     }
 
@@ -662,16 +718,16 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeBlockZeroAndNullSlotsAreNotCopiedFo
     item->set_backing_type(MemoryOperationRequestPB::MEMORY);
     item->set_cache_block_kind(MemoryOperationRequestPB::STATE_SWA_KV);
     item->set_is_complete(true);
+    std::vector<BlockIdxType> gpu_blocks(slots.size(), NULL_BLOCK_IDX);
     for (size_t i = 0; i < slots.size(); ++i) {
         if (i == state_slots[0]) {
-            item->add_gpu_blocks(valid_gpu_block);
+            gpu_blocks[i] = valid_gpu_block;
         } else if (i == state_slots[1]) {
-            item->add_gpu_blocks(0);
-        } else {
-            item->add_gpu_blocks(NULL_BLOCK_IDX);
+            gpu_blocks[i] = 0;
         }
         item->add_slot_valid_mask(i == state_slots[0] || i == state_slots[1] || i == state_slots[2] ? 1 : 0);
     }
+    addTaggedGpuBlocks(*item, slots, gpu_blocks);
 
     MemoryOperationResponsePB response;
     ASSERT_TRUE(connector->copyCache(request, response));
@@ -782,10 +838,12 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeD2HMergeSourceKeepsOldSlotsAndOverl
     item->set_backing_type(MemoryOperationRequestPB::MEMORY);
     item->set_cache_block_kind(MemoryOperationRequestPB::STATE_SWA_KV);
     item->set_is_complete(true);
+    std::vector<BlockIdxType> gpu_blocks(slots.size(), NULL_BLOCK_IDX);
     for (size_t i = 0; i < slots.size(); ++i) {
-        item->add_gpu_blocks(i == state_slots[1] ? new_gpu_block : NULL_BLOCK_IDX);
+        gpu_blocks[i] = i == state_slots[1] ? new_gpu_block : NULL_BLOCK_IDX;
         item->add_slot_valid_mask(i == state_slots[0] || i == state_slots[1] ? 1 : 0);
     }
+    addTaggedGpuBlocks(*item, slots, gpu_blocks);
 
     MemoryOperationResponsePB response;
     ASSERT_TRUE(connector->copyCache(request, response));

@@ -10,7 +10,6 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
 from rtp_llm.models_py.model_desc.block_map import (
-    get_fmha_params,
     get_group_tags_for_layers,
     get_primary_attention_inputs,
     select_attention_inputs_for_layer,
@@ -28,7 +27,6 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
     RMSResNorm,
 )
-from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
     causal_conv1d_fn,
@@ -79,7 +77,6 @@ class Qwen3NextMetadata(object):
         cp_restore_indices: Optional[torch.Tensor] = None,
         cp_local_extract_indices: Optional[torch.Tensor] = None,
         cp_local_valid_mask: Optional[torch.Tensor] = None,
-        cp_write_cache_store_impl: Optional[WriteCacheStoreOp] = None,
     ):
         self.prefill_conv1d_meta = prefill_conv1d_meta
         self.is_target_verify = is_target_verify
@@ -88,7 +85,6 @@ class Qwen3NextMetadata(object):
         self.cp_restore_indices = cp_restore_indices
         self.cp_local_extract_indices = cp_local_extract_indices
         self.cp_local_valid_mask = cp_local_valid_mask
-        self.cp_write_cache_store_impl = cp_write_cache_store_impl
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
@@ -96,6 +92,35 @@ class Qwen3NextMetadata(object):
     @property
     def is_cp_linear_attn(self) -> bool:
         return self.cp_restore_indices is not None
+
+
+def _write_cp_cache_store(
+    attention_inputs: PyAttentionInputs, kv_cache: LayerKVCache
+) -> None:
+    """Write a CP linear layer using that layer's tag-local cache metadata."""
+    if attention_inputs.cache_store_inputs is None:
+        return
+    cp_info = attention_inputs.context_parallel_info
+    if cp_info is None:
+        raise RuntimeError("CP cache store requires context_parallel_info")
+    compute_ops.write_cache_store(
+        cp_info.prefill_actual_input_lengths_cpu,
+        attention_inputs.prefix_lengths,
+        attention_inputs.kv_cache_block_id,
+        attention_inputs.cache_store_inputs,
+        kv_cache,
+    )
+
+
+def _maybe_write_cp_cache_store(
+    attention_inputs: PyAttentionInputs,
+    kv_cache: Optional[LayerKVCache],
+    attn_meta: Qwen3NextMetadata,
+) -> None:
+    """Keep CacheStore writes on the CP linear-attention path only."""
+    if kv_cache is None or not attn_meta.is_cp_linear_attn:
+        return
+    _write_cp_cache_store(attention_inputs, kv_cache)
 
 
 class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
@@ -856,8 +881,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 chunk_size=64,
             )
 
-        if kv_cache is not None and attn_meta.cp_write_cache_store_impl is not None:
-            attn_meta.cp_write_cache_store_impl(kv_cache)
+        _maybe_write_cp_cache_store(attention_inputs, kv_cache, attn_meta)
 
         full_attn_out = attn_out.squeeze_(0)
 
@@ -1148,8 +1172,6 @@ class Qwen3NextModel(GptModelBase):
         cp_restore_indices = None
         cp_local_extract_indices = None
         cp_local_valid_mask = None
-        cp_write_cache_store_impl = None
-
         if attention_inputs.is_prefill and not is_target_verify:
             if is_cp:
                 (
@@ -1161,14 +1183,6 @@ class Qwen3NextModel(GptModelBase):
                 ) = self._build_cp_linear_attn_metadata(
                     attention_inputs, hidden_states.device
                 )
-                if attention_inputs.cache_store_inputs:
-                    cp_info = attention_inputs.context_parallel_info
-                    cp_write_cache_store_impl = WriteCacheStoreOp(
-                        cp_info.prefill_actual_input_lengths_cpu,
-                        attention_inputs.prefix_lengths,
-                        attention_inputs.kv_cache_block_id,
-                        attention_inputs.cache_store_inputs,
-                    )
             else:
                 cu_seqlen_without_padding = attention_inputs.cu_seqlens_device
                 prefill_conv1d_meta = prepare_causal_conv1d_metadata(
@@ -1184,7 +1198,6 @@ class Qwen3NextModel(GptModelBase):
             cp_restore_indices=cp_restore_indices,
             cp_local_extract_indices=cp_local_extract_indices,
             cp_local_valid_mask=cp_local_valid_mask,
-            cp_write_cache_store_impl=cp_write_cache_store_impl,
         )
 
         if fmha_impl is None:
@@ -1211,7 +1224,7 @@ class Qwen3NextModel(GptModelBase):
             )
 
         hidden_states, residual = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states, get_fmha_params(fmha_impl))
+        return PyModelOutputs(hidden_states)
 
 
 class Qwen35Model(Qwen3NextModel):

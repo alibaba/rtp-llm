@@ -66,15 +66,15 @@ public:
                                                             const CacheKeysType&   cache_keys,
                                                             bool                   is_connector = false) = 0;
 
-    virtual GroupedCacheLayerLayout allLayerCacheBase() const                                     = 0;
-    virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                                  const std::vector<int>&        block_src_batch,
-                                                  bool                           copy_last_block,
-                                                  std::vector<BlockIdPair>&      block_update_mapping) = 0;
-    virtual int                     seqSizePerBlock() const                                       = 0;
+    virtual GroupedCacheLayerLayout allLayerCacheBase() const                                           = 0;
+    virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
+                                                  const std::vector<int>&         block_src_batch,
+                                                  bool                            copy_last_block,
+                                                  std::vector<TaggedBlockIdPair>& block_update_mapping) = 0;
+    virtual int                     seqSizePerBlock() const                                             = 0;
     virtual int                     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                           int                            seq_len,
-                                                          int                            reserve_step) const                 = 0;
+                                                          int                            reserve_step) const                       = 0;
     // Common-prefix growth is charged once; non-common growth is charged once per target sequence.
     int estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                     int                            seq_len,
@@ -89,6 +89,7 @@ public:
     virtual void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
     virtual void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     virtual void blockBatchCopy(const torch::Tensor& copy_mapping);
+    virtual void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping);
 
     BlockPoolPtr getBlockPool() const {
         return block_pool_;
@@ -147,27 +148,27 @@ protected:
     virtual bool         doInit() = 0;
     virtual size_t       reservableAvailableBlocksNum() const;
     MallocResult         initMalloc(const MallocInfo& malloc_info);
-    virtual MallocResult incrMalloc(const MallocInfo& malloc_info)                                          = 0;
-    virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info)                              = 0;
-    virtual int          getNeedBlocks(const MallocInfo& malloc_info) const                                 = 0;
+    virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
+    virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) = 0;
+    virtual int          getNeedBlocks(const MallocInfo& malloc_info) const    = 0;
     // Estimate peak additional blocks for one sequence resource.
-    virtual int          estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
-                                                int                    seq_len,
-                                                int                    remaining_tokens,
-                                                int                    reserve_step,
-                                                bool                   enable_reuse_cache) const = 0;
-    virtual int          estimateInitialBatchPeakNeedBlocks(int  seq_len,
-                                                            int  common_seq_len,
-                                                            int  remaining_tokens,
-                                                            int  reserve_step,
-                                                            bool enable_reuse_cache,
-                                                            int  target_batch_size) const = 0;
-    virtual void         checkCPShardedMallocResult(const MallocInfo&) const {}
-    virtual void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) = 0;
-    bool                 cpShardThisGroupForCapacity(size_t gid) const;
-    size_t               logicalSeqSizePerBlockForCapacity(size_t gid) const;
-    int                  cpEffectiveSeqLenForAlloc(size_t gid, int seq_len) const;
-    int                  deviceCacheMetricTokensPerBlock() const;
+    virtual int  estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
+                                        int                    seq_len,
+                                        int                    remaining_tokens,
+                                        int                    reserve_step,
+                                        bool                   enable_reuse_cache) const           = 0;
+    virtual int  estimateInitialBatchPeakNeedBlocks(int  seq_len,
+                                                    int  common_seq_len,
+                                                    int  remaining_tokens,
+                                                    int  reserve_step,
+                                                    bool enable_reuse_cache,
+                                                    int  target_batch_size) const = 0;
+    virtual void checkCPShardedMallocResult(const MallocInfo&) const {}
+    virtual void decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) = 0;
+    bool         cpShardThisGroupForCapacity(size_t gid) const;
+    size_t       logicalSeqSizePerBlockForCapacity(size_t gid) const;
+    int          cpEffectiveSeqLenForAlloc(size_t gid, int seq_len) const;
+    int          deviceCacheMetricTokensPerBlock() const;
 
     CacheConfig                        config_;
     AllocationType                     allocation_type_;

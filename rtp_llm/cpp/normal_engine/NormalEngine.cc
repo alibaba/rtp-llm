@@ -192,6 +192,12 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
     };
     std::list<GenerateStreamPtr> streams{stream};
     THROW_IF_STATUS_ERROR(executor_->process(streams));
+#if USING_CUDA
+    if (mode == preRunMode::build_system_prompt) {
+        // Keep the stream and its execution buffers alive until the resident KV writes finish.
+        cudaDeviceSynchronize();
+    }
+#endif
     return stream;
 }
 

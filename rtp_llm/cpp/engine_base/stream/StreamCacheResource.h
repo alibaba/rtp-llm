@@ -83,7 +83,7 @@ public:
     }
 
     // get block copy mapping of last kv cache update
-    const std::vector<BlockIdPair>& getKVBlockUpdateMapping() const {
+    const std::vector<TaggedBlockIdPair>& getKVBlockUpdateMapping() const {
         return block_update_mapping_;
     }
 
@@ -144,10 +144,10 @@ private:
     void                          waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context);
 
 private:
-    GenerateStream*          stream_;
-    BatchKVCacheResourcePtr  batch_kv_cache_resource_;
-    ResourceContext          resource_context_;
-    std::vector<BlockIdPair> block_update_mapping_;
+    GenerateStream*                stream_;
+    BatchKVCacheResourcePtr        batch_kv_cache_resource_;
+    ResourceContext                resource_context_;
+    std::vector<TaggedBlockIdPair> block_update_mapping_;
 
     bool                          need_release_resource_ = true;
     bool                          last_block_aligned_    = false;

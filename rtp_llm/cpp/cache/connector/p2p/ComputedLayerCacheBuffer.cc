@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/connector/p2p/ComputedLayerCacheBuffer.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
@@ -9,7 +10,7 @@ ComputedLayerCacheBuffer::ComputedLayerCacheBuffer(int64_t                      
                                                    int64_t                                  deadline_ms):
     request_id_(request_id), deadline_ms_(deadline_ms) {
     if (layer_cache_buffer) {
-        layer_cache_buffers_[{layer_cache_buffer->getLayerId(), layer_cache_buffer->getGroupId()}] = layer_cache_buffer;
+        layer_cache_buffers_[{layer_cache_buffer->getLayerId(), layer_cache_buffer->cacheTag()}] = layer_cache_buffer;
     }
 }
 
@@ -17,7 +18,7 @@ void ComputedLayerCacheBuffer::addBuffer(const std::shared_ptr<LayerCacheBuffer>
                                          int64_t                                  deadline_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (layer_cache_buffer) {
-        layer_cache_buffers_[{layer_cache_buffer->getLayerId(), layer_cache_buffer->getGroupId()}] = layer_cache_buffer;
+        layer_cache_buffers_[{layer_cache_buffer->getLayerId(), layer_cache_buffer->cacheTag()}] = layer_cache_buffer;
     }
     int64_t cur = deadline_ms_.load(std::memory_order_relaxed);
     if (deadline_ms > cur) {
@@ -46,6 +47,23 @@ void ComputedLayerCacheBuffer::waitChange(int last_layer_num, int timeout_ms) {
     condition_variable_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this, last_layer_num] {
         return static_cast<int>(layer_cache_buffers_.size()) > last_layer_num;
     });
+}
+
+void ComputedLayerCacheBuffer::setExpectedBufferCount(size_t expected_buffer_count) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        RTP_LLM_CHECK_WITH_INFO(!expected_buffer_count_.has_value() || *expected_buffer_count_ == expected_buffer_count,
+                                "inconsistent expected P2P layer cache buffer count: old=%zu new=%zu",
+                                expected_buffer_count_.value_or(0),
+                                expected_buffer_count);
+        expected_buffer_count_ = expected_buffer_count;
+    }
+    condition_variable_.notify_all();
+}
+
+std::optional<size_t> ComputedLayerCacheBuffer::expectedBufferCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return expected_buffer_count_;
 }
 
 ComputedLayerCacheBufferStore::ComputedLayerCacheBufferStore() {}

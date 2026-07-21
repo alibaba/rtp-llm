@@ -44,11 +44,11 @@ public:
     size_t   kernel_seq_size_per_block = 0;
 
     size_t seqSizePerBlockForGroup(size_t gid) const {
-        return topology().groupBySlot(gid).seq_size_per_block;
+        return topology().groupById(gid).seq_size_per_block;
     }
 
     size_t kernelSeqSizePerBlockForGroup(size_t gid) const {
-        return topology().groupBySlot(gid).kernel_seq_size_per_block;
+        return topology().groupById(gid).kernel_seq_size_per_block;
     }
 
     size_t kernelBlocksPerKvBlockForGroup(size_t gid) const {
@@ -142,23 +142,23 @@ public:
     }
 
     const std::shared_ptr<const KVCacheSpec>& specForGroup(size_t gid) const {
-        return topology().groupBySlot(gid).spec;
+        return topology().groupById(gid).spec;
     }
 
     CacheGroupType typeForGroup(size_t gid) const {
-        return topology().groupBySlot(gid).policy.group_type;
+        return topology().groupById(gid).policy.group_type;
     }
 
     const std::string& tagForGroup(size_t gid) const {
-        return topology().groupBySlot(gid).tag;
+        return topology().groupById(gid).tag;
     }
 
     int groupIdForTag(const std::string& tag) const {
-        return static_cast<int>(topology().slotForTag(tag));
+        return static_cast<int>(topology().groupIdForTag(tag));
     }
 
     const std::vector<int>& layerIdsForGroup(size_t gid) const {
-        return topology().groupBySlot(gid).layer_ids;
+        return topology().groupById(gid).layer_ids;
     }
 
     std::vector<CacheGroupType> groupTypesSnapshot() const {
@@ -268,15 +268,15 @@ public:
     }
 
     uint32_t blockNumForGroup(size_t gid) const {
-        return topology().groupBySlot(gid).block_num;
+        return topology().groupById(gid).block_num;
     }
 
     size_t kvBlockStrideBytesForGroup(size_t gid) const {
-        return topology().groupBySlot(gid).kv_block_stride_bytes;
+        return topology().groupById(gid).kv_block_stride_bytes;
     }
 
     size_t kvScaleStrideBytesForGroup(size_t gid) const {
-        return topology().groupBySlot(gid).kv_scale_stride_bytes;
+        return topology().groupById(gid).kv_scale_stride_bytes;
     }
 
     size_t blockSizeBytesForGroup(size_t gid) const {
@@ -284,7 +284,7 @@ public:
     }
 
     uint32_t localKvHeadNumForGroup(size_t gid) const {
-        const auto& group = topology().groupBySlot(gid);
+        const auto& group = topology().groupById(gid);
         RTP_LLM_CHECK_WITH_INFO(group.local_kv_head_num > 0,
                                 "CacheConfig::localKvHeadNumForGroup invalid local_kv_head_num=%u gid=%zu",
                                 group.local_kv_head_num,
@@ -310,7 +310,7 @@ public:
     }
 
     CacheGroupPolicy policyForGroup(size_t gid) const {
-        return topology().groupBySlot(gid).policy;
+        return topology().groupById(gid).policy;
     }
 
     int groupIdForLayerTag(int layer_id, const std::string& tag) const {

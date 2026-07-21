@@ -820,10 +820,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("SLIDING_WINDOW", HybridAttentionType::SLIDING_WINDOW);
 
     pybind11::class_<HybridAttentionConfig>(m, "HybridAttentionConfig")
+        .def(pybind11::init<>())
         .def(pybind11::init<bool, bool, std::vector<HybridAttentionType>>(),
-             pybind11::arg("enable_hybrid_attention")           = false,
-             pybind11::arg("enable_independent_kv_cache_pools") = false,
-             pybind11::arg("hybrid_attention_types")            = std::vector<HybridAttentionType>{})
+             pybind11::arg("enable_hybrid_attention"),
+             pybind11::arg("enable_independent_kv_cache_pools"),
+             pybind11::arg("hybrid_attention_types"))
         .def("to_string", &HybridAttentionConfig::to_string)
         .def_readwrite("enable_hybrid_attention", &HybridAttentionConfig::enable_hybrid_attention)
         .def_readwrite("enable_independent_kv_cache_pools", &HybridAttentionConfig::enable_independent_kv_cache_pools)

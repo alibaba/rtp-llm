@@ -16,18 +16,10 @@ class LayerBlockConverterImpl: public LayerBlockConverter {
 public:
     explicit LayerBlockConverterImpl(const std::shared_ptr<KVCacheAllocator>& allocator): allocator_(allocator) {}
 
-    std::vector<BlockInfo>
-    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override {
-        const auto layout = allocator_->allLayerCacheBase();
-        RTP_LLM_CHECK_WITH_INFO(layer_id >= 0, "invalid layer id=%d", layer_id);
-        (void)layout.at(static_cast<size_t>(layer_id));
-        return filterValid(allocator_->convertIndexToBuffer(layer_id, block_id, partition_count, partition_id));
-    }
-
-    std::vector<BlockInfo> convertIndexToBuffer(
-        int layer_id, int group_id, int block_id, int partition_count, int partition_id) const override {
+    std::vector<BlockInfo> convertIndexToBufferByTag(
+        int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override {
         return filterValid(
-            allocator_->convertIndexToBuffer(layer_id, group_id, block_id, partition_count, partition_id));
+            allocator_->convertIndexToBufferByTag(layer_id, tag, block_id, partition_count, partition_id));
     }
 
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {

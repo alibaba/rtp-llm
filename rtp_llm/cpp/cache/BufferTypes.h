@@ -66,7 +66,7 @@ private:
 };
 
 // Canonical KV-cache buffer layout: semantic group tag -> dense all-layer
-// layout. CacheTopology is the sole owner of group metadata and numeric slots.
+// layout. CacheTopology is the sole owner of group metadata and numeric group ids.
 class GroupedCacheLayerLayout {
 public:
     using GroupLayouts = std::map<std::string, CacheLayerLayout>;
@@ -100,7 +100,7 @@ public:
     }
 
     const CacheLayerLayout& group(size_t group_id) const {
-        return group(topology().groupBySlot(group_id).tag);
+        return group(topology().groupById(group_id).tag);
     }
 
     const BlockBufferPtrInfo& at(std::string_view tag, size_t layer_id) const {
@@ -139,7 +139,7 @@ public:
     }
 
     size_t groupId(std::string_view tag) const {
-        return topology().slotForTag(tag);
+        return topology().groupIdForTag(tag);
     }
 
     const CacheTopology& topology() const {

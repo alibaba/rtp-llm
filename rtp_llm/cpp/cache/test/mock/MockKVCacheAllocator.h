@@ -29,10 +29,10 @@ public:
     MOCK_METHOD(GroupedCacheLayerLayout, allLayerCacheBase, (), (const, override));
     MOCK_METHOD(bool,
                 updateKVBlock,
-                (const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                 const std::vector<int>&        block_src_batch,
-                 bool                           copy_last_block,
-                 std::vector<BlockIdPair>&      block_update_mapping),
+                (const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
+                 const std::vector<int>&         block_src_batch,
+                 bool                            copy_last_block,
+                 std::vector<TaggedBlockIdPair>& block_update_mapping),
                 (override));
     MOCK_METHOD(int, seqSizePerBlock, (), (const, override));
     MOCK_METHOD(int,
@@ -55,12 +55,12 @@ protected:
     MOCK_METHOD(int, getNeedBlocks, (const MallocInfo&), (const, override));
     MOCK_METHOD(int,
                 estimateInitialBatchPeakNeedBlocks,
-                (int seq_len,
-                 int common_seq_len,
-                 int remaining_tokens,
-                 int reserve_step,
+                (int  seq_len,
+                 int  common_seq_len,
+                 int  remaining_tokens,
+                 int  reserve_step,
                  bool enable_reuse_cache,
-                 int target_batch_size),
+                 int  target_batch_size),
                 (const, override));
 };
 

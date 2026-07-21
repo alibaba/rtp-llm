@@ -59,6 +59,60 @@ inline std::shared_ptr<MHAKVCacheSpec> makeResolvedMhaSpec(rtp_llm::DataType  dt
     return std::dynamic_pointer_cast<MHAKVCacheSpec>(SpecBuilder::build(desc, ctx));
 }
 
+inline std::shared_ptr<const CacheTopology> makeTestCacheTopology(int                                  group_num,
+                                                                  int                                  layer_num,
+                                                                  const std::vector<std::vector<int>>& layer_group_ids,
+                                                                  size_t kernel_blocks_per_kv_block              = 1,
+                                                                  const std::vector<CacheGroupType>& group_types = {}) {
+    RTP_LLM_CHECK_WITH_INFO(group_num > 0, "test topology requires at least one group");
+    RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "test topology requires at least one layer");
+    RTP_LLM_CHECK_WITH_INFO(layer_group_ids.size() == static_cast<size_t>(layer_num),
+                            "test topology layer map size=%zu layer_num=%d",
+                            layer_group_ids.size(),
+                            layer_num);
+    RTP_LLM_CHECK_WITH_INFO(group_types.empty() || group_types.size() == static_cast<size_t>(group_num),
+                            "test topology group type size=%zu group_num=%d",
+                            group_types.size(),
+                            group_num);
+
+    std::vector<std::vector<int>> group_layer_ids(static_cast<size_t>(group_num));
+    std::vector<LayerBase>        layers;
+    layers.reserve(static_cast<size_t>(layer_num));
+    for (int layer_id = 0; layer_id < layer_num; ++layer_id) {
+        LayerBase layer;
+        layer.layer_id = layer_id;
+        for (int group_id : layer_group_ids[static_cast<size_t>(layer_id)]) {
+            RTP_LLM_CHECK_WITH_INFO(group_id >= 0 && group_id < group_num,
+                                    "test topology invalid group_id=%d for layer=%d",
+                                    group_id,
+                                    layer_id);
+            group_layer_ids[static_cast<size_t>(group_id)].push_back(layer_id);
+            layer.group_tags.push_back("group" + std::to_string(group_id));
+        }
+        layers.push_back(std::move(layer));
+    }
+
+    const size_t           blocks_per_kv_block = std::max<size_t>(1, kernel_blocks_per_kv_block);
+    std::vector<GroupBase> groups;
+    groups.reserve(static_cast<size_t>(group_num));
+    for (int group_id = 0; group_id < group_num; ++group_id) {
+        const auto tag  = "group" + std::to_string(group_id);
+        auto       spec = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, blocks_per_kv_block, tag);
+
+        GroupBase group;
+        group.tag                       = tag;
+        group.spec                      = std::move(spec);
+        group.policy                    = defaultCacheGroupPolicy(group_types.empty() ? CacheGroupType::FULL :
+                                                                     group_types[static_cast<size_t>(group_id)]);
+        group.layer_ids                 = std::move(group_layer_ids[static_cast<size_t>(group_id)]);
+        group.block_num                 = 16;
+        group.seq_size_per_block        = blocks_per_kv_block;
+        group.kernel_seq_size_per_block = 1;
+        groups.push_back(std::move(group));
+    }
+    return CacheTopology::create(std::move(groups), std::move(layers));
+}
+
 inline std::shared_ptr<MLAKVCacheSpec> makeResolvedMlaSpec(rtp_llm::DataType  dtype,
                                                            uint32_t           kv_lora_rank,
                                                            uint32_t           rope_head_dim,
@@ -258,7 +312,7 @@ inline void setHybridAttentionKvCacheSpecs(ModelConfig& model_config) {
     swa_desc.entry_elems     = static_cast<uint32_t>(model_config.attn_config.size_per_head)
                            * static_cast<uint32_t>(model_config.attn_config.kv_head_num) * 2;
     swa_desc.explicit_entry_count = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-    swa_desc.entry_dtype = DataType::TYPE_FP16;
+    swa_desc.entry_dtype          = DataType::TYPE_FP16;
 
     KVCacheSpecDesc linear_desc;
     linear_desc.tag        = "linear";

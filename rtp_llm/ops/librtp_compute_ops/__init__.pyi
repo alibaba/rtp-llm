@@ -186,9 +186,6 @@ class KVCache:
     def get_layer_cache(self, arg0: int, arg1: str) -> LayerKVCache:
         """Return a LayerKVCache for the given layer and tag."""
         ...
-    def get_layer_cache_by_group(self, arg0: int, arg1: int) -> LayerKVCache:
-        """Return a LayerKVCache for the given layer and group id."""
-        ...
     def get_layer_cache_groups(self, arg0: int) -> list[LayerKVCache]:
         """Return all LayerKVCache objects for every group the layer owns."""
         ...
@@ -241,8 +238,6 @@ class PyAttentionInputs:
     kv_cache_kernel_block_id_device: torch.Tensor
     kv_cache_block_id: torch.Tensor
     kv_cache_block_id_device: torch.Tensor
-    kv_cache_kernel_block_id_by_group: list[torch.Tensor]
-    kv_cache_kernel_block_id_device_by_group: list[torch.Tensor]
     @property
     def input_lengths_device(self) -> torch.Tensor: ...
     @property
@@ -380,13 +375,7 @@ class PyModelOutputs:
     @typing.overload
     def __init__(self, hidden_states: torch.Tensor) -> None:
         """
-        Initialize with hidden states tensor only (params_ptr defaults to nullptr)
-        """
-
-    @typing.overload
-    def __init__(self, hidden_states: torch.Tensor, params_ptr: typing.Any) -> None:
-        """
-        Initialize with hidden states tensor and params pointer
+        Initialize with hidden states tensor
         """
 
     @property
@@ -397,14 +386,6 @@ class PyModelOutputs:
 
     @hidden_states.setter
     def hidden_states(self, arg0: torch.Tensor) -> None: ...
-    @property
-    def params_ptr(self) -> ParamsBase:
-        """
-        Parameters pointer
-        """
-
-    @params_ptr.setter
-    def params_ptr(self, arg0: ParamsBase) -> None: ...
 
 class PyMultimodalInputs:
     def __init__(self) -> None: ...

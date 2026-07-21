@@ -1,9 +1,12 @@
+import ast
 import unittest
+from pathlib import Path
 
 import torch
 
 from rtp_llm.models_py.model_desc.block_map import select_attention_inputs_for_layer
 from rtp_llm.models_py.utils.kvcache import SingleGroupKVCacheAdapter
+from rtp_llm.ops import HybridAttentionConfig, HybridAttentionType
 from rtp_llm.ops.compute_ops import (
     KVCache,
     LayerKVCache,
@@ -25,6 +28,56 @@ class _RoutingCache:
 
 
 class PyModelInputsCompatTest(unittest.TestCase):
+    def test_hybrid_attention_config_has_explicit_constructors(self) -> None:
+        default_config = HybridAttentionConfig()
+        self.assertFalse(default_config.enable_hybrid_attention)
+        self.assertFalse(default_config.enable_independent_kv_cache_pools)
+        self.assertEqual(default_config.hybrid_attention_types, [])
+
+        attention_types = [HybridAttentionType.NONE, HybridAttentionType.LINEAR]
+        config = HybridAttentionConfig(True, True, attention_types)
+        self.assertTrue(config.enable_hybrid_attention)
+        self.assertTrue(config.enable_independent_kv_cache_pools)
+        self.assertEqual(config.hybrid_attention_types, attention_types)
+
+        with self.assertRaises(TypeError):
+            HybridAttentionConfig(True, True)
+
+    def test_cache_binding_stubs_match_runtime_members(self) -> None:
+        stub_path = (
+            Path(__file__).resolve().parents[2]
+            / "ops"
+            / "librtp_compute_ops"
+            / "__init__.pyi"
+        )
+        module = ast.parse(stub_path.read_text())
+        stub_classes = {
+            node.name: node for node in module.body if isinstance(node, ast.ClassDef)
+        }
+
+        for class_name, runtime_class in (
+            ("KVCache", KVCache),
+            ("LayerKVCache", LayerKVCache),
+            ("PyAttentionInputs", PyAttentionInputs),
+        ):
+            with self.subTest(class_name=class_name):
+                stub_members = set()
+                for node in stub_classes[class_name].body:
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        stub_members.add(node.name)
+                    elif isinstance(node, ast.AnnAssign) and isinstance(
+                        node.target, ast.Name
+                    ):
+                        stub_members.add(node.target.id)
+
+                stub_members = {
+                    name for name in stub_members if not name.startswith("_")
+                }
+                runtime_members = {
+                    name for name in vars(runtime_class) if not name.startswith("_")
+                }
+                self.assertEqual(stub_members, runtime_members)
+
     def _attn_inputs(self, is_prefill: bool, input_length: int) -> PyAttentionInputs:
         attn_inputs = PyAttentionInputs()
         attn_inputs.is_prefill = is_prefill
@@ -40,9 +93,14 @@ class PyModelInputsCompatTest(unittest.TestCase):
         self.assertTrue(inputs.attention_inputs.is_prefill)
         self.assertEqual(3, inputs.attention_inputs.input_lengths.item())
 
-    def test_model_outputs_discards_python_only_params(self) -> None:
-        outputs = PyModelOutputs(torch.empty(0), {"full": None})
-        self.assertIsNone(outputs.params_ptr)
+    def test_model_outputs_only_exposes_hidden_states(self) -> None:
+        hidden_states = torch.empty(0)
+        outputs = PyModelOutputs(hidden_states)
+
+        self.assertEqual(hidden_states.data_ptr(), outputs.hidden_states.data_ptr())
+        self.assertFalse(hasattr(outputs, "params_ptr"))
+        with self.assertRaises(TypeError):
+            PyModelOutputs(hidden_states, {"full": None})
 
     def test_attention_inputs_field_updates_directly(self) -> None:
         inputs = PyModelInputs()
@@ -82,7 +140,6 @@ class PyModelInputsCompatTest(unittest.TestCase):
             "group_tags",
             "layer_count",
             "get_layer_cache",
-            "get_layer_cache_by_group",
             "get_layer_cache_groups",
             "get_seq_size_per_block",
             "get_kernel_seq_size_per_block",

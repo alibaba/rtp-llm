@@ -1,11 +1,20 @@
-from collections.abc import Iterable, Mapping
-from typing import Any
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Protocol, TypeVar
 
-from rtp_llm.ops.compute_ops import PyAttentionInputs
+from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, PyModelInputs
+
+AttentionInputs = PyAttentionInputs | Mapping[str, PyAttentionInputs]
+T = TypeVar("T")
 
 
-def get_attention_inputs_value(inputs: Any) -> Any:
-    value = getattr(inputs, "attention_inputs", None)
+class LayeredKVCache(Protocol):
+    def get_layer_cache_groups(
+        self, local_layer_idx: int
+    ) -> Sequence[LayerKVCache]: ...
+
+
+def get_attention_inputs_value(inputs: PyModelInputs) -> AttentionInputs:
+    value = inputs.attention_inputs
     if isinstance(value, PyAttentionInputs):
         return value
     if isinstance(value, Mapping) and value:
@@ -16,7 +25,7 @@ def get_attention_inputs_value(inputs: Any) -> Any:
 
 
 def get_primary_attention_inputs(
-    inputs: Any, kv_cache: Any = None
+    inputs: PyModelInputs, kv_cache: LayeredKVCache | None = None
 ) -> PyAttentionInputs:
     """Return the common/single fast-path value without interpreting tag names."""
     value = get_attention_inputs_value(inputs)
@@ -26,7 +35,7 @@ def get_primary_attention_inputs(
 
 
 def select_attention_inputs_for_tag(
-    attention_inputs: Any, tag: str
+    attention_inputs: AttentionInputs, tag: str
 ) -> PyAttentionInputs:
     """Select a group directly when the model already knows its business tag."""
     if isinstance(attention_inputs, PyAttentionInputs):
@@ -41,7 +50,7 @@ def select_attention_inputs_for_tag(
         ) from error
 
 
-def get_layer_tags(kv_cache: Any, local_layer_idx: int) -> list[str]:
+def get_layer_tags(kv_cache: LayeredKVCache | None, local_layer_idx: int) -> list[str]:
     if kv_cache is None:
         return []
     layer_caches = kv_cache.get_layer_cache_groups(local_layer_idx)
@@ -52,7 +61,7 @@ def get_layer_tags(kv_cache: Any, local_layer_idx: int) -> list[str]:
 
 
 def get_group_tags_for_layers(
-    kv_cache: Any, local_layer_indices: Iterable[int]
+    kv_cache: LayeredKVCache | None, local_layer_indices: Iterable[int]
 ) -> list[str]:
     """Return topology tags for model-selected layers, preserving topology order."""
     tags: list[str] = []
@@ -66,8 +75,10 @@ def get_group_tags_for_layers(
 
 
 def select_attention_inputs_for_layer(
-    inputs: Any, kv_cache: Any, local_layer_idx: int
-) -> Any:
+    inputs: PyModelInputs,
+    kv_cache: LayeredKVCache | None,
+    local_layer_idx: int,
+) -> PyAttentionInputs | list[PyAttentionInputs]:
     """Return the group-local input(s) owned by a model-local layer."""
     value = get_attention_inputs_value(inputs)
     if isinstance(value, PyAttentionInputs):
@@ -79,8 +90,10 @@ def select_attention_inputs_for_layer(
 
 
 def select_fmha_impl_for_layer(
-    fmha_impl: Any, kv_cache: Any, local_layer_idx: int
-) -> Any:
+    fmha_impl: T | Mapping[str, T],
+    kv_cache: LayeredKVCache | None,
+    local_layer_idx: int,
+) -> T | list[T]:
     if not isinstance(fmha_impl, Mapping):
         return fmha_impl
     tags = get_layer_tags(kv_cache, local_layer_idx)
@@ -92,13 +105,3 @@ def select_fmha_impl_for_layer(
             )
         selected.append(fmha_impl[tag])
     return selected[0] if len(selected) == 1 else selected
-
-
-def get_fmha_params(fmha_impl: Any) -> Any:
-    """Return the single-group C++ params fast path when it is representable."""
-    if isinstance(fmha_impl, Mapping):
-        # PyModelOutputs has one ParamsBasePtr slot. Multi-tag implementations are
-        # already kept alive by the model/CUDA-graph owner and cannot be encoded in
-        # that slot without retaining Python objects across a GIL-free C++ lifetime.
-        return None
-    return getattr(fmha_impl, "fmha_params", None)

@@ -500,9 +500,9 @@ TEST_F(LinearKVCacheGroupTest, MatchSingleKeyReturnsMatchedBlockOrEmpty) {
     auto blocks = block_pool->malloc(1);
     ASSERT_EQ(blocks.size(), 1u);
 
-    std::vector<BlockIdxType> group_slots(8, NULL_BLOCK_IDX);
-    group_slots[7] = blocks[0];
-    shared_cache->put(123, group_slots, /*is_resident=*/false);
+    std::vector<BlockIdxType> group_block_ids(8, NULL_BLOCK_IDX);
+    group_block_ids[7] = blocks[0];
+    shared_cache->put(123, group_block_ids, /*is_resident=*/false);
 
     auto hit = group.matchSingleKey(123);
     ASSERT_EQ(hit.block_indices.size(), 1u);

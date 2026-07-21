@@ -200,17 +200,17 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
                             "physical kv_cache_block_id must be 3-D for tagged inputs");
 
     torch_ext::AttentionInputsByTag by_tag;
-    for (size_t slot = 0; slot < group_count; ++slot) {
+    for (size_t group_id = 0; group_id < group_count; ++group_id) {
         auto group_inputs                            = py_attn_inputs;
-        group_inputs.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id[slot];
+        group_inputs.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id[group_id];
         group_inputs.kv_cache_kernel_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_kernel_block_id);
         if (inputs.kv_cache_block_id.defined()) {
-            group_inputs.kv_cache_block_id        = inputs.kv_cache_block_id[slot];
+            group_inputs.kv_cache_block_id        = inputs.kv_cache_block_id[group_id];
             group_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_block_id);
         }
-        const auto [it, inserted] = by_tag.emplace(group_tags[slot], std::move(group_inputs));
+        const auto [it, inserted] = by_tag.emplace(group_tags[group_id], std::move(group_inputs));
         (void)it;
-        RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate attention input tag=%s", group_tags[slot].c_str());
+        RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate attention input tag=%s", group_tags[group_id].c_str());
     }
 
     // A single global group keeps the direct fast path. Multiple groups are
@@ -333,6 +333,11 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
                                                                     use_group_local_storage_layout ?
                                                                         group.kv_scale_stride_bytes :
                                                                         cache_store_inputs.kv_scale_stride_bytes);
+            // The decode-side allocator registers the tag-local logical block,
+            // even when the shared backing pool spaces blocks by the maximum
+            // group stride. Keep transfer length separate from address stride.
+            cache_store_inputs.kv_block_transfer_bytes_by_tag.emplace(group.tag, group.kv_block_stride_bytes);
+            cache_store_inputs.kv_scale_transfer_bytes_by_tag.emplace(group.tag, group.kv_scale_stride_bytes);
         }
         params = cache_store_inputs;
     }

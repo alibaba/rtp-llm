@@ -6,7 +6,6 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import (
-    get_fmha_params,
     get_group_tags_for_layers,
     select_attention_inputs_for_layer,
     select_fmha_impl_for_layer,
@@ -131,4 +130,4 @@ class Qwen3NextMTPModel(GptModelBase):
                 attn_meta=Qwen3NextMetadata(),
             )
         hidden_states, residual = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states, get_fmha_params(fmha_impl))
+        return PyModelOutputs(hidden_states)

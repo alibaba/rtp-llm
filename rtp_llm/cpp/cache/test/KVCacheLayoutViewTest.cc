@@ -82,9 +82,9 @@ GroupedCacheLayerLayout makeLayout(std::vector<GroupBase>          groups,
     EXPECT_EQ(groups.size(), buffers.size());
     auto topology = CacheTopology::create(std::move(groups), {{0, std::move(layer_tags)}});
     GroupedCacheLayerLayout::GroupLayouts layouts;
-    for (size_t slot = 0; slot < topology->groups().size(); ++slot) {
-        layouts.emplace(topology->groupBySlot(slot).tag,
-                        CacheLayerLayout(std::vector<BlockBufferPtrInfo>{std::move(buffers[slot])}));
+    for (size_t group_id = 0; group_id < topology->groups().size(); ++group_id) {
+        layouts.emplace(topology->groupById(group_id).tag,
+                        CacheLayerLayout(std::vector<BlockBufferPtrInfo>{std::move(buffers[group_id])}));
     }
     return GroupedCacheLayerLayout(std::move(topology), std::move(layouts));
 }
@@ -102,14 +102,13 @@ TEST(KVCacheLayoutViewTest, MhaUsesGroupHeadsAndSpecPayloadForKernelView) {
                            /*local_kv_heads=*/1);
     torch_ext::KVCache cache(makeLayout({std::move(group)}, {"full"}, {{base, scale}}));
 
-    const auto layer    = cache.getLayerCache(0);
-    const auto by_tag   = cache.getLayerCache(0, "full");
-    const auto by_group = cache.getLayerCacheByGroup(0, 0);
+    const auto layer  = cache.getLayerCache(0);
+    const auto by_tag = cache.getLayerCache(0, "full");
     EXPECT_EQ(layer.seq_size_per_block, 2);
     EXPECT_EQ(layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{12, 2, 1, 2, 4}));
     EXPECT_EQ(layer.kv_scale_base.sizes().vec(), (std::vector<int64_t>{12, 4}));
     EXPECT_EQ(layer.kv_cache_base.data_ptr(), base.data_ptr());
-    EXPECT_EQ(by_tag.kv_cache_base.data_ptr(), by_group.kv_cache_base.data_ptr());
+    EXPECT_EQ(by_tag.kv_cache_base.data_ptr(), layer.kv_cache_base.data_ptr());
     EXPECT_EQ(by_tag.group_id, 0);
     EXPECT_EQ(by_tag.tag, "full");
     EXPECT_EQ(cache.groupTags(), std::vector<std::string>{"full"});
@@ -177,14 +176,11 @@ TEST(KVCacheLayoutViewTest, MultiGroupRequiresTagAndEnumerationSkipsPlaceholder)
     EXPECT_EQ(groups[0].tag, "full");
     EXPECT_EQ(groups[1].tag, "linear");
     EXPECT_EQ(cache.getLayerCache(0, "linear").kv_cache_base.data_ptr(), linear.data_ptr());
-    EXPECT_EQ(cache.getLayerCacheByGroup(0, 1).kv_cache_base.data_ptr(), linear.data_ptr());
 
     EXPECT_ANY_THROW(cache.getLayerCache(-1));
     EXPECT_ANY_THROW(cache.getLayerCache(1));
     EXPECT_ANY_THROW(cache.getLayerCache(0, "missing"));
     EXPECT_ANY_THROW(cache.getLayerCache(0, "empty"));
-    EXPECT_ANY_THROW(cache.getLayerCacheByGroup(0, -1));
-    EXPECT_ANY_THROW(cache.getLayerCacheByGroup(0, 3));
     EXPECT_ANY_THROW(cache.getSeqSizePerBlock("missing"));
 }
 

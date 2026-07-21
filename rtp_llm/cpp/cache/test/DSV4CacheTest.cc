@@ -187,12 +187,7 @@ static void setGroupBlockNumsForTest(CacheConfig& config, const std::vector<uint
 }
 
 static void initDsv4BatchGroups(BatchKVCacheResource& batch_res, const CacheConfig& config) {
-    batch_res.initGroups(config.groupNums(),
-                         static_cast<int>(config.layer_all_num),
-                         config.layerGroupIdsSnapshot(),
-                         config.kernelBlocksPerKvBlock(),
-                         config.groupTypesSnapshot(),
-                         config.groupKernelBlocksPerKvBlockSnapshot());
+    batch_res.initGroups(config.topologyPtr());
 }
 
 static std::vector<int> makeProLayerCompressRatios() {
@@ -205,16 +200,16 @@ static std::vector<int> makeProLayerCompressRatios() {
 
 static ModelConfig makeProModelConfig() {
     ModelConfig mc;
-    mc.num_layers                   = 61;
-    mc.hidden_size                  = 7168;
-    mc.attn_config.head_num         = 128;
-    mc.attn_config.kv_head_num      = 1;
-    mc.attn_config.size_per_head    = 512;
-    mc.attn_config.rope_head_dim    = 64;
-    mc.attn_config.indexer_head_dim = 128;
-    mc.attn_config.indexer_head_num = 64;
-    mc.attn_config.indexer_topk     = 1024;
-    mc.attn_config.tokens_per_block = kDsv4TokensPerBlock;
+    mc.num_layers                                                = 61;
+    mc.hidden_size                                               = 7168;
+    mc.attn_config.head_num                                      = 128;
+    mc.attn_config.kv_head_num                                   = 1;
+    mc.attn_config.size_per_head                                 = 512;
+    mc.attn_config.rope_head_dim                                 = 64;
+    mc.attn_config.indexer_head_dim                              = 128;
+    mc.attn_config.indexer_head_num                              = 64;
+    mc.attn_config.indexer_topk                                  = 1024;
+    mc.attn_config.tokens_per_block                              = kDsv4TokensPerBlock;
     mc.hybrid_attention_config.enable_hybrid_attention           = true;
     mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
     setDsv4KvCacheSpecs(mc, makeProLayerCompressRatios());
@@ -2485,9 +2480,9 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
         auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size()));
         ASSERT_EQ(blocks.size(), cached_keys.size());
         for (size_t i = 0; i < cached_keys.size(); ++i) {
-            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
-            group_slots[gid] = blocks[i];
-            shared_cache->put(cached_keys[i], group_slots, true);
+            std::vector<BlockIdxType> group_block_ids(group_num, NULL_BLOCK_IDX);
+            group_block_ids[gid] = blocks[i];
+            shared_cache->put(cached_keys[i], group_block_ids, true);
         }
         cached_blocks[gid] = blocks;
         block_pool->requestFree(blocks);
@@ -2552,9 +2547,9 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
         auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size()));
         ASSERT_EQ(blocks.size(), cached_keys.size());
         for (size_t i = 0; i < cached_keys.size(); ++i) {
-            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
-            group_slots[gid] = blocks[i];
-            shared_cache->put(cached_keys[i], group_slots, true);
+            std::vector<BlockIdxType> group_block_ids(group_num, NULL_BLOCK_IDX);
+            group_block_ids[gid] = blocks[i];
+            shared_cache->put(cached_keys[i], group_block_ids, true);
         }
         cached_blocks[gid] = blocks;
         block_pool->requestFree(blocks);
@@ -2607,9 +2602,9 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseDoesNotRequireHCAStateHit) {
             if (config.typeForGroup(gid) != CacheGroupType::FULL && i + 1 < cached_keys.size()) {
                 continue;
             }
-            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
-            group_slots[gid] = blocks[i];
-            shared_cache->put(cached_keys[i], group_slots, true);
+            std::vector<BlockIdxType> group_block_ids(group_num, NULL_BLOCK_IDX);
+            group_block_ids[gid] = blocks[i];
+            shared_cache->put(cached_keys[i], group_block_ids, true);
         }
         cached_blocks[gid] = blocks;
         block_pool->requestFree(blocks);
@@ -2661,9 +2656,9 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseAcceptsSingleLatestSWATailHit) {
             if (config.typeForGroup(gid) != CacheGroupType::FULL && i + 1 < cached_keys.size()) {
                 continue;
             }
-            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
-            group_slots[gid] = blocks[i];
-            shared_cache->put(cached_keys[i], group_slots, true);
+            std::vector<BlockIdxType> group_block_ids(group_num, NULL_BLOCK_IDX);
+            group_block_ids[gid] = blocks[i];
+            shared_cache->put(cached_keys[i], group_block_ids, true);
         }
         block_pool->requestFree(blocks);
     }
@@ -2708,9 +2703,9 @@ TEST_F(DSV4AllocatorTest, FlashPrefixCacheReusePagedGroupsOnly) {
         auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size()));
         ASSERT_EQ(blocks.size(), cached_keys.size());
         for (size_t i = 0; i < cached_keys.size(); ++i) {
-            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
-            group_slots[gid] = blocks[i];
-            shared_cache->put(cached_keys[i], group_slots, true);
+            std::vector<BlockIdxType> group_block_ids(group_num, NULL_BLOCK_IDX);
+            group_block_ids[gid] = blocks[i];
+            shared_cache->put(cached_keys[i], group_block_ids, true);
         }
         cached_blocks[gid] = blocks;
         block_pool->requestFree(blocks);
@@ -2850,9 +2845,9 @@ TEST_F(DSV4AllocatorTest, SWAGroupParticipatesInPrefixCacheReuse) {
     {
         auto blocks = block_pool->malloc(2);
         for (size_t i = 0; i < 2; ++i) {
-            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
-            group_slots[0] = blocks[i];
-            shared_cache->put(cached_keys[i], group_slots, true);
+            std::vector<BlockIdxType> group_block_ids(group_num, NULL_BLOCK_IDX);
+            group_block_ids[0] = blocks[i];
+            shared_cache->put(cached_keys[i], group_block_ids, true);
         }
         csa_blocks = blocks;
         block_pool->requestFree(blocks);
@@ -2861,9 +2856,9 @@ TEST_F(DSV4AllocatorTest, SWAGroupParticipatesInPrefixCacheReuse) {
     {
         auto blocks = block_pool->malloc(2);
         for (size_t i = 0; i < 2; ++i) {
-            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
-            group_slots[6] = blocks[i];
-            shared_cache->put(cached_keys[i], group_slots, true);
+            std::vector<BlockIdxType> group_block_ids(group_num, NULL_BLOCK_IDX);
+            group_block_ids[6] = blocks[i];
+            shared_cache->put(cached_keys[i], group_block_ids, true);
         }
         swa_blocks = blocks;
         block_pool->requestFree(blocks);
@@ -2902,9 +2897,9 @@ TEST_F(DSV4AllocatorTest, SWAPrefixCacheRestoresTailReuse) {
     for (int gid = 0; gid < group_num; gid++) {
         auto blocks = block_pool->malloc(2);
         for (size_t i = 0; i < 2; ++i) {
-            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
-            group_slots[gid] = blocks[i];
-            shared_cache->put(cached_keys[i], group_slots, true);
+            std::vector<BlockIdxType> group_block_ids(group_num, NULL_BLOCK_IDX);
+            group_block_ids[gid] = blocks[i];
+            shared_cache->put(cached_keys[i], group_block_ids, true);
         }
         cached_blocks[gid] = blocks;
         block_pool->requestFree(blocks);

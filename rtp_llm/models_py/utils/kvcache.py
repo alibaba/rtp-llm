@@ -70,11 +70,6 @@ class SingleGroupKVCacheAdapter:
             kv_scale_base=self._layer_scale_tensors[layer_id],
         )
 
-    def get_layer_cache_by_group(self, layer_id: int, group_id: int) -> LayerKVCache:
-        if group_id != 0:
-            raise RuntimeError(f"Invalid KV cache group id: {group_id}")
-        return self.get_layer_cache(layer_id)
-
     def get_layer_cache_groups(self, layer_id: int) -> list[LayerKVCache]:
         return [self.get_layer_cache(layer_id)]
 
