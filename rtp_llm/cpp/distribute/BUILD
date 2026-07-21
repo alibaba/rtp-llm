@@ -73,6 +73,11 @@ cc_test(
         "//:rtp_compute_ops",
         "//:th_transformer",
     ],
+    # libth_transformer.so has a runtime dependency on libcuda.so.1 even
+    # though this test only inspects symbols. Route it to the H20 pool instead
+    # of a driverless remote worker.
+    exec_properties = {"gpu": "H20"},
     linkopts = ["-ldl"],
+    tags = ["H20"],
     timeout = "short",
 )
