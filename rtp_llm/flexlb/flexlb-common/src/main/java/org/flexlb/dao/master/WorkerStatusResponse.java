@@ -19,6 +19,11 @@ public class WorkerStatusResponse {
     @JsonProperty("role")
     private RoleType role;
 
+    /**
+     * Compatibility-only field. RTP-LLM's gRPC GetWorkerStatus currently does
+     * not populate available_concurrency, so the observed value is the protobuf
+     * default 0. Do not use it for routing, admission control, or batch sizing.
+     */
     @JsonProperty("available_concurrency")
     private long availableConcurrency;
 
@@ -66,6 +71,18 @@ public class WorkerStatusResponse {
 
     @JsonProperty("total_kv_cache")
     private long totalKvCacheTokens;
+
+    /** Model-level maximum sequence length reported by the Engine. */
+    @JsonProperty("max_seq_len")
+    private long maxSeqLen;
+
+    /**
+     * FIFO scheduler's strict aggregate context-token limit for one admitted
+     * batch/group. A group whose total context length is greater than or equal
+     * to this value cannot be admitted by the Engine.
+     */
+    @JsonProperty("max_batch_tokens_size")
+    private long maxBatchTokensSize;
 
     @JsonProperty("version")
     private long version;

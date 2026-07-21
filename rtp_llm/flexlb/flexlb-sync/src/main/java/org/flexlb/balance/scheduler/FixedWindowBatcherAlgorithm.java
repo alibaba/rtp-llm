@@ -31,8 +31,8 @@ import java.util.concurrent.TimeUnit;
  * <ul>
  *   <li>No SLO deadline tracking — does not read {@code BatchItem.deadlineMs()}.</li>
  *   <li>No EMA arrival rate estimation.</li>
- *   <li>No token capacity filtering — frontend is expected to pre-filter
- *       oversized requests.</li>
+ *   <li>Uses FIFO selection subject to the Engine-reported aggregate token
+ *       capacity; it does not use SLO incremental-cost admission.</li>
  *   <li>No inflight-batch backpressure check.</li>
  * </ul>
  */
@@ -78,6 +78,15 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         long fixedWaitMs = ctx.cfg().getFlexlbBatchFixedWaitMs();
         int batchMaxCount = Math.max(1, ctx.cfg().getFlexlbBatchSizeMax());
         long predictThresholdMs = ctx.cfg().getFlexlbBatchPredictThresholdMs();
+        long batchMaxTokens = ctx.batchTokenCapacity();
+
+        // The Engine admits a group only when total context tokens are strictly
+        // below max_batch_tokens_size. Reject an impossible head explicitly so
+        // it cannot block the FIFO queue or cause an entire group to fast-fail.
+        if (!BatcherContext.fitsBatchTokenCapacity(0, head.seqLen(), batchMaxTokens)) {
+            ctx.rejectForBatchTokenCapacity(head, batchMaxTokens);
+            return;
+        }
 
         // 0. Engine backpressure: park if the prefill worker already has too
         //    many batches inflight, to prevent overloading the engine.
@@ -90,14 +99,14 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
 
         // 1. Queue size >= batchMaxCount → dispatch immediately (batch full)
         if (ctx.size() >= batchMaxCount) {
-            List<BatchItem> picked = pickFirstN(ctx, batchMaxCount);
+            List<BatchItem> picked = pickWithinCapacity(ctx, batchMaxCount, batchMaxTokens);
             dispatch(ctx, picked, "batch_full");
             return;
         }
 
         // 2. Queue size < batchMaxCount → check window timeout
         if (elapsedMs >= fixedWaitMs) {
-            List<BatchItem> picked = pickFirstN(ctx, batchMaxCount);
+            List<BatchItem> picked = pickWithinCapacity(ctx, batchMaxCount, batchMaxTokens);
             if (!picked.isEmpty()) {
                 dispatch(ctx, picked, "fixed_window_timeout");
             }
@@ -107,7 +116,7 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         // 3. Predictor-based early dispatch
         if (predictThresholdMs > 0) {
             PrefillTimePredictor predictor = ctx.prefillEp().getPredictor();
-            List<BatchItem> candidates = pickFirstN(ctx, batchMaxCount);
+            List<BatchItem> candidates = pickWithinCapacity(ctx, batchMaxCount, batchMaxTokens);
             if (!candidates.isEmpty() && predictor.predictBatchMs(candidates) >= predictThresholdMs) {
                 dispatch(ctx, candidates, "predict_threshold");
                 return;
@@ -121,17 +130,21 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
     // ==================== Internal helpers ====================
 
     /**
-     * Pick the first {@code maxCount} items from the queue in sorted order.
-     * No token capacity filtering — frontend is expected to pre-filter
-     * oversized requests.
+     * Greedily pick up to {@code maxCount} items in FIFO order while keeping
+     * the aggregate request sequence length strictly below the Engine limit.
      */
-    private static List<BatchItem> pickFirstN(BatcherContext ctx, int maxCount) {
+    private static List<BatchItem> pickWithinCapacity(BatcherContext ctx, int maxCount, long batchMaxTokens) {
         List<BatchItem> picked = new ArrayList<>();
+        long totalTokens = 0;
         for (BatchItem item : ctx.sortedItems()) {
             if (picked.size() >= maxCount) {
                 break;
             }
+            if (!BatcherContext.fitsBatchTokenCapacity(totalTokens, item.seqLen(), batchMaxTokens)) {
+                continue;
+            }
             picked.add(item);
+            totalTokens += item.seqLen();
         }
         return picked;
     }
@@ -158,6 +171,6 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
                 reason, picked.size(), waitMs, ctx.size(), ctx.key(), head.requestId());
 
         ctx.dispatch(picked,
-                new DispatchMeta(reason, 1.0, ctx.cfg().getFlexlbBatchMaxCapacity(), ctx.size() - picked.size()));
+                new DispatchMeta(reason, 1.0, ctx.size() - picked.size()));
     }
 }

@@ -22,6 +22,11 @@ public class WorkerStatus {
     private int port;
     private int grpcPort;
     private String site;
+    /**
+     * Compatibility-only mirror of WorkerStatusPB.available_concurrency.
+     * LocalRpcServer currently leaves that protobuf field unset, so this value
+     * must not participate in routing, admission control, or batch sizing.
+     */
     private Long availableConcurrency;
     private volatile boolean alive;
     private AtomicLong availableKvCacheTokens = new AtomicLong();
@@ -35,6 +40,10 @@ public class WorkerStatus {
     private long dpSize;
     private long tpSize;
     private long dpRank;
+    /** Model-level maximum sequence length reported by the Engine. */
+    private long maxSeqLen;
+    /** Strict aggregate context-token limit for an Engine batch/group. */
+    private long maxBatchTokensSize;
 
     private AtomicLong statusLastUpdateTime = new AtomicLong(-1);
     private AtomicLong statusUpdateIntervalUs = new AtomicLong(0);
@@ -63,6 +72,8 @@ public class WorkerStatus {
         this.dpSize = resp.getDpSize();
         this.tpSize = resp.getTpSize();
         this.dpRank = resp.getDpRank();
+        this.maxSeqLen = resp.getMaxSeqLen();
+        this.maxBatchTokensSize = resp.getMaxBatchTokensSize();
         this.availableKvCacheTokens.set(resp.getAvailableKvCacheTokens());
         this.totalKvCacheTokens.set(resp.getTotalKvCacheTokens());
         // GetWorkerStatus response does not include cache status; preserve the one
