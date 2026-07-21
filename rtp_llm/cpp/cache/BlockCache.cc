@@ -1,4 +1,8 @@
 #include "rtp_llm/cpp/cache/BlockCache.h"
+
+#include <algorithm>
+#include <limits>
+
 #include "rtp_llm/cpp/utils/LRUCache.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -37,6 +41,15 @@ bool BlockCache::put(CacheItem& item) {
     }
 
     lru_cache_.put(key, item);
+    if (event_publisher_) {
+        auto& group_count = key_group_counts_[item.cache_key];
+        ++group_count;
+        if (group_count == static_cast<size_t>(required_group_count_)) {
+            // tryPublish never waits for network or queue capacity. Keeping it under
+            // mu_ preserves the same ordering as cache state transitions.
+            (void)event_publisher_->tryPublish({KVCacheEventType::BLOCK_ADD, item.cache_key, 0});
+        }
+    }
     return true;
 }
 
@@ -53,6 +66,21 @@ BlockIndicesType BlockCache::pop(int nums) {
         if (!success)
             break;
         pop_blocks.push_back(item.block_index);
+        if (event_publisher_) {
+            auto count_it = key_group_counts_.find(item.cache_key);
+            if (count_it != key_group_counts_.end()) {
+                const bool was_complete = count_it->second >= static_cast<size_t>(required_group_count_);
+                if (count_it->second > 0) {
+                    --count_it->second;
+                }
+                if (was_complete && count_it->second < static_cast<size_t>(required_group_count_)) {
+                    (void)event_publisher_->tryPublish({KVCacheEventType::BLOCK_DELETE, item.cache_key, 0});
+                }
+                if (count_it->second == 0) {
+                    key_group_counts_.erase(count_it);
+                }
+            }
+        }
         nums--;
     }
 
@@ -65,6 +93,21 @@ std::optional<BlockCache::CacheItem> BlockCache::remove(CacheKeyType cache_key, 
     CacheItem                   removed_item;
     if (!lru_cache_.remove(key, &removed_item)) {
         return std::nullopt;
+    }
+    if (event_publisher_) {
+        auto count_it = key_group_counts_.find(cache_key);
+        if (count_it != key_group_counts_.end()) {
+            const bool was_complete = count_it->second >= static_cast<size_t>(required_group_count_);
+            if (count_it->second > 0) {
+                --count_it->second;
+            }
+            if (was_complete && count_it->second < static_cast<size_t>(required_group_count_)) {
+                (void)event_publisher_->tryPublish({KVCacheEventType::BLOCK_DELETE, cache_key, 0});
+            }
+            if (count_it->second == 0) {
+                key_group_counts_.erase(count_it);
+            }
+        }
     }
     return removed_item;
 }
@@ -84,10 +127,66 @@ BlockCache::CacheSnapshot BlockCache::cacheSnapshot(int64_t latest_version) cons
     return lru_cache_.cacheSnapshot(latest_version);
 }
 
+BlockCache::LogicalCacheSnapshot BlockCache::logicalCacheSnapshot() const {
+    LogicalCacheSnapshot logical_snapshot;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        // Requesting a version newer than any practical cache version avoids
+        // copying every physical CacheItem merely to read the version.
+        logical_snapshot.version =
+            lru_cache_.cacheSnapshot(std::numeric_limits<int64_t>::max()).version;
+
+        if (event_publisher_) {
+            // This index is maintained by the same state transitions as the
+            // events. Hybrid caches copy one entry per logical key instead of
+            // rebuilding counts from every group.
+            logical_snapshot.cache_keys.reserve(key_group_counts_.size());
+            for (const auto& [cache_key, group_count] : key_group_counts_) {
+                if (group_count >= static_cast<size_t>(required_group_count_)) {
+                    logical_snapshot.cache_keys.push_back(cache_key);
+                }
+            }
+        } else {
+            // Preserve the public method's diagnostic behavior when no
+            // publisher is installed.
+            std::unordered_map<CacheKeyType, size_t> group_counts;
+            group_counts.reserve(lru_cache_.size());
+            for (const auto& [key, item] : lru_cache_.items()) {
+                (void)key;
+                ++group_counts[item.cache_key];
+            }
+            logical_snapshot.cache_keys.reserve(group_counts.size());
+            for (const auto& [cache_key, group_count] : group_counts) {
+                if (group_count >= static_cast<size_t>(required_group_count_)) {
+                    logical_snapshot.cache_keys.push_back(cache_key);
+                }
+            }
+        }
+    }
+    // Sorting is deterministic but does not participate in the cache-state
+    // capture boundary, so keep it outside the inference-facing mutex.
+    std::sort(logical_snapshot.cache_keys.begin(), logical_snapshot.cache_keys.end());
+    return logical_snapshot;
+}
+
+void BlockCache::setEventPublisher(KVCacheEventPublisherPtr publisher, int required_group_count) {
+    std::lock_guard<std::mutex> lock(mu_);
+    event_publisher_      = std::move(publisher);
+    required_group_count_ = std::max(required_group_count, 1);
+    key_group_counts_.clear();
+    if (!event_publisher_) {
+        return;
+    }
+    for (const auto& [key, item] : lru_cache_.items()) {
+        (void)key;
+        ++key_group_counts_[item.cache_key];
+    }
+}
+
 BlockCache::EvictResult BlockCache::selectAndEvict(size_t min_blocks) {
     std::lock_guard<std::mutex> lock(mu_);
+    EvictResult                 result;
 
-    EvictResult result;
     if (lru_cache_.empty()) {
         return result;
     }
@@ -141,16 +240,35 @@ BlockCache::EvictResult BlockCache::selectAndEvict(size_t min_blocks) {
     for (const auto cache_key : selected_keys) {
         auto&                  items = grouped_items.at(cache_key);
         std::vector<CacheItem> evicted_items;
+        const auto             count_it     = key_group_counts_.find(cache_key);
+        const bool             was_complete = event_publisher_ && count_it != key_group_counts_.end()
+                                  && count_it->second >= static_cast<size_t>(required_group_count_);
         for (const auto& item : items) {
             CacheKeyGroupPair key{item.cache_key, item.group_id};
             CacheItem         removed_item;
             if (lru_cache_.remove(key, &removed_item)) {
                 evicted_items.push_back(removed_item);
+                if (event_publisher_) {
+                    auto current_count = key_group_counts_.find(cache_key);
+                    if (current_count != key_group_counts_.end() && current_count->second > 0) {
+                        --current_count->second;
+                    }
+                }
             }
         }
         if (!evicted_items.empty()) {
             result.evicted_keys.push_back(cache_key);
             result.evicted_items[cache_key] = std::move(evicted_items);
+        }
+        if (event_publisher_) {
+            auto         current_count = key_group_counts_.find(cache_key);
+            const size_t remaining     = current_count == key_group_counts_.end() ? 0 : current_count->second;
+            if (was_complete && remaining < static_cast<size_t>(required_group_count_)) {
+                (void)event_publisher_->tryPublish({KVCacheEventType::BLOCK_DELETE, cache_key, 0});
+            }
+            if (current_count != key_group_counts_.end() && current_count->second == 0) {
+                key_group_counts_.erase(current_count);
+            }
         }
     }
 

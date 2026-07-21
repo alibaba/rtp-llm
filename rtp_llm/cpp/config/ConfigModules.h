@@ -167,6 +167,22 @@ struct KVCacheConfig {
     int64_t device_cache_min_free_blocks = 0;
     int     load_cache_retry_times       = 1;  // Maximum retry attempts for load cache transfer failures
 
+    // HBM cache event publishing. Only tp_rank=0 creates an active publisher for each DP replica.
+    std::string kv_cache_event_publisher_type        = "none";  // none | log | kvcm
+    std::string kv_cache_event_manager_endpoint      = "";      // KVCM Meta HTTP endpoint
+    std::string kv_cache_event_instance_group        = "";
+    std::string kv_cache_event_instance_id           = "";
+    std::string kv_cache_event_host_ip_port          = "";
+    int64_t     kv_cache_event_queue_capacity        = 100000;
+    int64_t     kv_cache_event_report_batch_size     = 1000;
+    int         kv_cache_event_flush_interval_ms     = 20;
+    int         kv_cache_event_heartbeat_interval_ms = 1000;
+    int         kv_cache_event_request_timeout_ms    = 1500;
+    int         kv_cache_event_snapshot_timeout_ms   = 30000;
+    int         kv_cache_event_retry_interval_ms     = 500;
+    int         kv_cache_event_snapshot_interval_ms  = 300000;
+    int64_t     kv_cache_event_log_max_keys          = 8;
+
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
     std::string reco_vipserver_domain                = "";

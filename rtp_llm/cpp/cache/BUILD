@@ -77,6 +77,12 @@ cc_library(
     ] + torch_deps(),
 )
 
+alias(
+    name = "kv_cache_event_publisher",
+    actual = "//rtp_llm/cpp/cache/events:kv_cache_event_publisher",
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "block_pool",
     srcs = [
@@ -97,6 +103,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_types",
+        "//rtp_llm/cpp/cache/events:kv_cache_event",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
@@ -250,6 +257,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_core",
+        "//rtp_llm/cpp/cache/events:kv_cache_event_publisher",
         "//rtp_llm/cpp/cache/connector",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",

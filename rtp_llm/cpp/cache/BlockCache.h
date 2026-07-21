@@ -7,9 +7,10 @@
 #include <unordered_set>
 #include <vector>
 
-#include "rtp_llm/cpp/utils/LRUCache.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/LRUCache.h"
 
 namespace rtp_llm {
 
@@ -40,6 +41,11 @@ public:
                                    PairBothEqual<CacheKeyType, GroupIdType>>;
     using CacheSnapshot = typename LRUCacheType::CacheSnapshot;
 
+    struct LogicalCacheSnapshot {
+        int64_t                   version = -1;
+        std::vector<CacheKeyType> cache_keys;
+    };
+
 public:
     explicit BlockCache(): lru_cache_(kCacheMaxCapacity) {}
 
@@ -68,9 +74,18 @@ public:
 
     CacheSnapshot cacheSnapshot(int64_t latest_version) const;
 
+    LogicalCacheSnapshot logicalCacheSnapshot() const;
+
+    // Installed once during engine initialization and removed before publisher shutdown.
+    // A logical key is externally reusable only when every required cache group exists.
+    void setEventPublisher(KVCacheEventPublisherPtr publisher, int required_group_count);
+
 private:
-    size_t       seq_size_per_block_;
-    LRUCacheType lru_cache_;
+    size_t                                   seq_size_per_block_;
+    LRUCacheType                             lru_cache_;
+    KVCacheEventPublisherPtr                 event_publisher_;
+    int                                      required_group_count_ = 1;
+    std::unordered_map<CacheKeyType, size_t> key_group_counts_;
     // NOTE: BlockCache/LRUCache is accessed from multiple RPC/engine threads.
     // LRUCache is NOT thread-safe (unordered_map + list). Guard all accesses here.
     mutable std::mutex mu_;

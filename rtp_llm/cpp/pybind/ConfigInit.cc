@@ -381,6 +381,20 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_tiered_memory_cache", &KVCacheConfig::enable_tiered_memory_cache)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
+        .def_readwrite("kv_cache_event_publisher_type", &KVCacheConfig::kv_cache_event_publisher_type)
+        .def_readwrite("kv_cache_event_manager_endpoint", &KVCacheConfig::kv_cache_event_manager_endpoint)
+        .def_readwrite("kv_cache_event_instance_group", &KVCacheConfig::kv_cache_event_instance_group)
+        .def_readwrite("kv_cache_event_instance_id", &KVCacheConfig::kv_cache_event_instance_id)
+        .def_readwrite("kv_cache_event_host_ip_port", &KVCacheConfig::kv_cache_event_host_ip_port)
+        .def_readwrite("kv_cache_event_queue_capacity", &KVCacheConfig::kv_cache_event_queue_capacity)
+        .def_readwrite("kv_cache_event_report_batch_size", &KVCacheConfig::kv_cache_event_report_batch_size)
+        .def_readwrite("kv_cache_event_flush_interval_ms", &KVCacheConfig::kv_cache_event_flush_interval_ms)
+        .def_readwrite("kv_cache_event_heartbeat_interval_ms", &KVCacheConfig::kv_cache_event_heartbeat_interval_ms)
+        .def_readwrite("kv_cache_event_request_timeout_ms", &KVCacheConfig::kv_cache_event_request_timeout_ms)
+        .def_readwrite("kv_cache_event_snapshot_timeout_ms", &KVCacheConfig::kv_cache_event_snapshot_timeout_ms)
+        .def_readwrite("kv_cache_event_retry_interval_ms", &KVCacheConfig::kv_cache_event_retry_interval_ms)
+        .def_readwrite("kv_cache_event_snapshot_interval_ms", &KVCacheConfig::kv_cache_event_snapshot_interval_ms)
+        .def_readwrite("kv_cache_event_log_max_keys", &KVCacheConfig::kv_cache_event_log_max_keys)
         // Remote connector configuration fields
         .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)
         .def_readwrite("reco_vipserver_domain", &KVCacheConfig::reco_vipserver_domain)
@@ -448,10 +462,24 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reco_get_broadcast_timeout,
                                       self.reco_put_broadcast_timeout,
                                       self.reco_client_config,
-                                      self.ssm_state_dtype);
+                                      self.ssm_state_dtype,
+                                      self.kv_cache_event_publisher_type,
+                                      self.kv_cache_event_manager_endpoint,
+                                      self.kv_cache_event_instance_group,
+                                      self.kv_cache_event_instance_id,
+                                      self.kv_cache_event_host_ip_port,
+                                      self.kv_cache_event_queue_capacity,
+                                      self.kv_cache_event_report_batch_size,
+                                      self.kv_cache_event_flush_interval_ms,
+                                      self.kv_cache_event_heartbeat_interval_ms,
+                                      self.kv_cache_event_request_timeout_ms,
+                                      self.kv_cache_event_retry_interval_ms,
+                                      self.kv_cache_event_snapshot_interval_ms,
+                                      self.kv_cache_event_log_max_keys,
+                                      self.kv_cache_event_snapshot_timeout_ms);
             },
             [](py::tuple t) {
-                if (t.size() != 43)
+                if (t.size() != 43 && t.size() != 56 && t.size() != 57)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -498,6 +526,24 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.reco_put_broadcast_timeout           = t[40].cast<int>();
                     c.reco_client_config                   = t[41].cast<std::string>();
                     c.ssm_state_dtype                      = t[42].cast<std::string>();
+                    if (t.size() >= 56) {
+                        c.kv_cache_event_publisher_type        = t[43].cast<std::string>();
+                        c.kv_cache_event_manager_endpoint      = t[44].cast<std::string>();
+                        c.kv_cache_event_instance_group        = t[45].cast<std::string>();
+                        c.kv_cache_event_instance_id           = t[46].cast<std::string>();
+                        c.kv_cache_event_host_ip_port          = t[47].cast<std::string>();
+                        c.kv_cache_event_queue_capacity        = t[48].cast<int64_t>();
+                        c.kv_cache_event_report_batch_size     = t[49].cast<int64_t>();
+                        c.kv_cache_event_flush_interval_ms     = t[50].cast<int>();
+                        c.kv_cache_event_heartbeat_interval_ms = t[51].cast<int>();
+                        c.kv_cache_event_request_timeout_ms    = t[52].cast<int>();
+                        c.kv_cache_event_retry_interval_ms     = t[53].cast<int>();
+                        c.kv_cache_event_snapshot_interval_ms  = t[54].cast<int>();
+                        c.kv_cache_event_log_max_keys          = t[55].cast<int64_t>();
+                        if (t.size() == 57) {
+                            c.kv_cache_event_snapshot_timeout_ms = t[56].cast<int>();
+                        }
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }

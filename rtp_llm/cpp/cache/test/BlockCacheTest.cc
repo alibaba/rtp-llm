@@ -12,6 +12,30 @@ namespace test {
 
 typedef BlockCache::CacheItem CacheItem;
 
+class RecordingPublisher final: public KVCacheEventPublisher {
+public:
+    bool start() noexcept override {
+        return true;
+    }
+
+    PublishResult tryPublish(KVCacheEvent event) noexcept override {
+        events.push_back(event);
+        return PublishResult::ACCEPTED;
+    }
+
+    void stop() noexcept override {}
+
+    PublisherStatus status() const noexcept override {
+        return {PublisherState::READY, 0, events.size(), 0};
+    }
+
+    bool enabled() const noexcept override {
+        return true;
+    }
+
+    std::vector<KVCacheEvent> events;
+};
+
 class BlockCacheTest: public ::testing::Test {
 protected:
     void SetUp() override {
@@ -33,6 +57,17 @@ TEST_F(BlockCacheTest, ConstructorTest) {
     BlockCache cache1;
     EXPECT_TRUE(cache1.empty());
     EXPECT_EQ(cache1.size(), 0);
+}
+
+TEST_F(BlockCacheTest, LogicalSnapshotWorksWithoutPublisher) {
+    CacheItem item1 = {101, 0, 1, false};
+    CacheItem item2 = {102, 0, 2, false};
+    ASSERT_TRUE(cache_->put(item1));
+    ASSERT_TRUE(cache_->put(item2));
+
+    const auto snapshot = cache_->logicalCacheSnapshot();
+    EXPECT_EQ(std::vector<CacheKeyType>({101, 102}), snapshot.cache_keys);
+    EXPECT_GE(snapshot.version, 0);
 }
 
 TEST_F(BlockCacheTest, MatchBasicTest) {
@@ -109,6 +144,111 @@ TEST_F(BlockCacheTest, PopBasicTest) {
     auto popped4 = cache_->pop(2);
     EXPECT_EQ(popped4.size(), 0);
     EXPECT_EQ(cache_->size(), 1);
+}
+
+TEST_F(BlockCacheTest, PublishesOnlyCompleteLogicalHybridKeys) {
+    auto publisher = std::make_shared<RecordingPublisher>();
+    cache_->setEventPublisher(publisher, 2);
+
+    CacheItem group0 = {101, 0, 10, false};
+    CacheItem group1 = {101, 1, 11, false};
+    EXPECT_TRUE(cache_->put(group0));
+    EXPECT_TRUE(publisher->events.empty());
+    EXPECT_TRUE(cache_->logicalCacheSnapshot().cache_keys.empty());
+
+    EXPECT_TRUE(cache_->put(group1));
+    ASSERT_EQ(1, publisher->events.size());
+    EXPECT_EQ(KVCacheEventType::BLOCK_ADD, publisher->events[0].type);
+    EXPECT_EQ(101, publisher->events[0].block_key);
+    EXPECT_EQ(std::vector<CacheKeyType>({101}), cache_->logicalCacheSnapshot().cache_keys);
+
+    EXPECT_FALSE(cache_->put(group1));
+    EXPECT_EQ(1, publisher->events.size());
+
+    ASSERT_TRUE(cache_->remove(101, 0).has_value());
+    ASSERT_EQ(2, publisher->events.size());
+    EXPECT_EQ(KVCacheEventType::BLOCK_DELETE, publisher->events[1].type);
+    EXPECT_TRUE(cache_->logicalCacheSnapshot().cache_keys.empty());
+
+    ASSERT_TRUE(cache_->remove(101, 1).has_value());
+    EXPECT_EQ(2, publisher->events.size());
+}
+
+TEST_F(BlockCacheTest, PublishesOneDeleteForLogicalEviction) {
+    auto publisher = std::make_shared<RecordingPublisher>();
+    cache_->setEventPublisher(publisher, 2);
+
+    CacheItem group0 = {101, 0, 10, false};
+    CacheItem group1 = {101, 1, 11, false};
+    cache_->put(group0);
+    cache_->put(group1);
+    ASSERT_EQ(1, publisher->events.size());
+
+    auto result = cache_->selectAndEvict(1);
+    ASSERT_EQ(1, result.evicted_keys.size());
+    ASSERT_EQ(2, publisher->events.size());
+    EXPECT_EQ(KVCacheEventType::BLOCK_DELETE, publisher->events[1].type);
+    EXPECT_EQ(101, publisher->events[1].block_key);
+}
+
+TEST_F(BlockCacheTest, ConcurrentMutationsAndSnapshotsConverge) {
+    constexpr size_t kWriterCount   = 4;
+    constexpr size_t kKeysPerWriter = 1000;
+    constexpr size_t kKeyCount      = kWriterCount * kKeysPerWriter;
+
+    auto publisher = std::make_shared<RecordingPublisher>();
+    cache_->setEventPublisher(publisher, 1);
+
+    std::atomic<bool> stop_snapshot{false};
+    std::atomic<bool> snapshots_valid{true};
+    std::thread snapshotter([&] {
+        while (!stop_snapshot.load(std::memory_order_acquire)) {
+            const auto snapshot = cache_->logicalCacheSnapshot();
+            if (!std::is_sorted(snapshot.cache_keys.begin(), snapshot.cache_keys.end())
+                || std::adjacent_find(snapshot.cache_keys.begin(), snapshot.cache_keys.end())
+                       != snapshot.cache_keys.end()) {
+                snapshots_valid.store(false, std::memory_order_relaxed);
+            }
+        }
+    });
+
+    std::vector<std::thread> writers;
+    writers.reserve(kWriterCount);
+    for (size_t writer_id = 0; writer_id < kWriterCount; ++writer_id) {
+        writers.emplace_back([&, writer_id] {
+            for (size_t i = 0; i < kKeysPerWriter; ++i) {
+                const auto key = static_cast<CacheKeyType>(writer_id * kKeysPerWriter + i + 1);
+                CacheItem item{key, 0, static_cast<BlockIdxType>(key), false};
+                cache_->put(item);
+                if ((key & 1) == 0) {
+                    cache_->remove(key, 0);
+                }
+            }
+        });
+    }
+    for (auto& writer : writers) {
+        writer.join();
+    }
+    stop_snapshot.store(true, std::memory_order_release);
+    snapshotter.join();
+
+    EXPECT_TRUE(snapshots_valid.load(std::memory_order_relaxed));
+    const auto final_snapshot = cache_->logicalCacheSnapshot();
+    ASSERT_EQ(kKeyCount / 2, final_snapshot.cache_keys.size());
+
+    std::set<CacheKeyType> materialized;
+    for (const auto& event : publisher->events) {
+        if (event.type == KVCacheEventType::BLOCK_ADD) {
+            materialized.insert(static_cast<CacheKeyType>(event.block_key));
+        } else {
+            materialized.erase(static_cast<CacheKeyType>(event.block_key));
+        }
+    }
+    EXPECT_EQ(final_snapshot.cache_keys.size(), materialized.size());
+    for (const auto key : final_snapshot.cache_keys) {
+        EXPECT_EQ(1, key & 1);
+        EXPECT_EQ(1, materialized.count(key));
+    }
 }
 
 // ==================== selectAndEvict tests ====================

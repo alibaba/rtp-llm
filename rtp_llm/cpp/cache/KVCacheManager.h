@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -97,6 +98,7 @@ public:
     size_t                  totalBlocksNum() const;
     size_t                  maxAvailableTokensNum() const;
     KVCacheInfo             getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    PublisherStatus         cacheEventPublisherStatus() const;
 
     // 系统资源管理
     void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
@@ -135,6 +137,8 @@ public:
 
 private:
     void initConnectorCoordinator();
+    void initCacheEventPublisher();
+    void stopCacheEventPublisher();
     void allocateAndSync();
     void reportMetricsLoop();
 
@@ -149,11 +153,15 @@ private:
     const SpeculativeExecutionConfig   sp_config_;
     const PDSepConfig                  pd_sep_config_;
     const CacheStoreConfig             cache_store_config_;
+    const bool                         warmup_;
 
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
 
     std::shared_ptr<KVCacheConnectorCoordinator> coordinator_;
+
+    KVCacheEventPublisherPtr cache_event_publisher_;
+    BlockCachePtr            publisher_block_cache_;
 
     mutable std::mutex          cache_store_mutex_;
     std::shared_ptr<CacheStore> cache_store_;
