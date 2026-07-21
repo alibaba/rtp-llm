@@ -2,6 +2,8 @@ package org.flexlb.httpserver;
 
 import io.grpc.Context;
 import io.grpc.Status;
+import io.grpc.StatusException;
+import io.grpc.StatusRuntimeException;
 import io.grpc.Deadline;
 import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
@@ -114,8 +116,31 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 try {
                     if (responded.compareAndSet(false, true)) {
                         if (ex != null) {
-                            Logger.error("FlexlbService.schedule async error, request_id={}", request.getRequestId(), ex);
-                            completeSchedule(requestContext, buildErrorResponse(ex), responseObserver);
+                            Status.Code grpcCode = grpcStatusCode(ex);
+                            if (grpcCode == Status.Code.CANCELLED
+                                    || grpcCode == Status.Code.DEADLINE_EXCEEDED) {
+                                // Client-initiated cancellation or deadline expiry is an expected
+                                // operational outcome, not a server fault. Downgrade to WARN (no full
+                                // stack at WARN; stack available at DEBUG) so genuine errors are not
+                                // masked by this high-volume client-driven noise.
+                                // Deadline expiry is a timeout, not an active client cancel; keep the
+                                // response code unified (REQUEST_CANCELLED) but differentiate the
+                                // message so logs/responses describe the actual outcome.
+                                String cancelMsg = (grpcCode == Status.Code.DEADLINE_EXCEEDED)
+                                        ? "request deadline exceeded"
+                                        : "request cancelled by client";
+                                Logger.warn("FlexlbService.schedule client cancelled/timeout (gRPC {}), request_id={}",
+                                        grpcCode, request.getRequestId());
+                                Logger.debug("FlexlbService.schedule client cancelled/timeout detail, request_id={}",
+                                        request.getRequestId(), ex);
+                                completeSchedule(requestContext,
+                                        buildErrorResponse(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
+                                                cancelMsg),
+                                        responseObserver);
+                            } else {
+                                Logger.error("FlexlbService.schedule async error, request_id={}", request.getRequestId(), ex);
+                                completeSchedule(requestContext, buildErrorResponse(ex), responseObserver);
+                            }
                         } else {
                             completeSchedule(requestContext, response, responseObserver);
                         }
@@ -235,6 +260,34 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             }
             engineHealthReporter.reportBalancingService(ctx);
         }
+    }
+
+    /**
+     * Extracts the gRPC {@link Status.Code} from {@code throwable}, unwrapping the cause
+     * chain to handle wrappers such as {@link java.util.concurrent.CompletionException} or
+     * {@link java.util.concurrent.ExecutionException}. Returns {@code null} when no gRPC
+     * status is present in the chain.
+     *
+     * <p>The explicit cause walk avoids relying on {@link Status#fromThrowable(Throwable)}
+     * whose traversal semantics vary across gRPC versions, keeping the classification
+     * deterministic. Client cancellations ({@link Status.Code#CANCELLED}) and deadline
+     * expiries ({@link Status.Code#DEADLINE_EXCEEDED}) are expected operational outcomes;
+     * callers use them to downgrade logging from ERROR to WARN so genuine server faults are
+     * not masked by client-driven noise.</p>
+     */
+    static Status.Code grpcStatusCode(Throwable throwable) {
+        Throwable cur = throwable;
+        int depth = 0;
+        // Bounded cause walk: a self-referential cause chain would otherwise loop forever.
+        while (cur != null && depth++ < 64) {
+            if (cur instanceof StatusRuntimeException sre) {
+                return sre.getStatus().getCode();
+            } else if (cur instanceof StatusException se) {
+                return se.getStatus().getCode();
+            }
+            cur = cur.getCause();
+        }
+        return null;
     }
 
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB buildErrorResponse(Throwable error) {
