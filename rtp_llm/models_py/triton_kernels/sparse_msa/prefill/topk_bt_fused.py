@@ -25,6 +25,19 @@ from .flash_with_topk_idx import _bitonic_merge, _flash_attn_fwd_with_block_scor
 # kernel + schedule are reused verbatim -> output is bit-identical + deterministic.
 _M3_MSA_FUSED_CSR = os.environ.get("M3_MSA_FUSED_CSR", "1") == "1"
 
+# Opt-in chunked step3: sparse_atten_func internally allocates O_partial
+# [topk, total_q, Hq, dim] (+ LSE_partial), i.e. workspace scales with total_q --
+# tens of GB at 1M-token prefill. When enabled, step3 splits the query dim into
+# fixed-size chunks (CSR/schedule rebuilt per chunk, causal alignment preserved
+# via per-chunk seqused_k) so the workspace is bounded by the chunk size.
+# Disabled by default; chunk size defaults to 16K queries.
+_M3_SPARSE_ATTN_CHUNK_ENABLE = (
+    os.environ.get("M3_SPARSE_ATTN_CHUNK_ENABLE", "0") == "1"
+)
+_M3_SPARSE_ATTN_CHUNK_SIZE = int(
+    os.environ.get("M3_SPARSE_ATTN_CHUNK_SIZE", "16384")
+)
+
 
 def _patch_fmha_sm100_cxx_standard():
     """GCC < 11 crashes (ICE) on CUDA 13's libcudacxx C++20 templates.
@@ -561,6 +574,135 @@ def flash_prefill_topk_to_block_tables(
 
 
 @torch.no_grad()
+def _sparse_attn_chunked(
+    q,  # [total_q, num_q_heads, head_dim] bf16
+    k_paged_f,  # [num_paged, nkv, blk, dim]
+    v_paged_f,  # [num_paged, nkv, blk, dim]
+    topk_idx,  # [nkv, total_q, topk] int32, -1 padded
+    kv_indices,  # flat per-segment physical page ids (int32)
+    sparse_attn_plan,
+    topk: int,
+    block_size_k: int,
+    sm_scale: float,
+    chunk_size: int,
+):
+    """Step3 with the query dim split into ``chunk_size`` chunks (memory-saving).
+
+    ``sparse_atten_func`` allocates O_partial [topk, total_q, Hq, dim] (+
+    LSE_partial) per call, so its workspace scales with total_q -- prohibitive at
+    1M-token prefill. Each query row only depends on its own top-k KV blocks, so
+    chunking over queries is lossless: per chunk [q0, q1) of a request with
+    prefix P we rebuild the CSR + schedule from the topk_idx slice and call
+    sparse_atten_func with seqused_k = P + q1. The kernel's bottom-right causal
+    alignment (causal_q_offset = seqlen_k - seqlen_q = P + q0) then gives local
+    query i the kv limit P + q0 + i -- identical to the full call. Workspace is
+    bounded by chunk_size; per-chunk CSR/schedule rebuild + small H2D copies are
+    the accepted trade-off of this opt-in mode. Chunks never span requests.
+    """
+    from src.sm100.prepare_k2q_csr import SparseK2qCsrBuilderSm100
+    from interface import sparse_atten_func
+
+    p = sparse_attn_plan
+    dev = q.device
+    total_q, num_q_heads, head_dim = q.shape
+    num_kv_heads = int(p["num_kv_heads"])
+    qhead_per_kv = num_q_heads // num_kv_heads
+    usable_sm = int(p.get("usable_SM_count", -1))
+
+    # Per-forward host metadata: per-batch aligned page tables + per-chunk
+    # geometry/cu_seqlens tensors, built by the first sparse layer and reused by
+    # the rest (the plan is per-forward, so is kv_indices).
+    meta = p.get("_chunk_meta")
+    if meta is None:
+        qo_lens = [int(v) for v in p["qo_segment_lens"].tolist()]  # CPU tensor
+        seqused = [int(v) for v in p["seqused_k"].cpu().tolist()]  # one DtoH sync
+        chunks, off, gq0 = [], 0, 0
+        for b, q_len in enumerate(qo_lens):
+            kv_len = seqused[b]
+            prefix = kv_len - q_len
+            n = (kv_len + block_size_k - 1) // block_size_k
+            # 16-byte aligned [1, n] page table (the cute kernel asserts %16 == 0)
+            buf = torch.empty(n + 4, dtype=torch.int32, device=dev)
+            shift = ((-buf.data_ptr()) % 16) // 4
+            pt = buf[shift : shift + n].view(1, n)
+            pt[0] = kv_indices[off : off + n]
+            off += n
+            for q0 in range(0, q_len, chunk_size):
+                q1 = min(q0 + chunk_size, q_len)
+                kv_used = prefix + q1  # effective KV length at the chunk end
+                cu_q = torch.tensor([0, q1 - q0], dtype=torch.int32, device=dev)
+                cu_k = torch.tensor([0, kv_used], dtype=torch.int32, device=dev)
+                # standalone alloc: the kernel asserts 16-byte data alignment,
+                # so a cu_k[1:] view (base + 4B) would be rejected
+                sk = torch.tensor([kv_used], dtype=torch.int32, device=dev)
+                chunks.append(
+                    dict(
+                        g0=gq0 + q0,
+                        g1=gq0 + q1,
+                        csz=q1 - q0,
+                        kv_used=kv_used,
+                        total_rows=(kv_used + block_size_k - 1) // block_size_k,
+                        cu_q=cu_q,
+                        cu_k=cu_k,
+                        seqused=sk,
+                        pt=pt,
+                    )
+                )
+            gq0 += q_len
+        builder = SparseK2qCsrBuilderSm100()
+        builder._ensure_loaded()
+        meta = dict(chunks=chunks, builder=builder)
+        p["_chunk_meta"] = meta
+
+    out = torch.empty(total_q, num_q_heads, head_dim, dtype=torch.bfloat16, device=dev)
+    for c in meta["chunks"]:
+        g0, g1, csz, kv_used = c["g0"], c["g1"], c["csz"], c["kv_used"]
+        # dim-1 slice of the contiguous [nkv, total_q, topk] is non-contiguous
+        # across heads -> small copy (nkv * csz * topk int32)
+        topk_chunk = topk_idx[:, g0:g1, :].contiguous()
+        # Mirror sparse_fmha: the native builder schedule ignores
+        # usable_SM_count, so when SM-limited let sparse_atten_func build one.
+        ret = meta["builder"](
+            topk_chunk,
+            c["cu_q"],
+            c["cu_k"],
+            total_k=kv_used,
+            blk_kv=block_size_k,
+            max_seqlen_k=kv_used,
+            max_seqlen_q=csz,
+            total_rows=c["total_rows"],
+            qhead_per_kv=qhead_per_kv,
+            return_schedule=usable_sm <= 0,
+        )
+        row_ptr, q_ind = ret[0], ret[1]
+        sched = ret[2] if len(ret) == 3 else None
+        out_c = sparse_atten_func(
+            q[g0:g1],
+            k_paged_f,
+            v_paged_f,
+            row_ptr,
+            q_ind,
+            topk,
+            cu_seqlens_q=c["cu_q"],
+            cu_seqlens_k=c["cu_k"],
+            max_seqlen_q=csz,
+            max_seqlen_k=kv_used,
+            blk_kv=block_size_k,
+            causal=p["causal"],
+            softmax_scale=sm_scale,
+            return_softmax_lse=False,
+            page_table=c["pt"],
+            seqused_k=c["seqused"],
+            schedule=sched,
+            usable_SM_count=usable_sm,
+        )
+        if isinstance(out_c, tuple):
+            out_c = out_c[0]
+        out[g0:g1].copy_(out_c)
+    return out
+
+
+@torch.no_grad()
 def flash_prefill_with_fmha(
     q: torch.Tensor,  # [total_q, num_q_heads, head_dim] bf16
     k_cache: torch.Tensor,  # [max_slots, num_kv_heads, head_dim] FLAT
@@ -640,6 +782,23 @@ def flash_prefill_with_fmha(
     k_paged_f, v_paged_f = _kv_flat_to_paged(
         k_cache, v_cache, num_paged, block_size_k, num_kv_heads, head_dim
     )
+    # Opt-in chunked step3 (M3_SPARSE_ATTN_CHUNK_ENABLE): route BOTH step3 paths
+    # (direct CSR and adapter -- they converge on the same sparse_atten_func)
+    # through the chunked implementation to bound the O_partial workspace.
+    if _M3_SPARSE_ATTN_CHUNK_ENABLE and total_q > _M3_SPARSE_ATTN_CHUNK_SIZE:
+        out_f = _sparse_attn_chunked(
+            q,
+            k_paged_f,
+            v_paged_f,
+            topk_idx,
+            kv_indices,
+            sparse_attn_plan,
+            topk,
+            block_size_k,
+            sm_scale,
+            _M3_SPARSE_ATTN_CHUNK_SIZE,
+        )
+        return out_f.view(total_q, num_q_heads, head_dim)
     # Opt-1+ direct path: when the per-forward CSR buffers are attached, bypass the
     # adapter -- feed topk_idx (already [nkv,Q,topk] = q2k) straight to the native CSR
     # _run into prealloc row_ptr/q_indices, GPU page_table (no .tolist() sync), direct
