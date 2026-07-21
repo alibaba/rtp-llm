@@ -66,11 +66,12 @@ public:
     void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
     void blockBatchCopy(const torch::Tensor& copy_mapping);
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
+    void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping);
 
-    bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                       const std::vector<int>&        block_src_batch,
-                       bool                           copy_last_block,
-                       std::vector<BlockIdPair>&      block_update_mapping);
+    bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
+                       const std::vector<int>&         block_src_batch,
+                       bool                            copy_last_block,
+                       std::vector<TaggedBlockIdPair>& block_update_mapping);
 
     // 地址转换和缓冲区访问
     BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id) const;

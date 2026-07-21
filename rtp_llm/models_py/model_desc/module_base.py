@@ -2,7 +2,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any, Optional
 
-from torch import Tensor, nn
+from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
@@ -12,6 +12,7 @@ from rtp_llm.models_py.model_desc.block_map import (
     select_attention_inputs_for_tag,
 )
 from rtp_llm.models_py.modules import AttnImplFactory
+from rtp_llm.models_py.modules.factory.attention.attn_factory import AttentionImpl
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -53,9 +54,6 @@ class GptModelBase(nn.Module):
         self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device_type()
 
-        ## (batch_size -> fmha_params)
-        self.params_dict: dict[int, Any] = {}
-
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
         if self.kv_cache is not None:
@@ -76,30 +74,9 @@ class GptModelBase(nn.Module):
             )
         return True
 
-    ## for cuda graph attn kernel params' fill
-    def fill_params(
-        self,
-        sequence_lengths: Tensor,
-        input_lengths: Tensor,
-        kv_cache_block_id_host: Tensor,
-        replay_batch_size: int,
-        capture_batch_size: int,
-        seq_size_per_block: int,
-    ):
-        assert capture_batch_size in self.params_dict
-        params_ptr = self.params_dict[capture_batch_size]
-        assert params_ptr is not None
-        params_ptr.fillParams(
-            sequence_lengths,
-            input_lengths,
-            kv_cache_block_id_host,
-            replay_batch_size,
-            seq_size_per_block,
-        )
-
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
-    ) -> Any:
+    ) -> AttentionImpl | dict[str, AttentionImpl]:
         attention_inputs = get_attention_inputs_value(inputs)
         if isinstance(attention_inputs, Mapping):
             fmha_group_tags = self._get_fmha_group_tags()

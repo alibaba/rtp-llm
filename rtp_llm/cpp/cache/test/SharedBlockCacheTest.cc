@@ -44,7 +44,7 @@ TEST(SharedBlockCacheTest, PrefixTreeEvictsCollectedChainInParentFirstOrderWithD
     auto evicted = cache.selectAndEvict(/*min_blocks=*/1);
 
     ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{1, 2, 3}));
-    ASSERT_EQ(evicted.evicted_slots.at(1), (std::vector<BlockIdxType>{101}));
+    ASSERT_EQ(evicted.evicted_group_block_ids.at(1), (std::vector<BlockIdxType>{101}));
     ASSERT_FALSE(evicted.evicted_dependencies.at(1).has_parent);
     ASSERT_TRUE(evicted.evicted_dependencies.at(2).has_parent);
     ASSERT_EQ(evicted.evicted_dependencies.at(2).parent_key, 1);
@@ -246,7 +246,7 @@ TEST(SharedBlockCacheTest, NonMatchableSlotStillEvictsButDoesNotMatchGroup) {
 
     auto evicted = cache.selectAndEvict(/*min_blocks=*/2);
     ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{1}));
-    ASSERT_EQ(evicted.evicted_slots.at(1), (std::vector<BlockIdxType>{101, 201}));
+    ASSERT_EQ(evicted.evicted_group_block_ids.at(1), (std::vector<BlockIdxType>{101, 201}));
 }
 
 TEST(SharedBlockCacheTest, StateIndependentEvictionDropsDeepestNonLeafStateFirst) {
@@ -272,7 +272,7 @@ TEST(SharedBlockCacheTest, StateIndependentEvictionDropsDeepestNonLeafStateFirst
     auto evicted = cache.selectAndEvictForGroup(/*group_id=*/3, /*min_blocks=*/1);
 
     ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{2}));
-    ASSERT_EQ(evicted.evicted_slots.at(2),
+    ASSERT_EQ(evicted.evicted_group_block_ids.at(2),
               (std::vector<BlockIdxType>{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 302}));
     ASSERT_TRUE(evicted.evicted_independent_group.count(2));
     EXPECT_EQ(evicted.evicted_independent_group.at(2), 3);
@@ -402,9 +402,9 @@ TEST(SharedBlockCacheTest, SelectAndEvictForGroupPrunesBranchUntilTargetAncestor
     auto evicted = cache.selectAndEvictForGroup(/*group_id=*/1, /*min_blocks=*/1);
 
     ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{2, 1, 3}));
-    ASSERT_EQ(evicted.evicted_slots.at(1), (std::vector<BlockIdxType>{101, 201}));
-    EXPECT_TRUE(isNullBlockIdx(evicted.evicted_slots.at(2)[1]));
-    EXPECT_TRUE(isNullBlockIdx(evicted.evicted_slots.at(3)[1]));
+    ASSERT_EQ(evicted.evicted_group_block_ids.at(1), (std::vector<BlockIdxType>{101, 201}));
+    EXPECT_TRUE(isNullBlockIdx(evicted.evicted_group_block_ids.at(2)[1]));
+    EXPECT_TRUE(isNullBlockIdx(evicted.evicted_group_block_ids.at(3)[1]));
     EXPECT_TRUE(cache.empty());
 }
 

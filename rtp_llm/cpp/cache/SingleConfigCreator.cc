@@ -163,6 +163,11 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
                                               static_cast<int>(per_layer_stride_bytes));
 
+    auto groups                     = config.topology().groups();
+    groups[0].kv_block_stride_bytes = config.kv_block_stride_bytes;
+    groups[0].kv_scale_stride_bytes = config.kv_scale_stride_bytes;
+    config.setTopology(std::move(groups), config.topology().layers());
+
     return config;
 }
 

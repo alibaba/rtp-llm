@@ -17,7 +17,6 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.model_desc.block_map import (
-    get_fmha_params,
     get_group_tags_for_layers,
     get_primary_attention_inputs,
     select_attention_inputs_for_layer,
@@ -880,4 +879,4 @@ class KimiLinearModel(GptModelBase):
 
         hidden_states, _ = self.norm(hidden_states, residual)
 
-        return PyModelOutputs(hidden_states, get_fmha_params(fmha_impl))
+        return PyModelOutputs(hidden_states)

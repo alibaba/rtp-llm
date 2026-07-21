@@ -57,7 +57,7 @@ struct GptModelInputs {
     torch::Tensor kv_cache_kernel_block_id;  // [group, batch, kernel_blocks], int32
 
     torch::Tensor kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
-    torch::Tensor kv_cache_update_mapping;  // [block_copy_num, 2] kv cache update mapping
+    torch::Tensor kv_cache_update_mapping;  // [block_copy_num, 3]: group_id, src block, dst block
 
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
     torch::Tensor text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]
@@ -178,8 +178,12 @@ struct CacheStoreInputs {
     torch::Tensor                                    host_kv_cache_offset;
     std::map<std::string, rtp_llm::CacheGroupPolicy> kv_cache_group_policies;
     std::map<std::string, size_t>                    tokens_per_block_by_tag;
-    std::map<std::string, size_t>                    kv_block_stride_bytes_by_tag;
-    std::map<std::string, size_t>                    kv_scale_stride_bytes_by_tag;
+    // Address strides describe the backing allocation. Transfer sizes describe
+    // the tag-local payload registered by the decode-side allocator.
+    std::map<std::string, size_t> kv_block_stride_bytes_by_tag;
+    std::map<std::string, size_t> kv_scale_stride_bytes_by_tag;
+    std::map<std::string, size_t> kv_block_transfer_bytes_by_tag;
+    std::map<std::string, size_t> kv_scale_transfer_bytes_by_tag;
 
     size_t context_batch_size = 0;
     size_t decoder_batch_size = 0;

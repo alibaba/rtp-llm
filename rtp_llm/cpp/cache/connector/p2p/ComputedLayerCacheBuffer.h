@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <unordered_map>
 #include <utility>
@@ -27,17 +28,22 @@ public:
     /// @brief 阻塞等待层数变化，直到超过 last_layer_num 或 timeout_ms 超时
     void waitChange(int last_layer_num, int timeout_ms);
 
+    /// @brief Publish the topology-derived number of (layer, tag) buffers for this request.
+    void                  setExpectedBufferCount(size_t expected_buffer_count);
+    std::optional<size_t> expectedBufferCount() const;
+
     int64_t deadlineMs() const {
         return deadline_ms_.load(std::memory_order_relaxed);
     }
 
 private:
-    int64_t                                                          request_id_;
-    std::map<std::pair<int, int>, std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers_;
-    std::atomic<int64_t>                                             deadline_ms_;
+    int64_t                                                                  request_id_;
+    std::map<std::pair<int, std::string>, std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers_;
+    std::atomic<int64_t>                                                     deadline_ms_;
 
-    std::mutex              mutex_;
+    mutable std::mutex      mutex_;
     std::condition_variable condition_variable_;
+    std::optional<size_t>   expected_buffer_count_;
 };
 
 class ComputedLayerCacheBufferStore {

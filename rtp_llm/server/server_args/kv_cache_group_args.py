@@ -151,6 +151,86 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="Memory Cache 多TP同步的超时时间, 单位为毫秒",
     )
     kv_cache_group.add_argument(
+        "--enable_memory_cache_disk",
+        env_name="ENABLE_MEMORY_CACHE_DISK",
+        bind_to=(kv_cache_config, "enable_memory_cache_disk"),
+        type=str2bool,
+        default=False,
+        help="控制是否启用磁盘 KV cache。默认关闭。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_paths",
+        env_name="MEMORY_CACHE_DISK_PATHS",
+        bind_to=(kv_cache_config, "memory_cache_disk_paths"),
+        type=str,
+        default="",
+        help="磁盘 KV cache 路径；多个路径的格式由磁盘 cache 实现解析。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_size_mb",
+        env_name="MEMORY_CACHE_DISK_SIZE_MB",
+        bind_to=(kv_cache_config, "memory_cache_disk_size_mb"),
+        type=int,
+        default=0,
+        help="单个 rank 的磁盘 KV cache 容量，单位 MB。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_buffered_io",
+        env_name="MEMORY_CACHE_DISK_BUFFERED_IO",
+        bind_to=(kv_cache_config, "memory_cache_disk_buffered_io"),
+        type=str2bool,
+        default=True,
+        help="磁盘 KV cache 是否使用 buffered I/O。默认开启。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_sync_timeout_ms",
+        env_name="MEMORY_CACHE_DISK_SYNC_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "memory_cache_disk_sync_timeout_ms"),
+        type=int,
+        default=30000,
+        help="磁盘 KV cache 同步超时，单位毫秒。",
+    )
+    kv_cache_group.add_argument(
+        "--enable_gpu_prefix_tree",
+        env_name="ENABLE_GPU_PREFIX_TREE",
+        bind_to=(kv_cache_config, "enable_gpu_prefix_tree"),
+        type=str2bool,
+        default=False,
+        help="控制是否启用 GPU prefix-tree cache 策略。默认关闭。",
+    )
+    kv_cache_group.add_argument(
+        "--enable_prefix_tree_memory_cache",
+        env_name="ENABLE_PREFIX_TREE_MEMORY_CACHE",
+        bind_to=(kv_cache_config, "enable_prefix_tree_memory_cache"),
+        type=str2bool,
+        default=False,
+        help="控制 memory cache 是否使用 prefix-tree 策略。默认关闭。",
+    )
+    kv_cache_group.add_argument(
+        "--enable_legacy_memory_connector_fallback",
+        env_name="ENABLE_LEGACY_MEMORY_CONNECTOR_FALLBACK",
+        bind_to=(kv_cache_config, "enable_legacy_memory_connector_fallback"),
+        type=str2bool,
+        default=True,
+        help="新 memory cache 路径不可用时是否回退 legacy connector。默认开启。",
+    )
+    kv_cache_group.add_argument(
+        "--prefix_tree_memory_state_swa_pool_ratio",
+        env_name="PREFIX_TREE_MEMORY_STATE_SWA_POOL_RATIO",
+        bind_to=(kv_cache_config, "prefix_tree_memory_state_swa_pool_ratio"),
+        type=int,
+        default=0,
+        help="Prefix-tree memory cache 中 state/SWA pool 的容量比例。",
+    )
+    kv_cache_group.add_argument(
+        "--enable_independent_group_eviction",
+        env_name="ENABLE_INDEPENDENT_GROUP_EVICTION",
+        bind_to=(kv_cache_config, "enable_independent_group_eviction"),
+        type=str2bool,
+        default=False,
+        help="控制各 KV cache group 是否独立驱逐。默认关闭。",
+    )
+    kv_cache_group.add_argument(
         "--write_cache_sync",
         env_name="WRITE_CACHE_SYNC",
         bind_to=(kv_cache_config, "write_cache_sync"),

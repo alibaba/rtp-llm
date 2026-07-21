@@ -42,9 +42,9 @@ public:
     struct UnifiedCacheItem {
         CacheKeyType              cache_key;
         bool                      is_resident = false;
-        std::vector<BlockIdxType> slots;
-        std::vector<bool>         matchable_slots;
-        std::vector<int64_t>      slot_created_time_us;
+        std::vector<BlockIdxType> group_block_ids;
+        std::vector<bool>         matchable_groups;
+        std::vector<int64_t>      group_block_created_time_us;
         int64_t                   created_time_us = 0;
         BlockDependency           dependency;
         NamespaceId               dependency_namespace = kDefaultNamespace;
@@ -53,7 +53,7 @@ public:
 
     struct EvictResult {
         std::vector<CacheKeyType>                                   evicted_keys;
-        std::unordered_map<CacheKeyType, std::vector<BlockIdxType>> evicted_slots;
+        std::unordered_map<CacheKeyType, std::vector<BlockIdxType>> evicted_group_block_ids;
         std::unordered_map<CacheKeyType, BlockDependency>           evicted_dependencies;
         std::unordered_map<CacheKeyType, NamespaceId>               evicted_namespaces;
         std::unordered_map<CacheKeyType, int64_t>                   evicted_lifetime_ms;
@@ -62,7 +62,7 @@ public:
 
     struct MatchResult {
         bool                      found = false;
-        std::vector<BlockIdxType> group_blocks;
+        std::vector<BlockIdxType> group_block_ids;
     };
 
     using LRUCacheType = LRUCache<CacheKeyType, UnifiedCacheItem>;
@@ -72,13 +72,13 @@ public:
 
     void init(int group_num, const std::vector<BlockPoolPtr>& group_pools);
 
-    void put(CacheKeyType cache_key, const std::vector<BlockIdxType>& group_slots, bool is_resident);
+    void put(CacheKeyType cache_key, const std::vector<BlockIdxType>& group_block_ids, bool is_resident);
     void put(CacheKeyType                     cache_key,
-             const std::vector<BlockIdxType>& group_slots,
+             const std::vector<BlockIdxType>& group_block_ids,
              bool                             is_resident,
              NamespaceId                      namespace_id,
              const BlockDependency&           dependency,
-             const std::vector<bool>&         matchable_slots = {});
+             const std::vector<bool>&         matchable_groups = {});
 
     MatchResult match(CacheKeyType cache_key);
 
@@ -153,14 +153,14 @@ private:
     bool                       updateItemDependencyLocked(UnifiedCacheItem&      item,
                                                           NamespaceId            namespace_id,
                                                           const BlockDependency& dependency) const;
-    static bool                slotMatchable(const UnifiedCacheItem& item, size_t group_id);
-    static bool                hasUsableSlot(const UnifiedCacheItem& item, int group_id);
+    static bool                groupMatchable(const UnifiedCacheItem& item, size_t group_id);
+    static bool                hasUsableGroup(const UnifiedCacheItem& item, int group_id);
     std::vector<NamespacedKey> collectEvictChainLocked(const NamespacedKey& leaf_key) const;
-    bool                       chainHasUsableSlotLocked(const std::vector<NamespacedKey>& chain, int group_id) const;
-    bool chainHasReachableAncestorSlotLocked(const std::vector<NamespacedKey>& chain, int group_id) const;
-    bool subtreeEvictableForAncestorSlotLocked(const NamespacedKey& key) const;
+    bool                       chainHasUsableGroupLocked(const std::vector<NamespacedKey>& chain, int group_id) const;
+    bool chainHasReachableAncestorGroupLocked(const std::vector<NamespacedKey>& chain, int group_id) const;
+    bool subtreeEvictableForAncestorGroupLocked(const NamespacedKey& key) const;
     bool selectIndependentGroupEvictionsLocked(int group_id, size_t min_blocks, EvictResult& result);
-    void removeSlotFromItemLocked(CacheKeyType cache_key, int group_id, EvictResult& result);
+    void removeGroupFromItemLocked(CacheKeyType cache_key, int group_id, EvictResult& result);
     bool hasFlatItemLocked(CacheKeyType cache_key) const;
     bool isFlatItemResidentLocked(CacheKeyType cache_key) const;
     bool isIndependentEvictionGroupLocked(int group_id) const;

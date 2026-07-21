@@ -54,7 +54,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("tag", &LayerKVCache::tag, "Cache group tag");
 
     pybind11::class_<KVCache>(m, "KVCache")
-        .def_property_readonly("group_tags", &KVCache::groupTags, "Cache group tags in topology slot order")
+        .def_property_readonly("group_tags", &KVCache::groupTags, "Cache group tags in topology group id order")
         .def_property_readonly("layer_count", &KVCache::layerCount, "Number of model-local cache layers")
         .def("get_layer_cache",
              static_cast<LayerKVCache (KVCache::*)(int) const>(&KVCache::getLayerCache),
@@ -62,9 +62,6 @@ void registerPyOpDefs(pybind11::module& m) {
         .def("get_layer_cache",
              static_cast<LayerKVCache (KVCache::*)(int, const std::string&) const>(&KVCache::getLayerCache),
              "Return a LayerKVCache for the given layer and tag")
-        .def("get_layer_cache_by_group",
-             &KVCache::getLayerCacheByGroup,
-             "Compatibility accessor using a CacheTopology slot")
         .def("get_layer_cache_groups",
              &KVCache::getLayerCacheGroups,
              "Return every valid LayerKVCache group owned by the layer")
@@ -267,29 +264,8 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
-        .def(pybind11::init<torch::Tensor>(),
-             pybind11::arg("hidden_states"),
-             "Initialize with hidden states tensor only (params_ptr defaults to nullptr)")
-        .def(pybind11::init([](torch::Tensor hidden_states, pybind11::object params_obj) {
-                 // PyModelOutputs may be destroyed by an engine thread without the
-                 // GIL. Keep its lifetime purely C++ and discard non-ParamsBase
-                 // Python objects instead of retaining them in the output.
-                 std::shared_ptr<rtp_llm::ParamsBase> params_ptr = nullptr;
-                 if (!params_obj.is_none()) {
-                     try {
-                         params_ptr = pybind11::cast<std::shared_ptr<rtp_llm::ParamsBase>>(params_obj);
-                     } catch (const pybind11::cast_error&) {
-                         // Some attention implementations expose Python-only params.
-                         // They are owned by the FMHA implementation during forward.
-                     }
-                 }
-                 return PyModelOutputs(std::move(hidden_states), std::move(params_ptr));
-             }),
-             pybind11::arg("hidden_states"),
-             pybind11::arg("params_ptr"),
-             "Initialize with hidden states tensor and params pointer")
-        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
-        .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer");
+        .def(pybind11::init<torch::Tensor>(), pybind11::arg("hidden_states"), "Initialize with hidden states tensor")
+        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor");
 }
 
 }  // namespace torch_ext

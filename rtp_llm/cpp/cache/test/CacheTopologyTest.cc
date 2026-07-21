@@ -62,6 +62,19 @@ TEST(CacheTopologyTest, CompatibilitySnapshotsAreLazyStableAndReadOnly) {
     EXPECT_EQ(topology->layerTagToGroupIdSnapshot().front().at("linear"), 1);
 }
 
+TEST(CacheTopologyTest, TagIdentityDoesNotDependOnNumericGroupOrder) {
+    auto first    = CacheTopology::create({makeGroup("full", {0}), makeGroup("linear", {0}, CacheGroupType::LINEAR)},
+                                          {{0, {"full", "linear"}}});
+    auto reversed = CacheTopology::create({makeGroup("linear", {0}, CacheGroupType::LINEAR), makeGroup("full", {0})},
+                                          {{0, {"full", "linear"}}});
+
+    EXPECT_NE(first->groupIdForTag("full"), reversed->groupIdForTag("full"));
+    EXPECT_EQ(first->group("full").policy.group_type, reversed->group("full").policy.group_type);
+    EXPECT_EQ(first->group("linear").policy.group_type, reversed->group("linear").policy.group_type);
+    EXPECT_EQ(first->groupForLayer(0, "full").tag, reversed->groupForLayer(0, "full").tag);
+    EXPECT_EQ(first->groupForLayer(0, "linear").tag, reversed->groupForLayer(0, "linear").tag);
+}
+
 TEST(CacheTopologyTest, RejectsInconsistentReverseMembership) {
     EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full", {0})}, {{0, {"full"}}, {1, {"full"}}}));
 }

@@ -29,6 +29,7 @@ public:
     std::vector<BlockInfo> convertIndexToBufferByTag(
         int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override;
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end) override;
+    void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping) override;
 
     GroupedCacheLayerLayout allLayerCacheBase() const override;
 

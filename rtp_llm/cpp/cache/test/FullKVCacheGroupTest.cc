@@ -86,7 +86,7 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
 
     FullKVCacheGroup group1({}, spec, block_pool, 0, shared_cache.get());
 
-    // Put items into shared cache: cache_key -> group_slots (group 0 = block_idx)
+    // Put items into shared cache: cache_key -> group_block_ids (group 0 = block_idx)
     shared_cache->put(101, {1}, false);
     shared_cache->put(102, {2}, false);
 

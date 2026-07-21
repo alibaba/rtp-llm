@@ -99,7 +99,7 @@ protected:
     void checkBlockFunc(BatchKVCacheResource& batch_resource, int outter_size, int inner_size) {
         ASSERT_EQ(batch_resource.batchSize(), outter_size);
         for (int i = 0; i < outter_size; ++i) {
-            ASSERT_EQ(batch_resource.blocks(i).size(), inner_size);
+            ASSERT_EQ(batch_resource.blocks(i, 0).size(), inner_size);
         }
     };
 
@@ -114,6 +114,27 @@ protected:
     GenerateStreamPtr               stream_;
     std::shared_ptr<KVCacheManager> cache_manager_;
 };
+
+TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    RuntimeConfig runtime_config;
+
+    auto generate_input             = std::make_shared<GenerateInput>();
+    generate_input->input_ids       = torch::tensor(std::vector<int32_t>{1, 2, 3}, torch::kInt32);
+    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    stream_ =
+        std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
+
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_EQ(resource.kvCache().groupNums(), 1);
+    EXPECT_EQ(resource.kvCache().cacheResource().soleGroupTagForLayer(0), "__warmup__");
+    EXPECT_EQ(resource.curBlocksNum(), 0);
+
+    stream_->fakeInitKVBlock(2);
+    EXPECT_EQ(resource.kvCache().blocks(0, "__warmup__").size(), 2);
+}
 
 TEST_F(StreamCacheResourceTest, testAllocateResource) {
     prepareResource();

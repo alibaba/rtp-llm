@@ -47,13 +47,11 @@ cc_library(
         "LinearKVCacheSpec.h",
         "MLAKVCacheSpec.h",
         "OpaqueKVCacheSpec.h",
-        "Types.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
         ":block_info",
-        ":batch_kv_cache_resource",
         ":cache_group_type",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/model_utils:model_utils",
@@ -260,8 +258,9 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
-        "//rtp_llm/cpp/utils:core_utils",
+        ":cache_config",
         ":cache_group_type",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
 )
 

@@ -29,11 +29,25 @@ KVCacheSpecPtr makeTestMhaSpec(const std::string& tag, uint32_t seq_size_per_blo
     desc.dtype      = rtp_llm::DataType::TYPE_FP16;
 
     SpecBuildContext ctx;
-    ctx.dtype                   = rtp_llm::DataType::TYPE_FP16;
-    ctx.seq_size_per_block      = seq_size_per_block;
-    ctx.attn_config             = &attn_config;
-    ctx.parallelism_config      = &parallelism_config;
+    ctx.dtype              = rtp_llm::DataType::TYPE_FP16;
+    ctx.seq_size_per_block = seq_size_per_block;
+    ctx.attn_config        = &attn_config;
+    ctx.parallelism_config = &parallelism_config;
     return SpecBuilder::build(desc, ctx);
+}
+
+void initializeResourceTopology(KVCacheResource& resource, const CacheConfig& config) {
+    std::vector<BlockIndicesType> blocks_by_group;
+    blocks_by_group.reserve(resource.groupBlocks().size());
+    for (const auto& block_ids : resource.groupBlocks()) {
+        blocks_by_group.push_back(block_ids->blocks());
+    }
+
+    resource.initGroups(config.topologyPtr());
+    ASSERT_EQ(static_cast<size_t>(resource.groupNums()), blocks_by_group.size());
+    for (size_t group_id = 0; group_id < blocks_by_group.size(); ++group_id) {
+        resource.mutableBlockIds(static_cast<int>(group_id)).assign(std::move(blocks_by_group[group_id]));
+    }
 }
 
 }  // namespace
@@ -123,8 +137,8 @@ private:
         cache_config_.block_num          = block_num;
         cache_config_.seq_size_per_block = seq_size_per_block;
 
-        auto mha_spec       = makeTestMhaSpec("default", static_cast<uint32_t>(seq_size_per_block));
-        cache_config_.dtype = rtp_llm::DataType::TYPE_FP16;
+        auto mha_spec                       = makeTestMhaSpec("default", static_cast<uint32_t>(seq_size_per_block));
+        cache_config_.dtype                 = rtp_llm::DataType::TYPE_FP16;
         cache_config_.kv_block_stride_bytes = mha_spec->block_size_bytes();  // one-layer KV bytes for one logical block
         cache_config_.kv_scale_stride_bytes = 0;
         cache_config_.kv_block_size_bytes   = static_cast<size_t>(layer_num) * cache_config_.kv_block_stride_bytes;
@@ -144,6 +158,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
     auto kv_cache_resouce        = std::make_shared<KVCacheResource>();
     kv_cache_resouce->cache_keys = {1, 2, 3, 4};
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
     auto      meta               = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t    tp_rank            = 0;
     Locations expected_locations = genFullotherLocations({1, 2, 3});
@@ -234,6 +249,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
     auto kv_cache_resouce        = std::make_shared<KVCacheResource>();
     kv_cache_resouce->cache_keys = {1, 2, 3, 4};
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
     kv_cache_resouce->setDeviceReuseBlockNum(1);
     auto      meta               = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t    tp_rank            = 0;
@@ -324,6 +340,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_act
     kv_cache_resouce->setLastBlockAligned(true);
     kv_cache_resouce->cache_keys = {1, 2, 3};
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t        tp_rank = 0;
     std::string   write_session_id("write_session_id_1");
@@ -369,6 +386,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
     kv_cache_resouce->setLastBlockAligned(true);
     kv_cache_resouce->cache_keys = {1, 2, 3};
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
 
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t        tp_rank = 0;
@@ -415,6 +433,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
     kv_cache_resouce->setLastBlockAligned(true);
     kv_cache_resouce->cache_keys = {1, 2, 3, 4};
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
 
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t        tp_rank = 0;
@@ -462,6 +481,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
     kv_cache_resouce->setLastBlockAligned(true);
     kv_cache_resouce->cache_keys = {1, 2, 3};
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
 
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t        tp_rank = 0;
@@ -490,6 +510,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_act
     kv_cache_resouce->setLastBlockAligned(true);
     kv_cache_resouce->cache_keys = {1, 2, 3};
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_2");
     size_t        tp_rank = 0;
     std::string   write_session_id("write_session_id_2");

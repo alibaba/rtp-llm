@@ -25,6 +25,23 @@ message IntMatrix {
     repeated IntVector rows = 1;
 }
 
+// KV-cache protocol compatibility contract:
+// Grouped topology and independent block pools change block addressing and
+// payload structures. Prefill, decode, P2P, remote-cache, and memory-cache
+// peers that exchange KV-cache RPCs must run the same build. Mixed-version
+// rollout across this protocol change is intentionally unsupported; no legacy
+// dual-read/write fallback is provided.
+message TaggedBlockPB {
+    string tag = 1;
+    int32 block_id = 2;
+    int32 layer_id = 3;
+}
+
+message TaggedBlockIdsPB {
+    string tag = 1;
+    repeated int32 block_ids = 2;
+}
+
 message RoleAddrPB {
     enum RoleType {
         PDFUSION = 0;
@@ -281,21 +298,27 @@ message GenerateRequestPB {
     TensorPB propose_hidden = 11;
 }
 
-// in tp case, decode master broadcast to decode worker
+// In the TP case, the decode master broadcasts to decode workers.
+// This request uses the tagged grouped-cache layout. Legacy group-addressing
+// field numbers stay reserved even though mixed-version KV-cache deployment is
+// outside the supported protocol contract documented above.
 message BroadcastLoadRequestPB {
     int64 request_id = 1;
     string request_key = 2;
     repeated string peer_addrs = 3;
     repeated int64 cache_keys = 4;
-    repeated int32 block_ids = 5;
+    reserved 5;
+    reserved "block_ids";
     int64 block_num = 6;
     int64 reuse_block_size = 7;
     int64 timeout_ms = 8;
     int64 dp_rank = 9;
     int32 partition_count = 10;
     int32 partition_id = 11;
-    repeated IntVector group_block_ids = 12;
+    reserved 12;
+    reserved "group_block_ids";
     int32 prefill_cp_size = 13;
+    repeated TaggedBlockIdsPB tagged_group_block_ids = 14;
 
 }
 
@@ -472,7 +495,7 @@ service EmbeddingRpcService {
 message MemoryOperationRequestPB {
     message CopyItem {
         int32 mem_block = 1;
-        repeated int32 gpu_blocks = 2;
+        reserved 2;
         bool is_complete = 3;
         BackingType backing_type = 4;
         oneof disk_slot_presence {
@@ -487,6 +510,7 @@ message MemoryOperationRequestPB {
         oneof src_disk_slot_presence {
             int32 src_disk_slot = 10;
         }
+        repeated TaggedBlockPB tagged_gpu_blocks = 11;
     }
     enum CopyDirection {
         H2D = 0;
@@ -497,8 +521,8 @@ message MemoryOperationRequestPB {
         DISK = 1;
     }
     enum CacheBlockKind {
-        LEGACY_COMPLETE = 0;
-        LEGACY_INCOMPLETE = 1;
+        COMPLETE_KV = 0;
+        INCOMPLETE_KV = 1;
         COMPRESSED_KV = 2;
         STATE_SWA_KV = 3;
     }
@@ -519,7 +543,7 @@ message LayerCacheBlockPB {
     uint32 layer_id = 1;
     repeated int64 cache_keys = 2;
     repeated uint32 block_ids = 3;
-    uint32 group_id = 4;
+    string cache_tag = 4;
 }
 
 enum P2PConnectorBroadcastType {
@@ -583,12 +607,13 @@ message P2PConnectorStartLoadResponsePB {
     reserved 1 to 8;
     reserved "first_generate_token_id", "total_reuse_len", "local_reuse_len", "remote_reuse_len", "propose_token_ids", "propose_probs", "propose_hidden", "position_ids";
 
-    // Error handling - preserve field numbers 9, 10 for backward compatibility with deployed nodes
+    // Keep error field numbers stable within this schema. This does not imply
+    // mixed-version support for grouped/independent-pool KV-cache deployments.
     ErrorCodePB error_code = 9;
     string error_message = 10;
 
     // New side-channel payload: all data carried as structured map + scalars
-    // Field number 12+ to avoid conflict with legacy error_code (was field 9 in old proto)
+    // Field 12 avoids conflict with the error fields in the current schema.
     SideChannelPayloadPB payload = 12;
 }
 
@@ -615,11 +640,16 @@ message FunctionRequestPB {
 }
 
 message RemoteOperationRequestPB {
+    // group_tags is the only valid group identity. Remote/memory connector
+    // peers must follow the same-build KV-cache protocol contract documented
+    // above; the legacy numeric identity remains reserved without a fallback.
     RemoteOpType op = 1;
     string trace_id = 2;
-    repeated int32 group_ids = 3;
+    reserved 3;
+    reserved "group_ids";
     repeated int32 block_ids = 4;
     repeated string uris = 5;
+    repeated string group_tags = 6;
 }
 
 message RemoteOperationResponsePB {

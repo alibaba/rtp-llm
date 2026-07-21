@@ -103,9 +103,9 @@ void KVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         if (isNullBlockIdx(block_indices[i])) {
             continue;
         }
-        std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_id_ + 1), NULL_BLOCK_IDX);
-        group_slots[static_cast<size_t>(group_id_)] = block_indices[i];
-        shared_cache_->put(cache_keys[i], group_slots, is_resident);
+        std::vector<BlockIdxType> group_block_ids(static_cast<size_t>(group_id_ + 1), NULL_BLOCK_IDX);
+        group_block_ids[static_cast<size_t>(group_id_)] = block_indices[i];
+        shared_cache_->put(cache_keys[i], group_block_ids, is_resident);
     }
 }
 

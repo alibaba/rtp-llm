@@ -38,7 +38,7 @@ TEST_F(BlockCacheTest, ConstructorTest) {
 TEST_F(BlockCacheTest, MatchBasicTest) {
     // 测试put和match的基本功能
     // 空匹配
-    auto result0 = cache_->match(1);
+    auto result0 = cache_->match(1, 0);
     EXPECT_TRUE(isNullBlockIdx(result0.matched_index));
 
     CacheItem item    = {101, 0, 1, false};
@@ -49,10 +49,10 @@ TEST_F(BlockCacheTest, MatchBasicTest) {
     auto result2 = cache_->put(item);
     EXPECT_FALSE(result2);
 
-    auto result3 = cache_->match(101);
+    auto result3 = cache_->match(101, 0);
     EXPECT_EQ(result3.matched_index, 1);
 
-    auto result4 = cache_->match(102);
+    auto result4 = cache_->match(102, 0);
     EXPECT_TRUE(isNullBlockIdx(result4.matched_index));
 }
 
@@ -137,9 +137,9 @@ TEST_F(BlockCacheTest, SelectAndEvictBasic) {
 
     // Items should be removed from cache
     EXPECT_EQ(cache_->size(), 1);
-    EXPECT_TRUE(isNullBlockIdx(cache_->match(101).matched_index));
-    EXPECT_TRUE(isNullBlockIdx(cache_->match(102).matched_index));
-    EXPECT_EQ(cache_->match(103).matched_index, 3);
+    EXPECT_TRUE(isNullBlockIdx(cache_->match(101, 0).matched_index));
+    EXPECT_TRUE(isNullBlockIdx(cache_->match(102, 0).matched_index));
+    EXPECT_EQ(cache_->match(103, 0).matched_index, 3);
 }
 
 TEST_F(BlockCacheTest, SelectAndEvictMultipleGroups) {
@@ -244,7 +244,7 @@ TEST_F(BlockCacheTest, SelectAndEvictLRUOrder) {
     cache_->put(item3);  // newest
 
     // Access key 101 to make it most recently used
-    cache_->match(101);
+    cache_->match(101, 0);
 
     // Now LRU order should be: 102 (least), 103, 101 (most recent)
     auto result = cache_->selectAndEvict(1);

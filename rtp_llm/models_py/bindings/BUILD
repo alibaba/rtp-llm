@@ -24,6 +24,9 @@ cc_library(
 py_test(
     name = "py_model_inputs_compat_test",
     srcs = ["py_model_inputs_compat_test.py"],
+    data = [
+        "//rtp_llm:ops/librtp_compute_ops/__init__.pyi",
+    ],
     deps = [
         "//rtp_llm:testlib",
     ],

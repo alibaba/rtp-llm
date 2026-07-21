@@ -14,6 +14,51 @@ from rtp_llm.server.server_args.server_args import setup_args
 
 class GenerateConfigTest(TestCase):
 
+    @patch.dict(
+        "os.environ",
+        {
+            "TP_SIZE": "1",
+            "PP_SIZE": "1",
+            "WORLD_SIZE": "1",
+            "WORLD_RANK": "0",
+            "LOCAL_WORLD_SIZE": "1",
+            "START_PORT": "20000",
+            "MODEL_TYPE": "fake_model",
+            "ENABLE_MEMORY_CACHE_DISK": "1",
+            "MEMORY_CACHE_DISK_PATHS": "/tmp/cache-a,/tmp/cache-b",
+            "MEMORY_CACHE_DISK_SIZE_MB": "4096",
+            "MEMORY_CACHE_DISK_BUFFERED_IO": "0",
+            "MEMORY_CACHE_DISK_SYNC_TIMEOUT_MS": "12345",
+            "ENABLE_GPU_PREFIX_TREE": "1",
+            "ENABLE_PREFIX_TREE_MEMORY_CACHE": "1",
+            "ENABLE_LEGACY_MEMORY_CONNECTOR_FALLBACK": "0",
+            "PREFIX_TREE_MEMORY_STATE_SWA_POOL_RATIO": "25",
+            "ENABLE_INDEPENDENT_GROUP_EVICTION": "1",
+        },
+        clear=True,
+    )
+    def test_kv_cache_strategy_args_propagate_from_env(self):
+        py_env_configs: PyEnvConfigs = setup_args()
+        config = py_env_configs.kv_cache_config
+
+        self.assertTrue(config.enable_memory_cache_disk)
+        self.assertEqual(config.memory_cache_disk_paths, "/tmp/cache-a,/tmp/cache-b")
+        self.assertEqual(config.memory_cache_disk_size_mb, 4096)
+        self.assertFalse(config.memory_cache_disk_buffered_io)
+        self.assertEqual(config.memory_cache_disk_sync_timeout_ms, 12345)
+        self.assertTrue(config.enable_gpu_prefix_tree)
+        self.assertTrue(config.enable_prefix_tree_memory_cache)
+        self.assertFalse(config.enable_legacy_memory_connector_fallback)
+        self.assertEqual(config.prefix_tree_memory_state_swa_pool_ratio, 25)
+        self.assertTrue(config.enable_independent_group_eviction)
+
+    def test_kv_cache_strategy_defaults_are_rollback_safe(self):
+        config = PyEnvConfigs().kv_cache_config
+
+        self.assertFalse(config.enable_gpu_prefix_tree)
+        self.assertFalse(config.enable_prefix_tree_memory_cache)
+        self.assertTrue(config.enable_legacy_memory_connector_fallback)
+
     def test_engine_config_propagates_role_to_parallelism_config(self):
         py_env_configs = PyEnvConfigs()
         py_env_configs.role_config.role_type = RoleType.PREFILL

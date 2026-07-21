@@ -115,7 +115,7 @@ bool HybridPoolKVCacheAllocator::doInit() {
         RTP_LLM_CHECK_WITH_INFO(
             group_pool->init(), "Failed to initialize block pool %s(group %d)", pool_config.pool_name.c_str(), gid);
 
-        const auto& cache_group = config_.topology().groupBySlot(static_cast<size_t>(gid));
+        const auto& cache_group = config_.topology().groupById(static_cast<size_t>(gid));
 
         KVCacheGroupPtr group;
         if (group_type == CacheGroupType::LINEAR) {
@@ -150,7 +150,8 @@ int HybridPoolKVCacheAllocator::defaultGroupIdForLayer(int layer_id) const {
     if (layer_id < 0 || static_cast<size_t>(layer_id) >= config_.layer_all_num) {
         RTP_LLM_FAIL("invalid layer_id=%d", layer_id);
     }
-    const int gid = config_.groupIdFor(layer_id);
+    const auto& group = config_.topology().soleGroupForLayer(layer_id);
+    const int   gid   = static_cast<int>(config_.topology().groupIdForTag(group.tag));
     RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < static_cast<int>(kv_cache_groups_.size()),
                             "invalid default group id %d for layer %d",
                             gid,
@@ -219,7 +220,7 @@ GroupedCacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
                                     layers.size());
             layers[static_cast<size_t>(layer_id)].kv_scale_addr = tensor;
         }
-        groups.emplace(topology->groupBySlot(gid).tag, CacheLayerLayout(std::move(layers)));
+        groups.emplace(topology->groupById(gid).tag, CacheLayerLayout(std::move(layers)));
     }
     return GroupedCacheLayerLayout(topology, std::move(groups));
 }
@@ -244,23 +245,22 @@ std::vector<BlockInfo> HybridPoolKVCacheAllocator::convertIndexToBuffer(int laye
 }
 
 BlockAddrInfo HybridPoolKVCacheAllocator::convertIndexToAddr(int layer_id, int group_id, int block_id) const {
-    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology slot=%d", group_id);
-    return convertIndexToAddrByTag(
-        layer_id, config_.topology().groupBySlot(static_cast<size_t>(group_id)).tag, block_id);
+    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology group id=%d", group_id);
+    return convertIndexToAddrByTag(layer_id, config_.topology().groupById(static_cast<size_t>(group_id)).tag, block_id);
 }
 
 std::vector<BlockInfo>
 HybridPoolKVCacheAllocator::convertIndexToBuffer(int layer_id, int group_id, int block_id) const {
-    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology slot=%d", group_id);
+    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology group id=%d", group_id);
     return convertIndexToBufferByTag(
-        layer_id, config_.topology().groupBySlot(static_cast<size_t>(group_id)).tag, block_id);
+        layer_id, config_.topology().groupById(static_cast<size_t>(group_id)).tag, block_id);
 }
 
 std::vector<BlockInfo> HybridPoolKVCacheAllocator::convertIndexToBuffer(
     int layer_id, int group_id, int block_id, int partition_count, int partition_id) const {
-    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology slot=%d", group_id);
+    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology group id=%d", group_id);
     return convertIndexToBufferByTag(layer_id,
-                                     config_.topology().groupBySlot(static_cast<size_t>(group_id)).tag,
+                                     config_.topology().groupById(static_cast<size_t>(group_id)).tag,
                                      block_id,
                                      partition_count,
                                      partition_id);
@@ -268,21 +268,21 @@ std::vector<BlockInfo> HybridPoolKVCacheAllocator::convertIndexToBuffer(
 
 BlockAddrInfo
 HybridPoolKVCacheAllocator::convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const {
-    const auto gid = static_cast<int>(config_.topology().slotForTag(tag));
+    const auto gid = static_cast<int>(config_.topology().groupIdForTag(tag));
     validateGroupIdForLayer(layer_id, gid);
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, block_id);
 }
 
 std::vector<BlockInfo>
 HybridPoolKVCacheAllocator::convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const {
-    const auto gid = static_cast<int>(config_.topology().slotForTag(tag));
+    const auto gid = static_cast<int>(config_.topology().groupIdForTag(tag));
     validateGroupIdForLayer(layer_id, gid);
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(layer_id, block_id);
 }
 
 std::vector<BlockInfo> HybridPoolKVCacheAllocator::convertIndexToBufferByTag(
     int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const {
-    const auto gid = static_cast<int>(config_.topology().slotForTag(tag));
+    const auto gid = static_cast<int>(config_.topology().groupIdForTag(tag));
     validateGroupIdForLayer(layer_id, gid);
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(
         layer_id, block_id, partition_count, partition_id);
@@ -293,16 +293,33 @@ void HybridPoolKVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, co
         return;
     }
 
+    RTP_LLM_CHECK_WITH_INFO(config_.topology().hasOneGroupPerLayer(),
+                            "legacy layer-only block copy requires exactly one cache group per layer");
+    std::vector<TaggedBlockIdPair> tagged_mappings;
+    tagged_mappings.reserve(static_cast<size_t>(end_ptr - begin_ptr) * config_.topology().groups().size());
+    for (const auto& group : config_.topology().groups()) {
+        for (auto it = begin_ptr; it != end_ptr; ++it) {
+            tagged_mappings.push_back({group.tag, it->src, it->dst});
+        }
+    }
+    blockBatchCopyByTag(tagged_mappings);
+}
+
+void HybridPoolKVCacheAllocator::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping) {
+    if (copy_mapping.empty()) {
+        return;
+    }
+
     size_t copy_nums[BatchCopyParams::TYPE_SIZE] = {};
-    for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
+    for (const auto& mapping : copy_mapping) {
+        const auto gid = static_cast<int>(config_.topology().groupIdForTag(mapping.tag));
         RTP_LLM_CHECK_WITH_INFO(
             static_cast<size_t>(gid) < group_block_pools_.size(), "missing block pool for group %d", gid);
         const auto   copy_type = BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(gid)]->where(),
                                                               group_block_pools_[static_cast<size_t>(gid)]->where());
-        const auto&  spec      = config_.specForGroup(static_cast<size_t>(gid));
-        const size_t buffers_per_layer = spec->scale_block_size_bytes() > 0 ? 2 : 1;
-        copy_nums[copy_type] += config_.layerIdsForGroup(static_cast<size_t>(gid)).size()
-                                * static_cast<size_t>(end_ptr - begin_ptr) * buffers_per_layer;
+        const auto&  group     = config_.topology().groupById(static_cast<size_t>(gid));
+        const size_t buffers_per_layer = group.kv_scale_stride_bytes > 0 ? 2 : 1;
+        copy_nums[copy_type] += config_.layerIdsForGroup(static_cast<size_t>(gid)).size() * buffers_per_layer;
     }
 
     BatchCopyParams copy_params;
@@ -310,40 +327,35 @@ void HybridPoolKVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, co
         copy_params.reserve(static_cast<BatchCopyParams::CopyType>(i), copy_nums[i]);
     }
 
-    for (auto it = begin_ptr; it != end_ptr; ++it) {
-        auto [src_block_index, dest_block_index] = *it;
+    for (const auto& mapping : copy_mapping) {
+        const auto gid = static_cast<int>(config_.topology().groupIdForTag(mapping.tag));
+        RTP_LLM_CHECK_WITH_INFO(
+            static_cast<size_t>(gid) < group_block_pools_.size(), "missing block pool for group %d", gid);
+        const auto&  group               = config_.topology().groupById(static_cast<size_t>(gid));
+        const size_t kv_block_size_bytes = group.kv_block_stride_bytes;
+        const size_t scale_block_bytes   = group.kv_scale_stride_bytes;
+        const auto   copy_type = BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(gid)]->where(),
+                                                              group_block_pools_[static_cast<size_t>(gid)]->where());
 
-        for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
-            const auto&  spec                = config_.specForGroup(static_cast<size_t>(gid));
-            const size_t kv_block_size_bytes = spec->block_size_bytes();
-            const size_t scale_block_bytes   = spec->scale_block_size_bytes();
-            const auto   copy_type =
-                BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(gid)]->where(),
-                                               group_block_pools_[static_cast<size_t>(gid)]->where());
+        for (int layer_id : config_.layerIdsForGroup(static_cast<size_t>(gid))) {
+            auto src_addr_info = kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, mapping.src);
+            auto dst_addr_info = kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, mapping.dst);
 
-            for (int layer_id : config_.layerIdsForGroup(static_cast<size_t>(gid))) {
-                auto src_addr_info =
-                    kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, src_block_index);
-                auto dst_addr_info =
-                    kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, dest_block_index);
+            if (!src_addr_info.kv_addr || !dst_addr_info.kv_addr) {
+                RTP_LLM_LOG_ERROR("Failed to get block address for pool %s(group %d) layer %d, src_block %d, "
+                                  "dst_block %d",
+                                  group_block_pools_[static_cast<size_t>(gid)]->poolName().c_str(),
+                                  gid,
+                                  layer_id,
+                                  mapping.src,
+                                  mapping.dst);
+                continue;
+            }
 
-                if (!src_addr_info.kv_addr || !dst_addr_info.kv_addr) {
-                    RTP_LLM_LOG_ERROR("Failed to get block address for pool %s(group %d) layer %d, src_block %d, "
-                                      "dst_block %d",
-                                      group_block_pools_[static_cast<size_t>(gid)]->poolName().c_str(),
-                                      gid,
-                                      layer_id,
-                                      src_block_index,
-                                      dest_block_index);
-                    continue;
-                }
+            copy_params.add(dst_addr_info.kv_addr, src_addr_info.kv_addr, kv_block_size_bytes, copy_type);
 
-                copy_params.add(dst_addr_info.kv_addr, src_addr_info.kv_addr, kv_block_size_bytes, copy_type);
-
-                if (scale_block_bytes > 0 && src_addr_info.kv_scale_addr && dst_addr_info.kv_scale_addr) {
-                    copy_params.add(
-                        dst_addr_info.kv_scale_addr, src_addr_info.kv_scale_addr, scale_block_bytes, copy_type);
-                }
+            if (scale_block_bytes > 0 && src_addr_info.kv_scale_addr && dst_addr_info.kv_scale_addr) {
+                copy_params.add(dst_addr_info.kv_scale_addr, src_addr_info.kv_scale_addr, scale_block_bytes, copy_type);
             }
         }
     }
@@ -391,12 +403,7 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
 
     auto batch_resource = std::make_shared<BatchKVCacheResource>();
     batch_resource->resetBatchSize(1);
-    batch_resource->initGroups(config_.groupNums(),
-                               static_cast<int>(config_.layer_all_num),
-                               config_.layerGroupIdsSnapshot(),
-                               config_.kernelBlocksPerKvBlock(),
-                               config_.groupTypesSnapshot(),
-                               config_.groupKernelBlocksPerKvBlockSnapshot());
+    batch_resource->initGroups(config_.topologyPtr());
     batch_resource->setLastBlockAligned(true);
 
     for (int gid = 0; gid < config_.groupNums(); ++gid) {
@@ -408,8 +415,8 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
     evicted_keys.reserve(evict_result.evicted_keys.size());
     evicted_dependencies.reserve(evict_result.evicted_keys.size());
     for (size_t evicted_idx = 0; evicted_idx < evict_result.evicted_keys.size(); ++evicted_idx) {
-        const auto  cache_key = evict_result.evicted_keys[evicted_idx];
-        const auto& slots     = evict_result.evicted_slots.at(cache_key);
+        const auto  cache_key       = evict_result.evicted_keys[evicted_idx];
+        const auto& group_block_ids = evict_result.evicted_group_block_ids.at(cache_key);
         evicted_keys.push_back(cache_key);
         auto dep_it = evict_result.evicted_dependencies.find(cache_key);
         if (dep_it != evict_result.evicted_dependencies.end()) {
@@ -423,9 +430,9 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
             }
             evicted_dependencies.push_back(dependency);
         }
-        for (int gid = 0; gid < static_cast<int>(slots.size()) && gid < config_.groupNums(); ++gid) {
-            if (!isNullBlockIdx(slots[gid])) {
-                batch_resource->mutableBlockIds(0, gid).setAt(evicted_idx, slots[gid]);
+        for (int gid = 0; gid < static_cast<int>(group_block_ids.size()) && gid < config_.groupNums(); ++gid) {
+            if (!isNullBlockIdx(group_block_ids[gid])) {
+                batch_resource->mutableBlockIds(0, gid).setAt(evicted_idx, group_block_ids[gid]);
             }
         }
     }

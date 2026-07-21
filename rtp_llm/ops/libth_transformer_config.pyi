@@ -592,7 +592,11 @@ class HybridAttentionConfig:
     enable_hybrid_attention: bool
     enable_independent_kv_cache_pools: bool
     hybrid_attention_types: list[HybridAttentionType]
-    def __init__(self, enable_hybrid_attention: bool = False, enable_independent_kv_cache_pools: bool = False, hybrid_attention_types: list[HybridAttentionType] = []) -> None:
+    @typing.overload
+    def __init__(self) -> None:
+        ...
+    @typing.overload
+    def __init__(self, enable_hybrid_attention: bool, enable_independent_kv_cache_pools: bool, hybrid_attention_types: list[HybridAttentionType]) -> None:
         ...
     def to_string(self) -> str:
         ...

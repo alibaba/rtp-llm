@@ -217,9 +217,9 @@ TEST_F(SWAKVCacheGroupTest, MatchSingleKey_NotFound) {
 }
 
 TEST_F(SWAKVCacheGroupTest, MatchSingleKey_Found) {
-    auto                      group       = makeGroup(4);
-    std::vector<BlockIdxType> group_slots = {1};  // group_id=0, block_index=1
-    shared_cache_->put(101, group_slots, false);
+    auto                      group           = makeGroup(4);
+    std::vector<BlockIdxType> group_block_ids = {1};  // group_id=0, block_index=1
+    shared_cache_->put(101, group_block_ids, false);
 
     auto result = group.matchSingleKey(101);
     ASSERT_EQ(result.block_indices.size(), 1u);
@@ -602,8 +602,8 @@ TEST_F(SWAKVCacheGroupTest, PutIntoCache_SkipsNullBlocks) {
     // Simulate allocator-level insertIntoCache: only put non-NULL blocks
     for (size_t i = 0; i < keys.size() && i < block_ids.blocksNum(); ++i) {
         if (!isNullBlockIdx(block_ids.blocks()[i])) {
-            std::vector<BlockIdxType> slots = {block_ids.blocks()[i]};
-            shared_cache_->put(keys[i], slots, false);
+            std::vector<BlockIdxType> group_block_ids = {block_ids.blocks()[i]};
+            shared_cache_->put(keys[i], group_block_ids, false);
         }
     }
 

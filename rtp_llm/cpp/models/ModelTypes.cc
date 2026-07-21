@@ -155,7 +155,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                 rtp_llm::DataType::TYPE_INT32,
                 {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_kernel_blocks});
             inputs.kv_cache_update_mapping = allocBuf(
-                rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum], 2});
+                rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum], 3});
         }
         if (max_blocks != 0) {
             inputs.kv_cache_block_id =

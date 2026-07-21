@@ -84,6 +84,8 @@ private:
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
+    static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
+    static std::string     makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
     static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);

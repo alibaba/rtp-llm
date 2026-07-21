@@ -153,7 +153,7 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
         const bool   has_propose_group = propose_it != propose_gid_by_tag.end();
         const auto&  source_config     = has_propose_group ? propose_config : *this;
         const size_t source_gid        = has_propose_group ? propose_it->second : target_gid;
-        const auto&  source_group      = source_config.topology().groupBySlot(source_gid);
+        const auto&  source_group      = source_config.topology().groupById(source_gid);
 
         if (has_propose_group) {
             RTP_LLM_CHECK_WITH_INFO(
@@ -175,7 +175,7 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
             const size_t expected_existing_layers =
                 static_cast<size_t>(group_layer_num) + static_cast<size_t>(module_index) * mtp_layer_num;
             RTP_LLM_CHECK_WITH_INFO(target_groups[target_gid].layer_ids.size() == expected_existing_layers,
-                                    "CacheConfig::mergeMTPModule tag=%s gid=%zu physical slot alignment mismatch: "
+                                    "CacheConfig::mergeMTPModule tag=%s gid=%zu physical group alignment mismatch: "
                                     "existing_layers=%zu expected=%zu module=%d group_layer_num=%d module_layers=%u",
                                     tag.c_str(),
                                     target_gid,

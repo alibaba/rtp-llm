@@ -34,8 +34,9 @@ private:
     void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const override;
     void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) override;
 
-    int defaultGroupIdForLayer(int layer_id) const;
-    int validateGroupIdForLayer(int layer_id, int group_id) const;
+    int                    defaultGroupIdForLayer(int layer_id) const;
+    int                    validateGroupIdForLayer(int layer_id, int group_id) const;
+    std::vector<BlockInfo> logicalGroupBlockBuffers(int group_id, std::vector<BlockInfo> buffers) const;
 
     // global layer id -> local layer id
     std::vector<int> global_layer_to_local_id_;

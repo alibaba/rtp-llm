@@ -236,11 +236,7 @@ makeProductionDSV4Config(uint32_t full_block_num, uint32_t max_concurrency, uint
 static BatchKVCacheResourcePtr makeDSV4BatchResource(const CacheConfig& config) {
     auto res = std::make_shared<BatchKVCacheResource>();
     res->resetBatchSize(1);
-    res->initGroups(config.groupNums(),
-                    static_cast<int>(config.layer_all_num),
-                    config.layerGroupIdsSnapshot(),
-                    config.kernelBlocksPerKvBlock(),
-                    config.groupTypesSnapshot());
+    res->initGroups(config.topologyPtr());
     return res;
 }
 
@@ -707,7 +703,12 @@ TEST_F(KVCacheManagerTest, DSV4BlockCopyPreservesTypedRegionBytes) {
         assertDsv4RegionPatternEq(manager, dst_block, region_case.layer_id, region_case.gid, bytes, 0);
     }
 
-    manager->blockCopy(src_block, dst_block);
+    std::vector<TaggedBlockIdPair> copy_mapping;
+    copy_mapping.reserve(manager_config.topology().groups().size());
+    for (const auto& group : manager_config.topology().groups()) {
+        copy_mapping.push_back({group.tag, src_block, dst_block});
+    }
+    manager->blockBatchCopyByTag(copy_mapping);
     runtimeSyncAndCheck();
 
     for (const auto& region_case : cases) {
@@ -1031,13 +1032,13 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
     auto shared_cache = kv_cache_manager->allocator_->sharedBlockCache();
     ASSERT_NE(shared_cache, nullptr);
     {
-        std::vector<BlockIdxType> group_slots(1);
-        group_slots[0] = 1;
-        shared_cache->put(10, group_slots, false);
-        group_slots[0] = 2;
-        shared_cache->put(11, group_slots, false);
-        group_slots[0] = 3;
-        shared_cache->put(12, group_slots, false);
+        std::vector<BlockIdxType> group_block_ids(1);
+        group_block_ids[0] = 1;
+        shared_cache->put(10, group_block_ids, false);
+        group_block_ids[0] = 2;
+        shared_cache->put(11, group_block_ids, false);
+        group_block_ids[0] = 3;
+        shared_cache->put(12, group_block_ids, false);
     }
 
     // Inject a lightweight memory connector with a MemoryBlockCache snapshot:

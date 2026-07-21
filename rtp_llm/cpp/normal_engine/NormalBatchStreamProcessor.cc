@@ -27,6 +27,7 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.use_opaque_kv_cache_store  = cache_config.use_opaque_kv_cache_store;
     if (model_input_gatherer_config_.kv_cache_group_nums > 0) {
         model_input_gatherer_config_.kv_cache_group_types = cache_config.groupTypesSnapshot();
+        model_input_gatherer_config_.kv_cache_group_tags  = cache_config.groupTagsSnapshot();
     }
     model_input_gatherer_config_.warm_up           = warm_up;
     model_input_gatherer_config_.enable_detail_log = profiling_debug_logging_config.enable_detail_log;

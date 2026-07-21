@@ -8,7 +8,6 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
-#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"

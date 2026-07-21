@@ -54,34 +54,38 @@ bool P2PConnectorWorkerPrefill::writeByLayer(int                       layer_id,
                                              std::optional<c10::Event> event) {
     auto collector = std::make_shared<PrefillWorkerStoreMetricsCollector>();
 
+    RTP_LLM_CHECK_WITH_INFO(resource != nullptr, "writeByLayer requires a cache resource");
+    RTP_LLM_CHECK_WITH_INFO(resource->layerNum() == static_cast<int>(config_.layer_all_num),
+                            "P2P cache resource layer count mismatch: resource=%d configured=%u",
+                            resource->layerNum(),
+                            config_.layer_all_num);
+    const int64_t deadline_ms     = currentTimeMs() + store_wait_timeout_ms_;
+    auto          computed_buffer = computed_buffers_->addBuffer(request_id, nullptr, deadline_ms);
+    if (!computed_buffer->expectedBufferCount().has_value()) {
+        size_t expected_buffer_count = 0;
+        for (int expected_layer = 0; expected_layer < resource->layerNum(); ++expected_layer) {
+            for (const auto& expected_tag : resource->groupTagsForLayer(expected_layer)) {
+                expected_buffer_count += LayerCacheBufferUtil::hasTransferableBlocks(
+                    *resource, expected_layer, expected_tag, 0, -1, config_.cp_rank, config_.cp_size);
+            }
+        }
+        computed_buffer->setExpectedBufferCount(expected_buffer_count);
+    }
+
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
-    const auto&                                    layer_group_blocks = resource->layerGroupBlocks();
-    if (layer_id >= 0 && static_cast<size_t>(layer_id) < layer_group_blocks.size()) {
-        const auto& group_blocks = layer_group_blocks[static_cast<size_t>(layer_id)];
-        for (size_t group_id = 0; group_id < group_blocks.size(); ++group_id) {
-            if (!group_blocks[group_id]) {
-                continue;
-            }
-            auto layer_cache_buffer = LayerCacheBufferUtil::convertLayer(
-                *resource, 0, layer_id, static_cast<int>(group_id), 0, -1, config_.cp_rank, config_.cp_size);
-            if (layer_cache_buffer) {
-                collector->total_block_count += layer_cache_buffer->blockIdMap().size();
-                layer_cache_buffers.push_back(std::move(layer_cache_buffer));
-            }
+    for (const auto& cache_tag : resource->groupTagsForLayer(layer_id)) {
+        auto layer_cache_buffer = LayerCacheBufferUtil::convertLayer(
+            *resource, 0, layer_id, cache_tag, 0, -1, config_.cp_rank, config_.cp_size);
+        if (layer_cache_buffer) {
+            collector->total_block_count += layer_cache_buffer->blockIdMap().size();
+            layer_cache_buffers.push_back(std::move(layer_cache_buffer));
         }
     }
     if (layer_cache_buffers.empty()) {
-        RTP_LLM_LOG_ERROR(
-            "writeByLayer failed: layer_cache_buffer is null, request_id=%ld, layer_id=%d", request_id, layer_id);
-        if (metrics_reporter_) {
-            collector->success = false;
-            metrics_reporter_->report<P2PConnectorMetrics, PrefillWorkerStoreMetricsCollector>(nullptr,
-                                                                                               collector.get());
-        }
-        return false;
+        RTP_LLM_LOG_DEBUG("writeByLayer has no transferable blocks, request_id=%ld, layer_id=%d", request_id, layer_id);
+        return true;
     }
 
-    int64_t                     deadline_ms = currentTimeMs() + store_wait_timeout_ms_;
     std::shared_ptr<c10::Event> shared_event;
     if (event.has_value()) {
         shared_event = std::make_shared<c10::Event>(std::move(*event));
@@ -121,11 +125,11 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
     int64_t                                          return_deadline_ms,
     const std::shared_ptr<std::atomic<bool>>&        cancel_flag,
     const std::shared_ptr<SendTransferResult>&       transfer_result,
-    std::set<std::pair<int, int>>&                   sent_layer_group_ids,
+    std::set<std::pair<int, std::string>>&           sent_layer_groups,
     int&                                             total_transfers) {
-    int           sent_count    = 0;
-    const int     partition_num = static_cast<int>(tp_partition_ctxs.size());
-    std::set<int> observed_layers;
+    int       sent_count    = 0;
+    const int partition_num = static_cast<int>(tp_partition_ctxs.size());
+    bool      dispatch_complete{false};
 
     while (!cancel_flag->load() && currentTimeMs() < return_deadline_ms) {
         std::set<int> need_layer_ids;
@@ -137,22 +141,25 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
         bool sent_any                                     = false;
 
         for (const auto& layer_cache_buffer : ready_layer_buffers) {
-            const int layer_id = layer_cache_buffer->getLayerId();
-            const int group_id = layer_cache_buffer->getGroupId();
-            observed_layers.insert(layer_id);
-            const auto layer_group_id = std::make_pair(layer_id, group_id);
-            if (sent_layer_group_ids.count(layer_group_id)) {
+            const int   layer_id    = layer_cache_buffer->getLayerId();
+            const auto& cache_tag   = layer_cache_buffer->cacheTag();
+            const auto  layer_group = std::make_pair(layer_id, cache_tag);
+            if (sent_layer_groups.count(layer_group)) {
                 continue;
             }
-            sent_layer_group_ids.insert(layer_group_id);
+            sent_layer_groups.insert(layer_group);
             sent_count += sendLayerToPartitions(
                 layer_cache_buffer, tp_partition_ctxs, unique_key, return_deadline_ms, transfer_result);
             sent_any = true;
         }
 
-        total_transfers = std::max(total_transfers, total_layer_group_num * partition_num);
-        if (!sent_any && observed_layers.size() >= static_cast<size_t>(config_.layer_all_num)
-            && sent_layer_group_ids.size() >= static_cast<size_t>(total_layer_group_num)) {
+        const auto expected_buffer_count = computed_buffer->expectedBufferCount();
+        if (expected_buffer_count.has_value()) {
+            total_transfers = static_cast<int>(*expected_buffer_count) * partition_num;
+        }
+        if (expected_buffer_count.has_value() && static_cast<size_t>(total_layer_group_num) == *expected_buffer_count
+            && sent_layer_groups.size() == *expected_buffer_count) {
+            dispatch_complete = true;
             break;
         }
         if (!sent_any) {
@@ -160,10 +167,8 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
         }
     }
 
-    if (observed_layers.size() < static_cast<size_t>(config_.layer_all_num)) {
+    if (!dispatch_complete) {
         total_transfers = std::max(total_transfers, sent_count + 1);
-    } else {
-        total_transfers = std::max(total_transfers, sent_count);
     }
     return sent_count;
 }
@@ -173,9 +178,9 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
                                                      const std::string&                         unique_key,
                                                      int64_t                                    transfer_deadline_ms,
                                                      const std::shared_ptr<SendTransferResult>& transfer_result) {
-    int       count    = 0;
-    const int layer_id = layer_cache_buffer->getLayerId();
-    const int group_id = layer_cache_buffer->getGroupId();
+    int               count     = 0;
+    const int         layer_id  = layer_cache_buffer->getLayerId();
+    const std::string cache_tag = layer_cache_buffer->cacheTag();
 
     for (const auto& partition_ctx : tp_partition_ctxs) {
         auto key_block_infos = LayerCacheBufferUtil::buildKeyBlockInfos(layer_block_converter_,
@@ -184,7 +189,7 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
                                                                         partition_ctx.local_partition_id);
 
         std::string partition_layer_key =
-            P2PKeyUtil::makePartitionLayerGroupKey(unique_key, layer_id, group_id, partition_ctx.remote_partition_id);
+            P2PKeyUtil::makePartitionLayerTagKey(unique_key, layer_id, cache_tag, partition_ctx.remote_partition_id);
 
         transfer::SendRequest send_req;
         send_req.ip          = partition_ctx.decode_ip;
@@ -290,16 +295,16 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                                  
     auto computed_layer_cache_buffer    = computed_buffers_->addBuffer(request_id, nullptr, deadline_ms);
     collector->first_layer_wait_time_us = currentTimeUs() - start_time_us;
 
-    std::set<std::pair<int, int>> sent_layer_group_ids;
-    const int                     sent_transfer_count = dispatchPendingLayerTransfers(computed_layer_cache_buffer,
+    std::set<std::pair<int, std::string>> sent_layer_groups;
+    const int sent_transfer_count      = dispatchPendingLayerTransfers(computed_layer_cache_buffer,
                                                                   tp_partition_ctxs,
                                                                   unique_key,
                                                                   return_deadline_ms,
                                                                   cancel_flag,
                                                                   transfer_result,
-                                                                  sent_layer_group_ids,
+                                                                  sent_layer_groups,
                                                                   total_transfers);
-    collector->last_layer_wait_time_us                = currentTimeUs() - start_time_us;
+    collector->last_layer_wait_time_us = currentTimeUs() - start_time_us;
 
     {
         std::lock_guard<std::mutex> lock(handle_cancel_mutex_);

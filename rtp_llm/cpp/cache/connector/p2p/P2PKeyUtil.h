@@ -4,20 +4,14 @@
 
 namespace rtp_llm {
 
-/// Shared key format for P2P transfer: base_key + "_" + layer_id + "_" + partition_id
+/// Shared key format for P2P transfer includes the semantic cache tag.
 class P2PKeyUtil {
 public:
-    static std::string makePartitionLayerKey(const std::string& base_key, int layer_id, int partition_id) {
-        return base_key + "_" + std::to_string(layer_id) + "_" + std::to_string(partition_id);
-    }
-
-    static std::string
-    makePartitionLayerGroupKey(const std::string& base_key, int layer_id, int group_id, int partition_id) {
-        if (group_id == 0) {
-            return makePartitionLayerKey(base_key, layer_id, partition_id);
-        }
-        return base_key + "_" + std::to_string(layer_id) + "_g" + std::to_string(group_id) + "_"
-               + std::to_string(partition_id);
+    static std::string makePartitionLayerTagKey(const std::string& base_key,
+                                                int                layer_id,
+                                                const std::string& cache_tag,
+                                                int                partition_id) {
+        return base_key + "_" + std::to_string(layer_id) + "_tag" + cache_tag + "_" + std::to_string(partition_id);
     }
 };
 

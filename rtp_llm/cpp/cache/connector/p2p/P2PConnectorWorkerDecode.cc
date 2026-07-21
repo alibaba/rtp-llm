@@ -37,15 +37,15 @@ P2PConnectorWorkerDecode::buildRecvTasks(const std::vector<std::shared_ptr<Layer
         if (!layer_cache_buffer) {
             continue;
         }
-        const int layer_id = layer_cache_buffer->getLayerId();
-        const int group_id = layer_cache_buffer->getGroupId();
+        const int         layer_id  = layer_cache_buffer->getLayerId();
+        const std::string cache_tag = layer_cache_buffer->cacheTag();
 
         for (int partition_id = 0; partition_id < recv_partition_count; ++partition_id) {
             auto key_block_infos = LayerCacheBufferUtil::buildKeyBlockInfos(
                 layer_block_converter_, layer_cache_buffer, recv_partition_count, partition_id);
 
             const std::string partition_layer_key =
-                P2PKeyUtil::makePartitionLayerGroupKey(unique_key, layer_id, group_id, partition_id);
+                P2PKeyUtil::makePartitionLayerTagKey(unique_key, layer_id, cache_tag, partition_id);
 
             transfer::RecvRequest recv_req;
             recv_req.unique_key  = partition_layer_key;

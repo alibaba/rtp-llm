@@ -6,10 +6,7 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.block_map import (
-    get_fmha_params,
-    select_fmha_impl_for_layer,
-)
+from rtp_llm.models_py.model_desc.block_map import select_fmha_impl_for_layer
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeDecoderLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
@@ -128,7 +125,7 @@ class Qwen3VLMoeModel(GptModelBase):
             residual = output.residual
 
         hidden_states, _ = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states, get_fmha_params(fmha_impl))
+        return PyModelOutputs(hidden_states)
 
 
 __all__ = ["Qwen3VLMoeModel"]
