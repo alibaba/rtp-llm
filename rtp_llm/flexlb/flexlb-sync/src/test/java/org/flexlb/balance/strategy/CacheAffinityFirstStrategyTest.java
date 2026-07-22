@@ -180,7 +180,7 @@ class CacheAffinityFirstStrategyTest {
 
         CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
         Mockito.when(cacheAwareService.findMatchingEngines(
-                        Mockito.anyString(), Mockito.anyList(), Mockito.any(), Mockito.any()))
+                        Mockito.anyString(), Mockito.anyList(), Mockito.anyLong(), Mockito.any(), Mockito.any()))
                 .thenReturn(new CacheMatchResult(cacheMatches, CacheMatchSource.KVCM, 123));
 
         return new CacheAffinityFirstStrategy(

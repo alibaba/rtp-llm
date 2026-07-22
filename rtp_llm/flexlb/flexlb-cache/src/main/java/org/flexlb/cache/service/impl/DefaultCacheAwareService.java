@@ -58,6 +58,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
     public CacheMatchResult findMatchingEngines(
             String requestId,
             List<Long> blockCacheKeys,
+            long blockSize,
             RoleType roleType,
             String group) {
         CacheMatchSource source = cacheMatchProvider.source();
@@ -68,7 +69,8 @@ public class DefaultCacheAwareService implements CacheAwareService {
         long startTime = System.nanoTime();
         try {
             Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> resultMap
-                = cacheMatchProvider.findMatchingEngines(requestId, blockCacheKeys, roleType, group);
+                = cacheMatchProvider.findMatchingEngines(
+                        requestId, blockCacheKeys, blockSize, roleType, group);
             long queryTimeUs = (System.nanoTime() - startTime) / 1_000;
             cacheMetricsReporter.reportFindMatchingEnginesRT(roleType, startTime / 1_000, "0");
             return new CacheMatchResult(resultMap, source, queryTimeUs);

@@ -38,6 +38,7 @@ public class LocalCacheMatchProvider implements CacheMatchProvider {
     public Map<String, Integer> findMatchingEngines(
             String requestId,
             List<Long> blockCacheKeys,
+            long blockSize,
             RoleType roleType,
             String group) {
         return kvCacheManager.findMatchingEngines(blockCacheKeys, roleType, group);

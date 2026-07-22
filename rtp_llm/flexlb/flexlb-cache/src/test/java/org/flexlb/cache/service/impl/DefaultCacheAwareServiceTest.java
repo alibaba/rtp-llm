@@ -34,20 +34,20 @@ class DefaultCacheAwareServiceTest {
         when(localProvider.source()).thenReturn(CacheMatchSource.LOCAL);
         when(kvcmProvider.source()).thenReturn(CacheMatchSource.KVCM);
         when(kvcmProvider.findMatchingEngines(
-                "request-1", List.of(1L), RoleType.PREFILL, "default"))
+                "request-1", List.of(1L), 2192L, RoleType.PREFILL, "default"))
                 .thenThrow(new IllegalStateException("KVCM unavailable"));
 
         DefaultCacheAwareService service = new DefaultCacheAwareService(
                 List.of(localProvider, kvcmProvider), modelMetaConfig(true), metricsReporter);
 
         CacheMatchResult result = service.findMatchingEngines(
-                "request-1", List.of(1L), RoleType.PREFILL, "default");
+                "request-1", List.of(1L), 2192L, RoleType.PREFILL, "default");
 
         assertTrue(result.matches().isEmpty());
         assertEquals(CacheMatchSource.KVCM, result.source());
         assertTrue(result.queryTimeUs() >= 0);
         verify(localProvider, never()).findMatchingEngines(
-                "request-1", List.of(1L), RoleType.PREFILL, "default");
+                "request-1", List.of(1L), 2192L, RoleType.PREFILL, "default");
     }
 
     @Test
@@ -55,19 +55,19 @@ class DefaultCacheAwareServiceTest {
         when(localProvider.source()).thenReturn(CacheMatchSource.LOCAL);
         when(kvcmProvider.source()).thenReturn(CacheMatchSource.KVCM);
         when(localProvider.findMatchingEngines(
-                "request-1", List.of(1L), RoleType.PREFILL, "default"))
+                "request-1", List.of(1L), 2192L, RoleType.PREFILL, "default"))
                 .thenReturn(Map.of("127.0.0.1:8080", 1));
 
         DefaultCacheAwareService service = new DefaultCacheAwareService(
                 List.of(localProvider, kvcmProvider), modelMetaConfig(false), metricsReporter);
 
         CacheMatchResult result = service.findMatchingEngines(
-                "request-1", List.of(1L), RoleType.PREFILL, "default");
+                "request-1", List.of(1L), 2192L, RoleType.PREFILL, "default");
 
         assertEquals(1, result.matches().get("127.0.0.1:8080"));
         assertEquals(CacheMatchSource.LOCAL, result.source());
         verify(kvcmProvider, never()).findMatchingEngines(
-                "request-1", List.of(1L), RoleType.PREFILL, "default");
+                "request-1", List.of(1L), 2192L, RoleType.PREFILL, "default");
     }
 
     @Test

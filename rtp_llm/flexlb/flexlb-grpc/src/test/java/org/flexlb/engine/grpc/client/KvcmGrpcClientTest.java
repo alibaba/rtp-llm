@@ -89,14 +89,14 @@ class KvcmGrpcClientTest {
         assertEquals(2, matches.get("10.0.0.1:8601"));
         assertEquals(2, decodeMatches.get("10.0.0.1:8601"));
         GetHostCacheStateRequest request = lastCacheRequest.get();
-        assertEquals("deployment-first", request.getInstanceId());
+        assertEquals("deployment-first_2192", request.getInstanceId());
         assertEquals(QueryType.QT_PREFIX_MATCH, request.getQueryType());
         assertEquals(List.of(11L, 22L, 33L), request.getBlockCacheKeysList());
         assertEquals(0, request.getMediumCount());
         assertTrue(client.findMatchingEngines(
-                "request-null-group", List.of(11L, 22L, 33L), RoleType.PDFUSION, null).isEmpty());
+                "request-null-group", List.of(11L, 22L, 33L), 2192L, RoleType.PDFUSION, null).isEmpty());
         assertTrue(client.findMatchingEngines(
-                "request-empty-group", List.of(11L, 22L, 33L), RoleType.PDFUSION, "").isEmpty());
+                "request-empty-group", List.of(11L, 22L, 33L), 2192L, RoleType.PDFUSION, "").isEmpty());
     }
 
     @Test
@@ -110,7 +110,7 @@ class KvcmGrpcClientTest {
         Map<String, Integer> matches = waitForMatches(RoleType.PDFUSION, null);
 
         assertEquals(2, matches.get("10.0.0.1:8601"));
-        assertEquals("vllm-test-0", lastCacheRequest.get().getInstanceId());
+        assertEquals("vllm-test-0_2192", lastCacheRequest.get().getInstanceId());
         assertEquals(QueryType.QT_PREFIX_MATCH_WITH_MAMBA, lastCacheRequest.get().getQueryType());
     }
 
@@ -122,7 +122,7 @@ class KvcmGrpcClientTest {
         long deadline = System.currentTimeMillis() + 3000L;
         while (System.currentTimeMillis() < deadline) {
             Map<String, Integer> result = client.findMatchingEngines(
-                    "request-1", List.of(11L, 22L, 33L), roleType, group);
+                    "request-1", List.of(11L, 22L, 33L), 2192L, roleType, group);
             if (!result.isEmpty()) {
                 return result;
             }

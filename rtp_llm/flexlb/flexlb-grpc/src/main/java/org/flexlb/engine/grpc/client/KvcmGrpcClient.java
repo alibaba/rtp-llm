@@ -80,6 +80,7 @@ public class KvcmGrpcClient {
     public Map<String, Integer> findMatchingEngines(
             String requestId,
             List<Long> blockCacheKeys,
+            long blockSize,
             RoleType roleType,
             String group) {
         if (!enabled) {
@@ -92,8 +93,14 @@ public class KvcmGrpcClient {
             log.debug("Skipping KVCM cache query because blockCacheKeys is empty, requestId={}", requestId);
             return Collections.emptyMap();
         }
+        if (blockSize <= 0) {
+            log.warn("Skipping KVCM cache query because blockSize is unavailable, "
+                            + "requestId={}, role={}, group={}",
+                    requestId, roleType, group);
+            return Collections.emptyMap();
+        }
 
-        String namespace = namespaceResolver.resolve(roleType, group);
+        String namespace = namespaceResolver.resolve(roleType, group, blockSize);
         if (StringUtils.isBlank(namespace)) {
             log.warn("Skipping KVCM cache query because namespace is unavailable, "
                             + "requestId={}, role={}, group={}",

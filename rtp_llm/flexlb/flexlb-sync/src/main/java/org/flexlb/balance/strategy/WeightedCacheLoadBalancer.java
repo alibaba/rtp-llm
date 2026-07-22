@@ -86,9 +86,14 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         WorkerStatus selectedWorker = weightedRandomSelection(workerStatusList);
 
         if (selectedWorker != null) {
+            long blockSize = request.getBlockSize();
+            if (blockSize <= 0 && selectedWorker.getCacheStatus() != null) {
+                blockSize = selectedWorker.getCacheStatus().getBlockSize();
+            }
             CacheMatchResult cacheMatchResult = cacheAwareService.findMatchingEngines(
                     balanceContext.getRequestId(),
                     balanceContext.getRequest().getBlockCacheKeys(),
+                    blockSize,
                     roleType,
                     group);
             long prefixLength = calcPrefixMatchLength(selectedWorker, cacheMatchResult.matches());

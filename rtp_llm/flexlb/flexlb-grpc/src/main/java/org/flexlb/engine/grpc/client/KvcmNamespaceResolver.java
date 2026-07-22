@@ -40,13 +40,14 @@ public class KvcmNamespaceResolver {
         this.serviceDiscovery = serviceDiscovery;
     }
 
-    public String resolve(RoleType roleType, String group) {
-        if (configuredNamespace != null) {
-            return configuredNamespace;
+    public String resolve(RoleType roleType, String group, long blockSize) {
+        String namespace = configuredNamespace;
+        if (namespace == null) {
+            ConcurrentMap<RoleType, String> namespaceByRole =
+                    namespaceByGroupAndRole.get(StringUtils.defaultString(group));
+            namespace = namespaceByRole == null ? null : namespaceByRole.get(roleType);
         }
-        ConcurrentMap<RoleType, String> namespaceByRole =
-                namespaceByGroupAndRole.get(StringUtils.defaultString(group));
-        return namespaceByRole == null ? null : namespaceByRole.get(roleType);
+        return namespace == null ? null : namespace + "_" + blockSize;
     }
 
     public boolean usesConfiguredNamespace() {

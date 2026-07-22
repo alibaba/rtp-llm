@@ -55,6 +55,7 @@ class ScheduleRequestPreprocessorTest {
         preprocessor.prepare(context).block();
 
         assertEquals(List.of(2164874634404590027L), request.getBlockCacheKeys());
+        assertEquals(4L, request.getBlockSize());
         assertNull(request.getInputIds());
         assertEquals(12, context.getBlockHashQueueWaitTimeUs());
         assertEquals(34, context.getBlockHashExecutionTimeUs());

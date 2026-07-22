@@ -52,6 +52,7 @@ public class ScheduleRequestPreprocessor {
         long blockSize = request.getBlockSize() > 0
                 ? request.getBlockSize()
                 : hashConfig.blockSize();
+        request.setBlockSize(blockSize);
 
         return blockHashExecutor.calculate(inputIds, blockSize, hashConfig.lookaheadTokens())
                 .doOnNext(result -> {

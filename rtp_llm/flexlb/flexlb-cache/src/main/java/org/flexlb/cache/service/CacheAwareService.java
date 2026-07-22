@@ -19,6 +19,7 @@ public interface CacheAwareService {
      *
      * @param requestId      Request ID used to correlate cache queries
      * @param blockCacheKeys List of cache block IDs to query
+     * @param blockSize      Token count represented by each cache block
      * @param roleType       Engine role to query
      * @param group          Engine group to query
      * @return Cache matching result and provider query time
@@ -26,6 +27,7 @@ public interface CacheAwareService {
     CacheMatchResult findMatchingEngines(
             String requestId,
             List<Long> blockCacheKeys,
+            long blockSize,
             RoleType roleType,
             String group);
     

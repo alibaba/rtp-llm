@@ -94,7 +94,7 @@ class ShortestTTFTStrategyTest {
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
         Mockito.when(cacheAwareService.findMatchingEngines(
-                        Mockito.anyString(), Mockito.anyList(), Mockito.any(), Mockito.any()))
+                        Mockito.anyString(), Mockito.anyList(), Mockito.anyLong(), Mockito.any(), Mockito.any()))
                 .thenReturn(new CacheMatchResult(
                         Map.of("127.0.0.2:8080", 3), CacheMatchSource.KVCM, 123));
 
@@ -114,6 +114,8 @@ class ShortestTTFTStrategyTest {
         Assertions.assertEquals("KVCM", balanceContext.getCacheMatchSource());
         Assertions.assertEquals(123, balanceContext.getCacheMatchQueryTimeUs());
         Assertions.assertEquals(1, balanceContext.getCacheMatchQueryCount());
+        Mockito.verify(cacheAwareService).findMatchingEngines(
+                "request-12345", blockCacheKeys, 256L, RoleType.PREFILL, null);
         TaskInfo selectedTask = workerStatus1.getLocalTaskMap().get("request-12345");
         Assertions.assertNotNull(selectedTask);
         Assertions.assertEquals(768, selectedTask.getPredictedPrefixLength());
@@ -255,7 +257,7 @@ class ShortestTTFTStrategyTest {
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
         Mockito.when(cacheAwareService.findMatchingEngines(
-                        Mockito.anyString(), Mockito.anyList(), Mockito.any(), Mockito.any()))
+                        Mockito.anyString(), Mockito.anyList(), Mockito.anyLong(), Mockito.any(), Mockito.any()))
                 .thenReturn(new CacheMatchResult(cacheMatches, CacheMatchSource.KVCM, 123));
 
         ShortestTTFTStrategy strategy = new ShortestTTFTStrategy(

@@ -143,8 +143,13 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         }
 
         // Calculate cache match results for each engine
+        long blockSize = resolveBlockSize(balanceContext, availableWorkers);
         CacheMatchResult cacheMatchResult = cacheAwareService.findMatchingEngines(
-                requestId, balanceContext.getRequest().getBlockCacheKeys(), roleType, group);
+                requestId,
+                balanceContext.getRequest().getBlockCacheKeys(),
+                blockSize,
+                roleType,
+                group);
 
         List<ScoredWorker> scoredWorkers = scoreWorkers(
                 availableWorkers,
@@ -173,6 +178,21 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 requestId,
                 seqLen,
                 config.getPrefillCacheHitDiscount());
+    }
+
+    private long resolveBlockSize(
+            BalanceContext balanceContext,
+            List<WorkerStatus> availableWorkers) {
+        long requestBlockSize = balanceContext.getRequest().getBlockSize();
+        if (requestBlockSize > 0) {
+            return requestBlockSize;
+        }
+        for (WorkerStatus worker : availableWorkers) {
+            if (worker.getCacheStatus() != null && worker.getCacheStatus().getBlockSize() > 0) {
+                return worker.getCacheStatus().getBlockSize();
+            }
+        }
+        return 0;
     }
 
     /**
