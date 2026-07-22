@@ -222,6 +222,31 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_ErrorDuringLoading_
     ASSERT_TRUE(stream->isFinished());
 }
 
+TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCheck_LoadFailureReportsErrorWithoutDeadlock) {
+    setupMockCoordinator();
+
+    auto mock_ctx = std::make_shared<NiceMock<MockAsyncContext>>();
+    ON_CALL(*mock_ctx, done()).WillByDefault(Return(true));
+    ON_CALL(*mock_ctx, success()).WillByDefault(Return(false));
+    ON_CALL(*mock_ctx, waitDone()).WillByDefault(Return());
+    ON_CALL(*mock_ctx, errorInfo())
+        .WillByDefault(Return(ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, "cache transfer failed")));
+    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(mock_ctx)));
+
+    auto scheduler = createScheduler();
+    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    ASSERT_TRUE(scheduler->schedule().ok());
+    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1u);
+
+    auto result = scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result->empty());
+    EXPECT_TRUE(stream->isFinished());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::LOAD_CACHE_TIMEOUT);
+}
+
 // ============================================================================
 // 5. loading_cache_streams_ counted in evaluateRunningBatch (batch size limit)
 // ============================================================================

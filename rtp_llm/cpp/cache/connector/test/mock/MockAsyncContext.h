@@ -15,6 +15,7 @@ public:
     MOCK_METHOD(void, waitDone, (), (override));
     MOCK_METHOD(bool, done, (), (const, override));
     MOCK_METHOD(bool, success, (), (const, override));
+    MOCK_METHOD(ErrorInfo, errorInfo, (), (const, override));
 };
 
 }  // namespace rtp_llm
