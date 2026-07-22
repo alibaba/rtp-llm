@@ -14,7 +14,8 @@ EngineBase::EngineBase(const EngineInitParams& params) {
 
 EngineBase::~EngineBase() {}
 
-std::vector<GenerateStreamPtr> EngineBase::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
+std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+EngineBase::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
     throw std::runtime_error("not implemeted");
 }
 

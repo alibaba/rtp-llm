@@ -666,7 +666,8 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
                             stream_->streamLogTag().c_str(),
                             error.ToString().c_str());
         if (error.hasError()) {
-            stream_->reportError(error.code(), error.ToString());
+            // loadCacheDone() is called from moveToNext(), which already holds the stream mutex.
+            stream_->reportErrorWithoutLock(error.code(), error.ToString());
         }
         return;
     }

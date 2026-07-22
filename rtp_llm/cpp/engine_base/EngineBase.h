@@ -1,5 +1,7 @@
 #pragma once
 
+#include <utility>
+
 #include "absl/status/status.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
@@ -52,7 +54,8 @@ public:
 
     virtual void enqueue(std::shared_ptr<GenerateStream>& stream) = 0;
 
-    virtual std::vector<GenerateStreamPtr> enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs);
+    virtual std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+    enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs);
 
     virtual std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input);
 

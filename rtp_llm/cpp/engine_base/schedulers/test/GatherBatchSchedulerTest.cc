@@ -3,7 +3,6 @@
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/engine_base/schedulers/GatherBatchScheduler.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
-#include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
@@ -98,10 +97,23 @@ TEST_F(GatherBatchSchedulerTest, testGatherBatchAccumulatesBeforeRunning) {
     ASSERT_EQ(scheduler->runningStreamsSize(), 2);
 }
 
-// Without load_python_model the scheduler is allowed to add new streams to a non-empty running
-// set (the prefill+decode mix is fine for the regular C++ path). This pins down that the new
-// guard does not regress the non-py_model behaviour.
-TEST_F(GatherBatchSchedulerTest, testNonPyModelAllowsGatherWhileRunning) {
+TEST_F(GatherBatchSchedulerTest, testEnqueueGroupReturnsUnsupported) {
+    auto                           scheduler = makeScheduler(/*load_python_model=*/true);
+    std::vector<GenerateStreamPtr> streams   = {makeStream(), makeStream()};
+
+    auto [enqueue_successes, returned_streams] = scheduler->enqueueGroup(streams);
+    ASSERT_EQ(enqueue_successes, std::vector<bool>({false, false}));
+    ASSERT_EQ(returned_streams, streams);
+    ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
+    for (const auto& stream : streams) {
+        ASSERT_TRUE(stream->hasError());
+        ASSERT_EQ(stream->statusInfo().code(), ErrorCode::UNKNOWN_ERROR);
+    }
+}
+
+// The load_python_model flag no longer changes scheduling behavior. Even when callers pass
+// false, a new prefill must wait until the running batch drains.
+TEST_F(GatherBatchSchedulerTest, testRemovedPyModelFlagStillDefersGatherWhileRunning) {
     auto scheduler = makeScheduler(/*load_python_model=*/false);
 
     auto stream1 = makeStream();
@@ -116,9 +128,8 @@ TEST_F(GatherBatchSchedulerTest, testNonPyModelAllowsGatherWhileRunning) {
 
     auto streams_status2 = scheduler->schedule();
     ASSERT_TRUE(streams_status2.ok());
-    // Without the py_model guard, stream2 is allowed to join running alongside stream1.
-    ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
-    ASSERT_EQ(scheduler->runningStreamsSize(), 2);
+    ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
+    ASSERT_EQ(scheduler->runningStreamsSize(), 1);
 }
 
 // load_python_model=true with empty running is the happy path — the guard does not fire and

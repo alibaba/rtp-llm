@@ -153,7 +153,7 @@ TEST_F(FIFOSchedulerCancelTest, CancelWhileRunning) {
 
 // ============================================================================
 // 3. Cancel during resource allocation (stream transitions through WAITING
-//    where initKVBlock happens inside prepare())
+//    where initKVBlock happens inside moveToNext)
 // ============================================================================
 TEST_F(FIFOSchedulerCancelTest, CancelDuringResourceAllocation) {
     auto scheduler   = createScheduler();
@@ -163,7 +163,7 @@ TEST_F(FIFOSchedulerCancelTest, CancelDuringResourceAllocation) {
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
 
     // Report error before the first schedule() — the stream is WAITING
-    // and prepare() will see the Error event via alive() check
+    // and moveToNext() will see the Error event before attempting initKVBlock
     stream->reportError(ErrorCode::CANCELLED, "cancelled during init");
 
     auto result = scheduler->schedule();
@@ -244,9 +244,9 @@ TEST_F(FIFOSchedulerCancelTest, VerifyStateAndErrorAfterCancel) {
     ASSERT_FALSE(stream->getStatus() == StreamState::RUNNING);
     ASSERT_FALSE(stream->getStatus() == StreamState::WAITING);
     ASSERT_EQ(stream->stopReason(), "user requested cancel");
-    // finish() on FINISHED stream should not crash (idempotent)
-    stream->finish();
-    ASSERT_TRUE(stream->isFinished());
+    // moveToNext on FINISHED stream should not crash (idempotent)
+    auto state = stream->moveToNext();
+    ASSERT_EQ(state, StreamState::FINISHED);
 }
 
 // ============================================================================
@@ -315,8 +315,8 @@ TEST_F(FIFOSchedulerCancelTest, ConcurrentCancelDuringSchedule) {
     // Run schedule() while cancel thread is active.
     // Only call schedule() when there are running streams to avoid blocking
     // on an empty scheduler (waitPredicate would return false and cv blocks forever).
-    // reportEvent() only sets event flags; the streams remain in running_
-    // until schedule() -> advance() detects the error and calls finish().
+    // reportEvent() only sets event flags; the streams remain in running_streams_
+    // until schedule() -> evaluateAndUpdateStreams() calls moveToNext().
     while (scheduler->runningStreamsSize() > 0) {
         auto result = scheduler->schedule();
         ASSERT_TRUE(result.ok());
