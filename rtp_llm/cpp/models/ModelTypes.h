@@ -79,6 +79,13 @@ enum GptModelInputIndex : size_t {
     skipRun,
     gptModelRequestLength,  // length of request id & pd_separation
     isFakeStream,
+    // Row count of last_hidden_states. The dspark prefill-seeding draft input
+    // carries [ctx_tokens, n_aux*H] aux features whose row count differs from
+    // combo_tokens (one [anchor + k masks] block per stream), so the shape
+    // cannot be inferred from comboTokens like the MTP hidden chain.
+    mtpHiddenStatesRows,
+    dsparkCtxLengths,  // numel of dspark_ctx_lengths ([batch] int32)
+    dsparkCtxStarts,   // numel of dspark_ctx_starts ([batch] int32)
     // Per-tensor device hint bitmap from root so non-root ranks allocate
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
@@ -88,11 +95,13 @@ enum GptModelInputIndex : size_t {
 // Bit positions for `tensorDeviceMap`. Only fields that participate in the
 // MTP/Eagle decode-prepare GPU path need a bit; other fields stay CPU.
 enum GptModelInputDeviceBit : uint32_t {
-    kDeviceBitComboTokens     = 1u << 0,
-    kDeviceBitInputLengths    = 1u << 1,
-    kDeviceBitSequenceLengths = 1u << 2,
-    kDeviceBitPrefixLengths   = 1u << 3,
-    kDeviceBitLmOutputIndexes = 1u << 4,
+    kDeviceBitComboTokens      = 1u << 0,
+    kDeviceBitInputLengths     = 1u << 1,
+    kDeviceBitSequenceLengths  = 1u << 2,
+    kDeviceBitPrefixLengths    = 1u << 3,
+    kDeviceBitLmOutputIndexes  = 1u << 4,
+    kDeviceBitDsparkCtxLengths = 1u << 5,
+    kDeviceBitDsparkCtxStarts  = 1u << 6,
 };
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);

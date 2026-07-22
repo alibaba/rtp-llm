@@ -187,8 +187,11 @@ class Qwen3DFlashModel(GptModelBase):
             )
 
         # Stage C output head (Stage D's Markov head is DSpark-only; see
-        # qwen3_dspark.py).
-        self.lm_head_weight = weights.get_global_weight(W.lm_head)  # [V, H]
+        # qwen3_dspark.py).  Under TP the loader vocab-shards lm_head
+        # (sp_0_pad8): each rank holds [V_pad/tp, H] and compute_base_logits
+        # all-gathers the shard logits back to the full vocab.
+        self.tp_size = parallelism_config.tp_size
+        self.lm_head_weight = weights.get_global_weight(W.lm_head)  # [V(/tp), H]
 
         # Stage B rope: same op/cache/interleave flags as the block-forward path.
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
@@ -205,8 +208,10 @@ class Qwen3DFlashModel(GptModelBase):
         Unlike a normal draft (input_hiddens = a single [T, H] hidden), the
         DSpark/DFlash draft consumes the target's layer-concatenated aux hiddens
         [T, n_aux*H] (stage A's fc input).  The CUDA graph runner sizes its
-        static input_hiddens buffer to this instead of the model hidden H
-        (phase-1 is tp=1, so H here is the full model hidden).
+        static input_hiddens buffer to this instead of the model hidden H.
+        H is the full model hidden on every rank: aux features come off the
+        replicated residual stream, and stage A's fc weight is sp_id
+        (replicated), so TP does not shard this dimension.
         """
         return len(self.dspark_params.aux_hidden_state_layer_ids) * self.config.hidden_size
 
@@ -428,12 +433,52 @@ class Qwen3DFlashModel(GptModelBase):
         """lm_head over the k mask positions (bonus-anchor layout).
 
         head_hidden: [B*(1+k), H].  Returns [B, k, V] (weights' dtype).
+
+        TP: head_hidden is the replicated residual stream, so each rank's
+        F.linear yields the [B, k, V_pad/tp] vocab shard; all-gather + reorder
+        rebuilds the full vocab on every rank (same NCCL collective the engine
+        uses for target logits in tpSyncEmbeddingOrLogits), then the sp_0_pad8
+        padding rows are sliced off so argmax can never pick a pad id.  Runs
+        outside the CUDA graph (draft_tail is eager by design).
         """
         width = self.dspark_params.block_width
         hidden = head_hidden.view(-1, width, head_hidden.shape[-1])[:, 1:, :]
         # The engine loader may keep lm_head in fp32 (enable_fp32_lm_head);
         # follow the weight dtype — logits go through .float() downstream.
-        return F.linear(hidden.to(self.lm_head_weight.dtype), self.lm_head_weight)
+        logits = F.linear(hidden.to(self.lm_head_weight.dtype), self.lm_head_weight)
+        if self.tp_size > 1:
+            logits = self._gather_vocab_shards(logits)
+        return logits
+
+    def _gather_vocab_shards(self, shard_logits: torch.Tensor) -> torch.Tensor:
+        """All-gather [B, k, V_pad/tp] shard logits into full-vocab [B, k, V]."""
+        from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+
+        rows = shard_logits.shape[0] * shard_logits.shape[1]
+        gathered = all_gather(
+            shard_logits.reshape(rows, -1).contiguous(), group=Group.TP
+        )  # [tp * rows, V_pad/tp], rank-major
+        return self._merge_vocab_shards(gathered, shard_logits.shape)
+
+    def _merge_vocab_shards(
+        self, gathered: torch.Tensor, shard_shape: torch.Size
+    ) -> torch.Tensor:
+        """Reorder rank-major gathered rows to [B, k, V] and strip pad rows.
+
+        Pure tensor math (no collective) so tests can drive it with a
+        hand-built gathered tensor.
+        """
+        batch, k, shard_vocab = shard_shape
+        rows = batch * k
+        full = (
+            gathered.reshape(self.tp_size, rows, shard_vocab)
+            .permute(1, 0, 2)
+            .reshape(batch, k, self.tp_size * shard_vocab)
+        )
+        # sp_0_pad8 pads the vocab to a tp*8 multiple with zero rows on the
+        # last rank; a zero logit can out-rank real negative logits, so the
+        # pad columns must never reach argmax/softmax.
+        return full[..., : self.vocab_size].contiguous()
 
     # ---- Stage D (virtual seam) -----------------------------------------
 

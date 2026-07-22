@@ -375,11 +375,14 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         // a static logical block table + dspark_ctx_starts refreshed per replay.
         // Prefill seeding stays eager (canRun rejects the ragged prefill batch),
         // so no separate sp_prefill_draft_model_ is created for dspark below.
-        // tpSyncModelInputs does not broadcast dspark_ctx_lengths yet, and the
-        // fake-stream path (dp_size > 1) has no k-wide propose state.
-        RTP_LLM_CHECK_WITH_INFO(params.parallelism_config.tp_size <= 1 && params.parallelism_config.dp_size <= 1,
-                                "dspark phase-1a only supports tp_size=1/dp_size=1, got tp=%zu dp=%zu",
-                                (size_t)params.parallelism_config.tp_size,
+        // TP (step 3): tpSyncModelInputs broadcasts dspark_ctx_starts/lengths
+        // and the aux-width last_hidden_states; broadcastPostRejectionInputs
+        // carries the decode-tail extras (prefix_lengths + ctx window); the
+        // draft samples in-model, so draft_tail all-gathers the vocab-sharded
+        // lm_head logits itself. The fake-stream path (dp_size > 1) still has
+        // no k-wide propose state.
+        RTP_LLM_CHECK_WITH_INFO(params.parallelism_config.dp_size <= 1,
+                                "dspark does not support dp_size > 1 yet, got dp=%zu",
                                 (size_t)params.parallelism_config.dp_size);
         RTP_LLM_CHECK_WITH_INFO(params.sp_config.sp_dspark_mask_token_id >= 0,
                                 "dspark requires sp_dspark_mask_token_id from the draft ckpt config, got %ld",
@@ -1108,7 +1111,25 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     } else {
         model_input.lm_output_indexes =
             torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-        model_input.last_hidden_states = model_output.all_hidden_states;
+        if (is_dspark_) {
+            // Receive buffers for broadcastPostRejectionInputs, shaped like
+            // rank 0's updateDecodePostDSparkDraftModelInput outputs: the tail
+            // draft input is the [B*(k+1), n_aux*H] aux export (the local aux
+            // is a same-shape replica — the residual stream is replicated
+            // across TP ranks), plus the [B] dense injection window pair.
+            RTP_LLM_CHECK_WITH_INFO(model_output.aux_hidden_states.defined(),
+                                    "dspark decode tail: target verify did not export aux_hidden_states");
+            // Fresh allocation, not a view: under CUDA graph the local aux is
+            // a slice of the target graph's static output buffer, which the
+            // NCCL receive below must not write into.
+            const auto& aux                = model_output.aux_hidden_states;
+            model_input.last_hidden_states = torch::empty_like(aux.reshape({aux.size(0), -1}));
+            const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+            model_input.dspark_ctx_starts  = torch::empty({(int64_t)batch_size}, cuda_i32);
+            model_input.dspark_ctx_lengths = torch::empty({(int64_t)batch_size}, cuda_i32);
+        } else {
+            model_input.last_hidden_states = model_output.all_hidden_states;
+        }
     }
 
     // Record before broadcast/draft work so the worker waits only for
@@ -1440,6 +1461,14 @@ void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input) {
         execBroadcast({{model_input.combo_tokens}, 0});
         execBroadcast({{model_input.last_hidden_states}, 0});
         execBroadcast({{model_input.lm_output_indexes}, 0});
+        if (is_dspark_) {
+            // The dspark tail rewrites the committed prefix (advanced by
+            // accept_len) and the dense injection window on rank 0; without
+            // these, non-root block forwards attend to the stale window.
+            execBroadcast({{model_input.prefix_lengths}, 0});
+            execBroadcast({{model_input.dspark_ctx_starts}, 0});
+            execBroadcast({{model_input.dspark_ctx_lengths}, 0});
+        }
     }
     model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
     model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;

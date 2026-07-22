@@ -27,6 +27,7 @@ import unittest
 from typing import Dict, List
 
 import torch
+import torch.nn.functional as F
 
 DEFAULT_CKPT = "/data0/caihaowen.chw/dspark-work/models/dspark_draft_rtp"
 DEFAULT_GOLDEN = "/data0/caihaowen.chw/dspark-work/golden/ctx96_seed42"
@@ -702,6 +703,73 @@ class DFlashWeightInfoMappingTest(unittest.TestCase):
         # Everything DFlash declares must still exist in the (superset) ckpt.
         missing = [name for name in declared if name not in inventory]
         self.assertFalse(missing, f"DFlash declared names missing: {missing}")
+
+
+class TpVocabShardMergeTest(unittest.TestCase):
+    """compute_base_logits' TP merge math, driven without a process group.
+
+    Shards a full lm_head with the loader's real sp_0_pad8 split, computes
+    per-rank shard logits, hand-builds the rank-major gathered tensor that
+    collective all_gather would return, and checks _merge_vocab_shards
+    reconstructs the full-vocab logits (pure reshape/permute, so CPU + no
+    distributed init is enough).
+    """
+
+    TP = 2
+    BATCH, K, HIDDEN = 2, 3, 16
+    VOCAB = 37  # not a tp*8 multiple: sp_0_pad8 pads to 48, 24 per rank
+
+    def _make_fake_model(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(tp_size=self.TP, vocab_size=self.VOCAB)
+
+    def _shard_and_gather(self, lm_head: torch.Tensor, hidden: torch.Tensor):
+        from rtp_llm.models_py.model_desc.qwen3_dflash import Qwen3DFlashModel
+        from rtp_llm.utils.model_weight import sp_0_pad8
+
+        shards = [
+            sp_0_pad8(lm_head, tp=self.TP, tp_rank=r) for r in range(self.TP)
+        ]
+        shard_logits = [F.linear(hidden, s) for s in shards]  # [B, K, V_pad/tp]
+        rows = self.BATCH * self.K
+        gathered = torch.cat(
+            [sl.reshape(rows, -1) for sl in shard_logits], dim=0
+        )  # rank-major, what collective all_gather returns
+        merged = Qwen3DFlashModel._merge_vocab_shards(
+            self._make_fake_model(), gathered, shard_logits[0].shape
+        )
+        return shards, merged
+
+    def test_merge_matches_full_lm_head(self):
+        torch.manual_seed(7)
+        lm_head = torch.randn(self.VOCAB, self.HIDDEN)
+        hidden = torch.randn(self.BATCH, self.K, self.HIDDEN)
+
+        shards, merged = self._shard_and_gather(lm_head, hidden)
+        self.assertEqual(shards[0].shape[0], 24)  # pad8 shard size sanity
+
+        full = F.linear(hidden, lm_head)  # tp=1 reference
+        self.assertEqual(tuple(merged.shape), (self.BATCH, self.K, self.VOCAB))
+        torch.testing.assert_close(merged, full, rtol=1e-5, atol=1e-5)
+
+    def test_pad_rows_never_win_argmax(self):
+        # All real logits negative: if the zero-valued sp_0_pad8 pad columns
+        # survived the merge, argmax would return an id >= VOCAB.
+        torch.manual_seed(11)
+        hidden = torch.ones(self.BATCH, self.K, self.HIDDEN)
+        lm_head = -torch.rand(self.VOCAB, self.HIDDEN) - 0.1
+
+        _, merged = self._shard_and_gather(lm_head, hidden)
+        full = F.linear(hidden, lm_head)
+        self.assertTrue((full < 0).all())
+        self.assertTrue(
+            (merged.argmax(dim=-1) < self.VOCAB).all(),
+            "pad columns leaked into the merged logits",
+        )
+        self.assertEqual(
+            merged.argmax(dim=-1).tolist(), full.argmax(dim=-1).tolist()
+        )
 
 
 if __name__ == "__main__":
