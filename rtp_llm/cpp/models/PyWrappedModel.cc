@@ -806,9 +806,21 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
+            // DSpark draft: the graph captured the backbone only (head_hidden);
+            // run the eager lm_head + Markov + softmax tail here, reading the
+            // static head_hidden buffer BEFORE it is cloned below.  draft_tail
+            // fills draft_tokens/draft_probs as fresh (non-static) tensors, so
+            // the [B, k, V] distribution never persists as a graph output.
+            if (is_dspark_ && !use_spec_decoding_) {
+                py::gil_scoped_acquire gil;
+                auto tail_obj = py_model_.attr("draft_tail")(py_model_outputs, py_model_inputs);
+                py_model_outputs = tail_obj.cast<PyModelOutputs>();
+            }
             hidden_states = py_model_outputs.hidden_states.clone();
             // Graph output buffers are reused across replays; detach copies of
-            // the optional dspark outputs.
+            // the optional dspark outputs.  draft_tokens/draft_probs are fresh
+            // eager tensors on the dspark path (clone is a harmless no-op-ish
+            // copy); aux_hidden_states may still alias a static buffer.
             for (torch::Tensor* t :
                  {&py_model_outputs.aux_hidden_states, &py_model_outputs.draft_tokens, &py_model_outputs.draft_probs}) {
                 if (t->defined()) {

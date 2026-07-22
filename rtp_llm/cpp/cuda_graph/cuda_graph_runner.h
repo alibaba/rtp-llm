@@ -24,6 +24,7 @@ public:
         enable_cuda_graph_(graph_params.enable_cuda_graph),
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
         is_target_verify_(graph_params.is_target_verify),
+        is_dspark_(graph_params.is_dspark),
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
@@ -47,7 +48,15 @@ public:
         }
         max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
-        py_forward_method_    = py_instance_.attr("forward");
+        // The DSpark draft splits its forward: the graph captures the backbone
+        // (A+B+C -> head_hidden [., H]) only, and the engine runs the lm_head +
+        // Markov + softmax tail eagerly after replay (draft_tail).  This keeps
+        // the [B, k, V] draft distribution out of the static graph output
+        // buffers -- the vLLM boundary.  The target-verify graph (also is_dspark_)
+        // captures the whole forward as usual.
+        const bool capture_backbone_only = is_dspark_ && !is_target_verify_;
+        py_forward_method_ =
+            py_instance_.attr(capture_backbone_only ? "forward_backbone" : "forward");
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
@@ -130,6 +139,7 @@ private:
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
+    bool                    is_dspark_{false};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};
     size_t                  max_bs_{1};

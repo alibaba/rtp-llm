@@ -22,6 +22,10 @@ public:
         decoder_layer_hidden_states_ = hidden_states;
     };
 
+    void setAuxHiddenStates(at::Tensor aux_hidden_states) {
+        decoder_layer_aux_hidden_states_ = aux_hidden_states;
+    };
+
     CaptureMemoryHold() {}
 
     CaptureMemoryHold(at::Tensor hidden_states, torch_ext::PyModelInputs& inputs, bool is_embedding):
@@ -41,6 +45,9 @@ public:
         py_model_inputs_.attention_inputs.combo_position_ids      = inputs.attention_inputs.combo_position_ids;
         py_model_inputs_.input_ids                                = inputs.input_ids;
         py_model_inputs_.combo_position_ids                       = inputs.combo_position_ids;
+        // DSpark: static window-base buffer bound into the captured forward
+        // (undefined for non-dspark graphs). Refreshed per replay.
+        py_model_inputs_.dspark_ctx_starts                        = inputs.dspark_ctx_starts;
 
         // for spec
         py_model_inputs_.input_hiddens                     = inputs.input_hiddens;
@@ -64,6 +71,10 @@ public:
 public:
     py::object               attn_pyobj_{py::none()};
     at::Tensor               decoder_layer_hidden_states_;
+    // DSpark target verify: second static graph output mirroring
+    // outputs.aux_hidden_states [tokens, n_aux, H] (the draft's fc input).
+    // Undefined for every other graph flavor.
+    at::Tensor               decoder_layer_aux_hidden_states_;
     torch_ext::PyModelInputs py_model_inputs_;
 };
 

@@ -22,6 +22,11 @@ struct GraphParams {
     bool                 enable_cuda_graph_debug_mode = false;
     bool                 is_prefill_cuda_graph_mode   = false;
     bool                 is_target_verify             = false;
+    // DSpark draft graph: the captured forward writes feature KV into the
+    // paged cache (stage B) before the block forward, so the runner keeps a
+    // static logical block table + dspark_ctx_starts and refreshes them per
+    // replay (MTP/eagle drafts have no such in-forward cache-write stage).
+    bool                 is_dspark                    = false;
     int                  max_seq_len                  = 0;
     int                  tokens_per_block             = 0;  // physical kv block size
     int                  kernel_tokens_per_block      = 0;  // must be explicitly configured

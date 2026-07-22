@@ -271,6 +271,20 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
             }
         }
     }
+
+    // DSpark dense injection window base: refresh the captured [batch] buffer
+    // from the executor's device tensor (D2D). One int32 per request.
+    if (is_dspark_ && !is_target_verify_ && inputs.dspark_ctx_starts.defined()
+        && inputs.dspark_ctx_starts.numel() > 0 && py_model_inputs_.dspark_ctx_starts.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(
+            inputs.dspark_ctx_starts.numel() <= py_model_inputs_.dspark_ctx_starts.numel(),
+            "dspark_ctx_starts numel mismatch: %zu > %zu",
+            inputs.dspark_ctx_starts.numel(),
+            py_model_inputs_.dspark_ctx_starts.numel());
+        optimizedCopyAsync(inputs.dspark_ctx_starts,
+                           py_model_inputs_.dspark_ctx_starts,
+                           inputs.dspark_ctx_starts.numel() * sizeof(int));
+    }
 }
 
 void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
@@ -490,6 +504,14 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         copyStridedHost(inputs.attention_inputs.kv_cache_kernel_block_id_host,
                         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host);
 
+        // DSpark injection reads the LOGICAL block table via a captured H2D from
+        // this static pinned buffer; refresh it here so the H2D sees fresh ids.
+        if (is_dspark_ && !is_target_verify_
+            && py_model_inputs_.attention_inputs.kv_cache_block_id_host.defined()) {
+            copyStridedHost(inputs.attention_inputs.kv_cache_block_id_host,
+                            py_model_inputs_.attention_inputs.kv_cache_block_id_host);
+        }
+
         optimizedCopyAsync(inputs.attention_inputs.kv_cache_layer_to_group,
                            py_model_inputs_.attention_inputs.kv_cache_layer_to_group,
                            inputs.attention_inputs.kv_cache_layer_to_group.numel() * sizeof(int32_t));
@@ -609,6 +631,13 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.seq_len_sum);
+        // DSpark target verify: surface the aux static buffer alongside the
+        // hidden states (PyWrappedModel clones it out of the graph buffer).
+        const auto& aux_hold =
+            graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_aux_hidden_states_;
+        if (aux_hold.defined()) {
+            outputs.aux_hidden_states = aux_hold.slice(0, 0, state.seq_len_sum);
+        }
     }
     // record forward done event
     forward_event_.record(cuda_graph::graphGetCurrentStream());
@@ -685,6 +714,20 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
             return tryGetRealGraphDecodeBatchSize(inputs, state);
         }
         return false;
+    }
+
+    if (is_dspark_ && !is_prefill_cuda_graph_mode_) {
+        // The DSpark draft block forward is prefill-shaped (k+1 tokens per
+        // request, prefix>0) yet runs in the decode graph -- like target verify,
+        // it must bypass the is_prefill gate below. Only the dense decode-tail
+        // (dspark_ctx_starts set) is capturable; prefill seeding uses a ragged
+        // host-indexed feature injection that cannot be captured, so it falls
+        // through to eager here.
+        if (!enable_cuda_graph_ || !inputs.dspark_ctx_starts.defined()
+            || inputs.dspark_ctx_starts.numel() == 0) {
+            return false;
+        }
+        return tryGetRealGraphDecodeBatchSize(inputs, state);
     }
 
     if (!enable_cuda_graph_ || (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_)) {
@@ -775,6 +818,23 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.kv_cache_kernel_block_id_host =
         torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
 
+    // DSpark feature-KV injection (stage B, inside the captured forward) reads a
+    // per-request LOGICAL block table to scatter projected K/V into the paged
+    // cache. The engine's standard path only publishes a pinned host table
+    // (kv_cache_block_id_host); the model's injection takes the host-fallback
+    // (host.to(device, non_blocking=True)), which is a capturable async H2D from
+    // pinned memory. We keep that pinned host table static here and H2H-refresh
+    // it every replay (prepareAttentionInputs), so the captured H2D reads fresh
+    // page ids. The block forward's own attention keeps using the kernel table
+    // above; this buffer is injection-only. Sized to max_blocks because the
+    // injection indexes it at kernel_tokens_per_block granularity (phase-1:
+    // tokens_per_block == kernel_tokens_per_block). DRAFT only (the target-verify
+    // graph, also is_dspark_, does no injection).
+    if (is_dspark_ && !is_target_verify_) {
+        inputs.attention_inputs.kv_cache_block_id_host =
+            torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+    }
+
     auto layer_num = kv_cache_layer_to_group_.size();
     if (layer_num > 0) {
         auto kv_cache_layer_to_group_capture_ =
@@ -800,7 +860,14 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
 
     // prefix_lengths [batch_size, int32] is only meaningful for prefill and target-verify.
     // Plain decode must leave it undefined.
-    if (is_target_verify_) {
+    //
+    // The DSpark draft's block forward is prefill-shaped (num_tokens_per_bs = k+1
+    // query tokens over a committed prefix) yet runs in the decode graph, exactly
+    // like target verify. Its RoPE positions are prefix + [0, num_tokens_per_bs);
+    // with prefix unset they run off sequence_lengths (~max_seq_len) and the
+    // cos/sin-cache index goes out of bounds during capture. Seed the same
+    // capped prefix as target verify so positions stay in [0, max_seq_len).
+    if (is_target_verify_ || (is_dspark_ && !is_prefill_cuda_graph_mode_)) {
         inputs.attention_inputs.prefix_lengths =
             torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs_, options_cuda_int32_);
     } else if (is_prefill_cuda_graph_mode_) {
@@ -916,7 +983,24 @@ void CudaGraphRunner::initCapture() {
         PyModelInputs inputs;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
         inputs.input_ids     = torch::zeros({max_num_token_}, options_cuda_int32_);
-        inputs.input_hiddens = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
+        // The DSpark draft consumes the target's layer-concatenated aux hiddens
+        // [T, n_aux*H] (stage A's fc input), wider than the model hidden H; the
+        // model reports the exact width so the static buffer's numel check
+        // (prepareInputData) holds. Output hidden buffer stays H (set below).
+        int input_hidden_dim = hidden_size_;
+        if (is_dspark_ && !is_target_verify_) {
+            py::gil_scoped_acquire gil;
+            input_hidden_dim = py_instance_.attr("cuda_graph_input_hidden_dim")().cast<int>();
+        }
+        inputs.input_hiddens = torch::zeros({max_num_token_, input_hidden_dim}, options_cuda_float_);
+        // DSpark dense decode-tail injection window base, one per request. The
+        // model reads it inside the captured forward to place the k+1-wide
+        // feature window; refreshed per replay in prepareInputData. Only the
+        // DRAFT injects features; the target-verify graph (also is_dspark_) does
+        // not, so exclude it.
+        if (is_dspark_ && !is_target_verify_) {
+            inputs.dspark_ctx_starts = torch::zeros({int(max_bs_)}, options_cuda_int32_);
+        }
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
 
@@ -930,10 +1014,28 @@ void CudaGraphRunner::initCapture() {
         // get real output data type (params already prepared in attn impl __init__/create_params)
         auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
         RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
-        py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
+        auto probe_outputs_obj = py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
         RTP_LLM_LOG_INFO("initCapture forward for output datatype end");
         output = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
         capture_mem_hold_.setHiddenStates(output);
+        // DSpark target verify exports aux_hidden_states [T, n_aux, H] (the
+        // draft's fc input) from inside the captured forward, so the graph
+        // needs a second static output buffer for it, sized from the probe
+        // forward above (the runner does not know n_aux). The decode tail
+        // (MtpBatchStreamProcessor) hard-requires the export; fail fast at
+        // capture time if the model's capture_aux_hidden_layer_ids wiring is
+        // missing instead of asserting mid-stream.
+        if (is_dspark_ && is_target_verify_) {
+            py::gil_scoped_acquire gil;
+            auto                   probe_outputs = probe_outputs_obj.cast<PyModelOutputs>();
+            RTP_LLM_CHECK_WITH_INFO(probe_outputs.aux_hidden_states.defined(),
+                                    "dspark target verify graph: model did not export aux_hidden_states — "
+                                    "check capture_aux_hidden_layer_ids wiring");
+            auto aux_sizes = probe_outputs.aux_hidden_states.sizes().vec();
+            aux_sizes[0]   = max_num_token_;
+            capture_mem_hold_.setAuxHiddenStates(
+                torch::zeros(aux_sizes, probe_outputs.aux_hidden_states.options()));
+        }
         initCaptureAttentionInputsPost();
         logCudaGraphPoolMemory("before_capture");
 
@@ -1049,6 +1151,13 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 throw;
             }
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
+            // DSpark target verify: persist aux_hidden_states into its static
+            // buffer as part of the graph (this copy_ is captured too).
+            if (graph_instances_[key].mem_hold_.decoder_layer_aux_hidden_states_.defined()) {
+                RTP_LLM_CHECK_WITH_INFO(outputs.aux_hidden_states.defined(),
+                                        "dspark target verify capture: forward did not export aux_hidden_states");
+                graph_instances_[key].mem_hold_.decoder_layer_aux_hidden_states_.copy_(outputs.aux_hidden_states);
+            }
             graph.capture_end();
         }
 
@@ -1089,6 +1198,10 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     const int  token_slice_len = draft_prefill_graph_mode ? batch_size * num_tokens_per_bs_ : seq_len_or_tokens;
     inputs.input_ids           = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
     inputs.input_hiddens       = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
+    if (is_dspark_ && capture_mem_hold_.py_model_inputs_.dspark_ctx_starts.defined()) {
+        inputs.dspark_ctx_starts =
+            capture_mem_hold_.py_model_inputs_.dspark_ctx_starts.slice(0, 0, batch_size);
+    }
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
     inputs.attention_inputs.padding_offset =
@@ -1159,9 +1272,13 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
 
 CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count) {
     // only when prefill or target model score phase, the num_tokens_per_bs_ > 1
-    return CaptureMemoryHold(capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, tokens_count),
-                             inputs,
-                             is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1);
+    auto hold = CaptureMemoryHold(capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, tokens_count),
+                                  inputs,
+                                  is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1);
+    if (capture_mem_hold_.decoder_layer_aux_hidden_states_.defined()) {
+        hold.setAuxHiddenStates(capture_mem_hold_.decoder_layer_aux_hidden_states_.slice(0, 0, tokens_count));
+    }
+    return hold;
 }
 
 CudaGraphRunner* CudaGraphRunner::createForPrefill(py::object py_instance, GraphParams params) {

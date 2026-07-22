@@ -197,6 +197,19 @@ class Qwen3DFlashModel(GptModelBase):
 
         self._ctx_rope = MhaRotaryEmbeddingOp(attn_configs)
 
+    # ---- CUDA graph capture hook --------------------------------------
+
+    def cuda_graph_input_hidden_dim(self) -> int:
+        """Width of input_hiddens the captured forward consumes: n_aux * H.
+
+        Unlike a normal draft (input_hiddens = a single [T, H] hidden), the
+        DSpark/DFlash draft consumes the target's layer-concatenated aux hiddens
+        [T, n_aux*H] (stage A's fc input).  The CUDA graph runner sizes its
+        static input_hiddens buffer to this instead of the model hidden H
+        (phase-1 is tp=1, so H here is the full model hidden).
+        """
+        return len(self.dspark_params.aux_hidden_state_layer_ids) * self.config.hidden_size
+
     # ---- Stage A ------------------------------------------------------
 
     def combine_hidden_states(self, aux_concat: torch.Tensor) -> torch.Tensor:
@@ -438,6 +451,56 @@ class Qwen3DFlashModel(GptModelBase):
 
     # ---- Full pipeline --------------------------------------------------
 
+    def _propose_backbone(
+        self,
+        inputs: PyModelInputs,
+        fmha_impl: Any,
+        ctx_lengths: Optional[torch.Tensor] = None,
+        ctx_starts: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Stages A+B+C: feature combine, inject, block forward -> head_hidden.
+
+        This is the CUDA-graph-capturable region (see forward_backbone): it
+        ends at head_hidden [B*(1+k), H] and deliberately excludes the lm_head
+        + Markov + softmax tail (stage D), which is eager (draft_tail) so no
+        [B, k, V] tensor ever becomes a static graph output.  Matches the vLLM
+        boundary (backbone in graph, compute_logits + sampling eager after).
+        """
+        width = self.dspark_params.block_width
+        attention_inputs = inputs.attention_inputs
+        input_lengths = attention_inputs.input_lengths
+        if not input_lengths.is_cuda:
+            # Host-side sanity only on CPU inputs (UT paths): a CUDA read here
+            # would D2H-sync every decode round.  The executor guarantees
+            # uniform k+1 blocks on the engine path.
+            assert bool((input_lengths == width).all()), (
+                f"dspark block forward expects uniform input_lengths == {width}, "
+                f"got {input_lengths.tolist()}"
+            )
+
+        # Executor channel for the dense decode-tail window base; when set,
+        # injection takes the device fast path with a fixed [B, width] window.
+        if ctx_starts is None:
+            ctx_starts = getattr(inputs, "dspark_ctx_starts", None)
+            if ctx_starts is not None and ctx_starts.numel() == 0:
+                ctx_starts = None
+
+        if ctx_lengths is None and ctx_starts is None:
+            # Executor channel for the incremental (decode-tail) injection
+            # window; unset means "whole prefix" (prefill seeding).
+            ctx_from_inputs = getattr(inputs, "dspark_ctx_lengths", None)
+            if ctx_from_inputs is not None and ctx_from_inputs.numel() > 0:
+                ctx_lengths = ctx_from_inputs.cpu()
+
+        aux = inputs.input_hiddens
+        if aux is not None and aux.numel() > 0:
+            fused = self.combine_hidden_states(aux)
+            self.inject_context_kv(
+                fused, attention_inputs, ctx_lengths, ctx_starts=ctx_starts
+            )
+
+        return self.block_forward(inputs.input_ids, inputs, fmha_impl)
+
     def propose(
         self,
         inputs: PyModelInputs,
@@ -461,42 +524,10 @@ class Qwen3DFlashModel(GptModelBase):
           - inputs.attention_inputs: chunked-prefill metadata with
             prefix_lengths = committed_len, input_lengths = 1+k each.
         """
-        width = self.dspark_params.block_width
-        attention_inputs = inputs.attention_inputs
-        input_lengths = attention_inputs.input_lengths
-        if not input_lengths.is_cuda:
-            # Host-side sanity only on CPU inputs (UT paths): a CUDA read here
-            # would D2H-sync every decode round.  The executor guarantees
-            # uniform k+1 blocks on the engine path.
-            assert bool((input_lengths == width).all()), (
-                f"dspark block forward expects uniform input_lengths == {width}, "
-                f"got {input_lengths.tolist()}"
-            )
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
-
-        # Executor channel for the dense decode-tail window base; when set,
-        # injection takes the device fast path with a fixed [B, width] window.
-        if ctx_starts is None:
-            ctx_starts = getattr(inputs, "dspark_ctx_starts", None)
-            if ctx_starts is not None and ctx_starts.numel() == 0:
-                ctx_starts = None
-
-        if ctx_lengths is None and ctx_starts is None:
-            # Executor channel for the incremental (decode-tail) injection
-            # window; unset means "whole prefix" (prefill seeding).
-            ctx_from_inputs = getattr(inputs, "dspark_ctx_lengths", None)
-            if ctx_from_inputs is not None and ctx_from_inputs.numel() > 0:
-                ctx_lengths = ctx_from_inputs.cpu()
-
-        aux = inputs.input_hiddens
-        if aux is not None and aux.numel() > 0:
-            fused = self.combine_hidden_states(aux)
-            self.inject_context_kv(
-                fused, attention_inputs, ctx_lengths, ctx_starts=ctx_starts
-            )
-
-        head_hidden = self.block_forward(inputs.input_ids, inputs, fmha_impl)
+        width = self.dspark_params.block_width
+        head_hidden = self._propose_backbone(inputs, fmha_impl, ctx_lengths, ctx_starts)
         base_logits = self.compute_base_logits(head_hidden)
         anchor_ids = inputs.input_ids.view(-1, width)[:, 0]
         draft_tokens, corrected = self.markov_correct(base_logits, anchor_ids)
@@ -507,8 +538,51 @@ class Qwen3DFlashModel(GptModelBase):
             head_hidden=head_hidden,
         )
 
+    # ---- CUDA-graph split: backbone (captured) + tail (eager) ------------
+
+    def forward_backbone(
+        self, inputs: PyModelInputs, fmha_impl: Any = None
+    ) -> PyModelOutputs:
+        """Graph-captured entry: stages A+B+C only, output = head_hidden.
+
+        The CUDA graph runner binds THIS (not forward) for the dspark draft
+        (cuda_graph capture_method_name); its single static output buffer is
+        [B*(1+k), H], never the [B, k, V] draft distribution.  The engine runs
+        draft_tail eagerly after replay to produce draft_tokens/draft_probs.
+        """
+        if fmha_impl is None:
+            fmha_impl = self.prepare_fmha_impl(inputs)
+        head_hidden = self._propose_backbone(inputs, fmha_impl)
+        return PyModelOutputs(head_hidden, fmha_impl.fmha_params)
+
+    def draft_tail(
+        self, outputs: PyModelOutputs, inputs: PyModelInputs
+    ) -> PyModelOutputs:
+        """Eager stage D on head_hidden: lm_head + Markov + softmax.
+
+        Runs OUTSIDE the CUDA graph (vLLM boundary), reading the block hidden
+        states the captured forward_backbone left in outputs.hidden_states and
+        the anchor ids from inputs.input_ids (the static graph input buffer,
+        refreshed pre-replay, valid until the next replay's refresh).  Produces
+        a fresh (non-static) draft_probs [B, k, V] each call, so the vocab-wide
+        tensor never has to persist as a graph output.
+        """
+        width = self.dspark_params.block_width
+        head_hidden = outputs.hidden_states
+        base_logits = self.compute_base_logits(head_hidden)
+        anchor_ids = inputs.input_ids.view(-1, width)[:, 0]
+        draft_tokens, corrected = self.markov_correct(base_logits, anchor_ids)
+        outputs.draft_tokens = draft_tokens
+        outputs.draft_probs = torch.softmax(corrected, dim=-1)
+        return outputs
+
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        """Engine entry: full pipeline, returns hidden states + proposal.
+        """Eager engine entry: full pipeline (backbone + tail).
+
+        Used on the non-graph path (canRun false, e.g. prefill seeding).  The
+        CUDA-graph path calls forward_backbone (captured) then draft_tail
+        (eager) separately; this composes them so the eager fallback keeps the
+        same output contract.
 
         G3 contract: draft sampling lives in the model, so the outputs carry
         draft_tokens [B, k] and draft_probs [B, k, V] (softmax of the corrected
@@ -518,13 +592,8 @@ class Qwen3DFlashModel(GptModelBase):
         are softmax at T=1 (greedy verification is exact token match and does
         not read them).
         """
-        if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)
-        proposal = self.propose(inputs, fmha_impl)
-        outputs = PyModelOutputs(proposal.head_hidden, fmha_impl.fmha_params)
-        outputs.draft_tokens = proposal.draft_tokens
-        outputs.draft_probs = torch.softmax(proposal.corrected_logits, dim=-1)
-        return outputs
+        outputs = self.forward_backbone(inputs, fmha_impl)
+        return self.draft_tail(outputs, inputs)
 
 
 __all__ = [

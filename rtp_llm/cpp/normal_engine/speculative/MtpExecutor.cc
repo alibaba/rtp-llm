@@ -370,8 +370,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         RTP_LLM_CHECK_WITH_INFO(!params.parallelism_config.prefill_cp_config.is_enabled()
                                     && !params.parallelism_config.prefill_cp_config.is_prefill_enabled(),
                                 "dspark phase-1a does not support context parallel");
-        RTP_LLM_CHECK_WITH_INFO(!params.hw_kernel_config.enable_cuda_graph,
-                                "dspark phase-1a does not support ENABLE_CUDA_GRAPH");
+        // CUDA graph (phase-1b): the single decode draft model captures the
+        // k+1-wide block forward + dense feature-KV injection; the runner keeps
+        // a static logical block table + dspark_ctx_starts refreshed per replay.
+        // Prefill seeding stays eager (canRun rejects the ragged prefill batch),
+        // so no separate sp_prefill_draft_model_ is created for dspark below.
         // tpSyncModelInputs does not broadcast dspark_ctx_lengths yet, and the
         // fake-stream path (dp_size > 1) has no k-wide propose state.
         RTP_LLM_CHECK_WITH_INFO(params.parallelism_config.tp_size <= 1 && params.parallelism_config.dp_size <= 1,
@@ -514,8 +517,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
             draft_model_.reset(new PyWrappedModel(
                 model_params, params.py_sp_model, false, false, draft_cache_layer_layout.layer_to_groups));
-            // Create separate model for speculative prefill with CUDA graph if enabled (from params)
-            const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph;
+            // Create separate model for speculative prefill with CUDA graph if enabled (from params).
+            // DSpark uses a single decode draft object (its block forward is the
+            // same k+1 shape in decode-tail and seeding), so it never needs the
+            // separate prefill draft graph that MTP requires.
+            const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph && !is_dspark_;
             RTP_LLM_LOG_INFO(
                 "[speculative decoding] enable_cuda_graph=%d (set ENABLE_CUDA_GRAPH=1 when starting server to enable sp_prefill_draft_model_)",
                 static_cast<int>(enable_cuda_graph));
