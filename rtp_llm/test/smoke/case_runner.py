@@ -2,6 +2,9 @@ import concurrent.futures
 import json
 import logging
 import os
+import signal
+import shutil
+import threading
 import traceback
 import time
 
@@ -122,6 +125,8 @@ class CaseRunner(object):
         return default
 
     def run(self):
+        keepalive_before_curl = self._keepalive_enabled()
+        keepalive_after_curl = self._keepalive_enabled(after_curl=True)
         self._dmesg_baseline = snapshot_dmesg()
         env_dict = self.create_env_from_args(self.env_args)
         enable_remote_cache = self._extract_bool_arg(self.smoke_args_str, "--enable_remote_cache")
@@ -138,9 +143,17 @@ class CaseRunner(object):
             if server_manager is None:
                 task_states.ret = False
                 return task_states
+            if keepalive_before_curl:
+                return self._keep_server_alive(server_manager, enable_remote_cache)
             task_states = self.curl_server(server_manager)
             if task_states.ret != True:
+                server_manager.stop_server()
+                if enable_remote_cache and self.remote_kvcm_server is not None:
+                    self.remote_kvcm_server.stop_server()
+                    self.remote_kvcm_server.copy_logs()
                 return task_states
+            if keepalive_after_curl:
+                return self._keep_server_alive(server_manager, enable_remote_cache)
             assert server_manager is not None, "server manager should not be None"
             server_manager.stop_server()
             if enable_remote_cache and self.remote_kvcm_server is not None:
@@ -151,6 +164,146 @@ class CaseRunner(object):
             summarize_and_cleanup_coredumps(
                 os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "")
             )
+
+    def _keep_server_alive(
+        self, server_manager: MagaServerManager, enable_remote_cache: bool
+    ) -> TaskStates:
+        return self._keep_servers_alive(
+            {"main": server_manager}, enable_remote_cache=enable_remote_cache
+        )
+
+    @staticmethod
+    def _keepalive_enabled(after_curl: bool = False) -> bool:
+        before = str_to_bool(
+            os.environ.get("SMOKE_KEEP_SERVER_ALIVE", "False")
+        )
+        after = str_to_bool(
+            os.environ.get("SMOKE_KEEP_SERVER_ALIVE_AFTER_CURL", "False")
+        )
+        if before and after:
+            raise ValueError(
+                "SMOKE_KEEP_SERVER_ALIVE and "
+                "SMOKE_KEEP_SERVER_ALIVE_AFTER_CURL are mutually exclusive"
+            )
+        return after if after_curl else before
+
+    def _keep_servers_alive(
+        self,
+        servers: Dict[str, MagaServerManager],
+        enable_remote_cache: bool = False,
+    ) -> TaskStates:
+        """Publish live endpoints and wait for an explicit stop request."""
+        if not servers:
+            raise ValueError("keepalive requires at least one server")
+
+        output_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
+        live_info_path = os.environ.get(
+            "SMOKE_LIVE_INFO", os.path.join(output_dir, "smoke_live_info.json")
+        )
+        stop_file = os.environ.get(
+            "SMOKE_STOP_FILE", os.path.join(output_dir, "smoke_stop")
+        )
+        stop_event = threading.Event()
+
+        def signal_handler(signum, _frame):
+            logging.info("keepalive smoke received signal %s", signum)
+            stop_event.set()
+
+        old_handlers = {}
+        tmp_live_info = f"{live_info_path}.tmp.{os.getpid()}"
+        try:
+            if threading.current_thread() is threading.main_thread():
+                for signum in (signal.SIGTERM, signal.SIGINT):
+                    old_handlers[signum] = signal.getsignal(signum)
+                    signal.signal(signum, signal_handler)
+
+            servers_info = {
+                role: {
+                    "port": manager.port,
+                    "server_pid": manager.server_pid,
+                    "log_file": manager.log_file_path,
+                }
+                for role, manager in servers.items()
+            }
+            live_info = {
+                "servers": servers_info,
+                "stop_file": stop_file,
+                "task_info": self.task_info.taskinfo_rel_path,
+                "smoke_args": (
+                    self.smoke_args
+                    if isinstance(self.smoke_args, dict) and self.smoke_args
+                    else self.smoke_args_str
+                ),
+            }
+            if len(servers) == 1:
+                only = next(iter(servers.values()))
+                live_info.update(
+                    {
+                        "port": only.port,
+                        "server_pid": only.server_pid,
+                        "log_file": only.log_file_path,
+                    }
+                )
+
+            live_info_dir = os.path.dirname(os.path.abspath(live_info_path))
+            os.makedirs(live_info_dir, exist_ok=True)
+            with open(tmp_live_info, "w", encoding="utf-8") as output:
+                json.dump(live_info, output, indent=2, sort_keys=True)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(tmp_live_info, live_info_path)
+            logging.info(
+                "SMOKE_KEEP_SERVER_ALIVE active; live info: %s", live_info
+            )
+
+            while not stop_event.is_set():
+                if os.path.exists(stop_file):
+                    logging.info("keepalive smoke stop file found: %s", stop_file)
+                    break
+                for role, manager in servers.items():
+                    pid = manager.server_pid
+                    if pid is None or not os.path.exists(f"/proc/{pid}"):
+                        raise RuntimeError(
+                            f"{role} server pid {pid} disappeared during keepalive"
+                        )
+                stop_event.wait(1)
+        finally:
+            try:
+                if os.path.exists(tmp_live_info):
+                    os.unlink(tmp_live_info)
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("keepalive temp-file cleanup failed: %s", exc)
+            for signum, handler in old_handlers.items():
+                try:
+                    signal.signal(signum, handler)
+                except Exception as exc:  # noqa: BLE001
+                    logging.warning(
+                        "keepalive signal-handler restore failed for signal=%s: %s",
+                        signum,
+                        exc,
+                    )
+            for role, manager in reversed(list(servers.items())):
+                try:
+                    logging.info("stopping keepalive server role=%s", role)
+                    manager.stop_server()
+                except Exception as exc:  # noqa: BLE001
+                    logging.warning(
+                        "keepalive stop_server failed for role=%s: %s", role, exc
+                    )
+            if (
+                enable_remote_cache
+                and getattr(self, "remote_kvcm_server", None) is not None
+            ):
+                try:
+                    self.remote_kvcm_server.stop_server()
+                except Exception as exc:  # noqa: BLE001
+                    logging.warning("keepalive remote KVCM stop failed: %s", exc)
+                try:
+                    self.remote_kvcm_server.copy_logs()
+                except Exception as exc:  # noqa: BLE001
+                    logging.warning("keepalive remote KVCM log copy failed: %s", exc)
+
+        return TaskStates()
 
     def _start_remote_kvcm_server(self) -> Optional[RemoteKVCMServer]:
         server_path = os.path.join(os.environ["TEST_SRCDIR"], os.environ["TEST_WORKSPACE"], "external/remote_kv_cache_manager_server")
@@ -482,9 +635,45 @@ class CaseRunner(object):
         env_dict: Dict[str, str] = {}
         for env_str in env_list:
             k, v = env_str.split("=", 1)
+            v = self._expand_env_value(v)
+            if k == "MEMORY_CACHE_DISK_PATHS":
+                self._prepare_memory_cache_disk_paths(v)
             env_dict.update({k: v})
             logging.info(f"env dict update {k}:{v}")
         return env_dict
+
+    def _expand_env_value(self, value: str) -> str:
+        output_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
+        tmp_dir = os.environ.get("TEST_TMPDIR")
+        if "__TEST_TMPDIR__" in value and tmp_dir is None:
+            raise RuntimeError(
+                "TEST_TMPDIR is not set; cannot expand __TEST_TMPDIR__"
+            )
+        tmp_dir = tmp_dir or output_dir
+        return value.replace("__TEST_UNDECLARED_OUTPUTS_DIR__", output_dir).replace(
+            "__TEST_TMPDIR__", tmp_dir
+        )
+
+    def _prepare_memory_cache_disk_paths(self, paths: str) -> None:
+        safe_roots = [
+            os.environ.get("TEST_TMPDIR"),
+            os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR"),
+        ]
+        safe_roots = [os.path.abspath(root) for root in safe_roots if root]
+        for path in paths.split(","):
+            path = path.strip()
+            if not path:
+                continue
+            abs_path = os.path.abspath(path)
+            if os.path.exists(abs_path):
+                if not any(os.path.commonpath([abs_path, root]) == root for root in safe_roots):
+                    raise RuntimeError(
+                        f"refuse to clean MEMORY_CACHE_DISK_PATHS outside test dirs: {abs_path}"
+                    )
+                shutil.rmtree(abs_path)
+                logging.info("cleaned memory cache disk path: %s", abs_path)
+            os.makedirs(abs_path, exist_ok=True)
+            logging.info("prepared memory cache disk path: %s", abs_path)
 
     def start_servers_parallel(
         self, server_configs: List[Dict[str, Any]]

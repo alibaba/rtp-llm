@@ -5,7 +5,36 @@ package(default_visibility = ["//visibility:public"])
 # own smoke/ children through smoke.__path__ without duplicating runner srcs.
 filegroup(
     name = "smoke_framework_srcs",
-    srcs = glob(["*.py"]),
+    srcs = glob(
+        ["*.py"],
+        exclude = ["*_test.py"],
+    ),
+)
+
+py_test(
+    name = "case_runner_keepalive_test",
+    srcs = glob(
+        ["*.py"],
+        exclude = ["entry.py"],
+    ),
+    main = "case_runner_keepalive_test.py",
+    imports = [".."],
+    deps = [
+        "//rtp_llm/test/utils:device_resource",
+        "//rtp_llm/test/utils:maga_server_manager",
+        "//rtp_llm/test/utils:test_util",
+        "//rtp_llm:dashscope",
+        "//rtp_llm:fastapi",
+        "//rtp_llm:jieba",
+        "//rtp_llm:json5",
+        "//rtp_llm:openai",
+        "//rtp_llm:partial_json_parser",
+        "//rtp_llm:psutil",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:testlib",
+        "//rtp_llm:tiktoken",
+        "//rtp_llm:uvicorn",
+    ],
 )
 
 exports_files([

@@ -35,6 +35,8 @@ class PdSeperationCaseRunner(CaseRunner):
 
     # override
     def run(self):
+        keepalive_before_curl = self._keepalive_enabled()
+        keepalive_after_curl = self._keepalive_enabled(after_curl=True)
         frontend_server_manager = None
         frontend_envs = {}
         prefill_envs = self.create_env_from_args(self.env_args[PREFILL_ROLE_NAME])
@@ -158,7 +160,28 @@ class PdSeperationCaseRunner(CaseRunner):
             else frontend_server_manager
         )
 
+        if keepalive_before_curl:
+            servers = {
+                "prefill": prefill_server_manager,
+                "decode": decode_server_manager,
+            }
+            if frontend_server_manager is not None:
+                servers["frontend"] = frontend_server_manager
+            return self._keep_servers_alive(
+                servers, enable_remote_cache=enable_remote_cache
+            )
+
         task_states = self.curl_server(curl_server_mgr)
+        if task_states.ret == True and keepalive_after_curl:
+            servers = {
+                "prefill": prefill_server_manager,
+                "decode": decode_server_manager,
+            }
+            if frontend_server_manager is not None:
+                servers["frontend"] = frontend_server_manager
+            return self._keep_servers_alive(
+                servers, enable_remote_cache=enable_remote_cache
+            )
         prefill_server_manager.stop_server()
         decode_server_manager.stop_server()
 
@@ -191,6 +214,8 @@ class DpSeperationCaseRunner(CaseRunner):
 
     # override
     def run(self):
+        keepalive_before_curl = self._keepalive_enabled()
+        keepalive_after_curl = self._keepalive_enabled(after_curl=True)
         frontend_server_manager = None
         frontend_envs = {}
         prefill_envs = self.create_env_from_args(self.env_args[PREFILL_ROLE_NAME])
@@ -320,7 +345,28 @@ class DpSeperationCaseRunner(CaseRunner):
             else frontend_server_manager
         )
 
+        if keepalive_before_curl:
+            servers = {
+                "prefill": prefill_server_manager,
+                "decode": decode_server_manager,
+            }
+            if frontend_server_manager is not None:
+                servers["frontend"] = frontend_server_manager
+            return self._keep_servers_alive(
+                servers, enable_remote_cache=enable_remote_cache
+            )
+
         task_states = self.curl_server(curl_server_mgr)
+        if task_states.ret == True and keepalive_after_curl:
+            servers = {
+                "prefill": prefill_server_manager,
+                "decode": decode_server_manager,
+            }
+            if frontend_server_manager is not None:
+                servers["frontend"] = frontend_server_manager
+            return self._keep_servers_alive(
+                servers, enable_remote_cache=enable_remote_cache
+            )
         prefill_server_manager.stop_server()
         decode_server_manager.stop_server()
 
@@ -349,6 +395,8 @@ class FrontAppSeperationCaseRunner(CaseRunner):
 
     # override
     def run(self):
+        keepalive_before_curl = self._keepalive_enabled()
+        keepalive_after_curl = self._keepalive_enabled(after_curl=True)
         frontend_server_manager = None
         frontend_envs = {}
         pd_fusion_envs = self.create_env_from_args(self.env_args[PD_FUNSION_ROLE_NAME])
@@ -405,7 +453,16 @@ class FrontAppSeperationCaseRunner(CaseRunner):
             return task_states
         assert server_manager is not None, "PDFUSION server manager should not be None"
 
+        if keepalive_before_curl:
+            return self._keep_servers_alive(
+                {"pd_fusion": server_manager, "frontend": frontend_server_manager}
+            )
+
         task_states = self.curl_server(frontend_server_manager)
+        if task_states.ret == True and keepalive_after_curl:
+            return self._keep_servers_alive(
+                {"pd_fusion": server_manager, "frontend": frontend_server_manager}
+            )
         server_manager.stop_server()
 
         if frontend_server_manager is not None:
@@ -438,6 +495,8 @@ class VitSeperationCaseRunner(CaseRunner):
 
     # override
     def run(self):
+        keepalive_before_curl = self._keepalive_enabled()
+        keepalive_after_curl = self._keepalive_enabled(after_curl=True)
         llm_envs = self.create_env_from_args(self.env_args[LLM_ROLE_NAME])
         vit_envs = self.create_env_from_args(self.env_args[VIT_ROLE_NAME])
         llm_gpu_size = int(llm_envs["WORLD_SIZE"])
@@ -512,7 +571,15 @@ class VitSeperationCaseRunner(CaseRunner):
             vit_server_manager.stop_server()
             return vit_task_states
         assert vit_server_manager is not None, "vit server manager should not be None"
+        if keepalive_before_curl:
+            return self._keep_servers_alive(
+                {"llm": llm_server_manager, "vit": vit_server_manager}
+            )
         task_states = self.curl_server(llm_server_manager)
+        if task_states.ret == True and keepalive_after_curl:
+            return self._keep_servers_alive(
+                {"llm": llm_server_manager, "vit": vit_server_manager}
+            )
         vit_server_manager.stop_server()
         llm_server_manager.stop_server()
         return task_states

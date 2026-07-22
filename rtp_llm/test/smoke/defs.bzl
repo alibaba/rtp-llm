@@ -132,7 +132,10 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
 
     kvcm_envs_str = "[" + ",".join(["\\\"" + x + "\\\"" for x in kvcm_envs]) + "]"
 
-    local_srcs = native.glob(["*.py", "mainse/*.py"])
+    local_srcs = native.glob(
+        ["*.py", "mainse/*.py"],
+        exclude = ["*_test.py", "mainse/*_test.py"],
+    )
     has_entry = bool([f for f in local_srcs if f == "entry.py" or f.endswith("/entry.py")])
     if has_entry:
         all_srcs = local_srcs
