@@ -134,19 +134,23 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         }
 
         if (load_back_ticket && !load_back_ticket->empty()) {
-            for (const PendingLoadBackItem& item : load_back_ticket->items()) {
-                if (!block_tree_cache_->validateDeviceGroupTagsForComponentGroup(item.group_id, item.device_group_tags)
-                    || item.device_group_tags.size() != 1 || item.device_group_tags.front() != tag
-                    || item.path_index >= reuse_blocks || item.source_blocks.size() != 1
-                    || isNullBlockIdx(item.source_blocks.front())) {
+            for (size_t item_index = 0; item_index < load_back_ticket->itemCount(); ++item_index) {
+                const int   group_id          = load_back_ticket->groupId(item_index);
+                const auto& device_group_tags = load_back_ticket->deviceGroupTags(item_index);
+                const auto& source_blocks     = load_back_ticket->sourceBlocks(item_index);
+                const auto  path_index        = load_back_ticket->pathIndex(item_index);
+                if (!block_tree_cache_->validateDeviceGroupTagsForComponentGroup(group_id, device_group_tags)
+                    || device_group_tags.size() != 1 || device_group_tags.front() != tag
+                    || path_index >= reuse_blocks || source_blocks.size() != 1
+                    || isNullBlockIdx(source_blocks.front())) {
                     return rollback();
                 }
-                if (item.source_tier == Tier::DEVICE) {
-                    const auto current = block_ids_0.blocks()[item.path_index];
-                    if (!isNullBlockIdx(current) && current != item.source_blocks.front()) {
+                if (load_back_ticket->sourceTier(item_index) == Tier::DEVICE) {
+                    const auto current = block_ids_0.blocks()[path_index];
+                    if (!isNullBlockIdx(current) && current != source_blocks.front()) {
                         return rollback();
                     }
-                    block_ids_0.setAt(item.path_index, item.source_blocks.front());
+                    block_ids_0.setAt(path_index, source_blocks.front());
                 }
             }
         }
@@ -168,13 +172,14 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
 
     std::vector<size_t> materialize_positions;
     if (load_back_ticket && !load_back_ticket->empty()) {
-        for (const PendingLoadBackItem& item : load_back_ticket->items()) {
-            if (item.source_tier == Tier::DEVICE) {
+        for (size_t item_index = 0; item_index < load_back_ticket->itemCount(); ++item_index) {
+            if (load_back_ticket->sourceTier(item_index) == Tier::DEVICE) {
                 continue;
             }
-            if (std::find(materialize_positions.begin(), materialize_positions.end(), item.path_index)
+            const size_t path_index = load_back_ticket->pathIndex(item_index);
+            if (std::find(materialize_positions.begin(), materialize_positions.end(), path_index)
                 == materialize_positions.end()) {
-                materialize_positions.push_back(item.path_index);
+                materialize_positions.push_back(path_index);
             }
         }
         for (size_t position = 0; position < reuse_blocks; ++position) {
@@ -209,15 +214,19 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     }
 
     if (load_back_ticket && !load_back_ticket->empty()) {
-        for (PendingLoadBackItem& item : load_back_ticket->items()) {
-            if (item.path_index >= block_ids_0.blocksNum() || isNullBlockIdx(block_ids_0.blocks()[item.path_index])) {
+        for (size_t item_index = 0; item_index < load_back_ticket->itemCount(); ++item_index) {
+            const size_t path_index = load_back_ticket->pathIndex(item_index);
+            if (path_index >= block_ids_0.blocksNum() || isNullBlockIdx(block_ids_0.blocks()[path_index])) {
                 return rollback();
             }
-            const auto target = block_ids_0.blocks()[item.path_index];
-            if (item.source_tier == Tier::DEVICE && target != item.source_blocks.front()) {
+            const auto target = block_ids_0.blocks()[path_index];
+            if (load_back_ticket->sourceTier(item_index) == Tier::DEVICE
+                && target != load_back_ticket->sourceBlocks(item_index).front()) {
                 return rollback();
             }
-            item.target_device_blocks = {target};
+            if (!load_back_ticket->bindTargetDeviceBlocks(item_index, {target})) {
+                return rollback();
+            }
         }
     }
 

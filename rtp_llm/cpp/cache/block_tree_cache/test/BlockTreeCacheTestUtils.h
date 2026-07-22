@@ -77,6 +77,7 @@ public:
 
     static void setCopyEngineForTest(BlockTreeCache& cache, CopyEnginePtr copy_engine);
     static void runMaintenanceForTest(BlockTreeCache& cache);
+    static int  reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier = Tier::DEVICE);
     static int  pendingTasksForTest(const BlockTreeCache& cache);
 
 private:

@@ -781,8 +781,8 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkCountsPrimaryAnd
     EXPECT_EQ(std::count(submitted_groups.begin(), submitted_groups.end(), 0), 1);
     EXPECT_EQ(std::count(submitted_groups.begin(), submitted_groups.end(), 1), 2);
 
-    cache->reclaimBlocks(/*num_blocks=*/100, Tier::DEVICE);
-    cache->reclaimBlocks(/*num_blocks=*/100, Tier::HOST);
+    block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::DEVICE);
+    block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::HOST);
     cache->waitForPendingTasks();
     allocator->setBlockTreeCache(nullptr);
 }
@@ -823,7 +823,7 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
     EXPECT_EQ(scripted_copy->submitCount(), 1u);
     EXPECT_EQ(backing->freeBlocksNum(), 7u);
 
-    cache->reclaimBlocks(/*num_blocks=*/100, Tier::HOST);
+    block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::HOST);
     cache->waitForPendingTasks();
     allocator->setBlockTreeCache(nullptr);
 }

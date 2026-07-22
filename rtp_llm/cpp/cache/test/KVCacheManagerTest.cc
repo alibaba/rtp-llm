@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTransferConverter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -24,6 +25,7 @@
 
 namespace rtp_llm {
 namespace test {
+using block_tree_cache_test::BlockTreeCacheTestPeer;
 
 namespace {
 constexpr int                  kDsv4PoolNum = 7;
@@ -1179,7 +1181,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoUsesAuthoritativeBlockTreeSnapshot) {
     EXPECT_EQ(kv_cache_manager->getKVCacheInfo(after_duplicate.version, true).cached_keys, std::vector<CacheKeyType>{});
 
     kv_cache_manager->free(FreeInfo{resource, tokens});
-    kv_cache_manager->blockTreeCache()->reclaimBlocks(/*num_blocks=*/100, Tier::DEVICE);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*kv_cache_manager->blockTreeCache(), /*num_blocks=*/100, Tier::DEVICE);
 }
 
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
@@ -1394,7 +1396,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
     EXPECT_GE(manager->freeBlocksNum(), free_after_c);
 
     // --- Reclaim all remaining BlockTreeCache holders and verify full pool recovery ---
-    manager->blockTreeCache()->reclaimBlocks(/*num_blocks=*/4096);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*manager->blockTreeCache(), /*num_blocks=*/4096);
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 
@@ -1466,7 +1468,7 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
     }
 
     manager->free(FreeInfo{reuse_res, reuse_tokens});
-    manager->blockTreeCache()->reclaimBlocks(/*num_blocks=*/4096);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*manager->blockTreeCache(), /*num_blocks=*/4096);
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 
@@ -1600,7 +1602,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     manager->free(FreeInfo{res_c, tokens_c});
 
     // Reclaim remaining declarative cache holders to restore every physical pool.
-    manager->blockTreeCache()->reclaimBlocks(/*num_blocks=*/4096);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*manager->blockTreeCache(), /*num_blocks=*/4096);
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle) {

@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -29,6 +30,7 @@
 
 namespace rtp_llm {
 namespace test {
+using block_tree_cache_test::BlockTreeCacheTestPeer;
 
 using TestHybridPoolKVCacheAllocator = BlockTreeCacheTestAllocator<HybridPoolKVCacheAllocator>;
 
@@ -1287,7 +1289,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionMarksCanonicalResour
 
     // The allocator publishes to BlockTreeCache, so eviction is observed through
     // the tree rather than the legacy allocator pop-resource facade.
-    EXPECT_GT(allocator->blockTreeCacheOwner()->reclaimBlocks(/*num_blocks=*/4096), 0);
+    EXPECT_GT(BlockTreeCacheTestPeer::reclaimBlocksForTest(*allocator->blockTreeCacheOwner(), /*num_blocks=*/4096), 0);
     const auto after = allocator->blockTreeCacheOwner()->getKeySnapshot(expected_canonical.size() + 1);
     EXPECT_GT(after.version, before.version);
     EXPECT_TRUE(after.keys.empty());

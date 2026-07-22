@@ -5,6 +5,7 @@
 #define private public
 #define protected public
 #include "rtp_llm/cpp/cache/AsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
@@ -148,7 +149,9 @@ TEST_F(SystemPromptConstructorTest, testSecondTaskFailureReleasesEarlierRequestO
               0u);
     EXPECT_EQ(manager->blockTreeCache()->getStats().device_heap_total_size, 1u);
 
-    EXPECT_EQ(manager->blockTreeCache()->reclaimBlocks(/*num_blocks=*/100, Tier::DEVICE), 1);
+    EXPECT_EQ(block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(
+                  *manager->blockTreeCache(), /*num_blocks=*/100, Tier::DEVICE),
+              1);
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 

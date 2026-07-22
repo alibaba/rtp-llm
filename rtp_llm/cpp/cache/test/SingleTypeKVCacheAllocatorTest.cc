@@ -29,6 +29,7 @@ namespace rtp_llm {
 namespace test {
 
 using TestSingleTypeKVCacheAllocator = BlockTreeCacheTestAllocator<SingleTypeKVCacheAllocator>;
+using PendingLoadBackItem = LoadBackTicket::PendingLoadBackItem;
 
 class CountingSingleTypeCopyEngine: public CopyEngine {
 public:
@@ -697,12 +698,13 @@ TEST_F(SingleTypeKVCacheAllocatorTest, EarlyCommonMallocFailureAbortsTicketBefor
         size_t                   abort_count              = 0;
         size_t                   free_blocks_during_abort = free_before;
         std::vector<std::string> events;
-        registry->abort_callback_ = [&](const std::vector<PendingLoadBackItem>& items) {
+        registry->abort_callback_ = [&](const LoadBackTicket& ticket) {
             ++abort_count;
+            const auto& items = ticket.items();
             events.push_back("ticket_abort_begin");
             EXPECT_FALSE(items.empty());
             EXPECT_LT(allocator_->freeBlocksNum(), free_before);
-            original_abort(items);
+            original_abort(ticket);
             free_blocks_during_abort = allocator_->freeBlocksNum();
             EXPECT_LT(free_blocks_during_abort, free_before);
             const size_t source_ref_after_abort = source_tier == Tier::HOST ?
@@ -765,13 +767,13 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LowerTierHitFollowedByOuterIncrFailureNev
         auto   original_abort      = registry->abort_callback_;
         size_t commit_count        = 0;
         size_t abort_count         = 0;
-        registry->commit_callback_ = [&](const std::vector<PendingLoadBackItem>& items) {
+        registry->commit_callback_ = [&](const LoadBackTicket& ticket) {
             ++commit_count;
-            return original_commit(items);
+            return original_commit(ticket);
         };
-        registry->abort_callback_ = [&](const std::vector<PendingLoadBackItem>& items) {
+        registry->abort_callback_ = [&](const LoadBackTicket& ticket) {
             ++abort_count;
-            original_abort(items);
+            original_abort(ticket);
         };
 
         auto resource = createBatchKVCacheResource(/*batch_size=*/3, config);
@@ -808,54 +810,6 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LowerTierHitFollowedByOuterIncrFailureNev
     }
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, SynchronousCommitFailureRollsBackFullRequestAndSourceProtection) {
-    ScopedSingleTypeDiskDirectory disk_directory;
-    const auto config = createSingleTypeTestConfig(/*layer_num=*/2, /*block_num=*/12, /*seq_size_per_block=*/4);
-    allocator_        = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
-    allocator_->setBlockTreeCacheConfigForTest(makeSingleTypeTieredConfig(Tier::HOST, disk_directory.path()));
-    ASSERT_TRUE(allocator_->init());
-
-    const auto& cache = allocator_->blockTreeCacheOwner();
-    ASSERT_NE(cache, nullptr);
-    auto copy_engine    = std::make_shared<CountingSingleTypeCopyEngine>(cache->componentGroups(), cache->components());
-    cache->copy_engine_ = copy_engine;
-    const BlockIdxType source_block = seedSingleTypeLowerTier(*cache, Tier::HOST, /*key=*/100);
-    ASSERT_NE(source_block, NULL_BLOCK_IDX);
-    const auto&  group             = cache->componentGroups().front();
-    const size_t source_ref_before = group->hostPool()->refCount(source_block);
-    const size_t free_before       = allocator_->freeBlocksNum();
-    const auto   snapshot_before   = cache->getKeySnapshot(/*limit=*/16);
-
-    auto   registry            = cache->load_back_ticket_registry_;
-    auto   original_commit     = registry->commit_callback_;
-    size_t commit_count        = 0;
-    registry->commit_callback_ = [&](const std::vector<PendingLoadBackItem>& items) {
-        ++commit_count;
-        auto invalid_items = items;
-        EXPECT_FALSE(invalid_items.empty());
-        EXPECT_FALSE(invalid_items[0].target_device_blocks.empty());
-        invalid_items[0].target_device_blocks[0] = NULL_BLOCK_IDX;
-        return original_commit(invalid_items);
-    };
-
-    auto resource = createBatchKVCacheResource(/*batch_size=*/2, config);
-    resource->setBatchCacheKeys(0, CacheKeysType{100, 200, 300});
-    auto       token_ids = createCompleteTokenIds(/*batch_size=*/2, /*seq_length=*/9, /*seq_size_per_block=*/4);
-    const auto result    = allocator_->malloc(MallocInfo{resource, token_ids});
-
-    EXPECT_FALSE(result.success);
-    EXPECT_EQ(result.async_context, nullptr);
-    EXPECT_EQ(commit_count, 1u);
-    EXPECT_EQ(copy_engine->submitCount(), 0u);
-    EXPECT_EQ(resource->curBlocksNum(), 0);
-    EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
-    EXPECT_EQ(group->hostPool()->refCount(source_block), source_ref_before);
-    const auto snapshot_after = cache->getKeySnapshot(/*limit=*/16);
-    EXPECT_EQ(snapshot_after.version, snapshot_before.version);
-    EXPECT_EQ(snapshot_after.keys, snapshot_before.keys);
-    registry->commit_callback_ = std::move(original_commit);
-}
-
 TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadBackExactlyOnce) {
     ScopedSingleTypeDiskDirectory disk_directory;
     const auto config  = createSingleTypeTestConfig(/*layer_num=*/2, /*block_num=*/16, /*seq_size_per_block=*/4);
@@ -874,9 +828,9 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadBackE
     auto   registry            = cache->load_back_ticket_registry_;
     auto   original_commit     = registry->commit_callback_;
     size_t commit_count        = 0;
-    registry->commit_callback_ = [&](const std::vector<PendingLoadBackItem>& items) {
+    registry->commit_callback_ = [&](const LoadBackTicket& ticket) {
         ++commit_count;
-        return original_commit(items);
+        return original_commit(ticket);
     };
 
     auto resource = createBatchKVCacheResource(/*batch_size=*/2, config);

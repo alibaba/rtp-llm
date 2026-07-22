@@ -158,6 +158,29 @@ void BlockTreeCacheTestPeer::runMaintenanceForTest(BlockTreeCache& cache) {
     cache.checkWatermark();
 }
 
+int BlockTreeCacheTestPeer::reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier) {
+    std::lock_guard<std::mutex> lock(cache.mutex_);
+    if (!cache.config_.isTierEnabled(tier)) {
+        return 0;
+    }
+
+    int total_evicted = 0;
+    for (size_t attempt = 0; attempt < num_blocks; ++attempt) {
+        auto eviction_move = cache.evictor_.chooseVictim(tier);
+        if (!eviction_move.has_value()) {
+            break;
+        }
+
+        // Tests use this entry to trigger eviction state transitions without
+        // exposing a direct-reclaim operation on the production cache API.
+        eviction_move->target_tier = Tier::NONE;
+        if (cache.submitEvictionLocked(*eviction_move)) {
+            ++total_evicted;
+        }
+    }
+    return total_evicted;
+}
+
 BlockTreeCacheTestPeer::ScopedQueueRejectionGuard::ScopedQueueRejectionGuard(BlockTreeCache& cache):
     cache_(&cache), armed_(BlockTreeCacheTestPeer::armQueueRejectionForTest(cache)) {
     if (!armed_) {
@@ -452,7 +475,7 @@ void FullSWAEnvironment::reclaimAll() {
     releaseRequestRefs();
     for (Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
         for (size_t attempt = 0; attempt < options_.path_length * groups.size() * 4; ++attempt) {
-            if (cache->reclaimBlocks(1, tier) == 0) {
+            if (BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, tier) == 0) {
                 break;
             }
             cache->waitForPendingTasks();

@@ -218,6 +218,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
@@ -278,6 +279,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
         ":block_tree_cache_allocator_test_helper",
         "//rtp_llm/cpp/cache/block_tree_cache",
     ],

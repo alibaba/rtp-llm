@@ -2,9 +2,11 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtil.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
 namespace rtp_llm {
 namespace {
+using block_tree_cache_test::BlockTreeCacheTestPeer;
 
 // Helper: build BlockTreeCache with Full(REUSABLE, gid=0) + Linear(REUSABLE, gid=1).
 class FullLinearEvictionTest: public ::testing::Test {
@@ -37,7 +39,7 @@ protected:
 // ---------------------------------------------------------------------------
 // Test: Full reclaim cascades to Linear (Full > LINEAR priority).
 //
-//   Before reclaimBlocks(1, DEVICE):             After reclaim + wait:
+//   Before reclaimBlocksForTest(1, DEVICE):             After reclaim + wait:
 //   root → [100] F:{10} L:{30}           root → [100] F:{10} L:{30}
 //          → [200] F:{10} L:{30} ←leaf
 //   Full heap: {[200]}  Linear heap: {[100],[200]}
@@ -53,7 +55,7 @@ TEST_F(FullLinearEvictionTest, FullReclaimCascadesToLinear) {
     EXPECT_EQ(stats0.tree_node_count, 2u);
     EXPECT_EQ(stats0.device_heap_total_size, 3u);  // 1 Full + 2 Linear
 
-    cache_->reclaimBlocks(1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
     cache_->waitForPendingTasks();
 
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);  // [100] survives
@@ -87,17 +89,17 @@ TEST_F(FullLinearEvictionTest, LinearOnlySequentialDrain) {
 
     EXPECT_EQ(lin_cache->getStats().device_heap_total_size, 3u);
 
-    lin_cache->reclaimBlocks(1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*lin_cache, 1, Tier::DEVICE);
     lin_cache->waitForPendingTasks();
     EXPECT_EQ(lin_cache->getStats().tree_node_count, 3u);
     EXPECT_EQ(lin_cache->getStats().device_heap_total_size, 2u);
 
-    lin_cache->reclaimBlocks(1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*lin_cache, 1, Tier::DEVICE);
     lin_cache->waitForPendingTasks();
     EXPECT_EQ(lin_cache->getStats().tree_node_count, 3u);
     EXPECT_EQ(lin_cache->getStats().device_heap_total_size, 1u);
 
-    lin_cache->reclaimBlocks(1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*lin_cache, 1, Tier::DEVICE);
     lin_cache->waitForPendingTasks();
     EXPECT_EQ(lin_cache->getStats().tree_node_count, 0u);
 }
@@ -113,7 +115,7 @@ TEST_F(FullLinearEvictionTest, LinearOnlySequentialDrain) {
 TEST_F(FullLinearEvictionTest, FullReclaimClearsBothGroupsSingleNode) {
     insertPath({100}, 10, 30);
 
-    cache_->reclaimBlocks(1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
     cache_->waitForPendingTasks();
 
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
@@ -128,11 +130,11 @@ TEST_F(FullLinearEvictionTest, FullReclaimClearsBothGroupsSingleNode) {
 TEST_F(FullLinearEvictionTest, SequentialFullReclaimDrainsChain) {
     insertPath({100, 200}, 10, 30);
 
-    cache_->reclaimBlocks(1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);
 
-    cache_->reclaimBlocks(1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 }

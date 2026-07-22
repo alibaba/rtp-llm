@@ -94,14 +94,16 @@ bool HybridKVCacheAllocator::preflightLoadBackMappings(const std::shared_ptr<Loa
     if (ticket == nullptr || ticket->empty()) {
         return true;
     }
-    for (const PendingLoadBackItem& item : ticket->items()) {
+    for (size_t item_index = 0; item_index < ticket->itemCount(); ++item_index) {
+        const int   group_id          = ticket->groupId(item_index);
+        const auto& device_group_tags = ticket->deviceGroupTags(item_index);
         if (!block_tree_cache_
-            || !block_tree_cache_->validateDeviceGroupTagsForComponentGroup(item.group_id, item.device_group_tags)
-            || item.device_group_tags.empty()) {
+            || !block_tree_cache_->validateDeviceGroupTagsForComponentGroup(group_id, device_group_tags)
+            || device_group_tags.empty()) {
             return false;
         }
         std::unordered_set<std::string> unique_tags;
-        for (const auto& tag : item.device_group_tags) {
+        for (const auto& tag : device_group_tags) {
             const int gid = groupIdForStableTag(config_, tag);
             if (tag.empty() || !unique_tags.emplace(tag).second || gid < 0 || skipReuseCacheGroup(gid)) {
                 return false;
@@ -184,32 +186,34 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     }
 
     if (ticket != nullptr) {
-        for (const PendingLoadBackItem& item : ticket->items()) {
-            if (item.source_tier != Tier::DEVICE) {
+        for (size_t item_index = 0; item_index < ticket->itemCount(); ++item_index) {
+            if (ticket->sourceTier(item_index) != Tier::DEVICE) {
                 continue;
             }
-            if (item.source_blocks.size() != item.device_group_tags.size() || item.source_blocks.empty()) {
+            const auto& source_blocks     = ticket->sourceBlocks(item_index);
+            const auto& device_group_tags = ticket->deviceGroupTags(item_index);
+            if (source_blocks.size() != device_group_tags.size() || source_blocks.empty()) {
                 return fail_match();
             }
-            for (size_t local = 0; local < item.device_group_tags.size(); ++local) {
-                const int gid = groupIdForStableTag(config_, item.device_group_tags[local]);
+            for (size_t local = 0; local < device_group_tags.size(); ++local) {
+                const int gid = groupIdForStableTag(config_, device_group_tags[local]);
                 if (gid < 0 || gid >= kv_resource.groupNums() || skipReuseCacheGroup(gid)
-                    || isNullBlockIdx(item.source_blocks[local])) {
+                    || isNullBlockIdx(source_blocks[local])) {
                     return fail_match();
                 }
                 const auto   type = config_.typeForGroup(static_cast<size_t>(gid));
                 const size_t target_position =
                     type == CacheGroupType::LINEAR
                             || (type == CacheGroupType::SWA && !cpCompactSwaGroup(gid, cp_mapper)) ?
-                        (item.path_index + 1) * static_cast<size_t>(cp_scale) - 1 :
-                        item.path_index;
+                        (ticket->pathIndex(item_index) + 1) * static_cast<size_t>(cp_scale) - 1 :
+                        ticket->pathIndex(item_index);
                 auto& target = kv_resource.mutableBlockIds(0, gid);
                 if (target_position >= target.blocksNum()
                     || (!isNullBlockIdx(target.blocks()[target_position])
-                        && target.blocks()[target_position] != item.source_blocks[local])) {
+                        && target.blocks()[target_position] != source_blocks[local])) {
                     return fail_match();
                 }
-                target.setAt(target_position, item.source_blocks[local]);
+                target.setAt(target_position, source_blocks[local]);
             }
         }
     }
@@ -274,11 +278,11 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
 
     std::vector<std::vector<size_t>> load_back_positions(static_cast<size_t>(kv_resource->groupNums()));
     if (load_back_ticket != nullptr && !load_back_ticket->empty()) {
-        for (const PendingLoadBackItem& item : load_back_ticket->items()) {
-            if (item.source_tier == Tier::DEVICE) {
+        for (size_t item_index = 0; item_index < load_back_ticket->itemCount(); ++item_index) {
+            if (load_back_ticket->sourceTier(item_index) == Tier::DEVICE) {
                 continue;
             }
-            for (const auto& tag : item.device_group_tags) {
+            for (const auto& tag : load_back_ticket->deviceGroupTags(item_index)) {
                 const int gid = groupIdForStableTag(config_, tag);
                 if (gid < 0 || gid >= kv_resource->groupNums() || skipReuseCacheGroup(gid)) {
                     return rollback({});
@@ -287,8 +291,8 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                 const size_t target_position =
                     type == CacheGroupType::LINEAR
                             || (type == CacheGroupType::SWA && !cpCompactSwaGroup(gid, cp_mapper)) ?
-                        (item.path_index + 1) * static_cast<size_t>(cp_scale) - 1 :
-                        item.path_index;
+                        (load_back_ticket->pathIndex(item_index) + 1) * static_cast<size_t>(cp_scale) - 1 :
+                        load_back_ticket->pathIndex(item_index);
                 auto& positions = load_back_positions[static_cast<size_t>(gid)];
                 if (std::find(positions.begin(), positions.end(), target_position) == positions.end()) {
                     positions.push_back(target_position);
@@ -347,11 +351,13 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         }
     }
     if (load_back_ticket != nullptr && !load_back_ticket->empty()) {
-        for (PendingLoadBackItem& item : load_back_ticket->items()) {
-            item.target_device_blocks.clear();
-            bool valid = !item.device_group_tags.empty();
-            for (size_t local = 0; local < item.device_group_tags.size(); ++local) {
-                const int gid = groupIdForStableTag(config_, item.device_group_tags[local]);
+        for (size_t item_index = 0; item_index < load_back_ticket->itemCount(); ++item_index) {
+            const auto& device_group_tags = load_back_ticket->deviceGroupTags(item_index);
+            const auto& source_blocks     = load_back_ticket->sourceBlocks(item_index);
+            BlockIndicesType target_device_blocks;
+            bool             valid = !device_group_tags.empty();
+            for (size_t local = 0; local < device_group_tags.size(); ++local) {
+                const int gid = groupIdForStableTag(config_, device_group_tags[local]);
                 if (gid < 0 || gid >= kv_resource->groupNums()) {
                     valid = false;
                     break;
@@ -359,18 +365,18 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                 const auto   type     = config_.typeForGroup(static_cast<size_t>(gid));
                 const size_t position = type == CacheGroupType::LINEAR
                                                 || (type == CacheGroupType::SWA && !cpCompactSwaGroup(gid, cp_mapper)) ?
-                                            (item.path_index + 1) * static_cast<size_t>(cp_scale) - 1 :
-                                            item.path_index;
+                                            (load_back_ticket->pathIndex(item_index) + 1) * static_cast<size_t>(cp_scale) - 1 :
+                                            load_back_ticket->pathIndex(item_index);
                 const auto&  blocks   = kv_resource->blocks(0, gid);
                 if (position >= blocks.size() || isNullBlockIdx(blocks[position])
-                    || (item.source_tier == Tier::DEVICE
-                        && (local >= item.source_blocks.size() || blocks[position] != item.source_blocks[local]))) {
+                    || (load_back_ticket->sourceTier(item_index) == Tier::DEVICE
+                        && (local >= source_blocks.size() || blocks[position] != source_blocks[local]))) {
                     valid = false;
                     break;
                 }
-                item.target_device_blocks.push_back(blocks[position]);
+                target_device_blocks.push_back(blocks[position]);
             }
-            if (!valid) {
+            if (!valid || !load_back_ticket->bindTargetDeviceBlocks(item_index, std::move(target_device_blocks))) {
                 return rollback(original_sizes);
             }
         }

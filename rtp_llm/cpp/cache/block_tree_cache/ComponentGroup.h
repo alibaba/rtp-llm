@@ -1,10 +1,6 @@
 #pragma once
 
-#include <condition_variable>
-#include <cstdint>
-#include <functional>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -19,118 +15,7 @@
 
 namespace rtp_llm {
 
-namespace block_tree_cache_test {
-class LoadBackShutdownTestPeer;
-}
-
-class AsyncContext;
-
-struct PendingLoadBackItem {
-    TreeNode*                 node{nullptr};
-    int                       group_id{-1};
-    size_t                    path_index{0};
-    Tier                      source_tier{Tier::NONE};
-    std::vector<BlockIdxType> source_blocks;
-    // DEVICE denotes an already-resident logical coordinate that lies outside
-    // the public ready boundary. It is ticket-owned and settled asynchronously
-    // without a copy; target_device_blocks must preserve source identity.
-    // Allocator-facing per-tag group ids, ordered exactly like this component
-    // group's device pools. The allocator fills target_device_blocks from the
-    // request block table before committing the ticket.
-    std::vector<std::string>  device_group_tags;
-    std::vector<BlockIdxType> target_device_blocks;
-};
-
-class LoadBackTicketRegistry;
-
-class LoadBackTicket {
-public:
-    ~LoadBackTicket();
-
-    LoadBackTicket(const LoadBackTicket&)            = delete;
-    LoadBackTicket& operator=(const LoadBackTicket&) = delete;
-    LoadBackTicket(LoadBackTicket&&)                 = delete;
-    LoadBackTicket& operator=(LoadBackTicket&&)      = delete;
-
-    // Submits copies into allocator-owned targets. Every target must already be
-    // present in the request block table; BlockTreeCache never allocates a second
-    // private target set. Returns null on synchronous validation/submission failure
-    // and on repeated or empty commits.
-    std::shared_ptr<AsyncContext> commit();
-
-    bool empty() const {
-        return items_.empty();
-    }
-
-    size_t logicalMatchedBlocks() const {
-        return logical_matched_blocks_;
-    }
-
-    std::vector<PendingLoadBackItem>& items() {
-        return items_;
-    }
-    const std::vector<PendingLoadBackItem>& items() const {
-        return items_;
-    }
-
-private:
-    friend class LoadBackTicketRegistry;
-
-    LoadBackTicket(std::shared_ptr<LoadBackTicketRegistry> registry,
-                   uint64_t                                ticket_id,
-                   std::vector<PendingLoadBackItem>        items,
-                   size_t                                  logical_matched_blocks);
-
-    std::shared_ptr<LoadBackTicketRegistry> registry_;
-    uint64_t                                ticket_id_{0};
-    std::vector<PendingLoadBackItem>        items_;
-    const size_t                            logical_matched_blocks_{0};
-};
-
-class LoadBackTicketRegistry: public std::enable_shared_from_this<LoadBackTicketRegistry> {
-public:
-    using CommitCallback = std::function<std::shared_ptr<AsyncContext>(const std::vector<PendingLoadBackItem>& items)>;
-    using AbortCallback  = std::function<void(const std::vector<PendingLoadBackItem>& items)>;
-
-    LoadBackTicketRegistry(CommitCallback commit_callback, AbortCallback abort_callback);
-
-    std::shared_ptr<LoadBackTicket> createTicket(const std::vector<PendingLoadBackItem>& items,
-                                                 size_t                                  logical_matched_blocks = 0);
-    void                            shutdown();
-
-private:
-    friend class LoadBackTicket;
-    friend class block_tree_cache_test::LoadBackShutdownTestPeer;
-
-    class ActiveCallbackLease {
-    public:
-        explicit ActiveCallbackLease(LoadBackTicketRegistry* registry): registry_(registry) {}
-        ~ActiveCallbackLease() {
-            registry_->retireActiveCallback();
-        }
-
-        ActiveCallbackLease(const ActiveCallbackLease&)            = delete;
-        ActiveCallbackLease& operator=(const ActiveCallbackLease&) = delete;
-
-    private:
-        LoadBackTicketRegistry* registry_;
-    };
-
-    std::shared_ptr<AsyncContext> commit(uint64_t ticket_id, const std::vector<PendingLoadBackItem>& items);
-    void                          abort(uint64_t ticket_id);
-    void                          retireActiveCallback();
-
-    std::mutex                                                     mutex_;
-    std::condition_variable                                        cv_;
-    bool                                                           accepting_{true};
-    uint64_t                                                       next_ticket_id_{1};
-    size_t                                                         active_callbacks_{0};
-    std::unordered_map<uint64_t, std::vector<PendingLoadBackItem>> pending_tickets_;
-    CommitCallback                                                 commit_callback_;
-    AbortCallback                                                  abort_callback_;
-    // Installed only by the shutdown test peer; production keeps this empty.
-    std::function<void()> shutdown_wait_observer_for_test_;
-};
+class LoadBackTicket;
 
 struct Component {
     int                 component_id{-1};

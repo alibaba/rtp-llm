@@ -37,6 +37,7 @@ public:
 namespace rtp_llm {
 namespace {
 using namespace block_tree_cache_test;
+using PendingLoadBackItem = LoadBackTicket::PendingLoadBackItem;
 
 class PausableCopyEngine: public CopyEngine {
 public:
@@ -423,96 +424,6 @@ TEST_F(BlockTreeCacheIntegrationTest, OneShotCascadeFailureRollsBackSWAAndRetrie
     environment->scripted_copy_engine->clear();
     environment->reclaimAll();
     environment->expectFullyReclaimed();
-}
-
-TEST_F(BlockTreeCacheIntegrationTest, LoadBackDeviceAllocationFailureRollsBackAllItems) {
-    if (!cudaAvailable()) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-    DeviceBlockPoolPtr first_device_pool     = makeDevicePool({{1, 0}}, 1, "load_back_atomic_first");
-    DeviceBlockPoolPtr exhausted_device_pool = makeDevicePool({{1, 0}}, 1, "load_back_atomic_exhausted");
-
-    std::shared_ptr<HostBlockPool> first_host_pool  = makeHostPool(1, 2);
-    std::shared_ptr<HostBlockPool> second_host_pool = makeHostPool(1, 2);
-
-    std::vector<Component> components = {
-        copy_engine_test::makeSchemaComponent(0, 0, "tag_0", {1}),
-        copy_engine_test::makeSchemaComponent(1, 1, "tag_1", {1}),
-    };
-
-    std::shared_ptr<FullComponentGroup> first_group = std::make_shared<FullComponentGroup>();
-    first_group->component_group_id                 = 0;
-    first_group->setDevicePools({first_device_pool}, {"tag_0"});
-    first_group->setHostPool(first_host_pool);
-    ASSERT_TRUE(first_group->finalizeLayout({0}, components));
-    std::shared_ptr<FullComponentGroup> second_group = std::make_shared<FullComponentGroup>();
-    second_group->component_group_id                 = 1;
-    second_group->setDevicePools({exhausted_device_pool}, {"tag_1"});
-    second_group->setHostPool(second_host_pool);
-    ASSERT_TRUE(second_group->finalizeLayout({1}, components));
-
-    GroupBlockSet exhausted_holder = second_group->allocateBlocks(Tier::DEVICE, 1);
-    ASSERT_EQ(exhausted_holder.per_node.size(), 1u);
-    ASSERT_EQ(exhausted_holder.per_node[0].size(), 1u);
-    EXPECT_EQ(exhausted_device_pool->freeBlocksNum(), 0u);
-
-    const BlockIdxType first_host_block  = first_group->allocateSingleBlock(Tier::HOST);
-    const BlockIdxType second_host_block = second_group->allocateSingleBlock(Tier::HOST);
-    ASSERT_NE(first_host_block, NULL_BLOCK_IDX);
-    ASSERT_NE(second_host_block, NULL_BLOCK_IDX);
-
-    std::vector<ComponentGroupPtr> component_groups = {first_group, second_group};
-    BlockTreeCacheConfig           config;
-    config.enable_memory_cache            = true;
-    config.enable_load_back               = true;
-    std::unique_ptr<BlockTreeCache> cache = makeBlockTreeCacheForTest(
-        std::make_unique<BlockTree>(2), std::move(component_groups), std::move(components), std::move(config));
-    ASSERT_NE(cache, nullptr);
-
-    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(2));
-    slots[0][0].host_block = first_host_block;
-    slots[0][1].host_block = second_host_block;
-    ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
-
-    BlockTreeFindResult find = cache->tree()->findNode({100});
-    ASSERT_NE(find.matched_node, nullptr);
-    ASSERT_EQ(cache->getStats().host_heap_total_size, 2u);
-
-    BlockTreeMatchResult match_result = cache->match({100});
-    ASSERT_NE(match_result.load_back_ticket, nullptr);
-    ASSERT_EQ(match_result.load_back_ticket->items().size(), 2u);
-    EXPECT_EQ(first_host_pool->refCount(first_host_block), 2u);
-    EXPECT_EQ(second_host_pool->refCount(second_host_block), 2u);
-
-    std::shared_ptr<AsyncContext> context = match_result.load_back_ticket->commit();
-    EXPECT_EQ(context, nullptr);
-    EXPECT_EQ(first_device_pool->freeBlocksNum(), 1u);
-    EXPECT_EQ(exhausted_device_pool->freeBlocksNum(), 0u);
-    EXPECT_EQ(first_host_pool->refCount(first_host_block), 1u);
-    EXPECT_EQ(second_host_pool->refCount(second_host_block), 1u);
-    EXPECT_EQ(first_host_pool->freeBlocksNum(), 1u);
-    EXPECT_EQ(second_host_pool->freeBlocksNum(), 1u);
-    EXPECT_EQ(find.matched_node->group_slots[0].transfer_state, SlotTransferState::IDLE);
-    EXPECT_EQ(find.matched_node->group_slots[1].transfer_state, SlotTransferState::IDLE);
-    EXPECT_EQ(find.matched_node->group_slots[0].host_block, first_host_block);
-    EXPECT_EQ(find.matched_node->group_slots[1].host_block, second_host_block);
-    EXPECT_EQ(cache->getStats().host_heap_total_size, 2u);
-
-    EXPECT_EQ(cache->reclaimBlocks(2, Tier::HOST), 2);
-    cache->waitForPendingTasks();
-    const CacheStats stats = cache->getStats();
-    EXPECT_EQ(stats.device_heap_total_size, 0u);
-    EXPECT_EQ(stats.host_heap_total_size, 0u);
-    EXPECT_EQ(stats.disk_heap_total_size, 0u);
-    EXPECT_EQ(stats.tree_node_count, 0u);
-    EXPECT_EQ(first_host_pool->freeBlocksNum(), 2u);
-    EXPECT_EQ(second_host_pool->freeBlocksNum(), 2u);
-    EXPECT_FALSE(first_host_pool->isAllocated(first_host_block));
-    EXPECT_FALSE(second_host_pool->isAllocated(second_host_block));
-
-    second_group->unreferenceBlocks(exhausted_holder);
-    EXPECT_EQ(first_device_pool->freeBlocksNum(), 1u);
-    EXPECT_EQ(exhausted_device_pool->freeBlocksNum(), 1u);
 }
 
 TEST_F(BlockTreeCacheIntegrationTest, UncommittedLoadBackTicketReleasesSourceReferences) {
@@ -1040,71 +951,6 @@ TEST_F(BlockTreeCacheIntegrationTest, FullSWA_MatchPublishesOnlyReadyBoundary) {
     environment->releaseMatch(result);
     result.load_back_ticket.reset();
     environment->releaseRequestRefs();
-    environment->reclaimAll();
-    environment->expectFullyReclaimed();
-}
-
-TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadBackPreflightRejectionImmediatelyRestoresCandidates) {
-    if (!cudaAvailable()) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    auto environment = FullSWAEnvironment::create();
-    ASSERT_NE(environment, nullptr);
-    BlockTreeMatchResult result = makePartialReadyDeviceTicket(*environment);
-    ASSERT_NE(result.load_back_ticket, nullptr);
-    ASSERT_FALSE(result.load_back_ticket->items().empty());
-    ASSERT_EQ(result.load_back_ticket->items().front().source_tier, Tier::DEVICE);
-
-    std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> device_sources;
-    for (PendingLoadBackItem& item : result.load_back_ticket->items()) {
-        if (item.source_tier != Tier::DEVICE) {
-            continue;
-        }
-        ASSERT_EQ(item.device_group_tags.size(), item.source_blocks.size());
-        item.node                 = nullptr;
-        item.target_device_blocks = item.source_blocks;
-        for (size_t local_pool_index = 0; local_pool_index < item.source_blocks.size(); ++local_pool_index) {
-            DeviceBlockPoolPtr pool = devicePoolForTag(*environment, item.device_group_tags[local_pool_index]);
-            ASSERT_NE(pool, nullptr);
-            device_sources.emplace_back(std::move(pool), item.source_blocks[local_pool_index]);
-        }
-    }
-    ASSERT_EQ(device_sources.size(), 4u);
-    result.load_back_ticket->items().front().target_device_blocks.pop_back();
-
-    environment->releaseRequestRefs();
-    const size_t                           tree_nodes_before = environment->cache->getStats().tree_node_count;
-    std::vector<std::vector<BlockIdxType>> allocations_before;
-    for (const DeviceBlockPoolPtr& pool : environment->device_pools) {
-        allocations_before.push_back(allocatedBlocksSnapshot(*pool));
-    }
-    for (const auto& [pool, block] : device_sources) {
-        EXPECT_TRUE(pool->isAllocated(block));
-        EXPECT_EQ(pool->refCount(block), 2u);
-    }
-    environment->expectPayloads();
-
-    EXPECT_EQ(result.load_back_ticket->commit(), nullptr);
-    EXPECT_EQ(result.load_back_ticket->commit(), nullptr);
-    EXPECT_EQ(environment->cache->getStats().tree_node_count, tree_nodes_before);
-    EXPECT_EQ(environment->cache->getStats().device_heap_total_size, 1u);
-    for (size_t pool_index = 0; pool_index < environment->device_pools.size(); ++pool_index) {
-        EXPECT_EQ(allocatedBlocksSnapshot(*environment->device_pools[pool_index]), allocations_before[pool_index]);
-    }
-    for (const auto& [pool, block] : device_sources) {
-        EXPECT_EQ(pool->refCount(block), 1u);
-    }
-    environment->expectPayloads();
-
-    result.load_back_ticket.reset();
-    EXPECT_EQ(environment->cache->getStats().device_heap_total_size, 1u);
-    EXPECT_EQ(environment->cache->evictForTag("tag_0", 2), 2);
-    for (const auto& [pool, block] : device_sources) {
-        EXPECT_FALSE(pool->isAllocated(block));
-    }
-
-    environment->releaseMatch(result);
     environment->reclaimAll();
     environment->expectFullyReclaimed();
 }

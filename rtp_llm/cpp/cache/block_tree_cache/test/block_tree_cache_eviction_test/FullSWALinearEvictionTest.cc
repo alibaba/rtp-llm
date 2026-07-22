@@ -2,9 +2,11 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtil.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
 namespace rtp_llm {
 namespace {
+using block_tree_cache_test::BlockTreeCacheTestPeer;
 
 // Helper: BlockTreeCache with Full(gid=0) + SWA(gid=1) + Linear(gid=2), all REUSABLE.
 class FullSWALinearEvictionTest: public ::testing::Test {
@@ -40,13 +42,13 @@ protected:
 // ---------------------------------------------------------------------------
 // Test: Full reclaim cascades to BOTH SWA and Linear.
 //
-//   Before reclaimBlocks(1, DEVICE):
+//   Before reclaimBlocksForTest(1, DEVICE):
 //   root → [100] F:{10} S:{20} L:{30}
 //          → [200] F:{10} S:{20} L:{30} ←leaf
 //   Full heap: {[200]}  SWA heap: {[100],[200]}  Linear heap: {[100],[200]}
 //   Total: 5
 //
-//   After reclaimBlocks(1, DEVICE) + wait:
+//   After reclaimBlocksForTest(1, DEVICE) + wait:
 //   root → [100] F:{10} S:{20} L:{30}
 //
 //   Full[200] reclaimed → cascade: SWA[200]+Linear[200] cleared.
@@ -59,7 +61,7 @@ TEST_F(FullSWALinearEvictionTest, FullReclaimCascadesToBothSWAAndLinear) {
     EXPECT_EQ(stats0.tree_node_count, 2u);
     EXPECT_EQ(stats0.device_heap_total_size, 5u);  // 1 Full + 2 SWA + 2 Linear
 
-    cache_->reclaimBlocks(1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
     cache_->waitForPendingTasks();
 
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);  // [100] survives
@@ -68,7 +70,7 @@ TEST_F(FullSWALinearEvictionTest, FullReclaimCascadesToBothSWAAndLinear) {
 // ---------------------------------------------------------------------------
 // Test: Single node with all 3 groups — Full reclaim clears all.
 //
-//   Before:                               After reclaimBlocks(1, DEVICE) + wait:
+//   Before:                               After reclaimBlocksForTest(1, DEVICE) + wait:
 //   root → [100] F:{10} S:{20} L:{30}     root (empty tree)
 //
 //   Full[100] reclaimed → cascade SWA[100]+Linear[100] cleared.
@@ -77,7 +79,7 @@ TEST_F(FullSWALinearEvictionTest, FullReclaimCascadesToBothSWAAndLinear) {
 TEST_F(FullSWALinearEvictionTest, SingleNodeAllGroupsCleared) {
     insertPath({100}, 10, 20, 30);
 
-    cache_->reclaimBlocks(1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
     cache_->waitForPendingTasks();
 
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
@@ -97,15 +99,15 @@ TEST_F(FullSWALinearEvictionTest, SequentialReclaimDrainsAllGroups) {
     insertPath({100, 200, 300}, 10, 20, 30);
     EXPECT_EQ(cache_->getStats().tree_node_count, 3u);
 
-    cache_->reclaimBlocks(1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 2u);
 
-    cache_->reclaimBlocks(1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);
 
-    cache_->reclaimBlocks(1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 }
@@ -149,17 +151,17 @@ TEST_F(FullSWALinearEvictionTest, ForkBothBranchesEvictable) {
     EXPECT_EQ(stats0.device_heap_total_size, 8u);  // 2 Full + 3 SWA + 3 Linear
 
     // Reclaim first leaf
-    cache_->reclaimBlocks(1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 2u);
 
     // Reclaim second leaf
-    cache_->reclaimBlocks(1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);  // [100] survives
 
     // Reclaim [100] (now Full leaf)
-    cache_->reclaimBlocks(1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 }
@@ -201,13 +203,13 @@ TEST_F(FullSWALinearEvictionTest, SWAReclaimCascadesToLinear) {
     EXPECT_EQ(swa_lin_cache->getStats().device_heap_total_size, 4u);
 
     // Reclaim SWA[100] first (LRU); the empty internal node remains.
-    swa_lin_cache->reclaimBlocks(1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*swa_lin_cache, 1, Tier::DEVICE);
     swa_lin_cache->waitForPendingTasks();
     EXPECT_EQ(swa_lin_cache->getStats().tree_node_count, 2u);
     EXPECT_EQ(swa_lin_cache->getStats().device_heap_total_size, 2u);
 
     // Reclaim SWA[200], then delete the leaf and prune empty [100].
-    swa_lin_cache->reclaimBlocks(1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*swa_lin_cache, 1, Tier::DEVICE);
     swa_lin_cache->waitForPendingTasks();
     EXPECT_EQ(swa_lin_cache->getStats().tree_node_count, 0u);
 }
@@ -231,7 +233,7 @@ TEST_F(FullSWALinearEvictionTest, AncestorChainCleanupDeepChain) {
 
     // Sequential reclaim drains all 4 nodes
     for (int i = 4; i >= 1; --i) {
-        cache_->reclaimBlocks(1, Tier::DEVICE);
+        BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
         cache_->waitForPendingTasks();
         EXPECT_EQ(cache_->getStats().tree_node_count, static_cast<size_t>(i - 1))
             << "After reclaiming node " << (5 - i);

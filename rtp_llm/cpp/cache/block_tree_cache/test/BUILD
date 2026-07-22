@@ -203,7 +203,11 @@ cc_library(
         "BlockTreeCacheTestUtils.h",
     ],
     copts = test_copts,
-    visibility = ["//rtp_llm/cpp/cache/block_tree_cache/test:__subpackages__"],
+    visibility = [
+        "//rtp_llm/cpp/cache/block_tree_cache/test:__subpackages__",
+        "//rtp_llm/cpp/cache/test:__pkg__",
+        "//rtp_llm/cpp/engine_base/system_prompt/test:__pkg__",
+    ],
     deps = [
         ":copy_engine_test_utils",
         "//rtp_llm/cpp/cache/block_tree_cache",
