@@ -353,6 +353,10 @@ class NewModelLoader:
         model_filter: Optional[Callable[[str], bool]],
         expert_filter: Optional[_ExpertRangeFilter],
     ) -> Optional[Callable[[str], bool]]:
+        if model_filter is not None and (
+            not callable(model_filter) or isinstance(model_filter, nn.Module)
+        ):
+            raise TypeError("model_filter must be callable or None")
         if model_filter is None and expert_filter is None:
             return None
 

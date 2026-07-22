@@ -99,6 +99,10 @@ class FoundationLoaderTest(unittest.TestCase):
                     self._loader(model_path).load()
                 move.assert_not_called()
 
+    def test_combined_checkpoint_filter_rejects_model_instances(self):
+        with self.assertRaisesRegex(TypeError, "model_filter must be callable"):
+            NewModelLoader._checkpoint_name_filter(RtpModule(), None)
+
     def test_staged_modules_move_and_postprocess_one_at_a_time(self):
         events = []
 
@@ -523,6 +527,31 @@ class FoundationLoaderTest(unittest.TestCase):
                 ),
                 [draft],
             )
+
+    def test_model_filter_without_matches_fails(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            shard = os.path.join(model_path, "model.safetensors")
+            save_file({"main.weight": torch.ones(1)}, shard)
+            with open(
+                os.path.join(model_path, "model.safetensors.index.json"), "w"
+            ) as handle:
+                json.dump(
+                    {"weight_map": {"main.weight": os.path.basename(shard)}}, handle
+                )
+
+            with self.assertRaisesRegex(ValueError, "did not match"):
+                select_safetensor_files(
+                    model_path,
+                    [shard],
+                    lambda name: name.startswith("draft."),
+                )
+
+    def test_model_filter_preserves_non_safetensors_files(self):
+        files = ["pytorch_model.bin", "extra.pt"]
+        self.assertEqual(
+            select_safetensor_files("unused", files, lambda name: False),
+            files,
+        )
 
     def test_model_filter_rejects_index_shard_outside_discovered_set(self):
         with tempfile.TemporaryDirectory() as model_path:

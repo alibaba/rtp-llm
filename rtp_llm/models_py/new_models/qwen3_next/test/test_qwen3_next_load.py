@@ -284,6 +284,68 @@ class Qwen3NextLoadTest(unittest.TestCase):
         )
         torch.testing.assert_close(model.norm.weight, torch.full((4,), 2.0))
 
+    def test_mtp_forward_rejects_missing_and_mismatched_hidden_states(self):
+        model = Qwen35MoeMTPForCausalLM(_mtp_config(), _load_config())
+        model.load_weights(_mtp_weights())
+        input_ids = torch.tensor([0, 1], dtype=torch.int64)
+        attention_inputs = types.SimpleNamespace()
+
+        for input_hiddens, message in (
+            (None, "requires input_hiddens"),
+            (torch.zeros(1, 4), "must match token embeddings"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                model.forward(
+                    types.SimpleNamespace(
+                        input_ids=input_ids,
+                        input_hiddens=input_hiddens,
+                        attention_inputs=attention_inputs,
+                    )
+                )
+
+    def test_mtp_forward_projects_normalized_embedding_and_hidden_state(self):
+        class PassLayer(torch.nn.Module):
+            def forward(self, hidden_states, residual, fmha_impl, **kwargs):
+                return hidden_states, residual
+
+        class PassNorm(torch.nn.Module):
+            def forward(self, hidden_states, residual):
+                return hidden_states, residual
+
+        model = Qwen35MoeMTPForCausalLM(_mtp_config(), _load_config())
+        model.load_weights(_mtp_weights())
+        input_ids = torch.tensor([0, 1], dtype=torch.int64)
+        input_hiddens = torch.arange(8, dtype=torch.float32).reshape(2, 4) + 1
+        input_embeds = model.embed_tokens(input_ids)
+        expected = model.fc(
+            torch.cat(
+                [
+                    model.pre_fc_norm_embedding(input_embeds),
+                    model.pre_fc_norm_hidden(input_hiddens),
+                ],
+                dim=-1,
+            )
+        )
+        model.layers = torch.nn.ModuleList([PassLayer()])
+        model.norm = PassNorm()
+        model.kv_cache = None
+        fmha_impl = types.SimpleNamespace(fmha_params="mtp-fmha")
+        inputs = types.SimpleNamespace(
+            input_ids=input_ids,
+            input_hiddens=input_hiddens,
+            attention_inputs=types.SimpleNamespace(),
+        )
+
+        with mock.patch(
+            "rtp_llm.models_py.new_models.qwen3_next.language."
+            "select_block_map_for_layer"
+        ):
+            outputs = model.forward(inputs, fmha_impl=fmha_impl)
+
+        torch.testing.assert_close(outputs.hidden_states, expected)
+
     def test_new_loader_preselects_mtp_shard_before_materialization(self):
         with tempfile.TemporaryDirectory() as model_path:
             main_name = "model-00001-of-00002.safetensors"
