@@ -295,11 +295,11 @@ bool RtpLLMSchedulerMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(running_stream_size_metric, "rtp_llm_running_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(remote_running_stream_size_metric, "rtp_llm_remote_running_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(loading_cache_stream_size_metric, "rtp_llm_loading_cache_stream_size");
-    REGISTER_GAUGE_MUTABLE_METRIC(admitted_context_batch_size_metric,
-                                  "rtp_llm_scheduler_admitted_context_batch_size");
-    REGISTER_GAUGE_MUTABLE_METRIC(admitted_context_token_size_metric,
-                                  "rtp_llm_scheduler_admitted_context_token_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(admitted_context_batch_size_metric, "rtp_llm_scheduler_admitted_context_batch_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(admitted_context_token_size_metric, "rtp_llm_scheduler_admitted_context_token_size");
     REGISTER_GAUGE_MUTABLE_METRIC(waiting_oldest_age_us_metric, "rtp_llm_scheduler_waiting_oldest_age_us");
+    REGISTER_MUTABLE_METRIC_BASE(
+        group_fallback_acc_metric, "rtp_llm_scheduler_group_fallback_acc", kmonitor::COUNTER, kmonitor::NORMAL);
     return true;
 }
 
@@ -311,6 +311,9 @@ void RtpLLMSchedulerMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMSch
     REPORT_MUTABLE_METRIC(admitted_context_batch_size_metric, collector->admitted_context_batch_size);
     REPORT_MUTABLE_METRIC(admitted_context_token_size_metric, collector->admitted_context_token_size);
     REPORT_MUTABLE_METRIC(waiting_oldest_age_us_metric, collector->waiting_oldest_age_us);
+    if (collector->group_fallback_count > 0) {
+        REPORT_MUTABLE_METRIC(group_fallback_acc_metric, collector->group_fallback_count);
+    }
 }
 
 bool RtpLLMEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {

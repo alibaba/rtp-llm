@@ -174,6 +174,7 @@ FIFOScheduler::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
         }
         if (fallback_to_individual_streams) {
             waiting_streams_.insert(waiting_streams_.end(), valid_streams.begin(), valid_streams.end());
+            pending_group_fallback_count_.fetch_add(1, std::memory_order_relaxed);
         } else {
             waiting_group_queue_.emplace_back(valid_streams.begin(), valid_streams.end());
         }
@@ -550,6 +551,7 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
                             admitted_streams.size(),
                             deferred_count);
         dissolveGroup(group);
+        pending_group_fallback_count_.fetch_add(1, std::memory_order_relaxed);
         waiting_group_queue_.pop_front();
         return;
     }
@@ -656,6 +658,7 @@ void FIFOScheduler::reportMetrics() {
         collector.admitted_context_batch_size = last_admitted_context_batch_size_;
         collector.admitted_context_token_size = last_admitted_context_token_size_;
         collector.waiting_oldest_age_us       = last_waiting_oldest_age_us_;
+        collector.group_fallback_count        = pending_group_fallback_count_.exchange(0, std::memory_order_relaxed);
         metrics_reporter_->report<RtpLLMSchedulerMetrics, RtpLLMSchedulerMetricsCollector>(nullptr, &collector);
     }
     return;
