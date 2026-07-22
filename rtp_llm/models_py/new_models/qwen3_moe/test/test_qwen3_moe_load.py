@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 import torch
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import QuantizationConfig as SourceQuantizationConfig
 from rtp_llm.models_py import weight_mapper
@@ -16,6 +17,7 @@ from rtp_llm.models_py.model_loader import (
     NewModelLoader,
     _ExpertRangeFilter,
 )
+from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -194,6 +196,99 @@ class MoEWeightDispatchTest(unittest.TestCase):
             ]
         )
         self.assertEqual(handle.get_tensor.call_count, 2)
+
+    def test_safetensors_ep_expands_stacked_tensor_before_materialization(self):
+        rank_one = _ExpertRangeFilter(4, 2, 1)
+        stacked_name = "model.layers.0.mlp.experts.gate_up_proj"
+        stacked = torch.arange(24, dtype=torch.float32).reshape(4, 2, 3)
+        tensor_slice = mock.MagicMock()
+        tensor_slice.get_shape.return_value = stacked.shape
+        tensor_slice.__getitem__.side_effect = stacked.__getitem__
+        handle = mock.MagicMock()
+        handle.keys.return_value = [
+            stacked_name,
+            "model.layers.0.self_attn.q_proj.weight",
+        ]
+        handle.get_slice.return_value = tensor_slice
+        handle.get_tensor.return_value = torch.ones(1)
+        context = mock.MagicMock()
+        context.__enter__.return_value = handle
+
+        with mock.patch("safetensors.safe_open", return_value=context):
+            loaded = list(
+                weight_mapper.get_all_weights(
+                    ["model.safetensors"],
+                    name_filter=NewModelLoader._checkpoint_name_filter(
+                        RtpModule(), rank_one
+                    ),
+                    safetensor_slice_expander=rank_one,
+                )
+            )
+
+        self.assertEqual(
+            [name for name, _ in loaded],
+            [
+                "model.layers.0.mlp.experts.2.gate_up_proj.weight",
+                "model.layers.0.mlp.experts.3.gate_up_proj.weight",
+                "model.layers.0.self_attn.q_proj.weight",
+            ],
+        )
+        torch.testing.assert_close(loaded[0][1], stacked[2])
+        torch.testing.assert_close(loaded[1][1], stacked[3])
+        handle.get_tensor.assert_called_once_with(
+            "model.layers.0.self_attn.q_proj.weight"
+        )
+
+    def test_safetensors_ep_preserves_stacked_auxiliary_suffix(self):
+        rank_one = _ExpertRangeFilter(4, 2, 1)
+
+        expanded = rank_one.expand_safetensor(
+            "model.layers.0.mlp.experts.down_proj.weight_scale_inv",
+            (4, 2, 3),
+        )
+
+        self.assertEqual(
+            expanded,
+            [
+                (
+                    "model.layers.0.mlp.experts.2.down_proj.weight_scale_inv",
+                    2,
+                ),
+                (
+                    "model.layers.0.mlp.experts.3.down_proj.weight_scale_inv",
+                    3,
+                ),
+            ],
+        )
+
+    def test_safetensors_ep_rejects_wrong_stacked_expert_count(self):
+        rank_one = _ExpertRangeFilter(4, 2, 1)
+
+        with self.assertRaisesRegex(ValueError, "must contain 4 experts"):
+            rank_one.expand_safetensor(
+                "model.layers.0.mlp.experts.gate_up_proj.weight",
+                (3, 2, 3),
+            )
+
+    def test_model_filter_runs_before_stacked_expert_expansion(self):
+        rank_one = _ExpertRangeFilter(4, 2, 1)
+        handle = mock.MagicMock()
+        handle.keys.return_value = ["mtp.layers.0.mlp.experts.gate_up_proj"]
+        context = mock.MagicMock()
+        context.__enter__.return_value = handle
+
+        with mock.patch("safetensors.safe_open", return_value=context):
+            loaded = list(
+                weight_mapper.get_all_weights(
+                    ["model.safetensors"],
+                    name_filter=lambda name: not name.startswith("mtp."),
+                    safetensor_slice_expander=rank_one,
+                )
+            )
+
+        self.assertEqual(loaded, [])
+        handle.get_slice.assert_not_called()
+        handle.get_tensor.assert_not_called()
 
     def test_rms_res_norm_preserves_decoder_residual_contract(self):
         layer = RMSResNorm(2, eps=1e-6, params_dtype=torch.float32)
