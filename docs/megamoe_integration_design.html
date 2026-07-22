@@ -62,11 +62,11 @@
 <body>
 <div class="wrap">
 
-<h1>FlyDSL MegaMoE 移植到 rtp-llm 集成设计方案</h1>
-<div class="sub">目标模型：Qwen3.5-397B-A17B &nbsp;·&nbsp; 硬件：AMD Instinct MI308X ×8 (gfx942 / CDNA3) &nbsp;·&nbsp; EP8 / TP8 &nbsp;·&nbsp; 日期：2026-07-15</div>
+<h1>FlyDSL MegaMoE 移植到 rtp-llm 集成实现（as-built）</h1>
+<div class="sub">目标模型：Qwen3.5-397B-A17B &nbsp;·&nbsp; 硬件：AMD Instinct MI308X ×8 (gfx942 / CDNA3) &nbsp;·&nbsp; EP8 / TP8 &nbsp;·&nbsp; 初稿：2026-07-15 &nbsp;·&nbsp; 按实际实现更新：2026-07-22</div>
 
 <div class="card">
-<strong>文档目的</strong>：把 FlyDSL 中已验证的「2-stage 融合 MegaMoE」方案（stage1 = dispatch+GEMM1 融合，stage2 = GEMM2+combine 融合，e2e 全档 <b>1.29×~1.73×</b> 反超 aiter CK 基线）移植进 rtp-llm 推理引擎，通过环境变量开关控制启用，补充单元测试，并在 Qwen3.5-397B-A17B 上完成端到端验证。本文先给出<strong>设计</strong>供评审，不含实现代码改动。
+<strong>文档目的</strong>：把 FlyDSL 中已验证的「2-stage 融合 MegaMoE」方案（stage1 = dispatch+GEMM1 融合，stage2 = GEMM2+combine 融合，e2e 全档 <b>1.29×~1.73×</b> 反超 aiter CK 基线）移植进 rtp-llm 推理引擎，通过环境变量开关控制启用，补充单元测试，并在 Qwen3.5-397B-A17B 上完成端到端验证。本文最初为设计评审稿，<strong>现已按实际落地代码回填修订</strong>：架构骨架（方案 B）与设计一致，但组件命名、开关形态、权重注入方式、约束边界（topk）等细节以本文当前描述为准。文中标注 <span class="tag t-mod">与设计不同</span> 处即实现阶段的实际偏离。
 </div>
 
 <h2>目录</h2>
@@ -187,7 +187,7 @@
 <tr><td><code>FusedMoEZeroCopyFp8</code></td><td>kernels/moe_fused_chained_fp8.py</td><td>e2e 胶合模块，<code>forward(x_bf16, wts, topk_ids, w1, scale_w1)</code></td></tr>
 <tr><td><code>FusedMoEGemm1PlainFp8</code></td><td>kernels/fused_moe_stage1_plain_fp8.py</td><td>Stage1 facade（dispatch+GEMM1）</td></tr>
 <tr><td><code>compile_moe_gemm2_combine_fused</code></td><td>kernels/moe_gemm2_combine_fused.py</td><td>Stage2 编译入口</td></tr>
-<tr><td><code>FlyDSLMoeGemm2CombineOpGfx942</code></td><td class="t-risk">tests/kernels/test_profiler_moe_gemm2_combine.py</td><td>Stage2 wrapper（当前在 tests/ 下，需上移到 kernels/）</td></tr>
+<tr><td><code>FlyDSLMoeGemm2CombineOpGfx942</code></td><td class="t-risk">tests/kernels/test_profiler_moe_gemm2_combine.py（实际未上移）</td><td>Stage2 wrapper。<span class="tag t-mod">与设计不同</span>：设计计划上移到 kernels/，实际仍在 tests/ 下，由 <code>kernels/moe_fused_chained_fp8.py</code> 用 <code>sys.path.insert</code> 反向 import</td></tr>
 <tr><td><code>FlyDSLDispatchCombineIntraNodeOp</code></td><td>kernels/dispatch_combine_intranode_op.py</td><td>mori shmem dispatch/combine op</td></tr>
 </table>
 
@@ -208,7 +208,7 @@ out_tok, out_wts = forward(
     stream=None)
 # W2 / scale_w2 在构造后由模块内部持有（本设计改为外部注入，见 §7）</code></pre>
 
-<div class="callout"><b>依赖：</b><span class="tag t-dep">flydsl</span>（MLIR DSL 编译器，最大外部依赖）<span class="tag t-dep">mori.shmem</span>（rtp-llm 已通过 MoriEP 引入）<span class="tag t-dep">aiter</span>（ROCm，已可用，用于 per-token quant）。约束：<code>world_size ≤ 8</code>（mori intra-node）、<code>experts % world_size == 0</code>、<code>topk ≤ world_size</code>、<code>max_tok_per_rank</code> 为 2 的幂。</div>
+<div class="callout"><b>依赖：</b><span class="tag t-dep">flydsl</span>（MLIR DSL 编译器，最大外部依赖）<span class="tag t-dep">mori.shmem</span>（rtp-llm 已通过 MoriEP 引入）<span class="tag t-dep">aiter</span>（ROCm，已可用，用于 per-token quant）。约束：<code>world_size ≤ 8</code>（mori intra-node）、<code>experts % world_size == 0</code>、<span class="tag t-mod">与设计不同</span> <code>topk ≤ 64</code>（warp-ballot 车道预算）——设计原写 <code>topk ≤ world_size</code>，实测发现该假设是遗留错误：combine 缓冲 <code>shmem_comb_inp_tok</code> 早已按 <code>max(npes·mt, mt·topk+1)</code> 分配，<code>topk &gt; npes</code> 天然可放。正是放开此约束才跑通 Qwen3.5-397B-A17B（topk=10 &gt; world_size=8）。另需 <code>max_tok_per_rank</code> 为 2 的幂。</div>
 
 <!-- ============ 3 ============ -->
 <h2 id="s3"><span class="num">3</span>rtp-llm MoE 架构现状</h2>
@@ -292,12 +292,12 @@ out_tok, out_wts = forward(
   <!-- strategy -->
   <rect x="30" y="80" width="1000" height="66" rx="8" fill="#161b22" stroke="#3fb950"/>
   <text x="530" y="102" fill="#3fb950" text-anchor="middle" font-weight="bold">【新增】RocmMegaMoeStrategy  (注册于 fused_moe/__init__.py)</text>
-  <text x="530" y="122" fill="#c9d1d9" text-anchor="middle" font-size="11">check_conditions: is_ep_enabled &amp;&amp; USE_MEGAMOE &amp;&amp; MegaMoeWrapper.supported() &amp;&amp; gfx942 &amp;&amp; ep_size==world_size</text>
-  <text x="530" y="138" fill="#8b949e" text-anchor="middle" font-size="10">get_attributes → (router=MegaMoeRouter, executor=MegaMoeExecutor, quant=FP8_E4M3FNUZ per-token)</text>
+  <text x="530" y="122" fill="#c9d1d9" text-anchor="middle" font-size="11">check_conditions: strategy 仅查 USE_MEGAMOE；is_ep_enabled + supported() 由 Router 追加；gfx942 不校验(靠 fp8 dtype 隐式)</text>
+  <text x="530" y="138" fill="#8b949e" text-anchor="middle" font-size="10">get_attributes → (router=MegaMoePassthroughRouter, executor=MegaMoeFusedExecutor, quant=FP8 fnuz@gfx942 per-token)；ep==world 仅在 wrapper init 断言</text>
 
   <!-- router -->
   <rect x="40" y="180" width="300" height="150" rx="8" fill="#161b22" stroke="#bc8cff"/>
-  <text x="190" y="203" fill="#bc8cff" text-anchor="middle" font-weight="bold">【新增】MegaMoeRouter</text>
+  <text x="190" y="203" fill="#bc8cff" text-anchor="middle" font-weight="bold">【新增】MegaMoePassthroughRouter</text>
   <text x="190" y="226" fill="#c9d1d9" text-anchor="middle" font-size="11">prepare(): 透传</text>
   <text x="190" y="242" fill="#8b949e" text-anchor="middle" font-size="10">expert_x = hidden_states</text>
   <text x="190" y="256" fill="#8b949e" text-anchor="middle" font-size="10">expert_topk_ids = 全局 id</text>
@@ -307,7 +307,7 @@ out_tok, out_wts = forward(
 
   <!-- executor -->
   <rect x="380" y="180" width="330" height="150" rx="8" fill="#161b22" stroke="#d29922"/>
-  <text x="545" y="203" fill="#d29922" text-anchor="middle" font-weight="bold">【新增】MegaMoeExecutor</text>
+  <text x="545" y="203" fill="#d29922" text-anchor="middle" font-weight="bold">【新增】MegaMoeFusedExecutor</text>
   <text x="545" y="226" fill="#c9d1d9" text-anchor="middle" font-size="11">execute(payload):</text>
   <text x="545" y="243" fill="#8b949e" text-anchor="middle" font-size="10">wrapper.forward(x_bf16, wts, topk_ids,</text>
   <text x="545" y="257" fill="#8b949e" text-anchor="middle" font-size="10">w1, scale_w1) — 整条融合流水线</text>
@@ -319,15 +319,15 @@ out_tok, out_wts = forward(
   <rect x="750" y="180" width="280" height="150" rx="8" fill="#161b22" stroke="#58a6ff"/>
   <text x="890" y="203" fill="#58a6ff" text-anchor="middle" font-weight="bold">【新增】MegaMoeWrapper</text>
   <text x="890" y="224" fill="#8b949e" text-anchor="middle" font-size="10">singleton, 仿 MoriEPWrapper</text>
-  <text x="890" y="242" fill="#c9d1d9" text-anchor="middle" font-size="11">持有 per-layer</text>
+  <text x="890" y="242" fill="#c9d1d9" text-anchor="middle" font-size="11">全局共享 1 个</text>
   <text x="890" y="257" fill="#c9d1d9" text-anchor="middle" font-size="11">FusedMoEZeroCopyFp8 实例</text>
-  <text x="890" y="276" fill="#8b949e" text-anchor="middle" font-size="10">supported(): import flydsl</text>
-  <text x="890" y="291" fill="#8b949e" text-anchor="middle" font-size="10">init: mori shmem + pg 注册</text>
+  <text x="890" y="276" fill="#d29922" text-anchor="middle" font-size="10">与设计不同: 非 per-layer,</text>
+  <text x="890" y="291" fill="#d29922" text-anchor="middle" font-size="10">每次 execute 重灌本层 W2</text>
   <text x="890" y="309" fill="#8b949e" text-anchor="middle" font-size="10">(backend_manager 启动时初始化)</text>
 
   <!-- flydsl -->
   <rect x="380" y="360" width="330" height="50" rx="8" fill="#0d1117" stroke="#2d333b" stroke-dasharray="4"/>
-  <text x="545" y="382" fill="#ff7b9c" text-anchor="middle" font-size="11" font-weight="bold">FlyDSL kernels (只读引用，不改逻辑)</text>
+  <text x="545" y="382" fill="#ff7b9c" text-anchor="middle" font-size="11" font-weight="bold">FlyDSL kernels (基本只读, 仅放开 topk&gt;npes 约束)</text>
   <text x="545" y="398" fill="#8b949e" text-anchor="middle" font-size="10">FusedMoEZeroCopyFp8 / stage1 / stage2 / dispatch_combine_op</text>
 
   <g stroke="#8b949e" stroke-width="1.5" fill="none" marker-end="url(#ah3)">
@@ -344,27 +344,27 @@ out_tok, out_wts = forward(
 <h3>新增组件职责表</h3>
 <table>
 <tr><th>组件</th><th>类型</th><th>职责</th><th>参照现有</th></tr>
-<tr><td><code>MegaMoeWrapper</code></td><td><span class="tag t-new">新增</span></td><td>单例，管理 flydsl 依赖探测、mori shmem 初始化、per-layer <code>FusedMoEZeroCopyFp8</code> 实例缓存</td><td>MoriEPWrapper</td></tr>
-<tr><td><code>MegaMoeRouter</code></td><td><span class="tag t-new">新增</span></td><td>透传式：prepare 返回未 dispatch 的 hidden_states + 全局路由；finalize 透传</td><td>MoriEpIntranodeRouter</td></tr>
-<tr><td><code>MegaMoeExecutor</code></td><td><span class="tag t-new">新增</span></td><td>调用 wrapper 的融合前向，完成整条流水线</td><td>RocmExpertsFp8PerChannel</td></tr>
-<tr><td><code>RocmMegaMoeStrategy</code></td><td><span class="tag t-new">新增</span></td><td>条件判定 + 返回 router/executor/quant 组合</td><td>RocmEpNormalStrategy</td></tr>
-<tr><td><code>RouterType.MEGAMOE</code></td><td><span class="tag t-mod">改</span></td><td>枚举新增值（如 =8）</td><td>defs/type.py</td></tr>
-<tr><td><code>MoeConfig.use_megamoe</code></td><td><span class="tag t-mod">改</span></td><td>C++/pyi 配置字段 + CLI/env 绑定</td><td>use_mori_ep</td></tr>
+<tr><td><code>MegaMoeWrapper</code></td><td><span class="tag t-new">新增</span></td><td>单例，管理 flydsl 依赖探测、mori shmem 初始化。<span class="tag t-mod">与设计不同</span>：持有<b>全局共享的单个</b> <code>FusedMoEZeroCopyFp8</code>（非 per-layer 缓存）</td><td>MoriEPWrapper</td></tr>
+<tr><td><code>MegaMoePassthroughRouter</code></td><td><span class="tag t-new">新增</span></td><td>透传式：prepare 返回未 dispatch 的 hidden_states + 全局路由；finalize 透传并按 <code>original_num_tokens</code> 截断。<span class="tag t-mod">与设计不同</span>：类名带 Passthrough</td><td>MoriEpIntranodeRouter</td></tr>
+<tr><td><code>MegaMoeFusedExecutor</code></td><td><span class="tag t-new">新增</span></td><td>调用 wrapper 的融合前向；因 op 为共享单例，每次 execute 先把本层 W2 <code>copy_</code> 回 op 缓冲。<span class="tag t-mod">与设计不同</span>：类名带 Fused</td><td>RocmExpertsFp8PerChannel</td></tr>
+<tr><td><code>RocmMegaMoeStrategy</code></td><td><span class="tag t-new">新增</span></td><td>条件判定（仅查 <code>use_megamoe</code>）+ 返回 router/executor/quant 组合</td><td>RocmEpNormalStrategy</td></tr>
+<tr><td><code>RouterType.MEGAMOE=8 / ExecutorType.MEGAMOE_FUSED=9</code></td><td><span class="tag t-mod">改</span></td><td>两个枚举各新增一值；优先级 = 8·10+9 = 89（最高）</td><td>defs/type.py</td></tr>
+<tr><td><code>use_megamoe</code>（配置适配层）</td><td><span class="tag t-mod">改</span></td><td><span class="tag t-mod">与设计不同</span>：未新增 C++ <code>MoeConfig</code> 字段，改由 <code>config_adapter.py</code> 直接读 <code>USE_MEGAMOE</code> 环境变量</td><td>use_mori_ep</td></tr>
 </table>
 
 <!-- ============ 6 ============ -->
 <h2 id="s6"><span class="num">6</span>数据流与张量规格</h2>
 <p>Qwen3.5-397B-A17B 在 EP8 下的形状（需从模型 config 读取并校验）：</p>
 <table>
-<tr><th>符号</th><th>含义</th><th>Qwen3.5-397B-A17B (EP8) 取值*</th></tr>
-<tr><td>model_dim</td><td>hidden size</td><td>需从 config 确认（例：4096/6144 量级）</td></tr>
-<tr><td>inter_dim</td><td>专家 FFN 中间维</td><td>moe_intermediate_size（需确认）</td></tr>
-<tr><td>experts</td><td>全局专家数</td><td>需确认（须 % 8 == 0）</td></tr>
-<tr><td>epr</td><td>每卡专家数 = experts/8</td><td>experts/8</td></tr>
-<tr><td>topk</td><td>每 token 激活专家</td><td>需确认（须 ≤ 8）</td></tr>
-<tr><td>max_tok_per_rank</td><td>每卡 token 容量</td><td>向上取 2 的幂（≥ 单卡最大 batch·seq）</td></tr>
+<tr><th>符号</th><th>含义</th><th>Qwen3.5-397B-A17B (EP8) 实测取值</th></tr>
+<tr><td>model_dim</td><td>hidden size</td><td>4096</td></tr>
+<tr><td>inter_dim</td><td>专家 FFN 中间维</td><td>1024（moe_intermediate_size）</td></tr>
+<tr><td>experts</td><td>全局专家数</td><td>512（512 % 8 == 0 ✓）</td></tr>
+<tr><td>epr</td><td>每卡专家数 = experts/8</td><td>64</td></tr>
+<tr><td>topk</td><td>每 token 激活专家</td><td>10（&gt; world_size=8，靠放开约束支持）</td></tr>
+<tr><td>max_tok_per_rank</td><td>每卡 token 容量</td><td>512（<code>MEGAMOE_MAX_TOK</code> 默认，向上取 2 的幂）</td></tr>
 </table>
-<p class="sub">*具体数值在实现阶段从 <code>~/.cache/modelscope/.../Qwen3.5-397B-A17B/config.json</code> 读取，若违反约束（topk&gt;8 或 experts%8≠0）需在 <code>check_conditions</code> 中拒绝并回退到 Mori/DeepEP。</p>
+<p class="sub"><span class="tag t-mod">与设计不同</span>：设计原假设 <code>topk ≤ 8</code>，实测 397B 的 topk=10 超过 world_size；由于约束放开到 <code>topk ≤ 64</code>（见 §2），无需回退 Mori/DeepEP，直接由 MegaMoE 服务。数值从 <code>~/.cache/modelscope/.../Qwen3.5-397B-A17B/config.json</code> 读取，仍校验 <code>experts % 8 == 0</code>。</p>
 
 <h3>executor.execute 内张量映射</h3>
 <pre><code>ExpertForwardPayload:
@@ -393,118 +393,131 @@ CombineForwardPayload:
 <tr><td>scale_w1/w2</td><td>—</td><td>f32 per-N</td><td>量化时产出</td></tr>
 </table>
 
-<div class="callout"><b>设计决策</b>：把 W2 从 FlyDSL 模块内部「随机生成」改为 <b>外部注入</b>——由 <code>MegaMoeWrapper</code> 在建实例时接收 rtp-llm 已加载并转换好的真实权重。需为 <code>FusedMoEZeroCopyFp8</code> 增加一个「注入外部 w2/scale_w2」的入口（或在构造函数暴露参数），这是移植中对 FlyDSL 侧唯一必要的小改动。W1 保持 per-call 传入。</div>
+<div class="callout"><b>设计决策 → 实际实现</b>：<span class="tag t-mod">与设计不同</span>。设计想给 <code>FusedMoEZeroCopyFp8</code> 增一个「注入外部 W2」的构造入口；实际<b>没有</b> <code>set_w2/load_w2</code> API。op 在 <code>_alloc_buffers()</code> 里仍分配一块<b>随机占位 W2</b>（bf16→fp8 + scale=ones），executor 通过<b>直接 <code>copy_</code> 覆写</b> op 的 <code>_w2_storage</code>/<code>_w2_scale</code> 属性缓冲来注入真实权重。又因 op 是<b>全局共享单例</b>，executor 在<b>每次 <code>execute()</code></b> 都把本层的 W2 重新灌回缓冲（否则"最后构造的层会赢"）。W1（gate_up）走 <code>pertoken_quant</code> + <code>shuffle_weight</code> 后 per-call 传入。量化/shuffle 辅助函数从 <code>flydsl.tests.utils</code> import。</div>
 
-<div class="callout warn"><b>依赖上移</b>：Stage2 wrapper 类 <code>FlyDSLMoeGemm2CombineOpGfx942</code> 目前位于 <code>tests/</code> 目录，生产集成需将其（及 <code>tests/utils.shuffle_weight</code>）上移到 <code>kernels/</code> 稳定包路径，避免 rtp-llm 依赖测试代码。</div>
+<div class="callout warn"><b>依赖上移（未完成的技术债）</b>：<span class="tag t-mod">与设计不同</span>。设计要求把 Stage2 wrapper <code>FlyDSLMoeGemm2CombineOpGfx942</code>（及 <code>tests/utils</code> 的 <code>shuffle_weight/pertoken_quant</code>）上移到 <code>kernels/</code>。实际<b>仍留在 <code>tests/kernels/test_profiler_moe_gemm2_combine.py</code></b>，生产路径 <code>kernels/moe_fused_chained_fp8.py</code> 用 <code>sys.path.insert</code> 反向 import tests/——即生产代码依赖测试代码，属遗留技术债。</div>
 
 <!-- ============ 8 ============ -->
 <h2 id="s8"><span class="num">8</span>环境变量开关设计</h2>
-<p>沿用 rtp-llm 现有 <code>moe_group_args.py</code> 的 <code>env_name + bind_to</code> 模式，新增：</p>
-<pre><code># rtp_llm/server/server_args/moe_group_args.py
-moe_group.add_argument(
-    "--use_megamoe", env_name="USE_MEGAMOE",
-    bind_to=(moe_config, "use_megamoe"), type=str2bool, default=False,
-    help="Enable FlyDSL 2-stage fused MegaMoE on AMD gfx942 (EP<=8, fp8).")
+<p><span class="tag t-mod">与设计不同</span>：设计计划在 <code>moe_group_args.py</code> 用 <code>env_name + bind_to</code> 新增 <code>--use_megamoe</code> CLI 参数并加 C++ <code>MoeConfig</code> 字段；<b>实际都未做</b>。开关就是一个纯环境变量 <code>USE_MEGAMOE</code>，由下列位置直接读取：</p>
+<pre><code># 实际：无 CLI 参数、无 C++ 字段，纯 env 读取
+#   config_adapter.py   : self.use_megamoe = env USE_MEGAMOE in (1/true/on/yes)
+#   backend_manager.py  : if USE_MEGAMOE -> init_megamoe_wrapper(...)
+#   device_impl.py      : USE_MEGAMOE 时跳过 aiter(16,16) preshuffle
 
-# 可选调优旋钮（env）
-#   MEGAMOE_STAGE1_TILE_M (默认 64)   MEGAMOE_TILE_K (默认 256)
-#   MEGAMOE_STAGE2_TILE_N (默认 256)  MEGAMOE_ENABLE_CUDAGRAPH (默认继承 ENABLE_CUDA_GRAPH)</code></pre>
+# 唯一接入的调优旋钮（env）
+#   MEGAMOE_MAX_TOK (默认 512, 自动向上取 2 的幂)
+# 其余 tile（stage1_tile_m=64 / tile_n=128 / tile_k=256 /
+#   stage2_tile_m=32 / stage2_tile_n=256 / stage2_tile_k=128）
+#   为 MegaMoeWrapperConfig dataclass 硬编码默认，未做 env 化
+#   (设计里的 MEGAMOE_STAGE1_TILE_M / MEGAMOE_TILE_K / ... 均未实现)</code></pre>
 
 <h4>互斥与回退</h4>
 <table>
 <tr><th>USE_MEGAMOE</th><th>USE_MORI_EP</th><th>USE_DEEPEP_MOE</th><th>结果</th></tr>
-<tr><td>1</td><td>0</td><td>0</td><td class="t-new">启用 MegaMoE（满足 gfx942/EP8/fp8 约束时）</td></tr>
-<tr><td>1</td><td>1</td><td>-</td><td class="t-risk">check_conditions 报错互斥（仿现有 Mori+DeepEP 互斥）</td></tr>
-<tr><td>1</td><td>0</td><td>0</td><td class="t-mod">若不满足约束（topk&gt;8 等）→ 策略优先级落选 → 自动回退 Mori/DeepEP</td></tr>
+<tr><td>1</td><td>0</td><td>0</td><td class="t-new">启用 MegaMoE（满足 EP8/fp8；gfx942 不强校验，靠 fp8 dtype 隐式）</td></tr>
+<tr><td>1</td><td>1</td><td>-</td><td class="t-mod"><span class="tag t-mod">与设计不同</span>：<b>不报错互斥</b>。backend_manager 三个后端各自独立 try/except 初始化；最终由策略优先级决定——MegaMoE=89 最高，会被选中</td></tr>
+<tr><td>1</td><td>0</td><td>0</td><td class="t-mod">约束不满足（experts%8≠0 等）→ MegaMoe 策略 check 落选 → 回退 Mori/DeepEP。注：topk 已放开到 ≤64，不再是回退原因</td></tr>
 <tr><td>0</td><td>...</td><td>...</td><td>维持现状，零影响</td></tr>
 </table>
 
 <!-- ============ 9 ============ -->
 <h2 id="s9"><span class="num">9</span>单元测试方案</h2>
-<p>遵循 <code>moriep_intranode_router_test.py</code> 的多卡 <code>mp.spawn</code> 模式（<code>unittest</code> + Bazel <code>py_test</code>，<code>tags=["rocm"]</code>，<code>exec_properties={'gpu':'MI308X-ROCM7'}</code>）。</p>
+<p>遵循 <code>moriep_intranode_router_test.py</code> 的多卡 <code>mp.spawn</code> 模式（<code>unittest</code> + Bazel <code>py_test</code>，<code>tags=["rocm"]</code>）。<span class="tag t-mod">与设计不同</span>：设计里分开的 <code>megamoe_router_test.py</code> 与 <code>distributed/test/megamoe_test.py</code> <b>未创建</b>；实际合并/落成下述 3 个文件（均在 <code>impl/rocm/test/</code>）。</p>
 <div class="grid2">
 <div class="card">
-<h4 style="margin-top:0">① Router/Executor 集成单测</h4>
-<p><code>impl/rocm/test/megamoe_router_test.py</code></p>
+<h4 style="margin-top:0">① CPU 集成单测（实际）</h4>
+<p><code>impl/rocm/test/test_megamoe.py</code></p>
 <ul>
-<li>spawn 8 worker，init dist + mori shmem</li>
-<li>构造 MegaMoeRouter+Executor，跑 prepare→execute→finalize</li>
-<li>与 <code>torch_moe_ref</code>（CPU/torch fp32 参考）对比 <code>assert_close(rtol=0.05, atol=0.05)</code></li>
-<li>覆盖 batch = {1,8,64,256}</li>
+<li><code>TestMegaMoePassthroughRouter</code>：router_type、prepare 透传、finalize 透传 + 按 <code>original_num_tokens</code> 截断</li>
+<li><code>TestMegaMoeStrategy</code>：禁用/启用（mock <code>supported()</code>）、优先级 = 89</li>
+<li><code>TestMegaMoeConfigAdapter</code>：env <code>USE_MEGAMOE</code> 驱动（无 C++ 字段）</li>
+<li><code>TestMegaMoeWrapperConfig</code>：<code>_next_pow2</code> + <code>from_config_adapter</code></li>
 </ul>
 </div>
 <div class="card">
-<h4 style="margin-top:0">② Wrapper 单测</h4>
-<p><code>distributed/test/megamoe_test.py</code></p>
+<h4 style="margin-top:0">② 8 卡 GPU 单测（实际）</h4>
+<p><code>impl/rocm/test/megamoe_gpu_smoke.py</code></p>
 <ul>
-<li>验证 <code>MegaMoeWrapper.supported()</code> 对缺 flydsl 的降级</li>
-<li>验证单例 init/reset、shmem heap 生命周期</li>
-<li><code>MEGAMOE_TEST_MAX_GPUS</code> 控制 2/4/8 卡跳过</li>
+<li>8 worker spawn，跑一遍融合前向，断言输出 shape + finite</li>
+</ul>
+<p><code>impl/rocm/test/megamoe_gpu_correctness.py</code></p>
+<ul>
+<li>对比 <b>fp8 量化感知的 torch 参考</b>，逐 rank 打印 relL2 + PASS/FAIL</li>
+<li><code>--threshold 0.30</code>、<code>--force-expert</code>、<code>--same-tokens</code> 等旋钮</li>
+<li>397B 形状（topk=10）实测 relL2≈0.037，8 卡一致</li>
 </ul>
 </div>
 </div>
 <div class="card">
-<h4 style="margin-top:0">③ 策略选择单测（CPU，无需 GPU）</h4>
-<p><code>fused_moe/tests/test_rocm_strategies.py</code>（或扩展现有）— mock config 验证：<code>USE_MEGAMOE=1</code> 且满足约束时 <code>RocmMegaMoeStrategy</code> 被选中；不满足时回退；与 Mori 同开时报错。</p>
+<h4 style="margin-top:0">③ 策略选择单测</h4>
+<p><span class="tag t-mod">与设计不同</span>：设计的独立 <code>test_rocm_strategies.py</code> 未新建，策略选择/优先级=89 的覆盖并入上面 <code>test_megamoe.py</code> 的 <code>TestMegaMoeStrategy</code>。</p>
 </div>
-<div class="callout"><b>精度基线</b>：复用 FlyDSL 已有的 <code>test_full_pipeline.py</code> 三重精度对比思路（vs torch fp32 参考 + vs 非融合 baseline chain），在 rtp-llm 侧以 <code>torch_moe_ref</code> 为金标准。</div>
+<div class="callout"><b>精度基线</b>：以 fp8 量化感知的 <code>torch_moe_ref</code> 为金标准（含 gate_up swap / 加权变体的 bestfit 对齐），阈值 relL2 &lt; 0.30。</div>
 
 <!-- ============ 10 ============ -->
 <h2 id="s10"><span class="num">10</span>端到端验证方案</h2>
 <p>基于 <code>start_mori.sh</code> 派生 <code>start_megamoe.sh</code>，唯一关键差异是开关：</p>
-<pre><code># start_megamoe.sh（关键差异）
+<pre><code># start_megamoe.sh（关键差异，as-built）
 export USE_MORI_EP=0
 export USE_DEEPEP_MOE=0
-export USE_MEGAMOE=1          # ← 新增开关
-export ROCM_PATH=/opt/rocm-7.2.0
-export HIP_PATH=/opt/rocm-7.2.0
-export MORI_SHMEM_HEAP_SIZE=40G   # ← MegaMoE 需要（mori 对称堆）
+export USE_MEGAMOE=1          # ← 纯 env 开关（无 CLI 参数/C++ 字段）
+export MEGAMOE_MAX_TOK=512    # ← 每卡 token 容量（自动取 2 的幂）
+export MORI_SHMEM_HEAP_SIZE=8G    # ← 实测 8G 够用（设计写 40G）
+export TEST_BLOCK_NUM=256     # ← 与设计不同：397B 权重占用大，需压小 KV block 数避免 HIP OOM
+export WARM_UP=1              # ← 与设计不同：启动即 JIT 编译 FlyDSL kernel，否则首个请求阻塞 ~285s
+export ENABLE_CUDA_GRAPH=0    # 首版关闭
+export USE_ASM_PA=0
 export WORLD_SIZE=8; export TP_SIZE=8; export EP_SIZE=8; export DP_SIZE=1
 export ACT_TYPE=bf16; export MAX_SEQ_LEN=2048
 model_path=~/.cache/modelscope/hub/models/Qwen/Qwen3.5-397B-A17B/
 START_PORT=6655 TOKENIZER_PATH=$model_path CHECKPOINT_PATH=$model_path \
   MODEL_TYPE=qwen35_moe FT_SERVER_TEST=1 \
-  python3.10 -m rtp_llm.start_server 2>&1 | tee megamoe_e2e.log</code></pre>
+  python3.10 -m rtp_llm.start_server 2>&1 | tee megamoe_tp8ep8.log</code></pre>
 
 <h4>验证步骤与验收标准</h4>
 <table>
 <tr><th>#</th><th>步骤</th><th>验收标准</th></tr>
-<tr><td>1</td><td>服务拉起，MegaMoE 策略被选中</td><td>日志出现 <code>RocmMegaMoeStrategy selected</code>，无 fallback</td></tr>
-<tr><td>2</td><td>正确性：与 <code>USE_MORI_EP=1</code> 同 prompt 对比输出</td><td>生成文本一致 / logits 相对误差在容忍内</td></tr>
-<tr><td>3</td><td>性能：decode 延迟对比 Mori/DeepEP</td><td>参考 <code>deepep_vs_mori_perf_summary.md</code> 口径，MegaMoE decode 延迟 ≤ Mori</td></tr>
-<tr><td>4</td><td>稳定性：CONCURRENCY_LIMIT 压测</td><td>无 shmem OOM、无 hang、无精度漂移</td></tr>
+<tr><td>1</td><td>服务拉起，MegaMoE 策略被选中</td><td>策略优先级 89 最高被选中；8 rank 均 listen（:6656…）<span class="tag t-new">已验证</span></td></tr>
+<tr><td>2</td><td>正确性：GPU 单测 + e2e 输出</td><td>correctness 单测 relL2≈0.037（&lt;0.30）；e2e 输出正确（"Paris"、17×23=391）<span class="tag t-new">已验证</span></td></tr>
+<tr><td>3</td><td>首个请求延迟</td><td><span class="tag t-mod">注意</span>：<code>WARM_UP=0</code> 时首个请求会阻塞 ~285s（进程内 MLIR→AMDGPU JIT 编译，非 hang）；<code>WARM_UP=1</code> 把编译提前到启动阶段，首 token 恢复到 ~145ms</td></tr>
+<tr><td>4</td><td>性能：decode 延迟对比 Mori/DeepEP</td><td>参考 <code>deepep_vs_mori_perf_summary.md</code> 口径（待补充系统性对比）</td></tr>
+<tr><td>5</td><td>稳定性：CONCURRENCY_LIMIT 压测</td><td>无 shmem OOM、无精度漂移（待补充压测）</td></tr>
 </table>
-<div class="callout warn"><b>先决条件</b>：验证前需确认 Qwen3.5-397B-A17B 的 MoE 形状满足 MegaMoE 约束（<code>topk≤8</code>、<code>experts%8==0</code>）。若不满足，需先在小配置（如 Qwen3.5-35B-A3B）上验证融合正确性，再评估大模型适配。</div>
+<div class="callout warn"><b>先决条件（已更新）</b>：<span class="tag t-mod">与设计不同</span>。设计要求 <code>topk≤8</code>，实际已放开到 <code>topk≤64</code>，故只需 <code>experts%8==0</code> 这一硬性形状约束。397B-A17B（topk=10、experts=512）与 35B-A3B（topk=8、experts=256）均已在 8 卡 gfx942 上打通。</div>
 
 <!-- ============ 11 ============ -->
 <h2 id="s11"><span class="num">11</span>文件改动清单</h2>
 <h4><span class="tag t-new">新增</span></h4>
 <table>
 <tr><th>文件</th><th>内容</th></tr>
-<tr><td>rtp_llm/models_py/distributed/megamoe_wrapper.py</td><td>MegaMoeWrapper + MegaMoeWrapperConfig + init_megamoe_wrapper</td></tr>
-<tr><td>.../fused_moe/impl/rocm/routers/megamoe_router.py</td><td>MegaMoeRouter（透传式）</td></tr>
-<tr><td>.../fused_moe/impl/rocm/executors/megamoe_executor.py</td><td>MegaMoeExecutor（融合流水线调用）</td></tr>
+<tr><td>rtp_llm/models_py/distributed/megamoe_wrapper.py</td><td>MegaMoeWrapper（单例）+ MegaMoeWrapperConfig + init_megamoe_wrapper</td></tr>
+<tr><td>.../fused_moe/impl/rocm/routers/megamoe_router.py</td><td><code>MegaMoePassthroughRouter</code>（透传式）</td></tr>
+<tr><td>.../fused_moe/impl/rocm/executors/megamoe_executor.py</td><td><code>MegaMoeFusedExecutor</code>（融合流水线 + 每 call 注入 W2）</td></tr>
 <tr><td>.../fused_moe/impl/rocm/strategy/megamoe.py</td><td>RocmMegaMoeStrategy</td></tr>
-<tr><td>.../impl/rocm/test/megamoe_router_test.py</td><td>多卡集成单测</td></tr>
-<tr><td>.../distributed/test/megamoe_test.py</td><td>wrapper 单测</td></tr>
-<tr><td>start_megamoe.sh</td><td>e2e 启动脚本</td></tr>
+<tr><td>.../impl/rocm/test/test_megamoe.py</td><td>CPU 单测（router/strategy/adapter/wrapper-config 4 类）</td></tr>
+<tr><td>.../impl/rocm/test/megamoe_gpu_smoke.py</td><td>8 卡 smoke（shape + finite）</td></tr>
+<tr><td>.../impl/rocm/test/megamoe_gpu_correctness.py</td><td>8 卡数值正确性（vs fp8 torch ref，relL2）</td></tr>
+<tr><td>start_megamoe.sh</td><td>e2e 启动脚本（仓外，位于工程根目录）</td></tr>
 </table>
 <h4><span class="tag t-mod">修改</span></h4>
 <table>
 <tr><th>文件</th><th>内容</th></tr>
 <tr><td>.../fused_moe/__init__.py</td><td>ROCm 分支 <code>registry.register(RocmMegaMoeStrategy())</code></td></tr>
-<tr><td>.../fused_moe/defs/type.py</td><td>RouterType 增 <code>MEGAMOE</code></td></tr>
+<tr><td>.../fused_moe/defs/type.py</td><td><code>RouterType.MEGAMOE=8</code> + <code>ExecutorType.MEGAMOE_FUSED=9</code></td></tr>
 <tr><td>.../impl/rocm/strategy/__init__.py</td><td>导出 RocmMegaMoeStrategy</td></tr>
-<tr><td>rtp_llm/server/server_args/moe_group_args.py</td><td>新增 <code>--use_megamoe / USE_MEGAMOE</code></td></tr>
-<tr><td>cpp/config/ConfigModules.* + libth_transformer_config.pyi</td><td>MoeConfig 增 <code>use_megamoe</code> 字段</td></tr>
+<tr><td>.../fused_moe/defs/config_adapter.py</td><td>读 <code>USE_MEGAMOE</code> env → <code>use_megamoe</code></td></tr>
 <tr><td>rtp_llm/server/backend_manager.py</td><td>启动时 <code>init_megamoe_wrapper</code> 分支</td></tr>
+<tr><td>rtp_llm/device/device_impl.py</td><td>USE_MEGAMOE 时跳过 aiter(16,16) preshuffle</td></tr>
 <tr><td>各相关 BUILD</td><td>py_library / py_test 条目</td></tr>
 </table>
-<h4><span class="tag t-dep">FlyDSL 侧（最小改动）</span></h4>
+<div class="callout warn"><b>设计里列了但实际未做</b>：<code>moe_group_args.py</code> 的 <code>--use_megamoe</code> CLI 参数、C++ <code>MoeConfig.use_megamoe</code> 字段（<code>ConfigModules.* / *.pyi</code>）、独立的 <code>megamoe_router_test.py</code> 与 <code>distributed/test/megamoe_test.py</code>。</div>
+<h4><span class="tag t-dep">FlyDSL 侧（实际改动）</span></h4>
 <table>
-<tr><td>kernels/moe_gemm2_combine_op.py（新）</td><td>把 <code>FlyDSLMoeGemm2CombineOpGfx942</code> 从 tests/ 上移到 kernels/</td></tr>
-<tr><td>kernels/moe_fused_chained_fp8.py</td><td>暴露「注入外部 W2/scale_w2」入口（替代内部随机权重）</td></tr>
-<tr><td>打包</td><td>flydsl 作为 rtp-llm 可 import 的依赖（whl 或 PYTHONPATH）</td></tr>
+<tr><td>kernels/moe_gemm2_combine_fused.py<br>kernels/mixed_moe_gemm2_combine_fused.py<br>kernels/mixed_moe_gemm2_combine_fused_op.py</td><td><b>实际唯一改动</b>：删除过时的 <code>topk &gt; npes</code> 报错（保留 <code>topk==experts_per_token</code> 校验），放开 topk 约束</td></tr>
+<tr><td class="t-risk">kernels/moe_gemm2_combine_op.py（上移）</td><td><span class="tag t-mod">未做</span>：<code>FlyDSLMoeGemm2CombineOpGfx942</code> 仍在 tests/，靠 sys.path hack import</td></tr>
+<tr><td class="t-risk">kernels/moe_fused_chained_fp8.py 注入 W2 入口</td><td><span class="tag t-mod">未做</span>：无 set_w2 API，executor 直接 copy_ 覆写 op 的随机占位缓冲</td></tr>
+<tr><td>打包</td><td>flydsl 经 PYTHONPATH 引入（未 whl 化）</td></tr>
 </table>
 
 <!-- ============ 12 ============ -->
@@ -536,21 +549,24 @@ START_PORT=6655 TOKENIZER_PATH=$model_path CHECKPOINT_PATH=$model_path \
 </svg>
 </div>
 
-<h3>风险登记</h3>
+<h3>风险登记（实际结果回填）</h3>
 <table>
-<tr><th>风险</th><th>等级</th><th>缓解</th></tr>
-<tr><td>flydsl 依赖打包（MLIR runtime）进 rtp-llm 生产环境</td><td><span class="tag t-risk">高</span></td><td>先以 PYTHONPATH 引入验证；后续评估 whl 化；<code>supported()</code> 缺失时优雅降级</td></tr>
-<tr><td>Qwen3.5-397B MoE 形状可能违反约束（topk≤8 / experts%8）</td><td><span class="tag t-risk">高</span></td><td>实现前先读 config 校验；不满足则先在 35B-A3B 验证</td></tr>
-<tr><td>权重 preshuffle/量化与 aiter 布局一致性</td><td><span class="tag t-mod">中</span></td><td>复用 FlyDSL <code>shuffle_weight</code>；单测逐值比对 scale</td></tr>
-<tr><td>路由权重重复相乘 / combine 语义错配</td><td><span class="tag t-mod">中</span></td><td>finalize 不再乘权重；单测对比 torch ref</td></tr>
-<tr><td>mori shmem 堆与现有 MoriEP 复用冲突</td><td><span class="tag t-mod">中</span></td><td>MegaMoE 独占 shmem，与 Mori 互斥，不同时初始化</td></tr>
+<tr><th>风险</th><th>等级</th><th>实际结果 / 缓解</th></tr>
+<tr><td>flydsl 依赖打包（MLIR runtime）进 rtp-llm 生产环境</td><td><span class="tag t-risk">高</span></td><td>仍以 PYTHONPATH 引入；<code>supported()</code> 缺失时优雅降级；whl 化未做（<b>仍开放</b>）</td></tr>
+<tr><td>397B MoE 形状违反 <code>topk≤8</code> 约束</td><td><span class="tag t-risk">高</span></td><td><span class="tag t-mod">假设有误</span>：该约束本身是错的，放开到 <code>topk≤64</code> 后 397B（topk=10）直接跑通，<b>已解决</b></td></tr>
+<tr><td>权重 preshuffle/量化与 aiter 布局一致性</td><td><span class="tag t-mod">中</span></td><td>USE_MEGAMOE 时跳过 aiter preshuffle，改用 FlyDSL <code>shuffle_weight</code>；relL2≈0.037 验证一致，<b>已解决</b></td></tr>
+<tr><td>路由权重重复相乘 / combine 语义错配</td><td><span class="tag t-mod">中</span></td><td>finalize 不再乘权重；correctness 单测对齐 torch ref，<b>已解决</b></td></tr>
+<tr><td class="t-risk">共享单例 op：W2 需每次 execute 重灌</td><td><span class="tag t-risk">新增</span></td><td>op 全局共享一个实例，executor 每 call <code>copy_</code> 本层 W2；否则"最后一层赢"。已缓解但脆弱，<b>建议后续改 per-layer 或加校验</b></td></tr>
+<tr><td class="t-risk">首个请求进程内 JIT 编译 ~285s（貌似 hang）</td><td><span class="tag t-risk">新增</span></td><td>非死锁，是 MLIR→AMDGPU 编译。<code>WARM_UP=1</code> 提前到启动阶段规避，<b>已缓解</b></td></tr>
+<tr><td class="t-risk">397B 权重后 KV-cache HIP OOM</td><td><span class="tag t-mod">新增</span></td><td><code>TEST_BLOCK_NUM=256</code>（原 2048 为 35B 调优）避开 OOM，<b>已缓解</b></td></tr>
+<tr><td>Stage2 wrapper 依赖 tests/（sys.path hack）</td><td><span class="tag t-dep">低</span></td><td>技术债，未上移到 kernels/，<b>仍开放</b></td></tr>
 <tr><td>CUDAGraph 与 rtp-llm 现有 capture 冲突</td><td><span class="tag t-dep">低</span></td><td>首版 <code>ENABLE_CUDA_GRAPH=0</code>，decode 优化作为后续增量</td></tr>
 </table>
 
-<div class="callout ok"><b>结论</b>：采用<strong>方案 B（透传 Router + 独占 Executor）</strong>对 rtp-llm 框架侵入最小，能完整保留 FlyDSL 已验证的融合收益。首要前置动作是（a）确认 397B 的 MoE 形状约束、（b）打通 flydsl 依赖引入与真实权重的 preshuffle。建议先在 <code>Qwen3.5-35B-A3B</code> 上打通正确性，再上 397B 做性能验证。</div>
+<div class="callout ok"><b>结论（as-built）</b>：<strong>方案 B（透传 Router + 独占 Executor + 单例 Wrapper）</strong>已落地，对 rtp-llm 框架侵入小，完整保留 FlyDSL 融合收益。<code>Qwen3.5-35B-A3B</code>（topk=8）与 <code>Qwen3.5-397B-A17B</code>（topk=10）均已在 8 卡 gfx942 上端到端跑通、精度正确（relL2≈0.037，e2e 输出正确）。遗留项：flydsl whl 化、tests/→kernels/ 上移、W2 单例注入改造、系统性性能对比与压测。</div>
 
 <div class="foot">
-生成：Qoder · 基于 FlyDSL <code>PROGRESS.md</code> + rtp-llm fused_moe 框架源码 + start_mori.sh 分析 · 本文为设计评审稿，不含代码改动
+生成：Qoder · 基于 FlyDSL <code>PROGRESS.md</code> + rtp-llm fused_moe 框架源码分析 · 初为设计评审稿，<b>2026-07-22 按实际落地代码回填为 as-built 文档</b>
 </div>
 
 </div>
