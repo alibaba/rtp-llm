@@ -29,6 +29,7 @@ public:
     bool                                     ok() const;
     bool                                     hasError() const;
     bool                                     cancelled() const;
+    virtual bool                             isRequestCancelled() const;
     int64_t                                  executeTimeMs();
     void                                     reportTime();
     void                                     collectBasicMetrics(RpcMetricsCollector& collector);
@@ -83,7 +84,7 @@ protected:
     }
 
 #define CHECK_REQUEST_CANCELLED(generate_context)                                                                      \
-    if (generate_context.server_context && generate_context.server_context->IsCancelled()) {                           \
+    if (generate_context.isRequestCancelled()) {                                                                       \
         generate_context.error_info   = ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");                       \
         generate_context.error_status = serializeErrorMsg(                                                             \
             generate_context.request_key, generate_context.request_info, generate_context.error_info);                 \

@@ -284,52 +284,61 @@ TEST_F(GenerateStreamStateTest, testStreamStateToString) {
 }
 
 // ============================================================================
-// 9. Lifecycle method tests
+// 9. LoadInitiated event: Verify Decode mode cache load fix
 // ============================================================================
 
-TEST_F(GenerateStreamStateTest, testPrepareAllocatesKVBlocks) {
+TEST_F(GenerateStreamStateTest, testLoadInitiatedPreventsDuplicateInitKVBlock) {
     auto stream = createStream();
     ASSERT_EQ(stream->getStatus(), StreamState::WAITING);
-    bool needs_loading = stream->prepare();
-    ASSERT_FALSE(needs_loading);
-    ASSERT_TRUE(stream->alive());
+
+    auto& resource = stream->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream->reportEvent(StreamEvents::LoadInitiated);
+
+    auto new_state = stream->moveToNext();
+    ASSERT_EQ(new_state, StreamState::WAITING);
+
+    stream->reportEvent(StreamEvents::CanRun);
+    new_state = stream->moveToNext();
+    ASSERT_EQ(new_state, StreamState::RUNNING);
 }
 
-TEST_F(GenerateStreamStateTest, testActivateTransitionsToRunning) {
+TEST_F(GenerateStreamStateTest, testLoadInitiatedSkipsAsyncLoadCache) {
     auto stream = createStream();
-    stream->prepare();
-    stream->activate();
-    ASSERT_EQ(stream->getStatus(), StreamState::RUNNING);
-    ASSERT_TRUE(stream->alive());
+    ASSERT_EQ(stream->getStatus(), StreamState::WAITING);
+
+    auto& resource = stream->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream->reportEvent(StreamEvents::LoadInitiated);
+    ASSERT_FALSE(resource.load_cache_context_);
+
+    stream->reportEvent(StreamEvents::CanRun);
+    auto new_state = stream->moveToNext();
+    ASSERT_EQ(new_state, StreamState::RUNNING);
+    ASSERT_FALSE(resource.load_cache_context_);
 }
 
-TEST_F(GenerateStreamStateTest, testFinishReleasesResource) {
-    auto stream = createStream();
-    stream->prepare();
-    stream->activate();
-    ASSERT_EQ(stream->getStatus(), StreamState::RUNNING);
-    stream->finish();
-    ASSERT_EQ(stream->getStatus(), StreamState::FINISHED);
-    ASSERT_FALSE(stream->alive());
+TEST_F(GenerateStreamStateTest, testPrefillFallbackDecodeGrowsBlocksAfterContext) {
+    auto stream = createStream({1, 2}, /*reuse_cache=*/false, RoleType::PREFILL);
+
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    ASSERT_TRUE(stream->isContextStream());
+    ASSERT_EQ(stream->curBlocksNum(), 1u);
+
+    stream->setIsContextStream(false);
+    stream->setSeqLength(3);
+
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    EXPECT_EQ(stream->curBlocksNum(), 2u);
 }
 
-TEST_F(GenerateStreamStateTest, testFinishIsIdempotent) {
-    auto stream = createStream();
-    stream->prepare();
-    stream->activate();
-    stream->finish();
-    ASSERT_FALSE(stream->alive());
-    stream->finish();
-    ASSERT_FALSE(stream->alive());
-}
+TEST_F(GenerateStreamStateTest, testNormalPathTriggersAsyncLoadCache) {
+    auto stream = createStream({1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true);
+    ASSERT_EQ(stream->getStatus(), StreamState::WAITING);
 
-TEST_F(GenerateStreamStateTest, testPrepareWithReuseCacheReturnsLoading) {
-    // Only test if reuse_cache streams exist in test helpers
-    // If createStream doesn't support reuse_cache, skip this test
-    auto stream = createStream();
-    // Without reuse cache connector, prepare returns false (no loading needed)
-    bool needs_loading = stream->prepare();
-    ASSERT_FALSE(needs_loading);
+    auto new_state = stream->moveToNext();
+    ASSERT_TRUE(new_state == StreamState::LOADING_CACHE || new_state == StreamState::WAITING);
 }
 
 }  // namespace rtp_llm

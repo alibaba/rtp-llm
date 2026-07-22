@@ -1,8 +1,9 @@
 #pragma once
 
 #include <list>
-#include <vector>
 #include <memory>
+#include <utility>
+#include <vector>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
@@ -15,9 +16,10 @@ namespace rtp_llm {
 class SchedulerBase {
 public:
     virtual ~SchedulerBase() {}
-    virtual absl::Status                   enqueue(const GenerateStreamPtr& stream)                    = 0;
-    virtual std::vector<GenerateStreamPtr> enqueueGroup(const std::vector<GenerateStreamPtr>& streams) = 0;
-    virtual absl::StatusOr<std::list<GenerateStreamPtr>> schedule()                                    = 0;
+    virtual absl::Status enqueue(const GenerateStreamPtr& stream) = 0;
+    virtual std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+    enqueueGroup(const std::vector<GenerateStreamPtr>& streams)     = 0;
+    virtual absl::StatusOr<std::list<GenerateStreamPtr>> schedule() = 0;
 
     // Conservative-KV scheduling variant for async execution. The async path
     // schedules step N+1 before step N's specUpdate has run, so seq_len is not
