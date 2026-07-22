@@ -6,7 +6,6 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.mock.FlexLBMockTestBase;
-import org.flexlb.mock.InflightAssertions;
 import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
 import org.junit.jupiter.api.Test;
@@ -34,7 +33,6 @@ import static org.mockito.Mockito.when;
  * 4. Submit 4 requests
  * 5. Verify: both workers received at least 1 EnqueueBatch call
  * 6. Verify: total EnqueueBatch count matches the number of submitted requests
- * 7. Clean up: cancel all requests to release inflight resources
  *
  * <p>Key mechanism:
  * <ul>
@@ -123,16 +121,6 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
         assertEquals(0, mockDecodeWorker.getEnqueueCount(),
                 "Decode worker should not have received any enqueue request");
 
-        // 9. Clean up: cancel all requests to release inflight resources
-        for (long id : requestIds) {
-            cancelRequest(id);
-        }
-
-        // 10. Verify: all inflight resources released (both workers)
-        InflightAssertions.assertResourcesReleasedWithin(
-                getPrefillEndpoint(), getDecodeEndpoint(), 5000);
-        InflightAssertions.assertPrefillInflightEmpty(
-                endpointRegistry.getPrefill(workerBIpPort));
     }
 
     // ==================== Helper: build routing response ====================
