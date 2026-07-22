@@ -4,6 +4,7 @@ from .chatglm4_renderer import ChatGlm4Renderer
 from .chatglm45_renderer import ChatGlm45Renderer
 from .chatglm47_renderer import ChatGlm47Renderer
 from .deepseek_vl2_renderer import DeepSeekVLV2Renderer
+from .deepseekv4_renderer import DeepseekV4Renderer
 from .deepseekv31_renderer import DeepseekV31Renderer
 from .deepseekv32_renderer import DeepseekV32Renderer
 from .kimi_k25_renderer import KimiK25Renderer

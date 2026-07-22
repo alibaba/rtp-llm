@@ -36,6 +36,70 @@ class GenerateConfigTest(TestCase):
             "max_new_tokens": 100,
         }
 
+    def test_chat_request_thinking_switch(self):
+        request = ChatCompletionRequest(messages=[])
+        self.assertIsNone(request.enable_thinking)
+        self.assertIsNone(request.reasoning_effort)
+        self.assertIsNone(request.thinking_budget)
+        self.assertIsNone(request.max_completion_tokens)
+        self.assertIsNone(request.top_k)
+        self.assertFalse(request.enable_thinking_requested())
+        self.assertFalse(request.disable_thinking())
+        dumped = request.model_dump(exclude_none=True)
+        self.assertNotIn("enable_thinking", dumped)
+        self.assertNotIn("reasoning_effort", dumped)
+        self.assertNotIn("thinking_budget", dumped)
+        self.assertNotIn("max_completion_tokens", dumped)
+
+        request = ChatCompletionRequest(
+            messages=[], enable_thinking=True, reasoning_effort="high"
+        )
+        self.assertIs(request.enable_thinking, True)
+        self.assertEqual(request.reasoning_effort, "high")
+        self.assertTrue(request.enable_thinking_requested())
+        self.assertFalse(request.disable_thinking())
+
+        request = ChatCompletionRequest(messages=[], enable_thinking=False)
+        self.assertFalse(request.enable_thinking_requested())
+        self.assertTrue(request.disable_thinking())
+
+        request = ChatCompletionRequest(
+            messages=[], chat_template_kwargs={"enable_thinking": True}
+        )
+        self.assertTrue(request.enable_thinking_requested())
+
+        request = ChatCompletionRequest(messages=[], thinking_budget=0)
+        self.assertTrue(request.disable_thinking())
+
+        request = ChatCompletionRequest(
+            messages=[], extra_configs=GenerateConfig(max_thinking_tokens=0)
+        )
+        self.assertTrue(request.disable_thinking())
+
+        request = ChatCompletionRequest(
+            messages=[], chat_template_kwargs={"thinking_mode": "thinking"}
+        )
+        self.assertTrue(request.enable_thinking_requested())
+        self.assertFalse(request.disable_thinking())
+
+        request = ChatCompletionRequest(
+            messages=[],
+            enable_thinking=True,
+            extra_configs=GenerateConfig(
+                chat_template_kwargs={"thinking_mode": "chat"}
+            ),
+        )
+        self.assertTrue(request.enable_thinking_requested())
+        self.assertTrue(request.disable_thinking())
+
+        request = ChatCompletionRequest(
+            messages=[],
+            enable_thinking=True,
+            thinking_budget=64,
+            extra_configs=GenerateConfig(max_thinking_tokens=0),
+        )
+        self.assertFalse(request.disable_thinking())
+
     def _create_generate_config_for_select_tokens_id(self):
         return {"select_tokens_id": [0, 3]}
 
@@ -250,6 +314,114 @@ class OpenaiGenerateConfigTest(TestCase):
             *args,
             **kwargs,
         )
+
+    def _extract_request_config(
+        self,
+        request: ChatCompletionRequest,
+        generate_env_config: Optional[GenerateEnvConfig] = None,
+    ) -> GenerateConfig:
+        model_config = ModelConfig()
+        model_config.generate_env_config = (
+            generate_env_config or GenerateEnvConfig()
+        )
+        model_config.render_config = RenderConfig()
+        model_config.special_tokens = SpecialTokens()
+        model_config.max_seq_len = 1024
+        model_config.template_type = None
+        model_config.model_name = ""
+        model_config.ckpt_path = ""
+
+        endpoint = OpenaiEndpoint(
+            model_config=model_config,
+            misc_config=PyMiscellaneousConfig(),
+            vit_config=VitConfig(),
+            tokenizer=self.tokenizer,
+            backend_rpc_server_visitor=None,
+        )
+        return endpoint._extract_generation_config(request)
+
+    def test_request_thinking_budget_and_completion_caps(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_end_token_id = 42
+        request = ChatCompletionRequest(
+            messages=[],
+            enable_thinking=True,
+            thinking_budget=64,
+            top_k=7,
+            max_completion_tokens=80,
+            max_tokens=50,
+        )
+
+        config = self._extract_request_config(request, generate_env_config)
+        self.assertTrue(config.in_think_mode)
+        self.assertEqual(config.max_thinking_tokens, 64)
+        self.assertEqual(config.end_think_token_ids, [42])
+        self.assertEqual(config.top_k, 7)
+        self.assertEqual(config.max_new_tokens, 50)
+
+        config = self._extract_request_config(
+            ChatCompletionRequest(
+                messages=[], enable_thinking=True, thinking_budget=-1
+            ),
+            generate_env_config,
+        )
+        self.assertEqual(config.max_thinking_tokens, 2_147_483_647)
+
+        config = self._extract_request_config(
+            ChatCompletionRequest(
+                messages=[], enable_thinking=True, thinking_budget=0
+            ),
+            generate_env_config,
+        )
+        self.assertFalse(config.in_think_mode)
+        self.assertEqual(config.max_thinking_tokens, 0)
+
+        config = self._extract_request_config(
+            ChatCompletionRequest(
+                messages=[],
+                enable_thinking=True,
+                extra_configs=GenerateConfig(max_thinking_tokens=0),
+                max_completion_tokens=0,
+                max_tokens=11,
+            ),
+            generate_env_config,
+        )
+        self.assertFalse(config.in_think_mode)
+        self.assertEqual(config.max_thinking_tokens, 0)
+        self.assertEqual(config.max_new_tokens, 11)
+
+        config = self._extract_request_config(
+            ChatCompletionRequest(
+                messages=[],
+                chat_template_kwargs={"thinking_mode": "thinking"},
+            ),
+            generate_env_config,
+        )
+        self.assertTrue(config.in_think_mode)
+
+        config = self._extract_request_config(
+            ChatCompletionRequest(
+                messages=[],
+                enable_thinking=True,
+                extra_configs=GenerateConfig(
+                    chat_template_kwargs={"thinking_mode": "chat"}
+                ),
+            ),
+            generate_env_config,
+        )
+        self.assertFalse(config.in_think_mode)
+
+        config = self._extract_request_config(
+            ChatCompletionRequest(
+                messages=[],
+                enable_thinking=True,
+                thinking_budget=64,
+                extra_configs=GenerateConfig(max_thinking_tokens=0),
+            ),
+            generate_env_config,
+        )
+        self.assertTrue(config.in_think_mode)
+        self.assertEqual(config.max_thinking_tokens, 64)
 
     def _generate_config_with_stop_word(
         self,

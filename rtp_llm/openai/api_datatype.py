@@ -25,7 +25,7 @@ class ModelList(BaseModel):
 
 class FunctionCall(BaseModel):
     name: Optional[str]
-    arguments: Optional[str]
+    arguments: Optional[Union[str, Dict[str, Any], List[Any]]]
 
 
 class ToolCall(BaseModel):
@@ -128,9 +128,13 @@ class ChatCompletionRequest(BaseModel):
     messages: List[ChatMessage]
     functions: Optional[List[GPTFunctionDefinition]] = None
     tools: Optional[List[GPTToolDefinition]] = None
+    reasoning_effort: Optional[str] = None
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
+    top_k: Optional[int] = None
     max_tokens: Optional[int] = None
+    max_completion_tokens: Optional[int] = None
+    thinking_budget: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     user: Optional[str] = None
@@ -160,6 +164,7 @@ class ChatCompletionRequest(BaseModel):
     )
     master_info: Optional[Dict[str, Any]] = None
     chat_template_kwargs: Optional[Dict[str, Any]] = None
+    enable_thinking: Optional[bool] = None
 
     @staticmethod
     def is_openai_request(request: Dict[str, Any]):
@@ -174,14 +179,35 @@ class ChatCompletionRequest(BaseModel):
         else:
             return self.chat_template_kwargs
 
+    def enable_thinking_requested(self):
+        if self.enable_thinking is True:
+            return True
+        chat_template_kwargs = self.get_chat_template_kwargs()
+        return chat_template_kwargs is not None and (
+            chat_template_kwargs.get("enable_thinking") is True
+            or chat_template_kwargs.get("thinking_mode") == "thinking"
+        )
+
     def disable_thinking(self):
-        if (
-            self.get_chat_template_kwargs() is not None
-            and self.get_chat_template_kwargs().get("enable_thinking", True) is False
+        # Explicit mode switches are hard disables. Budget sources use the
+        # same later-wins order as OpenaiEndpoint: thinking_budget overrides
+        # an explicitly supplied extra_configs.max_thinking_tokens.
+        if self.enable_thinking is False:
+            return True
+        chat_template_kwargs = self.get_chat_template_kwargs()
+        if chat_template_kwargs is not None and (
+            chat_template_kwargs.get("enable_thinking", True) is False
+            or chat_template_kwargs.get("thinking_mode") == "chat"
         ):
             return True
-        else:
-            return False
+        if self.thinking_budget is not None:
+            return self.thinking_budget == 0
+        if (
+            self.extra_configs is not None
+            and "max_thinking_tokens" in self.extra_configs.model_fields_set
+        ):
+            return self.extra_configs.max_thinking_tokens == 0
+        return False
 
 
 class BatchChatCompletionRequest(BaseModel):
