@@ -343,5 +343,159 @@ class LegacyEnvForwardingTest(WeightMemorySaverTestBase):
         )
 
 
+class ExpandableCoexistenceTest(WeightMemorySaverTestBase):
+    """expandable_segments:True coexists with the torch_memory_saver pool by
+    being DEFERRED through init: stripped from the env and forced off at prepare
+    (so weights/KV land at low registerable VA), then turned on live only after
+    the engine is ready (enable_runtime_expandable), and disabled again around
+    each weights-region pool allocation.
+
+    GPU-free: the live allocator setter is patched out so no CUDA driver call is
+    made -- the test asserts the env normalization and toggle *sequence*.
+    """
+
+    _CONF = "expandable_segments:True,max_split_size_mb:128"
+
+    def setUp(self) -> None:
+        super().setUp()
+        os.environ[wms.ENV_SWITCH] = "1"
+        self._saved_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF")
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = self._CONF
+        self.fake = self._inject_fake_tms()
+        # Record enable/disable toggles instead of touching the real driver.
+        self.toggles: List[bool] = []
+        self._real_setter = wms._set_expandable_segments
+        wms._set_expandable_segments = lambda enabled: self.toggles.append(enabled)
+
+    def tearDown(self) -> None:
+        wms._set_expandable_segments = self._real_setter
+        if self._saved_conf is None:
+            os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+        else:
+            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = self._saved_conf
+        super().tearDown()
+
+    def test_alloc_conf_without_expandable(self) -> None:
+        self.assertEqual(
+            wms._alloc_conf_without_expandable(self._CONF), "max_split_size_mb:128"
+        )
+        self.assertEqual(
+            wms._alloc_conf_without_expandable("expandable_segments:True"), ""
+        )
+        self.assertEqual(
+            wms._alloc_conf_without_expandable("max_split_size_mb:128"),
+            "max_split_size_mb:128",
+        )
+        self.assertEqual(wms._alloc_conf_without_expandable(""), "")
+
+    def test_prepare_strips_env_and_defers(self) -> None:
+        wms._prepare_expandable_coexistence()
+        # expandable_segments removed from the env (so TMS init won't refuse),
+        # other keys preserved.
+        self.assertEqual(os.environ["PYTORCH_CUDA_ALLOC_CONF"], "max_split_size_mb:128")
+        self.assertEqual(wms._expandable_base_conf, "max_split_size_mb:128")
+        # Requested, but deferred: not yet active, and forced off at init so the
+        # whole startup path (weights + KV alloc + KV MR reg) stays low-VA.
+        self.assertTrue(wms._expandable_requested)
+        self.assertFalse(wms._expandable_active)
+        self.assertEqual(self.toggles, [False])
+
+    def test_prepare_runs_once(self) -> None:
+        wms._prepare_expandable_coexistence()
+        wms._prepare_expandable_coexistence()
+        self.assertEqual(self.toggles, [False])
+
+    def test_region_stays_off_before_runtime_enable(self) -> None:
+        # Before enable_runtime_expandable(), expandable is not active, so the
+        # weights region does not toggle it (the init force-off is the only call).
+        with wms.weights_region():
+            pass
+        self.assertFalse(wms._expandable_active)
+        self.assertEqual(self.toggles, [False])
+        self.assertEqual(
+            self.fake.region_calls,
+            [{"tag": wms.WEIGHTS_TAG, "enable_cpu_backup": True}],
+        )
+
+    def test_enable_runtime_expandable_turns_on_once(self) -> None:
+        wms._prepare_expandable_coexistence()
+        wms.enable_runtime_expandable()
+        self.assertTrue(wms._expandable_active)
+        # init force-off, then runtime turn-on.
+        self.assertEqual(self.toggles, [False, True])
+        # Idempotent: a second call does not toggle again.
+        wms.enable_runtime_expandable()
+        self.assertEqual(self.toggles, [False, True])
+
+    def test_enable_runtime_expandable_inert_without_request(self) -> None:
+        # No expandable requested -> enable_runtime_expandable is a no-op.
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
+        wms._prepare_expandable_coexistence()
+        wms.enable_runtime_expandable()
+        self.assertFalse(wms._expandable_active)
+        self.assertEqual(self.toggles, [])
+
+    def test_region_toggles_off_then_on_after_runtime_enable(self) -> None:
+        wms._prepare_expandable_coexistence()
+        wms.enable_runtime_expandable()
+        self.assertEqual(self.toggles, [False, True])
+        with wms.weights_region():
+            pass
+        # region enter -> off, region exit -> restore on.
+        self.assertEqual(self.toggles, [False, True, False, True])
+        self.assertEqual(
+            self.fake.region_calls,
+            [{"tag": wms.WEIGHTS_TAG, "enable_cpu_backup": True}],
+        )
+
+    def test_no_expandable_in_env_is_inert(self) -> None:
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "garbage_collection_threshold:0.9"
+        wms._prepare_expandable_coexistence()
+        self.assertFalse(wms._expandable_requested)
+        self.assertFalse(wms._expandable_active)
+        self.assertEqual(self.toggles, [])
+        # Env left untouched when expandable segments were not requested.
+        self.assertEqual(
+            os.environ["PYTORCH_CUDA_ALLOC_CONF"], "garbage_collection_threshold:0.9"
+        )
+
+
+class PausableAllocGuardTest(WeightMemorySaverTestBase):
+    """assert_pausable_alloc_safe() refuses a sleep-persistent allocation while
+    expandable_segments is live (the silent post-wake corruption guard).
+
+    GPU-free: drives the live-state flag directly rather than through the CUDA
+    allocator, so it validates the guard's decision in isolation.
+    """
+
+    def test_guard_noop_when_expandable_not_live(self) -> None:
+        wms._expandable_live = False
+        # Must not raise -- the common, safe case.
+        wms.assert_pausable_alloc_safe("unit-test")
+
+    def test_guard_raises_when_expandable_live(self) -> None:
+        wms._expandable_live = True
+        with self.assertRaises(RuntimeError) as ctx:
+            wms.assert_pausable_alloc_safe("unit-test-site")
+        msg = str(ctx.exception)
+        # Message points at the offending site and explains the corruption.
+        self.assertIn("unit-test-site", msg)
+        self.assertIn("silently corrupted", msg)
+        self.assertIn("expandable_segments_disabled", msg)
+
+    def test_suppressed_region_asserts_when_expandable_live(self) -> None:
+        # The level-2 wake reload path (suppress_weights_region) bypasses the
+        # expandable_segments_disabled() guard, so weights_region() re-asserts:
+        # allocating reload scratch with expandable live would corrupt it across
+        # the resume boundary.
+        os.environ[wms.ENV_SWITCH] = "1"
+        self._inject_fake_tms()
+        wms._expandable_live = True
+        with self.assertRaises(RuntimeError):
+            with wms.suppress_weights_region():
+                with wms.weights_region():
+                    pass
+
+
 if __name__ == "__main__":
     unittest.main()
