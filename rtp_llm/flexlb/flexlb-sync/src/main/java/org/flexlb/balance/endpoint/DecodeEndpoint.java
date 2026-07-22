@@ -100,7 +100,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     RequestInflight removed = inflightRequests.remove(task.getRequestId());
                     if (removed != null) {
                         inflightKvReservedTotal.addAndGet(-removed.kvTokens());
-                    } else if (!isCancelError(task)) {
+                    } else {
                         logger.warn("Decode calibrate: finished failed request reqId={} not in inflight, error={}",
                                 task.getRequestId(), task.getErrorMessage());
                     }
@@ -191,10 +191,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
     @Override
     public long getLoadMetric() {
         return getTotalLoad();
-    }
-
-    private static boolean isCancelError(TaskInfo task) {
-        return task.getErrorMessage() != null && task.getErrorMessage().toLowerCase().contains("cancel");
     }
 
 }

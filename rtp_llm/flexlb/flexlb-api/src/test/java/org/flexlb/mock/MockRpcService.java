@@ -17,7 +17,6 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>Implements only the RPCs needed by FlexLB's batch scheduler:
  * <ul>
  *   <li>{@code enqueueBatch()} — records requests, applies configured delay, returns success/error</li>
- *   <li>{@code cancel()} — records cancel calls; may skip response if {@code ignoreCancel=true}</li>
  *   <code>getWorkerStatus()} — returns configurable {@link EngineRpcService.WorkerStatusPB}</code>
  *   <li>{@code getCacheStatus()} — returns configurable {@link EngineRpcService.CacheStatusPB}</li>
  *   <li>{@code checkHealth()} — always returns healthy</li>
@@ -36,9 +35,6 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
 
     /** All EnqueueBatch requests received, in arrival order. */
     final CopyOnWriteArrayList<EngineRpcService.EnqueueBatchRequestPB> enqueuedRequests = new CopyOnWriteArrayList<>();
-
-    /** All Cancel requests received, in arrival order. */
-    final CopyOnWriteArrayList<Long> cancelledRequests = new CopyOnWriteArrayList<>();
 
     /** Counter for GetWorkerStatus calls. */
     final AtomicLong workerStatusCallCount = new AtomicLong(0);
@@ -70,16 +66,8 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         return List.copyOf(enqueuedRequests);
     }
 
-    public List<Long> getCancelledRequests() {
-        return List.copyOf(cancelledRequests);
-    }
-
     public int getEnqueueCount() {
         return enqueuedRequests.size();
-    }
-
-    public int getCancelCount() {
-        return cancelledRequests.size();
     }
 
     public long getWorkerStatusCallCount() {
@@ -97,7 +85,6 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     /** Clear all call records (useful between test cases sharing a worker). */
     public void resetRecords() {
         enqueuedRequests.clear();
-        cancelledRequests.clear();
         workerStatusCallCount.set(0);
         cacheStatusCallCount.set(0);
         healthCheckCount.set(0);
@@ -150,24 +137,6 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         }
 
         responseObserver.onNext(responseBuilder.build());
-        responseObserver.onCompleted();
-    }
-
-    @Override
-    public void cancel(EngineRpcService.CancelRequestPB request,
-                       StreamObserver<EngineRpcService.EmptyPB> responseObserver) {
-        cancelledRequests.add(request.getRequestId());
-        MockWorkerBehavior beh = behavior;
-        log.info("MockRpcService cancel: request_id={}, ignore={}",
-                request.getRequestId(), beh.isIgnoreCancel());
-
-        if (beh.isIgnoreCancel()) {
-            // Don't respond — simulate a worker that never acks cancel.
-            // The scheduler's TTL or gRPC deadline will eventually time out.
-            return;
-        }
-
-        responseObserver.onNext(EngineRpcService.EmptyPB.getDefaultInstance());
         responseObserver.onCompleted();
     }
 

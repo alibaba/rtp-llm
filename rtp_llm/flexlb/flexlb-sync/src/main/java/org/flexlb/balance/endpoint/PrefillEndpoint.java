@@ -254,10 +254,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
             }
             Set<Long> failedIds = new HashSet<>();
             for (TaskInfo t : localFailedTasks) {
-                if (!isCancelError(t)) {
-                    logger.warn("Prefill calibrate: batch failure batchId={} reqId={} error={}",
-                            batchId, t.getRequestId(), t.getErrorMessage());
-                }
+                logger.warn("Prefill calibrate: batch failure batchId={} reqId={} error={}",
+                        batchId, t.getRequestId(), t.getErrorMessage());
                 failedIds.add(t.getRequestId());
             }
             repackBatch(batchId, failedIds);
@@ -421,10 +419,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
         cachedWaitTimeMs = result;
         cachedWaitTimeExpireAtMs = nowMs + WAIT_TIME_CACHE_TTL_MS;
         return result;
-    }
-
-    private static boolean isCancelError(TaskInfo task) {
-        return task.getErrorMessage() != null && task.getErrorMessage().toLowerCase().contains("cancel");
     }
 
 }
