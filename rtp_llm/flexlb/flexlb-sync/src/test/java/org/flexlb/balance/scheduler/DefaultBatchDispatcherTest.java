@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import com.google.protobuf.Int64Value;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -21,10 +20,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -123,33 +120,6 @@ class DefaultBatchDispatcherTest {
         assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
         assertEquals(0, callback.successCount.get());
         assertEquals(1, callback.failureCount.get());
-    }
-
-    @Test
-    void dispatchKeepsCommittedItemsEvenIfCancellationRacesWithSend() throws Exception {
-        PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem active = createBatchItem(1L, 500, 200, prefillEp);
-        BatchItem cancelled = createBatchItem(2L, 300, 100, prefillEp);
-        cancelled.ctx().cancel(); // mark as cancelled
-
-        AtomicReference<EngineRpcService.EnqueueBatchRequestPB> captured = new AtomicReference<>();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
-                .thenAnswer(inv -> {
-                    captured.set(inv.getArgument(2));
-                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L, 2L)));
-                });
-
-        dispatcher.dispatch(List.of(active, cancelled), prefillEp, 1L, 100, "test", callback);
-
-        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
-        EngineRpcService.EnqueueBatchRequestPB sent = captured.get();
-        assertNotNull(sent);
-        // Scheduler committed both requests before handing them to the dispatcher.
-        // Dropping one here could let Cancel arrive before Enqueue and be lost.
-        long sentCount = sent.getDpSlotsList().stream()
-                .mapToLong(slot -> slot.getRequestsCount())
-                .sum();
-        assertEquals(2, sentCount);
     }
 
     @Test
@@ -255,8 +225,6 @@ class DefaultBatchDispatcherTest {
         // Provide a valid GenerateInputPB bytes (minimum: requestId + empty config)
         EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
                 .setRequestId(requestId)
-                .setGroupId(Int64Value.of(1L))
-                .setGroupSize(1)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().build())
                 .build();
         ctx.setGenerateInputPbBytes(input.toByteArray());

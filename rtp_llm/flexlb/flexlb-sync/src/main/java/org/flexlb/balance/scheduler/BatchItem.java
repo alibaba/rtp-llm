@@ -15,7 +15,7 @@ import java.util.concurrent.CompletableFuture;
  * with {@link WorkerBatcher}.
  *
  * <p>Carries direct {@link PrefillEndpoint} / {@link DecodeEndpoint} references
- * so downstream operations (commit, rollback, ack, cancel) avoid repeated
+ * so downstream operations (commit, rollback, ack) avoid repeated
  * {@code EndpointRegistry} lookups by ip+port.
  *
  * <p>{@link #sortKey} is mutable — the {@link BatcherAlgorithm} computes it

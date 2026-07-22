@@ -111,12 +111,7 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
         assertEquals(statusCallCountBefore + 1, mockPrefillWorker.getWorkerStatusCallCount(),
                 "Mock should have received 1 additional GetWorkerStatus call");
 
-        // 7. Cancel the request to clean up inflight
-        cancelRequest(30001);
-        InflightAssertions.assertResourcesReleasedWithin(
-                getPrefillEndpoint(), getDecodeEndpoint(), 5000);
-
-        // 8. Change mock behavior: available_concurrency = 0 (worker full)
+        // 7. Change mock behavior: available_concurrency = 0 (worker full)
         mockPrefillWorker.setBehavior(MockWorkerBehavior.builder()
                 .availableConcurrency(0)
                 .build());

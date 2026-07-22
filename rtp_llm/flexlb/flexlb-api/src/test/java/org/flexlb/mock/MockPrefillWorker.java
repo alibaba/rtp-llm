@@ -9,7 +9,6 @@ import org.flexlb.engine.grpc.EngineRpcService;
  * <p>Role-specific behavior:
  * <ul>
  *   <li>Configurable {@code enqueueDelayMs} to simulate prefill compute time</li>
- *   <li>Can ignore Cancel to test TTL fallback cleanup</li>
  *   <li>Can fail EnqueueBatch to test dispatch failure handling</li>
  * </ul>
  */
