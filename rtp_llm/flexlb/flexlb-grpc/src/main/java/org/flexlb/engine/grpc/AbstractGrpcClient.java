@@ -1,7 +1,6 @@
 package org.flexlb.engine.grpc;
 
 import io.grpc.ManagedChannel;
-import io.grpc.stub.AbstractBlockingStub;
 import lombok.Getter;
 import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.cache.core.EngineLocalView;
@@ -85,18 +84,12 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
             int httpPort = Integer.parseInt(parts[1]);
             int grpcPort = CommonUtils.toGrpcPort(httpPort);
 
-            String workerStatusKey = createKey(ip, grpcPort, ServiceType.WORKER_STATUS);
-            String cacheStatusKey = createKey(ip, grpcPort, ServiceType.CACHE_STATUS);
-            String multimodalWorkerStatusKey = createKey(ip, grpcPort, ServiceType.MULTIMODAL_WORKER_STATUS);
-            String multimodalCacheStatusKey = createKey(ip, grpcPort, ServiceType.MULTIMODAL_CACHE_STATUS);
-            boolean contained = currentKeys.remove(workerStatusKey) && currentKeys.remove(cacheStatusKey)
-                && currentKeys.remove(multimodalWorkerStatusKey) && currentKeys.remove(multimodalCacheStatusKey);
-
-            if (!contained) {
-                addedKeys.add(workerStatusKey);
-                addedKeys.add(cacheStatusKey);
-                addedKeys.add(multimodalWorkerStatusKey);
-                addedKeys.add(multimodalCacheStatusKey);
+            for (ServiceType serviceType : ServiceType.values()) {
+                String serviceKey = createKey(ip, grpcPort, serviceType);
+                boolean contained = currentKeys.remove(serviceKey);
+                if (!contained) {
+                    addedKeys.add(serviceKey);
+                }
             }
         }
 
@@ -237,6 +230,35 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
     }
 
     /**
+     * Wrapper class for FutureStub (async gRPC calls)
+     */
+    public static class GrpcFutureStubWrapper {
+        private final RpcServiceGrpc.RpcServiceFutureStub rpcServiceFutureStub;
+        private final MultimodalRpcServiceGrpc.MultimodalRpcServiceFutureStub multimodalFutureStub;
+
+        public GrpcFutureStubWrapper(RpcServiceGrpc.RpcServiceFutureStub rpcServiceFutureStub,
+                                     MultimodalRpcServiceGrpc.MultimodalRpcServiceFutureStub multimodalFutureStub) {
+            this.rpcServiceFutureStub = rpcServiceFutureStub;
+            this.multimodalFutureStub = multimodalFutureStub;
+        }
+
+        public RpcServiceGrpc.RpcServiceFutureStub getRpcServiceFutureStub() {
+            return rpcServiceFutureStub;
+        }
+
+        public MultimodalRpcServiceGrpc.MultimodalRpcServiceFutureStub getMultimodalFutureStub() {
+            return multimodalFutureStub;
+        }
+
+        public GrpcFutureStubWrapper withDeadlineAfter(long timeout, TimeUnit unit) {
+            return new GrpcFutureStubWrapper(
+                    rpcServiceFutureStub.withDeadlineAfter(timeout, unit),
+                    multimodalFutureStub.withDeadlineAfter(timeout, unit)
+            );
+        }
+    }
+
+    /**
      * Wrapper class for different gRPC service stubs
      */
     public static class GrpcStubWrapper {
@@ -327,7 +349,9 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
         WORKER_STATUS("worker", "GetWorkerStatus"),
         CACHE_STATUS("cache", "GetCacheStatus"),
         MULTIMODAL_WORKER_STATUS("multimodal_worker", "GetWorkerStatus"),
-        MULTIMODAL_CACHE_STATUS("multimodal_cache", "GetCacheStatus");
+        MULTIMODAL_CACHE_STATUS("multimodal_cache", "GetCacheStatus"),
+        BATCH_ENQUEUE("batch_enqueue", "EnqueueBatch"),
+        CANCEL("cancel", "Cancel");
 
         @Getter
         private final String suffix;

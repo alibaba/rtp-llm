@@ -260,6 +260,13 @@ class FrontendServer(object):
                 sequence,
             )
             request_headers = extract_request_headers(raw_request.headers)
+            logging.info(
+                "request_arrival: trace_id=%s request_id=%s model=%s prompt_len=%d",
+                req.get("trace_id", "-"),
+                req.get(request_id_field_name),
+                self.py_env_configs.model_args.model_type,
+                len(req.get("prompt", "")),
+            )
         except Exception as e:
             return self._handle_exception(req, e)
 
@@ -439,6 +446,11 @@ class FrontendServer(object):
             else complete_response
         )
         self._access_logger.log_success_access(req, complete_response)
+        logging.info(
+            "request_completion: trace_id=%s request_id=%s status=success",
+            req.get("trace_id", "-"),
+            req.get(request_id_field_name, "unknown"),
+        )
 
         return complete_response
 

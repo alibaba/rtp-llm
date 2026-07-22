@@ -1,6 +1,5 @@
 package org.flexlb.cache.monitor;
 
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
@@ -14,10 +13,6 @@ import java.lang.reflect.Field;
 
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
-import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MATCH_HIT_TOKENS;
-import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MATCH_TOTAL_TOKENS;
-import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS;
-import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
@@ -54,10 +49,6 @@ class CacheMetricsReporterTest {
         verify(monitor).register(CACHE_THEORY_HIT_COUNT, FlexMetricType.GAUGE);
         verify(monitor).register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.GAUGE);
         verify(monitor).register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
-        verify(monitor).register(CACHE_ROUTING_CANDIDATE_MATCH_HIT_TOKENS, FlexMetricType.GAUGE);
-        verify(monitor).register(CACHE_ROUTING_CANDIDATE_MATCH_TOTAL_TOKENS, FlexMetricType.GAUGE);
-        verify(monitor).register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.GAUGE);
-        verify(monitor).register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.GAUGE);
     }
 
     @Test
@@ -91,21 +82,4 @@ class CacheMetricsReporterTest {
         verify(monitor).report(CACHE_THEORY_HIT_RATIO, allTags, 0.5D);
     }
 
-    @Test
-    void should_report_routing_cache_match_token_metrics() {
-        reporter.reportRoutingCandidateCacheMatchMetrics(RoleType.PREFILL, "127.0.0.1", 256L, 1024L);
-        reporter.reportRoutingSelectedCacheMatchMetrics(RoleType.PREFILL, "127.0.0.2", 128L, 1024L);
-
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", RoleType.PREFILL.name(),
-                "engineIp", "127.0.0.1");
-        verify(monitor).report(CACHE_ROUTING_CANDIDATE_MATCH_HIT_TOKENS, tags, 256L);
-        verify(monitor).report(CACHE_ROUTING_CANDIDATE_MATCH_TOTAL_TOKENS, tags, 1024L);
-
-        FlexMetricTags selectedTags = FlexMetricTags.of(
-                "role", RoleType.PREFILL.name(),
-                "engineIp", "127.0.0.2");
-        verify(monitor).report(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, selectedTags, 128L);
-        verify(monitor).report(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, selectedTags, 1024L);
-    }
 }

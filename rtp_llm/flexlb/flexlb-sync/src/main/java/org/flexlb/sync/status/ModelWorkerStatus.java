@@ -25,12 +25,15 @@ public class ModelWorkerStatus {
 
     private Map<String/*ipPort*/, WorkerStatus> vitStatusMap = new ConcurrentHashMap<>();
 
+    private Map<String/*ipPort*/, WorkerStatus> frontendStatusMap = new ConcurrentHashMap<>();
+
     public Map<String, WorkerStatus> getRoleStatusMap(RoleType roleType) {
         return switch (roleType) {
             case DECODE -> decodeStatusMap;
             case PREFILL -> prefillStatusMap;
             case PDFUSION -> pdFusionStatusMap;
             case VIT -> vitStatusMap;
+            case FRONTEND -> frontendStatusMap;
             case null -> Map.of();
         };
     }
@@ -49,10 +52,13 @@ public class ModelWorkerStatus {
         if (!vitStatusMap.isEmpty()) {
             roleTypeList.add(RoleType.VIT);
         }
+        if (!frontendStatusMap.isEmpty()) {
+            roleTypeList.add(RoleType.FRONTEND);
+        }
         return roleTypeList;
     }
 
     public int getWorkerTotalCount() {
-        return pdFusionStatusMap.size() + decodeStatusMap.size() + prefillStatusMap.size() + vitStatusMap.size();
+        return pdFusionStatusMap.size() + decodeStatusMap.size() + prefillStatusMap.size() + vitStatusMap.size() + frontendStatusMap.size();
     }
 }

@@ -331,8 +331,17 @@ def update_worker_addrs(
         return
     worker_addrs = []
     worker_grpc_addrs = []
+    all_worker_grpc_addrs = [""] * parallelism_config.world_size
     local_rank = parallelism_config.local_rank
     for member in world_info.members:
+        member_grpc_addr = f"{member.ip}:{member.rpc_server_port}"
+        if 0 <= member.world_rank < len(all_worker_grpc_addrs):
+            all_worker_grpc_addrs[member.world_rank] = member_grpc_addr
+        else:
+            logging.warning(
+                f"world_info member world_rank {member.world_rank} out of range "
+                f"for world_size {parallelism_config.world_size}"
+            )
         if (
             int(
                 (member.world_rank / parallelism_config.tp_size)
@@ -343,7 +352,7 @@ def update_worker_addrs(
             worker_addrs.append(
                 f"{member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}"
             )
-            worker_grpc_addrs.append(f"{member.ip}:{member.rpc_server_port}")
+            worker_grpc_addrs.append(member_grpc_addr)
             logging.info(
                 f"append member for pd sep "
                 f"{member.ip}:{member.rpc_server_port}, {member.cache_store_listen_port}, "
@@ -351,6 +360,7 @@ def update_worker_addrs(
             )
     runtime_config.worker_grpc_addrs = worker_grpc_addrs
     runtime_config.worker_addrs = worker_addrs
+    runtime_config.all_worker_grpc_addrs = all_worker_grpc_addrs
 
 
 def setup_pd_sep_config(

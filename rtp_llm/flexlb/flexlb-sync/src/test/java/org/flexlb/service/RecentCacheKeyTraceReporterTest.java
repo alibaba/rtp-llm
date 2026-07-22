@@ -1,6 +1,6 @@
 package org.flexlb.service;
 
-import org.flexlb.cache.core.RecentCacheKeyWindow;
+import org.flexlb.cache.core.ShardedRecentCacheKeyWindow;
 import org.flexlb.cache.monitor.CacheHitTheoryStats;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
@@ -32,7 +32,7 @@ class RecentCacheKeyTraceReporterTest {
     @Test
     void should_report_request_hits_against_prior_pool() throws Exception {
         RecentCacheKeyTraceReporter reporter = new RecentCacheKeyTraceReporter();
-        inject(reporter, "recentCacheKeyWindow", smallWindow());
+        inject(reporter, "shardedRecentCacheKeyWindow", smallWindow());
         inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
 
         BalanceContext firstContext = mock(BalanceContext.class);
@@ -62,7 +62,7 @@ class RecentCacheKeyTraceReporterTest {
     @Test
     void should_skip_window_write_and_metric_when_window_switch_is_off() throws Exception {
         RecentCacheKeyTraceReporter reporter = new RecentCacheKeyTraceReporter();
-        inject(reporter, "recentCacheKeyWindow", smallWindow());
+        inject(reporter, "shardedRecentCacheKeyWindow", smallWindow());
         inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
 
         FlexlbConfig disabledConfig = new FlexlbConfig();
@@ -81,7 +81,7 @@ class RecentCacheKeyTraceReporterTest {
     @Test
     void should_write_window_but_skip_metric_when_metric_switch_is_off() throws Exception {
         RecentCacheKeyTraceReporter reporter = new RecentCacheKeyTraceReporter();
-        inject(reporter, "recentCacheKeyWindow", smallWindow());
+        inject(reporter, "shardedRecentCacheKeyWindow", smallWindow());
         inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
 
         FlexlbConfig metricOffConfig = new FlexlbConfig();
@@ -104,7 +104,7 @@ class RecentCacheKeyTraceReporterTest {
     @Test
     void should_record_zero_theory_hit_for_empty_cache_key_request() throws Exception {
         RecentCacheKeyTraceReporter reporter = new RecentCacheKeyTraceReporter();
-        inject(reporter, "recentCacheKeyWindow", smallWindow());
+        inject(reporter, "shardedRecentCacheKeyWindow", smallWindow());
         inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
 
         FlexlbConfig config = new FlexlbConfig();
@@ -120,7 +120,7 @@ class RecentCacheKeyTraceReporterTest {
     @Test
     void should_report_theory_hit_tokens_over_input_tokens() throws Exception {
         RecentCacheKeyTraceReporter reporter = new RecentCacheKeyTraceReporter();
-        inject(reporter, "recentCacheKeyWindow", smallWindow());
+        inject(reporter, "shardedRecentCacheKeyWindow", smallWindow());
         inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
 
         FlexlbConfig config = new FlexlbConfig();
@@ -140,7 +140,7 @@ class RecentCacheKeyTraceReporterTest {
     @Test
     void should_report_recent_hit_tokens_with_page_rr_cache_key_block_size() throws Exception {
         RecentCacheKeyTraceReporter reporter = new RecentCacheKeyTraceReporter();
-        inject(reporter, "recentCacheKeyWindow", smallWindow());
+        inject(reporter, "shardedRecentCacheKeyWindow", smallWindow());
         inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
 
         FlexlbConfig config = new FlexlbConfig();
@@ -160,13 +160,13 @@ class RecentCacheKeyTraceReporterTest {
         field.set(target, value);
     }
 
-    private static RecentCacheKeyWindow smallWindow() {
-        ConfigService configService = mock(ConfigService.class);
+    private static ShardedRecentCacheKeyWindow smallWindow() {
         FlexlbConfig config = new FlexlbConfig();
         config.setCacheHitTimeWindowMs(60_000L);
-        config.setCacheHitMaxCacheKeys(100L);
+        config.setCacheHitMaxCacheKeys(3_200L);
+        ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
-        return new RecentCacheKeyWindow(configService);
+        return new ShardedRecentCacheKeyWindow(configService);
     }
 
     private static BalanceContext contextWithConfig(FlexlbConfig config) {

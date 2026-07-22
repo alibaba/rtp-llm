@@ -2,20 +2,17 @@ package org.flexlb.balance.strategy;
 
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
-import org.flexlb.balance.resource.ResourceMeasure;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.StrategyConfigs;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.master.TaskInfo;
-import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.domain.worker.ScoredWorker;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -25,524 +22,285 @@ import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 /**
- * Load balancing strategy based on shortest Time-To-First-Token (TTFT)
+ * Load balancing strategy based on shortest Time-To-First-Token (TTFT).
  *
  * <p>This strategy selects the optimal worker by considering the following factors:
  * 1. KV-Cache hit rate: Prioritize workers with higher cache hit rates
  * 2. Queue time: Consider the current task queue status of workers
  * 3. Scheduling fairness: Achieve load balancing among workers with similar performance
  *
- * @author saichen.sm
- * @since 2025/3/10
+ * <p>Algorithm:
+ * <ol>
+ *   <li>Score all eligible endpoints by TTFT = prefillTime + queueTime</li>
+ *   <li>Sort by TTFT ascending, take top-N as the candidate pool</li>
+ *   <li>Within the pool, use CAS on {@code lastSelectedTime} to pick the
+ *       least-recently-selected worker, ensuring concurrent requests spread
+ *       across different workers</li>
+ *   <li>If all CAS attempts fail, fall back to the lowest-TTFT candidate</li>
+ * </ol>
+ *
+ * <p>Intended for the non-batch routing path (Direct/Queue).
+ * Batch path inflight is managed by {@code FlexlbBatchScheduler}.
  */
-@Component("shortestTTFTStrategy")
-public class ShortestTTFTStrategy implements LoadBalancer {
+@Component("shortestTtftStrategy")
+public class ShortestTTFTStrategy implements LoadBalanceStrategy {
 
     private final EngineWorkerStatus engineWorkerStatus;
-    private final EngineHealthReporter engineHealthReporter;
     private final CacheAwareService cacheAwareService;
     private final ResourceMeasureFactory resourceMeasureFactory;
-    private final ConfigService configService;
-
-    private static final double TTFT_THRESHOLD_PERCENTAGE = 0.1;
-    private static final double STDDEV_THRESHOLD_FACTOR = 0.5;
+    private final EngineHealthReporter engineHealthReporter;
 
     public ShortestTTFTStrategy(EngineWorkerStatus engineWorkerStatus,
-                                EngineHealthReporter engineHealthReporter,
                                 CacheAwareService cacheAwareService,
                                 ResourceMeasureFactory resourceMeasureFactory,
-                                ConfigService configService) {
+                                EngineHealthReporter engineHealthReporter) {
         this.engineWorkerStatus = engineWorkerStatus;
-        this.engineHealthReporter = engineHealthReporter;
         this.cacheAwareService = cacheAwareService;
         this.resourceMeasureFactory = resourceMeasureFactory;
-        this.configService = configService;
+        this.engineHealthReporter = engineHealthReporter;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, this);
     }
 
-    /**
-     * Select optimal worker to execute task
-     *
-     * @param balanceContext Load balancing context
-     * @param roleType Worker role type
-     * @param group Worker group
-     * @return Selected server status
-     */
     @Override
     public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
         try {
             return doSelect(balanceContext, roleType, group);
         } catch (Exception e) {
-            Logger.warn("Failed to select worker", e);
+            Logger.warn("ShortestTTFTStrategy select failed", e);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
     }
 
-    /**
-     * Release local cached tasks on the specified worker
-     *
-     * @param ipPort Worker IP address
-     * @param requestId Request ID
-     */
     @Override
-    public void rollBack(String ipPort, long requestId) {
-
-        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
-        Logger.debug("Prefill rollBack - ipPort: {}, requestId: {}", ipPort, requestId);
-
-        WorkerStatus workerStatus = workerStatusMap.get(ipPort);
-        if (workerStatus != null) {
-            workerStatus.removeLocalTask(requestId);
+    public void rollBack(WorkerEndpoint ep, long requestId) {
+        // Release non-batch prefill inflight reservation on routing failure.
+        // Batch path inflight is managed by FlexlbBatchScheduler — no-op here.
+        if (ep instanceof PrefillEndpoint pe) {
+            pe.releaseBatch(requestId);
         }
     }
 
-    /**
-     * Core logic for worker selection
-     *
-     * @param balanceContext Load balancing context
-     * @param roleType Worker role type
-     * @param group Worker group
-     * @return Selected server status
-     */
+    /** Internal record holding TTFT score and cache hit for a single endpoint. */
+    private record ScoredEndpoint(PrefillEndpoint ep, long ttft, long hitCache) {}
+
+    // ==================== Core Selection ====================
+
     private ServerStatus doSelect(BalanceContext balanceContext, RoleType roleType, String group) {
         long requestId = balanceContext.getRequestId();
         long seqLen = balanceContext.getRequest().getSeqLen();
-
-        Logger.debug("Starting shortest TTFT selection for role: {}", roleType);
-
-        // Get available worker list
         FlexlbConfig config = balanceContext.getConfig();
-        List<WorkerStatus> availableWorkers = getAvailableWorkers(roleType, group, config.getResourceMeasureIndicator(roleType));
-        if (CollectionUtils.isEmpty(availableWorkers)) {
-            Logger.warn("No available workers for role: {}", roleType.getCode());
+
+        List<PrefillEndpoint> eligible = getAvailableEndpoints(roleType, group, config.getResourceMeasureIndicator(roleType));
+        if (CollectionUtils.isEmpty(eligible)) {
+            Logger.warn("ShortestTTFT select failed: no available endpoints, request_id={}", requestId);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
-        // Calculate cache match results for each engine
         Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
-        reportCandidateRoutingCacheMatchMetrics(roleType, availableWorkers, cacheMatchResults, balanceContext.getRequest());
 
-        List<ScoredWorker> scoredWorkers = scoreWorkers(availableWorkers, cacheMatchResults, seqLen);
-
-        StrategyConfigs.CandidatePoolConfig candidatePoolConfig = configService.getStrategyConfigs()
-                .getShortestTtft()
-                .getCandidatePool();
-        ScoredWorker bestWorker = selectBestWorker(scoredWorkers, candidatePoolConfig);
-        if (bestWorker == null) {
-            Logger.warn("Failed to find best worker for role: {}", roleType);
+        // Score all eligible endpoints by TTFT
+        List<ScoredEndpoint> scoredEndpoints = scoreEndpoints(eligible, cacheMatchResults, seqLen);
+        if (scoredEndpoints.isEmpty()) {
+            Logger.warn("ShortestTTFT select failed: no scored endpoints, request_id={}", requestId);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
-        return finalizeWorkerSelection(bestWorker, balanceContext, roleType, requestId, seqLen, cacheMatchResults);
-    }
+        // Sort by TTFT ascending; secondary sort by lastSelectedTime for determinism
+        scoredEndpoints.sort(Comparator.comparingLong(ScoredEndpoint::ttft)
+                .thenComparingLong(se -> se.ep().getLastSelectedTime().get()));
 
-    /**
-     * Get available worker list
-     *
-     * @param roleType Worker role type
-     * @param group Worker group
-     * @param indicator ResourceMeasureIndicatorEnum
-     * @return Available worker list
-     */
-    private List<WorkerStatus> getAvailableWorkers(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator) {
+        // Select candidate pool (top-N by TTFT)
+        int candidateCount = config.resolveShortestTtftCandidateCount(scoredEndpoints.size());
+        List<ScoredEndpoint> candidates = scoredEndpoints.subList(0, Math.min(candidateCount, scoredEndpoints.size()));
 
-        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
-        if (MapUtils.isEmpty(workerStatusMap)) {
-            return new ArrayList<>();
+        // CAS fairness: prefer the least-recently-selected candidate
+        ScoredEndpoint selected = selectByFairness(candidates);
+        if (selected == null) {
+            // All CAS attempts failed; fall back to the lowest-TTFT candidate
+            selected = candidates.getFirst();
+            Logger.debug("ShortestTTFT: all CAS failed, falling back to lowest-TTFT endpoint, ip={}", selected.ep().getIp());
         }
 
-        ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(indicator);
-        if (resourceMeasure == null) {
-            Logger.warn("No ResourceMeasure registered for indicator: {}", indicator);
-            return new ArrayList<>();
-        }
+        Logger.debug("ShortestTTFT selected endpoint - ip: {}, port: {}, ttft: {}, hitCache: {}",
+                selected.ep().getIp(), selected.ep().getHttpPort(), selected.ttft(), selected.hitCache());
 
-        return new ArrayList<>(workerStatusMap.values()).stream()
-                .filter(WorkerStatus::isAlive)
-                .filter(resourceMeasure::isResourceAvailable)
-                .toList();
-    }
+        reportCacheHitMetrics(roleType, selected.ep().getIp(), selected.ep().ipPort(), selected.hitCache(), seqLen);
 
-    /**
-     * Get cache match results
-     *
-     * @param balanceContext Load balancing context
-     * @param roleType Worker role type
-     * @param group Worker group
-     * @return Cache match results: key: engineIpPort, value: prefixMatchLength
-     */
-    private Map<String /*engineIpPort*/, Integer /*prefixMatchLength*/> getCacheMatchResults(BalanceContext balanceContext,
-                                                                                             RoleType roleType,
-                                                                                             String group) {
-        List<Long> blockCacheKeys = balanceContext.getRequest().getBlockCacheKeys();
-        return cacheAwareService.findMatchingEngines(blockCacheKeys, roleType, group);
-    }
-
-    /**
-     * Calculate TTFT scores for all active workers
-     *
-     * @param workers Worker list
-     * @param cacheMatchResults Cache match results
-     * @param seqLen Sequence length
-     * @return List of scored workers
-     */
-    private List<ScoredWorker> scoreWorkers(List<WorkerStatus> workers, Map<String, Integer> cacheMatchResults, long seqLen) {
-        return workers.stream()
-                .filter(WorkerStatus::isAlive)
-                .map(workerStatus -> {
-                    long hitCacheTokens = calculatePrefixMatchLength(workerStatus, cacheMatchResults);
-                    long prefillTime = TaskInfo.estimatePrefillTimeMs(seqLen, hitCacheTokens);
-                    long queueTime = workerStatus.getRunningQueueTime().get();
-                    long newTTFT = prefillTime + queueTime;
-                    long lastSelectedTime = workerStatus.getLastSelectedTime().get();
-                    Logger.debug("Calculate TTFT for worker - ip: {}, port: {}, hitCacheTokens: {}, prefillTime: {}, queueTime: {}, newTTFT: {}",
-                            workerStatus.getIp(),
-                            workerStatus.getPort(),
-                            hitCacheTokens,
-                            prefillTime,
-                            queueTime,
-                            newTTFT);
-                    return new ScoredWorker(workerStatus, newTTFT, hitCacheTokens, lastSelectedTime);
-                })
-                .collect(Collectors.toList());
-    }
-
-    /**
-     * Finalize worker selection and update status
-     *
-     * @param selectedWorker Selected worker
-     * @param balanceContext Load balancing context
-     * @param roleType Worker role type
-     * @param requestId Request ID
-     * @param seqLen Sequence length
-     * @return Server status
-     */
-    private ServerStatus finalizeWorkerSelection(ScoredWorker selectedWorker,
-                                                 BalanceContext balanceContext,
-                                                 RoleType roleType,
-                                                 long requestId,
-                                                 long seqLen,
-                                                 Map<String, Integer> cacheMatchResults) {
-        WorkerStatus workerStatus = selectedWorker.worker();
-
-        logWorkerSelection(selectedWorker, roleType);
-        reportCacheHitMetrics(roleType, workerStatus.getIp(), selectedWorker.hitCacheTokens(), seqLen);
-        reportSelectedRoutingCacheMatchMetrics(roleType, workerStatus, cacheMatchResults, balanceContext.getRequest());
-
-        TaskInfo task = createTaskInfo(requestId, balanceContext.getRequest().getSeqLen(), selectedWorker.hitCacheTokens());
-        workerStatus.putLocalTask(requestId, task);
-
-        return buildServerStatus(selectedWorker, roleType, requestId);
-    }
-
-    /**
-     * Log worker selection
-     *
-     * @param selectedWorker Selected worker
-     * @param roleType Worker role type
-     */
-    private void logWorkerSelection(ScoredWorker selectedWorker, RoleType roleType) {
-        WorkerStatus workerStatus = selectedWorker.worker();
-        Logger.debug("Selected {} worker - ip: {}, port: {}, hitCacheTokens: {}, ttft: {}",
-                roleType,
-                workerStatus.getIp(),
-                workerStatus.getPort(),
-                selectedWorker.hitCacheTokens(),
-                selectedWorker.ttft());
-    }
-
-    /**
-     * Report cache hit metrics
-     *
-     * @param roleType Worker role type
-     * @param ip Worker IP address
-     * @param hitCacheTokens Number of cached tokens hit
-     * @param seqLen Sequence length
-     */
-    private void reportCacheHitMetrics(RoleType roleType, String ip, long hitCacheTokens, long seqLen) {
-        double hitRate = seqLen > 0 ? hitCacheTokens / (double) seqLen : 0.0;
-        engineHealthReporter.reportCacheHitMetrics(roleType, ip, hitCacheTokens, hitRate);
-    }
-
-    private void reportCandidateRoutingCacheMatchMetrics(RoleType roleType,
-                                                         List<WorkerStatus> availableWorkers,
-                                                         Map<String, Integer> cacheMatchResults,
-                                                         Request request) {
-        if (MapUtils.isEmpty(cacheMatchResults) || request == null || request.getSeqLen() <= 0L) {
-            return;
-        }
-
-        Map<String, WorkerStatus> workerStatusByIpPort = availableWorkers.stream()
-                .collect(Collectors.toMap(WorkerStatus::getIpPort, workerStatus -> workerStatus, (left, right) -> left));
-        for (Map.Entry<String, Integer> entry : cacheMatchResults.entrySet()) {
-            String engineIpPort = entry.getKey();
-            long hitTokens = calculateRoutingCacheMatchTokens(
-                    entry.getValue(),
-                    request,
-                    workerStatusByIpPort.get(engineIpPort));
-            engineHealthReporter.reportRoutingCandidateCacheMatchMetrics(
-                    roleType,
-                    engineIp(engineIpPort),
-                    hitTokens,
-                    request.getSeqLen());
-        }
-    }
-
-    private void reportSelectedRoutingCacheMatchMetrics(RoleType roleType,
-                                                        WorkerStatus selectedWorker,
-                                                        Map<String, Integer> cacheMatchResults,
-                                                        Request request) {
-        if (selectedWorker == null || cacheMatchResults == null || request == null || request.getSeqLen() <= 0L) {
-            return;
-        }
-
-        long hitTokens = calculateRoutingCacheMatchTokens(
-                cacheMatchResults.get(selectedWorker.getIpPort()),
-                request,
-                selectedWorker);
-        engineHealthReporter.reportRoutingSelectedCacheMatchMetrics(
-                roleType,
-                selectedWorker.getIp(),
-                hitTokens,
-                request.getSeqLen());
-    }
-
-    /**
-     * Create task information
-     *
-     * @param requestId Request ID
-     * @param inputLength Input length
-     * @param prefixLength Prefix length
-     * @return Task information
-     */
-    private TaskInfo createTaskInfo(long requestId, long inputLength, long prefixLength) {
-        TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
-        task.setInputLength(inputLength);
-        task.setPrefixLength(prefixLength);
-        return task;
-    }
-
-    /**
-     * Select best worker considering TTFT and scheduling fairness
-     *
-     * <p>Algorithm: 1. Sort workers by TTFT 2. Select strategy-configured candidates 3. Among candidates with similar TTFT, prioritize recently unscheduled workers
-     *
-     * @param scoredWorkers List of scored workers
-     * @param candidatePoolConfig candidate pool config
-     * @return Best worker
-     */
-    private ScoredWorker selectBestWorker(List<ScoredWorker> scoredWorkers,
-                                          StrategyConfigs.CandidatePoolConfig candidatePoolConfig) {
-        if (scoredWorkers.isEmpty()) {
-            return null;
-        }
-
-        List<ScoredWorker> sortedWorkers = sortByTTFT(scoredWorkers);
-        List<ScoredWorker> candidates = selectTopCandidates(sortedWorkers, candidatePoolConfig);
-        Logger.debug("Select best worker, sortedWorkers size: {}, candidates size: {}", sortedWorkers.size(), candidates.size());
-
-        if (candidates.isEmpty()) {
-            return null;
-        }
-
-        if (candidates.size() == 1) {
-            Logger.debug("Select best worker with single candidate shortcut, sortedWorkers size: {}", sortedWorkers.size());
-            return candidates.getFirst();
-        }
-
-        long minTTFT = candidates.getFirst().ttft();
-        double threshold = calculateTTFTThreshold(candidates, minTTFT);
-
-        List<ScoredWorker> similarWorkers = filterSimilarWorkers(candidates, minTTFT, threshold);
-
-        return selectWorkerByScheduleFairness(similarWorkers, candidates);
-    }
-
-    /**
-     * Sort workers by TTFT
-     *
-     * @param workers Worker list
-     * @return Sorted worker list in ascending order
-     */
-    private List<ScoredWorker> sortByTTFT(List<ScoredWorker> workers) {
-        // Two-level sorting
-        // 1. Primary sort: by TTFT (Time-To-First-Token) in ascending order
-        // 2. Secondary sort: when TTFT is equal, by lastSelectedTime in ascending order
-        return workers.stream()
-                .sorted(Comparator.comparingLong(ScoredWorker::ttft)
-                        .thenComparingLong(ScoredWorker::lastSelectedTime))
-                .toList();
-    }
-
-    /**
-     * Select top N candidate workers
-     *
-     * @param sortedWorkers Sorted worker list
-     * @return Candidate worker list
-     */
-    private List<ScoredWorker> selectTopCandidates(List<ScoredWorker> sortedWorkers,
-                                                   StrategyConfigs.CandidatePoolConfig candidatePoolConfig) {
-        int candidateCount = candidatePoolConfig.resolveCandidateCount(sortedWorkers.size());
-        return sortedWorkers.stream().limit(candidateCount).toList();
-    }
-
-    /**
-     * Calculate TTFT similarity threshold
-     *
-     * @param candidates Candidate worker list
-     * @return TTFT threshold
-     */
-    private double calculateTTFTThreshold(List<ScoredWorker> candidates, long minTTFT) {
-        double avgTTFT = candidates.stream().mapToLong(ScoredWorker::ttft).average().orElse(0.0);
-
-        double stdDev = Math.sqrt(
-                candidates.stream()
-                        .mapToLong(ScoredWorker::ttft)
-                        .mapToDouble(v -> Math.pow(v - avgTTFT, 2))
-                        .average()
-                        .orElse(0.0));
-        double percentageMinTTFT = minTTFT * TTFT_THRESHOLD_PERCENTAGE;
-        double factoredStdDev = stdDev * STDDEV_THRESHOLD_FACTOR;
-        Logger.debug("Calculate TTFT threshold, minTTFT: {}, avgTTFT: {}, stdDev: {}, percentageMinTTFT: {}, factoredStdDev: {}",
-                minTTFT, avgTTFT, stdDev, percentageMinTTFT, factoredStdDev);
-        return Math.max(percentageMinTTFT, factoredStdDev);
-    }
-
-    /**
-     * Filter workers with similar TTFT
-     *
-     * @param candidates Candidate worker list
-     * @param minTTFT Minimum TTFT value
-     * @param threshold Threshold
-     * @return List of workers with similar TTFT
-     */
-    private List<ScoredWorker> filterSimilarWorkers(List<ScoredWorker> candidates, long minTTFT, double threshold) {
-        List<ScoredWorker> scoredWorkers = candidates.stream()
-                .filter(worker -> Math.abs(worker.ttft() - minTTFT) <= threshold)
-                .toList();
-        Logger.debug("Filter similar workers, minTTFT: {}, threshold: {}, candidates size: {}", minTTFT, threshold, scoredWorkers.size());
-        return scoredWorkers;
+        return buildServerStatus(selected, roleType, requestId, config);
     }
 
     /**
      * Select worker based on scheduling fairness.
-     * Among workers with similar TTFT, prefer the least recently scheduled one.
-     * CAS on lastSelectedTime ensures concurrent requests are spread across different workers
-     * rather than all landing on the same one.
      *
-     * @param similarWorkers workers with similar TTFT
-     * @param fallbackCandidates fallback candidate list
-     * @return selected worker
+     * <p>Among the candidate pool, prefer the least-recently-selected worker.
+     * CAS on {@code lastSelectedTime} ensures concurrent requests are spread
+     * across different workers rather than all landing on the same one.
+     *
+     * @param candidates candidate pool (already sorted by TTFT ascending)
+     * @return selected endpoint, or {@code null} if all CAS attempts failed
      */
-    private ScoredWorker selectWorkerByScheduleFairness(List<ScoredWorker> similarWorkers, List<ScoredWorker> fallbackCandidates) {
-        if (similarWorkers.isEmpty()) {
-            return fallbackCandidates.getFirst();
+    private ScoredEndpoint selectByFairness(List<ScoredEndpoint> candidates) {
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        if (candidates.size() == 1) {
+            // Single candidate — still update lastSelectedTime for future fairness
+            long now = System.nanoTime() / 1000;
+            candidates.getFirst().ep().getLastSelectedTime().set(now);
+            return candidates.getFirst();
         }
 
         // Sort ascending by lastSelectedTime so the least recently used worker is tried first
-        List<ScoredWorker> sorted = similarWorkers.stream()
-                .sorted(Comparator.comparingLong(ScoredWorker::lastSelectedTime))
-                .toList();
+        List<ScoredEndpoint> sorted = new ArrayList<>(candidates);
+        sorted.sort(Comparator.comparingLong(se -> se.ep().getLastSelectedTime().get()));
 
         long now = System.nanoTime() / 1000;
-        for (ScoredWorker candidate : sorted) {
-            long expected = candidate.lastSelectedTime();
+        for (ScoredEndpoint candidate : sorted) {
+            long expected = candidate.ep().getLastSelectedTime().get();
             // CAS: claim this worker only if lastSelectedTime hasn't changed since we read it.
             // A failed CAS means another concurrent request already claimed this worker.
-            if (candidate.worker().getLastSelectedTime().compareAndSet(expected, now)) {
+            if (candidate.ep().getLastSelectedTime().compareAndSet(expected, now)) {
                 return candidate;
             }
             // Another request claimed this worker; try the next candidate
         }
 
-        // All candidates were claimed concurrently; fall back to the first candidate
-        return fallbackCandidates.getFirst();
+        // All candidates were claimed concurrently
+        return null;
     }
 
+    // ==================== Scoring ====================
+
     /**
-     * Build server status response
+     * Calculate TTFT scores for all eligible endpoints.
      *
-     * @param selectedWorker Selected worker
-     * @param roleType Worker role type
-     * @param requestId Request ID
-     * @return Server status
+     * <p>TTFT = predicted prefill time + estimated queue wait time.
+     * Endpoints without a predictor are skipped.
+     *
+     * @param endpoints eligible endpoint list
+     * @param cacheMatchResults cache match results from {@link CacheAwareService}
+     * @param seqLen request sequence length
+     * @return list of scored endpoints
      */
-    private ServerStatus buildServerStatus(ScoredWorker selectedWorker, RoleType roleType, long requestId) {
-        WorkerStatus workerStatus = selectedWorker.worker();
-        ServerStatus result = new ServerStatus();
-        try {
-            result.setSuccess(true);
-            result.setRole(roleType);
-            result.setRequestId(requestId);
-            result.setPrefillTime(selectedWorker.ttft());
-            result.setGroup(workerStatus.getGroup());
-            result.setServerIp(workerStatus.getIp());
-            result.setHttpPort(workerStatus.getPort());
-            result.setGrpcPort(CommonUtils.toGrpcPort(workerStatus.getPort()));
-        } catch (Exception e) {
-            Logger.error("Failed to build server status for requestId: {}", requestId, e);
-            result.setCode(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
-            result.setMessage(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorMsg());
-            result.setSuccess(false);
+    private List<ScoredEndpoint> scoreEndpoints(List<PrefillEndpoint> endpoints,
+                                                Map<String, Integer> cacheMatchResults,
+                                                long seqLen) {
+        List<ScoredEndpoint> result = new ArrayList<>(endpoints.size());
+        for (PrefillEndpoint ep : endpoints) {
+            PrefillTimePredictor predictor = ep.getPredictor();
+            if (predictor == null) {
+                Logger.debug("ShortestTTFT: skipping endpoint without predictor, ip={}", ep.getIp());
+                continue;
+            }
+            long cacheHit = calculateCacheHit(ep, cacheMatchResults, seqLen);
+            long prefillMs = predictor.estimateMs(seqLen, cacheHit);
+            long queueMs = ep.realWaitTimeMs();
+            long ttft = prefillMs + queueMs;
+            Logger.debug("ShortestTTFT score - ip: {}, hitCache: {}, prefillMs: {}, queueMs: {}, ttft: {}",
+                    ep.getIp(), cacheHit, prefillMs, queueMs, ttft);
+            result.add(new ScoredEndpoint(ep, ttft, cacheHit));
         }
         return result;
     }
 
-    /**
-     * Calculate prefix match length (number of cached tokens hit)
-     *
-     * @param workerStatus Worker status
-     * @param cacheMatchResults Cache match results
-     * @return Number of tokens hit
-     */
-    private long calculatePrefixMatchLength(WorkerStatus workerStatus, Map<String, Integer> cacheMatchResults) {
-        if (workerStatus.getCacheStatus() == null || cacheMatchResults == null) {
+    // ==================== Endpoint Filtering (mirrors CostBasedPrefillStrategy) ====================
+
+    private List<PrefillEndpoint> getAvailableEndpoints(RoleType roleType, String group,
+                                                        ResourceMeasureIndicatorEnum indicator) {
+        Map<String, WorkerEndpoint> workerEndpointMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
+        if (MapUtils.isEmpty(workerEndpointMap)) {
+            return new ArrayList<>();
+        }
+        PrefillResourceMeasure measure = (PrefillResourceMeasure) resourceMeasureFactory.getMeasure(indicator);
+        if (measure == null) {
+            return new ArrayList<>();
+        }
+        List<PrefillEndpoint> result = new ArrayList<>();
+        for (WorkerEndpoint ep : workerEndpointMap.values()) {
+            if (!(ep instanceof PrefillEndpoint pe)) {
+                continue;
+            }
+            if (!pe.getStatus().isAlive()) {
+                continue;
+            }
+            if (!measure.isResourceAvailable(pe)) {
+                continue;
+            }
+            result.add(pe);
+        }
+        return result;
+    }
+
+    private Map<String, Integer> getCacheMatchResults(BalanceContext balanceContext, RoleType roleType, String group) {
+        List<Long> blockCacheKeys = balanceContext.getRequest().getBlockCacheKeys();
+        return cacheAwareService.findMatchingEngines(blockCacheKeys, roleType, group);
+    }
+
+    private long calculateCacheHit(PrefillEndpoint ep, Map<String, Integer> cacheMatchResults, long seqLen) {
+        if (ep.getStatus().getCacheStatus() == null || cacheMatchResults == null) {
             return 0L;
         }
-
-        Integer prefixMatchLength = cacheMatchResults.get(workerStatus.getIpPort());
+        Integer prefixMatchLength = cacheMatchResults.get(ep.ipPort());
         if (prefixMatchLength == null) {
             return 0L;
         }
-
-        long blockSize = workerStatus.getCacheStatus().getBlockSize();
-        return blockSize * prefixMatchLength;
+        long blockSize = ep.getStatus().getCacheStatus().getBlockSize();
+        long rawHit = blockSize * prefixMatchLength;
+        if (rawHit >= seqLen) {
+            return Math.max(0L, seqLen - blockSize);
+        }
+        return Math.max(0L, rawHit);
     }
 
-    private long calculateRoutingCacheMatchTokens(Integer prefixMatchLength, Request request, WorkerStatus workerStatus) {
-        if (prefixMatchLength == null || prefixMatchLength <= 0 || request == null || request.getSeqLen() <= 0L) {
-            return 0L;
-        }
+    // ==================== Metrics & ServerStatus (mirrors CostBasedPrefillStrategy) ====================
 
-        // Page-RR routes one canonical key per virtual block, so the frontend sends
-        // cache_key_block_size as seq_size_per_block * cp_size in that mode.
-        long blockSize = request.getCacheKeyBlockSize();
-        if (blockSize <= 0L && workerStatus != null && workerStatus.getCacheStatus() != null) {
-            blockSize = workerStatus.getCacheStatus().getBlockSize();
-        }
-        if (blockSize <= 0L) {
-            return 0L;
-        }
-
-        long hitTokens = blockSize * prefixMatchLength;
-        if (hitTokens < 0L) {
-            return request.getSeqLen();
-        }
-        return Math.min(request.getSeqLen(), hitTokens);
+    private void reportCacheHitMetrics(RoleType roleType, String ip, String engineIpPort, long hitCacheTokens, long seqLen) {
+        double hitRate = seqLen > 0 ? hitCacheTokens / (double) seqLen : 0.0;
+        engineHealthReporter.reportCacheHitMetrics(roleType, ip, engineIpPort, hitCacheTokens, hitRate);
     }
 
-    private String engineIp(String engineIpPort) {
-        if (engineIpPort == null) {
-            return "";
+    private ServerStatus buildServerStatus(ScoredEndpoint selected, RoleType roleType, long requestId,
+                                           FlexlbConfig config) {
+        PrefillEndpoint ep = selected.ep();
+        long ttft = selected.ttft();
+        long bestCacheHit = selected.hitCache();
+
+        // Non-batch path: reserve prefill inflight for load-aware scoring.
+        // Batch path uses FlexlbBatchScheduler.commitBatch() instead — skip here to avoid double-counting.
+        if (isNonBatchPath(config)) {
+            ep.commitBatch(requestId, ttft, Collections.emptyList());
         }
-        int delimiter = engineIpPort.indexOf(':');
-        return delimiter < 0 ? engineIpPort : engineIpPort.substring(0, delimiter);
+
+        // Populate DebugInfo so BatchItem.hitCache() can read hitCacheLen for batch metrics
+        DebugInfo debugInfo = new DebugInfo();
+        debugInfo.setHitCacheLen(bestCacheHit);
+
+        ServerStatus result = new ServerStatus();
+        result.setSuccess(true);
+        result.setRole(roleType);
+        result.setRequestId(requestId);
+        result.setPrefillTime(ttft);
+        result.setGroup(ep.getStatus().getGroup());
+        result.setServerIp(ep.getIp());
+        result.setHttpPort(ep.getHttpPort());
+        result.setGrpcPort(CommonUtils.toGrpcPort(ep.getHttpPort()));
+        result.setDpRank(ep.getStatus().getDpRank());
+        result.setDebugInfo(debugInfo);
+        return result;
+    }
+
+    /**
+     * Whether batch dispatching is globally disabled.
+     * <p>When batch is enabled, FlexlbBatchScheduler handles all inflight tracking;
+     * placeholders are only needed when batch is fully off ({@code flexlbBatchEnabled=false}).
+     */
+    private static boolean isNonBatchPath(FlexlbConfig config) {
+        return !config.isFlexlbBatchEnabled();
     }
 }
