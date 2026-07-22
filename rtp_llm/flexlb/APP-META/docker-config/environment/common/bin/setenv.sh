@@ -74,6 +74,17 @@ if [ -z $SETENV_SETTED ]; then
         fi
         export CPU_COUNT
 
+        # Match HotSpot G1 ergonomics to the CPU quota visible to this container.
+        if [ "$CPU_COUNT" -le 8 ]; then
+          parallelGCThreads=$CPU_COUNT
+        else
+          parallelGCThreads=$((8 + (CPU_COUNT - 8) * 5 / 8))
+        fi
+        concGCThreads=$((parallelGCThreads / 4))
+        if [ "$concGCThreads" -lt 1 ]; then
+          concGCThreads=1
+        fi
+
         mkdir -p "$APP_HOME"/.default
         export SERVICE_PID=$APP_HOME/.default/${APP_NAME}.pid
         export SERVICE_OUT=$APP_HOME/logs/service_stdout.log
@@ -89,15 +100,21 @@ if [ -z $SETENV_SETTED ]; then
 
         let memTotal=`cat /proc/meminfo | grep MemTotal | awk '{printf "%d", $2/1024 }'`
         echo "INFO: OS total memory: "$memTotal"M"
-        # if os memory <= 2G
+        # Keep enough native-memory headroom for the 8c16g pool: direct buffers,
+        # metaspace, code cache, thread stacks, and the container runtime.
         if [ $memTotal -le 2048 ]; then
           SERVICE_OPTS="${SERVICE_OPTS} -Xms1536m -Xmx1536m"
+          maxDirectMemory=2g
+        elif [ $memTotal -le 16384 ]; then
+          SERVICE_OPTS="${SERVICE_OPTS} -Xms10g -Xmx10g"
+          maxDirectMemory=1g
         else
           SERVICE_OPTS="${SERVICE_OPTS} -Xms32g -Xmx32g"
+          maxDirectMemory=2g
         fi
 
         SERVICE_OPTS="${SERVICE_OPTS} -XX:MetaspaceSize=512m -XX:MaxMetaspaceSize=512m"
-        SERVICE_OPTS="${SERVICE_OPTS} -XX:ReservedCodeCacheSize=512m -XX:MaxDirectMemorySize=2g"
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:ReservedCodeCacheSize=512m -XX:MaxDirectMemorySize=${maxDirectMemory}"
         # 使用G1GC
         SERVICE_OPTS="${SERVICE_OPTS} -XX:+UseG1GC"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:+UnlockExperimentalVMOptions"
@@ -108,7 +125,7 @@ if [ -z $SETENV_SETTED ]; then
         SERVICE_OPTS="${SERVICE_OPTS} -XX:+ExplicitGCInvokesConcurrent"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:SurvivorRatio=8"
         SERVICE_OPTS="${SERVICE_OPTS} -Dsun.rmi.dgc.server.gcInterval=2592000000 -Dsun.rmi.dgc.client.gcInterval=2592000000"
-        SERVICE_OPTS="${SERVICE_OPTS} -XX:ParallelGCThreads=24 -XX:ConcGCThreads=8"
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:ParallelGCThreads=${parallelGCThreads} -XX:ConcGCThreads=${concGCThreads}"
         if [[ "$JAVA_VERSION" -lt 9 ]]; then
             SERVICE_OPTS="${SERVICE_OPTS} -Xloggc:${MIDDLEWARE_LOGS}/gc.log -XX:+PrintGCDetails -XX:+PrintGCDateStamps"
         else
