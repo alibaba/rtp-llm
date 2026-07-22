@@ -683,12 +683,21 @@ class PyFlashinferDecodeAttnOp(object):
         return get_scalar_type(attn_inputs.dtype)
 
     def _requires_fa2_cuda_graph_replan(self) -> bool:
-        # FlashInfer BatchDecode routes tensor-core decode through fa2 BatchPrefill.
-        # fa3 prefill paths do not need this replay-time plan refresh.
+        # Tensor-core BatchDecode routes through the FA2 batch-prefill planner.
         return self.use_tensor_core
 
-    def _plan_decode_wrapper(self, attn_inputs: PyAttentionInputs) -> None:
-        if self._requires_fa2_cuda_graph_replan():
+    def _plan_decode_wrapper(
+        self, attn_inputs: PyAttentionInputs, *, for_cuda_graph: bool = False
+    ) -> None:
+        """Refresh FlashInfer scheduling metadata for the current page table."""
+        if for_cuda_graph:
+            # The scheduler consumes indptr and last-page lengths on the host,
+            # while the wrapper copies page indices into its device buffer.
+            page_indptr = self.fmha_params.decode_page_indptr_h
+            page_indice = self.fmha_params.page_indice_d
+            last_page_len = self.fmha_params.paged_kv_last_page_len_h
+            plan_kwargs = {"non_blocking": True}
+        elif self._requires_fa2_cuda_graph_replan():
             page_indptr = self.fmha_params.decode_page_indptr_h
             page_indice = self.fmha_params.page_indice_h
             last_page_len = self.fmha_params.paged_kv_last_page_len_h
@@ -751,11 +760,12 @@ class PyFlashinferDecodeAttnOp(object):
                     device=self.g_workspace_buffer.device,
                 )
 
-        self._plan_decode_wrapper(attn_inputs)
+        # CUDA Graph planning uses host scheduler inputs and device page indices.
+        self._plan_decode_wrapper(attn_inputs, for_cuda_graph=self.enable_cuda_graph)
         return self.fmha_params
 
     def prepare_for_cuda_graph_replay(self, attn_inputs: PyAttentionInputs) -> None:
-        """Refresh FlashInfer runtime buffers before replaying the captured graph."""
+        """Refresh page tables and scheduling metadata before graph replay."""
         self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
@@ -764,8 +774,8 @@ class PyFlashinferDecodeAttnOp(object):
             self.seq_size_per_block,
             forbid_realloc=True,
         )
-        if self._requires_fa2_cuda_graph_replan():
-            self._plan_decode_wrapper(attn_inputs)
+        # Runtime KV lengths change the schedule for both decode implementations.
+        self._plan_decode_wrapper(attn_inputs, for_cuda_graph=True)
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
