@@ -6,6 +6,22 @@
 namespace rtp_llm {
 namespace tap = torch::autograd::profiler;
 
+namespace detail {
+
+std::unique_ptr<tap::ProfilerResult> tryDisableProfiler(DisableProfilerFn disable_profiler) {
+    try {
+        return disable_profiler();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("failed to disable torch profiler; dropping trace and continuing inference: %s", e.what());
+    } catch (...) {
+        RTP_LLM_LOG_WARNING(
+            "failed to disable torch profiler with unknown exception; dropping trace and continuing inference");
+    }
+    return nullptr;
+}
+
+}  // namespace detail
+
 // ---- TorchProfile ----
 
 std::atomic<size_t> TorchProfile::count_{0};
@@ -30,9 +46,15 @@ std::pair<std::unique_ptr<tap::ProfilerResult>, std::string> TorchProfile::stopA
     if (stopped_) {
         return {nullptr, ""};
     }
-    auto        res       = tap::disableProfiler();
+    // disableProfiler() pops the active profiler state before finalizing the
+    // trace. Mark this wrapper stopped first so an exception is never retried
+    // from the destructor.
+    stopped_ = true;
+    auto res = detail::tryDisableProfiler(&tap::disableProfiler);
+    if (!res) {
+        return {nullptr, ""};
+    }
     std::string file_name = output_dir_ + "/" + prefix_ + std::to_string(count_) + ".json";
-    stopped_              = true;
     return {std::move(res), std::move(file_name)};
 }
 
