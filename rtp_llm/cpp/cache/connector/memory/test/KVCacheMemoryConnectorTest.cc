@@ -617,6 +617,26 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnTrue_WithWorkerAddrs) {
     EXPECT_EQ(conn->broadcast_manager_->workerNum(), server_addrs_.size());
 }
 
+TEST_F(KVCacheMemoryConnectorTest, StagedCopyScratchPoolAllowsConcurrentCheckoutsPerDevice) {
+    auto first  = connector_->acquireStagedCopyScratchForDevice(/*device_index=*/0);
+    auto second = connector_->acquireStagedCopyScratchForDevice(/*device_index=*/0);
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    EXPECT_NE(first.get(), second.get());
+
+    auto* first_ptr  = first.get();
+    auto* second_ptr = second.get();
+    connector_->recycleStagedCopyScratchForDevice(/*device_index=*/0, std::move(first));
+    connector_->recycleStagedCopyScratchForDevice(/*device_index=*/0, std::move(second));
+
+    auto reused_first  = connector_->acquireStagedCopyScratchForDevice(/*device_index=*/0);
+    auto reused_second = connector_->acquireStagedCopyScratchForDevice(/*device_index=*/0);
+    EXPECT_TRUE((reused_first.get() == first_ptr && reused_second.get() == second_ptr)
+                || (reused_first.get() == second_ptr && reused_second.get() == first_ptr));
+    connector_->recycleStagedCopyScratchForDevice(/*device_index=*/0, std::move(reused_first));
+    connector_->recycleStagedCopyScratchForDevice(/*device_index=*/0, std::move(reused_second));
+}
+
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero) {
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 0;
