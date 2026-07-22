@@ -49,6 +49,18 @@ public class BatchScheduleTarget {
     private RoleType role;
 
     /**
+     * FE base URL ({@code http://ip:port}) the dispatcher should fan this chunk out to, assigned
+     * by the master so a single global cursor is the one and only source of FE selection across
+     * every dispatcher instance (each instance round-robining its own {@code FePool} would collide
+     * under load and split FE load across per-instance cursors). Filled only by the elected
+     * master's {@code /batch_schedule} response; {@code null} when the master has no FE view (a
+     * master node not running the dispatcher) — the dispatcher then fails that chunk visibly rather
+     * than picking a local FE, keeping FE load fully attributable to the single master cursor.
+     */
+    @JsonProperty("fe_url")
+    private String feUrl;
+
+    /**
      * Test-only convenience for a role-less gRPC target. Production builds targets via
      * {@link #of(WorkerStatus, RoleType, boolean)} or the no-arg constructor plus setters.
      */
