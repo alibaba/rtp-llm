@@ -45,13 +45,13 @@ public:
 
     bool put(CacheItem& cache_item);
 
-    bool contains(CacheKeyType cache_key, int group_id = 0) const;
+    bool contains(CacheKeyType cache_key, int group_id) const;
 
-    MatchResult match(CacheKeyType cache_key, int group_id = 0);
+    MatchResult match(CacheKeyType cache_key, int group_id);
 
     BlockIndicesType pop(int n);
 
-    std::optional<CacheItem> remove(CacheKeyType cache_key, int group_id = 0);
+    std::optional<CacheItem> remove(CacheKeyType cache_key, int group_id);
 
     // Select and remove LRU cache entries until at least min_blocks are freed.
     // Skips resident entries and keys that have any resident item.

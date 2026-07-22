@@ -46,7 +46,7 @@ public:
         BatchKVCacheResource addr;
         // New (refactored) BatchKVCacheResource: [batch_id][group_id] -> block_indices
         addr.resetBatchSize(1);
-        addr.initGroups(1, 1, {{0}});
+        addr.initGroups(makeProcessorCacheConfig().topologyPtr());
         addr.setBatchBlocks(0, 0, {block_id});
         stream->setKVCache(addr);
 

@@ -590,8 +590,13 @@ class HWKernelConfig:
         ...
 class HybridAttentionConfig:
     enable_hybrid_attention: bool
+    enable_independent_kv_cache_pools: bool
     hybrid_attention_types: list[HybridAttentionType]
-    def __init__(self, enable_hybrid_attention: bool = False, hybrid_attention_types: list[HybridAttentionType] = []) -> None:
+    @typing.overload
+    def __init__(self) -> None:
+        ...
+    @typing.overload
+    def __init__(self, enable_hybrid_attention: bool, enable_independent_kv_cache_pools: bool, hybrid_attention_types: list[HybridAttentionType]) -> None:
         ...
     def to_string(self) -> str:
         ...
@@ -646,6 +651,11 @@ class KVCacheConfig:
     max_block_size_per_item: int
     memory_cache_size_mb: int
     memory_cache_sync_timeout_ms: int
+    enable_memory_cache_disk: bool
+    memory_cache_disk_paths: str
+    memory_cache_disk_size_mb: int
+    memory_cache_disk_buffered_io: bool
+    memory_cache_disk_sync_timeout_ms: int
     multi_task_prompt: str
     multi_task_prompt_str: str
     multi_task_prompt_tokens: dict[str, list[int]]
@@ -673,6 +683,14 @@ class KVCacheConfig:
     reuse_cache: bool
     seq_size_per_block: int
     kernel_seq_size_per_block: int
+    enable_tiered_memory_cache: bool
+    enable_gpu_prefix_tree: bool
+    enable_prefix_tree_memory_cache: bool
+    enable_legacy_memory_connector_fallback: bool
+    prefix_tree_memory_state_swa_pool_ratio: int
+    enable_independent_group_eviction: bool
+    device_cache_min_free_blocks: int
+    load_cache_retry_times: int
     ssm_state_dtype: str
     test_block_num: int
     use_block_cache: int
@@ -860,23 +878,102 @@ class KVCacheSpecType:
     MHA: typing.ClassVar[KVCacheSpecType]
     MLA: typing.ClassVar[KVCacheSpecType]
     LINEAR: typing.ClassVar[KVCacheSpecType]
-
+    OPAQUE_KV: typing.ClassVar[KVCacheSpecType]
+    OPAQUE_STATE: typing.ClassVar[KVCacheSpecType]
     @property
-    def name(self) -> str:
-        ...
-
+    def name(self) -> str: ...
     @property
-    def value(self) -> int:
-        ...
+    def value(self) -> int: ...
 
+class CacheGroupType:
+    LINEAR: typing.ClassVar[CacheGroupType]
+    FULL: typing.ClassVar[CacheGroupType]
+    SWA: typing.ClassVar[CacheGroupType]
+
+class CacheReusePolicy:
+    REUSABLE: typing.ClassVar[CacheReusePolicy]
+    NON_REUSABLE: typing.ClassVar[CacheReusePolicy]
+
+class CacheEvictPolicy:
+    CHAIN: typing.ClassVar[CacheEvictPolicy]
+    INDEPENDENT: typing.ClassVar[CacheEvictPolicy]
+    NONE: typing.ClassVar[CacheEvictPolicy]
+
+class CacheMemoryPlacement:
+    DEVICE: typing.ClassVar[CacheMemoryPlacement]
+    HOST: typing.ClassVar[CacheMemoryPlacement]
+    HOST_PINNED: typing.ClassVar[CacheMemoryPlacement]
+
+class CpBlockMappingMode:
+    NONE: typing.ClassVar[CpBlockMappingMode]
+    BLOCK_ROUND_ROBIN: typing.ClassVar[CpBlockMappingMode]
+    COMPACT_LAST_RANK: typing.ClassVar[CpBlockMappingMode]
+
+class CpBlockSliceMode:
+    NONE: typing.ClassVar[CpBlockSliceMode]
+    EQUAL_BYTES: typing.ClassVar[CpBlockSliceMode]
+    PAYLOAD_BYTES: typing.ClassVar[CpBlockSliceMode]
+
+class OpaqueBlockEntryCountMode:
+    EXPLICIT: typing.ClassVar[OpaqueBlockEntryCountMode]
+    KERNEL_BLOCK_COMPRESSED: typing.ClassVar[OpaqueBlockEntryCountMode]
+    STATE_RING: typing.ClassVar[OpaqueBlockEntryCountMode]
+
+class CpPrefillSliceLayout:
+    NONE: typing.ClassVar[CpPrefillSliceLayout]
+    PAYLOAD: typing.ClassVar[CpPrefillSliceLayout]
+    BLOCK_STRIDE: typing.ClassVar[CpPrefillSliceLayout]
+
+class CacheReusePolicyDesc:
+    enable_prefix_reuse: typing.Any
+    evict_policy: typing.Any
+    def __init__(self) -> None: ...
+
+class CacheCapacityPolicyDesc:
+    reservable: typing.Any
+    explicit_block_num: typing.Any
+    charge_to_paged_budget: typing.Any
+    def __init__(self) -> None: ...
+
+class CacheMemoryPolicyDesc:
+    placement: typing.Any
+    def __init__(self) -> None: ...
+
+class CacheTailPolicyDesc:
+    active_tail_blocks: typing.Any
+    validate_tail_blocks: typing.Any
+    def __init__(self) -> None: ...
+
+class CacheCpPolicyDesc:
+    mapping: typing.Any
+    slice: typing.Any
+    scale_seq_size: typing.Any
+    align_payload: typing.Any
+    prefill_slice_layout: typing.Any
+    def __init__(self) -> None: ...
 
 class KVCacheSpecDesc:
     tag: str
     cache_type: KVCacheSpecType
     dtype: DataType
-
-    def __init__(self) -> None:
-        ...
+    is_state_cache: bool
+    entry_elems: int
+    entry_dtype: DataType
+    entry_count_mode: OpaqueBlockEntryCountMode
+    explicit_entry_count: int
+    compression_ratio: int
+    state_ring_overlap: int
+    state_ring_include_gen_num_per_cycle: bool
+    block_stride_bytes_override: int
+    block_stride_bytes_alignment: int
+    block_stride_alignment_min_entries: int
+    group_type: typing.Any
+    reuse: typing.Any
+    capacity: typing.Any
+    memory: typing.Any
+    tail: typing.Any
+    cp: typing.Any
+    def __init__(self) -> None: ...
 
 
 class ModelConfig:
@@ -1126,6 +1223,7 @@ class ParallelismConfig:
     local_world_size: int
     pp_size: int
     prefill_cp_config: ...
+    role_type: RoleType
     tp_rank: int
     tp_size: int
     world_rank: int
@@ -1148,7 +1246,9 @@ class ParallelismConfig:
         ...
 class PrefillCPConfig:
     comm_buffer_size: int
+    kv_cache_sharded: bool
     method: CPRotateMethod
+    prefill_cp_size: int
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:

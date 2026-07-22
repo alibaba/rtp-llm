@@ -5,6 +5,7 @@
 #include <string>
 #include <map>
 #include <unordered_map>
+#include <utility>
 #include "kvcm_client/common.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 
@@ -25,14 +26,29 @@ using LocationsView = std::vector<LocationView>;
 class GroupPolicy {
 public:
     struct Group {
+        Group() = default;
+        Group(bool        is_full,
+              uint64_t    group_name_bithash,
+              std::string group_name,
+              std::string tag              = {},
+              size_t      block_size_bytes = 0):
+            is_full(is_full),
+            group_name_bithash(group_name_bithash),
+            group_name(std::move(group_name)),
+            tag(std::move(tag)),
+            block_size_bytes(block_size_bytes) {}
+
         bool        is_full            = true;
         uint64_t    group_name_bithash = 0;
         std::string group_name;
+        std::string tag;
+        size_t      block_size_bytes = 0;
     };
     using GroupIdMap = std::map<int32_t, Group>;
     struct SpecInfo {
-        int32_t group_id;
-        int32_t tp_rank;
+        int32_t     group_id;
+        int32_t     tp_rank;
+        std::string tag;
     };
     using SpecInfoMap = std::map<std::string, SpecInfo, std::less<>>;
 
@@ -56,6 +72,9 @@ public:
     virtual bool genBlockBuffers(const std::vector<int32_t>&     group_ids,
                                  const std::vector<int32_t>&     block_ids,
                                  kv_cache_manager::BlockBuffers& block_buffers) const = 0;
+    bool         genBlockBuffersByTag(const std::vector<std::string>& tags,
+                                      const std::vector<int32_t>&     block_ids,
+                                      kv_cache_manager::BlockBuffers& block_buffers) const;
 
     const GroupIdMap& groups() const {
         return groups_;
@@ -83,6 +102,8 @@ protected:
 
     // group_id -> group
     GroupIdMap groups_;
+    // Stable semantic identity resolved once during policy initialization.
+    std::unordered_map<std::string, int32_t> tag_to_group_id_;
     // max support 64 groups, contains all group combinations
     std::unordered_map<uint64_t, std::string> location_spec_group_map_;
     // spec_name -> spec_info

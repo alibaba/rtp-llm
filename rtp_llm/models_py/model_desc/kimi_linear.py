@@ -16,7 +16,12 @@ import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_group_tags_for_layers,
+    get_primary_attention_inputs,
+    select_attention_inputs_for_layer,
+    select_fmha_impl_for_layer,
+)
 from rtp_llm.models_py.model_desc.generic_moe import DecodeLayerOutput, GenericMoeLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
@@ -820,12 +825,22 @@ class KimiLinearModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
+    def _get_fmha_group_tags(self) -> Optional[list[str]]:
+        if self.kv_cache is None:
+            return None
+        full_attention_layers = (
+            layer_idx
+            for layer_idx, layer in enumerate(self.layers)
+            if layer.layer_type != HybridAttentionType.LINEAR
+        )
+        return get_group_tags_for_layers(self.kv_cache, full_attention_layers)
+
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
 
-        attention_inputs: PyAttentionInputs = inputs.attention_inputs
+        attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
         prefill_conv1d_meta = None
         is_target_verify = attention_inputs.is_target_verify
         if attention_inputs.is_prefill and not is_target_verify:
@@ -843,13 +858,20 @@ class KimiLinearModel(GptModelBase):
         residual = torch.zeros_like(hidden_states)
 
         for i, decoder_layer in enumerate(self.layers):
-            select_block_map_for_layer(attention_inputs, i)
+            layer_attention_inputs = select_attention_inputs_for_layer(
+                inputs, self.kv_cache, i
+            )
+            layer_fmha_impl = (
+                None
+                if decoder_layer.layer_type == HybridAttentionType.LINEAR
+                else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+            )
             output = decoder_layer(
                 hidden_states,
                 residual,
-                fmha_impl,
+                layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
-                attention_inputs=attention_inputs,
+                attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
             hidden_states = output.hidden_states
@@ -857,4 +879,4 @@ class KimiLinearModel(GptModelBase):
 
         hidden_states, _ = self.norm(hidden_states, residual)
 
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        return PyModelOutputs(hidden_states)

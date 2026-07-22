@@ -32,7 +32,9 @@ public:
                                                                   cache_config.kv_scale_stride_bytes,
                                                                   main_spec,
                                                                   cache_config,
-                                                                  cache_config.localKvHeadNumForGroup(0));
+                                                                  cache_config.localKvHeadNumForGroup(0),
+                                                                  cache_config.seqSizePerBlockForGroup(0),
+                                                                  cache_config.kernelBlocksPerKvBlockForGroup(0));
 
         main_layout.kv_cache_offset_bytes = 0;
         main_layout.kv_scale_offset_bytes = main_layout.kv_cache_offset_bytes + main_layout.kv_block_pool_size_bytes;
@@ -46,9 +48,8 @@ public:
         for (size_t i = 0; i < cache_config.mtp_sub_configs.size(); ++i) {
             const auto& mtp_sub_config = cache_config.mtp_sub_configs[i];
             RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%zu] is null", i);
-            RTP_LLM_CHECK_WITH_INFO(mtp_sub_config->groupNums() > 0,
-                                    "MTP module %zu cache groups must not be empty",
-                                    i);
+            RTP_LLM_CHECK_WITH_INFO(
+                mtp_sub_config->groupNums() > 0, "MTP module %zu cache groups must not be empty", i);
 
             const auto mtp_layer_num = mtp_sub_config->layer_num;
 
@@ -63,13 +64,16 @@ public:
             // MTP block size may differ from the main model. Use the real
             // MTP group that owns a layer; target-aligned placeholder groups
             // must not affect the sub-model memory layout.
-            MemoryLayoutConfig mtp_layout = createMemoryLayoutConfig(false,
-                                                                     mtp_layer_num,
-                                                                     mtp_spec->block_size_bytes(),
-                                                                     mtp_spec->scale_block_size_bytes(),
-                                                                     mtp_spec,
-                                                                     cache_config,
-                                                                     mtp_sub_config->localKvHeadNumForGroup(real_mtp_gid));
+            MemoryLayoutConfig mtp_layout =
+                createMemoryLayoutConfig(false,
+                                         mtp_layer_num,
+                                         mtp_spec->block_size_bytes(),
+                                         mtp_spec->scale_block_size_bytes(),
+                                         mtp_spec,
+                                         cache_config,
+                                         mtp_sub_config->localKvHeadNumForGroup(real_mtp_gid),
+                                         mtp_sub_config->seqSizePerBlockForGroup(real_mtp_gid),
+                                         mtp_sub_config->kernelBlocksPerKvBlockForGroup(real_mtp_gid));
 
             mtp_layout.kv_cache_offset_bytes = current_offset;
             RTP_LLM_LOG_INFO("mtp_layout.kv_block_pool_size_bytes = %ld", mtp_layout.kv_block_pool_size_bytes);
@@ -91,6 +95,57 @@ public:
         RTP_LLM_LOG_INFO("BlockPoolConfig(memory_layouts=%zu): total_size=%zu bytes",
                          config.memory_layouts.size(),
                          config.total_size_bytes);
+        return config;
+    }
+
+    static BlockPoolConfig createConfigForGroup(const CacheConfig& cache_config, size_t group_id) {
+        RTP_LLM_CHECK_WITH_INFO(group_id < static_cast<size_t>(cache_config.groupNums()),
+                                "group_id %zu out of range, groupNums=%d",
+                                group_id,
+                                cache_config.groupNums());
+        const auto& spec = cache_config.specForGroup(group_id);
+        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", group_id);
+
+        BlockPoolConfig config;
+        config.pool_name = "group_" + std::to_string(group_id);
+        const auto& tag  = cache_config.tagForGroup(group_id);
+        if (!tag.empty()) {
+            config.pool_name = tag;
+        }
+        config.block_num            = cache_config.blockNumForGroup(group_id);
+        const bool has_group_blocks = config.block_num != cache_config.block_num;
+        RTP_LLM_LOG_INFO("createConfigForGroup: pool_name=%s gid=%zu block_num=%d (has_group_blocks=%d, "
+                         "groupNums=%d, global_block_num=%d)",
+                         config.pool_name.c_str(),
+                         group_id,
+                         config.block_num,
+                         has_group_blocks,
+                         cache_config.groupNums(),
+                         cache_config.block_num);
+
+        const uint32_t layer_num = static_cast<uint32_t>(cache_config.layerIdsForGroup(group_id).size());
+        RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "group %zu has no layers", group_id);
+
+        const size_t kv_stride    = cache_config.kvBlockStrideBytesForGroup(group_id);
+        const size_t scale_stride = cache_config.kvScaleStrideBytesForGroup(group_id);
+
+        CacheConfig group_cache_config = cache_config;
+        group_cache_config.block_num   = config.block_num;
+
+        MemoryLayoutConfig layout    = createMemoryLayoutConfig(false,
+                                                             layer_num,
+                                                             kv_stride,
+                                                             scale_stride,
+                                                             spec,
+                                                             group_cache_config,
+                                                             cache_config.localKvHeadNumForGroup(group_id),
+                                                             cache_config.seqSizePerBlockForGroup(group_id),
+                                                             cache_config.kernelBlocksPerKvBlockForGroup(group_id));
+        layout.kv_cache_offset_bytes = 0;
+        layout.kv_scale_offset_bytes = layout.kv_cache_offset_bytes + layout.kv_block_pool_size_bytes;
+
+        config.memory_layouts.push_back(layout);
+        config.total_size_bytes = layout.kv_block_pool_size_bytes + layout.kv_scale_pool_size_bytes;
         return config;
     }
 
@@ -121,13 +176,15 @@ public:
     }
 
 private:
-    static MemoryLayoutConfig createMemoryLayoutConfig(bool           enable_hybrid_attention,
-                                                       uint32_t       layer_num,
-                                                       size_t         kv_block_stride_bytes,
-                                                       size_t         kv_scale_stride_bytes,
-                                                       KVCacheSpecPtr spec,
-                                                       CacheConfig    cache_config,
-                                                       uint32_t       local_kv_head_num) {
+    static MemoryLayoutConfig createMemoryLayoutConfig(bool                               enable_hybrid_attention,
+                                                       uint32_t                           layer_num,
+                                                       size_t                             kv_block_stride_bytes,
+                                                       size_t                             kv_scale_stride_bytes,
+                                                       std::shared_ptr<const KVCacheSpec> spec,
+                                                       CacheConfig                        cache_config,
+                                                       uint32_t                           local_kv_head_num,
+                                                       size_t                             seq_size_per_block,
+                                                       size_t                             kernel_blocks_per_kv_block) {
         MemoryLayoutConfig cfg;
         cfg.layer_num             = layer_num;
         cfg.block_num             = cache_config.block_num;
@@ -143,10 +200,10 @@ private:
         cfg.local_head_num_kv       = local_kv_head_num;
         cfg.enable_hybrid_attention = enable_hybrid_attention;
         // Scale 3D layout for MLA and indexer; KV 3D only for MLA (concat_and_cache_mla)
-        cfg.is_mla             = cache_config.use_mla || cache_config.is_sparse;
-        cfg.use_mla            = cache_config.use_mla;
-        cfg.seq_size_per_block = static_cast<size_t>(cache_config.seq_size_per_block);
-        cfg.kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
+        cfg.is_mla                     = cache_config.use_mla || cache_config.is_sparse;
+        cfg.use_mla                    = cache_config.use_mla;
+        cfg.seq_size_per_block         = seq_size_per_block;
+        cfg.kernel_blocks_per_kv_block = kernel_blocks_per_kv_block;
 
         cfg.kv_block_pool_size_bytes =
             static_cast<size_t>(layer_num) * static_cast<size_t>(cfg.block_num) * cfg.kv_block_stride_bytes;

@@ -78,10 +78,7 @@ def auto_configure_deepep(
     prefill_cp_enabled = parallelism_config.prefill_cp_config.is_enabled()
     is_single_gpu = ep_size == 1
     is_pure_tp = (
-        tp_size > 1
-        and dp_size == 1
-        and ep_size == tp_size
-        and not prefill_cp_enabled
+        tp_size > 1 and dp_size == 1 and ep_size == tp_size and not prefill_cp_enabled
     )
     # Explicit opt-in via --moe_strategy must preserve use_all_gather, otherwise
     # the matching strategy's check_conditions (which requires use_all_gather)
@@ -343,6 +340,12 @@ def set_parallelism_config(
         parallelism_config.prefill_cp_config.method = py_prefill_cp_config.method
         parallelism_config.prefill_cp_config.comm_buffer_size = (
             py_prefill_cp_config.comm_buffer_size
+        )
+        parallelism_config.prefill_cp_config.kv_cache_sharded = (
+            py_prefill_cp_config.kv_cache_sharded
+        )
+        parallelism_config.prefill_cp_config.prefill_cp_size = (
+            py_prefill_cp_config.prefill_cp_size
         )
     logging.info(
         f"set_parallelism_config: rank {world_rank}\nparallelism_config={parallelism_config.to_string()}world_rank={world_rank}\n"

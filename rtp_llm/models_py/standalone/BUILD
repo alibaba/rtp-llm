@@ -13,6 +13,7 @@ py_library(
         "//rtp_llm:async_model",           # async_decoder_engine
         "//rtp_llm:embedding",             # embedding
         "//rtp_llm:models",                # rtp_llm.models
+        "//rtp_llm/models_py:utils",
     ],
     visibility = ["//visibility:public"],
 )

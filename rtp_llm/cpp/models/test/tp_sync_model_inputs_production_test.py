@@ -45,9 +45,8 @@ _EXPECTED = {
 _EXPECTED_GPU = {
     "kv_cache_kernel_block_id": [[[1, 2], [3, 4]]],
     "kv_cache_block_id": [[[10, 11, 12], [20, 21, 22]]],
-    "kv_cache_layer_to_group": [0, 0],
     "kv_cache_group_types": [1],
-    "kv_cache_update_mapping": [[4, 5], [6, 7]],
+    "kv_cache_update_mapping": [[0, 4, 5], [0, 6, 7]],
     "cache_keys": [[1001, 1002, 1003], [2001, 2002, 2003]],
     "mm_features_locs": [0, 2],
     "multimodal_feature_0": [[10.5, 11.5], [12.5, 13.5]],

@@ -48,8 +48,8 @@ struct RPCContext {
         return request->request_id();
     }
 
-    const GenerateInputPB*                 request;
-    grpc::ServerWriter<GenerateOutputsPB>* writer;
+    const GenerateInputPB*                              request;
+    grpc::internal::WriterInterface<GenerateOutputsPB>* writer;
 };
 
 class PrefillGenerateContext: public GenerateContext {
@@ -62,8 +62,7 @@ public:
                            std::shared_ptr<RpcServerRuntimeMeta> meta):
         GenerateContext(rpc_context.requestID(), timeout_ms, server_context, metrics_reporter, meta),
         resource(resource),
-        rpc_context(rpc_context)
-    {
+        rpc_context(rpc_context) {
         prefill_worker_cache_store_addrs = resource->workers;
     }
     ~PrefillGenerateContext();

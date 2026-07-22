@@ -312,12 +312,12 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyP
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenStop) {
-    CacheConfig cache_config = makeSimpleMhaCacheConfig(/*layer_num=*/1,
-                                                       /*block_num=*/1,
-                                                       /*tokens_per_block=*/4,
-                                                       rtp_llm::TYPE_FP16,
-                                                       /*local_head_num_kv=*/1,
-                                                       /*size_per_head=*/1);
+    CacheConfig cache_config      = makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                        /*block_num=*/1,
+                                                        /*tokens_per_block=*/4,
+                                                        rtp_llm::TYPE_FP16,
+                                                        /*local_head_num_kv=*/1,
+                                                        /*size_per_head=*/1);
     cache_config.block_size_bytes = 1;
 
     auto allocator   = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_config);
@@ -349,7 +349,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenCacheKeysEmpty)
     coordinator_->allocator_  = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layerGroupIdsSnapshot());
+    resource.initGroups(cache_config_.topologyPtr());
     // leave cacheKeys empty to hit the early return
     auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     std::shared_ptr<Meta> meta =
@@ -384,7 +384,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenIncrKVCacheRefR
     }
 
     KVCacheResource resource;
-    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layerGroupIdsSnapshot());
+    resource.initGroups(cache_config_.topologyPtr());
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
     auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
@@ -414,7 +414,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenNoMatchContexts
     // and will be processed/cleaned up by the coordinator update loop if enabled.
     // Use a plain shared_ptr here to avoid custom-deleter side effects in this no-connector path.
     auto resource = std::make_shared<KVCacheResource>();
-    resource->initGroups(1, cache_config_.layer_all_num, cache_config_.layerGroupIdsSnapshot());
+    resource->initGroups(cache_config_.topologyPtr());
     // Don't let gmock keep a ref to `resource` until program exit.
     // gmock actions are stored as const; use a shared holder to release the ref after first call.
     auto resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(resource);
@@ -490,12 +490,12 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnContextAndEnqueue_WhenHa
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenStop) {
-    CacheConfig cache_config = makeSimpleMhaCacheConfig(/*layer_num=*/1,
-                                                       /*block_num=*/1,
-                                                       /*tokens_per_block=*/4,
-                                                       rtp_llm::TYPE_FP16,
-                                                       /*local_head_num_kv=*/1,
-                                                       /*size_per_head=*/1);
+    CacheConfig cache_config      = makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                        /*block_num=*/1,
+                                                        /*tokens_per_block=*/4,
+                                                        rtp_llm::TYPE_FP16,
+                                                        /*local_head_num_kv=*/1,
+                                                        /*size_per_head=*/1);
     cache_config.block_size_bytes = 1;
 
     auto allocator   = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_config);
@@ -527,7 +527,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenCacheKeysEmpty
     coordinator_->allocator_  = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layerGroupIdsSnapshot());
+    resource.initGroups(cache_config_.topologyPtr());
     // leave cacheKeys empty
     auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     std::shared_ptr<Meta> meta =
@@ -549,7 +549,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenIncrKVCacheRef
 
     // Build a connector context with non-empty cache keys.
     auto ctx_resource = std::make_shared<KVCacheResource>();
-    ctx_resource->initGroups(1, cache_config_.layer_all_num, cache_config_.layerGroupIdsSnapshot());
+    ctx_resource->initGroups(cache_config_.topologyPtr());
     ctx_resource->cacheKeys()    = CacheKeysType{1, 2, 3};
     auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     std::shared_ptr<Meta> meta =
@@ -574,7 +574,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenMemory
     coordinator_->allocator_  = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layerGroupIdsSnapshot());
+    resource.initGroups(cache_config_.topologyPtr());
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
     auto selected_resource        = makeResourceWithAutoDecr();
@@ -613,7 +613,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenConnec
     coordinator_->allocator_  = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layerGroupIdsSnapshot());
+    resource.initGroups(cache_config_.topologyPtr());
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
     auto selected_resource        = makeResourceWithAutoDecr();
@@ -653,7 +653,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenNoConn
     coordinator_->allocator_ = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layerGroupIdsSnapshot());
+    resource.initGroups(cache_config_.topologyPtr());
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
     auto selected_resource        = makeResourceWithAutoDecr();

@@ -103,9 +103,8 @@ py::dict runProductionTpSyncModelInputs(const std::string& transformer_path,
         if (include_gpu) {
             inputs.kv_cache_kernel_block_id = int32Tensor({1, 2, 3, 4}).reshape({1, 2, 2});
             inputs.kv_cache_block_id        = int32Tensor({10, 11, 12, 20, 21, 22}).reshape({1, 2, 3});
-            inputs.kv_cache_layer_to_group  = int32Tensor({0, 0});
             inputs.kv_cache_group_types     = int32Tensor({1});
-            inputs.kv_cache_update_mapping  = int32Tensor({4, 5, 6, 7}).reshape({2, 2});
+            inputs.kv_cache_update_mapping  = int32Tensor({0, 4, 5, 0, 6, 7}).reshape({2, 3});
             inputs.cache_keys               = int64Tensor({1001, 1002, 1003, 2001, 2002, 2003}).reshape({2, 3});
             inputs.mm_features_locs         = int32Tensor({0, 2});
             inputs.multimodal_features      = std::vector<torch::Tensor>{
@@ -145,7 +144,6 @@ py::dict runProductionTpSyncModelInputs(const std::string& transformer_path,
     if (include_gpu) {
         result["kv_cache_kernel_block_id"] = inputs.kv_cache_kernel_block_id;
         result["kv_cache_block_id"]        = inputs.kv_cache_block_id;
-        result["kv_cache_layer_to_group"]  = inputs.kv_cache_layer_to_group;
         result["kv_cache_group_types"]     = inputs.kv_cache_group_types;
         result["kv_cache_update_mapping"]  = inputs.kv_cache_update_mapping;
         result["cache_keys"]               = inputs.cache_keys;

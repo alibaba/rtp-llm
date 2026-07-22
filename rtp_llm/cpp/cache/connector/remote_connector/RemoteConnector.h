@@ -88,11 +88,11 @@ private:
                          ActualUriGather&                        actual_uri_gather) const;
     // for all_rank:
     bool Read(const std::string&                 trace_id,
-              const std::vector<int32_t>&        group_ids,
+              const std::vector<std::string>&    group_tags,
               const std::vector<int32_t>&        block_ids,
               const kv_cache_manager::UriStrVec& uri_str_vec);
     bool Write(const std::string&                 trace_id,
-               const std::vector<int32_t>&        group_ids,
+               const std::vector<std::string>&    group_tags,
                const std::vector<int32_t>&        block_ids,
                const kv_cache_manager::UriStrVec& uri_str_vec,
                kv_cache_manager::UriStrVec&       out_uri_str_vec);

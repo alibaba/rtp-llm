@@ -1,8 +1,11 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
 
 using namespace rtp_llm;
@@ -19,10 +22,33 @@ bool operator==(const GroupPolicy::Group& lhs, const GroupPolicy::Group& rhs) {
 }
 
 bool operator==(const GroupPolicy::SpecInfo& lhs, const GroupPolicy::SpecInfo& rhs) {
-    return lhs.group_id == rhs.group_id && lhs.tp_rank == rhs.tp_rank;
+    return lhs.group_id == rhs.group_id && lhs.tp_rank == rhs.tp_rank && lhs.tag == rhs.tag;
 }
 
 namespace test {
+
+namespace {
+
+KVCacheSpecPtr makeFakeSpec(const std::string& tag) {
+    AttentionConfigs attn_config;
+    attn_config.kv_head_num      = 1;
+    attn_config.size_per_head    = 1;
+    attn_config.tokens_per_block = 1;
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+    KVCacheSpecDesc desc;
+    desc.tag        = tag;
+    desc.cache_type = KVCacheSpecType::MultiHeadAttention;
+    desc.dtype      = DataType::TYPE_FP16;
+    SpecBuildContext ctx;
+    ctx.dtype              = DataType::TYPE_FP16;
+    ctx.seq_size_per_block = 1;
+    ctx.attn_config        = &attn_config;
+    ctx.parallelism_config = &parallelism_config;
+    return SpecBuilder::build(desc, ctx);
+}
+
+}  // namespace
 
 class FakeKVCacheAllocator: public KVCacheAllocator {
 public:
@@ -31,15 +57,35 @@ public:
                          const std::vector<int32_t>& other_group_ids,
                          size_t                      per_group_layer_num):
         KVCacheAllocator(config) {
+        std::vector<int> layer_group_ids;
         for (int32_t full_group_id : full_group_ids) {
             for (int i = 0; i < per_group_layer_num; i++) {
-                fake_layout_.layer_to_group_ids.push_back({full_group_id});
+                layer_group_ids.push_back(full_group_id);
             }
         }
         for (int32_t other_group_id : other_group_ids) {
             for (int i = 0; i < per_group_layer_num; i++) {
-                fake_layout_.layer_to_group_ids.push_back({other_group_id});
+                layer_group_ids.push_back(other_group_id);
             }
+        }
+        if (!layer_group_ids.empty()) {
+            const auto  max_gid = *std::max_element(layer_group_ids.begin(), layer_group_ids.end());
+            CacheConfig fake_config;
+            fake_config.layer_num     = static_cast<uint32_t>(layer_group_ids.size());
+            fake_config.layer_all_num = fake_config.layer_num;
+            std::vector<KVCacheSpecPtr>   specs;
+            std::vector<std::vector<int>> layers_by_group(static_cast<size_t>(max_gid + 1));
+            std::vector<CacheGroupType>   types(static_cast<size_t>(max_gid + 1), CacheGroupType::FULL);
+            std::vector<std::string>      tags;
+            for (int gid = 0; gid <= max_gid; ++gid) {
+                tags.push_back(std::to_string(gid));
+                specs.push_back(makeFakeSpec(tags.back()));
+            }
+            for (size_t layer_id = 0; layer_id < layer_group_ids.size(); ++layer_id) {
+                layers_by_group[static_cast<size_t>(layer_group_ids[layer_id])].push_back(static_cast<int>(layer_id));
+            }
+            fake_config.fromGroupedSpecs(specs, layers_by_group, types, tags);
+            topology_ = fake_config.topologyPtr();
         }
     }
     void free(const FreeInfo& free_info) override {
@@ -58,8 +104,13 @@ public:
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override {
         return {};
     }
-    CacheLayerLayout allLayerCacheBase() const override {
-        return fake_layout_;
+    GroupedCacheLayerLayout allLayerCacheBase() const override {
+        RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "fake allocator has no cache topology");
+        GroupedCacheLayerLayout::GroupLayouts groups;
+        for (const auto& group : topology_->groups()) {
+            groups.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>(topology_->layers().size())));
+        }
+        return GroupedCacheLayerLayout(topology_, std::move(groups));
     }
     int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                               int                            seq_len,
@@ -93,10 +144,10 @@ public:
     void decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override {
         return;
     }
-    bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                       const std::vector<int>&        block_src_batch,
-                       bool                           copy_last_block,
-                       std::vector<BlockIdPair>&      block_update_mapping) {
+    bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
+                       const std::vector<int>&         block_src_batch,
+                       bool                            copy_last_block,
+                       std::vector<TaggedBlockIdPair>& block_update_mapping) override {
         return false;
     }
     int seqSizePerBlock() const override {
@@ -140,7 +191,7 @@ protected:
     }
 
 private:
-    CacheLayerLayout fake_layout_;
+    std::shared_ptr<const CacheTopology> topology_;
 };
 
 MATCHER_P(LocationsEqLocationsView, locations_view, "") {
@@ -620,7 +671,7 @@ TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_success_single_tp) 
         (std::unordered_map<uint64_t, std::string>({{0b111, "F0L1L2"}, {0b001, "F0"}, {0b010, "L1"}, {0b100, "L2"}})),
         cast_group_policy->location_spec_group_map_);
     EXPECT_EQ(cast_group_policy->reachableAggregateMasks(), (std::vector<uint64_t>{0b001, 0b111}));
-    ASSERT_EQ(GroupPolicy::SpecInfoMap({{"tp0_F0", {0, 0}}, {"tp0_L1", {1, 0}}, {"tp0_L2", {2, 0}}}),
+    ASSERT_EQ(GroupPolicy::SpecInfoMap({{"tp0_F0", {0, 0, "0"}}, {"tp0_L1", {1, 0, "1"}}, {"tp0_L2", {2, 0, "2"}}}),
               cast_group_policy->spec_name_to_info_);
     ASSERT_EQ((std::map<int32_t, std::vector<int>>({{0, {0, 1, 2, 3}}, {1, {4, 5, 6, 7}}, {2, {8, 9, 10, 11}}})),
               cast_group_policy->group_to_layer_ids_);
@@ -639,12 +690,12 @@ TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_success_two_tp) {
     ASSERT_EQ(
         (std::unordered_map<uint64_t, std::string>({{0b111, "F0L1L2"}, {0b001, "F0"}, {0b010, "L1"}, {0b100, "L2"}})),
         cast_group_policy->location_spec_group_map_);
-    ASSERT_EQ(GroupPolicy::SpecInfoMap({{"tp0_F0", {0, 0}},
-                                        {"tp0_L1", {1, 0}},
-                                        {"tp0_L2", {2, 0}},
-                                        {"tp1_F0", {0, 1}},
-                                        {"tp1_L1", {1, 1}},
-                                        {"tp1_L2", {2, 1}}}),
+    ASSERT_EQ(GroupPolicy::SpecInfoMap({{"tp0_F0", {0, 0, "0"}},
+                                        {"tp0_L1", {1, 0, "1"}},
+                                        {"tp0_L2", {2, 0, "2"}},
+                                        {"tp1_F0", {0, 1, "0"}},
+                                        {"tp1_L1", {1, 1, "1"}},
+                                        {"tp1_L2", {2, 1, "2"}}}),
               cast_group_policy->spec_name_to_info_);
     ASSERT_EQ((std::map<int32_t, std::vector<int>>({{0, {0, 1, 2, 3}}, {1, {4, 5, 6, 7}}, {2, {8, 9, 10, 11}}})),
               cast_group_policy->group_to_layer_ids_);
@@ -675,14 +726,14 @@ TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_success_two_full_gr
         cast_group_policy->location_spec_group_map_);
     EXPECT_EQ(cast_group_policy->reachableAggregateMasks(), (std::vector<uint64_t>{0b0011, 0b1111}));
     EXPECT_EQ(GroupPolicy::SpecInfoMap({
-                  {"tp0_F0", {0, 0}},
-                  {"tp0_F1", {1, 0}},
-                  {"tp0_L2", {2, 0}},
-                  {"tp0_L3", {3, 0}},
-                  {"tp1_F0", {0, 1}},
-                  {"tp1_F1", {1, 1}},
-                  {"tp1_L2", {2, 1}},
-                  {"tp1_L3", {3, 1}},
+                  {"tp0_F0", {0, 0, "0"}},
+                  {"tp0_F1", {1, 0, "1"}},
+                  {"tp0_L2", {2, 0, "2"}},
+                  {"tp0_L3", {3, 0, "3"}},
+                  {"tp1_F0", {0, 1, "0"}},
+                  {"tp1_F1", {1, 1, "1"}},
+                  {"tp1_L2", {2, 1, "2"}},
+                  {"tp1_L3", {3, 1, "3"}},
               }),
               cast_group_policy->spec_name_to_info_);
     EXPECT_EQ((std::map<int32_t, std::vector<int>>(
@@ -724,13 +775,25 @@ TEST_F(GroupPolicyTest, test_init_FullLayerGroupPolicy_fail_for_empty_full_group
     ASSERT_FALSE(group_policy_->init());
 }
 
-TEST_F(GroupPolicyTest, test_init_FullLayerGroupPolicy_fail_for_too_mush_full_group) {
-    std::vector<int32_t> full_group_ids = {0, 1};
-    std::vector<int32_t> other_group_ids;
-    allocator_ = std::make_shared<FakeKVCacheAllocator>(config_, full_group_ids, other_group_ids, 10);
-    group_policy_ =
-        std::make_shared<remote_connector::FullLayerGroupPolicy>(allocator_, full_group_ids, other_group_ids);
-    ASSERT_FALSE(group_policy_->init());
+TEST_F(GroupPolicyTest, test_init_FullLayerGroupPolicy_success_for_multiple_full_groups) {
+    initGroupPolicy(/*tp_size=*/1,
+                    RemoteConnectorGroupMode::RCGM_ONLY_FULL_LAYER,
+                    /*per_group_layer_num=*/1,
+                    /*full_group_ids=*/{0, 1});
+
+    EXPECT_EQ(group_policy_->reachableAggregateMasks(), (std::vector<uint64_t>{0b11}));
+    EXPECT_EQ(group_policy_->location_spec_group_map_,
+              (std::unordered_map<uint64_t, std::string>{{0b01, "F0"}, {0b10, "F1"}, {0b11, "F0F1"}}));
+
+    auto resource        = std::make_shared<KVCacheResource>();
+    resource->cache_keys = {0, 1};
+    resource->groupBlocks().push_back(makeGroupBlockIds({10, 11}));
+    resource->groupBlocks().push_back(makeGroupBlockIds({20, NULL_BLOCK_IDX}));
+    resource->setLastBlockAligned(true);
+
+    std::vector<std::string> need_write_groups;
+    ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, need_write_groups));
+    EXPECT_EQ(need_write_groups, (std::vector<std::string>{"F0F1", "F0"}));
 }
 
 TEST_F(GroupPolicyTest, test_init_FullLayerGroupPolicy_fail_for_not_empty_other_group) {
