@@ -10,6 +10,7 @@ import torch
 from rtp_llm.config.sleep_mode_compatibility import reject_dynamic_weight_update
 from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.model_loader.weight_memory_saver import expandable_segments_disabled
 from rtp_llm.model_loader.weight_memory_saver import is_enabled as sleep_mode_enabled
 from rtp_llm.model_loader.weight_memory_saver import (
     sleep_mode_level,
@@ -489,7 +490,18 @@ class WeightManager:
         # that stick (growing with weight count) and OOM the KV-cache resume -- the
         # same failure prepare_weights_fastsafetensor(in_weights_region=False) fixes
         # for the fast path.
-        with self._lock, suppress_weights_region():
+        # expandable_segments_disabled: the reload streams checkpoint tensors as
+        # copy_ SOURCES (fastsafetensors shards / dequant / TP-split intermediates)
+        # and copies them into the resident weights. suppress_weights_region keeps
+        # those transients out of the torch_memory_saver weights region, but with
+        # runtime expandable_segments enabled they would otherwise land in torch
+        # expandable segments -- and a tensor read/written across the tms
+        # pause/resume boundary comes back CORRUPTED (silent: coverage stays
+        # correct, values are wrong -> garbage output after wake). Force the whole
+        # reload non-expandable so the copy_ sources are plain, driver-backed
+        # allocations, matching the verified-correct expandable-off wake. No-op
+        # unless expandable coexistence is active.
+        with self._lock, suppress_weights_region(), expandable_segments_disabled():
             with torch.cuda.stream(self._working_stream), torch.inference_mode():
                 for layer_id, name, tensor in source:
                     seen += 1
@@ -636,9 +648,14 @@ class WeightManager:
         # kernel weights + compressor fused wkv/wgate). Runs OUTSIDE
         # suppress_weights_region (so the fresh buffers are re-tagged `weights` for
         # the next sleep) and before the KV-cache resume (so it has full headroom).
-        self._rederive_dsv4_computed_weights(
-            mega_by_layer, mega_acc, mega_routed_keys, compressors
-        )
+        # Also non-expandable: the transform reads the staged raw routed weights
+        # and writes the fused kernel buffers through default-pool scratch, which
+        # must not straddle the tms pause/resume boundary in an expandable segment
+        # (same corruption reason as the reload loop above).
+        with expandable_segments_disabled():
+            self._rederive_dsv4_computed_weights(
+                mega_by_layer, mega_acc, mega_routed_keys, compressors
+            )
         if pending:
             sample = sorted(str(k) for k in pending)[:10]
             raise RuntimeError(

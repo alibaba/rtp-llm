@@ -23,6 +23,7 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
 )
+from rtp_llm.model_loader.weight_memory_saver import prepare_expandable_coexistence
 from rtp_llm.model_loader.weight_memory_saver import (
     start_configured_process as start_memory_saver_configured_process,
 )
@@ -244,6 +245,11 @@ def local_rank_start(
         py_env_configs.server_config.set_local_rank(local_rank)
         py_env_configs.distribute_config.set_local_rank(local_rank)
         setup_cuda_device_and_accl_env(local_rank)
+        # Normalize expandable_segments before any CUDA allocation: strip it from
+        # the env and force it off so weights + KV land at low, RDMA-registerable
+        # VA. It is turned back on after the engine is ready (BackendManager.start
+        # -> enable_runtime_expandable). No-op unless requested with sleep mode.
+        prepare_expandable_coexistence()
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
