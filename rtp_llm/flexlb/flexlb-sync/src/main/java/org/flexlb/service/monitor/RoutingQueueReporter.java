@@ -46,9 +46,9 @@ public class RoutingQueueReporter {
     public void init() {
         monitor.register(ROUTING_QUEUE_LENGTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_QUEUE_ENTRY_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(ROUTING_QUEUE_TIMEOUT_QPS, FlexMetricType.QPS);
-        monitor.register(ROUTING_QUEUE_REJECTED_QPS, FlexMetricType.QPS);
-        monitor.register(ROUTING_QUEUE_CANCELLED_QPS, FlexMetricType.QPS);
+        monitor.register(ROUTING_QUEUE_TIMEOUT_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(ROUTING_QUEUE_REJECTED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(ROUTING_QUEUE_CANCELLED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_QUEUE_WAIT_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_ROUTE_EXECUTION_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 

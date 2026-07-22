@@ -3,6 +3,7 @@ package org.flexlb.cache.monitor;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
+import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -77,7 +78,7 @@ public class CacheMetricsReporter {
         // Cache hit rate metrics
         monitor.register(CACHE_HIT_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_HIT_RATIO, FlexMetricType.GAUGE);
-        monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS);
+        monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
         // Cache service response time metrics
         monitor.register(CACHE_FIND_MATCHING_ENGINES_RT, FlexMetricType.GAUGE);

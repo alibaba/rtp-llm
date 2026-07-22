@@ -2,6 +2,7 @@ package org.flexlb.httpserver;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.enums.FlexMetricType;
+import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.metric.FlexStatisticsType;
@@ -76,7 +77,7 @@ public class BlockHashExecutor {
     public void registerMetrics() {
         monitor.register(BLOCK_HASH_QUEUE_WAIT_TIME_US, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         monitor.register(BLOCK_HASH_EXECUTION_TIME_US, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
-        monitor.register(BLOCK_HASH_RESULT, FlexMetricType.QPS);
+        monitor.register(BLOCK_HASH_RESULT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(BLOCK_HASH_THREAD_POOL_INFO, FlexMetricType.GAUGE);
     }
 
