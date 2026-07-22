@@ -89,12 +89,17 @@ class BaseMultiModalMixin:
         load_method: LoadMethod,
         vit_config: VitConfig,
         ckpt_path: str,
+        use_new_loader: bool = False,
     ) -> None:
         self.compute_dtype = compute_dtype
+        self.device = device
         self.mm_related_params = mm_related_params
         self.vit_config = vit_config
         self.load_method = load_method
         self.ckpt_path = ckpt_path
+        if not isinstance(use_new_loader, bool):
+            raise TypeError("use_new_loader must be a bool")
+        self.use_new_loader = use_new_loader
 
         with torch.device(device):
             torch_default_dtype = torch.get_default_dtype()

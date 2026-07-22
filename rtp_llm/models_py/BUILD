@@ -126,6 +126,7 @@ py_library(
         "new_models/*.py",
         "new_models/qwen2/*.py",
         "new_models/qwen2_moe/*.py",
+        "new_models/qwen2_vl/*.py",
         "new_models/qwen3/*.py",
         "new_models/qwen3_moe/*.py",
         "new_models/qwen3_next/*.py",
@@ -150,6 +151,30 @@ py_library(
         "//:th_transformer_config",
     ],
     visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "qwen2_vl_vision_loader",
+    srcs = [
+        "__init__.py",
+        "model_loader.py",
+        "module_base.py",
+        "new_models/__init__.py",
+        "new_models/qwen2_vl/__init__.py",
+        "new_models/qwen2_vl/vision.py",
+        "registry.py",
+        "weight_mapper.py",
+    ],
+    deps = [
+        "//rtp_llm:safetensors",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+    ] + select({
+        "@//:using_cuda12_9_x86": flashattn,
+        "@//:using_cuda12_arm": flashattn,
+        "//conditions:default": [],
+    }),
+    visibility = ["//rtp_llm:__subpackages__"],
 )
 
 py_library(

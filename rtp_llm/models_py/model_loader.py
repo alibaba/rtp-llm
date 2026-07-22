@@ -7,9 +7,10 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Callable, List, Optional, Tuple
 
-import rtp_llm.models_py.weight_mapper as weight_mapper
 import torch
 import torch.nn as nn
+
+import rtp_llm.models_py.weight_mapper as weight_mapper
 from rtp_llm.models_py.module_base import RtpModule, collect_loaded_tensor_ids
 from rtp_llm.models_py.registry import get_model_class, list_models
 
@@ -341,10 +342,12 @@ class NewModelLoader:
         model: RtpModule,
     ) -> Optional[Callable[[str], bool]]:
         model_filter = model.checkpoint_weight_name_filter()
-        if model_filter is not None and not callable(model_filter):
+        if model_filter is not None and (
+            not callable(model_filter) or isinstance(model_filter, nn.Module)
+        ):
             raise TypeError(
                 f"{type(model).__name__}.checkpoint_weight_name_filter() must "
-                "return a callable or None"
+                "return a callable function or None, not an nn.Module"
             )
         return model_filter
 

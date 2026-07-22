@@ -226,6 +226,7 @@ py_library(
         ":torchvision",
         ":protobuf",
         ":pyOpenSSL",
+        "//rtp_llm/models_py:qwen2_vl_vision_loader",
     ] + select({
         "@//:using_arm": [],
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
