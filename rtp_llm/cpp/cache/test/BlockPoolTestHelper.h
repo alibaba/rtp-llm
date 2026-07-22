@@ -102,9 +102,10 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
                                         size_t            v_scale_stride_bytes = 0,
                                         rtp_llm::DataType dtype                = rtp_llm::DataType::TYPE_FP16,
                                         uint32_t          local_head_num_kv    = 1,
-                                        uint32_t          seq_size_per_block   = 1) {
+                                        uint32_t          seq_size_per_block   = 1,
+                                        uint32_t          block_num            = 10) {
     constexpr uint32_t kLayerNum = 4;
-    constexpr uint32_t kBlockNum = 10;
+    const uint32_t     kBlockNum = block_num;
 
     auto spec = createTestKvCacheSpec(
         kLayerNum, dtype, local_head_num_kv, seq_size_per_block, k_block_stride_bytes, v_block_stride_bytes);
@@ -142,6 +143,13 @@ inline void createDevice() {
 BlockPoolPtr createBlockPool() {
     createDevice();
     auto config     = createTestConfig();
+    auto block_pool = std::make_shared<BlockPool>(config);
+    return block_pool;
+}
+
+BlockPoolPtr createBlockPoolWithSize(uint32_t block_num) {
+    createDevice();
+    auto config     = createTestConfig(512, 512, 0, 0, rtp_llm::DataType::TYPE_FP16, 1, 1, block_num);
     auto block_pool = std::make_shared<BlockPool>(config);
     return block_pool;
 }
