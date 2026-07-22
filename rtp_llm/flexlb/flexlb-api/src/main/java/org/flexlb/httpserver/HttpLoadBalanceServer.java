@@ -6,6 +6,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.BatchScheduleContext;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
+import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
 import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
 import org.flexlb.dao.loadbalance.Request;
@@ -17,6 +18,7 @@ import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
+import org.flexlb.dispatcher.FePool;
 import org.flexlb.exception.BatchScheduleTransportException;
 import org.flexlb.exception.EngineReadTimeoutException;
 import org.flexlb.service.BatchScheduleCoordinator;
@@ -25,6 +27,8 @@ import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.Logger;
+import org.flexlb.util.RateLimitedWarn;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -35,6 +39,7 @@ import org.springframework.web.server.ServerWebInputException;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 import static org.springframework.web.reactive.function.server.RequestPredicates.accept;
@@ -49,6 +54,17 @@ public class HttpLoadBalanceServer {
     private final QueueManager queueManager;
     private final ActiveRequestCounter activeRequestCounter;
     private final BatchScheduleCoordinator batchScheduleCoordinator;
+    /**
+     * The dispatcher's FE round-robin pool, present only on a node that runs the dispatcher
+     * ({@code dispatch.fe-pool-service-id} set, gating the {@code @ConditionalOnProperty} bean).
+     * On the elected master this is the single fleet-wide FE cursor whose picks are stamped into
+     * {@code /batch_schedule} responses; on a master node without the dispatcher it is absent and
+     * responses carry no {@code fe_url}. Injected via {@link ObjectProvider} so the server bean
+     * still constructs when the pool is not wired.
+     */
+    private final ObjectProvider<FePool> fePoolProvider;
+    /** An empty FE snapshot fails FE assignment on every batch request; cap the WARN at 1/s. */
+    private final RateLimitedWarn feAssignWarn = new RateLimitedWarn(1, TimeUnit.SECONDS);
 
     public HttpLoadBalanceServer(GeneralHttpNettyService generalHttpNettyService,
                                  RouteService routeService,
@@ -56,7 +72,8 @@ public class HttpLoadBalanceServer {
                                  EngineHealthReporter engineHealthReporter,
                                  QueueManager queueManager,
                                  ActiveRequestCounter activeRequestCounter,
-                                 BatchScheduleCoordinator batchScheduleCoordinator) {
+                                 BatchScheduleCoordinator batchScheduleCoordinator,
+                                 ObjectProvider<FePool> fePoolProvider) {
         this.generalHttpNettyService = generalHttpNettyService;
         this.routeService = routeService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
@@ -64,6 +81,7 @@ public class HttpLoadBalanceServer {
         this.queueManager = queueManager;
         this.activeRequestCounter = activeRequestCounter;
         this.batchScheduleCoordinator = batchScheduleCoordinator;
+        this.fePoolProvider = fePoolProvider;
     }
 
     @Bean
@@ -134,10 +152,54 @@ public class HttpLoadBalanceServer {
                     if (!response.isSuccess()) {
                         Logger.error("[BatchSchedule] failed: {}", response.getErrorMessage());
                     }
+                    assignFeUrls(response);
                     return json(statusOf(response), response);
                 })
                 .onErrorResume(BatchScheduleTransportException.class,
                         e -> batchError(bctx, StrategyErrorType.NO_AVAILABLE_WORKER, e));
+    }
+
+    /**
+     * Stamps each target's {@code fe_url} from the local {@link FePool} so one master-side cursor
+     * drives FE selection fleet-wide, replacing each dispatcher round-robining its own pool with
+     * a private (colliding) cursor.
+     *
+     * <p>Two guards keep this an optimization that never breaks correctness:
+     * <ol>
+     *   <li>Only when this node resolved the batch locally — it is the elected master, or
+     *       consistency is off. A slave that merely forwarded to the master already holds the
+     *       master's assignment in the response; re-stamping it here with the slave's own cursor
+     *       would reintroduce the collision this feature removes.</li>
+     *   <li>Only when the {@link FePool} bean exists (this master node also runs the dispatcher).
+     *       Absent it, targets keep {@code fe_url == null} and the dispatcher fails those chunks
+     *       visibly — FE has exactly one source, so a misconfigured master (no FE view) surfaces
+     *       as chunk failures rather than a silent split onto per-instance cursors.</li>
+     * </ol>
+     * An empty FE snapshot (pool throws) is swallowed the same way — leaving {@code fe_url} null —
+     * so BE assignment (already computed) still returns; the affected chunks then fail visibly in
+     * the dispatcher rather than aborting the whole schedule response.
+     */
+    private void assignFeUrls(BatchScheduleResponse response) {
+        if (!response.isSuccess() || response.getServerStatus() == null) {
+            return;
+        }
+        boolean resolvedLocally = !lbStatusConsistencyService.isNeedConsistency()
+                || lbStatusConsistencyService.isMaster();
+        if (!resolvedLocally) {
+            return;
+        }
+        FePool pool = fePoolProvider.getIfAvailable();
+        if (pool == null) {
+            return;
+        }
+        try {
+            for (BatchScheduleTarget target : response.getServerStatus()) {
+                target.setFeUrl(pool.next());
+            }
+        } catch (RuntimeException e) {
+            feAssignWarn.warn("[BatchSchedule] FE assignment skipped, dispatcher will fall back "
+                    + "to local pool: {}", e.toString());
+        }
     }
 
     /**

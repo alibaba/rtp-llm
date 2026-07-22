@@ -22,6 +22,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -29,6 +30,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -65,6 +67,11 @@ class BatchHandlerContractTest {
     void setUp() {
         lenient().when(cfg.getSubBatchSpec()).thenReturn(SubBatchSpec.parse("count:2"));
         lenient().when(cfg.isPreAssignBe()).thenReturn(false);
+        // FE assignment now always resolves through the master (no local fallback), so the handler
+        // calls the client for every splittable batch even with BE pre-assign off. These contract
+        // tests mock fanout, so an empty target list is enough to exercise the split path.
+        lenient().when(batchScheduleClient.requestTargets(org.mockito.ArgumentMatchers.anyInt()))
+                .thenReturn(Mono.just(java.util.List.of()));
         // BatchHandler now relays the caller's end-to-end headers + query to each chunk.
         ServerRequest.Headers headers = mock(ServerRequest.Headers.class);
         lenient().when(headers.asHttpHeaders()).thenReturn(new org.springframework.http.HttpHeaders());
@@ -168,33 +175,50 @@ class BatchHandlerContractTest {
     void stringListEmbeddingsInputStillSplits() {
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/v1/embeddings");
         stubBody("{\"model\":\"m\",\"input\":[\"a\",\"b\",\"c\"]}");
-        when(fanoutService.dispatchChunks(anyString(), anyList(), any(), any(), any()))
+        when(fanoutService.dispatchChunks(anyString(), anyList(), anyList(), any(), any(), any()))
                 .thenReturn(Mono.just(List.of(SubBatchResult.failed(3, 0, "fe_http_500"))));
 
         handler.handle(serverRequest, spec).block();
 
         verifyNoInteractions(passthroughClient);
         org.mockito.Mockito.verify(fanoutService)
-                .dispatchChunks(eq("/v1/embeddings"), anyList(), eq(spec), any(), any());
+                .dispatchChunks(eq("/v1/embeddings"), anyList(), anyList(), eq(spec), any(), any());
     }
 
     @Test
-    void preAssignSkipsEndpointsWhoseFeModelIgnoresGenerateConfig() {
-        // FE's BatchChatCompletionRequest (plain pydantic BaseModel) silently drops unknown
-        // top-level fields, so stamping generate_config.role_addrs there is a dead write.
-        // With preAssignBe on, the handler must not consume a /batch_schedule round-trip
-        // (advancing master's RR cursor and emitting fake pre-assign metrics) for it.
+    void nonPreAssignableEndpointStillCallsMasterForFeButSkipsBeStamp() {
+        // FE selection is sourced solely from the master (no local fallback), so the
+        // /batch_schedule round-trip now happens even for endpoints whose FE model ignores
+        // generate_config — it is not wasted, it carries the per-chunk fe_url. BE role_addrs
+        // stamping stays skipped there: FE's BatchChatCompletionRequest (plain pydantic BaseModel)
+        // drops unknown top-level fields, so a stamped generate_config would be a dead write.
         org.mockito.Mockito.when(cfg.isPreAssignBe()).thenReturn(true);
         handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient,
                 DispatcherTestSupport.noopMetrics());
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/v1/batch/chat/completions");
         stubBody("{\"requests\":[{\"messages\":[]},{\"messages\":[]}]}");
-        when(fanoutService.dispatchChunks(anyString(), anyList(), any(), any(), any()))
+        // A stampable BE target — so the skip is proven to come from the endpoint being
+        // non-preAssignable, not from an unstampable (portless/roleless) target.
+        org.flexlb.dao.loadbalance.BatchScheduleTarget beTarget =
+                new org.flexlb.dao.loadbalance.BatchScheduleTarget("10.0.0.1", 8088, 50051,
+                        org.flexlb.dao.route.RoleType.PDFUSION);
+        beTarget.setFeUrl("http://fe-1");
+        when(batchScheduleClient.requestTargets(anyInt())).thenReturn(Mono.just(List.of(beTarget)));
+        @SuppressWarnings("rawtypes")
+        org.mockito.ArgumentCaptor<List> chunkBodies = org.mockito.ArgumentCaptor.forClass(List.class);
+        when(fanoutService.dispatchChunks(anyString(), chunkBodies.capture(), anyList(), any(), any(), any()))
                 .thenReturn(Mono.just(List.of(SubBatchResult.failed(2, 0, "fe_http_500"))));
 
         handler.handle(serverRequest, spec).block();
 
-        verifyNoInteractions(batchScheduleClient);
+        // Master IS consulted — the FE assignment always comes from it now...
+        verify(batchScheduleClient).requestTargets(anyInt());
+        // ...but no chunk carries a stamped BE role_addrs on a non-preAssignable endpoint.
+        for (Object o : chunkBodies.getValue()) {
+            JSONObject gc = ((JSONObject) o).getJSONObject("generate_config");
+            assertTrue(gc == null || gc.getJSONArray("role_addrs") == null,
+                    "a non-preAssignable endpoint must not stamp role_addrs");
+        }
     }
 
     @Test
@@ -206,7 +230,7 @@ class BatchHandlerContractTest {
         stubBody("{\"prompt_batch\":[\"a\",\"b\"]}");
         when(batchScheduleClient.requestTargets(anyInt()))
                 .thenReturn(Mono.just(List.of()));
-        when(fanoutService.dispatchChunks(anyString(), anyList(), any(), any(), any()))
+        when(fanoutService.dispatchChunks(anyString(), anyList(), anyList(), any(), any(), any()))
                 .thenReturn(Mono.just(List.of(SubBatchResult.failed(2, 0, "fe_http_500"))));
 
         handler.handle(serverRequest, spec).block();
@@ -264,7 +288,7 @@ class BatchHandlerContractTest {
     void allChunksFailedReturns500WithDedupedReasons() {
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
         stubBody("{\"prompt_batch\":[\"a\",\"b\",\"c\",\"d\"]}");
-        when(fanoutService.dispatchChunks(anyString(), anyList(), any(), any(), any()))
+        when(fanoutService.dispatchChunks(anyString(), anyList(), anyList(), any(), any(), any()))
                 .thenReturn(Mono.just(List.of(
                         SubBatchResult.failed(2, 0, "boom", 500),
                         SubBatchResult.failed(2, 2, "boom", 500))));
@@ -294,7 +318,7 @@ class BatchHandlerContractTest {
         // client that sent a bad batch gets a 4xx, not a misleading server error.
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
         stubBody("{\"prompt_batch\":[\"a\",\"b\",\"c\",\"d\"]}");
-        when(fanoutService.dispatchChunks(anyString(), anyList(), any(), any(), any()))
+        when(fanoutService.dispatchChunks(anyString(), anyList(), anyList(), any(), any(), any()))
                 .thenReturn(Mono.just(List.of(
                         SubBatchResult.failed(2, 0, "fe_http_400", 400),
                         SubBatchResult.failed(2, 2, "fe_http_400", 400))));

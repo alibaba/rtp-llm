@@ -9,9 +9,9 @@ import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.List;
 
-import static org.flexlb.dispatcher.DispatcherTestSupport.fePool;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -20,6 +20,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class FanoutServiceTest {
@@ -32,10 +35,9 @@ class FanoutServiceTest {
         // lines per second — enough to cost real throughput. Failures must still produce
         // SubBatchResult.failed per chunk, but the WARN stream must be rate-limited.
         FeClient feClient = mock(FeClient.class);
-        FePool pool = fePool(List.of("http://a"));
         when(feClient.postBytes(anyString(), anyString(), any(), any(), any()))
                 .thenReturn(Mono.error(new RuntimeException("connection refused")));
-        FanoutService svc = new FanoutService(feClient, pool, DispatcherTestSupport.noopMetrics());
+        FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
 
         ch.qos.logback.classic.Logger flexlbLogger =
                 (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger("flexlbLogger");
@@ -48,8 +50,9 @@ class FanoutServiceTest {
             for (int i = 0; i < 200; i++) {
                 chunks.add(chunk("p" + i));
             }
-            List<SubBatchResult> subs =
-                    svc.dispatchChunks("/batch_infer", chunks, BATCH_INFER, new HttpHeaders(), null).block();
+            List<SubBatchResult> subs = svc.dispatchChunks("/batch_infer", chunks,
+                            Collections.nCopies(200, "http://a"), BATCH_INFER, new HttpHeaders(), null)
+                    .block();
 
             assertNotNull(subs);
             assertEquals(200, subs.size(), "every chunk must still resolve to a result");
@@ -70,16 +73,16 @@ class FanoutServiceTest {
     @Test
     void fansOutChunksAndPreservesOrder() {
         FeClient feClient = mock(FeClient.class);
-        FePool pool = fePool(List.of("http://a", "http://b"));
         when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r0", "r1")));
         when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r2")));
 
-        FanoutService svc = new FanoutService(feClient, pool, DispatcherTestSupport.noopMetrics());
+        FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
 
         StepVerifier.create(svc.dispatchChunks(
-                        "/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")), BATCH_INFER, new HttpHeaders(), null))
+                        "/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")),
+                        List.of("http://a", "http://b"), BATCH_INFER, new HttpHeaders(), null))
                 .assertNext(subs -> {
                     assertEquals(2, subs.size());
                     SubBatchResult s0 = subs.get(0);
@@ -101,16 +104,16 @@ class FanoutServiceTest {
     @Test
     void failedChunkBecomesFailedSubResultNotAnError() {
         FeClient feClient = mock(FeClient.class);
-        FePool pool = fePool(List.of("http://a", "http://b"));
         when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r0", "r1")));
         when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any()))
                 .thenReturn(Mono.error(new RuntimeException("FE down")));
 
-        FanoutService svc = new FanoutService(feClient, pool, DispatcherTestSupport.noopMetrics());
+        FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
 
         StepVerifier.create(svc.dispatchChunks(
-                        "/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")), BATCH_INFER, new HttpHeaders(), null))
+                        "/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")),
+                        List.of("http://a", "http://b"), BATCH_INFER, new HttpHeaders(), null))
                 .assertNext(subs -> {
                     assertEquals(2, subs.size());
                     assertTrue(subs.get(0).success());
@@ -129,16 +132,16 @@ class FanoutServiceTest {
         // chunk would silently disappear from collectList and the merged response array would
         // come back shorter than the request — breaking index correlation for the caller.
         FeClient feClient = mock(FeClient.class);
-        FePool pool = fePool(List.of("http://a", "http://b"));
         when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r0", "r1")));
         when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any()))
                 .thenReturn(Mono.empty());
 
-        FanoutService svc = new FanoutService(feClient, pool, DispatcherTestSupport.noopMetrics());
+        FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
 
         StepVerifier.create(svc.dispatchChunks(
-                        "/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")), BATCH_INFER, new HttpHeaders(), null))
+                        "/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")),
+                        List.of("http://a", "http://b"), BATCH_INFER, new HttpHeaders(), null))
                 .assertNext(subs -> {
                     assertEquals(2, subs.size(), "the empty-body chunk must still produce a result");
                     assertTrue(subs.get(0).success());
@@ -157,16 +160,16 @@ class FanoutServiceTest {
         // never an "ok" for the 200 plus a "failed" for the parse — and still hold the chunk's
         // failed placeholder at the right index.
         FeClient feClient = mock(FeClient.class);
-        FePool pool = fePool(List.of("http://a", "http://b"));
         when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r0", "r1")));
         when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any()))
                 .thenReturn(Mono.just("not json".getBytes(StandardCharsets.UTF_8)));
         DispatcherTestSupport.RecordingMetrics metrics = DispatcherTestSupport.recordingMetrics();
-        FanoutService svc = new FanoutService(feClient, pool, metrics);
+        FanoutService svc = new FanoutService(feClient, metrics);
 
         StepVerifier.create(svc.dispatchChunks(
-                        "/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")), BATCH_INFER, new HttpHeaders(), null))
+                        "/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")),
+                        List.of("http://a", "http://b"), BATCH_INFER, new HttpHeaders(), null))
                 .assertNext(subs -> {
                     assertEquals(2, subs.size(), "the garbage-body chunk must still produce a result");
                     assertTrue(subs.get(0).success());
@@ -195,16 +198,16 @@ class FanoutServiceTest {
         // wellFormed authority. chunk0 (size 2) gets a matching 2-element array → ok; chunk1
         // (size 1) gets a 2-element array → length mismatch → malformed.
         FeClient feClient = mock(FeClient.class);
-        FePool pool = fePool(List.of("http://a", "http://b"));
         when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r0", "r1")));
         when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("x0", "x1")));
         DispatcherTestSupport.RecordingMetrics metrics = DispatcherTestSupport.recordingMetrics();
-        FanoutService svc = new FanoutService(feClient, pool, metrics);
+        FanoutService svc = new FanoutService(feClient, metrics);
 
         StepVerifier.create(svc.dispatchChunks(
-                        "/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")), BATCH_INFER, new HttpHeaders(), null))
+                        "/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")),
+                        List.of("http://a", "http://b"), BATCH_INFER, new HttpHeaders(), null))
                 .assertNext(subs -> assertEquals(2, subs.size()))
                 .verifyComplete();
 
@@ -220,22 +223,73 @@ class FanoutServiceTest {
     }
 
     @Test
-    void emptyFePoolFailsChunksSoftly() {
+    void usesMasterAssignedFeUrl() {
+        // FE selection is sourced solely from the master's assignment: the chunk must go to the
+        // fe_url the master stamped, verbatim. There is no local pool to pick from, so this is the
+        // only path. Mutation guard: change dispatchOne to ignore plan.feUrl() and the stubbed FE
+        // is never called.
         FeClient feClient = mock(FeClient.class);
-        FePool pool = fePool(List.of());
-
-        FanoutService svc = new FanoutService(feClient, pool, DispatcherTestSupport.noopMetrics());
+        when(feClient.postBytes(eq("http://master-fe"), eq("/batch_infer"), any(), any(), any()))
+                .thenReturn(Mono.just(responseBatchBytes("r0")));
+        FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
 
         StepVerifier.create(svc.dispatchChunks(
-                        "/batch_infer", List.of(chunk("p0", "p1")), BATCH_INFER, new HttpHeaders(), null))
+                        "/batch_infer", List.of(chunk("p0")), List.of("http://master-fe"),
+                        BATCH_INFER, new HttpHeaders(), null))
                 .assertNext(subs -> {
                     assertEquals(1, subs.size());
-                    assertFalse(subs.get(0).success());
-                    assertEquals(0, subs.get(0).startIndex());
-                    assertEquals(2, subs.get(0).chunkSize());
-                    assertTrue(subs.get(0).reason().contains("IllegalStateException"));
+                    assertTrue(subs.get(0).success(), "chunk must reach the master-assigned FE");
                 })
                 .verifyComplete();
+        verify(feClient).postBytes(eq("http://master-fe"), eq("/batch_infer"), any(), any(), any());
+    }
+
+    @Test
+    void missingMasterFeUrlFailsChunkWithNoFallback() {
+        // No local fallback by design: a chunk the master did not assign (null fe_url) must FAIL
+        // visibly, not silently reroute to some local pick. The proof of "no fallback" is that the
+        // FE client is never invoked at all — nothing gets sent anywhere — and the chunk comes back
+        // failed at its correct index. Mutation guard: reintroduce a local fallback and feClient
+        // would be called + the chunk would succeed.
+        FeClient feClient = mock(FeClient.class);
+        FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
+
+        java.util.List<String> withNull = new java.util.ArrayList<>();
+        withNull.add(null);
+        StepVerifier.create(svc.dispatchChunks(
+                        "/batch_infer", List.of(chunk("p0", "p1")), withNull,
+                        BATCH_INFER, new HttpHeaders(), null))
+                .assertNext(subs -> {
+                    assertEquals(1, subs.size());
+                    assertFalse(subs.get(0).success(), "an unassigned chunk must fail, not reroute");
+                    assertEquals(0, subs.get(0).startIndex());
+                    assertEquals(2, subs.get(0).chunkSize());
+                    assertNotNull(subs.get(0).reason());
+                })
+                .verifyComplete();
+        verifyNoInteractions(feClient);
+    }
+
+    @Test
+    void shortMasterAssignmentFailsUncoveredChunks() {
+        // The master assignment is index-aligned to chunks. If it covers fewer chunks than the
+        // batch (short list), the uncovered chunks have no fe_url — they must fail, not fall back.
+        FeClient feClient = mock(FeClient.class);
+        when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any()))
+                .thenReturn(Mono.just(responseBatchBytes("r0")));
+        FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
+
+        StepVerifier.create(svc.dispatchChunks(
+                        "/batch_infer", List.of(chunk("p0"), chunk("p1")), List.of("http://a"),
+                        BATCH_INFER, new HttpHeaders(), null))
+                .assertNext(subs -> {
+                    assertEquals(2, subs.size());
+                    assertTrue(subs.get(0).success(), "the covered chunk reaches its FE");
+                    assertFalse(subs.get(1).success(), "the uncovered chunk fails, no fallback");
+                })
+                .verifyComplete();
+        verify(feClient).postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any());
+        verify(feClient, never()).postBytes(eq("http://b"), anyString(), any(), any(), any());
     }
 
     @Test
@@ -243,16 +297,15 @@ class FanoutServiceTest {
         // /v1/embeddings sets fanoutWriteNulls=true so a user-supplied explicit null reaches FE
         // byte-for-byte; /batch_infer sets it false and drops the null (the common-wire-shape win).
         FeClient feClient = mock(FeClient.class);
-        FePool pool = fePool(List.of("http://a"));
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
         when(feClient.postBytes(anyString(), anyString(), payload.capture(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r0")));
-        FanoutService svc = new FanoutService(feClient, pool, DispatcherTestSupport.noopMetrics());
+        FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
 
         JSONObject embeddingBody = new JSONObject();
         embeddingBody.put("input", JSONArray.of("a"));
         embeddingBody.put("user", null);
-        svc.dispatchChunks("/v1/embeddings", List.of(embeddingBody),
+        svc.dispatchChunks("/v1/embeddings", List.of(embeddingBody), List.of("http://a"),
                 BatchEndpointSpec.BY_PATH.get("/v1/embeddings"), new HttpHeaders(), null).block();
         assertTrue(new String(payload.getValue(), StandardCharsets.UTF_8).contains("\"user\":null"),
                 "fanoutWriteNulls=true must preserve the explicit null");
@@ -260,7 +313,8 @@ class FanoutServiceTest {
         JSONObject promptBody = new JSONObject();
         promptBody.put("prompt_batch", JSONArray.of("a"));
         promptBody.put("user", null);
-        svc.dispatchChunks("/batch_infer", List.of(promptBody), BATCH_INFER, new HttpHeaders(), null).block();
+        svc.dispatchChunks("/batch_infer", List.of(promptBody), List.of("http://a"),
+                BATCH_INFER, new HttpHeaders(), null).block();
         assertFalse(new String(payload.getValue(), StandardCharsets.UTF_8).contains("\"user\""),
                 "fanoutWriteNulls=false must drop the explicit null");
     }

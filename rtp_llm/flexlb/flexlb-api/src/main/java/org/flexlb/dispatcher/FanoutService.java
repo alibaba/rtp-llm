@@ -40,13 +40,13 @@ public class FanoutService {
     private static final int FANOUT_MAX_CONCURRENCY = 64;
 
     private final FeClient feClient;
-    private final FePool fePool;
     private final DispatcherMetricsReporter metricsReporter;
     /** During an FE outage the fanout path fails per chunk; cap the WARN stream at 1/s. */
     private final RateLimitedWarn failureWarn = new RateLimitedWarn(1, TimeUnit.SECONDS);
 
     public Mono<List<SubBatchResult>> dispatchChunks(String fePath,
                                                      List<JSONObject> chunkBodies,
+                                                     List<String> preAssignedFeUrls,
                                                      BatchEndpointSpec spec,
                                                      HttpHeaders inboundHeaders,
                                                      String rawQuery) {
@@ -54,9 +54,13 @@ public class FanoutService {
         String arrayField = spec.getRequestArrayField();
         List<ChunkPlan> plans = new ArrayList<>(chunkBodies.size());
         int start = 0;
-        for (JSONObject body : chunkBodies) {
+        for (int i = 0; i < chunkBodies.size(); i++) {
+            JSONObject body = chunkBodies.get(i);
             int chunkSize = body.getJSONArray(arrayField).size();
-            plans.add(new ChunkPlan(body, start, chunkSize));
+            // Master-assigned FE for this chunk (single global cursor); null for chunks the master
+            // did not cover (short list, no FE view) — dispatchOne then picks from the local pool.
+            String preAssignedFe = i < preAssignedFeUrls.size() ? preAssignedFeUrls.get(i) : null;
+            plans.add(new ChunkPlan(body, start, chunkSize, preAssignedFe));
             start += chunkSize;
         }
         return Flux.fromIterable(plans)
@@ -81,7 +85,18 @@ public class FanoutService {
      */
     private Mono<SubBatchResult> dispatchOne(String fePath, ChunkPlan plan, JSONWriter.Feature[] features,
                                              BatchEndpointSpec spec, HttpHeaders inboundHeaders, String rawQuery) {
-        return Mono.fromCallable(() -> new Pick(fePool.next(), JSON.toJSONBytes(plan.body(), features)))
+        // FE selection is sourced solely from the master's single global cursor — there is no
+        // local fallback by design, so FE load stays fully attributable to that one cursor and
+        // load debugging never has to reason about a second, per-instance distribution. A chunk
+        // the master did not assign (null fe_url) throws here and is metered as a visible
+        // CHUNK_PICK_FAILED by the outer onErrorResume, rather than silently rerouting.
+        return Mono.fromCallable(() -> {
+                    String feUrl = plan.feUrl();
+                    if (feUrl == null) {
+                        throw new IllegalStateException("no master FE assignment for chunk");
+                    }
+                    return new Pick(feUrl, JSON.toJSONBytes(plan.body(), features));
+                })
                 .flatMap(pick -> {
                     long start = System.currentTimeMillis();
                     return feClient.postBytes(pick.feUrl(), fePath, pick.payload(), inboundHeaders, rawQuery)
@@ -142,8 +157,11 @@ public class FanoutService {
         return DispatcherMetricsReporter.CHUNK_TRANSPORT;
     }
 
-    /** A chunk's request body plus its absolute offset and item count in the batch. */
-    private record ChunkPlan(JSONObject body, int startIndex, int chunkSize) {
+    /**
+     * A chunk's request body plus its absolute offset and item count in the batch. {@code feUrl}
+     * is the master's pre-assigned FE for this chunk, or {@code null} to pick from the local pool.
+     */
+    private record ChunkPlan(JSONObject body, int startIndex, int chunkSize, String feUrl) {
     }
 
     /** A picked FE URL with the chunk already serialized for it. */

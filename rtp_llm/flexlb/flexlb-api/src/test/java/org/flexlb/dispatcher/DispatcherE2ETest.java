@@ -534,11 +534,24 @@ class DispatcherE2ETest {
         feConnectionProvider = reactor.netty.resources.ConnectionProvider.builder("e2e").build();
         FeClient feClient = new FeClient(WebClient.builder(), feConnectionProvider, cfg);
         org.flexlb.dispatcher.FanoutService fanout =
-                new org.flexlb.dispatcher.FanoutService(feClient, pool, DispatcherTestSupport.noopMetrics());
+                new org.flexlb.dispatcher.FanoutService(feClient, DispatcherTestSupport.noopMetrics());
         BatchScheduleClient batchScheduleClient = new BatchScheduleClient(null) {
             @Override
             public reactor.core.publisher.Mono<List<org.flexlb.dao.loadbalance.BatchScheduleTarget>> requestTargets(int count) {
-                return reactor.core.publisher.Mono.just(targets);
+                // FE selection is now master-sourced (no local pool in FanoutService): return one
+                // target per chunk, cycling fe_url across the three FEs so fanout still routes
+                // chunk i → fe(i % 3) — the same distribution the old FePool round-robin produced,
+                // now assigned per chunk index. Reuse any caller-supplied BE targets so preAssignBe
+                // stamping still sees the intended role_addrs, overlaying the fe_url onto them.
+                List<org.flexlb.dao.loadbalance.BatchScheduleTarget> out = new ArrayList<>(count);
+                for (int i = 0; i < count; i++) {
+                    org.flexlb.dao.loadbalance.BatchScheduleTarget t = i < targets.size()
+                            ? targets.get(i)
+                            : new org.flexlb.dao.loadbalance.BatchScheduleTarget();
+                    t.setFeUrl(urls.get(i % urls.size()));
+                    out.add(t);
+                }
+                return reactor.core.publisher.Mono.just(out);
             }
         };
         PassthroughClient passthrough =

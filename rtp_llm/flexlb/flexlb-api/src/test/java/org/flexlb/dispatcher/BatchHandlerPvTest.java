@@ -86,7 +86,7 @@ class BatchHandlerPvTest {
         okArr.add("r2");
         okBody.put(spec.getResponseArrayField(), okArr);
 
-        when(fanoutService.dispatchChunks(anyString(), anyList(), any(), any(), any()))
+        when(fanoutService.dispatchChunks(anyString(), anyList(), anyList(), any(), any(), any()))
                 .thenReturn(Mono.just(List.of(
                         SubBatchResult.ok(okBody, 3, 0),
                         SubBatchResult.failed(2, 3, "fe_http_500"))));
@@ -111,7 +111,10 @@ class BatchHandlerPvTest {
         // ever gets a status; the pv record must say 499 / "client cancelled" instead of the
         // 0 that would read as "request never finished" in pv.log.
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
-        when(fanoutService.dispatchChunks(anyString(), anyList(), any(), any(), any()))
+        // Lenient: whether fanout is reached before the cancel propagates depends on timing (the
+        // handler now always resolves targets from the master first). The assertion under test is
+        // the 499 pv record, not that fanout was invoked, so this stub may go unused on a fast cancel.
+        lenient().when(fanoutService.dispatchChunks(anyString(), anyList(), anyList(), any(), any(), any()))
                 .thenReturn(Mono.never());
         byte[] body = "{\"prompt_batch\":[\"a\",\"b\"]}".getBytes(StandardCharsets.UTF_8);
         when(serverRequest.bodyToMono(byte[].class)).thenReturn(Mono.just(body));

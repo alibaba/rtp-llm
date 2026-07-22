@@ -2,6 +2,7 @@ package org.flexlb.httpserver;
 
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.dispatcher.FePool;
 import org.flexlb.dao.BatchScheduleContext;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -17,6 +18,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.core.codec.DecodingException;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.server.ServerWebInputException;
@@ -46,6 +48,8 @@ class HttpLoadBalanceServerTest {
     @Mock
     private BatchScheduleCoordinator batchScheduleCoordinator;
     @Mock
+    private ObjectProvider<FePool> fePoolProvider;
+    @Mock
     private ServerRequest serverRequest;
 
     private HttpLoadBalanceServer server;
@@ -54,7 +58,7 @@ class HttpLoadBalanceServerTest {
     void setUp() {
         server = new HttpLoadBalanceServer(generalHttpNettyService, routeService,
                 lbStatusConsistencyService, engineHealthReporter, queueManager,
-                activeRequestCounter, batchScheduleCoordinator);
+                activeRequestCounter, batchScheduleCoordinator, fePoolProvider);
     }
 
     private BatchScheduleContext capturedBatchContext() {
@@ -85,6 +89,61 @@ class HttpLoadBalanceServerTest {
         BatchScheduleContext bctx = capturedBatchContext();
         assertEquals(success, bctx.getBatchResponse());
         org.junit.jupiter.api.Assertions.assertTrue(bctx.isSuccess());
+    }
+
+    @Test
+    void master_stamps_fe_url_on_each_target_from_local_pool() {
+        // On the elected master (resolves locally) with a dispatcher FE pool present, every target
+        // gets an fe_url from the single local cursor — this is what lets one master coordinate FE
+        // selection across the whole dispatcher fleet. Mutation guard: drop the stamping and the
+        // targets come back with null fe_url.
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(2);
+        when(serverRequest.bodyToMono(BatchScheduleRequest.class)).thenReturn(Mono.just(batchRequest));
+        when(activeRequestCounter.acquire()).thenReturn(org.mockito.Mockito.mock(
+                org.flexlb.service.grace.ActiveRequestCounter.RequestToken.class));
+        org.flexlb.dao.loadbalance.BatchScheduleResponse success =
+                org.flexlb.dao.loadbalance.BatchScheduleResponse.success(java.util.List.of(
+                        new org.flexlb.dao.loadbalance.BatchScheduleTarget("10.0.0.1", 8088, 50051),
+                        new org.flexlb.dao.loadbalance.BatchScheduleTarget("10.0.0.2", 8088, 50051)));
+        when(batchScheduleCoordinator.schedule(batchRequest)).thenReturn(Mono.just(success));
+
+        FePool pool = org.mockito.Mockito.mock(FePool.class);
+        when(pool.next()).thenReturn("http://fe-1", "http://fe-2");
+        when(fePoolProvider.getIfAvailable()).thenReturn(pool);
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(true);
+
+        server.batchScheduleRequest(serverRequest).block();
+
+        assertEquals("http://fe-1", success.getServerStatus().get(0).getFeUrl());
+        assertEquals("http://fe-2", success.getServerStatus().get(1).getFeUrl());
+    }
+
+    @Test
+    void slave_forwarding_does_not_restamp_the_master_fe_url() {
+        // A slave that forwarded to the master already holds the master's fe_url in the response;
+        // it must NOT overwrite it with its own cursor (that would reintroduce the collision the
+        // feature removes). Guard: isMaster()==false → assignFeUrls returns before the pool.
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(1);
+        when(serverRequest.bodyToMono(BatchScheduleRequest.class)).thenReturn(Mono.just(batchRequest));
+        when(activeRequestCounter.acquire()).thenReturn(org.mockito.Mockito.mock(
+                org.flexlb.service.grace.ActiveRequestCounter.RequestToken.class));
+        org.flexlb.dao.loadbalance.BatchScheduleTarget fromMaster =
+                new org.flexlb.dao.loadbalance.BatchScheduleTarget("10.0.0.1", 8088, 50051);
+        fromMaster.setFeUrl("http://master-picked-fe");
+        org.flexlb.dao.loadbalance.BatchScheduleResponse forwarded =
+                org.flexlb.dao.loadbalance.BatchScheduleResponse.success(java.util.List.of(fromMaster));
+        when(batchScheduleCoordinator.schedule(batchRequest)).thenReturn(Mono.just(forwarded));
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+
+        server.batchScheduleRequest(serverRequest).block();
+
+        assertEquals("http://master-picked-fe", forwarded.getServerStatus().get(0).getFeUrl(),
+                "a forwarding slave must preserve the master's fe_url, not restamp it");
+        org.mockito.Mockito.verifyNoInteractions(fePoolProvider);
     }
 
     @Test
@@ -197,7 +256,7 @@ class HttpLoadBalanceServerTest {
         ActiveRequestCounter slaveCounter = org.mockito.Mockito.mock(ActiveRequestCounter.class);
         HttpLoadBalanceServer slave = new HttpLoadBalanceServer(generalHttpNettyService, routeService,
                 lbStatusConsistencyService, org.mockito.Mockito.mock(EngineHealthReporter.class), queueManager,
-                slaveCounter, slaveCoordinator);
+                slaveCounter, slaveCoordinator, fePoolProvider);
         BatchScheduleRequest forwarded = new BatchScheduleRequest();
         forwarded.setBatchCount(2);
         when(slaveRequest.bodyToMono(BatchScheduleRequest.class)).thenReturn(Mono.just(forwarded));

@@ -13,6 +13,7 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.SignalType;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -87,14 +88,24 @@ public class BatchHandler {
             pv.setChunkCount(chunks.size());
             List<JSONObject> chunkBodies = BatchChunkAssembler.buildChunkBodies(
                     body, chunks, spec.getRequestArrayField());
-            return resolvePreAssignedTargets(spec, chunks.size())
+            return resolveTargets(chunks.size())
                     .flatMap(targets -> {
-                        BatchChunkAssembler.stampPreAssignedBe(chunkBodies, targets);
+                        // BE role_addrs stamping stays gated on the toggle + endpoint support; FE
+                        // assignment does not — it is always sourced from the master (below).
+                        if (preAssignBe && spec.isPreAssignable()) {
+                            BatchChunkAssembler.stampPreAssignedBe(chunkBodies, targets);
+                        }
+                        // Per-chunk FE the master assigned from its single global cursor. There is
+                        // no local fallback by design: a chunk with no master fe_url fails visibly
+                        // in fanout, so FE load stays fully attributable to the master cursor and
+                        // never splits across a second, per-instance distribution.
+                        List<String> preAssignedFeUrls = preAssignedFeUrls(targets);
                         long fanoutStart = System.currentTimeMillis();
                         // Relay the caller's end-to-end headers and query to every chunk: the split
                         // path must not silently change auth/tenancy/tracing semantics relative to
                         // the passthrough path for the same route.
-                        return fanoutService.dispatchChunks(spec.getPath(), chunkBodies, spec,
+                        return fanoutService.dispatchChunks(spec.getPath(), chunkBodies,
+                                        preAssignedFeUrls, spec,
                                         request.headers().asHttpHeaders(), request.uri().getRawQuery())
                                 .doOnNext(subs -> metricsReporter.reportFanoutRt(
                                         System.currentTimeMillis() - fanoutStart))
@@ -145,6 +156,20 @@ public class BatchHandler {
         }
     }
 
+    /**
+     * The master's per-chunk FE assignment, index-aligned to {@code targets} (and thus to chunks).
+     * A null entry — or an index past a short target list — means "no master FE for this chunk";
+     * {@link FanoutService} fails such a chunk visibly rather than picking a local FE, so FE load
+     * has exactly one source.
+     */
+    private static List<String> preAssignedFeUrls(List<BatchScheduleTarget> targets) {
+        List<String> feUrls = new ArrayList<>(targets.size());
+        for (BatchScheduleTarget target : targets) {
+            feUrls.add(target.getFeUrl());
+        }
+        return feUrls;
+    }
+
     private Mono<ServerResponse> badRequest(String message) {
         return DispatcherResponses.error(400, "invalid_batch_request", message);
     }
@@ -165,15 +190,15 @@ public class BatchHandler {
     }
 
     /**
-     * Resolves pre-assigned BE targets when both the config toggle and the endpoint support it;
-     * otherwise short-circuits to an empty list without touching master (no {@code /batch_schedule}
-     * round-trip, no RR cursor advance, no pre-assign metric for a path FE would ignore).
+     * Resolves per-chunk targets from the master for every splittable batch. FE selection is
+     * sourced solely from the master's single global cursor with no local fallback, so this
+     * {@code /batch_schedule} round-trip is now unconditional — it also carries the per-chunk
+     * {@code fe_url}, which is never wasted even on endpoints that ignore BE {@code role_addrs}
+     * stamping (those merely skip the stamp, see {@link #handle}). All {@link BatchScheduleClient}
+     * failure paths collapse to an empty list; the affected chunks then fail visibly in fanout
+     * rather than silently falling onto a per-instance FE distribution.
      */
-    private Mono<List<BatchScheduleTarget>> resolvePreAssignedTargets(BatchEndpointSpec spec,
-                                                                      int chunkCount) {
-        if (!preAssignBe || !spec.isPreAssignable()) {
-            return Mono.just(List.of());
-        }
+    private Mono<List<BatchScheduleTarget>> resolveTargets(int chunkCount) {
         long start = System.currentTimeMillis();
         return batchScheduleClient.requestTargets(chunkCount)
                 .doOnNext(targets -> metricsReporter.reportPreassignRt(
