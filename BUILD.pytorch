@@ -25,6 +25,7 @@ cc_library(
         ] + glob([
             "torch/lib/libcudart*.so*",
             "torch/lib/libnvToolsExt*.so*",
+            "torch/lib/libtorch_nvshmem*.so*",
         ]),
         "@//:using_rocm": [
             # "torch/lib/librocfft.so",
@@ -92,7 +93,7 @@ cc_library(
             "-lcudnn",
             "-lnvToolsExt",
         ],
-        "@//:using_cuda12_9_x86": [
+        "@//:using_cu12_9_or_13_x86": [
             "-L/usr/local/cuda/lib64",
             "-L/usr/local/cuda/extras/CUPTI/lib64",
             "-lcupti",

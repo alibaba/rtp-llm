@@ -1,0 +1,52 @@
+-r requirements_base.txt
+
+# CUDA 13.2 / torch 2.11+cu130 / triton 3.6.0 dep set.
+# First-version scope: torch + torchvision + triton + deep_gemm + flash_mla
+# + tilelang + fast_safetensors + fastsafetensors (the last two rebuilt against
+# torch 2.11+cu130 and mirrored to oss://rtp-maga/0502/).  Other
+# torch-ABI-bound wheels (flash_attn, flashinfer, deep_ep, rtp_kernel,
+# fast_hadamard, nvidia_cutlass_dsl) are deferred — see plan
+# §K and bazel/arch_select.bzl whl_deps() cuda13_x86 branch for how
+# rtp_llm/BUILD selects subset out of that set.
+
+# Core torch stack — wheels mirrored to OSS by us; upstream is
+# https://download.pytorch.org/whl/cu130/.
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl
+
+# Triton 3.6.0 supports CUDA 13.x ptxas natively (no wrapper needed).
+triton==3.6.0
+
+# Self-built wheels (built from GitHub deepseek-ai/{DeepGEMM,FlashMLA} main
+# against torch 2.11+cu130 with gcc-toolset-12; SHAs encoded in filename).
+http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/deep_gemm-2.5.0%2B8a4dfba-cp310-cp310-linux_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl
+
+# DSV4 mHC uses TileLang by default.  Keep the same version as cuda12_9.
+tilelang==0.1.9
+
+# rtp_kernel built from gitlab cuda_extension main (sm_80/90a/100a)
+# against torch 2.11+cu130; flashinfer-dependent submodules (xqa,
+# sparse_attention*, clustered_gather) are import-tolerant in this build.
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/rtp_kernel-0.1.0%2Bcu13.4a1a7e3-cp310-cp310-linux_x86_64.whl
+
+# fastsafetensors / fast_safetensors rebuilt against torch 2.11+cu130
+# (originals were torch 2.1.2 + cu121).  Project name is `fast-safetensors`
+# on PyPI but the import is `fast_safetensors`; both wheels installed.
+# Required by --load_method fastsafetensors smoke targets.
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl
+# fast_safetensors rebuilt against torch 2.11+cu130.
+
+# Pin safetensors and tabulate for parity with cu12_9 lock.
+safetensors==0.7.0
+mysql-connector-python
+tabulate==0.9.0
+
+# autoawq / auto_gptq / bitsandbytes / peft are torch-ABI-bound; pip will
+# resolve compatible versions if available, otherwise we'll see them in
+# the lock.  Drop autoawq from cuda13 (no torch 2.11 wheel yet upstream)
+# and autoawq-kernels (same).
+# auto_gptq      # deferred — torch 2.11 ABI rebuild needed
+# autoawq        # deferred
+# tensorrt 10.x cu12 series — drop for cuda13 (use TRT-LLM plugins via C++ side).

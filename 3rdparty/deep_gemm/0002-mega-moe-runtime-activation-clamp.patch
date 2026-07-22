@@ -1,0 +1,64 @@
+diff --git a/csrc/jit_kernels/impls/sm100_fp8_fp4_mega_moe.hpp b/csrc/jit_kernels/impls/sm100_fp8_fp4_mega_moe.hpp
+index 4d91256..c8c9936 100644
+--- a/csrc/jit_kernels/impls/sm100_fp8_fp4_mega_moe.hpp
++++ b/csrc/jit_kernels/impls/sm100_fp8_fp4_mega_moe.hpp
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include <limits>
+ #include <torch/python.h>
+ 
+ #include "../../jit/compiler.hpp"
+@@ -84,7 +85,7 @@ static void __instantiate_kernel() {{
+     args.config.num_stages,
+     args.config.num_dispatch_threads, args.config.num_non_epilogue_threads, args.config.num_epilogue_threads,
+     args.launch_args.grid_dim.first, args.num_ranks,
+-    to_string(args.activation_clamp),
++    (args.activation_clamp != std::numeric_limits<float>::infinity() ? "true" : "false"),
+     args.fast_math ? "true" : "false");
+     }
+ 
+@@ -94,6 +95,7 @@ static void __instantiate_kernel() {{
+             args.y,
+             args.cumulative_local_expert_recv_stats,
+             args.num_tokens,
++            args.activation_clamp,
+             args.sym_buffer_ptrs,
+             args.tensor_map_l1_acts,
+             args.tensor_map_l1_acts_sf,
+diff --git a/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh b/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh
+index b2adc6c..9205c45 100644
+--- a/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh
++++ b/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh
+@@ -32,7 +32,7 @@ template <
+     uint32_t kNumDispatchThreads, uint32_t kNumNonEpilogueThreads,
+     uint32_t kNumEpilogueThreads,
+     uint32_t kNumSMs, uint32_t kNumRanks,
+-    float kActivationClamp,
++    bool kHasActivationClamp,
+     bool kFastMath,
+     uint32_t L1_SHAPE_N = kIntermediateHidden * 2,
+     uint32_t L1_SHAPE_K = kHidden,
+@@ -50,6 +50,7 @@ CUTLASS_GLOBAL __launch_bounds__(kNumThreads, 1) void
+ sm100_fp8_fp4_mega_moe_impl(void* y,
+                             int* cumulative_local_expert_recv_stats,
+                             const uint32_t num_tokens,
++                            const float activation_clamp,
+                             const __grid_constant__ layout::SymBuffer<kNumRanks> sym_buffer,
+                             const __grid_constant__ cute::TmaDescriptor tensor_map_l1_acts,
+                             const __grid_constant__ cute::TmaDescriptor tensor_map_l1_acts_sf,
+@@ -999,10 +1000,10 @@ sm100_fp8_fp4_mega_moe_impl(void* y,
+                             auto bf16_up = __float22bfloat162_rn(make_float2(fp32_values[k * 4 + 2], fp32_values[k * 4 + 3]));
+ 
+                             // Clamp
+-                            if constexpr (kActivationClamp != cute::numeric_limits<float>::infinity()) {
+-                                bf16_gate = __hmin2(bf16_gate, {kActivationClamp, kActivationClamp});
+-                                bf16_up = __hmax2(bf16_up, {-kActivationClamp, -kActivationClamp});
+-                                bf16_up = __hmin2(bf16_up, {kActivationClamp, kActivationClamp});
++                            if constexpr (kHasActivationClamp) {
++                                bf16_gate = __hmin2(bf16_gate, {activation_clamp, activation_clamp});
++                                bf16_up = __hmax2(bf16_up, {-activation_clamp, -activation_clamp});
++                                bf16_up = __hmin2(bf16_up, {activation_clamp, activation_clamp});
+                             }
+ 
+                             // SwiGLU
