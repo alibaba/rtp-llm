@@ -1748,45 +1748,34 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.prefill_prepare_resource_pool_size);
             },
             [](py::tuple t) {
-                if (t.size() != 22 && t.size() != 23 && t.size() < 25)
-                    throw std::runtime_error("Invalid state!");
+                if (t.size() != 23)
+                    throw std::runtime_error("Invalid PDSepConfig state: expected 23 fields, got "
+                                             + std::to_string(t.size()));
                 PDSepConfig c;
                 try {
-                    c.role_type                       = t[0].cast<RoleType>();
-                    c.cache_store_rdma_mode           = t[1].cast<bool>();
-                    c.cache_store_listen_port         = t[2].cast<int64_t>();
-                    c.cache_store_connect_port        = t[3].cast<int64_t>();
-                    c.cache_store_rdma_listen_port    = t[4].cast<int64_t>();
-                    c.cache_store_rdma_connect_port   = t[5].cast<int64_t>();
-                    c.remote_rpc_server_port          = t[6].cast<int64_t>();
-                    c.prefill_retry_times             = t[7].cast<int64_t>();
-                    c.prefill_retry_timeout_ms        = t[8].cast<int64_t>();
-                    c.prefill_max_wait_timeout_ms     = t[9].cast<int64_t>();
-                    c.decode_retry_times              = t[10].cast<int64_t>();
-                    c.decode_retry_timeout_ms         = t[11].cast<int64_t>();
-                    c.decode_retry_interval_ms        = t[12].cast<int64_t>();
-                    c.decode_polling_kv_cache_step_ms = t[13].cast<int64_t>();
-                    c.decode_polling_call_prefill_ms  = t[14].cast<int64_t>();
-                    c.rdma_connect_retry_times        = t[15].cast<int64_t>();
-                    c.load_cache_timeout_ms           = t[16].cast<int64_t>();
-                    c.max_rpc_timeout_ms              = t[17].cast<int64_t>();
-                    c.worker_port_offset              = t[18].cast<int64_t>();
-                    c.decode_entrance                 = t[19].cast<bool>();
-                    if (t.size() == 22 || t.size() == 23) {
-                        // The 22-field layout called index 20 prefill_slot_pool_size. That pool
-                        // carried the async response runners, so preserve it as worker-run size.
-                        c.prefill_worker_run_pool_size        = t[20].cast<int64_t>();
-                        c.prefill_stop_stream_wait_timeout_ms = t[21].cast<int64_t>();
-                        if (t.size() == 23) {
-                            c.prefill_prepare_resource_pool_size = t[22].cast<int64_t>();
-                        }
-                    } else {
-                        // Older tuples contain removed batch coordination settings and omit
-                        // prefill_stop_stream_wait_timeout_ms. The oldest supported layout additionally has
-                        // batch_dispatch_timeout_ms at index 20.
-                        const size_t batch_config_offset = t.size() >= 26 ? 1 : 0;
-                        c.prefill_worker_run_pool_size   = t[24 + batch_config_offset].cast<int64_t>();
-                    }
+                    c.role_type                           = t[0].cast<RoleType>();
+                    c.cache_store_rdma_mode               = t[1].cast<bool>();
+                    c.cache_store_listen_port             = t[2].cast<int64_t>();
+                    c.cache_store_connect_port            = t[3].cast<int64_t>();
+                    c.cache_store_rdma_listen_port        = t[4].cast<int64_t>();
+                    c.cache_store_rdma_connect_port       = t[5].cast<int64_t>();
+                    c.remote_rpc_server_port              = t[6].cast<int64_t>();
+                    c.prefill_retry_times                 = t[7].cast<int64_t>();
+                    c.prefill_retry_timeout_ms            = t[8].cast<int64_t>();
+                    c.prefill_max_wait_timeout_ms         = t[9].cast<int64_t>();
+                    c.decode_retry_times                  = t[10].cast<int64_t>();
+                    c.decode_retry_timeout_ms             = t[11].cast<int64_t>();
+                    c.decode_retry_interval_ms            = t[12].cast<int64_t>();
+                    c.decode_polling_kv_cache_step_ms     = t[13].cast<int64_t>();
+                    c.decode_polling_call_prefill_ms      = t[14].cast<int64_t>();
+                    c.rdma_connect_retry_times            = t[15].cast<int64_t>();
+                    c.load_cache_timeout_ms               = t[16].cast<int64_t>();
+                    c.max_rpc_timeout_ms                  = t[17].cast<int64_t>();
+                    c.worker_port_offset                  = t[18].cast<int64_t>();
+                    c.decode_entrance                     = t[19].cast<bool>();
+                    c.prefill_worker_run_pool_size        = t[20].cast<int64_t>();
+                    c.prefill_stop_stream_wait_timeout_ms = t[21].cast<int64_t>();
+                    c.prefill_prepare_resource_pool_size  = t[22].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PDSepConfig unpickle error: ") + e.what());
                 }
