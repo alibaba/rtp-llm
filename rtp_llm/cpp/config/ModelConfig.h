@@ -93,9 +93,16 @@ public:
     bool    moe_normalize_expert_scale = false;
     // 0 for no moe; 1 for all layer moe; 2 for partial layer moe
     int64_t moe_style = 0;
-    // 0 for softmax; 1 for sigmoid
+    // 0 for softmax; 1 for sigmoid; 2 for sqrt_softplus (DeepSeek-V4)
     int64_t              scoring_func    = 0;
     std::vector<int64_t> moe_layer_index = {};
+
+    // DeepSeek-V4 specific.
+    int64_t hc_mult           = 1;
+    int64_t hc_sinkhorn_iters = 0;
+    double  hc_eps            = 1e-6;
+    double  swiglu_limit      = 0.0;
+    int64_t num_hash_layers   = 0;
 
     bool   has_positional_encoding    = false;
     bool   has_pre_decoder_layernorm  = false;

@@ -3,6 +3,17 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "fp8_deepgemm_linear_out_test",
+    srcs = ["fp8_deepgemm_linear_out_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
     name = "fp8_linear_test",
     srcs = ["fp8_linear_test.py"],
     deps = py_test_deps,

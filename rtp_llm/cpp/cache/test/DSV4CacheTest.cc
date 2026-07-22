@@ -190,29 +190,31 @@ static void initDsv4BatchGroups(BatchKVCacheResource& batch_res, const CacheConf
     batch_res.initGroups(config.topologyPtr());
 }
 
-static std::vector<int> makeProLayerCompressRatios() {
-    std::vector<int> ratios = {128, 128};
-    for (int i = 2; i < 61; ++i) {
-        ratios.push_back((i % 2 == 0) ? 4 : 128);
-    }
-    return ratios;
-}
-
 static ModelConfig makeProModelConfig() {
     ModelConfig mc;
-    mc.num_layers                                                = 61;
-    mc.hidden_size                                               = 7168;
-    mc.attn_config.head_num                                      = 128;
-    mc.attn_config.kv_head_num                                   = 1;
-    mc.attn_config.size_per_head                                 = 512;
-    mc.attn_config.rope_head_dim                                 = 64;
-    mc.attn_config.indexer_head_dim                              = 128;
-    mc.attn_config.indexer_head_num                              = 64;
-    mc.attn_config.indexer_topk                                  = 1024;
-    mc.attn_config.tokens_per_block                              = kDsv4TokensPerBlock;
+    mc.num_layers                   = 61;
+    mc.hidden_size                  = 7168;
+    mc.attn_config.head_num         = 128;
+    mc.attn_config.kv_head_num      = 1;
+    mc.attn_config.size_per_head    = 512;
+    mc.attn_config.rope_head_dim    = 64;
+    mc.attn_config.sliding_window   = 128;
+    mc.attn_config.indexer_head_dim = 128;
+    mc.attn_config.indexer_head_num = 64;
+    mc.attn_config.indexer_topk     = 1024;
+    mc.attn_config.o_groups         = 16;
+    mc.attn_config.o_lora_rank      = 1024;
+    mc.attn_config.tokens_per_block = kDsv4TokensPerBlock;
+    std::vector<int> ratios;
+    ratios.push_back(128);
+    ratios.push_back(128);
+    for (int i = 2; i < 61; i++) {
+        ratios.push_back((i % 2 == 0) ? 4 : 128);
+    }
+    mc.attn_config.layer_compress_ratios                         = ratios;
     mc.hybrid_attention_config.enable_hybrid_attention           = true;
     mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
-    setDsv4KvCacheSpecs(mc, makeProLayerCompressRatios());
+    setDsv4KvCacheSpecs(mc);
     return mc;
 }
 
@@ -224,24 +226,29 @@ static ModelConfig makeFlashModelConfig() {
     mc.attn_config.kv_head_num      = 1;
     mc.attn_config.size_per_head    = 512;
     mc.attn_config.rope_head_dim    = 64;
+    mc.attn_config.sliding_window   = 128;
     mc.attn_config.indexer_head_dim = 128;
     mc.attn_config.indexer_head_num = 64;
     mc.attn_config.indexer_topk     = 512;
+    mc.attn_config.o_groups         = 8;
+    mc.attn_config.o_lora_rank      = 1024;
     mc.attn_config.tokens_per_block = kDsv4TokensPerBlock;
     std::vector<int> ratios         = {0, 0};
     for (int i = 2; i < 43; i++) {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
+    mc.attn_config.layer_compress_ratios                         = ratios;
     mc.hybrid_attention_config.enable_hybrid_attention           = true;
     mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
-    setDsv4KvCacheSpecs(mc, ratios);
+    setDsv4KvCacheSpecs(mc);
     return mc;
 }
 
 static ModelConfig makeFlashMtpModelConfig() {
-    ModelConfig mc = makeFlashModelConfig();
-    mc.num_layers  = 1;
-    setDsv4KvCacheSpecs(mc, {0});
+    ModelConfig mc                       = makeFlashModelConfig();
+    mc.num_layers                        = 1;
+    mc.attn_config.layer_compress_ratios = {0};
+    setDsv4KvCacheSpecs(mc);
     return mc;
 }
 
@@ -634,7 +641,7 @@ TEST(HybridPoolConfigCreatorTest, Fp8BlockSizeBytesUsePaddedPhysicalStride) {
     ParallelismConfig pc;
     auto              mc          = makeProModelConfig();
     mc.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
-    setDsv4KvCacheSpecs(mc, makeProLayerCompressRatios());
+    setDsv4KvCacheSpecs(mc);
     auto config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
 
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
@@ -706,7 +713,7 @@ TEST(HybridPoolConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlock
 
     auto mc                       = makeProModelConfig();
     mc.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
-    setDsv4KvCacheSpecs(mc, makeProLayerCompressRatios());
+    setDsv4KvCacheSpecs(mc);
     auto config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
 
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);

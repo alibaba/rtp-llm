@@ -77,8 +77,12 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
         inputs.tag                                            = captured_kv_cache.tag;
         inputs.cp_rank                                        = captured_cache_store.cp_rank;
         inputs.cp_size                                        = captured_cache_store.cp_size;
-        inputs.pre_created_event                              = std::move(event);
-        inputs.tokens_per_block_by_tag[captured_kv_cache.tag] = layer_tokens_per_block;
+        inputs.pre_created_event = std::move(event);
+
+        // The layer view may use the attention-kernel page size (for example
+        // 128 tokens), while cache-store offsets address allocator-owned
+        // physical blocks (for example 256 tokens).  PyWrappedModel already
+        // captures the physical geometry per tag; keep it authoritative here.
 
         KvCacheInfo kv_cache_info;
         kv_cache_info.kv_cache_buffer = captured_kv_cache.kv_cache_base;

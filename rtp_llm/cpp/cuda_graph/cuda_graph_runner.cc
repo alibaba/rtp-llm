@@ -1,7 +1,9 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -11,6 +13,31 @@ using namespace torch_ext;
 namespace rtp_llm {
 
 namespace {
+
+class ScopedEnvFlag {
+public:
+    ScopedEnvFlag(const char* name, const char* value): name_(name) {
+        const char* old_value = std::getenv(name_);
+        if (old_value != nullptr) {
+            had_old_value_ = true;
+            old_value_     = old_value;
+        }
+        setenv(name_, value, 1);
+    }
+
+    ~ScopedEnvFlag() {
+        if (had_old_value_) {
+            setenv(name_, old_value_.c_str(), 1);
+        } else {
+            unsetenv(name_);
+        }
+    }
+
+private:
+    const char* name_;
+    bool        had_old_value_ = false;
+    std::string old_value_;
+};
 
 void callPrepareCudaGraph(py::object attn_pyobj, PyModelInputs& inputs) {
     if (!attn_pyobj || attn_pyobj.is_none()) {
@@ -672,7 +699,7 @@ void CudaGraphRunner::initCapture() {
         PyModelInputs inputs;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
         inputs.input_ids     = torch::zeros({max_num_token_}, options_cuda_int32_);
-        inputs.input_hiddens = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
+        inputs.input_hiddens = torch::zeros({max_num_token_, hidden_size_ * hc_mult_}, options_cuda_float_);
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
 
@@ -684,9 +711,24 @@ void CudaGraphRunner::initCapture() {
         initKernelInternalMemory();
 
         // get real output data type (params already prepared in attn impl __init__/create_params)
-        auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
+        py::object attn_pyobj;
+        try {
+            attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
+        } catch (const py::error_already_set& e) {
+            RTP_LLM_LOG_ERROR("initCapture prepare_fmha_impl failed: %s", e.what());
+            throw;
+        }
         RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
-        py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
+        try {
+            // DSV4 distributed MoE needs all ranks to rendezvous during this
+            // eager warmup forward. The flag is scoped so real graph capture
+            // and replay never contain the synchronization.
+            ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+            py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
+        } catch (const py::error_already_set& e) {
+            RTP_LLM_LOG_ERROR("initCapture output-dtype forward failed: %s", e.what());
+            throw;
+        }
         RTP_LLM_LOG_INFO("initCapture forward for output datatype end");
         output = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
         capture_mem_hold_.setHiddenStates(output);

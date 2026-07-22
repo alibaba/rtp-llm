@@ -486,6 +486,56 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSharedPoolUsesPhysicalBlockStrideInsteadO
               reinterpret_cast<uintptr_t>(physical_kv.data_ptr()) + physical_kv.nbytes());
 }
 
+TEST_F(ExecOpsTest, testWriteCacheStoreFullGroupKeepsPhysicalTokensPerBlock) {
+    constexpr size_t physical_tokens_per_block = 256;
+    constexpr size_t kernel_tokens_per_block   = 128;
+    constexpr size_t physical_block_stride     = 64;
+    constexpr size_t physical_block_num        = 2;
+    constexpr size_t canonical_key_num         = 4;
+
+    auto cache_store = std::make_shared<MockCacheStore>();
+    auto inputs      = makePyCacheStoreInputs(cache_store,
+                                         physical_tokens_per_block,
+                                         physical_block_stride,
+                                         /*scale_stride=*/0,
+                                         canonical_key_num,
+                                         /*mla_kvcache=*/true);
+    inputs.kv_cache_group_policies        = {{"full", defaultCacheGroupPolicy(CacheGroupType::FULL)}};
+    inputs.tokens_per_block_by_tag        = {{"full", physical_tokens_per_block}};
+    inputs.kv_block_stride_bytes_by_tag   = {{"full", physical_block_stride}};
+    inputs.kv_scale_stride_bytes_by_tag   = {{"full", 0}};
+    inputs.kv_block_transfer_bytes_by_tag = {{"full", physical_block_stride}};
+    inputs.kv_scale_transfer_bytes_by_tag = {{"full", 0}};
+    inputs.cp_rank                        = 0;
+    inputs.cp_size                        = 2;
+
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base =
+        torch::zeros({static_cast<int64_t>(physical_block_num), static_cast<int64_t>(physical_block_stride)},
+                     torch::kUInt8);
+    // DSV4 FULL attention exposes kernel-sized pages to the layer while the
+    // allocator/cache-store contract remains physical-block-sized.
+    layer_cache.seq_size_per_block = kernel_tokens_per_block;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "full";
+
+    // Mirrors the failing GPQA shape: with physical=256 and CP=2, 237
+    // tokens map to one rank-local row.  Treating the kernel page (128) as a
+    // physical block incorrectly maps the same request to two rows.
+    auto input_lengths  = torch::tensor({237}, torch::kInt32);
+    auto prefix_lengths = torch::tensor({0}, torch::kInt32);
+    auto block_ids      = torch::tensor({{0, 1}}, torch::kInt32);
+
+    ASSERT_NO_THROW(WriteCacheStoreOp(
+        input_lengths, prefix_lengths, block_ids, std::make_optional(inputs), std::make_optional(layer_cache)));
+
+    ASSERT_EQ(cache_store->records.size(), 1u);
+    const auto& record = cache_store->records.front();
+    ASSERT_EQ(record.blocks.size(), 1u);
+    const auto key = "kv_" + makeCacheKey(0, inputs.cache_keys.front(), layer_cache.layer_id, layer_cache.tag);
+    EXPECT_NE(record.blocks.find(key), record.blocks.end());
+}
+
 TEST_F(ExecOpsTest, testWriteCacheStoreCpStateSendsCompleteRankLocalRow) {
     constexpr size_t canonical_tokens_per_block = 4;
     constexpr size_t physical_row_stride        = 40;
