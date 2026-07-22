@@ -586,6 +586,7 @@ TEST_F(FIFOSchedulerTest, groupIsolation_size2) {
     ASSERT_TRUE(result.ok());
     ASSERT_EQ(scheduler.runningStreamsSize(), 2);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    EXPECT_EQ(scheduler.pending_group_fallback_count_.load(), 0);
 }
 
 TEST_F(FIFOSchedulerTest, enqueueGroupFallsBackToIndividualStreamsWhenGroupExceedsInitedLimit) {
@@ -617,6 +618,7 @@ TEST_F(FIFOSchedulerTest, enqueueGroupFallsBackToIndividualStreamsWhenGroupExcee
     EXPECT_EQ(returned_streams, streams);
     EXPECT_EQ(scheduler.waitingStreamsSize(), 2);
     EXPECT_EQ(scheduler.runningStreamsSize(), 0);
+    EXPECT_EQ(scheduler.pending_group_fallback_count_.load(), 1);
     for (const auto& stream : streams) {
         EXPECT_FALSE(stream->hasError());
         EXPECT_EQ(stream->curBlocksNum(), 0);
@@ -657,6 +659,7 @@ TEST_F(FIFOSchedulerTest, enqueueGroupFallsBackToIndividualStreamsWhenGroupExcee
     EXPECT_EQ(returned_streams, streams);
     EXPECT_EQ(scheduler.waitingStreamsSize(), 2);
     EXPECT_EQ(scheduler.runningStreamsSize(), 0);
+    EXPECT_EQ(scheduler.pending_group_fallback_count_.load(), 1);
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
@@ -1569,6 +1572,7 @@ TEST_F(FIFOSchedulerTest, enqueueGroupDissolvesWhenOnlyPartFitsTokenCap) {
     ASSERT_EQ(streams[0]->getStatus(), StreamState::RUNNING);
     ASSERT_EQ(streams[1]->getStatus(), StreamState::WAITING);
     ASSERT_EQ(streams[2]->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(scheduler.pending_group_fallback_count_.load(), 1);
 }
 
 TEST_F(FIFOSchedulerTest, testForceBatchTimeout) {
