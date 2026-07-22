@@ -128,6 +128,7 @@ py_library(
         "new_models/qwen2_moe/*.py",
         "new_models/qwen3/*.py",
         "new_models/qwen3_moe/*.py",
+        "new_models/qwen3_next/*.py",
         "quant_methods/*.py",
     ]),
     deps = [
@@ -141,6 +142,7 @@ py_library(
         "//rtp_llm:torch",
         "//rtp_llm:utils",
         "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/models_py/triton_kernels:triton_kernels",
     ],
     data = [
         "//:rtp_compute_ops",

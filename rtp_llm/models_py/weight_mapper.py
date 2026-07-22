@@ -3,7 +3,17 @@ import json
 import ntpath
 import os
 import re
-from typing import Callable, Dict, Iterator, List, Mapping, Optional, Tuple
+from typing import (
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+)
 
 import torch
 
@@ -80,6 +90,16 @@ class WeightsFilter:
                 yield name, tensor
 
 
+class SafetensorSliceExpander(Protocol):
+    """Expand one safetensors key into first-dimension slices."""
+
+    def handles_safetensor(self, name: str) -> bool: ...
+
+    def expand_safetensor(
+        self, name: str, shape: Tuple[int, ...]
+    ) -> Sequence[Tuple[str, int]]: ...
+
+
 def _unwrap_pytorch_state_dict(payload: object) -> Mapping[str, object]:
     if not isinstance(payload, Mapping):
         raise TypeError(
@@ -96,12 +116,28 @@ def _load_safetensors(
     path: str,
     device: str,
     name_filter: Optional[Callable[[str], bool]] = None,
+    slice_expander: Optional[SafetensorSliceExpander] = None,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     from safetensors import safe_open
 
     with safe_open(path, framework="pt", device=device) as handle:
         for name in handle.keys():
             if name_filter is not None and not name_filter(name):
+                continue
+            if slice_expander is not None and slice_expander.handles_safetensor(name):
+                source = handle.get_slice(name)
+                shape = tuple(source.get_shape())
+                for expanded_name, index in slice_expander.expand_safetensor(
+                    name, shape
+                ):
+                    if not 0 <= index < shape[0]:
+                        raise ValueError(
+                            f"Invalid first-dimension slice {index} for {name!r} "
+                            f"with shape {shape}"
+                        )
+                    # Preserve the leading dimension during the file read so the
+                    # safetensors backend materializes exactly one expert.
+                    yield expanded_name, source[index : index + 1][0]
                 continue
             yield name, handle.get_tensor(name)
 
@@ -126,12 +162,20 @@ def get_all_weights(
     ckpt_paths: List[str],
     device: str = "cpu",
     name_filter: Optional[Callable[[str], bool]] = None,
+    safetensor_slice_expander: Optional[SafetensorSliceExpander] = None,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     seen = set()
     for path in ckpt_paths:
         if path.endswith(".safetensors"):
-            weights = _load_safetensors(path, device, name_filter)
+            weights = _load_safetensors(
+                path, device, name_filter, safetensor_slice_expander
+            )
         elif path.endswith((".bin", ".pt", ".pth")):
+            if safetensor_slice_expander is not None:
+                raise ValueError(
+                    "Safetensor slice expansion cannot be used with a PyTorch "
+                    f"checkpoint: {path}"
+                )
             weights = _load_pytorch(path, device, name_filter)
         else:
             raise ValueError(f"Unsupported checkpoint format: {path}")
