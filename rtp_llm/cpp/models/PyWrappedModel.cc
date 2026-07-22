@@ -68,11 +68,6 @@ const bool kMtpDecodeDebugEnabled = []() {
     return env != nullptr && std::string(env) != "0";
 }();
 
-const bool kPrefillTraceEnabled = []() {
-    const char* env = std::getenv("RTP_LLM_PREFILL_TRACE");
-    return env != nullptr && std::string(env) == "1";
-}();
-
 bool pdDebugEnabled() {
     return kPdDebugEnabled;
 }
@@ -697,36 +692,6 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidd
                              skip_final_layernorm);
 }
 
-void PyWrappedModel::recordPrefillTrace(const torch::Tensor&  hidden_states,
-                                        const GptModelInputs& inputs,
-                                        bool                  hidden_is_last_rows,
-                                        const torch::Tensor&  actual_input_lengths) {
-    if (!kPrefillTraceEnabled || inputs.warmup || device_props_.tp_rank != 0 || inputs.sequence_lengths.numel() != 0
-        || inputs.input_lengths.numel() == 0) {
-        return;
-    }
-
-    const auto& input_lengths = actual_input_lengths.defined() ? actual_input_lengths : inputs.input_lengths;
-    try {
-        py::gil_scoped_acquire gil;
-        auto                   trace = py::module_::import("rtp_llm.models_py.utils.prefill_trace");
-        trace.attr("record_prefill")(hidden_states,
-                                     inputs.request_id,
-                                     input_lengths,
-                                     inputs.prefix_lengths,
-                                     hidden_is_last_rows,
-                                     model_id_,
-                                     device_props_.tp_rank);
-    } catch (const py::error_already_set& e) {
-        static std::atomic<int> warning_budget{8};
-        if (warning_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
-            RTP_LLM_LOG_WARNING("[PREFILL_TRACE] record failed and inference will continue: %s", e.what());
-        }
-    } catch (const std::exception& e) {
-        RTP_LLM_LOG_WARNING("[PREFILL_TRACE] non-Python record failure; inference will continue: %s", e.what());
-    }
-}
-
 std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.prepareWriteCacheParams");
     std::optional<PyCacheStoreInputs> params;
@@ -892,7 +857,6 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 
     RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
 
-    recordPrefillTrace(hidden_states, inputs, false);
     return callForwardPostLayers(hidden_states, inputs, false);
 }
 
@@ -1160,11 +1124,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             // ZigZagProcessor::handleOutputsLastHidden.
             if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
                 context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
-                recordPrefillTrace(hidden_states, inputs, true, cp_params.prefill_actual_input_lengths_cpu);
                 return forwardPostLayersLastHidden(hidden_states, inputs);
             }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            recordPrefillTrace(hidden_states, inputs, false, cp_params.prefill_actual_input_lengths_cpu);
             if (pdDebugEnabled()) {
                 static std::atomic<int> cp_output_log_budget{16};
                 if (cp_output_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
@@ -1204,7 +1166,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             }
             return outputs;
         }
-        recordPrefillTrace(hidden_states, inputs, false);
         return callForwardPostLayers(hidden_states, inputs, true);
 
     } catch (const py::error_already_set& e) {

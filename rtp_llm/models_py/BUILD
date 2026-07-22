@@ -5,7 +5,6 @@ py_library(
     srcs = glob([
         "utils/*.py",
     ]),
-    visibility = [":__subpackages__"],
 )
 
 # flashinfer-python is only available for CUDA12
