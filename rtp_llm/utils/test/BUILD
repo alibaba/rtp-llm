@@ -49,7 +49,7 @@ _JIT_SMOKE_DEPS = [
     "//rtp_llm/test/utils:maga_server_manager",
 ]
 
-# GPU smoke using the production manager and watchdog cold/warm lifecycle.
+# Shared-cache GPU smoke: a production watcher uploads a test-owned probe.
 py_test(
     name = "jit_cache_deepseek_v2_lite",
     timeout = "eternal",

@@ -1,4 +1,4 @@
-"""Cold/warm real-model smoke coverage for the remote JIT cache."""
+"""Real-model smoke coverage for the remote JIT cache on a shared host."""
 
 import json
 import logging
@@ -9,6 +9,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,8 +25,10 @@ if TYPE_CHECKING:
 REQUEST_TIMEOUT_S = 1800
 SERVER_TIMEOUT_S = 3600
 WEIGHT_UPDATE_TIMEOUT_S = 600
+PROBE_PUBLISH_TIMEOUT_S = 600
 REQUESTS = ((16, 1), (257, 2))
 WEIGHT_NAME = "model.layers.0.input_layernorm.weight"
+RUNTIME_ARTIFACT_SUFFIXES = (".so", ".cubin", ".hsaco")
 
 State = dict[str, tuple[int, int]]
 
@@ -127,6 +130,14 @@ def _state(root: Path) -> State:
     return result
 
 
+def _runtime_state(state: State) -> State:
+    return {
+        name: value
+        for name, value in state.items()
+        if name.endswith(RUNTIME_ARTIFACT_SUFFIXES)
+    }
+
+
 def _send_request(port: int, model: str, words: int, max_tokens: int) -> None:
     body = json.dumps(
         {
@@ -195,7 +206,8 @@ class JitCacheSmokeTest(unittest.TestCase):
         self.server: "MagaServerManager | None" = None
         self.old_work_dir = os.environ.get("MAGA_SERVER_WORK_DIR")
         self.metrics: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": 3,
+            "cache_mode": "shared_production_probe",
             "completed": False,
         }
 
@@ -223,7 +235,7 @@ class JitCacheSmokeTest(unittest.TestCase):
         config: SmokeConfig,
         model_path: str,
         model_type: str,
-        remote: Path,
+        remote: str,
         label: str,
     ) -> tuple[str, Path]:
         from rtp_llm.test.utils.maga_server_manager import MagaServerManager
@@ -232,7 +244,7 @@ class JitCacheSmokeTest(unittest.TestCase):
         os.environ["MAGA_SERVER_WORK_DIR"] = str(work_dir)
         self.server = MagaServerManager(
             env_args={
-                "REMOTE_JIT_DIR": str(remote),
+                "REMOTE_JIT_DIR": remote,
                 "FLASHINFER_DISABLE_VERSION_CHECK": "1",
                 "PATH": os.pathsep.join(
                     filter(None, ("/usr/local/cuda/bin", os.environ.get("PATH")))
@@ -269,17 +281,60 @@ class JitCacheSmokeTest(unittest.TestCase):
         for words, max_tokens in REQUESTS * 2:
             _send_request(self.server.port, model, words, max_tokens)
 
-    def _assert_restore_logged(self, work_dir: Path) -> None:
-        marker = "loaded JIT cache from remote snapshot"
-        logs = [Path(self.server.log_file_path), work_dir / "main_logs/main_0.log"]
-        self.assertTrue(
-            any(
-                path.is_file()
-                and marker in path.read_text(encoding="utf-8", errors="replace")
-                for path in logs
-            ),
-            f"no backend log proves remote restore: {logs}",
+    def _create_probe(self, config: SmokeConfig) -> tuple[Path, str, bytes]:
+        triton = next(
+            (item for item in jit._resolve_components() if item.name == "triton"),
+            None,
         )
+        self.assertIsNotNone(triton, "no managed Triton cache for JIT probe")
+        token = f"{config.model_name}-{uuid.uuid4().hex}"
+        probe = triton.local_dir / "rtp_llm_smoke_probe" / f"{token}.json"
+        payload = json.dumps(
+            {"model": config.model_name, "probe": token}, sort_keys=True
+        ).encode()
+        probe.parent.mkdir(parents=True, exist_ok=True)
+        staging = probe.with_suffix(".tmp")
+        staging.write_bytes(payload)
+        os.replace(staging, probe)
+
+        def cleanup() -> None:
+            probe.unlink(missing_ok=True)
+            try:
+                probe.parent.rmdir()
+            except OSError:
+                pass
+
+        self.addCleanup(cleanup)
+        return probe, probe.relative_to(jit.LOCAL_JIT_DIR).as_posix(), payload
+
+    def _wait_for_probe_snapshot(
+        self, remote_root: Path, probe_name: str, payload: bytes
+    ) -> tuple[Path, State]:
+        deadline = time.monotonic() + PROBE_PUBLISH_TIMEOUT_S
+        checked: set[Path] = set()
+        while time.monotonic() < deadline:
+            snapshots = sorted(
+                remote_root.glob(f"*{store.SNAPSHOT_SUFFIX}"), reverse=True
+            )
+            for snapshot in snapshots:
+                if snapshot in checked:
+                    continue
+                checked.add(snapshot)
+                with tempfile.TemporaryDirectory() as tmp:
+                    restored = Path(tmp) / "cache"
+                    restored.mkdir()
+                    try:
+                        store.extract_zstd_tar(snapshot, restored)
+                    except Exception:
+                        logging.warning(
+                            "could not inspect JIT snapshot %s", snapshot, exc_info=True
+                        )
+                        continue
+                    probe = restored / probe_name
+                    if probe.is_file() and probe.read_bytes() == payload:
+                        return snapshot, _state(restored)
+            time.sleep(1)
+        self.fail("production JIT publisher did not upload the smoke probe")
 
     def test_deepseek_v2_lite(self) -> None:
         self._run_lifecycle(CUDA_CONFIG)
@@ -291,42 +346,43 @@ class JitCacheSmokeTest(unittest.TestCase):
         self.metrics["model"] = config.model_name
         model_path, model_type = _model_config(config.task_info, config.model_path_env)
         self.assertTrue(Path(model_path).is_dir(), f"missing model: {model_path}")
-        # This smoke target owns the fixed shared cache for its test lifecycle.
+        # Co-located GPU tests use this same tree. Never remove the tree or its
+        # lifecycle markers from this non-exclusive smoke target.
         local = Path(jit.LOCAL_JIT_DIR)
-        shutil.rmtree(local, ignore_errors=True)
-        self.addCleanup(shutil.rmtree, local, True)
-        ready = local.with_name(f"{local.name}.ready")
-        ready.unlink(missing_ok=True)
-        self.addCleanup(ready.unlink, missing_ok=True)
-        self.addCleanup(local.with_name(f"{local.name}.lock").unlink, missing_ok=True)
-        remote = _runtime_dir(f"jit_remote_lifecycle_{config.model_name}")
-        remote_root = remote / jit.RTP_JIT_VERSION
-        remote_root.mkdir()
+        remote = os.environ.get("REMOTE_JIT_DIR", "").strip()
+        if not remote:
+            remote = str(_runtime_dir(f"jit_remote_lifecycle_{config.model_name}"))
+        remote_root = jit.resolve_remote_root(remote)
+        if remote_root is None:
+            self.fail(f"REMOTE_JIT_DIR is not accessible: {remote}")
+        self.metrics["remote_jit_dir"] = remote
 
-        cold_started = time.monotonic()
-        model, _ = self._start_server(config, model_path, model_type, remote, "cold")
+        producer_started = time.monotonic()
+        model, _ = self._start_server(
+            config, model_path, model_type, remote, "producer"
+        )
         try:
             self._exercise(config, model_path, model)
+            probe, probe_name, probe_payload = self._create_probe(config)
+            snapshot, remote_state = self._wait_for_probe_snapshot(
+                remote_root, probe_name, probe_payload
+            )
         finally:
             self._stop_server()
-        cold_state = _state(local)
-        self.assertTrue(cold_state, "cold run produced no JIT artifacts")
-        cold_bytes = sum(value[0] for value in cold_state.values())
+        local_state = _state(local)
+        self.assertTrue(local_state, "producer run found no shared JIT artifacts")
+        self.assertEqual(probe.read_bytes(), probe_payload)
+        local_bytes = sum(value[0] for value in local_state.values())
         self.metrics.update(
-            cold_total_ms=round((time.monotonic() - cold_started) * 1000, 3),
-            cold_local_files=len(cold_state),
-            cold_local_bytes=cold_bytes,
+            producer_total_ms=round((time.monotonic() - producer_started) * 1000, 3),
+            producer_local_files=len(local_state),
+            producer_local_bytes=local_bytes,
         )
 
-        with tempfile.TemporaryDirectory() as tmp:
-            restored = Path(tmp) / "cache"
-            self.assertTrue(store.RemoteSnapshotStore(remote_root).restore(restored))
-            remote_state = _state(restored)
-        self.assertTrue(remote_state, "cold run produced an empty remote snapshot")
-        self.assertEqual(
-            cold_state, remote_state, "remote snapshot is not one generation"
-        )
+        self.assertTrue(remote_state, "production publisher produced an empty snapshot")
         components = {name.split("/", 1)[0] for name in remote_state}
+        runtime_state = _runtime_state(remote_state)
+        self.assertTrue(runtime_state, "remote snapshot contains no runtime artifacts")
         tipc = [
             name
             for name in remote_state
@@ -334,24 +390,18 @@ class JitCacheSmokeTest(unittest.TestCase):
         ]
         if config.require_tipc:
             self.assertTrue(tipc, "TIPC extension missing from remote snapshot")
-        synced = sum(
-            remote_state.get(name) == value for name, value in cold_state.items()
-        )
         snapshots = list(remote_root.glob(f"*{store.SNAPSHOT_SUFFIX}"))
         snapshot_bytes = sum(path.stat().st_size for path in snapshots)
+        remote_bytes = sum(value[0] for value in remote_state.values())
         self.metrics.update(
-            cold_remote_files=len(remote_state),
-            cold_remote_bytes=sum(value[0] for value in remote_state.values()),
-            cold_synced_files=synced,
-            cold_sync_ratio=round(synced / len(cold_state), 6),
-            cold_snapshots=len(snapshots),
-            cold_snapshot_bytes=snapshot_bytes,
-            cold_components=sorted(components),
-            cold_tipc_artifacts=len(tipc),
-        )
-        self.assertLessEqual(len(snapshots), store.SNAPSHOT_KEEP)
-        self.assertLessEqual(
-            snapshot_bytes, store.SNAPSHOT_KEEP * max(1 << 20, cold_bytes)
+            producer_snapshot=snapshot.name,
+            snapshot_remote_files=len(remote_state),
+            snapshot_remote_bytes=remote_bytes,
+            snapshot_count=len(snapshots),
+            snapshot_bytes=snapshot_bytes,
+            snapshot_components=sorted(components),
+            snapshot_runtime_artifacts=len(runtime_state),
+            snapshot_tipc_artifacts=len(tipc),
         )
         self.assertFalse(
             config.required_components - components,
@@ -359,44 +409,27 @@ class JitCacheSmokeTest(unittest.TestCase):
             f"{sorted(config.required_components - components)}",
         )
 
-        shutil.rmtree(local)
-        local.with_name(f"{local.name}.ready").unlink()
-        warm_started = time.monotonic()
-        model, work_dir = self._start_server(
-            config, model_path, model_type, remote, "warm"
-        )
+        reuse_started = time.monotonic()
+        model, _ = self._start_server(config, model_path, model_type, remote, "reuse")
         try:
-            self._assert_restore_logged(work_dir)
             before = _state(local)
-            restored_count = sum(
-                before.get(name) == value for name, value in remote_state.items()
-            )
-            self.metrics.update(
-                warm_restored_files=restored_count,
-                warm_remote_files=len(remote_state),
-                warm_restore_ratio=round(restored_count / len(remote_state), 6),
-            )
-            self.assertEqual(
-                remote_state,
-                before,
-                "remote artifacts were not restored intact",
-            )
+            self.assertEqual(probe.read_bytes(), probe_payload)
             self._exercise(config, model_path, model)
             after = _state(local)
-            rewritten = sum(
-                before.get(name) != after.get(name)
-                for name in before.keys() | after.keys()
-            )
+            self.assertEqual(probe.read_bytes(), probe_payload)
+            changed = sum(after.get(name) != value for name, value in before.items())
+            added = sum(name not in before for name in after)
             self.metrics.update(
-                warm_local_files=len(after),
-                warm_local_bytes=sum(value[0] for value in after.values()),
-                warm_rewritten_files=rewritten,
+                reuse_remote_files=len(remote_state),
+                reuse_local_files=len(after),
+                reuse_local_bytes=sum(value[0] for value in after.values()),
+                reuse_changed_files=changed,
+                reuse_added_files=added,
             )
-            self.assertEqual(before, after, "warm run rebuilt JIT artifacts")
         finally:
             self._stop_server()
-        self.metrics["warm_total_ms"] = round(
-            (time.monotonic() - warm_started) * 1000, 3
+        self.metrics["reuse_total_ms"] = round(
+            (time.monotonic() - reuse_started) * 1000, 3
         )
         self.metrics["completed"] = True
 

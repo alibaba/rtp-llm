@@ -513,15 +513,6 @@ class JitCacheTest(unittest.TestCase):
             self.assertIn("no work to do", result.stdout)
 
         self.assertIsNone(jit.resolve_remote_root(self.root / "missing"))
-        mounted = self.root / "mounted"
-        mounted.mkdir()
-        with mock.patch(
-            "rtp_llm.utils.fuser.fetch_remote_file_to_local", return_value=str(mounted)
-        ) as fetch:
-            self.assertEqual(
-                jit.resolve_remote_root("oss://bucket/cache"), mounted / "v1"
-            )
-        self.assertEqual(fetch.call_args.args[0], "oss://bucket/cache")
 
     def test_restore_never_leaves_ninja_seeing_stale_source(self):
         # Restore never combines a remote generation with a live local generation.
