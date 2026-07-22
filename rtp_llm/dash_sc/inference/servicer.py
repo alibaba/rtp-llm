@@ -741,6 +741,9 @@ async def iter_real_model_stream_infer(
         term_id = runtime.terminate_token_id
         think_close_token_id = runtime.close_token_id
         max_new_tokens = int(getattr(generate_config, "max_new_tokens", 0) or 0)
+        request_max_new_think_tokens = sampling.max_new_think_tokens
+        if request_max_new_think_tokens is None:
+            request_max_new_think_tokens = other.max_new_think_tokens
         matched_think_bos_ids = matched_echo_ids or _matched_echo_prefix_ids(
             input_ids_list, list(runtime.bos_tokens)
         )
@@ -1010,10 +1013,22 @@ async def iter_real_model_stream_infer(
                 break
             cumulative_sent_ids.extend(ids_for_accounting)
             finish_reason_override = None
+            generated_ids_for_max_new_tokens = len(cumulative_sent_ids)
+            # With an explicit thinking budget, max_new_tokens applies only to
+            # content. A value of -1 keeps the legacy shared reasoning+content
+            # budget, so the full generated-token count remains authoritative.
+            if (
+                request_max_new_think_tokens != -1
+                and generate_think_token_num is not None
+            ):
+                generated_ids_for_max_new_tokens = max(
+                    0,
+                    generated_ids_for_max_new_tokens - generate_think_token_num,
+                )
             if (
                 out_py.finished
                 and max_new_tokens > 0
-                and len(cumulative_sent_ids) >= max_new_tokens
+                and generated_ids_for_max_new_tokens >= max_new_tokens
             ):
                 finish_reason_override = FINISH_REASON_LENGTH
             echo_was_split = False

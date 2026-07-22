@@ -341,6 +341,113 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_gen_ids(chunks[0]), [7, 8, 9])
         self.assertEqual(_finish_reason(chunks[0]), 1)
 
+    async def test_thinking_unlimited_max_new_tokens_counts_reasoning_and_content(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        out = GenerateOutput(
+            output_ids=torch.tensor([10, 11, 128822, 20, 21], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(max_new_tokens=5),
+                OtherParams(enable_thinking=True, max_new_think_tokens=-1),
+                visitor,
+                rtp_llm_request_id=1,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+            )
+        )
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(
+            chunks[0].infer_response.parameters["generate_think_token_num"].int64_param,
+            3,
+        )
+        # Unlimited thinking uses the combined reasoning + content budget.
+        self.assertEqual(_finish_reason(chunks[0]), 1)
+
+    async def test_separate_thinking_budget_excludes_reasoning_from_content_limit(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        out = GenerateOutput(
+            output_ids=torch.tensor([10, 11, 128822, 20, 21], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(max_new_tokens=4),
+                OtherParams(enable_thinking=True, max_new_think_tokens=10),
+                visitor,
+                rtp_llm_request_id=1,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+            )
+        )
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(
+            chunks[0].infer_response.parameters["generate_think_token_num"].int64_param,
+            3,
+        )
+        # Total output is 5 (> max_new_tokens), but content is only 2.
+        self.assertEqual(_finish_reason(chunks[0]), 0)
+
+    async def test_separate_thinking_budget_content_at_limit_reports_length(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        out = GenerateOutput(
+            output_ids=torch.tensor([10, 11, 128822, 20, 21], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(max_new_tokens=2),
+                OtherParams(enable_thinking=True, max_new_think_tokens=10),
+                visitor,
+                rtp_llm_request_id=1,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+            )
+        )
+
+        self.assertEqual(len(chunks), 1)
+        # The independent content budget is exactly exhausted.
+        self.assertEqual(_finish_reason(chunks[0]), 1)
+
     async def test_empty_list_yields_error_response(self) -> None:
         req = self._minimal_request()
         visitor = _FakeVisitor(_FakeAsyncStream([]))
