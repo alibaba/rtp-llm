@@ -202,6 +202,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
     private void logCacheHitComparisons(List<CacheHitComparisonPvLog> comparisons) {
         for (CacheHitComparisonPvLog comparison : comparisons) {
+            engineHealthReporter.reportCacheHitComparisonMetrics(modelName, comparison);
             String json = JsonUtils.toStringOrEmpty(comparison);
             if (!json.isEmpty()) {
                 pvLogger.info(json);

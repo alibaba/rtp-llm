@@ -130,6 +130,21 @@ public class MetricConstant {
     public static final String CACHE_HIT_RATIO = "app.cache.hit.ratio";
 
     /**
+     * Predicted cache-hit tokens from scheduling, compared with actual engine cache hits.
+     */
+    public static final String CACHE_HIT_COMPARISON_PREDICTED_TOKENS = "app.cache.hit.comparison.predicted.tokens";
+
+    /**
+     * Actual cache-hit tokens reported by the engine, compared with scheduling prediction.
+     */
+    public static final String CACHE_HIT_COMPARISON_ACTUAL_TOKENS = "app.cache.hit.comparison.actual.tokens";
+
+    /**
+     * Difference between actual and predicted cache-hit tokens.
+     */
+    public static final String CACHE_HIT_COMPARISON_DELTA_TOKENS = "app.cache.hit.comparison.delta.tokens";
+
+    /**
      * Cache request total count
      */
     public static final String CACHE_REQUEST_TOTAL = "app.cache.request.total";

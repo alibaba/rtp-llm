@@ -10,6 +10,7 @@ import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.pv.CacheHitComparisonPvLog;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.BalanceStatusEnum;
@@ -36,6 +37,9 @@ import java.util.concurrent.ThreadPoolExecutor;
 
 import static org.flexlb.constant.MetricConstant.CACHE_AVAILABLE_KV_CACHE_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_BLOCK_SIZE;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_PREDICTED_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KEY_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_FAIL;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_SUCCESS_PERIOD;
@@ -136,6 +140,9 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_STATUS_CHECK_SUCCESS_PERIOD, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_STATUS_CHECK_FAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_BLOCK_SIZE, FlexMetricType.GAUGE);
+        this.monitor.register(CACHE_HIT_COMPARISON_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_HIT_COMPARISON_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_USED_KV_CACHE_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_AVAILABLE_KV_CACHE_TOKENS, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_TOTAL_KV_CACHE_TOKENS, FlexMetricType.GAUGE);
@@ -370,6 +377,22 @@ public class EngineHealthReporter {
 
     public void reportCacheHitMetrics(RoleType roleType, String engineIp, long hitTokens, double hitRatio) {
         cacheMetricsReporter.reportCacheHitMetrics(roleType, engineIp, hitTokens, hitRatio);
+    }
+
+    public void reportCacheHitComparisonMetrics(String modelName, CacheHitComparisonPvLog comparison) {
+        if (comparison == null) {
+            return;
+        }
+        FlexMetricTags metricTags = FlexMetricTags.of(
+                "model", modelName,
+                "engineIp", comparison.workerIp(),
+                "role", comparison.role(),
+                "group", comparison.group(),
+                "taskState", comparison.taskState(),
+                "cacheMatchSource", comparison.cacheMatchSource() == null ? "" : comparison.cacheMatchSource());
+        monitor.report(CACHE_HIT_COMPARISON_PREDICTED_TOKENS, metricTags, comparison.predictedHitTokens());
+        monitor.report(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, metricTags, comparison.actualHitTokens());
+        monitor.report(CACHE_HIT_COMPARISON_DELTA_TOKENS, metricTags, comparison.deltaHitTokens());
     }
 
     public void reportArriveDelayTime(BalanceContext ctx) {
