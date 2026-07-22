@@ -536,9 +536,9 @@ std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<Gene
     return stream;
 }
 
-std::vector<std::shared_ptr<GenerateStream>>
+std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
 NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
-    std::vector<std::shared_ptr<GenerateStream>> streams;
+    std::vector<GenerateStreamPtr> streams;
     streams.reserve(inputs.size());
     for (auto& inp : inputs) {
         auto stream = std::make_shared<NormalGenerateStream>(

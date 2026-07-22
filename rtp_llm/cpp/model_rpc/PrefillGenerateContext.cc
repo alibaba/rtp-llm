@@ -74,9 +74,9 @@ void PrefillGenerateContext::stopStream() {
         // if is waiting, cancel it
         meta->dequeue(request_id, stream_);
         if (stream_->getStatus() != StreamState::FINISHED) {
-            // The engine loop's advance() runs BEFORE process() in each step(),
+            // The scheduler's moveToNext() runs BEFORE process() in each step(),
             // so GenerateDone set during process() won't be detected until the
-            // NEXT iteration. Wait for Engine Loop to call finish_internal()
+            // NEXT iteration. Wait for the scheduler to move the stream to FINISHED
             // naturally, which sets FINISHED and triggers releaseResource() →
             // tryReleaseKVBlock() → insertIntoCache() to persist KV cache.
             // Only reportError for genuine errors (no GenerateDone, or hasError).
@@ -109,7 +109,7 @@ grpc::Status PrefillGenerateContext::closeGrpcStream() {
         return last_grpc_stream_closed_status;
     }
     grpc_stream_closed = true;
-    if (cancelled() && client_context) {
+    if ((cancelled() || isRequestCancelled()) && client_context) {
         client_context->TryCancel();
     }
     if (client_stream) {
@@ -132,6 +132,11 @@ void PrefillGenerateContext::reset() {
     client_stream.reset();
     grpc_stream_closed             = false;
     last_grpc_stream_closed_status = grpc::Status::OK;
+}
+
+bool PrefillGenerateContext::isRequestCancelled() const {
+    // cancel state for Async BatchRequest
+    return GenerateContext::isRequestCancelled() || (cancel_state && cancel_state->load());
 }
 
 void PrefillGenerateContext::nextStage() {
@@ -179,18 +184,18 @@ void PrefillGenerateContext::reportTime() {
 
     collectBasicMetrics(collector);
 
-    collector.loading_cache_request          = loading_cache_requests;
-    collector.get_rpc_connection_rt_us       = stat_info.get_rpc_connection_rt_us;
-    collector.remote_allocate_resource_rt_us = stat_info.remote_allocate_resource_rt_us;
-    collector.multimodal_process_rt_us       = stat_info.multimodal_process_rt_us;
-    collector.enqueue_request_rt_us          = stat_info.enqueue_request_rt_us;
-    collector.remote_load_cache_start_rt_us  = stat_info.remote_load_cache_start_rt_us;
-    collector.remote_load_cache_wait_stream_rt_us = stat_info.remote_load_cache_wait_stream_rt_us;
+    collector.loading_cache_request                 = loading_cache_requests;
+    collector.get_rpc_connection_rt_us              = stat_info.get_rpc_connection_rt_us;
+    collector.remote_allocate_resource_rt_us        = stat_info.remote_allocate_resource_rt_us;
+    collector.multimodal_process_rt_us              = stat_info.multimodal_process_rt_us;
+    collector.enqueue_request_rt_us                 = stat_info.enqueue_request_rt_us;
+    collector.remote_load_cache_start_rt_us         = stat_info.remote_load_cache_start_rt_us;
+    collector.remote_load_cache_wait_stream_rt_us   = stat_info.remote_load_cache_wait_stream_rt_us;
     collector.remote_load_cache_write_request_rt_us = stat_info.remote_load_cache_write_request_rt_us;
-    collector.poll_local_output_rt_us        = stat_info.poll_local_output_rt_us;
-    collector.remote_load_cache_end_rt_us    = stat_info.remote_load_cache_end_rt_us;
-    collector.remote_generate_rt_us          = stat_info.remote_generate_rt_us;
-    collector.poll_remote_output_rt_us       = stat_info.poll_remote_output_rt_us;
+    collector.poll_local_output_rt_us               = stat_info.poll_local_output_rt_us;
+    collector.remote_load_cache_end_rt_us           = stat_info.remote_load_cache_end_rt_us;
+    collector.remote_generate_rt_us                 = stat_info.remote_generate_rt_us;
+    collector.poll_remote_output_rt_us              = stat_info.poll_remote_output_rt_us;
 
     reportMetrics(collector);
     metrics_reporter.reset();  // avoid to report metrics in base class
