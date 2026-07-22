@@ -10,7 +10,13 @@ namespace rtp_llm {
 class LogitsProcessorStates;
 typedef std::shared_ptr<LogitsProcessorStates> LogitsProcessorStatesPtr;
 
-struct SamplerInitParams {};
+struct SamplerInitParams {
+    // max_batch_size is an initial capacity. Set fixed_max_batch_size=false when callers can legally
+    // fan out beyond that capacity, e.g. num_return_sequences or variable beam requests. When
+    // max_batch_size == 0, fixed_max_batch_size is ignored and buffers grow dynamically.
+    size_t max_batch_size       = 0;
+    bool   fixed_max_batch_size = true;
+};
 
 struct SamplerInputs {
 public:
@@ -50,6 +56,8 @@ public:
     torch::Tensor no_repeat_ngram_size;  // shape: [batch_size], dtype via Buffer (INT32)
     torch::Tensor do_sample;             // shape: [batch_size], dtype via Buffer (BOOL)
     torch::Tensor finished_mask;         // shape: [batch_size], dtype via Buffer (BOOL)
+
+    bool return_original_all_probs = false;
 
     mutable torch::Tensor cum_log_probs;  // shape: [batch_size]
     mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size]

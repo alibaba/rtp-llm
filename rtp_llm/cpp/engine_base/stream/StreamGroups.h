@@ -117,18 +117,62 @@ public:
         return decode_streams_;
     }
 
-    bool needReturnAllProbs() const {
+    bool hasMMExtraInput() const {
         for (auto& stream : context_streams_) {
-            if (stream->getReturnAllProbs()) {
-                return true;
-            }
-        }
-        for (auto& stream : decode_streams_) {
-            if (stream->getReturnAllProbs()) {
+            if (stream->hasMultimodalExtraInput()) {
                 return true;
             }
         }
         return false;
+    }
+
+    // NOTE: Aggregates by "max mode" across all streams in the batch
+    // (NONE < DEFAULT < ORIGINAL). The scheduler (FIFOScheduler /
+    // BatchDecodeScheduler) now partitions streams so that DEFAULT and
+    // ORIGINAL are not scheduled into the same batch; therefore mixed
+    // DEFAULT+ORIGINAL batches should not reach this path in normal
+    // operation. The one-shot warning below remains as a defensive guard for
+    // code paths that construct StreamGroups directly without scheduler
+    // partitioning.
+    ReturnAllProbsMode needReturnAllProbs() const {
+        // get the max return all probs mode from all streams
+        ReturnAllProbsMode return_all_probs = ReturnAllProbsMode::NONE;
+        bool               has_default      = false;
+        bool               has_original     = false;
+        for (auto& stream : context_streams_) {
+            auto cur_return_all_probs = stream->getReturnAllProbs();
+            if (cur_return_all_probs == ReturnAllProbsMode::DEFAULT) {
+                has_default = true;
+            } else if (cur_return_all_probs == ReturnAllProbsMode::ORIGINAL) {
+                has_original = true;
+            }
+            if (cur_return_all_probs > return_all_probs) {
+                return_all_probs = cur_return_all_probs;
+            }
+        }
+        for (auto& stream : decode_streams_) {
+            auto cur_return_all_probs = stream->getReturnAllProbs();
+            if (cur_return_all_probs == ReturnAllProbsMode::DEFAULT) {
+                has_default = true;
+            } else if (cur_return_all_probs == ReturnAllProbsMode::ORIGINAL) {
+                has_original = true;
+            }
+            if (cur_return_all_probs > return_all_probs) {
+                return_all_probs = cur_return_all_probs;
+            }
+        }
+        if (has_default && has_original) {
+            // One-shot log per process: DEFAULT streams in this batch will
+            // see un-renormalized raw probs because sampler runs ORIGINAL.
+            static std::once_flag mixed_mode_warn_once;
+            std::call_once(mixed_mode_warn_once, []() {
+                RTP_LLM_LOG_WARNING("needReturnAllProbs: batch contains both DEFAULT and ORIGINAL "
+                                    "return_all_probs streams; DEFAULT consumers will receive raw "
+                                    "(un-renormalized) probabilities for this batch. The scheduler "
+                                    "should partition by mode to avoid this silent degradation.");
+            });
+        }
+        return return_all_probs;
     }
 
     bool needReturnCumLogProbs() const {

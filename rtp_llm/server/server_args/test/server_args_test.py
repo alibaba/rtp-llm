@@ -200,6 +200,83 @@ class ServerArgsSetTest(TestCase):
             1,
         )
 
+    def test_pdfusion_scheduler_mode_config(self):
+        """Test that pdfusion_scheduler_mode is opt-in and decode_prefill_ratio is configurable."""
+        py_env_configs = self._setup_args(args=[])
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode,
+            "",
+        )
+
+        py_env_configs = self._setup_args(
+            args=[
+                "--pdfusion_scheduler_mode",
+                "ratio",
+                "--decode_prefill_ratio",
+                "1/3",
+            ]
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode,
+            "ratio",
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.decode_prefill_ratio,
+            "1/3",
+        )
+
+    def test_pdfusion_scheduler_mode_rejects_unknown_value(self):
+        """Test that pdfusion_scheduler_mode only accepts fixed scheduler patterns."""
+        with self.assertRaises(SystemExit):
+            self._setup_args(args=["--pdfusion_scheduler_mode", "ratioo"])
+
+    def test_default_argv_path_parses_sys_argv(self):
+        """Regression: the production entry (rtp_llm.start_server -> setup_args()) reads sys.argv.
+
+        The other tests call setup_args(args=[...]) with an explicit list, so the default
+        ``args=None`` code path a deployed server actually uses had no coverage. Here we drive the
+        real sys.argv path: with PYTEST_CURRENT_TEST unset (the deployed condition), setup_args()
+        must parse argv into the config exactly like the CLI does.
+        """
+        import sys
+
+        import rtp_llm.server.server_args.server_args as server_args_mod
+
+        argv_backup = sys.argv
+        # setUp() already clears os.environ; drop PYTEST_CURRENT_TEST explicitly so the assertion
+        # does not depend on setUp ordering and truly exercises the production branch.
+        os.environ.pop("PYTEST_CURRENT_TEST", None)
+        try:
+            sys.argv = ["prog", "--model_type", "llama", "--tp_size", "8"]
+            importlib.reload(server_args_mod)
+            py_env_configs = server_args_mod.setup_args()  # args=None -> parse sys.argv
+        finally:
+            sys.argv = argv_backup
+
+        self.assertEqual(py_env_configs.model_args.model_type, "llama")
+        self.assertEqual(py_env_configs.parallelism_config.tp_size, 8)
+
+    def test_pytest_env_guard_ignores_sys_argv(self):
+        """Under pytest (PYTEST_CURRENT_TEST set) with args=None, pytest's own argv is ignored.
+
+        This is the guard that lets the suite run under pytest without argparse choking on pytest's
+        flags; assert it actually suppresses sys.argv parsing rather than silently leaking it.
+        """
+        import sys
+
+        import rtp_llm.server.server_args.server_args as server_args_mod
+
+        argv_backup = sys.argv
+        os.environ["PYTEST_CURRENT_TEST"] = "server_args_test::guard (call)"
+        try:
+            sys.argv = ["prog", "--model_type", "should_be_ignored"]
+            importlib.reload(server_args_mod)
+            py_env_configs = server_args_mod.setup_args()  # args=None + guard -> args=[]
+        finally:
+            sys.argv = argv_backup
+
+        self.assertNotEqual(py_env_configs.model_args.model_type, "should_be_ignored")
+
 
 if __name__ == "__main__":
     main()

@@ -86,6 +86,7 @@ class GenericMoeLayer(nn.Module):
         self.num_local_experts = self.w1.shape[0]
         self.add_shared_expert = config.moe_style == 2
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
+        self.ep_size = parallelism_config.ep_size
         if self.add_shared_expert:
             self.shared_expert = DenseMLP(
                 config.activation_type,
@@ -107,6 +108,13 @@ class GenericMoeLayer(nn.Module):
 
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
+        if self.correction_bias is not None:
+            self.group_topk = GroupTopK()
+            self.renormalize = self.config.has_moe_norm
+            self.num_expert_group = self.config.moe_n_group
+            self.topk_group = self.config.moe_topk_group
+            self.n_routed_experts = self.config.expert_num
+            self.routed_scaling_factor = self.config.routed_scaling_factor
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
@@ -127,13 +135,6 @@ class GenericMoeLayer(nn.Module):
         )
 
         if self.correction_bias is not None:
-            self.group_topk = GroupTopK()
-            self.renormalize = self.config.has_moe_norm
-            self.num_expert_group = self.config.moe_n_group
-
-            self.topk_group = self.config.moe_topk_group
-            self.n_routed_experts = self.config.expert_num  # config.n_routed_experts
-            self.routed_scaling_factor = self.config.routed_scaling_factor
             self.group_topk(
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
@@ -152,34 +153,52 @@ class GenericMoeLayer(nn.Module):
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
 
-        use_unified_allreduce = (
-            self.shared_expert is not None
-            and self.ffn_tp_size > 1
-            and self.fused_moe.supports_skip_allreduce
+        is_ep_mode = self.ep_size > 1
+        # EP mode: routed expert output is already complete (EP combine handles it).
+        # Shared expert output is TP-partial and needs separate allreduce.
+        use_ep_shared_allreduce = (
+            self.shared_expert is not None and self.ffn_tp_size > 1 and is_ep_mode
         )
+        # TODO(perf): In TP-only mode (ep_size == 1, ffn_tp_size > 1), both
+        # routed and shared experts do separate TP all_reduces (2 total).
+        # When fused_moe supports skip_allreduce, switch to a unified allreduce:
+        # both skip their internal allreduce, combine partial outputs, then do
+        # a single TP all_reduce on the combined result.
 
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
-            skip_allreduce=use_unified_allreduce,
         )
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(
-                hidden_states, skip_allreduce=use_unified_allreduce
+                hidden_states,
+                skip_allreduce=use_ep_shared_allreduce,
             )
-            if self.shared_expert_gate is not None:
-                gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
-                # Fused: experts_output += sigmoid(gate_output) * shared_expert_output
-                self.sigmoid_gate_scale_add(
-                    gate_output, shared_expert_output, experts_output
-                )
+            if use_ep_shared_allreduce:
+                # EP mode: routed expert output is already complete
+                # (EP combine via all_to_all / all_gather aggregated across ranks).
+                # Only the shared expert output is TP-partial and needs all_reduce.
+                shared_expert_output = all_reduce(shared_expert_output, group=Group.TP)
+                if self.shared_expert_gate is not None:
+                    gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
+                    # Fused: experts_output += sigmoid(gate_output) * shared_expert_output
+                    self.sigmoid_gate_scale_add(
+                        gate_output, shared_expert_output, experts_output
+                    )
+                else:
+                    experts_output = experts_output + shared_expert_output
             else:
-                experts_output = experts_output + shared_expert_output
-
-            if use_unified_allreduce:
-                experts_output = all_reduce(experts_output, group=Group.TP)
+                # TP-only mode: same as main - each component does its own allreduce.
+                if self.shared_expert_gate is not None:
+                    gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
+                    # Fused: experts_output += sigmoid(gate_output) * shared_expert_output
+                    self.sigmoid_gate_scale_add(
+                        gate_output, shared_expert_output, experts_output
+                    )
+                else:
+                    experts_output = experts_output + shared_expert_output
 
         return experts_output
 
@@ -269,7 +288,9 @@ class GenericMoeDecoderLayer(nn.Module):
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.self_attn(
-            hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
+            hidden_states=hidden_states,
+            fmha_impl=fmha_impl,
+            kv_cache=kv_cache,
         )
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)

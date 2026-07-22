@@ -13,7 +13,7 @@ import os
 from typing import Any, Dict, List, Mapping, Type, Union
 
 from rtp_llm.test.smoke.case_runner import CaseRunner
-from rtp_llm.test.smoke.common_def import REL_PATH
+from rtp_llm.test.smoke import common_def
 from rtp_llm.test.smoke.multi_inst_case_runner import (
     DpSeperationCaseRunner,
     FrontAppSeperationCaseRunner,
@@ -23,6 +23,7 @@ from rtp_llm.test.smoke.multi_inst_case_runner import (
 from rtp_llm.test.smoke.task_info import TaskInfo
 from rtp_llm.test.smoke.utils import resolve_prompt_refs
 from rtp_llm.test.smoke_framework.manifest import _parse_world_size, get_gpu_count
+from rtp_llm.test.smoke.rel_path_config import compute_smoke_rel_path
 from rtp_llm.utils.import_util import has_internal_source
 
 
@@ -71,11 +72,15 @@ def _build_env_args(
     """
     if isinstance(smoke_args, dict):
         env_args: Dict[str, List[str]] = {}
+        # Shared env list applies to every role unless overridden per-role.
+        shared_envs = list(envs) if isinstance(envs, list) else []
         envs_dict = envs if isinstance(envs, dict) else {}
         for role, args_str in smoke_args.items():
-            role_envs = list(envs_dict.get(role, []))
+            role_envs = list(shared_envs)
+            role_envs.extend(envs_dict.get(role, []))
             ws = _parse_world_size(args_str)
             role_envs.append(f"WORLD_SIZE={ws}")
+            role_envs.append("ENABLE_STABLE_SCATTER_ADD=ON")
             role_envs.append("DETERMINISTIC_GEMM=1")
             env_args[role] = role_envs
         return env_args
@@ -116,6 +121,15 @@ def run_smoke_test(test_name: str, test_config: Mapping[str, Any]) -> None:
     task_info_path = test_config["task_info"]
     gpu_card = test_config["gpu_type"]
 
+    # Compute per-test REL_PATH from data_root instead of using the
+    # import-time captured value.  This ensures task_info and prompt
+    # references resolve against the correct data tree (oss/internal).
+    data_root = test_config.get("data_root")
+    if data_root is not None:
+        local_rel_path = compute_smoke_rel_path(common_def.ABS_PATH, prefer=data_root)
+    else:
+        local_rel_path = common_def.REL_PATH
+
     env_args = _build_env_args(smoke_args, envs)
     _configure_optional_internal_env(test_config)
 
@@ -140,16 +154,26 @@ def run_smoke_test(test_name: str, test_config: Mapping[str, Any]) -> None:
     # Match legacy entry.py behavior: prefer json5 (handles comments), fall back
     # to stdlib json. Without this, parsing fails with "Expecting value: line 1
     # column 1" because stdlib json doesn't accept `//` comments.
-    with open(os.path.join(REL_PATH, task_info_path), "r") as f:
+    with open(os.path.join(local_rel_path, task_info_path), "r") as f:
         try:
             import json5
 
             x = json5.load(f)
         except ImportError:
             x = json.load(f)
-    if "query_result" in x:
-        x["query_result"] = [resolve_prompt_refs(qr) for qr in x["query_result"]]
-    task_info = TaskInfo(**x, taskinfo_rel_path=os.path.join(REL_PATH, task_info_path))
+    # Temporarily update common_def.REL_PATH so resolve_prompt_refs (and
+    # any other code that reads it) uses the per-test data root.
+    saved_rel_path = common_def.REL_PATH
+    common_def.REL_PATH = local_rel_path
+    # Clear prompt cache so it reloads from the correct data tree.
+    import rtp_llm.test.smoke.utils as _smoke_utils
+    _smoke_utils._PROMPT_CACHE = None
+    try:
+        if "query_result" in x:
+            x["query_result"] = [resolve_prompt_refs(qr) for qr in x["query_result"]]
+    finally:
+        common_def.REL_PATH = saved_rel_path
+    task_info = TaskInfo(**x, taskinfo_rel_path=os.path.join(local_rel_path, task_info_path))
 
     runner_class = get_runner_type(smoke_args, envs)
     logging.info("runner_class: %s", str(runner_class))

@@ -30,8 +30,9 @@ def _fwd_kernel_ep_scatter_1(
     )
     cumsum = tl.cumsum(tokens_per_expert) - tokens_per_expert
     tl.store(expert_start_loc + offset_cumsum, cumsum, mask=offset_cumsum < num_experts)
-    cur_expert_start = tl.load(expert_start_loc + cur_expert)
-    cur_expert_token_num = tl.load(num_recv_tokens_per_expert + cur_expert)
+    expert_mask = offset_cumsum == cur_expert
+    cur_expert_start = tl.sum(tl.where(expert_mask, cumsum, tl.zeros_like(cumsum)))
+    cur_expert_token_num = tl.sum(tl.where(expert_mask, tokens_per_expert, tl.zeros_like(tokens_per_expert)))
     m_indices_start_ptr = m_indices + cur_expert_start
     off_expert = tl.arange(0, BLOCK_E)
     for start_m in tl.range(0, cur_expert_token_num, BLOCK_E, num_stages=4):
@@ -555,12 +556,18 @@ def recompute_topk_ids_sum_expert_count(
     Recompute topk_ids by subtracting current_expert_start_id and count expert tokens.
 
     Args:
-        topk_ids: Tensor of shape [num_tokens, topk] containing expert IDs
+        topk_ids: Tensor of shape [num_tokens, topk] containing expert IDs.
+            Sentinel value -1 is allowed and treated as a padding/invalid slot.
         current_expert_start_id: Starting expert ID to subtract
         num_local_experts: Number of local experts
 
     Returns:
         tuple: (adjusted_topk_ids, expert_count)
+
+    Sentinel contract (relied on by PureDpRouter padding):
+        - Input slots equal to -1 are NOT counted in expert_count.
+        - Output adjusted_topk_ids preserves -1 in those slots (no remap).
+        - Out-of-range expert ids (after subtraction) also collapse to -1.
     """
     device = topk_ids.device
     num_tokens, topk = topk_ids.shape

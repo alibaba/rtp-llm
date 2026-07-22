@@ -111,7 +111,7 @@ struct FMHAConfig {
     bool        enable_xqa              = true;
     bool        use_aiter_pa            = true;
     bool        use_asm_pa              = true;
-    bool        use_triton_pa           = true;
+    bool        use_triton_pa           = false;
     int64_t     absorb_opt_len          = 1024;
     std::string to_string() const;
 };
@@ -137,12 +137,14 @@ struct KVCacheConfig {
     int         use_block_cache              = -1;  // -1 means not set, use Optional<int> equivalent
     bool        enable_device_cache          = true;
     bool        enable_memory_cache          = false;
+    // When true, memory-cache H2D/D2H may use split-KV SM scatter/gather (CUDA) when layout is eligible.
     bool        enable_memory_cache_sm_copy  = false;
     bool        enable_remote_cache          = false;
     bool        write_cache_sync             = false;
     bool        enable_tiered_memory_cache   = false;
     int64_t     device_cache_min_free_blocks = 0;
-    int         load_cache_retry_times       = 1;
+    int         load_cache_retry_times       = 1;  // Maximum retry attempts for load cache transfer failures
+
 
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
@@ -175,6 +177,9 @@ struct ProfilingDebugLoggingConfig {
     bool        ft_core_dump_on_exception = false;
     std::string ft_alog_conf_path         = "";
     bool        gen_timeline_sync         = false;
+    int         timeline_start_step       = 0;
+    int         timeline_num_steps        = 3;
+    std::string timeline_trace_name       = "profiler";
     std::string torch_cuda_profiler_dir   = "";
     int         log_file_backup_count     = 16;
     bool        debug_load_server         = false;
@@ -222,6 +227,7 @@ struct MoeConfig {
     bool        use_deepep_internode       = false;
     bool        use_deepep_low_latency     = true;
     bool        use_deepep_p2p_low_latency = false;
+    bool        use_mori_ep                = false;
     bool        fake_balance_expert        = false;
     bool        hack_moe_expert            = false;
     int         deep_ep_num_sm             = 0;
@@ -305,9 +311,26 @@ struct BatchDecodeSchedulerConfig {
     std::string to_string() const;
 };
 
+enum class PDFusionSchedulerMode {
+    DEFAULT = 0,
+    RATIO   = 1,
+    UNKNOWN = 2,
+};
+
+PDFusionSchedulerMode parsePDFusionSchedulerMode(const std::string& mode);
+
 struct FIFOSchedulerConfig {
-    int64_t     max_context_batch_size = 1;
-    int64_t     max_batch_tokens_size  = 0;
+    int64_t max_context_batch_size = 1;
+    int64_t max_batch_tokens_size  = 0;
+    // PDFUSION scheduler mode. Supported values:
+    //   ""      -> default FIFO/decode-first scheduler
+    //   "ratio" -> PDFusionRatioScheduler with decode_prefill_ratio
+    std::string pdfusion_scheduler_mode = "";
+    // PDFusionRatioScheduler cadence knob, as a decode:prefill round ratio string.
+    //   "N"   -> 1 prefill : N decode (decode-heavy); "1" = strict alternation.
+    //   "1/X" -> X prefill : 1 decode (prefill-heavy).
+    //   invalid input falls back to "1".
+    std::string decode_prefill_ratio = "1";
     std::string to_string() const;
 };
 
@@ -322,7 +345,6 @@ struct RuntimeConfig {
 
     // Scheduler configuration
     bool                       use_batch_decode_scheduler = false;
-    bool                       use_gather_batch_scheduler = false;
     BatchDecodeSchedulerConfig batch_decode_scheduler_config;
     FIFOSchedulerConfig        fifo_scheduler_config;
 

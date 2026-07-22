@@ -32,9 +32,8 @@ cd RTP-LLM
 # --config=rocm build target for AMD
 pip wheel . --no-deps --no-build-isolation -w dist/
 
-ln  -sf `pwd`/bazel-out/k8-opt/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2_grpc.py  `pwd`/rtp_llm/cpp/model_rpc/proto/
-ln  -sf `pwd`/bazel-out/k8-opt/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py  `pwd`/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py
-
+# Install the built wheel
+pip install dist/rtp_llm-*.whl
 ```
 
 

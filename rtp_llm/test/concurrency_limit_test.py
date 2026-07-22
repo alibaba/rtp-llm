@@ -77,12 +77,16 @@ class ConcurrencyLimitTest(TestCase):
                 OpenaiEndpoint, "chat_completion", fake_inference
             ),
         ]
+        self.port = random.randint(20000, 30000)
+        self._patches.append(
+            unittest.mock.patch.dict(
+                os.environ,
+                {"CONCURRENCY_LIMIT": "16", "START_PORT": str(self.port)},
+            )
+        )
         for p in self._patches:
             p.start()
 
-        self.port = random.randint(20000, 30000)
-        os.environ["CONCURRENCY_LIMIT"] = "16"
-        os.environ["START_PORT"] = str(self.port)
         py_env_configs = PyEnvConfigs()
         py_env_configs.server_config.start_port = self.port
         py_env_configs.server_config.rank_id = 0

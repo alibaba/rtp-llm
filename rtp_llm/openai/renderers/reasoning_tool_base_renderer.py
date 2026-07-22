@@ -32,7 +32,10 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector 
     BaseFormatDetector,
 )
 from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
-from rtp_llm.openai.renderers.sglang_helpers.token_normalizer import TokenNormalizer
+from rtp_llm.openai.renderers.sglang_helpers.token_normalizer import (
+    TokenNormalizer,
+    expand_prev_window,
+)
 from rtp_llm.utils.base_model_datatypes import GenerateOutput
 
 
@@ -187,6 +190,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             request: 聊天完成请求
             context: 模板渲染上下文
         """
+
         # 设置默认的tojson过滤器
         # 透传 json.dumps 支持的关键字参数（如 separators / indent / ensure_ascii），
         # Kimi-K2 等模板会调用 `tojson(separators=(',', ':'))`。
@@ -417,6 +421,9 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         if normalizer_yielded and new_token_ids:
             status.last_token_length = len(new_token_ids)
             status.last_output_ids = status.output_ids
+            status.last_token_length = expand_prev_window(
+                self.tokenizer, status.last_output_ids, status.last_token_length
+            )
 
         if collected_deltas:
             merged_delta = self._merge_deltas(collected_deltas)

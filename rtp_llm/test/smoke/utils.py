@@ -6,7 +6,7 @@ import shutil
 import tempfile
 from typing import Any
 
-from rtp_llm.test.smoke.common_def import REL_PATH
+from rtp_llm.test.smoke import common_def
 
 
 def create_temporary_copy(rel_path: str):
@@ -15,7 +15,7 @@ def create_temporary_copy(rel_path: str):
         return rel_path
     if rel_path.startswith("http"):
         return rel_path
-    path = os.path.abspath(os.path.join(REL_PATH, rel_path))
+    path = os.path.abspath(os.path.join(common_def.REL_PATH, rel_path))
     tmp = tempfile.NamedTemporaryFile(delete=False)
     shutil.copy2(path, tmp.name)
     return tmp.name
@@ -44,7 +44,7 @@ def _load_prompt_candidates():
     global _PROMPT_CACHE
     if _PROMPT_CACHE is not None:
         return _PROMPT_CACHE
-    candidates_path = os.path.join(REL_PATH, "data", "prompt_candidates.json")
+    candidates_path = os.path.join(common_def.REL_PATH, "data", "prompt_candidates.json")
     if not os.path.exists(candidates_path):
         _PROMPT_CACHE = {}
         return _PROMPT_CACHE

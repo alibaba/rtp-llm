@@ -102,6 +102,8 @@ class FusedQKRMSNorm(nn.Module):
         enable_pdl: bool = False,
     ):
         super().__init__()
+        if flashinfer is None:
+            raise RuntimeError("FusedQKRMSNorm requires flashinfer (CUDA-only)")
         self.q_weight = q_weight
         self.k_weight = k_weight
         self.eps = eps

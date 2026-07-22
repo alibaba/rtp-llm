@@ -37,6 +37,20 @@ cc_test(
 )
 
 cc_test(
+    name = "batch_decode_scheduler_test",
+    srcs = [
+        "BatchDecodeSchedulerTest.cc",
+    ],
+    data = [],
+    copts = copts() + ["-fno-access-control"],
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
     name = "fifo_scheduler_cancel_test",
     srcs = [
         "FIFOSchedulerCancelTest.cc",

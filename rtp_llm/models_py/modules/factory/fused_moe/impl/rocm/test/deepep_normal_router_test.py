@@ -180,7 +180,7 @@ def worker_function(
         destroy_distributed_environment()
 
 
-def test_single(world_size: int, use_fp8: bool):
+def run_single(world_size: int, use_fp8: bool):
     port_manager = PortManager()
     ports, locks = port_manager.get_consecutive_ports(1)
     nccl_port = ports[0]
@@ -243,7 +243,7 @@ if __name__ == "__main__":
     available_world_sizes = [ws for ws in [2, 4] if ws <= max_gpu_count]
     print(f"可用的world_size: {available_world_sizes}")
 
-    # 为每个world_size运行test_single函数
+    # 为每个world_size运行run_single函数
     for use_fp8 in [False]:
         for world_size in available_world_sizes:
-            test_single(world_size, use_fp8)
+            run_single(world_size, use_fp8)

@@ -34,7 +34,7 @@ class TRTMHAImpl(FMHAImplBase):
         # Store input info
         self.attn_inputs = attn_inputs
         self.input_lengths = attn_inputs.input_lengths
-        self.cu_seq_lens = attn_inputs.cu_seqlens
+        self.cu_seq_lens = attn_inputs.cu_seqlens_device
 
         # Only TRTMHAImpl uses prefill_cuda_graph_copy_params
         self.prefill_cuda_graph_copy_params = attn_inputs.prefill_cuda_graph_copy_params
@@ -138,15 +138,12 @@ class TRTPagedMHAImpl(FMHAImplBase):
         # Store input info
         self.attn_inputs = attn_inputs
         self.input_lengths = attn_inputs.input_lengths
-        self.cu_seq_lens = attn_inputs.cu_seqlens
+        self.cu_seq_lens = attn_inputs.cu_seqlens_device
 
         # Create params
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
-
-    def support_cuda_graph(self) -> bool:
-        return False
 
     @classmethod
     def support(

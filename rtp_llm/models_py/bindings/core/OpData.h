@@ -60,6 +60,8 @@ struct GptModelInputs {
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
     torch::Tensor text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]
     torch::Tensor mm_features_locs;  // features index
+    std::optional<std::vector<torch::Tensor>>
+        mm_extra_input;  // model-specific extra input (opaque flat 1-D, e.g. deepstack)
 
     std::optional<std::vector<torch::Tensor>> input_embeddings;  // all input embeddings in gathered stream stored here
     torch::Tensor                             input_embeddings_locs;  // input embeddings index
@@ -276,6 +278,13 @@ struct FfnConfigs {
     std::optional<MoeConfigs> moe_configs = std::nullopt;
 };
 
+struct GreedySamplingBuffers {
+    torch::Tensor seed_host;
+    torch::Tensor offset_host;
+    torch::Tensor output_ids_ptrs_host;
+    size_t        max_batch_size = 0;
+};
+
 struct GreedyParams {
     torch::Tensor logits;            // [batch_size, vocab_size_padded], mutable for in-place penalty
     torch::Tensor input_lengths;     // [batch_size]
@@ -293,12 +302,15 @@ struct GreedyParams {
     std::optional<torch::Tensor> cum_log_probs;
     std::optional<torch::Tensor> output_log_probs;
 
+    bool return_original_all_probs = false;
+
     std::optional<torch::Tensor> output_all_probs;
     std::optional<torch::Tensor> presence_penalty;
     std::optional<torch::Tensor> frequency_penalty;
     std::optional<torch::Tensor> do_sample;
 
     std::vector<at::Generator> generator;
+    GreedySamplingBuffers*     sampling_buffers = nullptr;
 };
 
 struct GreedyOutput {
@@ -306,12 +318,13 @@ struct GreedyOutput {
 };
 
 struct BeamSearchParams {
-    const torch::Tensor& logits;            // [batch_size, num_beams_in, vocab_size]
-    torch::Tensor        token_ids;         // [batch_size, num_beams_in, max_seq_len]
-    torch::Tensor        input_lengths;     // [batch_size, num_beams_in]
-    torch::Tensor        sequence_lengths;  // [batch_size, num_beams_in]
-    torch::Tensor        cum_log_probs;     // [batch_size, num_beams_in]
-    size_t               num_beams_out = 0;
+    // logits is modified inplace to save memory — callers must not reuse it after the call.
+    torch::Tensor logits;            // [batch_size, num_beams_in, vocab_size]
+    torch::Tensor token_ids;         // [batch_size, num_beams_in, max_seq_len]
+    torch::Tensor input_lengths;     // [batch_size, num_beams_in]
+    torch::Tensor sequence_lengths;  // [batch_size, num_beams_in]
+    torch::Tensor cum_log_probs;     // [batch_size, num_beams_in]
+    size_t        num_beams_out = 0;
 };
 
 struct BeamSearchOutput {
@@ -380,6 +393,17 @@ struct SpeculativeSamplingParams {
         output_token_ids_d(output_token_ids_d),
         output_accepted_token_num_d(output_accepted_token_num_d),
         output_emitted_token_num_d(output_emitted_token_num_d) {}
+};
+
+struct RejectionSamplingParams {
+    torch::Tensor draft_probs_d;
+    torch::Tensor draft_token_ids_d;
+    torch::Tensor uniform_samples_d;
+    torch::Tensor target_probs_d;
+    torch::Tensor target_token_ids_d;
+    torch::Tensor output_token_ids_d;
+    torch::Tensor output_accepted_token_num_d;
+    torch::Tensor do_sample_d;
 };
 
 }  // namespace rtp_llm

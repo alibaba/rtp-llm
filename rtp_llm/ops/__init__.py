@@ -61,17 +61,46 @@ parent_dir = os.path.dirname(current_dir)
 libs_path = os.path.join(parent_dir, "libs")
 SO_NAME = "libth_transformer_config.so"
 
-# All .so files are in rtp_llm/libs/ (copied by setup.py during uv/pip install)
+
+def _find_so_in_bazel_bin() -> str:
+    """Dev / `bazel test` fallback: locate SO_NAME under the workspace bazel-bin
+    tree (setup.py does not populate libs/ in those flows). Returns the
+    containing directory, or "" if not found / not a bazel workspace."""
+    bazel_bin = os.path.normpath(os.path.join(parent_dir, "..", "bazel-bin"))
+    if not os.path.isdir(bazel_bin):
+        return ""
+    for root, _, files in os.walk(bazel_bin):
+        if SO_NAME in files:
+            return root
+    return ""
+
+
+# All .so files are in rtp_llm/libs/ (copied by setup.py during uv/pip install).
 so_path = libs_path
 _so_available = os.path.exists(os.path.join(so_path, SO_NAME))
 if not _so_available:
-    logging.warning(
-        f"{SO_NAME} not found in {libs_path}. "
-        f"C++ extensions not available (collection-only mode)."
-    )
-else:
+    # Restore the dev/bazel-test fallback removed in the pyproject migration.
+    bazel_so_path = _find_so_in_bazel_bin()
+    if bazel_so_path:
+        so_path = bazel_so_path
+        _so_available = True
+
+if _so_available:
     logging.info(f"so path: {so_path}")
     sys.path.append(so_path)
+elif os.environ.get("RTP_LLM_ALLOW_MISSING_SO") == "1":
+    # Explicit collection-only mode (e.g. pytest collection with no build).
+    logging.warning(
+        f"{SO_NAME} not found in {libs_path} or bazel-bin; running collection-only "
+        f"(RTP_LLM_ALLOW_MISSING_SO=1). C++ extensions are unavailable."
+    )
+else:
+    # Fail fast by default so a missing/broken build is not silently degraded.
+    raise ImportError(
+        f"{SO_NAME} not found in {libs_path} or bazel-bin. Build the C++ extensions "
+        f"(e.g. `pip install -e .` or `bazel build ...`), or set "
+        f"RTP_LLM_ALLOW_MISSING_SO=1 to allow collection-only mode."
+    )
 
 
 # hack for amd rocm 6.3.0.2 test, libcaffe2_nvrtc.so should have been automatically loaded via torch
@@ -94,8 +123,35 @@ from ctypes import cdll
 try:
     _pyver = f"{sys.version_info.major}.{sys.version_info.minor}"
     cdll.LoadLibrary(sysconfig.get_config_var("LIBDIR") + f"/libpython{_pyver}.so")
-except OSError:
+except (OSError, TypeError):
     pass
+
+
+# Stub used for frontend / standalone / collection-only modes where the C++
+# extension is unavailable. Defined before the import blocks so they can fall
+# back to it.
+class EmptyClass:
+    def __init__(self, **kwargs):
+        pass
+
+
+# Symbols imported from libth_transformer_config; stubbed with EmptyClass in
+# collection-only mode (RTP_LLM_ALLOW_MISSING_SO=1) when the .so is missing.
+_LIBTH_CONFIG_SYMBOLS = [
+    "ArpcConfig", "AttentionConfigs", "GrpcConfig", "BatchDecodeSchedulerConfig",
+    "CacheStoreConfig", "ConcurrencyConfig", "DeviceResourceConfig", "EplbMode",
+    "FfnDisAggregateConfig", "FIFOSchedulerConfig", "FMHAConfig", "HWKernelConfig",
+    "KVCacheConfig", "MiscellaneousConfig", "MlaOpsType", "ModelConfig",
+    "ModelSpecificConfig", "MoeConfig", "NcclCommConfig", "PDSepConfig",
+    "ParallelismConfig", "ProfilingDebugLoggingConfig", "RopeCache", "RopeConfig",
+    "RopeStyle", "TaskType", "VitConfig", "VitSeparation", "check_rope_cache",
+    "get_rope_cache", "get_rope_cache_once", "CPRotateMethod", "PrefillCPConfig",
+    "QuantAlgo", "RoleType", "RuntimeConfig", "SpecialTokens",
+    "SpeculativeExecutionConfig", "SpeculativeType", "EPLBConfig", "ActivationType",
+    "DataType", "KvCacheDataType", "HybridAttentionConfig", "HybridAttentionType",
+    "LinearAttentionConfig", "MultimodalInput", "MMPreprocessConfig",
+    "EplbConfig", "cpp_get_block_cache_keys",
+]
 
 try:
     from libth_transformer_config import (
@@ -155,10 +211,22 @@ try:
     from libth_transformer_config import (
         get_block_cache_keys as cpp_get_block_cache_keys,
     )
+    from libth_transformer_config import MultimodalInput, MMPreprocessConfig
 
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
-    raise e
+    if os.environ.get("RTP_LLM_ALLOW_MISSING_SO") != "1":
+        raise e
+    # Collection-only mode: stub every libth_transformer_config symbol with
+    # EmptyClass so `import rtp_llm` succeeds without the C++ extension. Access
+    # to these types is non-functional (pytest collection / frontend only).
+    logging.warning(
+        "RTP_LLM_ALLOW_MISSING_SO=1: stubbing libth_transformer_config symbols "
+        "with EmptyClass (collection-only mode; C++ config types non-functional)."
+    )
+    for _sym in _LIBTH_CONFIG_SYMBOLS:
+        globals()[_sym] = EmptyClass
+
 
 def get_block_cache_keys(token_ids: List[int], block_size: int) -> List[int]:
     try:
@@ -175,11 +243,6 @@ def get_block_cache_keys(token_ids: List[int], block_size: int) -> List[int]:
         return []
 
 
-# Frontend not related
-class EmptyClass:
-    def __init__(self, **kwargs):
-        pass
-
 try:
     import librtp_compute_ops
     from .compute_ops import rtp_llm_ops
@@ -192,16 +255,12 @@ except BaseException as e:
 
 try:
 
-    from libth_transformer import MultimodalInput as MultimodalInputCpp
     from libth_transformer import RtpEmbeddingOp, RtpLLMOp
     from libth_transformer import EmbeddingCppOutput
 
     libth_transformer_imported = True
 except BaseException as e:
-    MultimodalInputCpp = EmbeddingCppOutput = (
-        EmptyClass
-    )
-    RtpEmbeddingOp = RtpLLMOp = EmptyClass
+    EmbeddingCppOutput = RtpEmbeddingOp = RtpLLMOp = EmptyClass
 
     logging.warning(f"libth_transformer import failed: {type(e).__name__}: {e}")
     logging.info(

@@ -129,9 +129,8 @@ def _in_pytest_plugin_discovery() -> bool:
 
 
 try:
-    import triton  # noqa: F401
-
     if not _in_pytest_plugin_discovery():
+        import triton  # noqa: F401
         from .ops import *  # noqa: F401,F403
 except Exception as exc:
     _bootstrap_error = exc

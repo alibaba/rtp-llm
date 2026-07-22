@@ -12,6 +12,7 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
+from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
 from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
     QWenTokenizer,
 )
@@ -205,7 +206,7 @@ class GenerateConfigTest(TestCase):
         generate_env_config.think_end_tag = "</think>"
         special_tokens = SpecialTokens()
         tokenizer_path = f"{self.test_data_path}/model_test/fake_test/testdata/deepseek_r1_qwen_14b_tokenizer"
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        tokenizer = BaseTokenizer(tokenizer_path)
         generate_config_dict = self._create_generate_config()
         generate_config_dict.update({"max_thinking_tokens": 20})
         generate_config = Pipeline.create_generate_config(
@@ -226,7 +227,7 @@ class GenerateConfigTest(TestCase):
         generate_env_config.think_end_tag = "</think>\n\n"
         special_tokens = SpecialTokens()
         tokenizer_path = f"{self.test_data_path}/model_test/fake_test/testdata/deepseek_r1_qwen_14b_tokenizer"
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        tokenizer = BaseTokenizer(tokenizer_path)
         generate_config_dict = self._create_generate_config()
         generate_config_dict.update({"max_thinking_tokens": 20})
         generate_config = Pipeline.create_generate_config(

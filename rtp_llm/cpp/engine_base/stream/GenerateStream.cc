@@ -78,6 +78,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     is_context_stream_  = std::make_shared<bool>();
     *is_context_stream_ = true;
     generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
+    sub_generate_status_.reserve(maxBatchSize());
     sub_generate_status_.clear();
     resizeSubGenerateStatus(init_batch_size);
 
@@ -113,10 +114,7 @@ const CacheKeysType& GenerateStream::cacheKeys(int32_t batch_id) const {
 absl::Status GenerateStream::initKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
-    if (generate_status_->status == StreamState::WAITING) {
-        wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
-    }
-    auto ret = stream_cache_resource_->initKVBlock(reserve_step_);
+    auto                        ret = stream_cache_resource_->initKVBlock(reserve_step_);
     if (!ret.ok()) {
         RTP_LLM_LOG_WARNING("GenerateStream::initKVBlock: initKVBlock failed, stream_id: %lld", streamId());
     }
@@ -319,16 +317,6 @@ int GenerateStream::initialReuseLength() const {
 
 void GenerateStream::setReuseLength(int reuse_length) {
     reuse_length_ = reuse_length;
-    if (generate_input_->mm_locs) {
-        auto& locs      = generate_input_->mm_locs.value();
-        auto* locs_data = locs.data_ptr<int32_t>();
-        for (int i = locs.numel() - 1; i >= 0; --i) {
-            if (reuse_length_ > locs_data[i]) {
-                reuse_mm_length_ = i + 1;
-                break;
-            }
-        }
-    }
 }
 
 void GenerateStream::setLocalReuseLength(int length) {
@@ -409,23 +397,39 @@ int GenerateStream::currentExecuteTokenSize() {
 
 std::vector<torch::Tensor> GenerateStream::multimodalFeatures() const {
     if (generate_input_->multimodal_features) {
-        auto& features = generate_input_->multimodal_features.value();
-        return std::vector<torch::Tensor>(features.begin() + reuse_mm_length_, features.end());
+        return generate_input_->multimodal_features.value();
     } else {
         return std::vector<torch::Tensor>();
     }
 }
 
+std::vector<torch::Tensor> GenerateStream::multimodalExtraInput() const {
+    if (generate_input_->mm_extra_input) {
+        return generate_input_->mm_extra_input.value();
+    }
+    return std::vector<torch::Tensor>();
+}
+
+bool GenerateStream::hasMultimodalExtraInput() const {
+    if (generate_input_->mm_extra_input) {
+        return generate_input_->mm_extra_input.value().size() > 0;
+    }
+    return false;
+}
+
 int GenerateStream::multimodalFeaturesLength() const {
-    return multimodalFeatures().size() * currentBatchSize();
+    if (generate_input_->multimodal_features) {
+        return generate_input_->multimodal_features.value().size() * currentBatchSize();
+    } else {
+        return 0;
+    }
 }
 
 torch::Tensor GenerateStream::multimodalLocations() const {
     if (!generate_input_->mm_locs) {
         return torch::Tensor();
     }
-    auto& mm_locs = generate_input_->mm_locs.value();
-    return mm_locs.slice(0, reuse_mm_length_, mm_locs.numel());
+    return generate_input_->mm_locs.value();
 }
 
 vector<int> GenerateStream::textTokensMask() const {
@@ -531,10 +535,16 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
 StreamState GenerateStream::moveToNext() {
     checkTimeout();
     std::lock_guard<std::mutex> lock(*mutex_);
-    StreamState                 state = generate_status_->moveToNext();
+    const auto                  old_status = getStatus();
+    StreamState                 state      = generate_status_->moveToNext();
+    const auto                  new_status = getStatus();
+
+    if (old_status == StreamState::WAITING && new_status != StreamState::WAITING) {
+        wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+    }
 
     // notify one thread waiting for stream completion
-    if (getStatus() == StreamState::FINISHED) {
+    if (new_status == StreamState::FINISHED) {
         cv_->notify_one();
     }
     return state;
@@ -810,13 +820,15 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(update_info);
 
-    bool is_done = getStatus() == StreamState::FINISHED;
+    // checkFinished() 已将本轮 updateOutput 中上报的 GenerateDone/Error 事件应用到状态上，
+    // 即使 moveToNext() 还未被调度器轮询，这里也能拿到与事件一致的"已完成"判断。
+    bool is_done = generate_status_->checkFinished();
 
     if (!is_done) {
         updateLogitProcessorStatus(update_info);
     }
 
-    if (!is_done || reuseCache()) {
+    if (!is_done || stream_cache_resource_->reuseCache()) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
         auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
         if (!update_res) {

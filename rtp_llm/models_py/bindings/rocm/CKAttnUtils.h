@@ -22,6 +22,7 @@ struct CKAttn {
     torch::Tensor kv_cache_kernel_block_id_device;
 
     torch::Tensor prefix_lengths;
+    torch::Tensor position_ids;
     torch::Tensor cu_seqlens;
     torch::Tensor cu_kv_seqlens;
     torch::Tensor input_lengths;
@@ -52,14 +53,10 @@ inline ParamsPtr PrepareCKAttn(const AttentionConfigs& configs,
     if (batch_size <= 0 || !kv_cache_block_id.defined() || kv_cache_block_id.numel() == 0) {
         return nullptr;
     }
-    auto            ck_attn    = std::make_shared<CKAttn>();
-    KvCacheDataType cache_type = KvCacheDataType::BASE;
-    if (configs.kv_cache_dtype == KvCacheDataType::INT8) {
-        RTP_LLM_LOG_DEBUG("now use kv_cache int8");
-        cache_type = KvCacheDataType::INT8;
-    }
-    const auto max_blocks_per_batch = kv_cache_block_id.size(1);
-    auto const elemSize             = use_fp8_fmha ? sizeof(int8_t) : 2;  // 2 for kv cache fp16
+    auto            ck_attn              = std::make_shared<CKAttn>();
+    KvCacheDataType cache_type           = KvCacheDataType::BASE;
+    const auto      max_blocks_per_batch = kv_cache_block_id.size(1);
+    auto const      elemSize             = use_fp8_fmha ? sizeof(int8_t) : 2;  // 2 for kv cache fp16
 
     ck_attn->kv_cache_offset           = torch::empty({(int64_t)batch_size, 1, 2, (int64_t)max_blocks_per_batch},
                                             torch::TensorOptions(torch::kInt32).device(torch::kCUDA));

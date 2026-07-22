@@ -40,9 +40,9 @@ namespace tensorrt_llm {
         {                                                                                                              \
             TLLM_CUDA_CHECK(cudaFuncGetAttributes(&attr, beamStage2Kernel<T, paddedBeamWidth, 128, false>));           \
         }                                                                                                              \
-        else if (nVPart <= 32)                                                                                         \
+        else if (nVPart <= kernels::MIN_BLOCK_SIZE)                                                                    \
         {                                                                                                              \
-            TLLM_CUDA_CHECK(cudaFuncGetAttributes(&attr, beamStage2Kernel<T, paddedBeamWidth, 32, true>));             \
+            TLLM_CUDA_CHECK(cudaFuncGetAttributes(&attr, beamStage2Kernel<T, paddedBeamWidth, kernels::MIN_BLOCK_SIZE, true>)); \
         }                                                                                                              \
         else if (nVPart <= 64)                                                                                         \
         {                                                                                                              \
@@ -57,7 +57,7 @@ namespace tensorrt_llm {
 
 #define GET_INFO_STAGE3(paddedBeamWidth, isV2)                                                                         \
     {                                                                                                                  \
-        int constexpr nThreadStage3 = (paddedBeamWidth + 31) / 32 * 32;                                                \
+        int constexpr nThreadStage3 = std::min(std::max((paddedBeamWidth + 31) / 32 * 32, (int)kernels::MIN_BLOCK_SIZE), (int)kernels::MAX_BLOCK_SIZE); \
         TLLM_CUDA_CHECK(                                                                                               \
             cudaFuncGetAttributes(&attr, beamStage3Kernel<T, paddedBeamWidth, nThreadStage3, true, isV2>));            \
         break;                                                                                                         \
@@ -207,7 +207,7 @@ BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
             batchSize, beamWidthIn * beamWidthOut * 2, beamWidthOut * 2, true);
         size_t const nByteStage3 = sizeof(T) * beamWidthIn * beamWidthOut * 2;
         config.mWorkspaceSize = nByteStage2LogProbs + nByteStage2Ids
-            + max(nByteStage1LogProbs + nByteStage1Ids + max(nByteStage1TopK, nByteStage2TopK), nByteStage3);
+            + std::max(nByteStage1LogProbs + nByteStage1Ids + std::max(nByteStage1TopK, nByteStage2TopK), nByteStage3);
     }
 
     RTP_LLM_LOG_DEBUG("configureBeamSearch: "

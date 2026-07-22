@@ -370,7 +370,7 @@ class FlashInferTRTLLMPrefillOp(object):
             seq_lens=sequence_lengths,
             input_lens=attention_inputs.input_lengths,
             block_tables=attention_inputs.kv_cache_kernel_block_id_device,
-            cu_seqlens=attention_inputs.cu_seqlens,
+            cu_seqlens=attention_inputs.cu_seqlens_device,
             cu_kv_seqlens=cu_kv_seqlens,
         )
 
@@ -380,6 +380,7 @@ class FlashInferTRTLLMPrefillOp(object):
         kv_cache: Optional[LayerKVCache],
         fmha_params: FlashInferTRTLLMParams,
     ) -> torch.Tensor:
+        assert kv_cache is not None, "kv_cache is required for FlashInferTRTLLMPrefillOp.forward()"
         dtype = kv_cache.kv_cache_base.dtype
         q_type = q.dtype
         q = q.to(dtype)
@@ -589,8 +590,8 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         p = self._cg
         _prepare_cg_prefill_kernel[p.grid](
-            attn_inputs.input_lengths_d,
-            attn_inputs.prefix_lengths_d,
+            attn_inputs.input_lengths_device,
+            attn_inputs.prefix_lengths_device,
             p.seq_lens,
             p.cu_kv_seqlens,
             attn_inputs.kv_cache_kernel_block_id_device,
@@ -657,7 +658,7 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
         p = self._cg
         if not attn_inputs.is_prefill:
             _prepare_cg_decode_kernel[p.grid](
-                attn_inputs.sequence_lengths_plus_1_d,
+                attn_inputs.sequence_lengths_plus_1_device,
                 p.seq_lens,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 p.kv_cache_offset,
@@ -668,8 +669,8 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
             )
         else:
             _prepare_cg_spec_decode_kernel[p.grid](
-                attn_inputs.prefix_lengths_d,
-                attn_inputs.input_lengths_d,
+                attn_inputs.prefix_lengths_device,
+                attn_inputs.input_lengths_device,
                 p.seq_lens,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 p.kv_cache_offset,
@@ -733,7 +734,7 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         p = self._cg
         _prepare_cg_decode_kernel[p.grid](
-            attn_inputs.sequence_lengths_plus_1_d,
+            attn_inputs.sequence_lengths_plus_1_device,
             p.seq_lens,
             attn_inputs.kv_cache_kernel_block_id_device,
             p.kv_cache_offset,

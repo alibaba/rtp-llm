@@ -1,6 +1,7 @@
 import logging
 import os
 import unittest
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -26,6 +27,12 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
 
     def setUp(self):
         """Setup test environment"""
+        # Snapshot os.environ so per-test RTP_LLM_FP4_GEMM_BACKEND mutations are
+        # rolled back automatically, avoiding cross-test ordering dependencies.
+        env_patcher = patch.dict(os.environ)
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
+
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         if self.device == "cpu":
             self.skipTest("FP4 tests require CUDA")

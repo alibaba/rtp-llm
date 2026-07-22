@@ -44,8 +44,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     sequence_lengths,
     max_block_size: tl.int32,
     scale,
-    N: tl.constexpr,  # num of sequences
-    T: tl.constexpr,  # num of tokens
+    N,  # num of sequences
+    T,  # num of tokens
     B: tl.constexpr,
     H: tl.constexpr,
     HV: tl.constexpr,
@@ -110,9 +110,10 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
 
     mask_k = o_k < K
     mask_v = o_v < V
-    mask_h = mask_k[:, None] & mask_v[None, :]
+    # V-first b_h: (BV, BK), matches the on-disk ssm_states (V, K) layout.
+    mask_h = mask_v[:, None] & mask_k[None, :]
 
-    b_h = tl.zeros([BK, BV], dtype=tl.float32)
+    b_h = tl.zeros([BV, BK], dtype=tl.float32)
     if USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
             load_block_offset = cal_block_idx(sequence_length - 1, SEQ_SIZE_PER_BLOCK)
@@ -124,7 +125,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             p_h0 = h0 + read_block_id * stride_init_state_token
         else:
             p_h0 = h0 + bos * HV * K * V
-        p_h0 = p_h0 + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+        p_h0 = p_h0 + i_hv * K * V + o_v[:, None] * K + o_k[None, :]
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
     for i_t in range(0, T):
@@ -137,19 +138,19 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
             b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
         b_q = b_q * scale
-        # [BK, BV]
+        # [BV, BK]
         b_h *= exp(b_g)
-        # [BV]
-        b_v -= tl.sum(b_h * b_k[:, None], 0)
+        # b_v[v] -= sum_k b_h[v, k] * b_k[k]
+        b_v -= tl.sum(b_h * b_k[None, :], 1)
         if IS_BETA_HEADWISE:
             b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
         else:
             b_beta = tl.load(p_beta).to(tl.float32)
         b_v *= b_beta
-        # [BK, BV]
-        b_h += b_k[:, None] * b_v[None, :]
-        # [BV]
-        b_o = tl.sum(b_h * b_q[:, None], 0)
+        # [BV, BK] = outer(b_v, b_k)
+        b_h += b_v[:, None] * b_k[None, :]
+        # b_o[v] = sum_k b_h[v, k] * b_q[k]
+        b_o = tl.sum(b_h * b_q[None, :], 1)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
         # keep the states for multi-query tokens
@@ -163,7 +164,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             p_ht = ht + write_block_id * stride_final_state_token
         else:
             p_ht = ht + (bos + i_t) * stride_final_state_token
-        p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+        p_ht = p_ht + i_hv * K * V + o_v[:, None] * K + o_k[None, :]
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
         p_q += stride_qs
@@ -202,7 +203,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     if inplace_final_state:
         final_state = initial_state
     else:
-        final_state = q.new_empty(T, HV, K, V, dtype=initial_state.dtype)
+        final_state = q.new_empty(T, HV, V, K, dtype=initial_state.dtype)
 
     stride_init_state_token = initial_state.stride(0)
     stride_final_state_token = final_state.stride(0)
@@ -337,7 +338,9 @@ def fused_recurrent_gated_delta_rule(
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
-            Initial state of shape `[N, HV, K, V]` for `N` input sequences.
+            Initial state of shape `[N, HV, V, K]` for `N` input sequences.
+            V-first layout: per-head state is contiguous (V, K) to match
+            the on-disk ssm_states layout used by LinearCacheConverter.
             For equal-length input sequences, `N` equals the batch size `B`.
             Default: `None`.
         inplace_final_state: bool:
@@ -355,7 +358,7 @@ def fused_recurrent_gated_delta_rule(
         o (torch.Tensor):
             Outputs of shape `[B, T, HV, V]`.
         final_state (torch.Tensor):
-            Final state of shape `[N, HV, K, V]`.
+            Final state of shape `[N, HV, V, K]`.
 
     Examples::
         >>> import torch
@@ -369,7 +372,7 @@ def fused_recurrent_gated_delta_rule(
         >>> v = torch.randn(B, T, HV, V, device='cuda')
         >>> g = F.logsigmoid(torch.rand(B, T, HV, device='cuda'))
         >>> beta = torch.rand(B, T, HV, device='cuda').sigmoid()
-        >>> h0 = torch.randn(B, HV, K, V, device='cuda')
+        >>> h0 = torch.randn(B, HV, V, K, device='cuda')
         >>> o, ht = fused_gated_recurrent_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,
@@ -384,6 +387,30 @@ def fused_recurrent_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
+    if initial_state is not None:
+        V = v.shape[-1]
+        K = k.shape[-1]
+        if initial_state.shape[-2] != V or initial_state.shape[-1] != K:
+            raise ValueError(
+                f"initial_state must use V-first layout [N, H, V, K] but got shape "
+                f"{tuple(initial_state.shape)} — expected last two dims ({V}, {K}). "
+                f"If your state is [N, H, K, V] (K-first), transpose with "
+                f"initial_state.transpose(-1, -2)."
+            )
+        # When V == K, shape alone cannot distinguish V-first from K-first.
+        # Use strides to detect transpose-view tensors that are actually K-first:
+        # a proper V-first contiguous tensor has stride(-2) == K and stride(-1) == 1.
+        if V == K and initial_state.stride(-2) == 1 and initial_state.stride(-1) == V:
+            import warnings
+
+            warnings.warn(
+                f"initial_state appears to be a transposed K-first view "
+                f"(stride(-2)=1, stride(-1)={V}) rather than a true V-first layout. "
+                f"Calling .contiguous() to fix. Please update your code to pass "
+                f"V-first [N, H, V, K] tensors directly.",
+                stacklevel=2,
+            )
+            initial_state = initial_state.contiguous()
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."

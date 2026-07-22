@@ -54,7 +54,7 @@ def _clone_item(item, new_name: str):
         name=new_name,
         callspec=getattr(item, "callspec", None),
         fixtureinfo=getattr(item, "_fixtureinfo", None),
-        keywords=item.keywords,
+        keywords=dict(item.keywords),
         originalname=getattr(item, "originalname", None),
     )
 

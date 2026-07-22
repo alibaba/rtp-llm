@@ -123,19 +123,33 @@ class TestQwen25DetectorStreaming(unittest.TestCase):
             f"Expected 0 calls, got {len(result1.calls)}. Calls: {result1.calls}",
         )
 
-        # Second chunk: newlines followed by complete tool call
+        # Second chunk: newlines followed by complete tool call.
+        # Since both the name AND the entire args JSON arrive in one chunk,
+        # the detector emits both atomically (name first with empty params,
+        # then full args). The user-visible aggregate is one complete tool
+        # call; whether it arrives as 1 or 2 ToolCallItems in this single
+        # result is an implementation detail.
         chunk2 = '\n\n<tool_call>\n{"name": "get_current_weather", "arguments": {"location": "杭州"}}\n</tool_call>'
         result2 = self.detector.parse_streaming_increment(chunk2, self.tools)
 
+        # Exactly one name announcement
+        name_items = [c for c in result2.calls if c.name]
         self.assertEqual(
-            len(result2.calls),
+            len(name_items),
             1,
-            f"Expected 1 call, got {len(result2.calls)}. Calls: {result2.calls}",
+            f"Expected 1 name announcement, got {len(name_items)}. Calls: {result2.calls}",
         )
         self.assertEqual(
-            result2.calls[0].name,
+            name_items[0].name,
             "get_current_weather",
-            f"Expected name 'get_current_weather', got '{result2.calls[0].name}'. Calls: {result2.calls}",
+            f"Expected name 'get_current_weather', got '{name_items[0].name}'. Calls: {result2.calls}",
+        )
+        # Concatenated parameters across all items must form the complete args.
+        full_params = "".join(c.parameters for c in result2.calls if c.parameters)
+        self.assertEqual(
+            full_params,
+            '{"location": "杭州"}',
+            f"Expected complete args, got '{full_params}'. Calls: {result2.calls}",
         )
 
     def test_thinking_tag_closing_gt_not_swallowed(self):

@@ -102,6 +102,13 @@ rtp_llm = [
     "test/**/*.yml",
     "test/**/*.sh",
     "test/**/*.jinja",
+    # Multimodal tests live under rtp_llm/multimodal/test (a pytest testpath) and load fixtures
+    # such as testdata/qwen2_vl/1.jpg + preprocessor_config.json; ship them so installed-wheel
+    # test runs can find them.
+    "multimodal/test/**/*.json",
+    "multimodal/test/**/*.jpg",
+    "multimodal/test/**/*.jpeg",
+    "multimodal/test/**/*.png",
 ]
 
 # ============================================================
@@ -119,6 +126,9 @@ base-dependencies = [
     "importlib_metadata",
 
     # ML/Transformers
+    # transformers is pinned to 4.51.2 to stay aligned with tokenizers 0.21.4 and
+    # ROCm/ARM wheel availability. Bumping to 4.57.x requires validating tokenizer
+    # and generation behavior across all supported platforms.
     "transformers==4.51.2",
     "tokenizers==0.21.4",
     "huggingface-hub>=0.30.0,<1.0",
@@ -201,7 +211,7 @@ testpaths = [
     "rtp_llm/distribute/test",
     "rtp_llm/server",
     "rtp_llm/frontend/test",
-    "rtp_llm/models/multimodal/test",
+    "rtp_llm/multimodal/test",
     "rtp_llm/models_py",
     "rtp_llm/cpp/models",
     "rtp_llm/cpp/model_rpc/test",
@@ -234,6 +244,7 @@ markers = [
     "SM100: (deprecated) use gpu(type='SM100')",
     "SM100_ARM: (deprecated) use gpu(type='SM100_ARM')",
     "MI308X: (deprecated) use gpu(type='MI308X')",
+    "MI308X_ROCM7: (deprecated) use gpu(type='MI308X_ROCM7')",
 
     # Test type markers
     "smoke: smoke tests",
@@ -246,6 +257,7 @@ markers = [
 
     # Feature markers
     "open_skip: skip in open source build",
+    "remote_cache: remote KV-cache / CAS smoke tests (smoke_remote_cache_oss profile)",
 ]
 
 # 日志配置

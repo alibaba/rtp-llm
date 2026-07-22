@@ -22,9 +22,9 @@ class NormalEngineTest: public DeviceTestBase {
 public:
 };
 
-TEST_F(NormalEngineTest, testInt8KVCache) {
+TEST_F(NormalEngineTest, testFp8KVCache) {
     CustomConfig config;
-    config.kv_cache_data_type = DataType::TYPE_INT8;
+    config.kv_cache_data_type = DataType::TYPE_FP8_E4M3;
     auto engine               = createMockEngine(config);
 
     std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
@@ -33,22 +33,18 @@ TEST_F(NormalEngineTest, testInt8KVCache) {
     query->generate_config->max_new_tokens = 5;
     query->generate_config->is_streaming   = false;
 
-    try {
-        shared_ptr<GenerateStream> stream = engine->enqueue(query);
+    shared_ptr<GenerateStream> stream = engine->enqueue(query);
 
-        ASSERT_TRUE(stream != nullptr);
-        auto output = stream->nextOutput();
-        ASSERT_TRUE(output.ok());
-        ASSERT_EQ(output.value().generate_outputs[0].aux_info.output_len, 5);
-        ASSERT_EQ(output.value().generate_outputs[0].aux_info.input_len, 7);
-        ASSERT_EQ(output.value().generate_outputs[0].aux_info.iter_count, 5);
+    ASSERT_TRUE(stream != nullptr);
+    auto output = stream->nextOutput();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().generate_outputs[0].aux_info.output_len, 5);
+    ASSERT_EQ(output.value().generate_outputs[0].aux_info.input_len, 7);
+    ASSERT_EQ(output.value().generate_outputs[0].aux_info.iter_count, 5);
 
-        ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
-        auto output2 = stream->nextOutput();
-        ASSERT_TRUE(!output2.ok());
-    } catch (const std::exception& e) {
-        std::cout << e.what() << std::endl;
-    }
+    ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+    auto output2 = stream->nextOutput();
+    ASSERT_TRUE(!output2.ok());
 }
 
 TEST_F(NormalEngineTest, testSimple) {

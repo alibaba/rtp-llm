@@ -120,7 +120,6 @@ std::string KVCacheConfig::to_string() const {
         << "memory_cache_size_mb: " << memory_cache_size_mb << "\n"
         << "memory_cache_sync_timeout_ms: " << memory_cache_sync_timeout_ms << "\n"
         << "linear_step: " << linear_step << "\n"
-        << "int8_kv_cache: " << int8_kv_cache << "\n"
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
         << "ssm_state_dtype: " << ssm_state_dtype << "\n"
         << "kv_cache_mem_mb: " << kv_cache_mem_mb << "\n"
@@ -146,6 +145,9 @@ std::string ProfilingDebugLoggingConfig::to_string() const {
         << "ft_core_dump_on_exception: " << ft_core_dump_on_exception << "\n"
         << "ft_alog_conf_path: " << ft_alog_conf_path << "\n"
         << "gen_timeline_sync: " << gen_timeline_sync << "\n"
+        << "timeline_start_step: " << timeline_start_step << "\n"
+        << "timeline_num_steps: " << timeline_num_steps << "\n"
+        << "timeline_trace_name: " << timeline_trace_name << "\n"
         << "torch_cuda_profiler_dir: " << torch_cuda_profiler_dir << "\n"
         << "log_file_backup_count: " << log_file_backup_count << "\n"
         << "debug_load_server: " << debug_load_server << "\n"
@@ -213,6 +215,7 @@ std::string MoeConfig::to_string() const {
         << "use_deepep_internode: " << use_deepep_internode << "\n"
         << "use_deepep_low_latency: " << use_deepep_low_latency << "\n"
         << "use_deepep_p2p_low_latency: " << use_deepep_p2p_low_latency << "\n"
+        << "use_mori_ep: " << use_mori_ep << "\n"
         << "fake_balance_expert: " << fake_balance_expert << "\n"
         << "hack_moe_expert: " << hack_moe_expert << "\n"
         << "deep_ep_num_sm: " << deep_ep_num_sm << "\n"
@@ -349,10 +352,22 @@ std::string BatchDecodeSchedulerConfig::to_string() const {
 }
 
 // FIFOSchedulerConfig
+PDFusionSchedulerMode parsePDFusionSchedulerMode(const std::string& mode) {
+    if (mode.empty()) {
+        return PDFusionSchedulerMode::DEFAULT;
+    }
+    if (mode == "ratio") {
+        return PDFusionSchedulerMode::RATIO;
+    }
+    return PDFusionSchedulerMode::UNKNOWN;
+}
+
 std::string FIFOSchedulerConfig::to_string() const {
     std::ostringstream oss;
     oss << "max_context_batch_size: " << max_context_batch_size << "\n"
-        << "max_batch_tokens_size: " << max_batch_tokens_size;
+        << "max_batch_tokens_size: " << max_batch_tokens_size << "\n"
+        << "pdfusion_scheduler_mode: " << pdfusion_scheduler_mode << "\n"
+        << "decode_prefill_ratio: " << decode_prefill_ratio;
     return oss.str();
 }
 

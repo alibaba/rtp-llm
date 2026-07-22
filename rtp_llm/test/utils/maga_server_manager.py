@@ -29,17 +29,17 @@ long_live_port_locks = []
 class MagaServerManager(object):
     def __init__(
         self,
-        env_args: Optional[Dict[str, Any]] = {},
+        env_args: Optional[Dict[str, Any]] = None,
         port: Optional[str] = None,
-        device_ids: List[int] = [],
+        device_ids: Optional[List[int]] = None,
         role_name: str = "main",
         process_file_name: str = "process.log",
         smoke_args_str: str = "",
     ):
         self._username = os.getenv("USER")
-        self._env_args = env_args
+        self._env_args = env_args if env_args is not None else {}
         self._log_file = None
-        self._device_ids = device_ids
+        self._device_ids = device_ids if device_ids is not None else []
         self._server_process = None
         self._role_name = role_name
         self._file_stream = None
@@ -97,13 +97,12 @@ class MagaServerManager(object):
             return None
 
     def wait_sever_done(self, timeout: int = 1600):
-        # currently we can not check vit server health, assume it is ready, xieshui will fix it
-        if int(self._env_args.get("VIT_SEPARATION", "0")) == 1:
-            return True
-
         from rtp_llm.utils.util import wait_sever_done
 
-        # Health check uses START_PORT (self._port); when VIT_SEPARATION==1 we return True above
+        # Health check uses START_PORT (self._port). The VIT server (VIT_SEPARATION==1)
+        # exposes /health on its http port only after its preprocess engine and gRPC
+        # server finish initializing, so it goes through the same readiness probe as the
+        # LLM server instead of being assumed ready.
         result = wait_sever_done(self._server_process, int(self._port), timeout)
         if not result:
             rc = self._server_process.poll() if self._server_process else None
@@ -242,7 +241,6 @@ class MagaServerManager(object):
             cwd=cwd_path,
         )
         self._server_process = p
-
         return self.wait_sever_done(timeout)
 
     def stop_server(self):

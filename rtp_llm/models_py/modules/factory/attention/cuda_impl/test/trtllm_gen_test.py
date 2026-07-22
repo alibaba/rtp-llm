@@ -152,7 +152,7 @@ class FlashInferPythonMHATest(TestCase):
             attn_inputs.input_lengths if is_prefill else attn_inputs.sequence_lengths
         )
         write_kv_cache(
-            k_ref, v_ref, kv_cache, kv_write_lengths, attn_inputs.kv_cache_block_id_host
+            k_ref, v_ref, kv_cache, kv_write_lengths, attn_inputs.kv_cache_block_id
         )
 
         out_ref = attention_prefill_ref(
@@ -177,7 +177,7 @@ class FlashInferPythonMHATest(TestCase):
             out_ref_f32 = out_ref.float()
             allowed_mismatch_rate = 1e-5
         else:
-            last_token_idx = attn_inputs.cu_seqlens[1:] - 1
+            last_token_idx = attn_inputs.cu_seqlens_device[1:] - 1
             if is_prefill:
                 q_len_per_req = 6
                 attn_inputs.prefix_lengths = attn_inputs.input_lengths - q_len_per_req

@@ -13,7 +13,9 @@ import importlib.util
 import json
 import os
 import platform
+import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -42,12 +44,16 @@ from pathlib import Path
 #
 # ============================================================================
 
-# Platform to version suffix mapping (for wheel naming)
+# Platform to version suffix mapping (for wheel naming).
+# The rocm suffix MUST track the ROCm ABI the rocm extras are actually built
+# against (see _build/oss_optional_extras.toml: torch/triton pinned to rocm7.2)
+# so cache/publish/rollback pick the right binary stack. A packaging contract
+# test asserts this suffix matches the wheel ABI.
 PLATFORM_CONFIG_VERSIONS = {
     "cuda12_6": "cu126",
     "cuda12_9": "cu129",
     "cuda12_9_arm": "cu129",
-    "rocm": "rocm62",
+    "rocm": "rocm72",
 }
 
 # Bazel config name -> pyproject.toml extras name
@@ -261,6 +267,31 @@ def _get_cuda_version_from_json() -> str | None:
         return None
 
 
+def _get_cuda_version_from_nvcc() -> str | None:
+    """Attempt to get CUDA version from nvcc --version output.
+
+    Returns:
+        CUDA version string (e.g. "12.6.0"), or None if nvcc is unavailable.
+    """
+    nvcc_path = shutil.which("nvcc")
+    if not nvcc_path:
+        return None
+    try:
+        result = subprocess.run(
+            [nvcc_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        # Parse line like: "Cuda compilation tools, release 12.6, V12.6.77"
+        match = re.search(r"release\s+(\d+\.\d+)", result.stdout)
+        if match:
+            return match.group(1) + ".0"
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return None
+
+
 def _parse_cuda_major_minor(version_str: str) -> tuple[int, int] | None:
     parts = version_str.split(".")
     if len(parts) < 2:
@@ -436,19 +467,22 @@ def detect_build_config(verbose: bool = True) -> str:
 
     if _detect_cuda():
         cuda_version = _get_cuda_version_from_json()
-        if cuda_version:
-            cuda_config = _get_cuda_config_from_version(cuda_version)
-            if verbose:
-                print(
-                    f"Detected CUDA environment (version: {cuda_version}, config: {cuda_config})"
-                )
+        if cuda_version is None:
+            cuda_version = _get_cuda_version_from_nvcc()
+        if cuda_version is None:
+            cuda_version = "12.6.0"
+        cuda_config = _get_cuda_config_from_version(cuda_version)
+        if verbose:
+            print(
+                f"Detected CUDA environment (version: {cuda_version}, config: {cuda_config})"
+            )
 
-            if platform.machine() == "aarch64" and cuda_config == "cuda12_9":
-                _cached_build_config = "cuda12_9_arm"
-                return "cuda12_9_arm"
+        if platform.machine() == "aarch64" and cuda_config == "cuda12_9":
+            _cached_build_config = "cuda12_9_arm"
+            return "cuda12_9_arm"
 
-            _cached_build_config = cuda_config
-            return cuda_config
+        _cached_build_config = cuda_config
+        return cuda_config
 
     if _detect_rocm():
         if verbose:

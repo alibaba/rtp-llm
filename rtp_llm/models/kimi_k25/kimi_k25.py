@@ -12,7 +12,9 @@ This wrapper:
   1. Re-uses DeepSeekV2 text path (config / weights / python_model).
   2. Promotes `text_config.quantization_config` to the top level so the
      compressed loader picks it up.
-  3. Wires the ViT + projector through MultiModalMixin.
+  3. Vision tower + projector are wired up by ``KimiK25Mixin`` (registered
+     in :mod:`rtp_llm.multimodal.multimodal_mixins.kimi_k25.kimi_k25_mixin`)
+     through the multimodal-mixin factory.
 """
 
 import json
@@ -23,13 +25,7 @@ from typing import Any, Dict
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.deepseek_v2 import DeepSeekV2
-from rtp_llm.models.kimi_k25.kimi_k25_vit import KimiK25ImageEmbedding
-from rtp_llm.models.kimi_k25.kimi_k25_weight import (
-    KimiK25VitWeight,
-    KimiK25Weight,
-)
-from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
-
+from rtp_llm.models.kimi_k25.kimi_k25_weight import KimiK25Weight
 
 _DEFAULT_MEDIA_PLACEHOLDER_ID = 163605
 _DEFAULT_VIDEO_PLACEHOLDER = "<|kimi_k25_video_placeholder|>"
@@ -38,16 +34,47 @@ _DEFAULT_VIDEO_PLACEHOLDER = "<|kimi_k25_video_placeholder|>"
 def _read_top_config(ckpt_path: str) -> Dict[str, Any]:
     config_path = os.path.join(ckpt_path, "config.json")
     if not os.path.exists(config_path):
-        return {}
+        # Returning {} here silently produced a misconfigured model (missing
+        # text/quantization config) instead of failing fast on a bad path.
+        raise FileNotFoundError(
+            "KimiK25._read_top_config: config.json not found at "
+            + config_path + " (ckpt_path=" + repr(ckpt_path) + "). "
+            "Verify CHECKPOINT_PATH env / model_path arg is correct "
+            "and the model dir is mounted on this host."
+        )
     with open(config_path, "r") as f:
         return json.load(f)
 
 
-class KimiK25(DeepSeekV2, MultiModalMixin):
+class KimiK25(DeepSeekV2):
     """Kimi-K2.5 multimodal model class."""
 
     def support_cuda_graph(self) -> bool:
         return True
+
+    def _create_python_model(self):
+        # Override DeepSeekV2._create_python_model to use MultimodalGenericModel
+        # so that vision features are injected into text embeddings.
+        # DeepSeekV2 uses GenericMoeModel (text-only) which silently drops image features.
+        from rtp_llm.models_py.model_desc.multimodal_generic import MultimodalGenericModel
+
+        model_config = self.model_config
+        parallelism_config = self.parallelism_config
+        fmha_config = self.fmha_config
+        py_hw_kernel_config = self.hw_kernel_config
+        moe_config = self.moe_config
+        max_generate_batch_size = self.max_generate_batch_size
+
+        self.py_model = MultimodalGenericModel(
+            model_config,
+            parallelism_config,
+            self.weight,
+            moe_config,
+            max_generate_batch_size=max_generate_batch_size,
+            fmha_config=fmha_config,
+            py_hw_kernel_config=py_hw_kernel_config,
+            device_resource_config=self.device_resource_config,
+        )
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
@@ -107,9 +134,7 @@ class KimiK25(DeepSeekV2, MultiModalMixin):
             "num_key_value_heads", config.attn_config.head_num
         )
         config.num_layers = text_config["num_hidden_layers"]
-        config.attn_config.rope_config.base = int(
-            text_config.get("rope_theta", 50000)
-        )
+        config.attn_config.rope_config.base = int(text_config.get("rope_theta", 50000))
         config.vocab_size = text_config["vocab_size"]
         config.layernorm_eps = text_config.get("rms_norm_eps", 1e-6)
         config.tie_word_embeddings = text_config.get("tie_word_embeddings", False)
@@ -228,28 +253,7 @@ class KimiK25(DeepSeekV2, MultiModalMixin):
             try:
                 config.mm_model_config.mm_sep_tokens = [[int(media_placeholder_id)]]
             except Exception as exc:  # mm_model_config schema may differ
-                logging.warning(
-                    f"unable to set mm_sep_tokens for kimi_k25: {exc}"
-                )
-
-    def _init_multimodal(self, mm_model_config, vit_config):
-        mm_related_params = self.model_config.mm_related_params
-        self.ignore_id = -100
-        self.mm_part = KimiK25ImageEmbedding(
-            mm_related_params,
-            model_config=self.model_config,
-            ignore_id=self.ignore_id,
-        )
-        # Dict keys must match the on-disk ckpt prefix segment so that
-        # `BaseVitWeights._get_vit_params` builds names like
-        # `vision_tower.encoder.blocks.X.xxx` and `mm_projector.proj.X.xxx`.
-        mm_related_params.vit_weights = KimiK25VitWeight(
-            {
-                "vision_tower": self.mm_part.vision_tower,
-                "mm_projector": self.mm_part.mm_projector,
-            },
-            with_prefix=True,
-        )
+                logging.warning(f"unable to set mm_sep_tokens for kimi_k25: {exc}")
 
     @staticmethod
     def get_weight_cls():

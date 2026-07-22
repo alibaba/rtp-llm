@@ -130,6 +130,9 @@ class HeadWisePrefillAttnOp:
         self.batch_wrappers: List[BatchWrapperItem] = []
         self.input_lengths: Optional[torch.Tensor] = None
         self.kv_lengths: Optional[torch.Tensor] = None
+        # Cached CPU lists of the above, populated in prepare() (see forward()).
+        self._input_lens_list: list = []
+        self._kv_lens_list: list = []
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         if not (_HAS_FLASHINFER and _HAS_RTP_KERNEL):
@@ -201,11 +204,13 @@ class HeadWisePrefillAttnOp:
 
         self.batch_wrappers = []
 
-        input_lens_list = self.input_lengths.cpu().tolist()
-        kv_lens_list = self.kv_lengths.cpu().tolist()
+        # Cache the GPU->CPU synced lists here (prepare runs once per step) so
+        # the forward() hot path reuses them instead of re-syncing every call.
+        self._input_lens_list = self.input_lengths.cpu().tolist()
+        self._kv_lens_list = self.kv_lengths.cpu().tolist()
 
-        for i, q_len in enumerate(input_lens_list):
-            kv_len = kv_lens_list[i] if kv_lens_list[i] > 0 else q_len
+        for i, q_len in enumerate(self._input_lens_list):
+            kv_len = self._kv_lens_list[i] if self._kv_lens_list[i] > 0 else q_len
 
             wrapper_item = self._plan_one_sequence(
                 q_len=q_len, kv_len=kv_len, kv_indices=self.kv_indices[i]
@@ -294,8 +299,9 @@ class HeadWisePrefillAttnOp:
         k_cache = k_slice if k_slice.is_contiguous() else k_slice.contiguous()
         v_cache = v_slice if v_slice.is_contiguous() else v_slice.contiguous()
 
-        input_lens_list = self.input_lengths.cpu().tolist()
-        kv_lens_list = self.kv_lengths.cpu().tolist()
+        # Reuse the lists computed in prepare() to avoid a per-forward GPU sync.
+        input_lens_list = self._input_lens_list
+        kv_lens_list = self._kv_lens_list
 
         offset = 0
         for i, wrapper_item in enumerate(self.batch_wrappers):

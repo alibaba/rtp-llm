@@ -80,6 +80,7 @@ class BackendManager(object):
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
             eplb_config=self.py_env_configs.eplb_config,
+            vit_config=self.py_env_configs.vit_config,
         )
         # Let engine_config finalize based on model_config (e.g. scheduler config)
         ModelFactory.update_engine_config_from_model_config(
@@ -87,17 +88,47 @@ class BackendManager(object):
             model_config=model_config,
         )
 
-        # Initialize DeepEP wrapper if MOE model and DeepEP is enabled
+        # Initialize DeepEP/MoriEP wrapper if MOE model and EP is enabled
         if (
-            engine_config.moe_config.use_deepep_moe
-            and model_config.expert_num > 0
+            model_config.expert_num > 0
             and engine_config.parallelism_config.world_size > 1
             and not engine_config.moe_config.use_all_gather
         ):
-            from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
+            deepep_init_success = False
+            moriep_init_success = False
 
-            logging.info("initialize deepep wrapper")
-            init_deepep_wrapper(engine_config, model_config)
+            # Initialize DeepEP if enabled
+            if engine_config.moe_config.use_deepep_moe:
+                try:
+                    from rtp_llm.models_py.distributed.deepep_wrapper import (
+                        init_deepep_wrapper,
+                    )
+
+                    init_deepep_wrapper(engine_config, model_config)
+                    deepep_init_success = True
+                except Exception as e:
+                    logging.error(f"Failed to initialize DeepEP wrapper: {e}")
+
+            # Initialize MoriEP if enabled (can be independent of DeepEP)
+            if engine_config.moe_config.use_mori_ep:
+                try:
+                    from rtp_llm.models_py.distributed.moriep_wrapper import (
+                        init_moriep_wrapper,
+                    )
+
+                    init_moriep_wrapper(engine_config, model_config)
+                    moriep_init_success = True
+                    logging.info("MoriEP wrapper initialized successfully")
+                except Exception as e:
+                    logging.error(f"Failed to initialize MoriEP wrapper: {e}")
+
+            # Raise if a requested EP backend failed to initialize
+            if engine_config.moe_config.use_deepep_moe and not deepep_init_success:
+                raise RuntimeError("DeepEP was requested but failed to initialize")
+            if engine_config.moe_config.use_mori_ep and not moriep_init_success:
+                raise RuntimeError(
+                    "use_mori_ep is set but MoriEP wrapper failed to initialize"
+                )
 
         # Optional propose model config
         propose_model_config = ModelFactory.create_propose_model_config(

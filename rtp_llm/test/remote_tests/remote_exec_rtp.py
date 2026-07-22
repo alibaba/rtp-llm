@@ -389,13 +389,17 @@ def build_remote_setup_command(rootdir: Path, *, setup_env: Optional[dict] = Non
         + gpu_diag
         + 'echo ">>>PHASE:pip_install_start $(date +%s)"; '
         "mkdir -p logs; "
-        f"OUT=$({prepare_env_prefix}/opt/conda310/bin/python internal_source/ci/prepare_venv.py 2>logs/prepare_venv.err); PV_RC=$?; "
-        'if [ "$PV_RC" -ne 0 ]; then '
-        "  cat logs/prepare_venv.err >&2; "
-        '  echo ">>>PHASE:pip_install_failed $(date +%s) rc=$PV_RC"; '
-        '  exit "$PV_RC"; '
+        "if [ -f internal_source/ci/prepare_venv.py ]; then "
+        f"  OUT=$({prepare_env_prefix}/opt/conda310/bin/python internal_source/ci/prepare_venv.py 2>logs/prepare_venv.err); PV_RC=$?; "
+        '  if [ "$PV_RC" -ne 0 ]; then '
+        "    cat logs/prepare_venv.err >&2; "
+        '    echo ">>>PHASE:pip_install_failed $(date +%s) rc=$PV_RC"; '
+        '    exit "$PV_RC"; '
+        "  fi; "
+        '  eval "$OUT"; cat logs/prepare_venv.err >&2; '
+        "else "
+        '  echo ">>>PHASE:prepare_venv_skipped $(date +%s)"; '
         "fi; "
-        'eval "$OUT"; cat logs/prepare_venv.err >&2; '
         'echo ">>>PHASE:pip_install_done $(date +%s)"; '
         f"if [ -f {shlex.quote(str(_RUNTIME_LIBS_ARCHIVE))} ]; then "
         f"  tar -xf {shlex.quote(str(_RUNTIME_LIBS_ARCHIVE))}; "

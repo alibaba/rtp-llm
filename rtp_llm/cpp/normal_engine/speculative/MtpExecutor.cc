@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/TimeUtility.h"
+#include <algorithm>
 #include <memory>
 #include <thread>
 #include <random>
@@ -157,7 +158,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                              params.eplb_config);
     }
 
-    sampler_.reset(new Sampler(SamplerInitParams{}));
+    const auto initial_sampler_batch_size =
+        (propose_params->gen_num_per_circle + 1)
+        * static_cast<size_t>(std::max(1, params.concurrency_config.concurrency_limit));
+    // Speculative decoding preallocates the expected fanout, but request-level return sequences or
+    // variable beams may still increase sampler rows. Keep the safe dynamic growth path enabled.
+    sampler_.reset(new Sampler(SamplerInitParams{initial_sampler_batch_size, false}));
 
     // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
     std::optional<CacheLayerLayout> kv_cache_layer_layout = std::nullopt;
@@ -756,8 +762,8 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
             decode_streams.push_back(stream);
         }
 
-        // init sp output buffer if not exist
-        stream->setReturnAllProbs(true);
+        // set base properties
+        stream->setReturnAllProbs(ReturnAllProbsMode::DEFAULT);
         if (stream->getSPOutputBuffer() == nullptr) {
             auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
             sp_output_buffer->tokens = torch::zeros({1, 2}, torch::kInt32);

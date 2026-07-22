@@ -91,7 +91,8 @@ _EMBEDDING_ENDPOINTS = {
     "/v1/embeddings/sparse",
     "/v1/embeddings/colbert",
 }
-register_comparer(lambda q_r, ep: "messages" in q_r["query"], OpenaiComparer)
+register_comparer(lambda q_r, ep: q_r.get("tau2_bench", False), Tau2BenchComparer)
+register_comparer(lambda q_r, ep: isinstance(q_r.get("query"), dict) and "messages" in q_r["query"], OpenaiComparer)
 register_comparer(lambda q_r, ep: ep in _EMBEDDING_ENDPOINTS, EmbeddingComparer)
 register_comparer(
     lambda q_r, ep: ep.startswith("/rtp_llm/worker_status"), WorkerStatusComparer
@@ -102,7 +103,6 @@ register_comparer(
 register_comparer(lambda q_r, ep: ep == "/v1/embeddings/similarity", SimilarityComparer)
 register_comparer(lambda q_r, ep: ep == "/v1/classifier", ClassifierComparer)
 register_comparer(lambda q_r, ep: ep == "/v1/reranker", RerankerComparer)
-register_comparer(lambda q_r, ep: q_r.get("tau2_bench", False), Tau2BenchComparer)
 set_default_comparer(NormalComparer)
 
 
@@ -238,6 +238,7 @@ class CaseRunner(object):
             env_dict["RECO_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
         task_states = TaskStates()
         logging.info(f"smoke_args_str: {self.smoke_args_str}")
+        server_manager = None
         try:
             server_manager = self.start_server(
                 env_dict,
@@ -249,15 +250,19 @@ class CaseRunner(object):
                 task_states.ret = False
                 return task_states
             task_states = self.curl_server(server_manager)
-            if task_states.ret != True:
-                return task_states
-            assert server_manager is not None, "server manager should not be None"
-            server_manager.stop_server()
-            if enable_remote_cache and self.remote_kvcm_server is not None:
-                self.remote_kvcm_server.stop_server()
-                self.remote_kvcm_server.copy_logs()
             return task_states
         finally:
+            if server_manager is not None:
+                try:
+                    server_manager.stop_server()
+                except Exception as e:
+                    logging.warning("server_manager.stop_server failed: %s", e)
+            if enable_remote_cache and self.remote_kvcm_server is not None:
+                try:
+                    self.remote_kvcm_server.stop_server()
+                    self.remote_kvcm_server.copy_logs()
+                except Exception as e:
+                    logging.warning("remote_kvcm_server cleanup failed: %s", e)
             _summarize_and_cleanup_coredumps(
                 os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "")
             )
@@ -309,8 +314,14 @@ class CaseRunner(object):
                     task_states = results[0]
                 else:
                     for result in results:
-                        if str(result) != str(str(results[0])):
-                            task_states = result
+                        if str(result) != str(results[0]):
+                            task_states.ret = False
+                            task_states.err_msg = (
+                                f"concurrency results differ: {result} vs {results[0]}"
+                            )
+                            break
+                    if task_states.ret:
+                        task_states = results[0]
         else:
             task_states = self._curl_server_impl(server_manager, self.task_info)
         return task_states
@@ -584,7 +595,7 @@ class CaseRunner(object):
                 )
                 if (
                     exp_update_status != update_status
-                    and update_response != exp_update_response
+                    or update_response != exp_update_response
                 ):
                     task_states.ret = False
                     task_states.err_msg = f"failed to update lora, real response is {update_response}, exp response is {exp_update_response}"
@@ -674,7 +685,7 @@ class CaseRunner(object):
 
             # 收集结果
             results = {}
-            for future in concurrent.futures.as_completed(future_to_config):
+            for future in concurrent.futures.as_completed(future_to_config, timeout=3600):
                 config = future_to_config[future]
                 try:
                     server_manager, task_states = future.result()

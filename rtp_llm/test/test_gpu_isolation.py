@@ -11,16 +11,10 @@ Collected by CI profiles (py_ut_sm8x etc.) as a permanent regression guard
 for GPU isolation correctness.
 """
 
-import json
 import os
-import pathlib
 
 import pytest
 import torch
-
-_GPU_VERIFY_DIR = pathlib.Path(
-    os.environ.get("GPU_VERIFY_DIR", "/tmp/rtp_llm_gpu_verify")
-)
 
 
 def _cvd_gpus():
@@ -108,48 +102,12 @@ class TestGpuIsolation:
             f"_RTP_TORCH_BEFORE_SLICE={flag}"
         )
 
-    def test_record_worker_gpu(self):
-        """Write worker GPU assignment to shared dir for xdist overlap check.
 
-        Non-xdist: writes as 'main.json'.
-        xdist: writes as 'gw0.json', 'gw1.json', etc.
-        """
-        worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
-        record = {
-            "worker": worker,
-            "pid": os.getpid(),
-            "cvd": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
-            "device_count": torch.cuda.device_count(),
-            "device_name": torch.cuda.get_device_name(0),
-        }
-        _GPU_VERIFY_DIR.mkdir(parents=True, exist_ok=True)
-        (_GPU_VERIFY_DIR / f"{worker}.json").write_text(json.dumps(record))
-
-
-@pytest.mark.gpu(type="A10", count=1)
-class TestXdistDisjoint:
-    """Verify xdist workers received non-overlapping GPUs.
-
-    Only meaningful under xdist (-n >= 2). Skipped in single-process mode.
-    """
-
-    def test_workers_have_disjoint_gpus(self):
-        worker = os.environ.get("PYTEST_XDIST_WORKER")
-        if not worker:
-            pytest.skip("Not running under xdist")
-
-        files = sorted(_GPU_VERIFY_DIR.glob("gw*.json"))
-        if len(files) < 2:
-            pytest.skip(f"Only {len(files)} worker record(s) found, need >= 2")
-
-        seen_cvds: dict = {}
-        for f in files:
-            rec = json.loads(f.read_text())
-            cvd = rec["cvd"]
-            w = rec["worker"]
-            if cvd in seen_cvds:
-                pytest.fail(
-                    f"GPU OVERLAP: workers {seen_cvds[cvd]} and {w} "
-                    f"both assigned CUDA_VISIBLE_DEVICES={cvd}"
-                )
-            seen_cvds[cvd] = w
+# Cross-worker GPU-disjointness is verified by the controller in conftest.py
+# (pytest_configure_node / pytest_testnodedown / pytest_sessionfinish) rather
+# than by a test item here. A normal test runs on only ONE xdist worker, so it
+# cannot observe the other workers' assignments; the previous file-based
+# `test_workers_have_disjoint_gpus` silently pytest.skip()'d when it saw < 2
+# shared records, letting a GPU-overlap misconfig pass CI. The controller hook
+# sees every worker's reported CVD and FAILS the run on overlap or a missing
+# report.
