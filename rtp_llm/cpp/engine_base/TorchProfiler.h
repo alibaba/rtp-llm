@@ -13,6 +13,16 @@ namespace rtp_llm {
 
 namespace tpi = torch::profiler::impl;
 
+namespace detail {
+
+using DisableProfilerFn = std::unique_ptr<torch::autograd::profiler::ProfilerResult> (*)();
+
+// PyTorch profiler finalization can reject malformed backend traces. Profiling
+// is diagnostic-only, so a bad trace must not terminate the inference engine.
+std::unique_ptr<torch::autograd::profiler::ProfilerResult> tryDisableProfiler(DisableProfilerFn disable_profiler);
+
+}  // namespace detail
+
 // Low-level profiler wrapper around Kineto.
 // IMPORTANT: start() and stop() MUST be called on the same thread (Kineto thread-affinity).
 class TorchProfile {

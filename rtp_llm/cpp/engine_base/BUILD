@@ -42,6 +42,7 @@ cc_library(
         "TorchProfiler.cc",
     ],
     deps = [
+        "//rtp_llm/cpp/utils:core_utils",
         "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],
@@ -88,5 +89,3 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
 )
-
-
