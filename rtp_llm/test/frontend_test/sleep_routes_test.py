@@ -473,6 +473,39 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
         defaults.update(kwargs)
         return pb2.SleepStatusResponsePB(**defaults)
 
+    async def test_health_check_failure_preserves_lifecycle_channels(self):
+        # Regression: a routine health probe timing out during a sleep/wake
+        # drain must NOT tear down the shared lifecycle _dp_channels. Closing a
+        # channel under a genuinely in-flight SleepServing/WakeUpServing call
+        # raises asyncio.CancelledError into that RPC (a BaseException that
+        # bypasses every ``except Exception``), cancelling the operation and
+        # returning HTTP 500 while the backend keeps transitioning -- a
+        # control-plane split brain. health_check may only reset its own
+        # channel.
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        wrapper, _ = self._build_wrapper(control_addresses=addresses)
+        wrapper.channel = MagicMock()
+        wrapper.channel.close = AsyncMock()
+        wrapper.stub = MagicMock()
+        wrapper.stub.CheckHealth = AsyncMock(
+            side_effect=self._aio_error(
+                grpc.StatusCode.DEADLINE_EXCEEDED, "backend draining"
+            )
+        )
+        dp_channels_before = dict(wrapper._dp_channels)
+        dp_stubs_before = dict(wrapper._dp_stubs)
+
+        result = await wrapper.health_check()
+
+        self.assertEqual(result["status"], "error")
+        # Only the health channel is reset; lifecycle channels stay intact.
+        self.assertIsNone(wrapper.channel)
+        self.assertIsNone(wrapper.stub)
+        self.assertEqual(wrapper._dp_channels, dp_channels_before)
+        self.assertEqual(wrapper._dp_stubs, dp_stubs_before)
+        for address in addresses:
+            self.assertFalse(wrapper._dp_channels[address].close.called)
+
     async def test_control_plane_sleep_wake_up_smoke_flow(self):
         addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
         wrapper, pb2 = self._build_wrapper(

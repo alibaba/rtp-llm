@@ -188,6 +188,26 @@ class GrpcClientWrapper:
         self._dp_channels.clear()
         self._dp_stubs.clear()
 
+    async def _reset_main_channel(self) -> None:
+        """Tear down ONLY the health/status channel so the next probe reconnects.
+
+        Deliberately does not touch self._dp_channels: those carry in-flight
+        sleep/wake lifecycle RPCs. Closing a channel while one of its calls is
+        genuinely in-flight (server-accepted, still processing) raises
+        asyncio.CancelledError into the awaiting coroutine -- a BaseException
+        that bypasses every ``except Exception`` on the lifecycle path. A
+        routine health-probe timeout during a sleep/wake drain would otherwise
+        cancel the unrelated lifecycle operation and surface HTTP 500 while the
+        backend keeps transitioning to SLEEPING -- a control-plane split brain.
+        """
+        if self.channel:
+            try:
+                await self.channel.close()
+            except Exception as e:
+                logging.warning(f"Failed to close health channel: {e}")
+        self.channel = None
+        self.stub = None
+
     async def health_check(self) -> Dict[str, Any]:
         """Check server health"""
         try:
@@ -197,7 +217,10 @@ class GrpcClientWrapper:
             await self.stub.CheckHealth(request, timeout=1)
             return {"status": "ok"}
         except Exception as e:
-            await self.close()
+            # Reset only the health channel. Never close the shared lifecycle
+            # (_dp_channels) here: see _reset_main_channel -- doing so would
+            # cancel an in-flight sleep/wake RPC that shares this wrapper.
+            await self._reset_main_channel()
             return {
                 "status": "error",
                 "message": e,
