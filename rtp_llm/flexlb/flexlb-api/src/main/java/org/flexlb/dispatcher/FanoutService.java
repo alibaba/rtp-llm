@@ -88,15 +88,17 @@ public class FanoutService {
         // FE selection is sourced solely from the master's single global cursor — there is no
         // local fallback by design, so FE load stays fully attributable to that one cursor and
         // load debugging never has to reason about a second, per-instance distribution. A chunk
-        // the master did not assign (null fe_url) throws here and is metered as a visible
-        // CHUNK_PICK_FAILED by the outer onErrorResume, rather than silently rerouting.
-        return Mono.fromCallable(() -> {
-                    String feUrl = plan.feUrl();
-                    if (feUrl == null) {
-                        throw new IllegalStateException("no master FE assignment for chunk");
-                    }
-                    return new Pick(feUrl, JSON.toJSONBytes(plan.body(), features));
-                })
+        // the master did not assign (null fe_url) fails here with its OWN reason (CHUNK_NO_FE),
+        // never folded into the generic serialization pick failure, so "the master isn't assigning
+        // FEs" reads straight off the metric rather than silently rerouting.
+        if (plan.feUrl() == null) {
+            metricsReporter.reportChunk(DispatcherMetricsReporter.CHUNK_NO_FE, 0);
+            failureWarn.warn("chunk has no master FE assignment, failing without fallback: size={}",
+                    plan.chunkSize());
+            return Mono.just(SubBatchResult.failed(plan.chunkSize(), plan.startIndex(),
+                    "no master FE assignment"));
+        }
+        return Mono.fromCallable(() -> new Pick(plan.feUrl(), JSON.toJSONBytes(plan.body(), features)))
                 .flatMap(pick -> {
                     long start = System.currentTimeMillis();
                     return feClient.postBytes(pick.feUrl(), fePath, pick.payload(), inboundHeaders, rawQuery)

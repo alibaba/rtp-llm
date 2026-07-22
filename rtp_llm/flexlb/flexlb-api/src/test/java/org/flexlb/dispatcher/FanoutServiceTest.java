@@ -252,7 +252,8 @@ class FanoutServiceTest {
         // failed at its correct index. Mutation guard: reintroduce a local fallback and feClient
         // would be called + the chunk would succeed.
         FeClient feClient = mock(FeClient.class);
-        FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
+        DispatcherTestSupport.RecordingMetrics metrics = DispatcherTestSupport.recordingMetrics();
+        FanoutService svc = new FanoutService(feClient, metrics);
 
         java.util.List<String> withNull = new java.util.ArrayList<>();
         withNull.add(null);
@@ -268,6 +269,11 @@ class FanoutServiceTest {
                 })
                 .verifyComplete();
         verifyNoInteractions(feClient);
+        // Distinct reason: "the master isn't assigning FEs" must read straight off the metric,
+        // never conflated with the generic serialization pick failure.
+        assertEquals(1, metrics.chunkReports.size());
+        assertEquals("no_fe_assignment", metrics.chunkReports.get(0).reason());
+        assertEquals("failed", metrics.chunkReports.get(0).result());
     }
 
     @Test

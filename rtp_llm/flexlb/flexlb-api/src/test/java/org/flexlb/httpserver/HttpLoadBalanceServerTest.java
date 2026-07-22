@@ -27,6 +27,7 @@ import reactor.core.publisher.Mono;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -144,6 +145,36 @@ class HttpLoadBalanceServerTest {
         assertEquals("http://master-picked-fe", forwarded.getServerStatus().get(0).getFeUrl(),
                 "a forwarding slave must preserve the master's fe_url, not restamp it");
         org.mockito.Mockito.verifyNoInteractions(fePoolProvider);
+    }
+
+    @Test
+    void master_empty_fe_pool_leaves_fe_url_null_without_failing_the_schedule() {
+        // An empty FE snapshot makes fePool.next() throw. assignFeUrls must swallow it: BE
+        // assignment already succeeded, so the schedule response still returns 200 with its
+        // targets; the affected chunks fail later in the dispatcher (no fallback), not here.
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(1);
+        when(serverRequest.bodyToMono(BatchScheduleRequest.class)).thenReturn(Mono.just(batchRequest));
+        when(activeRequestCounter.acquire()).thenReturn(org.mockito.Mockito.mock(
+                org.flexlb.service.grace.ActiveRequestCounter.RequestToken.class));
+        org.flexlb.dao.loadbalance.BatchScheduleResponse success =
+                org.flexlb.dao.loadbalance.BatchScheduleResponse.success(java.util.List.of(
+                        new org.flexlb.dao.loadbalance.BatchScheduleTarget("10.0.0.1", 8088, 50051)));
+        when(batchScheduleCoordinator.schedule(batchRequest)).thenReturn(Mono.just(success));
+
+        FePool pool = org.mockito.Mockito.mock(FePool.class);
+        when(pool.next()).thenThrow(new IllegalStateException("no FE endpoints available"));
+        when(fePoolProvider.getIfAvailable()).thenReturn(pool);
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(true);
+
+        org.springframework.web.reactive.function.server.ServerResponse out =
+                server.batchScheduleRequest(serverRequest).block();
+
+        assertNotNull(out);
+        assertEquals(200, out.statusCode().value(), "an empty FE pool must not fail the schedule");
+        assertNull(success.getServerStatus().get(0).getFeUrl(),
+                "an empty FE pool leaves fe_url null; the chunk fails later in the dispatcher");
     }
 
     @Test

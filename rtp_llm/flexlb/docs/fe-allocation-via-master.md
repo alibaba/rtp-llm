@@ -66,7 +66,7 @@ dispatcher receives batch
        (only when this node resolved locally AND the FePool bean exists — see Guards)
   -> BatchHandler: BE role_addrs stamped only when preAssignBe && spec.isPreAssignable();
                    per-chunk fe_url extracted from targets and passed to fanout
-  -> FanoutService.dispatchOne: send chunk to target.fe_url; null fe_url -> throw -> CHUNK_PICK_FAILED
+  -> FanoutService.dispatchOne: send chunk to target.fe_url; null fe_url -> fail with CHUNK_NO_FE
 ```
 
 ## Guards (correctness)
@@ -87,7 +87,8 @@ master node and every slave advance one global cursor.
 ## Decisions
 
 - **No fallback.** Determinism of load attribution is prioritized over availability. A chunk with
-  no master `fe_url` fails visibly (`CHUNK_PICK_FAILED`) rather than silently rerouting to a
+  no master `fe_url` fails visibly with a distinct reason (`CHUNK_NO_FE`, so "the master isn't
+  assigning FEs" reads straight off the metric) rather than silently rerouting to a
   per-instance pick.
 - **FE always from the master, decoupled from `DISPATCH_PRE_ASSIGN_BE`.** The `/batch_schedule`
   round-trip is now unconditional for every splittable batch, because it carries `fe_url` even for

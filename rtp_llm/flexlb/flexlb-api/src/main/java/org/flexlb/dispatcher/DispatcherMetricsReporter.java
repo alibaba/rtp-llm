@@ -46,6 +46,13 @@ public class DispatcherMetricsReporter {
     public static final String CHUNK_OK = "ok";
     public static final String CHUNK_TRANSPORT = "transport";
     public static final String CHUNK_PICK_FAILED = "pick_failed";
+    /**
+     * The master assigned no FE for this chunk (short/empty target list, or the elected master has
+     * no FE view). Distinct from {@link #CHUNK_PICK_FAILED} on purpose: FE selection is sourced
+     * solely from the master with no local fallback, so this reason reads straight off the metric as
+     * "the master isn't assigning FEs" rather than being conflated with a serialization pick failure.
+     */
+    public static final String CHUNK_NO_FE = "no_fe_assignment";
     public static final String CHUNK_HTTP_4XX = "http_4xx";
     public static final String CHUNK_HTTP_5XX = "http_5xx";
     /** 200 with a JSON body whose response array is absent or the wrong length — merged as a failure. */
@@ -61,6 +68,7 @@ public class DispatcherMetricsReporter {
             CHUNK_OK, FlexMetricTags.of("result", "ok", "reason", CHUNK_OK),
             CHUNK_TRANSPORT, FlexMetricTags.of("result", "failed", "reason", CHUNK_TRANSPORT),
             CHUNK_PICK_FAILED, FlexMetricTags.of("result", "failed", "reason", CHUNK_PICK_FAILED),
+            CHUNK_NO_FE, FlexMetricTags.of("result", "failed", "reason", CHUNK_NO_FE),
             CHUNK_HTTP_4XX, FlexMetricTags.of("result", "failed", "reason", CHUNK_HTTP_4XX),
             CHUNK_HTTP_5XX, FlexMetricTags.of("result", "failed", "reason", CHUNK_HTTP_5XX),
             CHUNK_MALFORMED, FlexMetricTags.of("result", "failed", "reason", CHUNK_MALFORMED));
@@ -115,8 +123,12 @@ public class DispatcherMetricsReporter {
     }
 
     /**
-     * In-process pre-assign (batch_schedule) latency; {@code gotTargets=false} means it fell back
-     * to no pre-assignment (empty target list).
+     * Latency of the master {@code batch_schedule} resolve, which now runs for every splittable
+     * batch (FE selection is sourced solely from the master, so the call is unconditional and also
+     * carries the per-chunk {@code fe_url}). {@code gotTargets=false} means the master returned an
+     * empty target list — no BE pre-assignment and, more importantly, no FE assignment, so those
+     * chunks fail in fanout ({@link #CHUNK_NO_FE}). The metric name stays {@code preassign.rt} for
+     * dashboard continuity; it measures the same master-call latency it always did.
      */
     public void reportPreassignRt(long ms, boolean gotTargets) {
         monitor.report(DISPATCHER_PREASSIGN_RT, gotTargets ? RESULT_OK : RESULT_EMPTY, ms);
@@ -132,7 +144,8 @@ public class DispatcherMetricsReporter {
     /**
      * Per-chunk fanout outcome and FE-call latency. {@code reason} is {@link #CHUNK_OK} on success
      * or one of the bounded failure categories ({@link #CHUNK_HTTP_4XX}, {@link #CHUNK_HTTP_5XX},
-     * {@link #CHUNK_TRANSPORT}, {@link #CHUNK_PICK_FAILED}); the {@code result} tag follows from it.
+     * {@link #CHUNK_TRANSPORT}, {@link #CHUNK_PICK_FAILED}, {@link #CHUNK_NO_FE}); the {@code result}
+     * tag follows from it.
      */
     public void reportChunk(String reason, long rtMs) {
         boolean ok = CHUNK_OK.equals(reason);
