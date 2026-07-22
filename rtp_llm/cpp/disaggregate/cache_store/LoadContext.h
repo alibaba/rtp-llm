@@ -8,6 +8,7 @@
 #include <atomic>
 
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/LoadCopyFence.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CommonDefine.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
@@ -37,6 +38,7 @@ public:
 
 protected:
     virtual bool doCall(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer, int64_t timeout_ms) = 0;
+    virtual void abortPendingWrites() {}
 
 protected:
     std::weak_ptr<CacheStore> cache_store_;
@@ -55,6 +57,7 @@ protected:
     std::condition_variable cond_;
     int                     expect_layer_cnt_ = 0;
     std::atomic_int         done_layer_cnt_   = 0;
+    bool                    terminal_         = false;
 };
 
 class LoadContext: public SyncContext {
@@ -73,8 +76,12 @@ public:
 
 protected:
     bool doCall(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer, int64_t timeout_ms) override;
+    void abortPendingWrites() override {
+        copy_fence_->closeAndDrain();
+    }
 
 private:
+    std::shared_ptr<LoadCopyFence> copy_fence_{std::make_shared<LoadCopyFence>()};
     std::string peer_ip_;
     uint32_t    port_;
     uint32_t    rdma_port_;

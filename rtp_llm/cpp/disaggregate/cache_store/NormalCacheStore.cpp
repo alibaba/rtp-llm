@@ -63,6 +63,7 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     messager_init_params.rdma_worker_thread_count     = params.rdma_worker_thread_count;
     messager_init_params.io_thread_count              = params.messager_io_thread_count;
     messager_init_params.worker_thread_count          = params.messager_worker_thread_count;
+    messager_init_params.worker_queue_size            = params.queue_size;
     messager_init_params.device_id                    = params.device_id;
 
     if (!messager_->init(messager_init_params)) {
@@ -217,6 +218,26 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
                             uint32_t                                   timeout_ms,
                             int                                        partition_count,
                             int                                        partition_id) {
+    load(request_block_buffer,
+         callback,
+         ip,
+         port,
+         rdma_port,
+         timeout_ms,
+         partition_count,
+         partition_id,
+         nullptr);
+}
+
+void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
+                            CacheStoreLoadDoneCallback                 callback,
+                            const std::string&                         ip,
+                            uint32_t                                   port,
+                            uint32_t                                   rdma_port,
+                            uint32_t                                   timeout_ms,
+                            int                                        partition_count,
+                            int                                        partition_id,
+                            const std::shared_ptr<LoadCopyFence>&       copy_fence) {
     if (request_block_buffer == nullptr || !request_block_buffer->isValid() || ip.empty()) {
         RTP_LLM_LOG_WARNING("normal cache store run load failed, invalid params");
         callback(false, CacheStoreErrorCode::InvalidParams);
@@ -246,14 +267,24 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
                  timeout_ms,
                  collector,
                  partition_count,
-                 partition_id]() {
+                 partition_id,
+                 copy_fence]() {
         if (!tryPinThreadDevice(this->device_id_, "normal cache store load task")) {
             collector->markEnd(false);
             callback(false, CacheStoreErrorCode::LoadErrorUnknown);
             return;
         }
         this->runLoadTask(
-            request_block_buffer, callback, ip, port, rdma_port, timeout_ms, collector, partition_count, partition_id);
+            request_block_buffer,
+            callback,
+            ip,
+            port,
+            rdma_port,
+            timeout_ms,
+            collector,
+            partition_count,
+            partition_id,
+            copy_fence);
     };
 
     if (thread_pool_->pushTask(task) != autil::ThreadPoolBase::ERROR_NONE) {
@@ -273,10 +304,11 @@ void NormalCacheStore::runLoadTask(const std::shared_ptr<RequestBlockBuffer>&   
                                    uint32_t                                                     timeout_ms,
                                    const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector,
                                    int                                                          partition_count,
-                                   int                                                          partition_id) {
+                                   int                                                          partition_id,
+                                   const std::shared_ptr<LoadCopyFence>&                         copy_fence) {
     collector->markTaskRun();
     auto load_request = std::make_shared<LoadRequest>(
-        ip, port, rdma_port, request_block_buffer, callback, timeout_ms, partition_count, partition_id);
+        ip, port, rdma_port, request_block_buffer, callback, timeout_ms, partition_count, partition_id, copy_fence);
     messager_->load(load_request, collector);
 }
 

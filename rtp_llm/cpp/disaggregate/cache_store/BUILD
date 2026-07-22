@@ -36,6 +36,7 @@ interface_includes = [
     "MemoryUtil.h",
     "RequestBlockBuffer.h",
     "LoadContext.h",
+    "LoadCopyFence.h",
     "RemoteStoreTask.h",
     "MessagerRequest.h",
     "ErrorCodeUtil.h",

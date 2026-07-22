@@ -58,6 +58,18 @@ public:
         callback(load_success, load_error);
     }
 
+    void load(const std::shared_ptr<rtp_llm::RequestBlockBuffer>&,
+              rtp_llm::CacheStoreLoadDoneCallback callback,
+              const std::string&,
+              uint32_t,
+              uint32_t,
+              uint32_t,
+              int,
+              int,
+              const std::shared_ptr<rtp_llm::LoadCopyFence>&) override {
+        callback(load_success, load_error);
+    }
+
     std::shared_ptr<rtp_llm::LoadContext> loadBuffers(const std::vector<std::shared_ptr<rtp_llm::RequestBlockBuffer>>&,
                                                       const std::string&,
                                                       uint32_t,

@@ -1,12 +1,17 @@
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreLoadServiceClosure.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/LoadContext.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/test/CacheStoreTestBase.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
 #include "autil/NetUtil.h"
 #include "autil/EnvUtil.h"
 
+#include <condition_variable>
+#include <chrono>
+#include <future>
 #include <limits>
+#include <thread>
 
 namespace rtp_llm {
 
@@ -15,7 +20,8 @@ protected:
     TcpCacheStoreLoadServiceClosure* makeClosure(arpc::ErrorCode              arpc_ec,
                                                  KvCacheStoreServiceErrorCode resp_ec,
                                                  CacheStoreLoadDoneCallback   callback,
-                                                 int                          device_id = -1);
+                                                 int                          device_id = -1,
+                                                 const std::shared_ptr<LoadCopyFence>& copy_fence = nullptr);
 };
 
 class TcpCacheStoreLoadServiceClosureNoDeviceTest: public TcpCacheStoreLoadServiceClosureTest {
@@ -27,7 +33,8 @@ protected:
 TcpCacheStoreLoadServiceClosure* TcpCacheStoreLoadServiceClosureTest::makeClosure(arpc::ErrorCode              arpc_ec,
                                                                                   KvCacheStoreServiceErrorCode resp_ec,
                                                                                   CacheStoreLoadDoneCallback   callback,
-                                                                                  int device_id) {
+                                                                                  int device_id,
+                                                                                  const std::shared_ptr<LoadCopyFence>& copy_fence) {
     auto request_buffer = std::make_shared<RequestBlockBuffer>("request-id");
     auto controller     = new arpc::ANetRPCController();
     auto request        = new CacheLoadRequest;
@@ -42,7 +49,7 @@ TcpCacheStoreLoadServiceClosure* TcpCacheStoreLoadServiceClosureTest::makeClosur
     response->set_error_code(resp_ec);
 
     return new TcpCacheStoreLoadServiceClosure(
-        memory_util_, request_buffer, controller, request, response, callback, collector, device_id);
+        memory_util_, request_buffer, controller, request, response, callback, collector, device_id, copy_fence);
 }
 
 TEST_F(TcpCacheStoreLoadServiceClosureNoDeviceTest, testRun_DevicePinFailed) {
@@ -209,6 +216,201 @@ TEST_F(TcpCacheStoreLoadServiceClosureTest, testRun_BlockContentError) {
 
     mutex.lock();
     mutex.unlock();
+}
+
+TEST_F(TcpCacheStoreLoadServiceClosureTest, testRun_ClosedFenceSkipsCopy) {
+    constexpr uint32_t block_size = 16;
+    auto               fence      = std::make_shared<LoadCopyFence>();
+    auto               block      = block_buffer_util_->makeBlockBuffer("a", block_size, 'B', false);
+
+    bool                callback_called = false;
+    bool                callback_ok     = true;
+    CacheStoreErrorCode callback_ec     = CacheStoreErrorCode::None;
+    auto callback = [&](bool ok, CacheStoreErrorCode ec) {
+        callback_called = true;
+        callback_ok     = ok;
+        callback_ec     = ec;
+    };
+
+    auto closure =
+        makeClosure(arpc::ARPC_ERROR_NONE, KvCacheStoreServiceErrorCode::EC_SUCCESS, callback, -1, fence);
+    closure->request_block_buffer_->addBlock(block);
+    auto response_block = closure->response_->add_blocks();
+    response_block->set_key("a");
+    response_block->set_len(block_size);
+    response_block->set_content(std::string(block_size, 'A'));
+
+    fence->closeAndDrain();
+    closure->Run();
+
+    EXPECT_TRUE(callback_called);
+    EXPECT_FALSE(callback_ok);
+    EXPECT_EQ(CacheStoreErrorCode::LoadBufferTimeout, callback_ec);
+    EXPECT_EQ(std::string(block_size, 'B'), std::string(static_cast<const char*>(block->addr.get()), block_size));
+}
+
+TEST(LoadCopyFenceTest, closeDrainsActiveCopyAndRejectsFutureCopy) {
+    auto fence = std::make_shared<LoadCopyFence>();
+
+    std::mutex              mutex;
+    std::condition_variable cond;
+    bool                    copy_entered   = false;
+    bool                    release_copy   = false;
+    bool                    close_returned = false;
+
+    std::thread copy_thread([&]() {
+        EXPECT_TRUE(fence->runIfOpen([&]() {
+            std::unique_lock<std::mutex> lock(mutex);
+            copy_entered = true;
+            cond.notify_all();
+            cond.wait(lock, [&]() { return release_copy; });
+        }));
+    });
+
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        cond.wait(lock, [&]() { return copy_entered; });
+    }
+
+    std::thread close_thread([&]() {
+        fence->closeAndDrain();
+        std::lock_guard<std::mutex> lock(mutex);
+        close_returned = true;
+        cond.notify_all();
+    });
+
+    const auto close_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!fence->closed() && std::chrono::steady_clock::now() < close_deadline) {
+        std::this_thread::yield();
+    }
+    EXPECT_TRUE(fence->closed());
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        EXPECT_FALSE(close_returned);
+        release_copy = true;
+    }
+    cond.notify_all();
+
+    copy_thread.join();
+    close_thread.join();
+
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        EXPECT_TRUE(close_returned);
+    }
+    bool mutated = false;
+    EXPECT_FALSE(fence->runIfOpen([&]() { mutated = true; }));
+    EXPECT_FALSE(mutated);
+}
+
+TEST(LoadContextTest, timeoutDrainsActiveCopyAndLateCallbackCannotOverwrite) {
+    auto context = std::make_shared<LoadContext>(nullptr, false);
+    context->expect_layer_cnt_ = 1;
+    context->deadline_ms_      = 0;
+    auto fence                 = context->copy_fence_;
+
+    std::mutex              mutex;
+    std::condition_variable cond;
+    bool                    copy_entered  = false;
+    bool                    release_copy  = false;
+    bool                    wait_returned = false;
+
+    std::thread copy_thread([&]() {
+        EXPECT_TRUE(fence->runIfOpen([&]() {
+            std::unique_lock<std::mutex> lock(mutex);
+            copy_entered = true;
+            cond.notify_all();
+            cond.wait(lock, [&]() { return release_copy; });
+        }));
+    });
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        cond.wait(lock, [&]() { return copy_entered; });
+    }
+
+    std::thread wait_thread([&]() {
+        context->waitDone();
+        std::lock_guard<std::mutex> lock(mutex);
+        wait_returned = true;
+        cond.notify_all();
+    });
+
+    const auto timeout_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!fence->closed() && std::chrono::steady_clock::now() < timeout_deadline) {
+        std::this_thread::yield();
+    }
+    EXPECT_TRUE(fence->closed());
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        EXPECT_FALSE(wait_returned);
+        release_copy = true;
+    }
+    cond.notify_all();
+
+    copy_thread.join();
+    wait_thread.join();
+
+    EXPECT_EQ(
+        ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT, context->getErrorInfo().code()
+    );
+    auto request_buffer = std::make_shared<RequestBlockBuffer>("late-request");
+    context->updateResult(
+        false, CacheStoreErrorCode::LoadErrorUnknown, request_buffer
+    );
+    EXPECT_EQ(
+        ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT, context->getErrorInfo().code()
+    );
+    EXPECT_TRUE(context->failedBlockDebugInfos().empty());
+}
+
+TEST(LoadContextTest, cancelIsTerminalForLateCallback) {
+    auto context = std::make_shared<LoadContext>(nullptr, false);
+    context->expect_layer_cnt_  = 1;
+    context->deadline_ms_       = std::numeric_limits<int64_t>::max();
+    context->check_cancel_func_ = []() { return true; };
+
+    context->waitDone();
+    EXPECT_EQ(ErrorCode::CANCELLED, context->getErrorInfo().code());
+
+    auto request_buffer = std::make_shared<RequestBlockBuffer>("late-request");
+    context->updateResult(
+        false, CacheStoreErrorCode::LoadErrorUnknown, request_buffer
+    );
+    EXPECT_EQ(ErrorCode::CANCELLED, context->getErrorInfo().code());
+    EXPECT_TRUE(context->failedBlockDebugInfos().empty());
+}
+
+TEST(LoadContextTest, directWriteTimeoutKeepsLeaseUntilCallback) {
+    auto context = std::make_shared<LoadContext>(nullptr, true);
+    context->expect_layer_cnt_ = 1;
+    context->deadline_ms_      = 0;
+
+    auto wait_future =
+        std::async(std::launch::async, [&]() { context->waitDone(); });
+
+    bool       terminal = false;
+    const auto terminal_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!terminal && std::chrono::steady_clock::now() < terminal_deadline) {
+        {
+            std::lock_guard<std::mutex> lock(context->mutex_);
+            terminal = context->terminal_;
+        }
+        std::this_thread::yield();
+    }
+    EXPECT_TRUE(terminal);
+    EXPECT_EQ(std::future_status::timeout,
+              wait_future.wait_for(std::chrono::milliseconds(10)));
+    EXPECT_FALSE(context->copy_fence_->closed());
+
+    auto request_buffer = std::make_shared<RequestBlockBuffer>("rdma-request");
+    context->updateResult(true, CacheStoreErrorCode::None, request_buffer);
+
+    EXPECT_EQ(std::future_status::ready,
+              wait_future.wait_for(std::chrono::seconds(1)));
+    wait_future.get();
+    EXPECT_EQ(ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT,
+              context->getErrorInfo().code());
 }
 
 }  // namespace rtp_llm

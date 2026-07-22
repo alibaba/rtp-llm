@@ -53,6 +53,14 @@ void SyncContext::updateResult(bool                                       succes
                                CacheStoreErrorCode                        ec,
                                const std::shared_ptr<RequestBlockBuffer>& request_block_buffer) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (terminal_) {
+        // A timeout/cancel result is final. Still account for late callbacks so
+        // their captured contexts can retire, but never overwrite the terminal
+        // error or add misleading failed-block diagnostics.
+        ++done_layer_cnt_;
+        cond_.notify_all();
+        return;
+    }
     if (!success) {
         auto error_code = transCacheStoreErrorCode(ec);
         error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
@@ -77,6 +85,18 @@ void SyncContext::updateResult(bool                                       succes
 void SyncContext::waitDone() {
     std::unique_lock<std::mutex> lock(mutex_);
     auto                         once_time_ms = 30;
+    auto finish_terminal = [this, &lock]() {
+        if (combine_load_) {
+            // RDMA writes directly into caller-owned buffers and cannot be
+            // stopped by the local copy fence. Keep the buffer lease until
+            // the transport completion callback retires the request.
+            RTP_LLM_LOG_WARNING("load context terminal result waiting for direct-write completion");
+            cond_.wait(lock, [this]() { return done_layer_cnt_ == expect_layer_cnt_; });
+        } else {
+            lock.unlock();
+            abortPendingWrites();
+        }
+    };
     while (true) {
         if (done_layer_cnt_ == expect_layer_cnt_) {
             return;
@@ -86,14 +106,18 @@ void SyncContext::waitDone() {
             auto error_code = ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT;
             error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
             timed_out_      = true;
+            terminal_       = true;
             RTP_LLM_LOG_INFO("load context wait done on timeout");
+            finish_terminal();
             return;
         }
 
         if (check_cancel_func_ != nullptr && check_cancel_func_()) {
             auto error_code = ErrorCode::CANCELLED;
             error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
+            terminal_       = true;
             RTP_LLM_LOG_INFO("load context wait done on cancelled");
+            finish_terminal();
             return;
         }
 
@@ -170,7 +194,8 @@ bool LoadContext::doCall(const std::shared_ptr<RequestBlockBuffer>& request_bloc
                       rdma_port_,
                       timeout_ms,
                       partition_count_,
-                      partition_id_);
+                      partition_id_,
+                      copy_fence_);
     return true;
 }
 

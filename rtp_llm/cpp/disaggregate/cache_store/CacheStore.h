@@ -29,6 +29,19 @@ public:
                       int                                        partition_count = 1,
                       int                                        partition_id    = 0) = 0;
 
+    // Implementations must explicitly handle the write fence. Copy-based
+    // transports drain it on timeout/cancel; direct-write transports must keep
+    // the caller-owned buffers leased until their completion callback.
+    virtual void load(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
+                      CacheStoreLoadDoneCallback                 callback,
+                      const std::string&                         ip,
+                      uint32_t                                   port,
+                      uint32_t                                   rdma_port,
+                      uint32_t                                   timeout_ms,
+                      int                                        partition_count,
+                      int                                        partition_id,
+                      const std::shared_ptr<LoadCopyFence>& copy_fence) = 0;
+
     virtual std::shared_ptr<LoadContext>
     loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
                 const std::string&                                      ip,

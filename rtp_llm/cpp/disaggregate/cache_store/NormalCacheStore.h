@@ -33,6 +33,16 @@ public:
               int                                        partition_count = 1,
               int                                        partition_id    = 0) override;
 
+    void load(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
+              CacheStoreLoadDoneCallback                 callback,
+              const std::string&                         ip,
+              uint32_t                                   port,
+              uint32_t                                   rdma_port,
+              uint32_t                                   timeout_ms,
+              int                                        partition_count,
+              int                                        partition_id,
+              const std::shared_ptr<LoadCopyFence>&       copy_fence) override;
+
     std::shared_ptr<LoadContext>
     loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
                 const std::string&                                      ip,
@@ -74,7 +84,8 @@ private:
                      uint32_t                                                     timeout_ms,
                      const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collelctor,
                      int                                                          partition_count,
-                     int                                                          partition_id);
+                     int                                                          partition_id,
+                     const std::shared_ptr<LoadCopyFence>&                         copy_fence);
 
     const std::shared_ptr<RequestBlockBufferStore>& getRequestBlockBufferStore() const;
 

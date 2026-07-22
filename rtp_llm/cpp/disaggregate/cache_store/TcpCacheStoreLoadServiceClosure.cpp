@@ -39,11 +39,35 @@ void TcpCacheStoreLoadServiceClosure::Run() {
         return;
     }
 
-    // TCP Mode 下需要Copy数据
-    if (response_->blocks_size() != request_block_buffer_->getBlocksCount()) {
-        RTP_LLM_LOG_WARNING("cache load response block count not equal to request block buffer");
+    CacheStoreErrorCode copy_error = CacheStoreErrorCode::None;
+    bool                copy_ran   = false;
+    try {
+        copy_ran = copy_fence_ ? copy_fence_->runIfOpen([&]() { copy_error = copyResponseBlocks(); })
+                               : (copy_error = copyResponseBlocks(), true);
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("cache load response copy failed: %s", e.what());
+        end(false, CacheStoreErrorCode::LoadErrorUnknown);
+        return;
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("cache load response copy failed with unknown exception");
+        end(false, CacheStoreErrorCode::LoadErrorUnknown);
+        return;
+    }
+    if (!copy_ran) {
         end(false, CacheStoreErrorCode::LoadBufferTimeout);
         return;
+    }
+
+    // The fence permit is released before callback execution. This lock order
+    // prevents deadlock with waitDone(), which closes the fence after dropping
+    // the SyncContext mutex.
+    end(copy_error == CacheStoreErrorCode::None, copy_error);
+}
+
+CacheStoreErrorCode TcpCacheStoreLoadServiceClosure::copyResponseBlocks() {
+    if (response_->blocks_size() != request_block_buffer_->getBlocksCount()) {
+        RTP_LLM_LOG_WARNING("cache load response block count not equal to request block buffer");
+        return CacheStoreErrorCode::LoadBufferTimeout;
     }
 
     for (int i = 0; i < response_->blocks_size(); i++) {
@@ -54,8 +78,7 @@ void TcpCacheStoreLoadServiceClosure::Run() {
             RTP_LLM_LOG_WARNING("can not find match block %s from response, request is %s",
                                 block.key().c_str(),
                                 request_block_buffer_->getRequestId().c_str());
-            end(false, CacheStoreErrorCode::LoadBufferTimeout);
-            return;
+            return CacheStoreErrorCode::LoadBufferTimeout;
         }
 
         auto dst_tensor = torch::from_blob(
@@ -67,7 +90,7 @@ void TcpCacheStoreLoadServiceClosure::Run() {
                                            torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
         execNoBlockCopy({dst_tensor, src_tensor});
     }
-    end(true, CacheStoreErrorCode::None);
+    return CacheStoreErrorCode::None;
 }
 
 void TcpCacheStoreLoadServiceClosure::end(bool success, CacheStoreErrorCode ec) {

@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 #include "rtp_llm/cpp/disaggregate/cache_store/CommonDefine.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/LoadCopyFence.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 
 namespace rtp_llm {
@@ -16,6 +17,7 @@ struct LoadRequest {
     uint32_t                            timeout_ms;
     int                                 partition_count;
     int                                 partition_id;
+    std::shared_ptr<LoadCopyFence>      copy_fence;
     LoadRequest(const std::string&                         ip,
                 uint32_t                                   port,
                 uint32_t                                   rdma_port,
@@ -23,7 +25,8 @@ struct LoadRequest {
                 CacheStoreLoadDoneCallback                 callback,
                 uint32_t                                   timeout_ms,
                 int                                        partition_count,
-                int                                        partition_id):
+                int                                        partition_id,
+                const std::shared_ptr<LoadCopyFence>&       copy_fence = nullptr):
         ip(ip),
         port(port),
         rdma_port(rdma_port),
@@ -31,7 +34,8 @@ struct LoadRequest {
         callback(callback),
         timeout_ms(timeout_ms),
         partition_count(partition_count),
-        partition_id(partition_id) {}
+        partition_id(partition_id),
+        copy_fence(copy_fence) {}
 };
 
 struct TransferRequest {
