@@ -14,14 +14,11 @@ import time
 import traceback
 import unittest
 
-# The shipped native modules rely on symbols loaded by torch.  Preserve this
-# order: importing either extension first can segfault in the dynamic loader.
+# The shipped native modules rely on symbols loaded by torch.  Import torch
+# first, then bootstrap through rtp_llm so libth_transformer_config owns shared
+# pybind types before librtp_compute_ops reuses them.
 # isort: off
 import torch
-import librtp_compute_ops
-import libth_transformer
-
-# isort: on
 
 from rtp_llm.cpp.models.test import (
     libtp_sync_model_inputs_production_test_bridge as production_bridge,
@@ -29,6 +26,11 @@ from rtp_llm.cpp.models.test import (
 from rtp_llm.models_py.distributed import collective_torch as ct
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 from rtp_llm.test.utils.port_util import PortManager
+
+import librtp_compute_ops
+import libth_transformer
+
+# isort: on
 
 _EXPECTED = {
     "combo_tokens": [11, 12, 13],
