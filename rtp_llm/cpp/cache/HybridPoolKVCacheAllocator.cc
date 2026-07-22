@@ -11,6 +11,7 @@
 
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -24,9 +25,8 @@ inline bool cpShardThisGroupForReserve(const std::shared_ptr<CPSlotMapper>& mapp
     return mapper && mapper->isSharded() && group_type == CacheGroupType::FULL;
 }
 
-inline int cpEffectiveSeqLenForReserve(const std::shared_ptr<CPSlotMapper>& mapper,
-                                       CacheGroupType                       group_type,
-                                       int                                  seq_len) {
+inline int
+cpEffectiveSeqLenForReserve(const std::shared_ptr<CPSlotMapper>& mapper, CacheGroupType group_type, int seq_len) {
     return cpShardThisGroupForReserve(mapper, group_type) ? mapper->effectiveSeqLenForAlloc(seq_len) : seq_len;
 }
 
@@ -63,6 +63,12 @@ bool HybridPoolKVCacheAllocator::doInit() {
 
     std::vector<BlockPoolConfig> group_pool_configs;
     group_pool_configs.reserve(static_cast<size_t>(group_nums));
+    const auto usesPinnedCpuBacking = [&](int gid) {
+        return allocation_type_ == AllocationType::DEVICE && config_.fixed_pool_uses_pinned_cpu
+               && static_cast<size_t>(gid) < config_.group_region_names.size()
+               && isDsv4FixedRegion(config_.group_region_names[static_cast<size_t>(gid)]);
+    };
+
     for (int gid = 0; gid < group_nums; ++gid) {
         auto pool_config = BlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(gid));
         if (gid >= 0 && gid <= 2) {
@@ -122,39 +128,77 @@ bool HybridPoolKVCacheAllocator::doInit() {
                          static_cast<double>(dsv4_fixed_pool_total_bytes) / kBytesPerMB);
     }
 
+    const bool is_warmup = std::all_of(
+        group_pool_configs.begin(), group_pool_configs.end(), [](const auto& config) { return config.block_num == 1; });
+
+    std::vector<size_t> arena_offsets(static_cast<size_t>(group_nums), 0);
+    VmmBackend          vmm_backend;
+    if (allocation_type_ == AllocationType::DEVICE && use_cuda_malloc_block_pool_ && !is_warmup
+        && vmm_backend.isAvailable()) {
+        constexpr size_t kBackingAlignment = 256;
+        size_t           arena_size        = 0;
+        for (int gid = 0; gid < group_nums; ++gid) {
+            if (usesPinnedCpuBacking(gid)) {
+                continue;
+            }
+            arena_size = (arena_size + kBackingAlignment - 1) / kBackingAlignment * kBackingAlignment;
+            arena_offsets[static_cast<size_t>(gid)] = arena_size;
+            arena_size += group_pool_configs[static_cast<size_t>(gid)].total_size_bytes;
+        }
+        if (arena_size > 0) {
+            kv_buffer_arena_ = BlockPool::allocatePausableDeviceBacking(arena_size);
+            RTP_LLM_LOG_INFO("HybridPool KV buffer arena: size=%zu bytes (%.2f MB), groups=%d",
+                             arena_size,
+                             static_cast<double>(arena_size) / kBytesPerMB,
+                             group_nums);
+        }
+    }
+
     for (int gid = 0; gid < group_nums; ++gid) {
         RTP_LLM_CHECK_WITH_INFO(gid < static_cast<int>(config_.group_types.size()),
                                 "missing group type for group %d in HybridPoolKVCacheAllocator",
                                 gid);
         const auto group_type = config_.group_types[static_cast<size_t>(gid)];
 
-        const auto& pool_config            = group_pool_configs[static_cast<size_t>(gid)];
-        const bool  use_pinned_cpu_backing = allocation_type_ == AllocationType::DEVICE
-                                            && config_.fixed_pool_uses_pinned_cpu
-                                            && static_cast<size_t>(gid) < config_.group_region_names.size()
-                                            && isDsv4FixedRegion(config_.group_region_names[static_cast<size_t>(gid)]);
-        auto group_pool = std::make_shared<BlockPool>(pool_config,
-                                                      allocation_type_,
-                                                      use_pinned_cpu_backing,
-                                                      use_cuda_malloc_block_pool_ && !use_pinned_cpu_backing);
+        const auto&  pool_config            = group_pool_configs[static_cast<size_t>(gid)];
+        const bool   use_pinned_cpu_backing = usesPinnedCpuBacking(gid);
+        BlockPoolPtr group_pool;
+        if (kv_buffer_arena_.defined() && !use_pinned_cpu_backing) {
+            auto backing = kv_buffer_arena_.narrow(0,
+                                                   static_cast<int64_t>(arena_offsets[static_cast<size_t>(gid)]),
+                                                   static_cast<int64_t>(pool_config.total_size_bytes));
+            group_pool   = std::make_shared<BlockPool>(pool_config, std::move(backing));
+        } else if (is_warmup && allocation_type_ == AllocationType::DEVICE && vmm_backend.isAvailable()
+                   && !use_pinned_cpu_backing) {
+            // The throwaway warmup pools must not claim the persistent kv_cache
+            // tag before the real arena is allocated.
+            auto backing = torch::empty({static_cast<int64_t>(pool_config.total_size_bytes)},
+                                        torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+            group_pool   = std::make_shared<BlockPool>(pool_config, std::move(backing));
+        } else {
+            group_pool = std::make_shared<BlockPool>(pool_config,
+                                                     allocation_type_,
+                                                     use_pinned_cpu_backing,
+                                                     use_cuda_malloc_block_pool_ && !use_pinned_cpu_backing);
+        }
         RTP_LLM_CHECK_WITH_INFO(group_pool->init(), "Failed to initialize block pool for group %d", gid);
 
         const auto& ids  = config_.global_layer_ids[static_cast<size_t>(gid)];
         auto        spec = config_.cache_specs[static_cast<size_t>(gid)];
 
         KVCacheGroupPtr group;
-	        if (group_type == CacheGroupType::LINEAR) {
-	            group = std::make_shared<LinearKVCacheGroup>(
-	                ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw, metrics_reporter_);
-	            linear_group_ids_.push_back(gid);
-	        } else if (group_type == CacheGroupType::SWA) {
-	            group = std::make_shared<SWAKVCacheGroup>(
-	                ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw, metrics_reporter_);
-	            swa_group_ids_.push_back(gid);
-	        } else {
-	            group = std::make_shared<FullKVCacheGroup>(ids, spec, group_pool, gid, shared_cache_raw, metrics_reporter_);
-	            full_group_ids_.push_back(gid);
-	        }
+        if (group_type == CacheGroupType::LINEAR) {
+            group = std::make_shared<LinearKVCacheGroup>(
+                ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw, metrics_reporter_);
+            linear_group_ids_.push_back(gid);
+        } else if (group_type == CacheGroupType::SWA) {
+            group = std::make_shared<SWAKVCacheGroup>(
+                ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw, metrics_reporter_);
+            swa_group_ids_.push_back(gid);
+        } else {
+            group = std::make_shared<FullKVCacheGroup>(ids, spec, group_pool, gid, shared_cache_raw, metrics_reporter_);
+            full_group_ids_.push_back(gid);
+        }
 
         RTP_LLM_CHECK_WITH_INFO(group->init(), "Failed to initialize KVCacheGroup gid %d", gid);
         group_block_pools_.push_back(group_pool);
@@ -599,6 +643,18 @@ void HybridPoolKVCacheAllocator::regUserMr(size_t model_id, std::shared_ptr<Cach
     }
 }
 
+void HybridPoolKVCacheAllocator::deregUserMr() {
+    // Must mirror regUserMr and deregister EVERY group pool. The base
+    // KVCacheAllocator::deregUserMr only touches the single block_pool_, which for the
+    // hybrid allocator leaves the other groups' RDMA user MRs registered. Those MRs pin
+    // the KV arena's GPU pages (nvidia-peermem / GPUDirect), so on engine sleep the
+    // subsequent tms_pause("kv_cache") cannot unmap the still-pinned physical pages and
+    // the whole arena stays resident. Deregistering all groups first lets pause reclaim it.
+    for (auto& pool : group_block_pools_) {
+        pool->deregUserMr();
+    }
+}
+
 int64_t HybridPoolKVCacheAllocator::getMrCostTimeMs() const {
     int64_t total = 0;
     for (const auto& pool : group_block_pools_) {
@@ -631,10 +687,10 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
     }
 
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
-        const auto group_type = static_cast<size_t>(gid) < config_.group_types.size() ?
-                                    config_.group_types[static_cast<size_t>(gid)] :
-                                    CacheGroupType::FULL;
-        const int  group_common_seq      = cpEffectiveSeqLenForReserve(cp_mapper, group_type, raw_common_seq_len);
+        const auto group_type             = static_cast<size_t>(gid) < config_.group_types.size() ?
+                                                config_.group_types[static_cast<size_t>(gid)] :
+                                                CacheGroupType::FULL;
+        const int  group_common_seq       = cpEffectiveSeqLenForReserve(cp_mapper, group_type, raw_common_seq_len);
         const int  group_seq_len          = cpEffectiveSeqLenForReserve(cp_mapper, group_type, raw_seq_len);
         const int  group_reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, gid) : 0;
         const auto need                   = kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocks(

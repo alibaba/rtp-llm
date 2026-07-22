@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
@@ -61,6 +62,15 @@ public:
 
     BlockPoolPtr getBlockPool() const {
         return block_pool_;
+    }
+
+    virtual std::vector<BlockPoolPtr> getBlockPools() const {
+        return block_pool_ ? std::vector<BlockPoolPtr>{block_pool_} : std::vector<BlockPoolPtr>{};
+    }
+
+    virtual std::pair<void*, size_t> physicalMemoryBacking() const {
+        return block_pool_ ? std::make_pair(block_pool_->getBaseAddress(), block_pool_->getTotalSizeBytes()) :
+                             std::make_pair(nullptr, size_t{0});
     }
 
     SharedBlockCachePtr sharedBlockCache() const {

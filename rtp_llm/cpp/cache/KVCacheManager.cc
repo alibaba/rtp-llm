@@ -170,12 +170,9 @@ bool KVCacheManager::init() {
 
 void KVCacheManager::initKVMemoryController() {
     kv_memory_controller_ = std::make_shared<KVCachePhysicalMemoryController>(std::make_shared<VmmBackend>());
-    auto block_pool       = allocator_->getBlockPool();
-    if (block_pool && block_pool->getBaseAddress() != nullptr) {
-        // Attach mode: the KV big buffer was already allocated by BlockPool via torch::empty(kCUDA);
-        // the preload shim (when present) intercepted that allocation, so the controller only needs
-        // to record ptr/size and drive pause/resume by tag.
-        kv_memory_controller_->allocateOrAttach(block_pool->getBaseAddress(), block_pool->getTotalSizeBytes());
+    const auto [base_ptr, size_bytes] = allocator_->physicalMemoryBacking();
+    if (base_ptr != nullptr && size_bytes > 0) {
+        kv_memory_controller_->allocateOrAttach(base_ptr, size_bytes);
     }
 }
 
@@ -718,14 +715,14 @@ bool KVCacheManager::restoreKVCacheMemoryBackingAndResetMetadata() {
 
     // Physical pages are re-mapped at the same VA but the content is garbage (discard mode):
     // wipe all KV metadata so the pool is indistinguishable from a freshly initialized one.
-    auto block_pool = allocator_->getBlockPool();
-    RTP_LLM_CHECK_WITH_INFO(block_pool != nullptr, "restoreKVCacheMemoryBackingAndResetMetadata: block pool is null");
-    block_pool->resetMetadata();
-    if (auto block_cache = block_pool->blockCache()) {
-        block_cache->clear();  // drops all prefix entries and bumps generation
+    const auto block_pools = allocator_->getBlockPools();
+    for (const auto& block_pool : block_pools) {
+        block_pool->resetMetadata();
+        if (auto block_cache = block_pool->blockCache()) {
+            block_cache->clear();
+        }
     }
-    RTP_LLM_LOG_INFO("restoreKVCacheMemoryBackingAndResetMetadata done: metadata reset, cache generation=%lu",
-                     block_pool->blockCache() ? block_pool->blockCache()->generation() : 0UL);
+    RTP_LLM_LOG_INFO("restoreKVCacheMemoryBackingAndResetMetadata done: reset %zu block pools", block_pools.size());
     return true;
 }
 

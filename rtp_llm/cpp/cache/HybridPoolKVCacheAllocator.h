@@ -45,11 +45,23 @@ public:
     size_t                  totalBlocksNum() const override;
     size_t                  maxAvailableTokensNum() const override;
     void                    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr) override;
+    void                    deregUserMr() override;
     int64_t                 getMrCostTimeMs() const override;
 
     // Per-pool access for diagnostics / per-pool metrics reporting.
     const std::vector<BlockPoolPtr>& groupBlockPools() const {
         return group_block_pools_;
+    }
+
+    std::vector<BlockPoolPtr> getBlockPools() const override {
+        return group_block_pools_;
+    }
+
+    std::pair<void*, size_t> physicalMemoryBacking() const override {
+        if (kv_buffer_arena_.defined()) {
+            return {kv_buffer_arena_.data_ptr(), static_cast<size_t>(kv_buffer_arena_.numel())};
+        }
+        return HybridKVCacheAllocator::physicalMemoryBacking();
     }
 
 private:
@@ -59,12 +71,13 @@ private:
     void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) override;
     bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const override;
 
-    int groupIdForLayerRegion(int layer_id, KVCacheRegionName region_name) const;
-    int defaultGroupIdForLayer(int layer_id) const;
+    int    groupIdForLayerRegion(int layer_id, KVCacheRegionName region_name) const;
+    int    defaultGroupIdForLayer(int layer_id) const;
     size_t minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
 
     std::vector<BlockPoolPtr> group_block_pools_;
     RoleType                  role_type_{RoleType::PDFUSION};
+    torch::Tensor             kv_buffer_arena_;
 };
 
 using HybridPoolKVCacheAllocatorPtr = std::shared_ptr<HybridPoolKVCacheAllocator>;

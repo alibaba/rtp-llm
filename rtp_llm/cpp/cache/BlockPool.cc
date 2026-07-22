@@ -24,6 +24,9 @@
 
 #if USING_CUDA
 #include <cuda_runtime.h>
+#include <ATen/cuda/MemPool.h>
+#include <c10/cuda/CUDACachingAllocator.h>
+#include <c10/cuda/CUDAFunctions.h>
 #endif
 
 namespace rtp_llm {
@@ -31,6 +34,26 @@ namespace rtp_llm {
 namespace {
 
 bool shouldPinHostBlockPool();
+
+class AllocationRegionGuard {
+public:
+    AllocationRegionGuard(VmmBackend& backend, const std::string& tag):
+        backend_(backend), active_(backend.isAvailable() && backend.beginAllocationRegion(tag)) {}
+
+    ~AllocationRegionGuard() {
+        if (active_) {
+            backend_.endAllocationRegion();
+        }
+    }
+
+    bool active() const {
+        return active_;
+    }
+
+private:
+    VmmBackend& backend_;
+    bool        active_;
+};
 
 const char* allocationTypeName(AllocationType allocation_type) {
     switch (allocation_type) {
@@ -121,8 +144,69 @@ BlockPool::BlockPool(const BlockPoolConfig& config,
     use_pinned_cpu_backing_(use_pinned_cpu_backing),
     use_cuda_malloc_backing_(use_cuda_malloc_backing) {}
 
+BlockPool::BlockPool(const BlockPoolConfig& config, torch::Tensor device_backing):
+    BlockPool(config, AllocationType::DEVICE, false, false) {
+    external_device_backing_ = std::move(device_backing);
+}
+
 BlockPool::~BlockPool() {
     cache_aligned_buffer_ = torch::Tensor();
+}
+
+torch::Tensor BlockPool::allocatePausableDeviceBacking(size_t size_bytes) {
+    const auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+    VmmBackend vmm_backend;
+
+#if USING_CUDA
+    if (vmm_backend.isAvailable()) {
+        // Route the KV big-buffer through the torch_memory_saver preload shim so its physical
+        // pages become pausable under the "kv_cache" tag. Two ingredients are required; setting
+        // the shim's interesting-region flag alone is NOT enough (that was the sleep-mode bug):
+        //
+        //   1) The allocation must trigger a *fresh* cudaMalloc. The shim intercepts cudaMalloc
+        //      (armed by the flag) and backs it with VMM pages; if torch serves the request from a
+        //      pre-existing cached block (allocated before the flag was set, e.g. a model-load
+        //      transient), no cudaMalloc happens, the pages are plain non-VMM memory, and a later
+        //      tms_pause("kv_cache") frees nothing. A brand-new private pool starts empty, so the
+        //      first allocation into it always misses the cache and issues a real cudaMalloc.
+        //   2) The VMM segment must stay isolated from the default pool. torch's default-pool
+        //      emptyCache()/cudaFree() paths cannot handle an unmapped/paused VMM range and raise
+        //      cudaErrorInvalidValue; keeping it in a dedicated pool prevents those paths from ever
+        //      touching it. This mirrors the proven weights path (torch_memory_saver.region(),
+        //      which enters use_mem_pool(primary_pool) before tagging).
+        //
+        // The pool is created and never released: the arena lives for the whole process, and there
+        // is exactly one per KV cache, so a permanent private-pool refcount is intentional.
+        const auto device  = c10::cuda::current_device();
+        const auto pool_id = at::cuda::MemPool::graph_pool_handle(/*is_user_created=*/true);
+        c10::cuda::CUDACachingAllocator::createOrIncrefPool(device, pool_id);
+        // Return unused default-pool reservations to the driver first (belt-and-suspenders; the
+        // fresh private pool already guarantees a cache miss).
+        c10::cuda::CUDACachingAllocator::emptyCache();
+        c10::cuda::CUDACachingAllocator::beginAllocateToPool(device, pool_id, [](cudaStream_t) { return true; });
+
+        torch::Tensor buffer;
+        {
+            AllocationRegionGuard region_guard(vmm_backend, KVCachePhysicalMemoryController::kDefaultTag);
+            try {
+                buffer = torch::empty({static_cast<int64_t>(size_bytes)}, options);
+            } catch (...) {
+                c10::cuda::CUDACachingAllocator::endAllocateToPool(device, pool_id);
+                throw;
+            }
+        }
+        c10::cuda::CUDACachingAllocator::endAllocateToPool(device, pool_id);
+        RTP_LLM_LOG_INFO("device backing (%zu bytes) allocated under VMM tag '%s' in isolated pool (%llu,%llu)",
+                         size_bytes,
+                         KVCachePhysicalMemoryController::kDefaultTag,
+                         static_cast<unsigned long long>(pool_id.first),
+                         static_cast<unsigned long long>(pool_id.second));
+        return buffer;
+    }
+#endif
+
+    // Shim unavailable: plain device allocation (not pausable; sleep mode inactive).
+    return torch::empty({static_cast<int64_t>(size_bytes)}, options);
 }
 
 void BlockPool::validateConfig() const {
@@ -146,7 +230,17 @@ void BlockPool::validateConfig() const {
 }
 
 void BlockPool::initializeCacheBuffer() {
-    if (allocation_type_ == AllocationType::HOST) {
+    if (external_device_backing_.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(external_device_backing_.is_cuda() && external_device_backing_.is_contiguous(),
+                                "external backing must be a contiguous CUDA tensor, pool_name=%s",
+                                config_.pool_name.c_str());
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(external_device_backing_.numel()) == config_.total_size_bytes,
+                                "external backing size mismatch, pool_name=%s, expected=%zu, actual=%ld",
+                                config_.pool_name.c_str(),
+                                config_.total_size_bytes,
+                                external_device_backing_.numel());
+        cache_aligned_buffer_ = external_device_backing_;
+    } else if (allocation_type_ == AllocationType::HOST) {
         auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
                                        torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
         if (shouldPinHostBlockPool()) {
@@ -173,33 +267,7 @@ void BlockPool::initializeCacheBuffer() {
     } else if (use_cuda_malloc_backing_) {
         initializeCudaMallocBuffer();
     } else {
-        // Sleep/wake_up: tag the KV big-buffer allocation so the torch_memory_saver
-        // preload shim (when present) tracks it under "kv_cache" and can later
-        // pause/resume its physical pages. Without the shim this is a no-op.
-        VmmBackend vmm_backend;
-        const bool tagged = vmm_backend.isAvailable()
-                            && vmm_backend.beginAllocationRegion(KVCachePhysicalMemoryController::kDefaultTag);
-        // RAII: the shim's "interesting region" flag is process-global and thread-local.
-        // If torch::empty(kCUDA) throws (e.g. OOM), we MUST still leave the region, or every
-        // subsequent cudaMalloc process-wide gets mis-tagged as "kv_cache" and a later pause
-        // would release unrelated memory. endAllocationRegion() is idempotent enough to run
-        // on the normal path too (guarded by `tagged`).
-        struct AllocationRegionGuard {
-            VmmBackend* backend;
-            bool        active;
-            ~AllocationRegionGuard() {
-                if (active) {
-                    backend->endAllocationRegion();
-                }
-            }
-        } region_guard{&vmm_backend, tagged};
-        cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
-                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
-        if (tagged) {
-            RTP_LLM_LOG_INFO("KV cache buffer (%zu bytes) allocated under VMM tag '%s'",
-                             config_.total_size_bytes,
-                             KVCachePhysicalMemoryController::kDefaultTag);
-        }
+        cache_aligned_buffer_ = allocatePausableDeviceBacking(config_.total_size_bytes);
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");

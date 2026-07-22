@@ -27,7 +27,10 @@ public:
               AllocationType         allocation_type         = AllocationType::DEVICE,
               bool                   use_pinned_cpu_backing  = false,
               bool                   use_cuda_malloc_backing = false);
+    BlockPool(const BlockPoolConfig& config, torch::Tensor device_backing);
     ~BlockPool();
+
+    static torch::Tensor allocatePausableDeviceBacking(size_t size_bytes);
 
     bool init();
 
@@ -97,6 +100,7 @@ public:
     size_t getTotalSizeBytes() const {
         return config_.total_size_bytes;
     }
+
     const std::string& poolName() const {
         return config_.pool_name;
     }
@@ -158,6 +162,7 @@ private:
     AllocationType allocation_type_;
     bool           use_pinned_cpu_backing_;
     bool           use_cuda_malloc_backing_;
+    torch::Tensor  external_device_backing_;
 
     BlockCachePtr block_cache_;
 
