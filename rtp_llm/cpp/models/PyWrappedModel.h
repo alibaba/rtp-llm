@@ -100,6 +100,10 @@ private:
                                           bool                  skip_final_layernorm,
                                           size_t                num_valid_tokens = -1);
     torch::Tensor   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
+    void            recordPrefillTrace(const torch::Tensor&  hidden_states,
+                                       const GptModelInputs& inputs,
+                                       bool                  hidden_is_last_rows,
+                                       const torch::Tensor&  actual_input_lengths = torch::Tensor());
 
     // Methods absorbed from GptModel
     torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
