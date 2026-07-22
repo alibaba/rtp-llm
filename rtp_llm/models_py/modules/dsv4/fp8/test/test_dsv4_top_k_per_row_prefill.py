@@ -170,6 +170,135 @@ def test_force_radix_sort():
     _assert_equiv(out, logits, rs, re, K=64, tag="force radix")
 
 
+def test_chunk_rows_8192_changes_hybrid_topk_algorithm():
+    """Regression for score chunking changing the TopK implementation.
+
+    The launcher chooses insertion sort for its first 12288 *call-local*
+    rows and radix sort for the rest.  Consequently, splitting a long
+    prefill into 8192-row score chunks silently changes rows >= 12288 from
+    radix to insertion sort.  Tie-heavy logits make the externally visible
+    index difference deterministic enough to catch here.
+
+    Production must force one algorithm for every score chunk; the DSV4
+    FP8 indexer uses radix for this reason.
+    """
+    threshold = 12288
+    chunk_rows = 8192
+    N = threshold + 64
+    T = 512
+    K = 64
+
+    # FP8 indexer scores can contain exact ties.  Repeating a short ramp
+    # concentrates ties around the TopK boundary without allocating a large
+    # long-context logits tensor.
+    row = (torch.arange(T, device="cuda", dtype=torch.float32) % 32).neg()
+    logits = row.unsqueeze(0).expand(N, T).contiguous()
+    rs = torch.zeros(N, dtype=torch.int32, device="cuda")
+    re = torch.full((N,), T, dtype=torch.int32, device="cuda")
+
+    one_shot_hybrid = _run(logits, rs, re, K)
+    chunked_hybrid = torch.cat(
+        [
+            _run(
+                logits[start : start + chunk_rows],
+                rs[start : start + chunk_rows],
+                re[start : start + chunk_rows],
+                K,
+            )
+            for start in range(0, N, chunk_rows)
+        ],
+        dim=0,
+    )
+    changed_rows = (one_shot_hybrid != chunked_hybrid).any(dim=1).sum().item()
+    print(f"  [chunk_rows=8192 hybrid mismatch rows] {changed_rows}/{N}")
+    assert changed_rows > 0, (
+        "test setup failed to expose the call-local insertion/radix switch"
+    )
+
+    # Both outputs still select the same score multiset.  The index identities
+    # differ only because all candidates at the boundary are exact ties.
+    one_shot_values = torch.gather(
+        logits, 1, one_shot_hybrid.to(torch.int64)
+    ).sort(dim=1).values
+    chunked_values = torch.gather(
+        logits, 1, chunked_hybrid.to(torch.int64)
+    ).sort(dim=1).values
+    torch.testing.assert_close(one_shot_values, chunked_values, atol=0, rtol=0)
+
+    # Force-radix removes the call-local insertion/radix branch switch.  The
+    # output order is still unspecified because higher-score bins use atomic
+    # compaction, but the selected set must be chunk invariant.
+    one_shot_radix = _run(logits, rs, re, K, force_radix_sort=True)
+    chunked_radix = torch.cat(
+        [
+            _run(
+                logits[start : start + chunk_rows],
+                rs[start : start + chunk_rows],
+                re[start : start + chunk_rows],
+                K,
+                force_radix_sort=True,
+            )
+            for start in range(0, N, chunk_rows)
+        ],
+        dim=0,
+    )
+    radix_changed_rows = (one_shot_radix != chunked_radix).any(dim=1).sum().item()
+    print(
+        f"  [chunk_rows=8192 forced-radix mismatch rows] "
+        f"{radix_changed_rows}/{N}"
+    )
+    one_shot_radix_values = torch.gather(
+        logits, 1, one_shot_radix.to(torch.int64)
+    ).sort(dim=1).values
+    chunked_radix_values = torch.gather(
+        logits, 1, chunked_radix.to(torch.int64)
+    ).sort(dim=1).values
+    torch.testing.assert_close(
+        one_shot_radix_values, chunked_radix_values, atol=0, rtol=0
+    )
+    torch.testing.assert_close(
+        torch.sort(one_shot_radix, dim=1).values,
+        torch.sort(chunked_radix, dim=1).values,
+        atol=0,
+        rtol=0,
+    )
+
+
+def test_exact_score_ties_have_algorithm_invariant_selected_set():
+    """Insertion and radix paths use the same token-index tie break."""
+    cases = [
+        # The final candidate bucket fits in shared-memory FinalItems.
+        (512, 50, 32),
+        # The exact-score threshold bucket itself exceeds FinalItems.
+        (8192, 512, 2),
+    ]
+    for T, K, period in cases:
+        row = (torch.arange(T, device="cuda", dtype=torch.float32) % period).neg()
+        logits = row.unsqueeze(0).contiguous()
+        rs = torch.zeros(1, dtype=torch.int32, device="cuda")
+        re = torch.full((1,), T, dtype=torch.int32, device="cuda")
+
+        insertion = _run(logits, rs, re, K, force_radix_sort=False)
+        radix = _run(logits, rs, re, K, force_radix_sort=True)
+        torch.testing.assert_close(
+            torch.sort(insertion, dim=1).values,
+            torch.sort(radix, dim=1).values,
+            atol=0,
+            rtol=0,
+            msg=lambda msg: f"T={T} K={K} period={period}: {msg}",
+        )
+
+        for repeat in range(5):
+            rerun = _run(logits, rs, re, K, force_radix_sort=True)
+            torch.testing.assert_close(
+                torch.sort(radix, dim=1).values,
+                torch.sort(rerun, dim=1).values,
+                atol=0,
+                rtol=0,
+                msg=lambda msg: f"repeat={repeat} T={T}: {msg}",
+            )
+
+
 def test_fast_topk_v2_short_inputs_topk_512_1024():
     """Short prefill policy uses fast_topk_v2_variable for K=512/1024."""
     if not _HAS_FAST_TOPK:
@@ -269,6 +398,8 @@ if __name__ == "__main__":
     test_long_T_radix_inside_block()
     test_radix_branch_above_threshold()
     test_force_radix_sort()
+    test_chunk_rows_8192_changes_hybrid_topk_algorithm()
+    test_exact_score_ties_have_algorithm_invariant_selected_set()
     test_fast_topk_v2_short_inputs_topk_512_1024()
     test_zero_length_row()
     print("\n== Benchmark ==")

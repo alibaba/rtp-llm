@@ -8,10 +8,16 @@ for index_select on local q_fp8.
 
 from types import SimpleNamespace
 from unittest import SkipTest, TestCase, main
+from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp
+from rtp_llm.models_py.modules.base.cuda.indexer_op import (
+    IndexerOp,
+    _canonicalize_topk_indices,
+    _fp8_prefill_topk_canonicalize,
+    _fp8_prefill_topk_force_radix_sort,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     generate_q_indices,
 )
@@ -39,6 +45,34 @@ SKIP_REASON = "CUDA and deep_gemm required for IndexerOp._get_topk_ragged_cp"
 
 
 class GetTopkRaggedCPZeroLocalTest(TestCase):
+    def test_prefill_topk_canonicalization_switch(self):
+        with patch.dict(
+            "os.environ", {"DSV4_INDEXER_TOPK_CANONICALIZE": "1"}
+        ):
+            self.assertTrue(_fp8_prefill_topk_canonicalize())
+        with patch.dict(
+            "os.environ", {"DSV4_INDEXER_TOPK_CANONICALIZE": "0"}
+        ):
+            self.assertFalse(_fp8_prefill_topk_canonicalize())
+
+    def test_prefill_topk_policy_is_chunk_invariant(self):
+        indices = torch.tensor([[7, -1, 3, 5], [9, 2, 4, -1]], dtype=torch.int32)
+
+        with patch.dict(
+            "os.environ",
+            {
+                "DSV4_PREFILL_TOPK_FORCE_RADIX": "1",
+                "DSV4_INDEXER_TOPK_CANONICALIZE": "1",
+            },
+        ):
+            self.assertTrue(_fp8_prefill_topk_force_radix_sort())
+            got = _canonicalize_topk_indices(indices)
+
+        expected = torch.tensor(
+            [[3, 5, 7, -1], [2, 4, 9, -1]], dtype=torch.int32
+        )
+        torch.testing.assert_close(got, expected, atol=0, rtol=0)
+
     def test_zero_local_ids_returns_empty_tensor(self):
         index_topk = 2048
         op = IndexerOp(

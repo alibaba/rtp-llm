@@ -117,6 +117,22 @@ def _fp8_prefill_topk_canonicalize() -> bool:
     )
 
 
+def _canonicalize_prefill_topk_output(out: torch.Tensor) -> None:
+    """Sort valid token indices in-place while preserving ``-1`` padding."""
+    if not _fp8_prefill_topk_canonicalize():
+        return
+    sentinel = torch.iinfo(out.dtype).max
+    sortable = torch.where(out >= 0, out, torch.full_like(out, sentinel))
+    sorted_indices = torch.sort(sortable, dim=-1).values
+    out.copy_(
+        torch.where(
+            sorted_indices == sentinel,
+            torch.full_like(sorted_indices, -1),
+            sorted_indices,
+        )
+    )
+
+
 def _run_prefill_topk_torch(
     logits: torch.Tensor,
     row_starts: torch.Tensor,
@@ -136,16 +152,8 @@ def _run_prefill_topk_torch(
     indices = indices.to(torch.int32) - row_starts.unsqueeze(1)
     lengths = (row_ends - row_starts).unsqueeze(1)
     indices = torch.where(indices < lengths, indices, torch.full_like(indices, -1))
-    if _fp8_prefill_topk_canonicalize():
-        sentinel = torch.iinfo(torch.int32).max
-        sortable = torch.where(
-            indices >= 0, indices, torch.full_like(indices, sentinel)
-        )
-        sorted_idx = torch.sort(sortable, dim=-1).values
-        indices = torch.where(
-            sorted_idx == sentinel, torch.full_like(sorted_idx, -1), sorted_idx
-        )
     out[:, :k_eff].copy_(indices)
+    _canonicalize_prefill_topk_output(out)
 
 
 def _run_prefill_topk(
@@ -172,6 +180,7 @@ def _run_prefill_topk(
         rtp_llm_ops.fast_topk_v2_variable(
             logits, out, lengths, row_starts.contiguous(), int(topk)
         )
+        _canonicalize_prefill_topk_output(out)
         return
 
     rtp_llm_ops.dsv4_top_k_per_row_prefill(
@@ -185,6 +194,7 @@ def _run_prefill_topk(
         int(topk),
         _fp8_prefill_topk_force_radix_sort(),
     )
+    _canonicalize_prefill_topk_output(out)
 
 
 def _fp8_prefill_score_chunk_rows() -> int:

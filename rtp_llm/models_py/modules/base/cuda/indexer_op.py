@@ -58,6 +58,29 @@ def _fp8_prefill_topk_force_radix_sort() -> bool:
     return os.environ.get("DSV4_PREFILL_TOPK_FORCE_RADIX", "1") != "0"
 
 
+def _fp8_prefill_topk_canonicalize() -> bool:
+    return os.environ.get("DSV4_INDEXER_TOPK_CANONICALIZE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _canonicalize_topk_indices(indices: torch.Tensor) -> torch.Tensor:
+    """Sort valid token indices while preserving trailing ``-1`` padding."""
+    sentinel = torch.iinfo(indices.dtype).max
+    sortable = torch.where(
+        indices >= 0, indices, torch.full_like(indices, sentinel)
+    )
+    sorted_indices = torch.sort(sortable, dim=-1).values
+    return torch.where(
+        sorted_indices == sentinel,
+        torch.full_like(sorted_indices, -1),
+        sorted_indices,
+    )
+
+
 def _pd_debug_enabled() -> bool:
     return os.environ.get("RTP_LLM_PD_DEBUG", "0") == "1"
 
@@ -906,6 +929,8 @@ class IndexerOp(nn.Module):
                 self.index_topk,
                 _fp8_prefill_topk_force_radix_sort(),
             )
+            if _fp8_prefill_topk_canonicalize():
+                topk_part = _canonicalize_topk_indices(topk_part)
             topk_result[row_start:row_end] = torch.where(
                 topk_part >= 0,
                 topk_part
@@ -1128,6 +1153,8 @@ class IndexerOp(nn.Module):
                     self.index_topk,
                     _fp8_prefill_topk_force_radix_sort(),
                 )
+                if _fp8_prefill_topk_canonicalize():
+                    topk_part = _canonicalize_topk_indices(topk_part)
                 topk_result[row_start:row_end] = torch.where(
                     topk_part >= 0,
                     topk_part + topk_off[row_start:row_end].unsqueeze(1),

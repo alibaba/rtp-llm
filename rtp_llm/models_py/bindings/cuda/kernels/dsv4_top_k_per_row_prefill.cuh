@@ -29,6 +29,15 @@ __device__ __forceinline__ uint32_t convert_to_uint32_dsv4(float x) {
     return (bits & 0x80000000) ? bits : ~bits & 0x7fffffff;
 }
 
+__device__ __forceinline__ uint64_t make_deterministic_sort_key(float logit, int index) {
+    const uint32_t bits = __float_as_uint(logit);
+    // Map IEEE-754 bits to an unsigned key whose natural order matches the
+    // numeric float order.  The low bits make a smaller token index rank
+    // first when scores are bitwise equal.
+    const uint32_t ordered = (bits & 0x80000000U) ? ~bits : (bits ^ 0x80000000U);
+    return (static_cast<uint64_t>(ordered) << 32) | (0xffffffffU - static_cast<uint32_t>(index));
+}
+
 template<int step>
 static inline __device__ uint32_t extractBinIdx(float x) {
     if constexpr (step == 0) {
@@ -218,20 +227,6 @@ __device__ bool processHistogramStep(const int*      indices,
                         smemFinal.items.indices[dstIdx] = idx;
                     }
                 }
-            } else {
-                if (binIdx == (uint32_t)thresholdBinIdx) {
-                    int dstIdx = atomicAdd(&smemFinal.histo.data[binIdx], 1);
-                    if (dstIdx < topK) {
-                        if constexpr (mergeBlocks) {
-                            smemOutput[dstIdx] = indices[idx];
-                        } else if constexpr (multipleBlocksPerRow) {
-                            smemOutput[dstIdx]                                  = idx + rowStart;
-                            reinterpret_cast<float*>(smemOutput + topK)[dstIdx] = logit;
-                        } else {
-                            smemOutput[dstIdx] = idx;
-                        }
-                    }
-                }
             }
         }
     };
@@ -245,6 +240,37 @@ __device__ bool processHistogramStep(const int*      indices,
         }
     }
     __syncthreads();
+
+    if constexpr (step == 3) {
+        // The last radix bin represents one exact float bit pattern.  The old
+        // atomicAdd path let whichever warp arrived first claim the remaining
+        // TopK slots, so exact-score ties could change the selected *set*
+        // across launches or score chunks.  This slow path is reached only
+        // when an exact-score threshold bin contains more than
+        // kNumFinalItems candidates.  Scan it in key-index order to make the
+        // tie break deterministic; higher-score bins were already emitted in
+        // parallel above.
+        if (threadIdx.x == 0) {
+            int dstIdx = smemFoundTopKValues[0];
+            for (int absoluteIdx = rowStart; absoluteIdx < rowEnd && dstIdx < topK; ++absoluteIdx) {
+                float logit = stride1 == 1 ? logits[absoluteIdx] : logits[absoluteIdx * stride1];
+                if (isPartialMatch<10>(logit, logitPattern)
+                    && extractBinIdx<3>(logit) == static_cast<uint32_t>(thresholdBinIdx)) {
+                    const int candidateIdx = stride1 == 1 ? absoluteIdx - rowStart : absoluteIdx;
+                    if constexpr (mergeBlocks) {
+                        smemOutput[dstIdx] = indices[candidateIdx];
+                    } else if constexpr (multipleBlocksPerRow) {
+                        smemOutput[dstIdx]                                  = absoluteIdx;
+                        reinterpret_cast<float*>(smemOutput + topK)[dstIdx] = logit;
+                    } else {
+                        smemOutput[dstIdx] = stride1 == 1 ? absoluteIdx - rowStart : absoluteIdx;
+                    }
+                    ++dstIdx;
+                }
+            }
+        }
+        __syncthreads();
+    }
 
     return smemFinalBinSize[0] > kNumFinalItems;
 }
@@ -264,7 +290,7 @@ static __device__ void topKPerRowJob(const int*   indices,
                                      int          topK) {
     static constexpr int kNumFinalItems          = 2048;
     static constexpr int kNumFinalItemsPerThread = kNumFinalItems / kNumThreadsPerBlock;
-    using FinalSort            = cub::BlockRadixSort<float, kNumThreadsPerBlock, kNumFinalItemsPerThread, int>;
+    using FinalSort = cub::BlockRadixSort<uint64_t, kNumThreadsPerBlock, kNumFinalItemsPerThread, int>;
     using FinalSortTempStorage = std::conditional_t<useRadixSort, typename FinalSort::TempStorage, int>;
     using Scan                 = cub::BlockScan<int, kNumThreadsPerBlock>;
 
@@ -391,22 +417,23 @@ static __device__ void topKPerRowJob(const int*   indices,
 
     if (!continueToNextStep) {
         if constexpr (useRadixSort) {
-            float finalLogits[kNumFinalItemsPerThread];
-            int   finalIndices[kNumFinalItemsPerThread];
+            uint64_t finalKeys[kNumFinalItemsPerThread];
+            int      finalIndices[kNumFinalItemsPerThread];
 #pragma unroll
             for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
-                finalLogits[ii] = -FLT_MAX;
+                finalKeys[ii] = 0;
             }
 #pragma unroll
             for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
                 int srcIdx = ii * kNumThreadsPerBlock + threadIdx.x;
                 if (srcIdx < smemFinalDstIdx[0]) {
-                    finalLogits[ii]  = smemFinal.items.logits[srcIdx];
                     finalIndices[ii] = smemFinal.items.indices[srcIdx];
+                    finalKeys[ii] = make_deterministic_sort_key(
+                        smemFinal.items.logits[srcIdx], smemFinal.items.indices[srcIdx]);
                 }
             }
             __syncthreads();
-            FinalSort(smemFinal.finalSort).SortDescendingBlockedToStriped(finalLogits, finalIndices);
+            FinalSort(smemFinal.finalSort).SortDescendingBlockedToStriped(finalKeys, finalIndices);
             int baseIdx = smemFoundTopKValues[0];
 #pragma unroll
             for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
@@ -415,7 +442,7 @@ static __device__ void topKPerRowJob(const int*   indices,
                 if (dstIdx < topK) {
                     smemOutput[dstIdx] = finalIndices[ii];
                     if constexpr (multipleBlocksPerRow) {
-                        reinterpret_cast<float*>(smemOutput + topK)[dstIdx] = finalLogits[ii];
+                        reinterpret_cast<float*>(smemOutput + topK)[dstIdx] = logits[finalIndices[ii] * stride1];
                     }
                 }
             }
@@ -426,7 +453,8 @@ static __device__ void topKPerRowJob(const int*   indices,
                 auto logit    = smemFinal.items.logits[i];
                 for (int j = 0; j < smemFinalDstIdx[0]; j++) {
                     auto otherLogit = smemFinal.items.logits[j];
-                    if (logit < otherLogit || (logit == otherLogit && i < j)) {
+                    if (logit < otherLogit
+                        || (logit == otherLogit && smemFinal.items.indices[i] > smemFinal.items.indices[j])) {
                         outIndex++;
                     }
                 }
