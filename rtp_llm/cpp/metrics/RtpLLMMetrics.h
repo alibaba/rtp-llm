@@ -32,17 +32,17 @@ public:
     int     loading_cache_request = 0;
 
     // pd-sep prefill metrics
-    int64_t get_rpc_connection_rt_us       = 0;
-    int64_t multimodal_process_rt_us       = 0;
-    int64_t remote_allocate_resource_rt_us = 0;
-    int64_t enqueue_request_rt_us          = 0;
-    int64_t remote_load_cache_start_rt_us  = 0;
-    int64_t remote_load_cache_wait_stream_rt_us = 0;
+    int64_t get_rpc_connection_rt_us              = 0;
+    int64_t multimodal_process_rt_us              = 0;
+    int64_t remote_allocate_resource_rt_us        = 0;
+    int64_t enqueue_request_rt_us                 = 0;
+    int64_t remote_load_cache_start_rt_us         = 0;
+    int64_t remote_load_cache_wait_stream_rt_us   = 0;
     int64_t remote_load_cache_write_request_rt_us = 0;
-    int64_t poll_local_output_rt_us        = 0;
-    int64_t remote_load_cache_end_rt_us    = 0;
-    int64_t remote_generate_rt_us          = 0;
-    int64_t poll_remote_output_rt_us       = 0;
+    int64_t poll_local_output_rt_us               = 0;
+    int64_t remote_load_cache_end_rt_us           = 0;
+    int64_t remote_generate_rt_us                 = 0;
+    int64_t poll_remote_output_rt_us              = 0;
 
     // pd-sep decode stage metrics
     int64_t prepare_generate_context_rt_us = 0;
@@ -79,17 +79,17 @@ public:
     kmonitor::MutableMetric* retry_cost_time_ms_metric    = nullptr;
     kmonitor::MutableMetric* loading_cache_request_metric = nullptr;
 
-    kmonitor::MutableMetric* get_rpc_connection_rt_us_metric       = nullptr;
-    kmonitor::MutableMetric* multimodal_process_rt_us_metric       = nullptr;
-    kmonitor::MutableMetric* remote_allocate_resource_rt_us_metric = nullptr;
-    kmonitor::MutableMetric* enqueue_request_rt_us_metric          = nullptr;
-    kmonitor::MutableMetric* remote_load_cache_start_rt_us_metric  = nullptr;
-    kmonitor::MutableMetric* remote_load_cache_wait_stream_rt_us_metric = nullptr;
+    kmonitor::MutableMetric* get_rpc_connection_rt_us_metric              = nullptr;
+    kmonitor::MutableMetric* multimodal_process_rt_us_metric              = nullptr;
+    kmonitor::MutableMetric* remote_allocate_resource_rt_us_metric        = nullptr;
+    kmonitor::MutableMetric* enqueue_request_rt_us_metric                 = nullptr;
+    kmonitor::MutableMetric* remote_load_cache_start_rt_us_metric         = nullptr;
+    kmonitor::MutableMetric* remote_load_cache_wait_stream_rt_us_metric   = nullptr;
     kmonitor::MutableMetric* remote_load_cache_write_request_rt_us_metric = nullptr;
-    kmonitor::MutableMetric* poll_local_output_rt_us_metric        = nullptr;
-    kmonitor::MutableMetric* remote_load_cache_end_rt_us_metric    = nullptr;
-    kmonitor::MutableMetric* remote_generate_rt_us_metric          = nullptr;
-    kmonitor::MutableMetric* poll_remote_output_rt_us_metric       = nullptr;
+    kmonitor::MutableMetric* poll_local_output_rt_us_metric               = nullptr;
+    kmonitor::MutableMetric* remote_load_cache_end_rt_us_metric           = nullptr;
+    kmonitor::MutableMetric* remote_generate_rt_us_metric                 = nullptr;
+    kmonitor::MutableMetric* poll_remote_output_rt_us_metric              = nullptr;
 
     kmonitor::MutableMetric* prepare_generate_context_rt_us_metric = nullptr;
     kmonitor::MutableMetric* allocate_resource_rt_us_metric        = nullptr;
@@ -197,19 +197,19 @@ public:
     bool is_streaming_qps  = false;
     bool not_streaming_qps = true;
 
-    int64_t total_latency_us       = 0;
-    int64_t first_token_latency_us = 0;
-    int64_t wait_latency_us        = 0;
-    int64_t enqueue_to_canrun_us   = 0;
-    int64_t canrun_to_running_us   = 0;
+    int64_t total_latency_us         = 0;
+    int64_t first_token_latency_us   = 0;
+    int64_t wait_latency_us          = 0;
+    int64_t enqueue_to_canrun_us     = 0;
+    int64_t canrun_to_running_us     = 0;
     int64_t loading_cache_latency_us = 0;
     int64_t load_done_to_running_us  = 0;
-    int64_t pause_latency_us       = 0;
-    int64_t iterate_count          = 0;
-    int64_t reuse_length           = 0;
+    int64_t pause_latency_us         = 0;
+    int64_t iterate_count            = 0;
+    int64_t reuse_length             = 0;
     int64_t effective_context_length = 0;
-    int64_t input_token_length     = 0;
-    int64_t output_token_length    = 0;
+    int64_t input_token_length       = 0;
+    int64_t output_token_length      = 0;
     // for timeout
     int64_t timeout_latency_us = 0;
 
@@ -232,20 +232,20 @@ public:
     kmonitor::MutableMetric* is_streaming_qps_metric  = nullptr;
     kmonitor::MutableMetric* not_streaming_qps_metric = nullptr;
 
-    kmonitor::MutableMetric* total_latency_us_metric       = nullptr;
-    kmonitor::MutableMetric* first_token_latency_us_metric = nullptr;
-    kmonitor::MutableMetric* wait_latency_us_metric        = nullptr;
-    kmonitor::MutableMetric* enqueue_to_canrun_us_metric   = nullptr;
-    kmonitor::MutableMetric* canrun_to_running_us_metric   = nullptr;
+    kmonitor::MutableMetric* total_latency_us_metric         = nullptr;
+    kmonitor::MutableMetric* first_token_latency_us_metric   = nullptr;
+    kmonitor::MutableMetric* wait_latency_us_metric          = nullptr;
+    kmonitor::MutableMetric* enqueue_to_canrun_us_metric     = nullptr;
+    kmonitor::MutableMetric* canrun_to_running_us_metric     = nullptr;
     kmonitor::MutableMetric* loading_cache_latency_us_metric = nullptr;
     kmonitor::MutableMetric* load_done_to_running_us_metric  = nullptr;
-    kmonitor::MutableMetric* pause_latency_us_metric       = nullptr;
-    kmonitor::MutableMetric* iterate_count_metric          = nullptr;
-    kmonitor::MutableMetric* reuse_length_metric           = nullptr;
+    kmonitor::MutableMetric* pause_latency_us_metric         = nullptr;
+    kmonitor::MutableMetric* iterate_count_metric            = nullptr;
+    kmonitor::MutableMetric* reuse_length_metric             = nullptr;
     kmonitor::MutableMetric* effective_context_length_metric = nullptr;
-    kmonitor::MutableMetric* input_token_length_metric     = nullptr;
-    kmonitor::MutableMetric* output_token_length_metric    = nullptr;
-    kmonitor::MutableMetric* query_batch_size_metric       = nullptr;
+    kmonitor::MutableMetric* input_token_length_metric       = nullptr;
+    kmonitor::MutableMetric* output_token_length_metric      = nullptr;
+    kmonitor::MutableMetric* query_batch_size_metric         = nullptr;
 
     kmonitor::MutableMetric* batch_with_prefill_times_metric = nullptr;
     kmonitor::MutableMetric* batch_with_prefill_len_metric   = nullptr;
@@ -302,13 +302,14 @@ private:
 
 class RtpLLMSchedulerMetricsCollector final {
 public:
-    int64_t wait_stream_size           = 0;
-    int64_t running_stream_size        = 0;
-    int64_t remote_running_stream_size = 0;
-    int64_t loading_cache_stream_size  = 0;
+    int64_t wait_stream_size            = 0;
+    int64_t running_stream_size         = 0;
+    int64_t remote_running_stream_size  = 0;
+    int64_t loading_cache_stream_size   = 0;
     int64_t admitted_context_batch_size = 0;
     int64_t admitted_context_token_size = 0;
     int64_t waiting_oldest_age_us       = 0;
+    int64_t group_fallback_count        = 0;
 };
 
 class RtpLLMSchedulerMetrics: public kmonitor::MetricsGroup {
@@ -317,13 +318,14 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMSchedulerMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* wait_stream_size_metric           = nullptr;
-    kmonitor::MutableMetric* running_stream_size_metric        = nullptr;
-    kmonitor::MutableMetric* remote_running_stream_size_metric = nullptr;
-    kmonitor::MutableMetric* loading_cache_stream_size_metric  = nullptr;
+    kmonitor::MutableMetric* wait_stream_size_metric            = nullptr;
+    kmonitor::MutableMetric* running_stream_size_metric         = nullptr;
+    kmonitor::MutableMetric* remote_running_stream_size_metric  = nullptr;
+    kmonitor::MutableMetric* loading_cache_stream_size_metric   = nullptr;
     kmonitor::MutableMetric* admitted_context_batch_size_metric = nullptr;
     kmonitor::MutableMetric* admitted_context_token_size_metric = nullptr;
     kmonitor::MutableMetric* waiting_oldest_age_us_metric       = nullptr;
+    kmonitor::MutableMetric* group_fallback_acc_metric          = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
