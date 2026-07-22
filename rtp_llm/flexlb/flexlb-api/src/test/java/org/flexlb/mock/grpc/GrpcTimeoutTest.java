@@ -101,12 +101,5 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
         Response response2 = future2.get(5, TimeUnit.SECONDS);
         assertTrue(response2.isSuccess(), "Subsequent request should succeed after recovery");
 
-        // 8. Cleanup: cancel the successful request to release inflight resources
-        //    (mock workers don't send status updates, so we must clean up manually)
-        cancelRequest(10002);
-
-        // 9. Verify: all inflight resources released
-        InflightAssertions.assertResourcesReleasedWithin(
-                getPrefillEndpoint(), getDecodeEndpoint(), 5000);
     }
 }

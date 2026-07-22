@@ -1,7 +1,6 @@
 package org.flexlb.httpserver;
 
 import io.grpc.stub.StreamObserver;
-import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.RequestLifecycleState;
 import org.flexlb.consistency.LBStatusConsistencyService;
@@ -191,70 +190,6 @@ class FlexlbServiceImplTest {
         assertFalse(resp.getSuccess());
         assertEquals(500, resp.getCode());
         assertTrue(resp.getErrorMessage().contains("test error"));
-    }
-
-    @Test
-    void testCancel_success() {
-        // Given
-        FlexlbScheduleProtocol.FlexlbCancelRequestPB request = FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                .setRequestId(12345L)
-                .build();
-
-        StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer = mock(StreamObserver.class);
-
-        // When
-        service.cancel(request, observer);
-
-        // Then
-        verify(routeService).cancelByRequestId(eq(12345L), any(), eq(0L));
-        verify(observer).onNext(any(FlexlbScheduleProtocol.FlexlbCancelResponsePB.class));
-        verify(observer).onCompleted();
-        verify(observer, never()).onError(any());
-    }
-
-    @Test
-    void testCancel_followerForwardsToMaster() {
-        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
-        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
-        FlexlbScheduleProtocol.FlexlbCancelRequestPB request =
-                FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                        .setRequestId(12346L)
-                        .setBatchId(7001L)
-                        .build();
-        FlexlbScheduleProtocol.FlexlbCancelResponsePB forwarded =
-                FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder().setFound(true).build();
-        when(grpcForwarder.forwardCancelToMaster(request)).thenReturn(forwarded);
-        StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer = mock(StreamObserver.class);
-
-        service.cancel(request, observer);
-
-        verify(grpcForwarder).forwardCancelToMaster(request);
-        verify(routeService).cancelByRequestId(12346L, CancelReason.CLIENT_CANCELLED,
-                7001L);
-        verify(observer).onNext(forwarded);
-        verify(observer).onCompleted();
-    }
-
-    @Test
-    void testCancel_exceptionHandling() {
-        // Given
-        doThrow(new RuntimeException("cancel error")).when(routeService)
-                .cancelByRequestId(eq(12345L), any(), eq(0L));
-
-        FlexlbScheduleProtocol.FlexlbCancelRequestPB request = FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                .setRequestId(12345L)
-                .build();
-
-        StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer = mock(StreamObserver.class);
-
-        // When
-        service.cancel(request, observer);
-
-        // Then
-        verify(routeService).cancelByRequestId(eq(12345L), any(), eq(0L));
-        verify(observer).onError(any());
-        verify(observer, never()).onNext(any());
-        verify(observer, never()).onCompleted();
     }
 
     @Test

@@ -9,7 +9,6 @@ import org.flexlb.engine.grpc.EngineRpcService;
  * <ul>
  *   <li>{@code enqueueDelayMs} — delay before responding to EnqueueBatch</li>
  *   <li>{@code failOnEnqueue} — return error response for EnqueueBatch</li>
- *   <li>{@code ignoreCancel} — skip responding to Cancel (tests TTL fallback)</li>
  *   <li>{@code availableConcurrency} — WorkerStatusPB.available_concurrency</li>
  *   <li>{@code availableKvCache} — WorkerStatusPB.available_kv_cache</li>
  *   <li>{@code totalKvCache} — WorkerStatusPB.total_kv_cache</li>
@@ -19,7 +18,6 @@ import org.flexlb.engine.grpc.EngineRpcService;
  * MockWorkerBehavior.builder()
  *     .enqueueDelayMs(5000)
  *     .failOnEnqueue(false)
- *     .ignoreCancel(false)
  *     .availableConcurrency(10)
  *     .availableKvCache(1000000L)
  *     .build()
@@ -29,7 +27,6 @@ public final class MockWorkerBehavior {
 
     private final long enqueueDelayMs;
     private final boolean failOnEnqueue;
-    private final boolean ignoreCancel;
     private final int availableConcurrency;
     private final long availableKvCache;
     private final long totalKvCache;
@@ -40,7 +37,6 @@ public final class MockWorkerBehavior {
     private MockWorkerBehavior(Builder b) {
         this.enqueueDelayMs = b.enqueueDelayMs;
         this.failOnEnqueue = b.failOnEnqueue;
-        this.ignoreCancel = b.ignoreCancel;
         this.availableConcurrency = b.availableConcurrency;
         this.availableKvCache = b.availableKvCache;
         this.totalKvCache = b.totalKvCache;
@@ -55,10 +51,6 @@ public final class MockWorkerBehavior {
 
     public boolean isFailOnEnqueue() {
         return failOnEnqueue;
-    }
-
-    public boolean isIgnoreCancel() {
-        return ignoreCancel;
     }
 
     public int getAvailableConcurrency() {
@@ -99,7 +91,6 @@ public final class MockWorkerBehavior {
         return new Builder()
                 .enqueueDelayMs(enqueueDelayMs)
                 .failOnEnqueue(failOnEnqueue)
-                .ignoreCancel(ignoreCancel)
                 .availableConcurrency(availableConcurrency)
                 .availableKvCache(availableKvCache)
                 .totalKvCache(totalKvCache)
@@ -111,7 +102,6 @@ public final class MockWorkerBehavior {
     public static final class Builder {
         private long enqueueDelayMs = 0;
         private boolean failOnEnqueue = false;
-        private boolean ignoreCancel = false;
         private int availableConcurrency = 10;
         private long availableKvCache = 1_000_000L;
         private long totalKvCache = 2_000_000L;
@@ -129,11 +119,6 @@ public final class MockWorkerBehavior {
 
         public Builder failOnEnqueue(boolean fail) {
             this.failOnEnqueue = fail;
-            return this;
-        }
-
-        public Builder ignoreCancel(boolean ignore) {
-            this.ignoreCancel = ignore;
             return this;
         }
 

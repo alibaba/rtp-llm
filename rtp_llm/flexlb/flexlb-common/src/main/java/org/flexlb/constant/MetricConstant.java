@@ -368,11 +368,6 @@ public class MetricConstant {
     public static final String ROUTING_QUEUE_REJECTED_QPS = "app.routing.queue.rejected.qps";
 
     /**
-     * Cancellation QPS
-     */
-    public static final String ROUTING_QUEUE_CANCELLED_QPS = "app.routing.queue.cancelled.qps";
-
-    /**
      * Wait time in milliseconds
      */
     public static final String ROUTING_QUEUE_WAIT_TIME_MS = "app.routing.queue.wait.time.ms";

@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-/** Immutable lifecycle view returned by cancellation and reconciliation APIs. */
+/** Immutable lifecycle view returned by request-state and reconciliation APIs. */
 public record RequestLifecycleSnapshot(long requestId,
                                        RequestLifecycleState state,
                                        long batchId,

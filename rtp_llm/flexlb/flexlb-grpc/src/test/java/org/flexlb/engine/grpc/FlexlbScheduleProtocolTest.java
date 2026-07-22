@@ -20,9 +20,8 @@ class FlexlbScheduleProtocolTest {
 
         var service = FlexlbScheduleProtocol.getDescriptor().findServiceByName("FlexlbService");
         assertEquals("FlexlbService", service.getFullName());
-        assertEquals("Schedule", service.getMethods().get(0).getName());
-        assertEquals("Cancel", service.getMethods().get(1).getName());
-        assertEquals("GetRequestState", service.getMethods().get(2).getName());
+        assertEquals("Schedule", service.findMethodByName("Schedule").getName());
+        assertEquals("GetRequestState", service.findMethodByName("GetRequestState").getName());
         assertNull(EngineRpcService.GenerateInputPB.getDescriptor().findFieldByNumber(10));
         assertNull(EngineRpcService.TaskInfoPB.getDescriptor().findFieldByNumber(14));
         assertNull(EngineRpcService.TaskInfoPB.getDescriptor().findFieldByNumber(15));
@@ -52,20 +51,4 @@ class FlexlbScheduleProtocolTest {
         assertArrayEquals(input.toByteArray(), parsed.getGenerateInput().toByteArray());
     }
 
-    @Test
-    void cancelRemainsWireCompatibleWithOriginalRequestAndEmptyResponse() throws Exception {
-        EngineRpcService.CancelRequestPB oldRequest = EngineRpcService.CancelRequestPB.newBuilder()
-                .setRequestId(456L)
-                .build();
-
-        FlexlbScheduleProtocol.FlexlbCancelRequestPB parsedRequest =
-                FlexlbScheduleProtocol.FlexlbCancelRequestPB.parseFrom(oldRequest.toByteArray());
-        assertEquals(456L, parsedRequest.getRequestId());
-
-        FlexlbScheduleProtocol.FlexlbCancelResponsePB newResponse =
-                FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder()
-                        .setFound(true)
-                        .build();
-        EngineRpcService.EmptyPB.parseFrom(newResponse.toByteArray());
-    }
 }

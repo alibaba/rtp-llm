@@ -22,7 +22,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.BlockingDeque;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingDeque;
@@ -117,7 +116,7 @@ public class QueueManager {
     /**
      * Take a single valid request from queue
      * <p>
-     * Checks for cancelled and timed-out requests, completes future for invalid requests
+     * Checks for timed-out requests and completes the future for invalid requests.
      *
      * @param sourceQueue Source queue
      * @return Request context, null if queue is empty
@@ -130,10 +129,6 @@ public class QueueManager {
                     return null;
                 }
                 ctx.setDequeueTime(System.currentTimeMillis());
-                if (ctx.isCancelled()) {
-                    ctx.getFuture().completeExceptionally(new CancellationException("Request cancelled by client"));
-                    continue;
-                }
                 long waitTimeMs = System.currentTimeMillis() - ctx.getEnqueueTime();
                 long maxQueueWaitTimeMs = ctx.getRequest().getGenerateTimeout();
                 if (waitTimeMs > maxQueueWaitTimeMs) {
@@ -158,14 +153,6 @@ public class QueueManager {
         Logger.warn("Request timeout in queue for id: {}, wait time: {}ms", ctx.getRequestId(), waitTimeMs);
     }
 
-    private void handleCanceled(BalanceContext ctx) {
-        remove(ctx);
-        metrics.reportCancelled();
-
-        long waitTimeMs = System.currentTimeMillis() - ctx.getEnqueueTime();
-        Logger.warn("Request canceled in queue for id: {}, wait time: {}ms", ctx.getRequestId(), waitTimeMs);
-    }
-
     private void handleInterruption(BalanceContext ctx) {
         remove(ctx);
         Thread.currentThread().interrupt();
@@ -185,9 +172,6 @@ public class QueueManager {
         if (cause instanceof TimeoutException) {
             handleTimeout(BalanceContext);
             return Mono.just(Response.error(StrategyErrorType.QUEUE_TIMEOUT));
-        } else if (cause instanceof CancellationException) {
-            handleCanceled(BalanceContext);
-            return Mono.just(Response.error(StrategyErrorType.REQUEST_CANCELLED));
         } else if (cause instanceof InterruptedException) {
             handleInterruption(BalanceContext);
             return Mono.just(Response.error(StrategyErrorType.QUEUE_TIMEOUT));

@@ -14,7 +14,7 @@ import org.flexlb.engine.grpc.EngineRpcService;
  *
  * <p>In PD-separated architecture, the decode worker receives requests only
  * after the prefill worker completes.  The mock decode worker's gRPC port
- * is used for status sync and cancel propagation.
+ * is used for status synchronization.
  */
 public class MockDecodeWorker extends MockWorker {
 

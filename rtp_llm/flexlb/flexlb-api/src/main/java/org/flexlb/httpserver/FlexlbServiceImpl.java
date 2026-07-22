@@ -1,18 +1,12 @@
 package org.flexlb.httpserver;
 
-import io.grpc.Context;
-import io.grpc.Status;
-import io.grpc.Deadline;
-import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
@@ -73,8 +67,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             ctx = buildContext(request);
             BalanceContext requestContext = ctx;
             boolean forwardToMaster = shouldForwardToMaster();
-            AtomicBoolean routedLocally = new AtomicBoolean(!forwardToMaster);
-            bindClientCancellation(responseObserver, requestContext, forwardToMaster, routedLocally);
             engineHealthReporter.reportArriveDelayTime(requestContext);
 
             if (forwardToMaster) {
@@ -86,29 +78,12 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     token.close();
                     return;
                 }
-                if (requestContext.isCancelled()) {
-                    responded.set(true);
-                    completeSchedule(requestContext,
-                            buildErrorResponse(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
-                                    "request cancelled before local fallback"),
-                            responseObserver);
-                    token.close();
-                    return;
-                }
-                routedLocally.set(true);
             }
 
             CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeFuture =
                     routeLocally(requestContext);
 
-            Context grpcContext = Context.current();
-            Context.CancellationListener cancellationListener = context ->
-                    routeFuture.completeExceptionally(
-                            Status.CANCELLED.withDescription("gRPC context cancelled").asRuntimeException());
-            grpcContext.addListener(cancellationListener, Runnable::run);
-
             routeFuture.whenComplete((response, ex) -> {
-                grpcContext.removeListener(cancellationListener);
                 try {
                     if (responded.compareAndSet(false, true)) {
                         if (ex != null) {
@@ -137,30 +112,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             } finally {
                 token.close();
             }
-        }
-    }
-
-    @Override
-    public void cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
-                       StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseObserver) {
-        try {
-            FlexlbScheduleProtocol.FlexlbCancelResponsePB response = null;
-            if (shouldForwardToMaster()) {
-                response = grpcForwarder.forwardCancelToMaster(request);
-            }
-            RequestLifecycleSnapshot snapshot = routeService.cancelByRequestId(
-                    request.getRequestId(), toCancelReason(request.getReason()),
-                    request.getBatchId());
-            if (snapshot != null || response == null) {
-                response = toCancelResponse(snapshot);
-            }
-            responseObserver.onNext(response);
-            responseObserver.onCompleted();
-        } catch (Exception e) {
-            Logger.error("FlexlbService.cancel error, request_id={}", request.getRequestId(), e);
-            responseObserver.onError(io.grpc.Status.INTERNAL
-                    .withDescription(e.getMessage())
-                    .asRuntimeException());
         }
     }
 
@@ -324,62 +275,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         return builder.build();
     }
 
-    private void bindClientCancellation(StreamObserver<?> observer,
-                                        BalanceContext ctx,
-                                        boolean forwardToMaster,
-                                        AtomicBoolean routedLocally) {
-        if (observer instanceof ServerCallStreamObserver<?> serverObserver) {
-            Deadline deadline = Context.current().getDeadline();
-            serverObserver.setOnCancelHandler(() -> {
-                ctx.cancel();
-                CancelReason reason = deadline != null && deadline.isExpired()
-                        ? CancelReason.DEADLINE_EXCEEDED
-                        : CancelReason.CLIENT_CANCELLED;
-                if (forwardToMaster) {
-                    FlexlbScheduleProtocol.FlexlbCancelRequestPB cancelRequest =
-                            FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                                    .setRequestId(ctx.getRequestId())
-                                    .setReason(toProtoCancelReason(reason))
-                                    .build();
-                    FlexlbScheduleProtocol.FlexlbCancelResponsePB forwarded =
-                            grpcForwarder.forwardCancelToMaster(cancelRequest);
-                    if (!routedLocally.get() && forwarded != null && forwarded.getFound()) {
-                        return;
-                    }
-                }
-                routeService.cancel(ctx, reason);
-            });
-        }
-    }
-
     private boolean shouldForwardToMaster() {
         return lbStatusConsistencyService.isNeedConsistency()
                 && !lbStatusConsistencyService.isMaster();
-    }
-
-    private static CancelReason toCancelReason(FlexlbScheduleProtocol.CancelReasonPB reason) {
-        return switch (reason) {
-            case CANCEL_REASON_DEADLINE_EXCEEDED -> CancelReason.DEADLINE_EXCEEDED;
-            default -> CancelReason.CLIENT_CANCELLED;
-        };
-    }
-
-    private static FlexlbScheduleProtocol.CancelReasonPB toProtoCancelReason(CancelReason reason) {
-        return switch (reason) {
-            case DEADLINE_EXCEEDED ->
-                    FlexlbScheduleProtocol.CancelReasonPB.CANCEL_REASON_DEADLINE_EXCEEDED;
-            default -> FlexlbScheduleProtocol.CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED;
-        };
-    }
-
-    private static FlexlbScheduleProtocol.FlexlbCancelResponsePB toCancelResponse(
-            RequestLifecycleSnapshot snapshot) {
-        FlexlbScheduleProtocol.FlexlbCancelResponsePB.Builder response =
-                FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder().setFound(snapshot != null);
-        if (snapshot != null) {
-            response.setLifecycle(toLifecycleProto(snapshot));
-        }
-        return response.build();
     }
 
     private static FlexlbScheduleProtocol.RequestLifecyclePB toLifecycleProto(
@@ -391,8 +289,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                             case QUEUED -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_QUEUED;
                             case DISPATCHING -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_DISPATCHING;
                             case ACKNOWLEDGED -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_ACKNOWLEDGED;
-                            case CANCEL_REQUESTED -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_CANCEL_REQUESTED;
-                            case CANCELLED -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_CANCELLED;
                             case TIMED_OUT -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_TIMED_OUT;
                             case FAILED -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_FAILED;
                             case COMPLETED -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_COMPLETED;

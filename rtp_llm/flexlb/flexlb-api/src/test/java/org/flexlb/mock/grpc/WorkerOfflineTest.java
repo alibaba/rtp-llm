@@ -4,7 +4,6 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.mock.FlexLBMockTestBase;
-import org.flexlb.mock.InflightAssertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -23,7 +22,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>Flow:
  * 1. Start mock prefill worker (normal config)
  * 2. Submit request → ACK succeeds (proves the gRPC link works)
- * 3. Cancel the first request to clean up its inflight resources
  * 4. Stop the mock prefill worker's gRPC server (simulates worker crash)
  * 5. Submit a new request → gRPC call fails (connection refused / channel broken)
  * 6. Verify: request fails with BATCH_DISPATCH_FAILED, inflight cleaned up,
@@ -72,21 +70,16 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         Response ackResponse = future1.get(5, TimeUnit.SECONDS);
         assertTrue(ackResponse.isSuccess(), "First request should succeed while worker is online");
         assertTrue(ackResponse.isEnqueuedByMaster(), "Should be enqueued by master");
+        int existingBatches = getPrefillEndpoint().getInflightBatchCount();
 
-        // 2. Cancel the first request to release its inflight resources
-        //    (mock workers don't send status updates, so we must clean up manually)
-        cancelRequest(20001);
-        InflightAssertions.assertResourcesReleasedWithin(
-                getPrefillEndpoint(), getDecodeEndpoint(), 5000);
-
-        // 3. Stop the mock prefill worker's gRPC server (simulates worker crash)
+        // 2. Stop the mock prefill worker's gRPC server (simulates worker crash)
         mockPrefillWorker.stop();
 
-        // 4. Brief pause to let the gRPC client detect the connection loss
+        // 3. Brief pause to let the gRPC client detect the connection loss
         //    (GOAWAY processing / keepalive detection is async)
         Thread.sleep(500);
 
-        // 5. Submit a new request — gRPC call should fail (connection refused)
+        // 4. Submit a new request — gRPC call should fail (connection refused)
         CompletableFuture<Response> future2 = submitRequest(20002);
         Response failResponse = future2.get(10, TimeUnit.SECONDS);
 
@@ -101,8 +94,8 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         assertTrue(errMsg != null && !errMsg.isEmpty(),
                 "Error message should not be empty");
 
-        // 8. Verify: dispatch failure cleans up PrefillEndpoint inflight state
-        InflightAssertions.assertPrefillInflightEmpty(getPrefillEndpoint());
+        // 8. Verify: the failed request does not add leaked prefill inflight state.
+        assertEquals(existingBatches, getPrefillEndpoint().getInflightBatchCount());
 
         // 9. Verify: decode worker never received any enqueue request (PD-separated)
         assertEquals(0, mockDecodeWorker.getEnqueueCount(),

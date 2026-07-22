@@ -5,31 +5,24 @@ import java.util.Map;
 
 /**
  * Serialized request lifecycle. All mutations are synchronized so dispatch,
- * cancellation, timeout and worker-status callbacks observe one transition order.
+ * timeout and worker-status callbacks observe one transition order.
  */
 final class RequestLifecycle {
 
     private static final Map<RequestLifecycleState, EnumSet<RequestLifecycleState>> ALLOWED = Map.of(
             RequestLifecycleState.QUEUED, EnumSet.of(
                     RequestLifecycleState.DISPATCHING,
-                    RequestLifecycleState.CANCELLED,
                     RequestLifecycleState.TIMED_OUT,
                     RequestLifecycleState.FAILED),
             RequestLifecycleState.DISPATCHING, EnumSet.of(
                     RequestLifecycleState.ACKNOWLEDGED,
-                    RequestLifecycleState.CANCEL_REQUESTED,
                     RequestLifecycleState.TIMED_OUT,
                     RequestLifecycleState.FAILED,
                     RequestLifecycleState.COMPLETED),
             RequestLifecycleState.ACKNOWLEDGED, EnumSet.of(
-                    RequestLifecycleState.CANCEL_REQUESTED,
                     RequestLifecycleState.TIMED_OUT,
                     RequestLifecycleState.FAILED,
                     RequestLifecycleState.COMPLETED),
-            RequestLifecycleState.CANCEL_REQUESTED, EnumSet.of(
-                    RequestLifecycleState.CANCELLED,
-                    RequestLifecycleState.TIMED_OUT),
-            RequestLifecycleState.CANCELLED, EnumSet.noneOf(RequestLifecycleState.class),
             RequestLifecycleState.TIMED_OUT, EnumSet.noneOf(RequestLifecycleState.class),
             RequestLifecycleState.FAILED, EnumSet.noneOf(RequestLifecycleState.class),
             RequestLifecycleState.COMPLETED, EnumSet.noneOf(RequestLifecycleState.class));
@@ -77,31 +70,10 @@ final class RequestLifecycle {
     }
 
     synchronized RequestLifecycleSnapshot acknowledge() {
-        if (state == RequestLifecycleState.CANCEL_REQUESTED || state.isTerminal()) {
+        if (state.isTerminal()) {
             return snapshot();
         }
         return transition(RequestLifecycleState.ACKNOWLEDGED, "engine acknowledged batch");
-    }
-
-    synchronized RequestLifecycleSnapshot requestCancel(CancelReason reason) {
-        if (state.isTerminal() || state == RequestLifecycleState.CANCEL_REQUESTED) {
-            return snapshot();
-        }
-        if (reason == CancelReason.DEADLINE_EXCEEDED) {
-            return transition(RequestLifecycleState.TIMED_OUT, "schedule deadline exceeded");
-        }
-        RequestLifecycleState next = state == RequestLifecycleState.DISPATCHING
-                || state == RequestLifecycleState.ACKNOWLEDGED
-                ? RequestLifecycleState.CANCEL_REQUESTED
-                : RequestLifecycleState.CANCELLED;
-        return transition(next, "cancelled by client");
-    }
-
-    synchronized RequestLifecycleSnapshot finishCancellation() {
-        if (state == RequestLifecycleState.CANCEL_REQUESTED) {
-            return transition(RequestLifecycleState.CANCELLED, "engine cancellation reconciled");
-        }
-        return snapshot();
     }
 
     synchronized RequestLifecycleSnapshot timeout(String message) {
@@ -115,9 +87,6 @@ final class RequestLifecycle {
         if (state.isTerminal()) {
             return snapshot();
         }
-        if (state == RequestLifecycleState.CANCEL_REQUESTED) {
-            return transition(RequestLifecycleState.CANCELLED, "cancel completed while dispatch failed");
-        }
         return transition(RequestLifecycleState.FAILED, message);
     }
 
@@ -125,14 +94,7 @@ final class RequestLifecycle {
         if (state.isTerminal()) {
             return snapshot();
         }
-        if (state == RequestLifecycleState.CANCEL_REQUESTED) {
-            return transition(RequestLifecycleState.CANCELLED, "cancel won completion race");
-        }
         return transition(RequestLifecycleState.COMPLETED, message);
-    }
-
-    synchronized boolean isCancellationRequested() {
-        return state == RequestLifecycleState.CANCEL_REQUESTED || state == RequestLifecycleState.CANCELLED;
     }
 
     synchronized boolean isTerminal() {

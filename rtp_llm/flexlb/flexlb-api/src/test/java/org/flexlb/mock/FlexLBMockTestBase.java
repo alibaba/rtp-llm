@@ -4,7 +4,6 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.scheduler.Router;
@@ -52,7 +51,6 @@ import static org.mockito.Mockito.when;
  *
  * <p>Subclasses call {@link #setupWorkers} in {@code @BeforeEach} (or
  * rely on the default), then use {@link #submitRequest(long)} and
- * {@link #cancelRequest(long)} to drive the scheduler.
  *
  * <p>Architecture:
  * <pre>
@@ -193,7 +191,7 @@ public abstract class FlexLBMockTestBase {
 
         // 11. Create real scheduler
         scheduler = new FlexlbBatchScheduler(
-                configService, router, grpcClient,
+                configService, router,
                 endpointRegistry, dispatcher, reporter, null);
 
         // 12. Register prefill endpoint with the real scheduler as BatchDecisionHandler
@@ -291,7 +289,7 @@ public abstract class FlexLBMockTestBase {
         return cfg;
     }
 
-    // ==================== Helper: submit / cancel ====================
+    // ==================== Helper: submit ====================
 
     /**
      * Submit a request with the given ID and default seq_len=128.
@@ -305,13 +303,6 @@ public abstract class FlexLBMockTestBase {
      */
     protected CompletableFuture<Response> submitRequest(long requestId, long seqLen) {
         return scheduler.submit(createBalanceContext(requestId, seqLen));
-    }
-
-    /**
-     * Cancel a request by ID.
-     */
-    protected void cancelRequest(long requestId) {
-        scheduler.cancel(requestId, CancelReason.CLIENT_CANCELLED, 0);
     }
 
     /**

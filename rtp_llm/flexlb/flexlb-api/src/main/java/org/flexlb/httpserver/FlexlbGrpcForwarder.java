@@ -75,11 +75,6 @@ public class FlexlbGrpcForwarder {
         }
     }
 
-    public FlexlbScheduleProtocol.FlexlbCancelResponsePB forwardCancelToMaster(
-            FlexlbScheduleProtocol.FlexlbCancelRequestPB request) {
-        return invokeMaster("cancel", request.getRequestId(), stub -> stub.cancel(request));
-    }
-
     public FlexlbScheduleProtocol.GetRequestStateResponsePB forwardGetRequestStateToMaster(
             FlexlbScheduleProtocol.GetRequestStateRequestPB request) {
         return invokeMaster("state query", request.getRequestId(),

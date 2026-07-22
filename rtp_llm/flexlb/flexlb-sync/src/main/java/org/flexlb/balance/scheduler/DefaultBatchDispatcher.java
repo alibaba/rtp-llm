@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import com.google.protobuf.Int64Value;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.grpc.Status;
 import io.micrometer.core.instrument.FunctionCounter;
@@ -260,11 +259,10 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
                         EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
                                 EngineRpcService.EnqueueBatchDpSlotPB.newBuilder()
                                         .setDpRank(entry.getKey().intValue());
-                        int groupSize = entry.getValue().size();
                         for (BatchItem item : entry.getValue()) {
                             try {
                                 slot.addRequests(EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
-                                        .setInput(buildInput(batchId, groupSize, item))
+                                        .setInput(buildInput(item))
                                         .build());
                             } catch (InvalidProtocolBufferException e) {
                                 throw new BatchRequestBuildException(e);
@@ -278,8 +276,7 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         return builder.build();
     }
 
-    private EngineRpcService.GenerateInputPB buildInput(long batchId, int groupSize,
-                                                        BatchItem item)
+    private EngineRpcService.GenerateInputPB buildInput(BatchItem item)
             throws InvalidProtocolBufferException {
         byte[] bytes = item.ctx().getGenerateInputPbBytes();
         if (bytes == null || bytes.length == 0) {
@@ -290,9 +287,6 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         if (input.getRequestId() != item.requestId()) {
             throw new IllegalArgumentException("request_id mismatch between schedule request and GenerateInputPB");
         }
-        input.setGroupId(Int64Value.of(batchId));
-        input.setGroupSize(groupSize);
-
         EngineRpcService.GenerateConfigPB.Builder config = input.getGenerateConfigBuilder();
         config.clearRoleAddrs();
         addRoleAddr(config, item.prefill());

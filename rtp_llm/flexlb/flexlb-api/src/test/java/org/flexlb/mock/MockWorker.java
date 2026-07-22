@@ -119,10 +119,6 @@ public abstract class MockWorker {
         return rpcService.getEnqueueCount();
     }
 
-    public int getCancelCount() {
-        return rpcService.getCancelCount();
-    }
-
     public long getWorkerStatusCallCount() {
         return rpcService.getWorkerStatusCallCount();
     }
