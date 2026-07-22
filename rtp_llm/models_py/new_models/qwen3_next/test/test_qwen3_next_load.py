@@ -1,16 +1,19 @@
+import json
 import os
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 import torch
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.qwen3_next.language import (
     Qwen3NextForCausalLM,
     Qwen3NextGatedDeltaNet,
     Qwen3NextMetadata,
+    Qwen3NextMTPForCausalLM,
+    Qwen35MoeMTPForCausalLM,
     _build_qwen3_next_metadata,
     reorder_ba,
     reorder_qkvz,
@@ -19,6 +22,7 @@ from rtp_llm.models_py.new_models.qwen3_next.language import (
 from rtp_llm.models_py.quant_methods import QuantizationConfig
 from rtp_llm.models_py.registry import get_model_class
 from rtp_llm.ops import DataType, HybridAttentionType
+from safetensors.torch import save_file
 
 
 def _parallelism(
@@ -198,9 +202,157 @@ def _moe_weights():
     return weights
 
 
+def _mtp_config(model_type="qwen35_moe_mtp"):
+    config = _config(tie=False)
+    config.model_type = model_type
+    config.is_mtp = True
+    config.moe_layer_index = [0]
+    config.hybrid_attention_config.hybrid_attention_types = [HybridAttentionType.NONE]
+    return config
+
+
+def _mtp_weights(embedding_prefix="model.language_model."):
+    weights = {}
+    for name, tensor in _moe_weights().items():
+        if name == "model.embed_tokens.weight":
+            weights[f"{embedding_prefix}embed_tokens.weight"] = tensor
+        elif name.startswith("model."):
+            weights[f"mtp.{name[len('model.'):]}"] = tensor
+        else:
+            weights[name] = tensor
+    weights.update(
+        {
+            "lm_head.weight": torch.full((8, 4), 3.0),
+            "mtp.pre_fc_norm_embedding.weight": torch.ones(4),
+            "mtp.pre_fc_norm_hidden.weight": torch.ones(4),
+            "mtp.fc.weight": torch.arange(32, dtype=torch.float32).reshape(4, 8),
+        }
+    )
+    return weights
+
+
 class Qwen3NextLoadTest(unittest.TestCase):
     def test_production_model_type_alias_uses_qwen3_next_newloader(self):
         self.assertIs(get_model_class("qwen35_moe"), Qwen3NextForCausalLM)
+
+    def test_mtp_model_type_aliases_use_typed_draft_models(self):
+        self.assertIs(get_model_class("qwen3_next_mtp"), Qwen3NextMTPForCausalLM)
+        self.assertIs(get_model_class("qwen35_moe_mtp"), Qwen35MoeMTPForCausalLM)
+
+    def test_mtp_filter_is_exact_and_rank_invariant(self):
+        accepted = (
+            "mtp.layers.0.self_attn.q_proj.weight",
+            "mtp.pre_fc_norm_embedding.weight",
+            "model.embed_tokens.weight",
+            "model.language_model.embed_tokens.weight",
+            "lm_head.weight",
+        )
+        rejected = (
+            "model.layers.0.self_attn.q_proj.weight",
+            "model.language_model.layers.0.mlp.gate.weight",
+            "model.visual.embed_tokens.weight",
+            "model.embed_tokens.weight_scale",
+            "lm_head.bias",
+            "mtp.",
+        )
+        for name in accepted:
+            with self.subTest(name=name):
+                self.assertTrue(Qwen3NextMTPForCausalLM._is_mtp_checkpoint_weight(name))
+        for name in rejected:
+            with self.subTest(name=name):
+                self.assertFalse(
+                    Qwen3NextMTPForCausalLM._is_mtp_checkpoint_weight(name)
+                )
+
+    def test_real_mtp_tree_loads_draft_only_weights(self):
+        model = Qwen35MoeMTPForCausalLM(_mtp_config(), _load_config())
+        model.load_weights(_mtp_weights())
+        NewModelLoader._validate_loaded_weights(model)
+
+        self.assertEqual(len(model.layers), 1)
+        self.assertNotIn("linear_attn", model.layers[0]._modules)
+        self.assertIsNotNone(model.layers[0].mlp.select_topk)
+        torch.testing.assert_close(
+            model.pre_fc_norm_embedding.weight, torch.full((4,), 2.0)
+        )
+        torch.testing.assert_close(
+            model.pre_fc_norm_hidden.weight, torch.full((4,), 2.0)
+        )
+        torch.testing.assert_close(
+            model.fc.weight,
+            torch.arange(32, dtype=torch.float32).reshape(4, 8),
+        )
+        torch.testing.assert_close(model.norm.weight, torch.full((4,), 2.0))
+
+    def test_new_loader_preselects_mtp_shard_before_materialization(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            main_name = "model-00001-of-00002.safetensors"
+            draft_name = "model-00002-of-00002.safetensors"
+            main_path = os.path.join(model_path, main_name)
+            draft_path = os.path.join(model_path, draft_name)
+            with open(main_path, "wb") as handle:
+                handle.write(b"not a safetensors file")
+            draft_weights = _mtp_weights()
+            save_file(draft_weights, draft_path)
+            weight_map = {"model.visual.unused": main_name}
+            weight_map.update({name: draft_name for name in draft_weights})
+            with open(
+                os.path.join(model_path, "model.safetensors.index.json"), "w"
+            ) as handle:
+                json.dump({"weight_map": weight_map}, handle)
+
+            with mock.patch(
+                "rtp_llm.models_py.layers.moe_experts.BaseMoEExperts."
+                "_maybe_build_fused_moe"
+            ):
+                model = NewModelLoader(
+                    _mtp_config(), _load_config(), model_path=model_path
+                ).load()
+
+        NewModelLoader._validate_loaded_weights(model)
+        self.assertEqual(len(model.layers), 1)
+
+    def test_qwen3_next_mtp_embedding_prefix_loads(self):
+        model = Qwen3NextMTPForCausalLM(_mtp_config("qwen3_next_mtp"), _load_config())
+        model.load_weights(_mtp_weights("model."))
+        NewModelLoader._validate_loaded_weights(model)
+
+    def test_mtp_unknown_checkpoint_tensor_fails(self):
+        model = Qwen35MoeMTPForCausalLM(_mtp_config(), _load_config())
+        weights = _mtp_weights()
+        weights["mtp.layers.0.self_attn.q_projj.weight"] = torch.ones(4, 4)
+        with self.assertRaisesRegex(RuntimeError, "q_projj"):
+            model.load_weights(weights)
+
+    def test_core_and_mtp_configs_cannot_cross_model_boundaries(self):
+        with self.assertRaisesRegex(ValueError, "MTP.*is_mtp=False"):
+            Qwen3NextMTPForCausalLM(_config(), _load_config())
+        config = _mtp_config()
+        with self.assertRaisesRegex(ValueError, "core.*is_mtp=True"):
+            Qwen3NextForCausalLM(config, _load_config())
+
+    def test_mtp_rejects_unsupported_layer_topology(self):
+        multi_layer = _mtp_config()
+        multi_layer.num_layers = 2
+        multi_layer.moe_layer_index = [0, 1]
+        multi_layer.hybrid_attention_config.hybrid_attention_types = [
+            HybridAttentionType.NONE,
+            HybridAttentionType.NONE,
+        ]
+        with self.assertRaisesRegex(ValueError, "exactly one layer"):
+            Qwen3NextMTPForCausalLM(multi_layer, _load_config())
+
+        linear_attention = _mtp_config()
+        linear_attention.hybrid_attention_config.hybrid_attention_types = [
+            HybridAttentionType.LINEAR
+        ]
+        with self.assertRaisesRegex(ValueError, "standard-attention"):
+            Qwen3NextMTPForCausalLM(linear_attention, _load_config())
+
+        dense_layer = _mtp_config()
+        dense_layer.moe_layer_index = []
+        with self.assertRaisesRegex(ValueError, "MoE layer index"):
+            Qwen3NextMTPForCausalLM(dense_layer, _load_config())
 
     def test_qwen35_language_model_prefix_maps_to_runtime_root(self):
         self.assertEqual(
@@ -346,7 +498,7 @@ class Qwen3NextLoadTest(unittest.TestCase):
 
         config = _config()
         config.is_mtp = True
-        with self.assertRaisesRegex(ValueError, "MTP is not part"):
+        with self.assertRaisesRegex(ValueError, "core.*is_mtp=True"):
             Qwen3NextForCausalLM(config, _load_config())
 
     def test_q_gate_per_channel_scale_accepts_vector_layout(self):

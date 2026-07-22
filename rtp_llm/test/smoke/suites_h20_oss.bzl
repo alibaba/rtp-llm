@@ -328,6 +328,10 @@ def h20_oss_suites():
                 name="next_mtp_basic",
                 task_info="data/model/qwen3_next/q_r_next_fp8_tp2_mtp.json",
                 smoke_args="--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16",
+                envs=[
+                    "LOAD_METHOD=scratch",
+                    "USE_NEW_LOADER=1",
+                ],
                 gpu_type=["H20"],
             ),
             smoke_test(

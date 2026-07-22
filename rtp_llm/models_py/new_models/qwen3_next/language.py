@@ -7,7 +7,6 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.layers.embedding import ParallelLMHead, VocabParallelEmbedding
@@ -16,7 +15,7 @@ from rtp_llm.models_py.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
-from rtp_llm.models_py.layers.norm import RMSResNorm
+from rtp_llm.models_py.layers.norm import RMSNorm, RMSResNorm
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule, copy_weight_
 from rtp_llm.models_py.modules import FakeBalanceExpert, SelectTopk
@@ -225,7 +224,10 @@ def _validate_partition(size: Any, rank: Any, name: str) -> Tuple[int, int]:
 
 
 def _extract_config_values(
-    model_config: ModelConfig, load_config: Any
+    model_config: ModelConfig,
+    load_config: Any,
+    *,
+    expects_mtp: bool = False,
 ) -> Dict[str, Any]:
     """Validate the typed runtime configuration used by Qwen3-Next."""
     if not isinstance(model_config, ModelConfig):
@@ -333,8 +335,12 @@ def _extract_config_values(
         raise ValueError(f"Invalid moe_layer_index {moe_layer_index!r}")
     has_moe_norm = _config_bool(model_config, "has_moe_norm", True)
     tie_word_embeddings = _config_bool(model_config, "tie_word_embeddings", False)
-    if _config_bool(model_config, "is_mtp", False):
-        raise ValueError("MTP is not part of the Qwen3-Next core newloader slice")
+    if not isinstance(expects_mtp, bool):
+        raise TypeError("expects_mtp must be a bool")
+    is_mtp = _config_bool(model_config, "is_mtp", False)
+    if is_mtp != expects_mtp:
+        expected = "MTP" if expects_mtp else "core"
+        raise ValueError(f"{expected} Qwen3-Next loader received is_mtp={is_mtp}")
 
     tp_size, tp_rank = _validate_partition(
         required_config_value(load_config, "tp_size"),
@@ -1729,6 +1735,8 @@ class Qwen3NextDecoderLayer(RtpModule):
 class Qwen3NextForCausalLM(GptModelBase):
     """Qwen3-Next Dense + Linear Attention (prefix model.)."""
 
+    _expects_mtp = False
+
     WEIGHTS_MAPPER = WeightsMapper(
         prefix_mapping={
             "model.language_model.": "",
@@ -1806,7 +1814,13 @@ class Qwen3NextForCausalLM(GptModelBase):
             return False
         # Standard norm weights: input_layernorm, post_attention_layernorm,
         # q_norm, k_norm, final norm — all use plus_one (gemma_rms_norm).
-        return name.endswith("norm.weight")
+        return name.endswith(
+            (
+                "norm.weight",
+                "pre_fc_norm_embedding.weight",
+                "pre_fc_norm_hidden.weight",
+            )
+        )
 
     @staticmethod
     def _split_q_gate_yield(
@@ -1855,7 +1869,9 @@ class Qwen3NextForCausalLM(GptModelBase):
         yield gate_name, gate_part
 
     def __init__(self, model_config: ModelConfig, load_config: Any):
-        cfg = _extract_config_values(model_config, load_config)
+        cfg = _extract_config_values(
+            model_config, load_config, expects_mtp=self._expects_mtp
+        )
         parallelism_config = cfg["parallelism_config"]
         fmha_config = getattr(load_config, "fmha_config", None)
         device_resource_config = getattr(load_config, "device_resource_config", None)
@@ -1933,3 +1949,113 @@ class Qwen3NextForCausalLM(GptModelBase):
             )
         hidden_states, residual = self.norm(hidden_states, residual)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+
+
+class Qwen3NextMTPForCausalLM(Qwen3NextForCausalLM):
+    """Single-layer Qwen3-Next draft model backed by ``mtp.*`` weights."""
+
+    _expects_mtp = True
+    WEIGHTS_MAPPER = WeightsMapper(
+        prefix_mapping={
+            "model.language_model.": "",
+            "model.": "",
+            "mtp.": "",
+        }
+    )
+    _EMBEDDING_WEIGHT_NAMES = frozenset(
+        {
+            "model.embed_tokens.weight",
+            "model.language_model.embed_tokens.weight",
+        }
+    )
+
+    @classmethod
+    def _is_mtp_checkpoint_weight(cls, name: str) -> bool:
+        return (
+            (name.startswith("mtp.") and len(name) > len("mtp."))
+            or name == "lm_head.weight"
+            or name in cls._EMBEDDING_WEIGHT_NAMES
+        )
+
+    def checkpoint_weight_name_filter(self) -> Callable[[str], bool]:
+        return self._is_mtp_checkpoint_weight
+
+    def __init__(self, model_config: ModelConfig, load_config: Any):
+        super().__init__(model_config, load_config)
+        cfg = self._cfg
+        if cfg["num_layers"] != 1:
+            raise ValueError(
+                f"Qwen3-Next MTP requires exactly one layer, got {cfg['num_layers']}"
+            )
+        if cfg["hybrid_types"] != [HybridAttentionType.NONE]:
+            raise ValueError("Qwen3-Next MTP requires one standard-attention layer")
+        if cfg["moe_layer_index"] != [0]:
+            raise ValueError("Qwen3-Next MTP requires MoE layer index [0]")
+
+        self.pre_fc_norm_embedding = RMSNorm(
+            cfg["hidden_size"],
+            eps=cfg["rms_norm_eps"],
+            params_dtype=cfg["params_dtype"],
+        )
+        self.pre_fc_norm_hidden = RMSNorm(
+            cfg["hidden_size"],
+            eps=cfg["rms_norm_eps"],
+            params_dtype=cfg["params_dtype"],
+        )
+        self.fc = ColumnParallelLinear(
+            input_size=cfg["hidden_size"] * 2,
+            output_size=cfg["hidden_size"],
+            tp_size=1,
+            tp_rank=0,
+            quant_config=None,
+            prefix="fc",
+            bias=False,
+            params_dtype=cfg["params_dtype"],
+        )
+
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        inputs_embeds = self.embed_tokens(inputs.input_ids)
+        last_hidden_states = inputs.input_hiddens
+        if last_hidden_states is None:
+            raise ValueError("Qwen3-Next MTP requires input_hiddens")
+        if last_hidden_states.shape != inputs_embeds.shape:
+            raise ValueError(
+                "Qwen3-Next MTP input_hiddens must match token embeddings: "
+                f"{tuple(last_hidden_states.shape)} != {tuple(inputs_embeds.shape)}"
+            )
+        hidden_states = self.fc(
+            torch.cat(
+                [
+                    self.pre_fc_norm_embedding(inputs_embeds),
+                    self.pre_fc_norm_hidden(last_hidden_states),
+                ],
+                dim=-1,
+            )
+        )
+
+        if inputs.attention_inputs is None:
+            raise ValueError("Qwen3-Next MTP requires attention inputs")
+        if fmha_impl is None:
+            fmha_impl = self.prepare_fmha_impl(inputs)
+        residual = torch.zeros_like(hidden_states)
+        # The draft layer is standard attention. Empty typed metadata also avoids
+        # allocating linear-attention prefill state during CUDA graph capture.
+        attn_meta = Qwen3NextMetadata()
+        for index, layer in enumerate(self.layers):
+            select_block_map_for_layer(inputs.attention_inputs, index)
+            hidden_states, residual = layer(
+                hidden_states,
+                residual,
+                fmha_impl,
+                kv_cache=(
+                    self.kv_cache.get_layer_cache(index) if self.kv_cache else None
+                ),
+                attention_inputs=inputs.attention_inputs,
+                attn_meta=attn_meta,
+            )
+        hidden_states, residual = self.norm(hidden_states, residual)
+        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+
+
+class Qwen35MoeMTPForCausalLM(Qwen3NextMTPForCausalLM):
+    """Qwen3.5 MoE MTP alias with the same runtime layout."""
