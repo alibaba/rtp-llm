@@ -358,7 +358,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
             Collection<Participant> participants = leaderSelector.getParticipants();
             for (Participant participant : participants) {
                 // Only notify non-master participants
-                if (!participant.isLeader() && localIp.equals(participant.getId())) {
+                if (!participant.isLeader() && !localIp.equals(participant.getId())) {
                     notifyParticipant(participant.getId());
                 }
             }
