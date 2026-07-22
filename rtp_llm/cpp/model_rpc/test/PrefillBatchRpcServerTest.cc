@@ -99,6 +99,31 @@ GenerateStreamPtr makeGenerateStream(const std::shared_ptr<GenerateInput>& input
         input, model_config, runtime_config, ResourceContext{}, /*metrics_reporter=*/nullptr);
 }
 
+void buildReadySlots(PrefillBatchRpcServer&                         server,
+                     const std::vector<int64_t>&                    request_ids,
+                     std::vector<PrefillBatchRpcServer::BatchSlot>& slots,
+                     std::vector<PrefillBatchRpcServer::ReadySlot>& ready_slots) {
+    slots.resize(request_ids.size());
+    ready_slots.reserve(request_ids.size());
+    for (size_t i = 0; i < request_ids.size(); ++i) {
+        const auto request_id = request_ids[i];
+        auto&      slot       = slots[i];
+        slot.input            = std::make_shared<GenerateInputPB>();
+        slot.input->set_request_id(request_id);
+        RPCContext rpc_context{slot.input.get(), nullptr};
+        slot.prefill_context                 = std::make_unique<PrefillGenerateContext>(&server.resource(),
+                                                                        rpc_context,
+                                                                        /*timeout_ms=*/0,
+                                                                        /*server_context=*/nullptr,
+                                                                        server.metrics_reporter_,
+                                                                        server.meta_);
+        slot.prefill_context->generate_input = makeGenerateInput(request_id);
+        auto entry                           = server.response_registry_.reserve(request_id);
+        ASSERT_NE(entry, nullptr);
+        ready_slots.push_back(PrefillBatchRpcServer::ReadySlot{&slot, std::move(entry)});
+    }
+}
+
 TEST(PrefillBatchRpcServerTest, FlattensLocalSlotsAndPreservesMissingInputResult) {
     TestPrefillBatchRpcServer server;
     server.setParallelism(/*dp_size=*/1, /*dp_rank=*/0);
@@ -238,24 +263,7 @@ TEST(PrefillBatchRpcServerTest, PartialSchedulerRejectionCleansRejectedPrefillRe
 
     std::vector<PrefillBatchRpcServer::BatchSlot> slots(2);
     std::vector<PrefillBatchRpcServer::ReadySlot> ready_slots;
-    ready_slots.reserve(slots.size());
-    for (size_t i = 0; i < slots.size(); ++i) {
-        const int64_t request_id = 1001 + static_cast<int64_t>(i);
-        auto&         slot       = slots[i];
-        slot.input               = std::make_shared<GenerateInputPB>();
-        slot.input->set_request_id(request_id);
-        RPCContext rpc_context{slot.input.get(), nullptr};
-        slot.prefill_context                 = std::make_unique<PrefillGenerateContext>(&server.resource(),
-                                                                        rpc_context,
-                                                                        /*timeout_ms=*/0,
-                                                                        /*server_context=*/nullptr,
-                                                                        server.metrics_reporter_,
-                                                                        server.meta_);
-        slot.prefill_context->generate_input = makeGenerateInput(request_id);
-        auto entry                           = server.response_registry_.reserve(request_id);
-        ASSERT_NE(entry, nullptr);
-        ready_slots.push_back(PrefillBatchRpcServer::ReadySlot{&slot, std::move(entry)});
-    }
+    buildReadySlots(server, {1001, 1002}, slots, ready_slots);
 
     engine->streams = {
         makeGenerateStream(slots[0].prefill_context->generate_input),
@@ -294,6 +302,29 @@ TEST(PrefillBatchRpcServerTest, PartialSchedulerRejectionCleansRejectedPrefillRe
     slots[0].prefill_context->cancel_state->store(true);
     slots[0].prefill_context.reset();
     EXPECT_EQ(server.response_registry_.size(), 0);
+}
+
+TEST(PrefillBatchRpcServerTest, FailsFastWhenEnqueueMultipleReordersStreams) {
+    PrefillBatchRpcServer server;
+    server.meta_   = std::make_shared<RpcServerRuntimeMeta>();
+    auto engine    = std::make_shared<PartialEnqueueEngine>();
+    server.engine_ = engine;
+
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots;
+    std::vector<PrefillBatchRpcServer::ReadySlot> ready_slots;
+    buildReadySlots(server, {2001, 2002}, slots, ready_slots);
+
+    engine->streams = {
+        makeGenerateStream(slots[1].prefill_context->generate_input),
+        makeGenerateStream(slots[0].prefill_context->generate_input),
+    };
+    engine->enqueue_successes = {true, true};
+
+    EnqueueBatchResponsePB response;
+    EXPECT_ANY_THROW(server.enqueueGroupStreams(ready_slots, &response));
+
+    server.response_registry_.abort(2001, ready_slots[0].entry);
+    server.response_registry_.abort(2002, ready_slots[1].entry);
 }
 
 }  // namespace
