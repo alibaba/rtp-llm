@@ -408,6 +408,12 @@ message UpdateWeightsRequestPB {
     string method = 3;
 }
 
+enum KvCacheGroupModePB {
+    KV_CACHE_GROUP_MODE_UNSPECIFIED = 0;
+    KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY = 1;
+    KV_CACHE_GROUP_MODE_WITH_MAMBA = 2;
+}
+
 message WorkerStatusPB {
     string role = 1;
     int32 available_concurrency = 2;
@@ -430,6 +436,7 @@ message WorkerStatusPB {
     reserved "free_gpu_memory_bytes", "total_gpu_memory_bytes";
     // Number of tokens after each full block included in its cache hash.
     int32 block_hash_lookahead_tokens = 21;
+    KvCacheGroupModePB kv_cache_group_mode = 22;
 }
 
 message KvCacheGroupMetadataPB {

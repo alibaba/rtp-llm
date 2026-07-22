@@ -38,8 +38,7 @@ public class KvcmGrpcClient {
     private final KvcmConfig config;
     private final KvcmMetaServiceClient metaServiceClient;
     private final KvcmLeaderResolver leaderResolver;
-    private final KvcmNamespaceResolver namespaceResolver;
-    private final KvcmQueryTypeResolver queryTypeResolver;
+    private final KvcmWorkerMetadataResolver workerMetadataResolver;
     private final ScheduledExecutorService refreshExecutor;
     private final AtomicBoolean immediateRefreshQueued = new AtomicBoolean();
 
@@ -47,12 +46,10 @@ public class KvcmGrpcClient {
             ModelMetaConfig modelMetaConfig,
             KvcmMetaServiceClient metaServiceClient,
             KvcmLeaderResolver leaderResolver,
-            KvcmNamespaceResolver namespaceResolver,
-            KvcmQueryTypeResolver queryTypeResolver) {
+            KvcmWorkerMetadataResolver workerMetadataResolver) {
         this.metaServiceClient = metaServiceClient;
         this.leaderResolver = leaderResolver;
-        this.namespaceResolver = namespaceResolver;
-        this.queryTypeResolver = queryTypeResolver;
+        this.workerMetadataResolver = workerMetadataResolver;
         ServiceRoute serviceRoute = modelMetaConfig.getServiceRoutes().stream().findFirst().orElse(null);
         this.config = serviceRoute != null ? serviceRoute.getKvcm() : null;
         this.enabled = config != null && config.isEnabled();
@@ -74,7 +71,7 @@ public class KvcmGrpcClient {
                 TimeUnit.MILLISECONDS);
         log.info("Started KVCM client, address={}, bootstrapPort={}, leaderRefreshIntervalMs={}, namespaceSource={}",
                 config.getAddress(), config.getPort(), config.getLeaderRefreshIntervalMs(),
-                namespaceResolver.usesConfiguredNamespace() ? "configuration" : "worker-discovery");
+                workerMetadataResolver.usesConfiguredNamespace() ? "configuration" : "worker-status");
     }
 
     public Map<String, Integer> findMatchingEngines(
@@ -100,7 +97,7 @@ public class KvcmGrpcClient {
             return Collections.emptyMap();
         }
 
-        String namespace = namespaceResolver.resolve(roleType, group, blockSize);
+        String namespace = workerMetadataResolver.resolveNamespace(roleType, group, blockSize);
         if (StringUtils.isBlank(namespace)) {
             log.warn("Skipping KVCM cache query because namespace is unavailable, "
                             + "requestId={}, role={}, group={}",
@@ -118,7 +115,7 @@ public class KvcmGrpcClient {
         }
 
         String traceId = IdUtils.fastUuid();
-        QueryType queryType = queryTypeResolver.resolve(roleType, group);
+        QueryType queryType = workerMetadataResolver.resolveQueryType(roleType, group);
         GetHostCacheStateRequest request = GetHostCacheStateRequest.newBuilder()
                 .setTraceId(traceId)
                 // KVCM exposes the cache namespace as instance_id in its protocol.
@@ -158,9 +155,8 @@ public class KvcmGrpcClient {
     }
 
     private void refreshKvcmServiceStateSafely() {
-        refreshSafely("query type state", queryTypeResolver::refresh);
         refreshSafely("leader state", leaderResolver::refresh);
-        refreshSafely("namespace state", namespaceResolver::refresh);
+        refreshSafely("worker metadata state", workerMetadataResolver::refresh);
     }
 
     private Map<String, Integer> toPrefixMatchBlocksByHost(List<HostCacheMatch> matches) {

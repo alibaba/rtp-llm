@@ -4,6 +4,7 @@ import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -79,7 +80,9 @@ public class KvCacheManager {
         }
 
         // Use candidate engine list
-        List<String> enginesIpPorts = workerStatusProvider.getWorkerIpPorts(roleType, group);
+        List<String> enginesIpPorts = workerStatusProvider.getWorkerStatuses(roleType, group).stream()
+                .map(WorkerStatus::getIpPort)
+                .toList();
 
         // Batch calculate prefix match length
         return globalCacheIndex.batchCalculatePrefixMatchLength(enginesIpPorts, blockCacheKeys);

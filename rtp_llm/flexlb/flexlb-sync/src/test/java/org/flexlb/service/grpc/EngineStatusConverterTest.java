@@ -2,6 +2,7 @@ package org.flexlb.service.grpc;
 
 import org.flexlb.domain.worker.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.enums.KvCacheGroupMode;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -9,6 +10,19 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EngineStatusConverterTest {
+
+    @Test
+    void convertsKvCacheGroupMode() {
+        EngineRpcService.WorkerStatusPB workerStatus = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setKvCacheGroupMode(
+                        EngineRpcService.KvCacheGroupModePB.KV_CACHE_GROUP_MODE_WITH_MAMBA)
+                .build();
+
+        WorkerStatusResponse response =
+                EngineStatusConverter.convertToWorkerStatusResponse(workerStatus);
+
+        assertEquals(KvCacheGroupMode.WITH_MAMBA, response.getKvCacheGroupMode());
+    }
 
     @Test
     void leavesCacheStatusEmptyWhenWorkerDoesNotReportBlockSize() {

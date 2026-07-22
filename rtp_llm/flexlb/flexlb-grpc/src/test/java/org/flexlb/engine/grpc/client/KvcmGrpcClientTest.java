@@ -6,6 +6,8 @@ import io.grpc.ServerBuilder;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.DiscoveryConfig;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.GroupRoleEndPoint;
@@ -16,6 +18,7 @@ import org.flexlb.discovery.RoutingServiceDiscovery;
 import org.flexlb.discovery.ServiceDiscoveryType;
 import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.engine.grpc.core.GrpcTarget;
+import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.kvcm.grpc.CommonResponseHeader;
 import org.flexlb.kvcm.grpc.ErrorCode;
 import org.flexlb.kvcm.grpc.GetClusterInfoRequest;
@@ -33,6 +36,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.io.IOException;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -41,7 +45,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.when;
 
 class KvcmGrpcClientTest {
@@ -50,13 +53,9 @@ class KvcmGrpcClientTest {
     private Server seedServer;
     private Server leaderServer;
     private KvcmGrpcClient client;
-    private KvcmQueryTypeResolver queryTypeResolver;
 
     @BeforeEach
     void setUp() throws IOException {
-        queryTypeResolver = Mockito.mock(KvcmQueryTypeResolver.class);
-        when(queryTypeResolver.resolve(any(RoleType.class), nullable(String.class)))
-                .thenReturn(QueryType.QT_PREFIX_MATCH);
         leaderServer = ServerBuilder.forPort(0)
                 .addService(new LeaderMetaService(lastCacheRequest))
                 .build()
@@ -81,7 +80,10 @@ class KvcmGrpcClientTest {
     @Test
     void usesBootstrapPortThenLeaderRpcPortAndQueriesFirstDeploymentNamespace() throws Exception {
         RoutingServiceDiscovery serviceDiscovery = serviceDiscovery();
-        client = newClient(modelMetaConfig(seedServer.getPort()), serviceDiscovery);
+        client = newClient(
+                modelMetaConfig(seedServer.getPort()),
+                serviceDiscovery,
+                KvCacheGroupMode.FULL_ATTENTION_ONLY);
 
         Map<String, Integer> matches = waitForMatches(RoleType.PDFUSION);
         Map<String, Integer> decodeMatches = waitForMatches(RoleType.DECODE);
@@ -102,10 +104,10 @@ class KvcmGrpcClientTest {
     @Test
     void configuredNamespaceTakesPriorityForCacheQuery() throws Exception {
         RoutingServiceDiscovery serviceDiscovery = serviceDiscovery();
-        when(queryTypeResolver.resolve(RoleType.PDFUSION, null))
-                .thenReturn(QueryType.QT_PREFIX_MATCH_WITH_MAMBA);
         client = newClient(
-                modelMetaConfig(seedServer.getPort(), "vllm-test-0"), serviceDiscovery);
+                modelMetaConfig(seedServer.getPort(), "vllm-test-0"),
+                serviceDiscovery,
+                KvCacheGroupMode.WITH_MAMBA);
 
         Map<String, Integer> matches = waitForMatches(RoleType.PDFUSION, null);
 
@@ -134,14 +136,26 @@ class KvcmGrpcClientTest {
 
     private KvcmGrpcClient newClient(
             ModelMetaConfig modelMetaConfig,
-            RoutingServiceDiscovery serviceDiscovery) {
+            RoutingServiceDiscovery serviceDiscovery,
+            KvCacheGroupMode mode) {
         KvcmMetaServiceClient metaServiceClient = new KvcmMetaServiceClient(channelFactory());
         return new KvcmGrpcClient(
                 modelMetaConfig,
                 metaServiceClient,
                 new KvcmLeaderResolver(modelMetaConfig, serviceDiscovery, metaServiceClient),
-                new KvcmNamespaceResolver(modelMetaConfig, serviceDiscovery),
-                queryTypeResolver);
+                new KvcmWorkerMetadataResolver(modelMetaConfig, workerStatusProvider(mode)));
+    }
+
+    private WorkerStatusProvider workerStatusProvider(KvCacheGroupMode mode) {
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setDeploymentName("deployment-first");
+        workerStatus.setKvCacheGroupMode(mode);
+        return new WorkerStatusProvider() {
+            @Override
+            public Collection<WorkerStatus> getWorkerStatuses(RoleType roleType, String group) {
+                return List.of(workerStatus);
+            }
+        };
     }
 
     private ModelMetaConfig modelMetaConfig(int bootstrapPort) {

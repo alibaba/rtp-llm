@@ -4,6 +4,7 @@ import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.dao.pv.CacheHitComparisonPvLog;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.enums.TaskStateEnum;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,6 +27,7 @@ public class WorkerStatus {
     public final transient ReentrantLock lock = new ReentrantLock();
     private String role;
     private String group;
+    private String deploymentName;
     private String ip;
     private int port;
     private String site;
@@ -45,6 +47,7 @@ public class WorkerStatus {
     private long dpSize;
     private long tpSize;
     private int blockHashLookaheadTokens;
+    private KvCacheGroupMode kvCacheGroupMode = KvCacheGroupMode.UNSPECIFIED;
 
     private AtomicLong statusLastUpdateTime = new AtomicLong(-1); // Last status update time (microseconds)
     private AtomicLong statusUpdateIntervalUs = new AtomicLong(0); // Actual interval between last two status updates (microseconds)

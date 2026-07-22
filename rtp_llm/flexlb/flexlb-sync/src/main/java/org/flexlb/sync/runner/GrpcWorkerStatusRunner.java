@@ -9,6 +9,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.worker.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.BalanceStatusEnum;
+import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -115,6 +116,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.setGroup(group);
             workerStatus.setRole(newWorkerStatus.getRole());
             workerStatus.setBlockHashLookaheadTokens(newWorkerStatus.getBlockHashLookaheadTokens());
+            updateKvCacheGroupMode(newWorkerStatus.getKvCacheGroupMode());
             updateCacheStatus(newWorkerStatus.getCacheStatus());
 
             long currentVersion = workerStatus.getStatusVersion().get();
@@ -218,6 +220,14 @@ public class GrpcWorkerStatusRunner implements Runnable {
         long availableKvCache = cacheStatus.getAvailableKvCache();
         long usedKvCache = Math.max(0L, cacheStatus.getTotalKvCache() - availableKvCache);
         workerStatus.updateKvCacheTokens(usedKvCache, availableKvCache);
+    }
+
+    private void updateKvCacheGroupMode(KvCacheGroupMode mode) {
+        if (mode == null || mode == KvCacheGroupMode.UNSPECIFIED
+                || mode == workerStatus.getKvCacheGroupMode()) {
+            return;
+        }
+        workerStatus.setKvCacheGroupMode(mode);
     }
 
     private void handleException(Throwable ex) {

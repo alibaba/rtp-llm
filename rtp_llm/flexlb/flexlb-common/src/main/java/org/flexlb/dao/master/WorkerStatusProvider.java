@@ -2,7 +2,7 @@ package org.flexlb.dao.master;
 
 import org.flexlb.dao.route.RoleType;
 
-import java.util.List;
+import java.util.Collection;
 
 /**
  * Worker status provider interface
@@ -12,11 +12,7 @@ import java.util.List;
 public interface WorkerStatusProvider {
 
     /**
-     * Get all worker IP:Port addresses
-     *
-     * @param roleType Worker role type to query
-     * @param group    Worker group to query
-     * @return Worker IP:Port list
+     * Get in-memory worker statuses for a role and group.
      */
-    List<String> getWorkerIpPorts(RoleType roleType, String group);
+    Collection<WorkerStatus> getWorkerStatuses(RoleType roleType, String group);
 }

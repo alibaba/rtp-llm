@@ -120,7 +120,7 @@ public class EngineSyncRunner implements Runnable {
                 String workerIpPort = host.getIpPort();
                 String site = host.getSite();
 
-                WorkerStatus workerStatus = getOrCreateWorkerStatus(cachedWorkerStatuses, workerIpPort);
+                WorkerStatus workerStatus = getOrCreateWorkerStatus(cachedWorkerStatuses, host);
 
                 if (workerStatus.getStatusCheckInProgress().compareAndSet(false, true)) {
                     logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
@@ -187,13 +187,15 @@ public class EngineSyncRunner implements Runnable {
         }
     }
 
-    private WorkerStatus getOrCreateWorkerStatus(Map<String, WorkerStatus> workerStatuses, String workerIpPort) {
+    private WorkerStatus getOrCreateWorkerStatus(
+            Map<String, WorkerStatus> workerStatuses, WorkerHost host) {
+        String workerIpPort = host.getIpPort();
         WorkerStatus workerStatus = workerStatuses.get(workerIpPort);
         if (workerStatus == null) {
             workerStatus = new WorkerStatus();
-            String[] split = workerIpPort.split(":");
-            workerStatus.setIp(split[0]);
-            workerStatus.setPort(Integer.parseInt(split[1]));
+            workerStatus.setIp(host.getIp());
+            workerStatus.setPort(host.getPort());
+            workerStatus.setDeploymentName(host.getDeploymentName());
             workerStatuses.put(workerIpPort, workerStatus);
             logger.info("Created new WorkerStatus for worker: {}", workerIpPort);
         }

@@ -4,6 +4,7 @@ import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.domain.worker.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.enums.KvCacheGroupMode;
 
 import java.util.HashMap;
 import java.util.List;
@@ -31,6 +32,7 @@ public class EngineStatusConverter {
         response.setDpSize(workerStatusPB.getDpSize());
         response.setTpSize(workerStatusPB.getTpSize());
         response.setBlockHashLookaheadTokens(workerStatusPB.getBlockHashLookaheadTokens());
+        response.setKvCacheGroupMode(convertKvCacheGroupMode(workerStatusPB.getKvCacheGroupMode()));
         response.setStatusVersion(workerStatusPB.getStatusVersion());
         response.setLatestFinishedVersion(workerStatusPB.getLatestFinishedVersion());
         response.setAlive(workerStatusPB.getAlive());
@@ -57,6 +59,15 @@ public class EngineStatusConverter {
         response.setFinishedTaskInfo(convertToTaskInfoList(workerStatusPB.getFinishedTaskListList()));
 
         return response;
+    }
+
+    private static KvCacheGroupMode convertKvCacheGroupMode(
+            EngineRpcService.KvCacheGroupModePB mode) {
+        return switch (mode) {
+            case KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY -> KvCacheGroupMode.FULL_ATTENTION_ONLY;
+            case KV_CACHE_GROUP_MODE_WITH_MAMBA -> KvCacheGroupMode.WITH_MAMBA;
+            default -> KvCacheGroupMode.UNSPECIFIED;
+        };
     }
 
     /**

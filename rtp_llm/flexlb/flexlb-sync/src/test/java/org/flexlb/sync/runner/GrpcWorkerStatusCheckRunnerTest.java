@@ -6,18 +6,19 @@ import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.pv.CacheHitComparisonPvLog;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GrpcWorkerStatusCheckRunnerTest {
 
@@ -53,6 +54,7 @@ class GrpcWorkerStatusCheckRunnerTest {
                 .setTotalKvCache(1000)
                 .setBlockSize(64)
                 .setBlockHashLookaheadTokens(1)
+                .setKvCacheGroupMode(EngineRpcService.KvCacheGroupModePB.KV_CACHE_GROUP_MODE_WITH_MAMBA)
                 .build();
 
         when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(), org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(workerStatusPB);
@@ -70,6 +72,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         assertEquals(800, workerStatus.getAvailableKvCacheTokens().get());
         assertEquals(200, workerStatus.getUsedKvCacheTokens().get());
         assertEquals(1, workerStatus.getBlockHashLookaheadTokens());
+        assertEquals(KvCacheGroupMode.WITH_MAMBA, workerStatus.getKvCacheGroupMode());
     }
 
     @Test
@@ -111,7 +114,8 @@ class GrpcWorkerStatusCheckRunnerTest {
 
         // Act
         new GrpcWorkerStatusRunner(
-                modelName, host, RoleType.PREFILL, workerStatus, engineHealthReporter, engineGrpcService, 20).run();
+                modelName, host, RoleType.PREFILL, workerStatus, engineHealthReporter,
+                engineGrpcService, 20).run();
 
         // Assert
         CacheHitComparisonPvLog expected = new CacheHitComparisonPvLog(
