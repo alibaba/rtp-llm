@@ -668,15 +668,15 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveRatioAndSnapshotsExcludeNonReserva
     const size_t participating_free = allocator->groupBlockPools()[1]->freeBlocksNum();
     ASSERT_GT(excluded_free, 0u);
     ASSERT_GT(participating_free, 0u);
-    EXPECT_EQ(allocator->reserveBlockNum(),
+    EXPECT_EQ(allocator->reserveBlocksNum(),
               static_cast<size_t>(reserve_ratio) * participating_free / static_cast<size_t>(100));
-    EXPECT_NE(allocator->reserveBlockNum(),
+    EXPECT_NE(allocator->reserveBlocksNum(),
               static_cast<size_t>(reserve_ratio) * (excluded_free + participating_free) / static_cast<size_t>(100));
 
     const auto snapshots = allocator->poolMetricsSnapshots();
     ASSERT_EQ(snapshots.size(), 2u);
     EXPECT_EQ(snapshots[0].reserve_blocks, 0u);
-    EXPECT_EQ(snapshots[1].reserve_blocks, allocator->reserveBlockNum());
+    EXPECT_EQ(snapshots[1].reserve_blocks, allocator->reserveBlocksNum());
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, NonReservableOnlyPoolsHaveDivisionSafeZeroReserveShares) {
@@ -686,11 +686,11 @@ TEST_F(HybridPoolKVCacheAllocatorTest, NonReservableOnlyPoolsHaveDivisionSafeZer
 
     auto allocator = makeAllocator(config, RoleType::PDFUSION, /*reserve_block_ratio=*/50);
     ASSERT_TRUE(allocator->init());
-    EXPECT_EQ(allocator->reserveBlockNum(), 0u);
+    EXPECT_EQ(allocator->reserveBlocksNum(), 0u);
 
     // Exercise snapshot distribution with a non-zero configured reserve and a
     // zero-participant denominator. Every pool must receive a safe zero share.
-    allocator->setReserveBlockNum(7);
+    allocator->setReserveBlocksNum(7);
     const auto snapshots = allocator->poolMetricsSnapshots();
     ASSERT_EQ(snapshots.size(), 2u);
     EXPECT_EQ(snapshots[0].reserve_blocks, 0u);

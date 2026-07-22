@@ -231,7 +231,7 @@ bool KVCacheManager::init() {
     allocator_->setCPSlotMapper(cp_slot_mapper_);
     RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
     if (kv_cache_config_.device_cache_min_free_blocks > 0) {
-        allocator_->setReserveBlockNum(static_cast<size_t>(kv_cache_config_.device_cache_min_free_blocks));
+        allocator_->setReserveBlocksNum(static_cast<size_t>(kv_cache_config_.device_cache_min_free_blocks));
     }
     const bool requires_broadcast_manager = parallelism_config_.tp_size > 1 && parallelism_config_.tp_rank == 0
                                             && !runtime_config_.worker_grpc_addrs.empty();

@@ -29,7 +29,7 @@ namespace rtp_llm {
 namespace test {
 
 using TestSingleTypeKVCacheAllocator = BlockTreeCacheTestAllocator<SingleTypeKVCacheAllocator>;
-using PendingLoadBackItem = LoadBackTicket::PendingLoadBackItem;
+using PendingLoadBackItem            = LoadBackTicket::PendingLoadBackItem;
 
 class CountingSingleTypeCopyEngine: public CopyEngine {
 public:
@@ -1725,7 +1725,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MixedOperations) {
 TEST_F(SingleTypeKVCacheAllocatorTest, EstimatePeakNeedBlocks) {
     // seq_size_per_block=4, block_num=10
     auto config = createSingleTypeTestConfig(/*layer_num=*/1, /*block_num=*/10, /*seq_size_per_block=*/4);
-    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
 
     // New resource (no blocks allocated): ceil((8+100)/4) - 0 = 27
@@ -1754,7 +1754,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, EstimatePeakNeedBlocks) {
 
 TEST_F(SingleTypeKVCacheAllocatorTest, EstimateBatchPeakNeedBlocksAccountsForNonEmptyTargetWidth) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/1, /*block_num=*/16, /*seq_size_per_block=*/4);
-    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
 
     auto resource = createBatchKVCacheResource(/*batch_size=*/2, config);
@@ -1825,7 +1825,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, EstimateBatchPeakNeedBlocksAccountsForNon
 
 TEST_F(SingleTypeKVCacheAllocatorTest, EstimateBatchPeakCoversPartialTailCopiesAtExactCapacity) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/1, /*block_num=*/6, /*seq_size_per_block=*/4);
-    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
 
     auto resource  = createBatchKVCacheResource(/*batch_size=*/1, config);
