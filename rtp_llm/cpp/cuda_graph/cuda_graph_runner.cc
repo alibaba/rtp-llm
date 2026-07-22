@@ -401,6 +401,24 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
 }
 
 bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state) {
+    // MTP draft-prefill graphs are captured with a fixed per-stream width of
+    // gen_num_per_cycle + 1.  The legacy MTP processor compacts rejected rows,
+    // so a partial accept produces a ragged input (for example 1, 2, or 3 rows
+    // for a graph captured with width 4).  Replaying the fixed-width graph in
+    // that case leaves the uncopied tail rows in capture memory stale and can
+    // mix a previous request into the current stream.  Until the processor
+    // publishes the dense fixed-width layout, run partial accepts eagerly.
+    if (isMtpDraftPrefillCudaGraph()) {
+        const auto& input_lengths = inputs.attention_inputs.input_lengths;
+        if (!input_lengths.defined() || input_lengths.numel() == 0
+            || !(input_lengths == num_tokens_per_bs_).all().item<bool>()) {
+            RTP_LLM_LOG_DEBUG(
+                "MTP draft-prefill input is not fixed-width=%d; fallback to eager to avoid stale graph rows",
+                num_tokens_per_bs_);
+            return false;
+        }
+    }
+
     state.current_seq_len = inputs.attention_inputs.input_lengths.sum(0).item<int>();
     if (capture_range_.empty()) {
         RTP_LLM_LOG_WARNING("prefill cuda graph: capture_range_ is empty, cannot run");
@@ -830,8 +848,13 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     // Common slice operations for input_ids and padding_offset
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
     inputs.attention_inputs.is_target_verify = is_target_verify_;
-    inputs.input_ids     = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, seq_len_or_tokens);
-    inputs.input_hiddens = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, seq_len_or_tokens);
+    // DSV4 MTP draft prefill executes an HC-shaped fixed-capacity Python path.
+    // Ordinary MTP models must slice to the current graph key so FlashInfer's
+    // batch_indices length remains equal to the query nnz.
+    const bool fixed_capacity_draft_prefill = usesFixedCapacityMtpDraftPrefillCudaGraph();
+    const int  token_slice_len = fixed_capacity_draft_prefill ? max_bs_ * num_tokens_per_bs_ : seq_len_or_tokens;
+    inputs.input_ids           = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
+    inputs.input_hiddens       = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
     inputs.attention_inputs.input_lengths_device =

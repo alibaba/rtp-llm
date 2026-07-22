@@ -334,5 +334,76 @@ class TestGenerateQKVPaddingMask(unittest.TestCase):
         self.assertTrue(torch.equal(expect_padding_mask, padding_mask))
 
 
+class TestComputeLocalLastHidden(unittest.TestCase):
+    @staticmethod
+    def _pad_to(value: int, multiple: int) -> int:
+        return ((value + multiple - 1) // multiple) * multiple
+
+    def _run_case(self, stream_lens, cp_size, hidden_dim=3, device="cpu"):
+        padded_lens = [self._pad_to(s, 2 * cp_size) for s in stream_lens]
+        chunk_lens = [p // cp_size for p in padded_lens]
+        padding_lens = [p - s for p, s in zip(padded_lens, stream_lens)]
+
+        chunk_lengths = torch.tensor(chunk_lens, dtype=torch.int32)
+        padding_lengths = torch.tensor(padding_lens, dtype=torch.int32)
+        restore_indice = cp_test.generate_qkv_restore_indices(chunk_lengths, cp_size)
+        padding_mask = cp_test.generate_qkv_padding_mask(
+            chunk_lengths, padding_lengths, cp_size
+        )
+
+        total_token_size = int(chunk_lengths.sum().item())
+        padded_total = cp_size * total_token_size
+        base = torch.arange(1, padded_total + 1, dtype=torch.float32).unsqueeze(1)
+        scale = torch.tensor([[1.0, 10.0, 100.0][:hidden_dim]], dtype=torch.float32)
+        original_hidden = base * scale
+
+        gathered_layout = torch.zeros((padded_total, hidden_dim), dtype=torch.float32)
+        gathered_layout.index_copy_(0, restore_indice.to(torch.long), original_hidden)
+        rank_chunks = gathered_layout.reshape(cp_size, total_token_size, hidden_dim).to(
+            device
+        )
+        restore_indice = restore_indice.to(device)
+        padding_mask = padding_mask.to(device)
+
+        valid_indices = torch.nonzero(padding_mask.cpu()).squeeze(-1)
+        restored = original_hidden.index_select(0, valid_indices.to(torch.long))
+        ends = []
+        offset = 0
+        for stream_len in stream_lens:
+            offset += stream_len
+            ends.append(offset - 1)
+        lm_output_indexes = torch.tensor(ends, dtype=torch.int32)
+        expected = restored.index_select(0, lm_output_indexes.to(torch.long))
+
+        actual = torch.zeros_like(expected)
+        contributors = torch.zeros(len(ends), dtype=torch.long)
+        for rank in range(cp_size):
+            local = cp_test.compute_local_last_hidden(
+                rank_chunks[rank].contiguous(),
+                restore_indice,
+                padding_mask,
+                lm_output_indexes,
+                rank,
+                cp_size,
+            )
+            actual += local
+            contributors += (local.abs().sum(dim=1) > 0).to(torch.long)
+
+        self.assertTrue(torch.equal(actual, expected))
+        self.assertTrue(
+            torch.equal(contributors, torch.ones(len(ends), dtype=torch.long))
+        )
+
+    def test_single_stream_with_padding(self):
+        self._run_case(stream_lens=[14], cp_size=2)
+
+    def test_multi_stream_cp4_with_padding(self):
+        self._run_case(stream_lens=[10, 20, 7], cp_size=4)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_cpu_indexes_with_cuda_hidden(self):
+        self._run_case(stream_lens=[14], cp_size=2, device="cuda")
+
+
 if __name__ == "__main__":
     unittest.main()

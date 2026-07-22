@@ -8,6 +8,7 @@
 #define private public
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #undef private
+#include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -854,6 +855,145 @@ TEST_F(MtpBatchStreamProcessorTest, updateMultiStepDraftSamplerOutput) {
     vector<float> expect_all_probs = {0.1, 0.2, 0.3, 0.4, 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4,
                                       0.5, 0.6, 0.7, 0.8, 1.5, 1.6, 1.7, 1.8, 2.5, 2.6, 2.7, 2.8};
     EXPECT_EQ(expect_all_probs, toVec<float>(sampler_output.all_probs));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, speculativeSamplerHandlesMixedBatchModes) {
+    ModelConfig     model_config;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 4;
+    model_config.num_layers  = 1;
+
+    auto stream0 = createContextStream(model_config, runtime_config, resource_context, {0}, 0);
+    auto stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    stream0->generateConfig()->top_k     = 1;
+    stream0->generateConfig()->do_sample = true;
+    stream1->generateConfig()->top_k     = 0;
+    stream1->generateConfig()->do_sample = true;
+
+    SamplerOutput draft_output;
+    draft_output.token_ids = torch::tensor({1, 2}, torch::kInt32).reshape({2, 1});
+    draft_output.all_probs =
+        torch::tensor({0.05f, 0.85f, 0.05f, 0.05f, 0.05f, 0.05f, 0.85f, 0.05f}, torch::kFloat32)
+            .reshape({2, 1, 4})
+            .cuda();
+
+    SamplerOutput target_output;
+    target_output.token_ids = torch::tensor({90, 3, 91, 0, 92, 2, 93, 1}, torch::kInt32).reshape({4, 2});
+    target_output.all_probs =
+        torch::tensor({0.05f, 0.05f, 0.10f, 0.80f,
+                       1.00f, 0.00f, 0.00f, 0.00f,
+                       0.05f, 0.05f, 0.85f, 0.05f,
+                       0.05f, 0.85f, 0.05f, 0.05f},
+                      torch::kFloat32)
+            .reshape({2, 2, 4})
+            .cuda();
+
+    speculative::SpeculativeSampler sampler(1);
+    auto output = sampler.forward({stream0, stream1}, draft_output, target_output);
+
+    EXPECT_EQ(output.accept_len, (vector<int>{1, 2}));
+    EXPECT_EQ(toVec<int>(output.accept_tokens[0]), (vector<int>{3}));
+    EXPECT_EQ(toVec<int>(output.accept_tokens[1]), (vector<int>{2, 1}));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, speculativeSamplerHonorsDoSampleFalse) {
+    ModelConfig     model_config;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 4;
+    model_config.num_layers  = 1;
+
+    auto stream0 = createContextStream(model_config, runtime_config, resource_context, {0}, 0);
+    auto stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    stream0->generateConfig()->top_k     = 1;
+    stream0->generateConfig()->do_sample = true;
+    stream1->generateConfig()->top_k     = 0;
+    stream1->generateConfig()->do_sample = false;
+
+    SamplerOutput draft_output;
+    draft_output.token_ids = torch::tensor({1, 2}, torch::kInt32).reshape({2, 1});
+    draft_output.all_probs =
+        torch::tensor({0.05f, 0.85f, 0.05f, 0.05f, 0.30f, 0.30f, 0.10f, 0.30f}, torch::kFloat32)
+            .reshape({2, 1, 4})
+            .cuda();
+
+    SamplerOutput target_output;
+    target_output.token_ids = torch::tensor({-1, 1, -1, 0, -1, 3, -1, 1}, torch::kInt32).reshape({4, 2});
+    target_output.all_probs =
+        torch::tensor({0.05f, 0.85f, 0.05f, 0.05f,
+                       1.00f, 0.00f, 0.00f, 0.00f,
+                       0.05f, 0.05f, 0.30f, 0.60f,
+                       0.05f, 0.85f, 0.05f, 0.05f},
+                      torch::kFloat32)
+            .reshape({2, 2, 4})
+            .cuda();
+
+    speculative::SpeculativeSampler sampler(1);
+    auto output = sampler.forward({stream0, stream1}, draft_output, target_output);
+
+    EXPECT_EQ(output.accept_len, (vector<int>{2, 1}));
+    EXPECT_EQ(toVec<int>(output.accept_tokens[0]), (vector<int>{1, 0}));
+    EXPECT_EQ(toVec<int>(output.accept_tokens[1]), (vector<int>{3}));
+}
+
+
+TEST_F(MtpBatchStreamProcessorTest, speculativeSamplerHandlesThreeDraftTokensPerStream) {
+    ModelConfig     model_config;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 4;
+    model_config.num_layers  = 1;
+
+    auto stream0 = createContextStream(model_config, runtime_config, resource_context, {0}, 0);
+    auto stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    stream0->generateConfig()->top_k     = 1;
+    stream0->generateConfig()->do_sample = true;
+    stream1->generateConfig()->top_k     = 0;
+    stream1->generateConfig()->do_sample = true;
+
+    SamplerOutput draft_output;
+    draft_output.token_ids =
+        torch::tensor({1, 2, 0, 2, 1, 3}, torch::kInt32).reshape({2, 3});
+    draft_output.all_probs =
+        torch::tensor({0.05f, 0.85f, 0.05f, 0.05f,
+                       0.05f, 0.05f, 0.85f, 0.05f,
+                       0.85f, 0.05f, 0.05f, 0.05f,
+                       0.05f, 0.05f, 0.85f, 0.05f,
+                       0.05f, 0.85f, 0.05f, 0.05f,
+                       0.05f, 0.05f, 0.05f, 0.85f},
+                      torch::kFloat32)
+            .reshape({2, 3, 4})
+            .cuda();
+
+    SamplerOutput target_output;
+    target_output.token_ids =
+        torch::tensor({90, 3, 91, 2, 92, 0, 93, 1,
+                       94, 2, 95, 1, 96, 3, 97, 0},
+                      torch::kInt32)
+            .reshape({8, 2});
+    target_output.all_probs =
+        torch::tensor({0.05f, 0.05f, 0.05f, 0.85f,
+                       0.05f, 0.05f, 0.85f, 0.05f,
+                       0.85f, 0.05f, 0.05f, 0.05f,
+                       0.05f, 0.85f, 0.05f, 0.05f,
+                       0.05f, 0.05f, 0.85f, 0.05f,
+                       0.05f, 0.85f, 0.05f, 0.05f,
+                       0.05f, 0.05f, 0.05f, 0.85f,
+                       0.85f, 0.05f, 0.05f, 0.05f},
+                      torch::kFloat32)
+            .reshape({2, 4, 4})
+            .cuda();
+
+    speculative::SpeculativeSampler sampler(3);
+    auto output = sampler.forward({stream0, stream1}, draft_output, target_output);
+
+    EXPECT_EQ(output.accept_len, (vector<int>{1, 4}));
+    EXPECT_EQ(toVec<int>(output.accept_tokens[0]), (vector<int>{3}));
+    EXPECT_EQ(toVec<int>(output.accept_tokens[1]), (vector<int>{2, 1, 3, 0}));
 }
 
 }  // namespace rtp_llm

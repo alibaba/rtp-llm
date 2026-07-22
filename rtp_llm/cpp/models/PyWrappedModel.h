@@ -40,6 +40,8 @@ public:
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
+    torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
+    torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
@@ -69,6 +71,7 @@ private:
                                       const GptModelInputs& inputs,
                                       torch::Tensor         merged_eagle3_hidden,
                                       bool                  skip_final_layernorm = false);
+    GptModelOutputs forwardPostLayersLastHidden(torch::Tensor hidden, const GptModelInputs& inputs);
     MicroBatchPlan  planMicroBatches(const GptModelInputs& inputs);
     std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
          splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan);

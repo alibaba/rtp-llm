@@ -34,9 +34,10 @@ void CudaGraphRunner::capturePrefill() {
             inputs.attention_inputs.cu_kv_seqlens_device.copy_(inputs.attention_inputs.cu_seqlens, false);
         } else {
             // Draft model prefill: distribute seq_len tokens across batches (max num_tokens_per_bs_ each).
-            // All max_bs_ batches get prefix to ensure buffer allocation covers worst-case replay.
+            // All max_bs_ batches get the largest legal prefix so
+            // prefix_len + q_len never exceeds max_seq_len_.
             int active_bs  = (seq_len + num_tokens_per_bs_ - 1) / num_tokens_per_bs_;
-            int prefix_len = max_seq_len_;
+            int prefix_len = max_seq_len_ > num_tokens_per_bs_ ? max_seq_len_ - num_tokens_per_bs_ : 0;
 
             // All batches get prefix_len to maximize buffer allocation during capture.
             // Active batches get real input tokens, inactive batches get 0 input tokens.
@@ -81,8 +82,13 @@ void CudaGraphRunner::capturePrefill() {
         graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, max_bs_ * num_tokens_per_bs_);
         graph_instances_[seq_len].mem_hold_.attn_pyobj_ =
             py_attn_pyobj_method_(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);
-        graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =
-            graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
+        // DSV4 MTP draft prefill keeps its HC-shaped output at fixed graph
+        // capacity. Other MTP and embedding prefill paths produce the real
+        // flattened seq_len and must keep their metadata shapes aligned.
+        if (!usesFixedCapacityMtpDraftPrefillCudaGraph()) {
+            graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =
+                graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
+        }
         capturePrefillOneSeqLen(seq_len);
         cuda_graph::finish_capture_session();
         replayAndSyncCheck(seq_len, "seq len");
