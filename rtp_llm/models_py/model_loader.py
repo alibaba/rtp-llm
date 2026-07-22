@@ -5,18 +5,23 @@ import re
 import time
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Callable, List, Optional, Tuple
 
-import rtp_llm.models_py.weight_mapper as weight_mapper
 import torch
 import torch.nn as nn
+
+import rtp_llm.models_py.weight_mapper as weight_mapper
 from rtp_llm.models_py.module_base import RtpModule, collect_loaded_tensor_ids
 from rtp_llm.models_py.registry import get_model_class, list_models
 
 logger = logging.getLogger(__name__)
 
 _EXPERT_ID_RE = re.compile(r"(?:^|\.)experts\.(\d+)(?:\.|$)")
-_STACKED_EXPERT_RE = re.compile(r"(?:^|\.)experts\.(?:gate_up_proj|down_proj)(?:\.|$)")
+_STACKED_EXPERT_RE = re.compile(
+    r"^(?P<prefix>(?:.*\.)?experts)\."
+    r"(?P<projection>gate_up_proj|down_proj)"
+    r"(?P<suffix>(?:\..+)?)$"
+)
 
 
 class _ExpertRangeFilter:
@@ -53,12 +58,34 @@ class _ExpertRangeFilter:
                     f"[0, {self.num_experts})"
                 )
             return self.start_expert <= expert_id < self.end_expert
-        if self.ep_size > 1 and _STACKED_EXPERT_RE.search(name):
+        if self.ep_size > 1 and _STACKED_EXPERT_RE.fullmatch(name):
             raise ValueError(
                 "EP loading requires per-expert checkpoint keys; stacked all-expert "
                 f"tensor {name!r} would materialize non-local experts"
             )
         return True
+
+    def handles_safetensor(self, name: str) -> bool:
+        return self.ep_size > 1 and _STACKED_EXPERT_RE.fullmatch(name) is not None
+
+    def expand_safetensor(
+        self, name: str, shape: Tuple[int, ...]
+    ) -> List[Tuple[str, int]]:
+        match = _STACKED_EXPERT_RE.fullmatch(name)
+        if match is None:
+            raise ValueError(f"Tensor {name!r} is not a stacked expert tensor")
+        if not shape or shape[0] != self.num_experts:
+            raise ValueError(
+                f"Stacked expert tensor {name!r} must contain "
+                f"{self.num_experts} experts, got shape {shape}"
+            )
+        suffix = match.group("suffix") or ".weight"
+        prefix = match.group("prefix")
+        projection = match.group("projection")
+        return [
+            (f"{prefix}.{expert_id}.{projection}{suffix}", expert_id)
+            for expert_id in range(self.start_expert, self.end_expert)
+        ]
 
 
 def _validate_runtime_device(device: str, label: str) -> None:
@@ -286,7 +313,7 @@ class NewModelLoader:
                 )
         return self._ckpt_files
 
-    def _expert_name_filter(self):
+    def _expert_filter(self):
         if self.load_config.ep_size == 1:
             return None
         num_experts = (
@@ -308,7 +335,31 @@ class NewModelLoader:
             num_experts,
             self.load_config.ep_size,
             self.load_config.ep_rank,
-        ).should_load
+        )
+
+    @staticmethod
+    def _checkpoint_name_filter(
+        model: RtpModule, expert_filter: Optional[_ExpertRangeFilter]
+    ) -> Optional[Callable[[str], bool]]:
+        model_filter = model.checkpoint_weight_name_filter()
+        if model_filter is not None and not callable(model_filter):
+            raise TypeError(
+                f"{type(model).__name__}.checkpoint_weight_name_filter() must "
+                "return a callable or None"
+            )
+        if model_filter is None and expert_filter is None:
+            return None
+
+        def should_load(name: str) -> bool:
+            if model_filter is not None and not model_filter(name):
+                return False
+            if expert_filter is None:
+                return True
+            if expert_filter.handles_safetensor(name):
+                return True
+            return expert_filter.should_load(name)
+
+        return should_load
 
     def _validate_ep_checkpoint_format(self, checkpoint_files) -> None:
         if self.load_config.ep_size == 1:
@@ -452,11 +503,14 @@ class NewModelLoader:
                 "checkpoints; use a global HF checkpoint"
             )
         started = time.time()
+        expert_filter = self._expert_filter()
+        name_filter = self._checkpoint_name_filter(model, expert_filter)
         model.load_weights(
             weight_mapper.get_all_weights(
                 checkpoint_files,
                 device="cpu",
-                name_filter=self._expert_name_filter(),
+                name_filter=name_filter,
+                safetensor_slice_expander=expert_filter,
             )
         )
         self._validate_loaded_weights(model)
