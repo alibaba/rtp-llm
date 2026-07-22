@@ -324,7 +324,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         all_gather_shapes = []
         cp_gather_shapes = []
 
-        def _record_all_gather(tensor, group=None):
+        def _record_all_gather(tensor, group=None, **_kwargs):
             all_gather_shapes.append(tuple(tensor.shape))
             return tensor
 
@@ -540,7 +540,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         self.assertFalse(cp_op.total_local_ids_is_identity)
 
         # With tp_size=1, all_gather is identity; mock it to avoid requiring distributed init
-        def _identity_all_gather(tensor, group=None):
+        def _identity_all_gather(tensor, group=None, **_kwargs):
             return tensor
 
         q0_idx_list, q1_idx_list = generate_q_indices(chunk_lengths)
@@ -704,7 +704,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         cp_op.plan(mla_params, block_table_device, attn_inputs=attn_inputs)
         self.assertTrue(cp_op.total_local_ids_is_identity)
 
-        def _identity_all_gather(tensor, group=None):
+        def _identity_all_gather(tensor, group=None, **_kwargs):
             return tensor
 
         q0_idx_list, q1_idx_list = generate_q_indices(chunk_lengths)
@@ -1058,7 +1058,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         # from 2 ranks (rank0 has first 4, rank1 has last 4).
         _all_gather_returns = iter([input_ckv.contiguous(), input_k_pe.contiguous()])
 
-        def _mock_all_gather_tp2(tensor, group=None):
+        def _mock_all_gather_tp2(tensor, group=None, **_kwargs):
             return next(_all_gather_returns)
 
         q0_idx_list, q1_idx_list = generate_q_indices(chunk_lengths)

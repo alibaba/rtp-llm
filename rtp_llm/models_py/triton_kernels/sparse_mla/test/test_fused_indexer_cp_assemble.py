@@ -33,6 +33,68 @@ def _build_dst_idx(actual_lens, padded_lens, device):
     return padded_cu.index_select(0, req_ids) + in_req_pos
 
 
+def test_master_switch_on_uses_one_packed_all_gather(monkeypatch):
+    from rtp_llm.models_py.triton_kernels.sparse_mla import (
+        fused_indexer_cp_assemble as assemble,
+    )
+
+    q_bytes = torch.arange(12, dtype=torch.uint8).view(3, 4)
+    local_q = q_bytes.view(torch.float8_e4m3fn)
+    local_s = torch.tensor(
+        [[101, 102], [103, 104], [105, 106]],
+        dtype=torch.uint8,
+    )
+    calls = []
+
+    def fake_all_gather(payload, group=None, **kwargs):
+        calls.append((payload.clone(), group, kwargs))
+        return payload
+
+    monkeypatch.setattr(assemble, "cp_opt_enabled", lambda: True)
+    monkeypatch.setattr(assemble, "all_gather", fake_all_gather)
+    gathered, gathered_s, q_cols, s_cols = assemble._all_gather_indexer_k(
+        local_q, local_s, group="tp"
+    )
+
+    assert len(calls) == 1
+    assert calls[0][2]["role"] == "indexer_k_packed"
+    assert gathered_s is None
+    assert tuple(gathered.shape) == (3, 6)
+    assert (q_cols, s_cols) == (4, 2)
+    assert torch.equal(gathered[:, :q_cols], q_bytes)
+    assert torch.equal(gathered[:, q_cols:], local_s)
+
+
+def test_master_switch_off_uses_two_separate_all_gathers(monkeypatch):
+    from rtp_llm.models_py.triton_kernels.sparse_mla import (
+        fused_indexer_cp_assemble as assemble,
+    )
+
+    local_q = torch.arange(12, dtype=torch.uint8).view(3, 4).view(
+        torch.float8_e4m3fn
+    )
+    local_s = torch.arange(6, dtype=torch.uint8).view(3, 2)
+    calls = []
+
+    def fake_all_gather(payload, group=None, **kwargs):
+        calls.append((payload, group, kwargs))
+        return payload
+
+    monkeypatch.setattr(assemble, "cp_opt_enabled", lambda: False)
+    monkeypatch.setattr(assemble, "all_gather", fake_all_gather)
+    gathered_q, gathered_s, q_cols, s_cols = assemble._all_gather_indexer_k(
+        local_q, local_s, group="tp"
+    )
+
+    assert [call[2]["role"] for call in calls] == [
+        "indexer_k_quant",
+        "indexer_k_scale",
+    ]
+    assert gathered_q is local_q
+    assert gathered_s is local_s
+    assert (q_cols, s_cols) == (4, 2)
+
+
 @pytest.mark.skipif(not _has_cuda(), reason=SKIP_REASON)
 class TestScatterToPadded:
     """Test _scatter_to_padded_kernel correctness."""

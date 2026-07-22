@@ -8,7 +8,8 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 from torch import nn
 
-from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, barrier
+from rtp_llm.models_py.distributed.collective_torch import Group, barrier
+from rtp_llm.models_py.distributed.pynccl_cp import all_gather
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
@@ -479,7 +480,9 @@ class IndexerOp(nn.Module):
         kv_restore_unpad_indices: torch.Tensor,
     ) -> None:
         assert kv_cache is not None, "kv_cache is required"
-        gathered_key = all_gather(key.contiguous(), group=Group.TP).reshape(
+        gathered_key = all_gather(
+            key.contiguous(), group=Group.TP, role="indexer_k_bf16"
+        ).reshape(
             -1, key.size(-1)
         )
         restored_key = gathered_key[kv_restore_unpad_indices]
@@ -655,7 +658,9 @@ class IndexerOp(nn.Module):
             Tuple of (q_fp8, q_scale) for local context only, shapes [local_tokens, ...].
         """
         assert kv_cache is not None, "kv_cache is required"
-        gathered_key = all_gather(key.contiguous(), group=Group.TP)
+        gathered_key = all_gather(
+            key.contiguous(), group=Group.TP, role="indexer_k_bf16"
+        )
         gathered_key = gathered_key.reshape(-1, key.size(-1))
         restored_key = gathered_key[kv_restore_unpad_indices]  # element wise
 

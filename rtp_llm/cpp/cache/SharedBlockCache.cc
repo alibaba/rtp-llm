@@ -265,8 +265,8 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
         bool   made_progress   = true;
         while (selected_blocks < min_blocks && made_progress && !leaf_lru_.empty()) {
             made_progress = false;
-            std::vector<LeafKey> leaves(leaf_lru_.begin(), leaf_lru_.end());
-            for (const auto& leaf : leaves) {
+            leaf_snapshot_scratch_.assign(leaf_lru_.begin(), leaf_lru_.end());
+            for (const auto& leaf : leaf_snapshot_scratch_) {
                 if (selected_blocks >= min_blocks) {
                     break;
                 }
@@ -795,8 +795,8 @@ bool SharedBlockCache::selectStateOnlyEvictionsLocked(int group_id, size_t min_b
         return false;
     }
     size_t selected_blocks = 0;
-    std::vector<LeafKey> leaves(leaf_lru_.begin(), leaf_lru_.end());
-    for (const auto& leaf : leaves) {
+    leaf_snapshot_scratch_.assign(leaf_lru_.begin(), leaf_lru_.end());
+    for (const auto& leaf : leaf_snapshot_scratch_) {
         if (selected_blocks >= min_blocks) {
             break;
         }

@@ -36,6 +36,16 @@ py_test(
 )
 
 py_test(
+    name = "pynccl_cp_unit_test",
+    srcs = ["pynccl_cp_unit_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "short",
+)
+
+py_test(
    name = "user_buffers_test",
    srcs = ["user_buffers_test.py"],
    deps = [

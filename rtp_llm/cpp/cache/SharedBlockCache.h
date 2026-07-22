@@ -179,6 +179,8 @@ private:
     std::unordered_map<NamespacedKey, std::unordered_set<NamespacedKey, NamespacedKeyHash>, NamespacedKeyHash>
         pending_children_by_parent_;
     std::set<LeafKey> leaf_lru_;
+    // Reused for eviction snapshots; guarded by mu_.
+    std::vector<LeafKey> leaf_snapshot_scratch_;
     std::unordered_set<int> state_eviction_group_ids_;
 };
 

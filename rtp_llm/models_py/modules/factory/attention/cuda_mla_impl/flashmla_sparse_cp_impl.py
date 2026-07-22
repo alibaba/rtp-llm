@@ -23,7 +23,12 @@ try:
 except (ImportError, AttributeError, ValueError) as _e:
     logging.warning(f"flash_mla not available: {_e}. Requires CUDA >= 12.9")
 
-from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+from rtp_llm.models_py.distributed.collective_torch import Group
+from rtp_llm.models_py.distributed.pynccl_cp import (
+    all_gather,
+    enabled as cp_opt_enabled,
+    warmup as warmup_pynccl,
+)
 from rtp_llm.models_py.modules.dsv4.cp import (
     build_kv_allgather_restore_indices,
     cp_actual_owned_kv_lens,
@@ -859,9 +864,13 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         """CP prefill: all-gather → restore → write to kv_cache → attend on q tokens
         owned by this rank (q[total_local_ids]). Returns [total_q_len, H, kv_lora_rank]
         with non-owned positions zero (scattered later by total_local_ids)."""
-        gathered_ckv = all_gather(compressed_kv.contiguous(), group=Group.TP)
+        gathered_ckv = all_gather(
+            compressed_kv.contiguous(), group=Group.TP, role="mla_ckv"
+        )
         gathered_ckv = gathered_ckv.reshape(-1, compressed_kv.size(-1))
-        gathered_k_pe = all_gather(k_pe.contiguous(), group=Group.TP)
+        gathered_k_pe = all_gather(
+            k_pe.contiguous(), group=Group.TP, role="mla_kpe"
+        )
         gathered_k_pe = gathered_k_pe.reshape(-1, k_pe.size(-1))
 
         restored_ckv = gathered_ckv[self.kv_restore_unpad_indices]
@@ -980,7 +989,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 per_req_padded_local_kv_lens=self.sharded_local_kv_lens,
             )
 
-        gathered = all_gather(local_fused.contiguous(), group=Group.TP).reshape(
+        gathered = all_gather(
+            local_fused.contiguous(), group=Group.TP, role="mla_history"
+        ).reshape(
             -1, local_fused.size(-1)
         )
         ws.fused_kv.copy_(gathered[self.sharded_kv_restore_indices])
@@ -1081,6 +1092,13 @@ class SparseMlaCpImpl(SparseMlaImpl):
         cp_cfg = getattr(parallelism_config, "prefill_cp_config", None)
         self._cp_rank = int(getattr(parallelism_config, "tp_rank", 0))
         self._cp_size = int(getattr(parallelism_config, "tp_size", 1))
+        # Build the optional direct-NCCL communicator before the first hot
+        # gather (and, importantly, before any CUDA graph capture starts).
+        # The communicator is process-group/device cached, so later layers are
+        # a dictionary lookup only.
+        if cp_opt_enabled() and self._cp_size > 1:
+            warmup_pynccl(Group.TP)
+
         self._kv_cache_sharded = bool(
             cp_cfg is not None
             and getattr(cp_cfg, "kv_cache_sharded", False)
