@@ -20,6 +20,7 @@ py_library(
     ]
 )
 
+# The Bazel config selects the CUDA-specific ARM pool for this shared target.
 py_test (
     name = "trtllm_gen_test",
     srcs = ["trtllm_gen_test.py"],
@@ -31,7 +32,7 @@ py_test (
     ],
     env = {"GPU_COUNT": "1"},
     tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'}
+    exec_properties = {'gpu_count':'1'}
 )
 
 # Test for PyFlashinferDecodeAttnOp decode attention implementation
@@ -200,4 +201,3 @@ py_test(
         'gpu': 'H20',
     },
 )
-
