@@ -1,0 +1,80 @@
+package org.flexlb.dispatcher;
+
+import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.dao.loadbalance.BatchScheduleTarget;
+import org.flexlb.util.RateLimitedWarn;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * Stamps each batch-schedule target's {@code fe_url} from the single master-side {@link FePool}
+ * cursor, so FE selection has exactly one source fleet-wide instead of each dispatcher instance
+ * round-robining a private (colliding) cursor.
+ *
+ * <p>This is the one and only place the stamp is applied, and both local-resolution entry points
+ * route through it: the HTTP {@code /batch_schedule} handler
+ * ({@link org.flexlb.httpserver.HttpLoadBalanceServer}, which stamps a slave's forwarded request)
+ * and the master's own in-process dispatcher ({@link BatchScheduleClient}). Centralizing it is
+ * deliberate — the earlier design wired stamping into the HTTP path only, which left the master's
+ * in-process resolution (and any consistency-off single node) unstamped, failing every chunk it
+ * resolved locally with {@code CHUNK_NO_FE}.
+ *
+ * <p>Two guards keep this an optimization that never breaks correctness:
+ * <ol>
+ *   <li>Only when this node resolved the batch locally — it is the elected master, or consistency
+ *       is off. A slave that merely forwarded to the master already holds the master's assignment;
+ *       re-stamping it with the slave's own cursor would reintroduce the collision this removes.</li>
+ *   <li>Only when the {@link FePool} bean exists (this node runs the dispatcher). Absent it, targets
+ *       keep {@code fe_url == null} and the dispatcher fails those chunks visibly — FE has exactly
+ *       one source, so a misconfigured master (no FE view) surfaces as chunk failures rather than a
+ *       silent split onto per-instance cursors.</li>
+ * </ol>
+ * An empty FE snapshot (pool throws) is swallowed the same way — leaving {@code fe_url} null — so BE
+ * assignment (already computed) still returns; the affected chunks then fail visibly in the
+ * dispatcher ({@code CHUNK_NO_FE}) rather than aborting the whole schedule.
+ */
+@Component
+public class MasterFeAssigner {
+
+    private final ObjectProvider<FePool> fePoolProvider;
+    private final LBStatusConsistencyService consistency;
+    /** An empty/failed FE snapshot fails FE assignment on every batch request; cap the WARN at 1/s. */
+    private final RateLimitedWarn feAssignWarn = new RateLimitedWarn(1, TimeUnit.SECONDS);
+
+    public MasterFeAssigner(ObjectProvider<FePool> fePoolProvider,
+                            LBStatusConsistencyService consistency) {
+        this.fePoolProvider = fePoolProvider;
+        this.consistency = consistency;
+    }
+
+    /**
+     * Stamps {@code fe_url} onto each target from the single master cursor when this node resolved
+     * the batch locally and a {@link FePool} is wired. A no-op otherwise (a slave's forwarded
+     * response, or a node not running the dispatcher), leaving whatever {@code fe_url} the targets
+     * already carry — the master's, for a forwarded response — untouched.
+     */
+    public void assign(List<BatchScheduleTarget> targets) {
+        if (targets == null || targets.isEmpty()) {
+            return;
+        }
+        boolean resolvedLocally = !consistency.isNeedConsistency() || consistency.isMaster();
+        if (!resolvedLocally) {
+            return;
+        }
+        FePool pool = fePoolProvider.getIfAvailable();
+        if (pool == null) {
+            return;
+        }
+        try {
+            for (BatchScheduleTarget target : targets) {
+                target.setFeUrl(pool.next());
+            }
+        } catch (RuntimeException e) {
+            feAssignWarn.warn("[BatchSchedule] FE assignment skipped (empty/failed FE pool); affected "
+                    + "chunks fail with CHUNK_NO_FE, no local fallback: {}", e.toString());
+        }
+    }
+}

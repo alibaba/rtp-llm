@@ -1,9 +1,11 @@
 package org.flexlb.dispatcher;
 
+import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceHostListener;
 import org.flexlb.metric.NoOpFlexMonitor;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.util.List;
@@ -73,6 +75,32 @@ final class DispatcherTestSupport {
             requestReports.add(new RequestReport(type, path, code, costMs));
             super.reportRequest(type, path, code, costMs);
         }
+    }
+
+    /**
+     * A {@link MasterFeAssigner} with no FePool wired — {@code assign()} is a guarded no-op, for
+     * tests that exercise a code path taking the assigner but not asserting on FE stamping.
+     */
+    @SuppressWarnings("unchecked")
+    static MasterFeAssigner noopFeAssigner() {
+        ObjectProvider<FePool> provider = mock(ObjectProvider.class);
+        // getIfAvailable() returns null by default → assign() short-circuits without stamping.
+        return new MasterFeAssigner(provider, mock(LBStatusConsistencyService.class));
+    }
+
+    /**
+     * A {@link MasterFeAssigner} backed by a specific {@link FePool} and consistency view, for
+     * stamping assertions: {@code needConsistency}/{@code isMaster} drive the "resolved locally"
+     * guard, and {@code pool} is the cursor whose {@code next()} the stamp reads.
+     */
+    @SuppressWarnings("unchecked")
+    static MasterFeAssigner masterFeAssigner(FePool pool, boolean needConsistency, boolean isMaster) {
+        ObjectProvider<FePool> provider = mock(ObjectProvider.class);
+        when(provider.getIfAvailable()).thenReturn(pool);
+        LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
+        when(consistency.isNeedConsistency()).thenReturn(needConsistency);
+        when(consistency.isMaster()).thenReturn(isMaster);
+        return new MasterFeAssigner(provider, consistency);
     }
 
     /**

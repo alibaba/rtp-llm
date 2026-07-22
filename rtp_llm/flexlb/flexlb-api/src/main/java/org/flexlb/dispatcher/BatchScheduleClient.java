@@ -43,6 +43,14 @@ public class BatchScheduleClient {
 
     private final BatchScheduleCoordinator coordinator;
     /**
+     * Stamps the master's single-cursor {@code fe_url} when this node resolves the batch locally
+     * (it is the elected master, or consistency is off) — the in-process path that never passes
+     * through {@link org.flexlb.httpserver.HttpLoadBalanceServer}, so without this the master's own
+     * dispatcher would fail every chunk with {@code CHUNK_NO_FE}. On a slave the response already
+     * carries the master's stamp and the assigner is a guarded no-op (see {@link MasterFeAssigner}).
+     */
+    private final MasterFeAssigner masterFeAssigner;
+    /**
      * A misconfigured deployment (multi-role fleet, master unreachable) fails pre-assignment on
      * every batch request; at dispatcher QPS an unlimited WARN per request is a log flood, so
      * cap it like {@link FanoutService} does its chunk-failure WARNs.
@@ -60,7 +68,12 @@ public class BatchScheduleClient {
                                 count, resp.isSuccess(), resp.getErrorMessage());
                         return List.<BatchScheduleTarget>of();
                     }
-                    return resp.getServerStatus();
+                    List<BatchScheduleTarget> targets = resp.getServerStatus();
+                    // Master-local (or consistency-off) resolution bypasses the HTTP handler, so it
+                    // must stamp fe_url here; a slave's forwarded response is already stamped and the
+                    // assigner leaves it untouched. One master cursor, exactly once per request.
+                    masterFeAssigner.assign(targets);
+                    return targets;
                 })
                 .switchIfEmpty(Mono.fromSupplier(() -> {
                     noTargetsWarn.warn("dispatcher batch_schedule returned empty Mono: count={}", count);

@@ -42,8 +42,8 @@ class BatchScheduleTargetJsonTest {
 
     @Test
     void legacyJsonWithoutFeUrlStillDeserializes() {
-        // An older master build never sends fe_url; the slave must parse the body and leave feUrl
-        // null (then fall back to its local pool) rather than fail the whole schedule.
+        // An older master build never sends fe_url; the newer peer must parse the body and leave
+        // feUrl null (those chunks then fail with CHUNK_NO_FE, no fallback) rather than fail to parse.
         String legacy = "{\"server_ip\":\"10.0.0.1\",\"http_port\":8088,\"grpc_port\":50051,\"role\":\"PREFILL\"}";
 
         BatchScheduleTarget back = JsonUtils.toObject(legacy, BatchScheduleTarget.class);

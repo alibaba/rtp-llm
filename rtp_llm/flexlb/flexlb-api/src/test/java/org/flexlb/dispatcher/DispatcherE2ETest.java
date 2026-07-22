@@ -535,7 +535,7 @@ class DispatcherE2ETest {
         FeClient feClient = new FeClient(WebClient.builder(), feConnectionProvider, cfg);
         org.flexlb.dispatcher.FanoutService fanout =
                 new org.flexlb.dispatcher.FanoutService(feClient, DispatcherTestSupport.noopMetrics());
-        BatchScheduleClient batchScheduleClient = new BatchScheduleClient(null) {
+        BatchScheduleClient batchScheduleClient = new BatchScheduleClient(null, null) {
             @Override
             public reactor.core.publisher.Mono<List<org.flexlb.dao.loadbalance.BatchScheduleTarget>> requestTargets(int count) {
                 // FE selection is now master-sourced (no local pool in FanoutService): return one

@@ -58,7 +58,8 @@ public class FanoutService {
             JSONObject body = chunkBodies.get(i);
             int chunkSize = body.getJSONArray(arrayField).size();
             // Master-assigned FE for this chunk (single global cursor); null for chunks the master
-            // did not cover (short list, no FE view) — dispatchOne then picks from the local pool.
+            // did not cover (short list, no FE view) — dispatchOne then fails such a chunk with
+            // CHUNK_NO_FE, no local fallback.
             String preAssignedFe = i < preAssignedFeUrls.size() ? preAssignedFeUrls.get(i) : null;
             plans.add(new ChunkPlan(body, start, chunkSize, preAssignedFe));
             start += chunkSize;
@@ -161,7 +162,8 @@ public class FanoutService {
 
     /**
      * A chunk's request body plus its absolute offset and item count in the batch. {@code feUrl}
-     * is the master's pre-assigned FE for this chunk, or {@code null} to pick from the local pool.
+     * is the master's pre-assigned FE for this chunk, or {@code null} — which fails the chunk with
+     * CHUNK_NO_FE, there is no local fallback.
      */
     private record ChunkPlan(JSONObject body, int startIndex, int chunkSize, String feUrl) {
     }

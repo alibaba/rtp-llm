@@ -3,6 +3,7 @@ package org.flexlb.httpserver;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dispatcher.FePool;
+import org.flexlb.dispatcher.MasterFeAssigner;
 import org.flexlb.dao.BatchScheduleContext;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -55,11 +56,17 @@ class HttpLoadBalanceServerTest {
 
     private HttpLoadBalanceServer server;
 
+    private MasterFeAssigner masterFeAssigner;
+
     @BeforeEach
     void setUp() {
+        // Real assigner over the mocked pool provider + consistency view: the stamping tests drive
+        // fePoolProvider.getIfAvailable() / isMaster() / isNeedConsistency() exactly as before, now
+        // through the shared MasterFeAssigner bean instead of a private method.
+        masterFeAssigner = new MasterFeAssigner(fePoolProvider, lbStatusConsistencyService);
         server = new HttpLoadBalanceServer(generalHttpNettyService, routeService,
                 lbStatusConsistencyService, engineHealthReporter, queueManager,
-                activeRequestCounter, batchScheduleCoordinator, fePoolProvider);
+                activeRequestCounter, batchScheduleCoordinator, masterFeAssigner);
     }
 
     private BatchScheduleContext capturedBatchContext() {
@@ -287,7 +294,7 @@ class HttpLoadBalanceServerTest {
         ActiveRequestCounter slaveCounter = org.mockito.Mockito.mock(ActiveRequestCounter.class);
         HttpLoadBalanceServer slave = new HttpLoadBalanceServer(generalHttpNettyService, routeService,
                 lbStatusConsistencyService, org.mockito.Mockito.mock(EngineHealthReporter.class), queueManager,
-                slaveCounter, slaveCoordinator, fePoolProvider);
+                slaveCounter, slaveCoordinator, masterFeAssigner);
         BatchScheduleRequest forwarded = new BatchScheduleRequest();
         forwarded.setBatchCount(2);
         when(slaveRequest.bodyToMono(BatchScheduleRequest.class)).thenReturn(Mono.just(forwarded));
