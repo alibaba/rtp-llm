@@ -372,7 +372,9 @@ def pytest_collection_modifyitems(config, items):
 
         gpu_type = gpu_marker.kwargs.get("type")
         if gpu_type:
-            item.add_marker(getattr(pytest.mark, gpu_type))
+            # 规范化：将连字符转换为下划线以符合Python标识符规则和已注册的marker名
+            marker_name = gpu_type.replace("-", "_")
+            item.add_marker(getattr(pytest.mark, marker_name))
 
         count = gpu_marker.kwargs.get("count", 1)
         try:
