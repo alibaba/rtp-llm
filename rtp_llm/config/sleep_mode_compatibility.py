@@ -9,6 +9,12 @@ class Level2SleepCompatibility:
     lora_adapter_count: int = 0
     merge_lora: bool = False
     local_multimodal_vit: bool = False
+    # A checkpoint-backed propose/draft model (e.g. DSV4 MTP) is a fully
+    # independent BaseModel whose own GPU weights are blank-remapped on level-2
+    # wake. It is now supported: the draft model's WeightManager is chained onto
+    # the main model's (ModelFactory.from_model_configs), so the wake reload fans
+    # out and restores the draft weights in place from its checkpoint. Retained
+    # here for diagnostics/back-compat but no longer a conflict.
     checkpoint_backed_propose_model: bool = False
     eplb_enabled: bool = False
     redundant_expert: int = 0
@@ -35,8 +41,8 @@ def validate_level2_sleep_compatibility(
         )
     if compatibility.local_multimodal_vit:
         conflicts.append("local multimodal ViT")
-    if compatibility.checkpoint_backed_propose_model:
-        conflicts.append("checkpoint-backed propose/draft model")
+    # checkpoint_backed_propose_model is intentionally NOT a conflict: the draft
+    # model's weights are reloaded on wake via the chained WeightManager reload.
     if compatibility.eplb_enabled:
         conflicts.append("MoE EPLB")
     if compatibility.redundant_expert > 0:

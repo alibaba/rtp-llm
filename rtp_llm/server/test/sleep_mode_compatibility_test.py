@@ -25,6 +25,8 @@ class Level2SleepCompatibilityTest(unittest.TestCase):
             {"lora_adapter_count": 1, "merge_lora": True},
             {"local_multimodal_vit": False},
             {"checkpoint_backed_propose_model": False},
+            # Now supported: draft weights are reloaded via chained WeightManager.
+            {"checkpoint_backed_propose_model": True},
             {"eplb_enabled": False, "redundant_expert": 0},
         ]
         for case in allowed:
@@ -54,7 +56,6 @@ class Level2SleepCompatibilityTest(unittest.TestCase):
             {"lora_adapter_count": 1, "merge_lora": False},
             {"lora_adapter_count": 2, "merge_lora": True},
             {"local_multimodal_vit": True},
-            {"checkpoint_backed_propose_model": True},
             {"eplb_enabled": True},
             {"redundant_expert": 1},
         ]
@@ -67,7 +68,7 @@ class Level2SleepCompatibilityTest(unittest.TestCase):
         with self.assertRaisesRegex(
             ValueError,
             "unmerged or multiple LoRA adapters .*; local multimodal ViT; "
-            "checkpoint-backed propose/draft model; MoE EPLB; "
+            "MoE EPLB; "
             r"redundant experts .*\. Use sleep mode level 1 instead\.",
         ):
             self.validate(

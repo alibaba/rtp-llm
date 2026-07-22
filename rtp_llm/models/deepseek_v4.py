@@ -779,6 +779,13 @@ class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
                 W.v4_mtp_e_proj_s,
                 [CkptWeightInfo("mtp.0.e_proj.scale", identity)],
                 identity,
+                # UE8M0 block scale (see _v4_fp8_linear, which asserts e8m0). Must
+                # be pinned explicitly: without a data_type the fastsafetensors
+                # reload path (level-2 wake) upcasts the F8_E8M0 checkpoint tensor
+                # to bf16, tripping the in-place dtype-match in
+                # reload_weights_from_loader. The main model's fp8 scales all carry
+                # this same data_type; only the MTP fusion scales were missing it.
+                data_type=torch.float8_e8m0fnu,
             ),
             AtomicWeight(
                 W.v4_mtp_h_proj_w,
@@ -789,6 +796,8 @@ class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
                 W.v4_mtp_h_proj_s,
                 [CkptWeightInfo("mtp.0.h_proj.scale", identity)],
                 identity,
+                # UE8M0 block scale; pinned for the same reason as e_proj_s above.
+                data_type=torch.float8_e8m0fnu,
             ),
         ]
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)

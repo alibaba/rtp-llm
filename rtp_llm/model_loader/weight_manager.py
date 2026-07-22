@@ -101,12 +101,29 @@ class WeightManager:
     """
 
     def __init__(
-        self, device, weight: ModelWeights, model_weights_loader: ModelLoader
+        self,
+        device,
+        weight: ModelWeights,
+        model_weights_loader: ModelLoader,
+        model_scope=None,
     ) -> None:
         """
         Initializes the WeightManager with a model's weights, device information, and weight loader.
+
+        model_scope: token identifying the owning model (``id(base_model)``). Used
+        by :meth:`reload_weights_from_loader` to filter the process-global DSV4
+        Mega-MoE / compressor registries down to this model's own instances, so a
+        coexisting checkpoint-backed propose/draft model (which registers into the
+        same registries and collides on layer ids) does not get re-derived here.
         """
         self._s_helper = SharedMemoryIPCHelper()
+        self._model_scope = model_scope
+        # Additional WeightManagers whose weights must also be reloaded during this
+        # manager's level-2 wake reload (e.g. a checkpoint-backed MTP draft model).
+        # The C++ wake hook only calls reload on the main model's manager, so the
+        # main manager fans out to these after its own reload. See
+        # :meth:`register_chained_reload`.
+        self._chained_reload: list["WeightManager"] = []
 
         # Use the explicit device/weights/loader passed in by the caller (e.g. BaseModel),
         # instead of relying on any global "engine" object.
@@ -434,9 +451,23 @@ class WeightManager:
                 W.v4_routed_w3_w,
                 W.v4_routed_w3_s,
             }
+
+            # Filter the process-global registries to THIS model's own instances.
+            # A coexisting checkpoint-backed propose/draft model (e.g. DSV4 MTP)
+            # registers its strategies/compressors into the same registries and its
+            # lone draft layer collides on layer_id=0 with the main model's layer 0.
+            # Each instance is stamped with its owning model's build scope at
+            # registration; match it against this manager's scope so the main reload
+            # never grabs the draft's layer-0 strategy (and vice versa). When scope
+            # is None on both sides (non-sleep / untagged builds) the match is a
+            # no-op that preserves the original all-instances behavior.
+            def _owned(obj) -> bool:
+                return getattr(obj, "_sleep_model_scope", None) == self._model_scope
+
             for strat in iter_mega_strategies():
-                mega_by_layer[strat.cfg.layer_id] = strat
-            compressors = iter_compressors()
+                if _owned(strat):
+                    mega_by_layer[strat.cfg.layer_id] = strat
+            compressors = [c for c in iter_compressors() if _owned(c)]
         except Exception:
             logging.info(
                 "reload_weights_from_loader: DSV4 computed-weight registries "
@@ -616,6 +647,32 @@ class WeightManager:
             method,
             seen,
         )
+        # Fan out to chained managers (e.g. a checkpoint-backed MTP draft model).
+        # The C++ level-2 wake hook only calls reload on the main model's manager;
+        # the draft model's GPU weights are also blank-remapped by resume("weights")
+        # and must be reloaded before the engine loop restarts. Runs after the main
+        # reload (transients already reclaimed) so each draft reload streams into a
+        # fresh headroom window. A chained failure propagates (draft weights left
+        # blank would silently corrupt speculative decoding).
+        for mgr in self._chained_reload:
+            logging.info(
+                "reload_weights_from_loader: reloading chained model weights "
+                "(scope=%s)",
+                getattr(mgr, "_model_scope", None),
+            )
+            mgr.reload_weights_from_loader()
+
+    def register_chained_reload(self, other: "WeightManager") -> None:
+        """Register another WeightManager to reload during this manager's level-2 wake.
+
+        Used to attach a checkpoint-backed propose/draft model's manager to the
+        main model's manager: the C++ wake hook only invokes
+        :meth:`reload_weights_from_loader` on the main manager, so the draft
+        model's blank-remapped GPU weights would otherwise never be restored.
+        Idempotent; ignores self / duplicate registrations."""
+        if other is None or other is self or other in self._chained_reload:
+            return
+        self._chained_reload.append(other)
 
     def _rederive_dsv4_computed_weights(
         self, mega_by_layer, mega_acc, mega_routed_keys, compressors

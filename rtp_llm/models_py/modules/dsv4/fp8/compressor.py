@@ -59,7 +59,18 @@ _COMPRESSOR_REGISTRY: "weakref.WeakSet" = weakref.WeakSet()
 
 def _register_compressor(compressor) -> None:
     """Track a live CompressorFP8 so its fused weight can be rebuilt at level-2
-    wake. Best-effort; never raises."""
+    wake. Best-effort; never raises.
+
+    Stamp the owning model's build scope (see ``_register_mega_strategy``) so the
+    level-2 wake reload rebuilds only its own model's compressors -- a
+    checkpoint-backed MTP draft coexisting with the main model registers its
+    compressors here too."""
+    try:
+        from rtp_llm.model_loader.weight_memory_saver import current_model_scope
+
+        compressor._sleep_model_scope = current_model_scope()
+    except Exception:
+        pass
     try:
         _COMPRESSOR_REGISTRY.add(compressor)
     except Exception:

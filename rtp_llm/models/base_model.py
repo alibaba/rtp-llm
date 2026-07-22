@@ -162,15 +162,26 @@ class BaseModel(object):
         self._load(device_str)
         from rtp_llm.model_loader.weight_manager import WeightManager
 
+        # model_scope=id(self): a stable per-model token. DSV4's global Mega-MoE /
+        # compressor registries are attributed by this token (stamped during
+        # _create_python_model below) so the level-2 wake reload re-derives only
+        # this model's computed weights -- required once a checkpoint-backed MTP
+        # draft coexists with the main model and their layer ids collide.
         self.weight_manager = WeightManager(
-            self.device, self.weight, self.model_weights_loader
+            self.device,
+            self.weight,
+            self.model_weights_loader,
+            model_scope=id(self),
         )
         if skip_python_model:
             return
         logging.info(
             f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
         )
-        self._create_python_model()
+        from rtp_llm.model_loader.weight_memory_saver import model_build_scope
+
+        with model_build_scope(id(self)):
+            self._create_python_model()
 
     def _create_python_model(self):
         pass

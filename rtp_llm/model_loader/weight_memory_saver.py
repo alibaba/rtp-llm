@@ -74,6 +74,72 @@ _enabled_override: Optional[bool] = None
 _level_override: Optional[int] = None
 _region_depth = threading.local()
 _region_suppressed = threading.local()
+_model_scope = threading.local()
+# Process-global mirror of the active build scope. DSV4's py-model construction
+# dispatches the actual module __init__ (MegaMoEStrategy / CompressorFP8, which
+# self-register into the global registries) onto a WORKER thread -- the JIT
+# warmup runs on a "Dummy-N" thread, not the MainThread that opened
+# model_build_scope. A threading.local scope set on MainThread is therefore
+# invisible on that worker, so the strategy stamps None and the level-2 wake
+# re-derive filter (_owned) drops every mega/compressor -> blank kernel weights
+# -> garbage output after wake. Model builds are strictly sequential (the main
+# model's _create_python_model fully returns, joining its workers, before the
+# MTP draft is built), so a single process-global unambiguously identifies the
+# model under construction even across threads. current_model_scope() prefers
+# the threadlocal (exact, when build and registration share a thread) and falls
+# back to this global (cross-thread build).
+_model_scope_global: Any = None
+
+
+@contextmanager
+def model_build_scope(token: Any) -> Iterator[None]:
+    """Mark the model whose py-model modules are being constructed on this thread.
+
+    DSV4 keeps *global* WeakSet registries of live Mega-MoE strategies and
+    attention compressors (see mega_buf.py / compressor.py) so the sleep reclaim
+    and the level-2 wake re-derive can reach every live instance. When a
+    checkpoint-backed propose/draft model (e.g. DSV4 MTP) coexists with the main
+    model, both register into the SAME registries, and their layer ids collide
+    (the MTP draft is ``num_layers=1`` -> ``layer_id=0``, same as the main
+    model's layer 0). The level-2 wake reload keys re-derivation by ``layer_id``,
+    so without attribution the main reload would grab the MTP strategy for
+    layer 0 (or vice versa) and corrupt both.
+
+    This context manager stamps the active model's ``token`` onto every
+    strategy/compressor registered while it is open, so each model's
+    :class:`WeightManager` can filter the global registries down to its own
+    instances. Re-entrant / nestable; restores the previous scope on exit.
+    ``token`` is typically ``id(base_model)`` — stable and distinct for the two
+    live models over the process lifetime.
+    """
+    global _model_scope_global
+    prev = getattr(_model_scope, "value", None)
+    prev_global = _model_scope_global
+    _model_scope.value = token
+    _model_scope_global = token
+    try:
+        yield
+    finally:
+        _model_scope.value = prev
+        _model_scope_global = prev_global
+
+
+def current_model_scope() -> Any:
+    """Token of the model currently being built (None if outside a
+    :func:`model_build_scope`). Stamped onto DSV4 registry entries at
+    registration time so the level-2 wake reload can attribute them per model.
+
+    Prefers the thread-local scope (exact when the module __init__ that registers
+    runs on the same thread that opened the scope), falling back to the
+    process-global mirror. The fallback is required because DSV4 constructs its
+    Mega-MoE strategies / compressors on a worker thread while the MainThread
+    holds the scope open; without it every registration stamps None and the
+    level-2 wake re-derive silently drops all computed weights. See
+    ``_model_scope_global``."""
+    local = getattr(_model_scope, "value", None)
+    if local is not None:
+        return local
+    return _model_scope_global
 
 
 def configure_from_runtime(
