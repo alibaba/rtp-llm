@@ -566,9 +566,13 @@ grpc::Status PrefillBatchRpcServer::enqueueGroupStreams(std::vector<ReadySlot>& 
     std::vector<ReadySlot> admitted_slots;
     admitted_slots.reserve(ready_slots.size());
     for (size_t i = 0; i < ready_slots.size(); ++i) {
-        auto& stream = streams[i];
-        RTP_LLM_CHECK_WITH_INFO(stream != nullptr, "enqueueMultiple returned null stream");
+        auto& stream     = streams[i];
         auto& ready_slot = ready_slots[i];
+        RTP_LLM_CHECK_WITH_INFO(stream != nullptr, "enqueueMultiple returned null stream");
+        RTP_LLM_CHECK_WITH_INFO(stream->streamId() == ready_slot.slot->input->request_id(),
+                                "enqueueMultiple result order mismatch: expected request_id=%ld actual=%ld",
+                                ready_slot.slot->input->request_id(),
+                                stream->streamId());
         ready_slot.slot->prefill_context->setStream(stream);
         if (!enqueue_successes[i]) {
             auto status = statusFromErrorInfo(stream->statusInfo());
@@ -660,7 +664,6 @@ void PrefillBatchRpcServer::runSlotStream(SlotRunnerState state, int64_t request
     if (!finish_status.ok()) {
         state.prefill_context->error_status = finish_status;
     }
-    state.prefill_context.reset();
     response_registry_.finish(request_id, state.entry, finish_status);
     RTP_LLM_LOG_DEBUG("EnqueueGroup request [%ld] finishStream done, ok=%d", request_id, finish_status.ok());
 }
