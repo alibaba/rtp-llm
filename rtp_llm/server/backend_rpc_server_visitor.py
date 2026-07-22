@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import random
 import time
 from typing import TYPE_CHECKING, AsyncGenerator, List, Optional, Set
 
@@ -10,6 +11,7 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
+from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
@@ -28,6 +30,7 @@ from rtp_llm.utils.base_model_datatypes import (
     RequestInfo,
 )
 from rtp_llm.utils.time_util import Timer
+from rtp_llm.utils.util import AtomicCounter
 
 if TYPE_CHECKING:
     from rtp_llm.config.py_config_modules import PyEnvConfigs
@@ -82,6 +85,11 @@ class BackendRPCServerVisitor:
         self.sp_config = sp_config
         self.source_role = source_role
         self.source_ip = str(getattr(server_config, "ip", "") or "")
+        self._server_port = int(getattr(server_config, "server_port", 0) or 0)
+        self._server_id_str = str(
+            getattr(server_config, "frontend_server_id", "") or ""
+        )
+        self._retry_seq_counter = AtomicCounter()
         assert self.max_seq_len > 0
 
         # Get max_rpc_timeout_ms and decode_entrance from pd_sep_config
@@ -169,6 +177,22 @@ class BackendRPCServerVisitor:
             or "recvmsg:Connection timed out" in text
             or "Socket closed" in text
         )
+
+    def _generate_retry_request_id(self, original_request_id: int) -> int:
+        """Generate a new request_id for PD route retry.
+
+        Uses the snowflake generator when server identity (ip/port/server_id)
+        is available; falls back to original_request_id + random offset.
+        """
+        if self.source_ip and self._server_port:
+            sequence = self._retry_seq_counter.increment() % 4096
+            return generate_request_id(
+                self.source_ip,
+                self._server_port,
+                self._server_id_str,
+                sequence,
+            )
+        return original_request_id + random.randint(1, 4095)
 
     @staticmethod
     def get_backend_role_list(
@@ -525,6 +549,7 @@ class BackendRPCServerVisitor:
 
         async def stream_with_aux_info():
             attempt = 0
+            original_request_id = None
             is_streaming = bool(getattr(input.generate_config, "is_streaming", False))
             while True:
                 yielded_output = False
@@ -551,12 +576,20 @@ class BackendRPCServerVisitor:
                     ):
                         raise
                     attempt += 1
+                    if original_request_id is None:
+                        original_request_id = input.request_id
+                    input.request_id = self._generate_retry_request_id(
+                        original_request_id
+                    )
                     route_logger.warning(
                         "retrying PD route after retryable RPC error, "
-                        "request_id=%s, attempt=%s/%s, error=%s",
+                        "request_id=%s, original_request_id=%s, attempt=%s/%s, "
+                        "error_type=%s, error=%s",
                         input.request_id,
+                        original_request_id,
                         attempt,
                         self.pd_route_retry_on_unavailable,
+                        type(e).__name__,
                         e,
                     )
                     await asyncio.sleep(min(0.2, 0.05 * attempt))
