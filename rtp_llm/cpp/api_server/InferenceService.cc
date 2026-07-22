@@ -186,7 +186,26 @@ void InferenceService::inferResponse(int64_t                                    
         auto input = fillGenerateInput(request_id, req.input_texts[i], req.input_urls[i], req.generate_configs[i]);
         inputs.push_back(input);
     }
-    auto                                                ori_streams = engine_->enqueueMultiple(inputs);
+    auto [enqueue_successes, ori_streams] = engine_->enqueueMultiple(inputs);
+    RTP_LLM_CHECK_WITH_INFO(enqueue_successes.size() == inputs.size() && ori_streams.size() == inputs.size(),
+                            "enqueueMultiple result size mismatch: input=%zu status=%zu stream=%zu",
+                            inputs.size(),
+                            enqueue_successes.size(),
+                            ori_streams.size());
+    auto rejected_it = std::find(enqueue_successes.begin(), enqueue_successes.end(), false);
+    if (rejected_it != enqueue_successes.end()) {
+        const size_t rejected_idx = std::distance(enqueue_successes.begin(), rejected_it);
+        for (size_t idx = 0; idx < ori_streams.size(); ++idx) {
+            if (enqueue_successes[idx] && ori_streams[idx]) {
+                ori_streams[idx]->reportError(ErrorCode::CANCELLED,
+                                              "InferenceService does not support partial enqueue");
+            }
+        }
+        const auto rejection = ori_streams[rejected_idx] ? ori_streams[rejected_idx]->statusInfo().ToString() :
+                                                           "scheduler returned a null rejected stream";
+        throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR,
+                                     "InferenceService does not support partial enqueue: " + rejection);
+    }
     std::vector<std::shared_ptr<GenerateStreamWrapper>> streams;
     streams.reserve(ori_streams.size());
     for (size_t idx = 0; idx < ori_streams.size(); ++idx) {

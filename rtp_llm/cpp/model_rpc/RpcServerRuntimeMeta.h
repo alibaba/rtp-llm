@@ -56,23 +56,8 @@ public:
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         auto                                new_task = EngineScheduleInfo::TaskInfo(
             {request_id, stream->prefixLength(), stream->inputLength(), stream->getTimeInfo().wait_time_us});
-        auto it = running_streams_.find(request_id);
-        if (it != running_streams_.end()) {
-            new_task.batch_id = it->second.task_info.batch_id;
-        }
+        new_task.batch_id            = stream->generateInput()->group_id;
         running_streams_[request_id] = RunningEntry{new_task, stream};
-    }
-
-    void enqueuePending(int64_t request_id, int64_t input_length, int64_t batch_id = -1) {
-        std::unique_lock<std::shared_mutex> lock(read_write_lock_);
-        auto                                task = EngineScheduleInfo::TaskInfo({request_id,
-                                                                                 /*prefix_length=*/0,
-                                                                                 input_length,
-                                                                                 /*waiting_time_ms=*/0,
-                                                                                 /*iterate_count=*/0,
-                                                                                 /*end_time_ms=*/-1});
-        task.batch_id                            = batch_id;
-        running_streams_[request_id]             = RunningEntry{task, nullptr};
     }
 
     void dequeue(int64_t request_id, const GenerateStreamPtr& stream) {
