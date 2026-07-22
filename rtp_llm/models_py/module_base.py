@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -142,6 +142,12 @@ class RtpModule(nn.Module):
 
     def validate_runtime_device(self, device: torch.device) -> None:
         """Validate device-specific runtime requirements before migration."""
+
+    def checkpoint_weight_name_filter(
+        self,
+    ) -> Optional[Callable[[str], bool]]:
+        """Return a pre-materialization checkpoint name filter, if needed."""
+        return None
 
     def requires_staged_device_postprocess(self) -> bool:
         """Whether this leaf must postprocess immediately after device migration."""
