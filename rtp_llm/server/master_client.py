@@ -277,7 +277,41 @@ class MasterClient:
         ) or getattr(input.generate_config, "timeout_ms", None)
         if ttft_timeout_ms is None or ttft_timeout_ms <= 0:
             ttft_timeout_ms = self.master_config.master_default_timeout_ms
-        timeout_s = ttft_timeout_ms / 1000.0 if ttft_timeout_ms > 0 else None
+
+        # Absolute-deadline propagation: if absolute_deadline_ms is set (>0),
+        # compute remaining time and use it as the gRPC timeout instead of the
+        # full ttft_timeout_ms. If remaining is below the minimum threshold,
+        # abort immediately without making the gRPC call.
+        absolute_deadline_ms = getattr(input.generate_config, "absolute_deadline_ms", 0)
+        if absolute_deadline_ms > 0:
+            remaining_ms = absolute_deadline_ms - int(time.time() * 1000)
+            min_remaining = self.master_config.min_remaining_deadline_ms
+            # ttft_timeout_ms caps the Schedule phase; absolute_deadline_ms is the
+            # overall deadline.  Cap remaining by ttft_timeout_ms so the Schedule
+            # gRPC call never exceeds the TTFT budget.
+            if ttft_timeout_ms > 0:
+                remaining_ms = min(remaining_ms, ttft_timeout_ms)
+            if remaining_ms < min_remaining:
+                route_logger.warning(
+                    "Schedule aborted: remaining %dms < min %dms, request_id=%s",
+                    remaining_ms,
+                    min_remaining,
+                    request_id,
+                )
+                raise FtRuntimeException(
+                    exception_type=ExceptionType.DEADLINE_EXCEEDED,
+                    message=f"FlexLB schedule deadline exceeded (remaining {remaining_ms}ms < min {min_remaining}ms) for request {request_id}",
+                )
+            timeout_s = remaining_ms / 1000.0
+            # generate_timeout passes remaining so that the Java side computes
+            # absoluteDeadlineMs = request_time_ms + remaining = original deadline,
+            # rather than request_time_ms + full ttft_timeout_ms which would extend
+            # the deadline by the frontend processing time.
+            effective_generate_timeout = remaining_ms
+        else:
+            # Fallback: absolute_deadline_ms not set (old client), use full timeout
+            timeout_s = ttft_timeout_ms / 1000.0 if ttft_timeout_ms > 0 else None
+            effective_generate_timeout = ttft_timeout_ms
 
         gc = input.generate_config
         api_key = self._extract_api_key(input)
@@ -285,7 +319,7 @@ class MasterClient:
             request_id=request_id,
             block_cache_keys=block_cache_keys,
             seq_len=input.prompt_length,
-            generate_timeout=ttft_timeout_ms,
+            generate_timeout=effective_generate_timeout,
             request_time_ms=int(time.time() * 1000),
             max_new_tokens=gc.max_new_tokens,
             num_beams=gc.num_beams,

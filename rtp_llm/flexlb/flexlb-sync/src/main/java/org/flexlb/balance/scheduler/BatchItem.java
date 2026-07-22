@@ -6,6 +6,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -32,6 +33,13 @@ public final class BatchItem {
     private final DecodeEndpoint decodeEp;
     private final long enqueuedAtMs;
 
+    /**
+     * Absolute deadline (epoch ms) for end-to-end timeout propagation.
+     * Computed as request_time_ms + generate_timeout from the Schedule request.
+     * 0 means not set (fallback to per-stage deadline).
+     */
+    private final long absoluteDeadlineMs;
+
     /** Mutable sort key set by the batcher algorithm at offer time. */
     private volatile long sortKey;
 
@@ -42,7 +50,9 @@ public final class BatchItem {
                      ServerStatus decode,
                      PrefillEndpoint prefillEp,
                      DecodeEndpoint decodeEp,
-                     long enqueuedAtMs) {
+                     long sortKey,
+                     long enqueuedAtMs,
+                     long absoluteDeadlineMs) {
         this.ctx = ctx;
         this.future = future;
         this.routeResponse = routeResponse;
@@ -50,7 +60,23 @@ public final class BatchItem {
         this.decode = decode;
         this.prefillEp = prefillEp;
         this.decodeEp = decodeEp;
+        this.sortKey = sortKey;
         this.enqueuedAtMs = enqueuedAtMs;
+        this.absoluteDeadlineMs = absoluteDeadlineMs;
+    }
+
+    /** Backward-compatible constructor (absoluteDeadlineMs defaults to 0 = not set). */
+    public BatchItem(BalanceContext ctx,
+                     CompletableFuture<Response> future,
+                     Response routeResponse,
+                     ServerStatus prefill,
+                     ServerStatus decode,
+                     PrefillEndpoint prefillEp,
+                     DecodeEndpoint decodeEp,
+                     long sortKey,
+                     long enqueuedAtMs) {
+        this(ctx, future, routeResponse, prefill, decode, prefillEp, decodeEp,
+                sortKey, enqueuedAtMs, 0L);
     }
 
     // -- accessors --
@@ -64,11 +90,18 @@ public final class BatchItem {
     public DecodeEndpoint decodeEp() { return decodeEp; }
     public long enqueuedAtMs() { return enqueuedAtMs; }
 
+    /** Absolute deadline (epoch ms); 0 means not set (fallback to per-stage deadline). */
+    public long absoluteDeadlineMs() { return absoluteDeadlineMs; }
+
     /** Priority queue sort key. */
     public long sortKey() { return sortKey; }
 
     /** Set by {@link WorkerBatcher#offer} after {@link BatcherAlgorithm#computeSortKey}. */
     public void setSortKey(long sortKey) { this.sortKey = sortKey; }
+
+    /** @deprecated use {@link #sortKey()} instead; kept for SLO-budget references. */
+    @Deprecated
+    public long deadlineMs() { return sortKey; }
 
     // -- derived accessors --
 
@@ -89,9 +122,35 @@ public final class BatchItem {
     }
 
     /** Extract cache-hit length from a {@link ServerStatus} debug info. */
-    private static long hitCacheOf(ServerStatus ss) {
+    public static long hitCacheOf(ServerStatus ss) {
         return ss != null && ss.getDebugInfo() != null
                 ? ss.getDebugInfo().getHitCacheLen() : 0;
     }
 
+    // -- Object --
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof BatchItem that)) return false;
+        return sortKey == that.sortKey && enqueuedAtMs == that.enqueuedAtMs
+                && Objects.equals(ctx, that.ctx) && Objects.equals(future, that.future)
+                && Objects.equals(routeResponse, that.routeResponse)
+                && Objects.equals(prefill, that.prefill)
+                && Objects.equals(decode, that.decode)
+                && Objects.equals(prefillEp, that.prefillEp)
+                && Objects.equals(decodeEp, that.decodeEp);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(ctx, future, routeResponse, prefill, decode,
+                prefillEp, decodeEp, sortKey, enqueuedAtMs);
+    }
+
+    @Override
+    public String toString() {
+        return "BatchItem{requestId=" + requestId() + ", seqLen=" + seqLen()
+                + ", sortKey=" + sortKey + ", enqueuedAtMs=" + enqueuedAtMs + '}';
+    }
 }

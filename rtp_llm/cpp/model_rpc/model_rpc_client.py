@@ -405,6 +405,7 @@ class ModelRpcClient(object):
         client_config,
         max_rpc_timeout_ms: int = 0,
         decode_entrance: bool = False,
+        min_remaining_deadline_ms: int = 500,
     ):
         """Initialize ModelRpcClient with addresses.
 
@@ -414,10 +415,14 @@ class ModelRpcClient(object):
                 the gRPC deadline. Callers normally pass pd_sep_config.max_rpc_timeout_ms
                 (args: --max_rpc_timeout_ms / env: MAX_RPC_TIMEOUT_MS).
             decode_entrance: Whether this is a decode entrance
+            min_remaining_deadline_ms: Minimum remaining deadline (ms) for
+                absolute-deadline propagation. If remaining time falls below
+                this threshold, the RPC is aborted before being sent.
         """
         self._addresses = addresses
         self._max_rpc_timeout_ms = max_rpc_timeout_ms
         self._decode_entrance = decode_entrance
+        self._min_remaining_deadline_ms = min_remaining_deadline_ms
         self._options = []
         for key, value in client_config.items():
             self._options.append((key, value))
@@ -440,14 +445,30 @@ class ModelRpcClient(object):
     async def enqueue(
         self, input_py: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
-        request_timeout_ms = input_py.generate_config.timeout_ms
-        # Prefer per-request timeout; otherwise fall back to the server-side default
-        # (pd_sep_config.max_rpc_timeout_ms). effective_ms <= 0 means no gRPC deadline.
-        effective_ms = (
-            request_timeout_ms
-            if request_timeout_ms is not None and request_timeout_ms > 0
-            else self._max_rpc_timeout_ms
+        # Absolute-deadline propagation: if absolute_deadline_ms is set (>0),
+        # compute remaining time and use it as the RPC timeout instead of the
+        # full per-request or server-side timeout. If remaining is below the
+        # minimum threshold, abort before sending the RPC.
+        absolute_deadline_ms = getattr(
+            input_py.generate_config, "absolute_deadline_ms", 0
         )
+        if absolute_deadline_ms > 0:
+            remaining_ms = absolute_deadline_ms - int(time.time() * 1000)
+            if remaining_ms < self._min_remaining_deadline_ms:
+                raise FtRuntimeException(
+                    ExceptionType.DEADLINE_EXCEEDED,
+                    f"RPC deadline exceeded (remaining {remaining_ms}ms < min "
+                    f"{self._min_remaining_deadline_ms}ms) for request {input_py.request_id}",
+                )
+            effective_ms = remaining_ms
+        else:
+            # Fallback: absolute_deadline_ms not set, use per-request or server default
+            request_timeout_ms = input_py.generate_config.timeout_ms
+            effective_ms = (
+                request_timeout_ms
+                if request_timeout_ms is not None and request_timeout_ms > 0
+                else self._max_rpc_timeout_ms
+            )
         input_pb = trans_input(input_py)
         response_iterator = None
         stream_state = StreamState()

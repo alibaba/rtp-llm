@@ -156,8 +156,20 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 decodeEp = endpointRegistry.getDecode(decodeIpPort);
             }
 
+            // Compute absolute deadline from the Schedule request's
+            // request_time_ms + generate_timeout for end-to-end deadline propagation.
+            long absoluteDeadlineMs = 0;
+            if (ctx.getRequest() != null) {
+                long requestTimeMs = ctx.getRequest().getRequestTimeMs();
+                long generateTimeout = ctx.getRequest().getGenerateTimeout();
+                if (requestTimeMs > 0 && generateTimeout > 0) {
+                    absoluteDeadlineMs = requestTimeMs + generateTimeout;
+                }
+            }
+
             BatchItem item = new BatchItem(ctx, future, routeResponse, copyOf(prefill), copyOf(decode),
-                    prefillEp, decodeEp, System.currentTimeMillis());
+                    prefillEp, decodeEp, /* sortKey set by batcher */ 0, System.currentTimeMillis(),
+                    absoluteDeadlineMs);
             InflightEntry entry = new InflightEntry(item);
             InflightEntry existing = inflight.putIfAbsent(ctx.getRequestId(), entry);
             if (existing != null || terminalStates.containsKey(ctx.getRequestId())) {

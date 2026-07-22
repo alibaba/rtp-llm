@@ -180,8 +180,39 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         // 2. Log dispatch
         logDispatch(batchId, items, prefillEp, predMs, reason);
 
-        // 3. Send gRPC (async)
-        long deadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
+        // 3. Compute EnqueueBatch deadline from absolute_deadline_ms if set.
+        // Uses the minimum absolute deadline across all items in the batch.
+        long configDeadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
+        long minAbsoluteDeadline = Long.MAX_VALUE;
+        for (BatchItem item : items) {
+            if (item.absoluteDeadlineMs() > 0) {
+                minAbsoluteDeadline = Math.min(minAbsoluteDeadline, item.absoluteDeadlineMs());
+            }
+        }
+
+        long deadlineMs;
+        if (minAbsoluteDeadline != Long.MAX_VALUE) {
+            long remaining = minAbsoluteDeadline - System.currentTimeMillis();
+            if (remaining <= 0) {
+                // Absolute deadline already passed — don't dispatch, mark as timed out
+                Logger.warn("EnqueueBatch skipped: absolute deadline already passed, "
+                        + "batchId={}, minAbsoluteDeadline={}, now={}",
+                        batchId, minAbsoluteDeadline, System.currentTimeMillis());
+                prefillEp.releaseBatch(batchId);
+                RuntimeException timeoutError = new RuntimeException(
+                        "EnqueueBatch deadline already exceeded (absolute deadline passed)");
+                for (BatchItem item : items) {
+                    callback.onTimeout(item, timeoutError);
+                }
+                return;
+            }
+            deadlineMs = Math.min(remaining, configDeadlineMs);
+        } else {
+            // Fallback: absolute_deadline_ms not set, use original config deadline
+            deadlineMs = configDeadlineMs;
+        }
+
+        // 4. Send gRPC (async)
         grpcClient.batchEnqueueAsync(prefillEp.getIp(), prefillEp.getGrpcPort(), request, deadlineMs)
                 .whenCompleteAsync((response, ex) -> {
                     try {
