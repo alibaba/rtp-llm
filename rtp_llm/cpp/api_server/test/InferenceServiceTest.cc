@@ -278,10 +278,9 @@ TEST_F(InferenceServiceTest, InferResponseSuccess) {
     // stream
     GenerateOutputs outputs;
     outputs.generate_outputs.emplace_back(GenerateOutput());
-    EXPECT_CALL(*mock_stream, nextOutput())
+    EXPECT_CALL(*mock_stream, nextOutput(_))
         .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))))
-        .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty")));
-    EXPECT_CALL(*mock_stream, getStatus()).Times(2).WillRepeatedly(Return(StreamState::RUNNING));
+        .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::FINISHED, "finished")));
 
     // writer
     EXPECT_CALL(*mock_writer_, isConnected()).WillOnce(Return(true));

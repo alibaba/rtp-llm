@@ -13,6 +13,21 @@
 
 using namespace ::testing;
 namespace rtp_llm {
+namespace {
+
+struct StreamErrorCase {
+    ErrorCode                    error_code;
+    HttpApiServerException::Type expected_type;
+    std::string                  message;
+};
+
+const std::vector<StreamErrorCase> kStreamErrorCases = {
+    {ErrorCode::GENERATE_TIMEOUT, HttpApiServerException::GENERATE_TIMEOUT_ERROR, "generation timed out"},
+    {ErrorCode::CANCELLED, HttpApiServerException::CANCELLED_ERROR, "generation cancelled"},
+    {ErrorCode::EXECUTION_EXCEPTION, HttpApiServerException::UNKNOWN_ERROR, "private backend detail"},
+};
+
+}  // namespace
 
 class ChatServiceTest: public ::testing::Test {
 public:
@@ -159,7 +174,7 @@ TEST_F(ChatServiceTest, ChatCompletions_ThrowException) {
 
     // outputs.generate_outputs 为空, 模拟抛出异常的情况
     GenerateOutputs outputs;
-    EXPECT_CALL(*mock_stream, nextOutput()).WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))));
+    EXPECT_CALL(*mock_stream, nextOutput(_)).WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))));
 
     // EXPECT_CALL(*mock_metric_reporter_, reportErrorQpsMetric)
     //     .WillOnce(Invoke([](const std::string& source, int error_code) {
@@ -281,10 +296,9 @@ TEST_F(ChatServiceTest, ChatCompletions) {
     GenerateOutputs outputs;
     outputs.generate_outputs.push_back(output);
 
-    // nextOutput 第一次正常返回, 第二次返回错误
-    EXPECT_CALL(*mock_stream, nextOutput())
+    EXPECT_CALL(*mock_stream, nextOutput(_))
         .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))))
-        .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty")));
+        .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::FINISHED, "finished")));
 
     EXPECT_CALL(*mock_metric_reporter_, reportResponseFirstTokenLatencyMs).WillOnce(Invoke([](double val) {
         EXPECT_TRUE(val >= 0);
@@ -315,6 +329,112 @@ TEST_F(ChatServiceTest, ChatCompletions) {
 
     EXPECT_EQ(writer_->_type, http_server::HttpResponseWriter::WriteType::Stream);
     EXPECT_EQ(writer_->_headers.count("Content-Type"), 1);
+    EXPECT_EQ(writer_->_headers.at("Content-Type"), "text/event-stream");
+}
+
+TEST_F(ChatServiceTest, NonStreamingStreamErrorsUseHttpExceptionPath) {
+    for (const auto& [error_code, expected_type, message] : kStreamErrorCases) {
+        http_server::HttpRequest request;
+        const std::string        body = R"del({
+    "messages": [{"role": "user", "content": "who are you?"}],
+    "stream": false,
+    "source": "test_source"
+})del";
+        request._request              = CreateHttpPacket(body);
+
+        auto generate_config = std::make_shared<GenerateConfig>();
+        EXPECT_CALL(*mock_openai_endpoint_, extract_generation_config).WillOnce(Return(generate_config));
+        EXPECT_CALL(*mock_metric_reporter_, reportFTInputTokenLengthMetric).Times(1);
+        EXPECT_CALL(*mock_metric_reporter_, reportFTNumBeansMetric).Times(1);
+
+        RenderedInputs rendered_inputs{std::vector<int>(), std::vector<MultimodalInput>(), std::string()};
+        EXPECT_CALL(*mock_render_, render_chat_request).WillOnce(Return(rendered_inputs));
+
+        auto mock_stream = CreateMockGenerateStream();
+        auto stream      = std::dynamic_pointer_cast<GenerateStream>(mock_stream);
+        EXPECT_CALL(*mock_engine_, enqueue(Matcher<const std::shared_ptr<GenerateInput>&>(_))).WillOnce(Return(stream));
+
+        auto mock_ctx = std::make_shared<MockRenderContext>();
+        auto ctx      = std::dynamic_pointer_cast<RenderContext>(mock_ctx);
+        EXPECT_CALL(*mock_render_, getRenderContext).WillOnce(Return(ctx));
+        EXPECT_CALL(*mock_ctx, init).WillOnce(Return());
+        EXPECT_CALL(*mock_stream, nextOutput(_)).WillOnce(Return(ErrorResult<GenerateOutputs>(error_code, message)));
+
+        try {
+            chat_service_->chatCompletions(writer_, request, 10086);
+            FAIL() << "expected stream error";
+        } catch (const HttpApiServerException& error) {
+            EXPECT_EQ(error.getType(), expected_type);
+            EXPECT_EQ(error.getMessage(), message);
+        }
+    }
+}
+
+TEST_F(ChatServiceTest, StreamingStreamErrorsUseSseErrorPath) {
+    EXPECT_CALL(*mock_metric_reporter_, reportSuccessQpsMetric).Times(0);
+    EXPECT_CALL(*mock_metric_reporter_, reportResponseIterateCountMetric).Times(0);
+    EXPECT_CALL(*mock_metric_reporter_, reportResponseLatencyMs).Times(0);
+    EXPECT_CALL(*mock_metric_reporter_, reportFTIterateCountMetric).Times(0);
+    EXPECT_CALL(*mock_metric_reporter_, reportFTOutputTokenLengthMetric).Times(0);
+
+    for (const auto& [error_code, expected_type, message] : kStreamErrorCases) {
+        http_server::HttpRequest request;
+        const std::string        body = R"del({
+    "messages": [{"role": "user", "content": "who are you?"}],
+    "stream": true,
+    "source": "test_source"
+})del";
+        request._request              = CreateHttpPacket(body);
+
+        auto generate_config = std::make_shared<GenerateConfig>();
+        EXPECT_CALL(*mock_openai_endpoint_, extract_generation_config).Times(2).WillRepeatedly(Return(generate_config));
+        EXPECT_CALL(*mock_metric_reporter_, reportFTInputTokenLengthMetric).Times(1);
+        EXPECT_CALL(*mock_metric_reporter_, reportFTNumBeansMetric).Times(1);
+
+        RenderedInputs rendered_inputs{std::vector<int>(), std::vector<MultimodalInput>(), std::string()};
+        EXPECT_CALL(*mock_render_, render_chat_request).WillOnce(Return(rendered_inputs));
+
+        auto mock_stream = CreateMockGenerateStream();
+        auto stream      = std::dynamic_pointer_cast<GenerateStream>(mock_stream);
+        EXPECT_CALL(*mock_engine_, enqueue(Matcher<const std::shared_ptr<GenerateInput>&>(_))).WillOnce(Return(stream));
+
+        auto mock_ctx = std::make_shared<MockRenderContext>();
+        auto ctx      = std::dynamic_pointer_cast<RenderContext>(mock_ctx);
+        EXPECT_CALL(*mock_render_, getRenderContext).WillOnce(Return(ctx));
+        EXPECT_CALL(*mock_ctx, init).WillOnce(Return());
+
+        const std::string first_response = "first response";
+        const std::string token_response = "token response";
+        EXPECT_CALL(*mock_ctx, render_stream_response_first).WillOnce(Return(first_response));
+        EXPECT_CALL(*mock_ctx, render_stream_response).WillOnce(Return(token_response));
+        EXPECT_CALL(*mock_ctx, render_stream_response_flush).Times(0);
+        EXPECT_CALL(*mock_ctx, render_stream_response_final).Times(0);
+
+        GenerateOutput output;
+        output.output_ids = CreateOutputIdsTensor();
+        GenerateOutputs outputs;
+        outputs.generate_outputs.push_back(std::move(output));
+        EXPECT_CALL(*mock_stream, nextOutput(_))
+            .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))))
+            .WillOnce(Return(ErrorResult<GenerateOutputs>(error_code, message)));
+
+        const HttpApiServerException expected_error(expected_type, message);
+        EXPECT_CALL(*mock_metric_reporter_, reportResponseFirstTokenLatencyMs).Times(1);
+        EXPECT_CALL(*mock_metric_reporter_, reportResponseIterateLatencyMs).Times(1);
+        EXPECT_CALL(*mock_metric_reporter_, reportErrorQpsMetric("test_source", expected_type)).Times(1);
+        {
+            InSequence sequence;
+            EXPECT_CALL(*mock_writer_, Write(ChatService::sseResponse(first_response))).WillOnce(Return(true));
+            EXPECT_CALL(*mock_writer_, Write(ChatService::sseResponse(token_response))).WillOnce(Return(true));
+            EXPECT_CALL(*mock_writer_, Write(ChatService::sseResponse(formatException(expected_error))))
+                .WillOnce(Return(true));
+            EXPECT_CALL(*mock_writer_, WriteDone).WillOnce(Return(true));
+        }
+
+        EXPECT_NO_THROW(chat_service_->chatCompletions(writer_, request, 10086));
+    }
+
+    EXPECT_EQ(writer_->_type, http_server::HttpResponseWriter::WriteType::Stream);
     EXPECT_EQ(writer_->_headers.at("Content-Type"), "text/event-stream");
 }
 

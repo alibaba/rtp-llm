@@ -19,7 +19,7 @@ public:
 public:
     MOCK_CONST_METHOD0(getStatus, StreamState());
     MOCK_CONST_METHOD0(hasError, bool());
-    MOCK_METHOD0(nextOutput, ErrorResult<GenerateOutputs>());
+    MOCK_METHOD1(nextOutput, ErrorResult<GenerateOutputs>(int64_t));
     MOCK_METHOD1(updateOutput, void(const StreamUpdateInfo&));
 };
 

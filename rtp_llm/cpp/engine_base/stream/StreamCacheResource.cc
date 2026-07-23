@@ -244,7 +244,7 @@ void StreamCacheResource::releaseResource() {
             RTP_LLM_LOG_ERROR("  stream id:                     %ld", stream_->streamId());
             RTP_LLM_LOG_ERROR("  stream state:                  %s",
                               StreamStateToString(stream_->generate_status_->status).c_str());
-            RTP_LLM_LOG_ERROR("  stream hasError:                %d", stream_->hasError());
+            RTP_LLM_LOG_ERROR("  stream hasError:                %d", stream_->hasErrorWithoutLock());
             RTP_LLM_LOG_ERROR("  stream hasNumBeams:            %d", stream_->hasNumBeams());
         }
         RTP_LLM_LOG_ERROR("  batch_kv_cache_resource_ use_count: %ld", batch_kv_cache_resource_.use_count());
@@ -257,7 +257,7 @@ void StreamCacheResource::releaseResource() {
         abort();
     }
     // do not reuse cache from stopped beam search streams, whose states are likely corrupted
-    if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->hasError())) {
+    if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->hasErrorWithoutLock())) {
         return;
     }
     RTP_LLM_LOG_DEBUG("releaseResource: stream=%ld, curBlocksNum=%d, pd_kvcache_ref=%p",
@@ -289,7 +289,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_CHECK(nums == total_blocks);
 
     if (total_blocks > 0) {
-        if (reuseCache() && !stream_->hasError() && stream_->getStatus() == StreamState::FINISHED) {
+        if (reuseCache() && !stream_->hasErrorWithoutLock() && stream_->getStatus() == StreamState::FINISHED) {
             RTP_LLM_LOG_DEBUG(
                 "tryReleaseKVBlock: stream=%ld, storing cache, curBlocksNum=%d", stream_->streamId(), total_blocks);
             // save cache to gpu
@@ -308,7 +308,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
             RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, NOT storing cache, reuseCache=%d, hasError=%d, status=%s",
                               stream_->streamId(),
                               reuseCache(),
-                              stream_->hasError(),
+                              stream_->hasErrorWithoutLock(),
                               StreamStateToString(stream_->getStatus()).c_str());
         }
 

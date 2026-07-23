@@ -106,6 +106,10 @@ public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
 
 protected:
+    virtual bool isCancelled(grpc::ServerContext* context) const {
+        return context->IsCancelled();
+    }
+
     grpc::Status serializeErrorMsg(const std::string& request_key, ErrorInfo error_info);
     grpc::Status pollStreamOutput(grpc::ServerContext*             context,
                                   const std::string&               request_key,
