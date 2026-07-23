@@ -52,3 +52,18 @@ py_test(
     tags = ["rocm"],
     exec_properties = {"gpu": "MI308X-ROCM7"},
 )
+
+# Known-failing minimal reproducer for AMD investigation. Run explicitly until
+# the AITER Triton paged-attention decode kernel is fixed.
+py_test(
+    name = "test_aiter_decode_triton_repro",
+    srcs = ["test_aiter_decode_triton_repro.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+    ],
+    timeout = "eternal",
+    tags = ["manual", "rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
