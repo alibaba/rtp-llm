@@ -705,7 +705,9 @@ class DeepSeekV2(BaseModel):
                 if i >= first_k_dense_replace and i % moe_step == 0
             ]
 
-            config.config_dtype = config_json.get("torch_dtype", None)
+            config.config_dtype = config_json.get(
+                "torch_dtype", config_json.get("dtype", None)
+            )
 
             if config_json.get("index_topk") is not None:
                 config.attn_config.is_sparse = True

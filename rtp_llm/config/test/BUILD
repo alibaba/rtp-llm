@@ -14,3 +14,10 @@ py_test(
     exec_properties = {'gpu':'H20'},
 )
 
+py_test(
+    name = "deepseek_config_dtype_test",
+    srcs = ["deepseek_config_dtype_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
