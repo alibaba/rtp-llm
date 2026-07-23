@@ -158,3 +158,13 @@ register_lazy_model(
     "rtp_llm.models_py.new_models.qwen2_moe",
     "Qwen2MoeForCausalLM",
 )
+register_lazy_model(
+    "qwen2_vl",
+    "rtp_llm.models_py.new_models.qwen2_vl.model",
+    "Qwen2VLForCausalLM",
+)
+register_lazy_model(
+    "qwen2_vl_vision",
+    "rtp_llm.models_py.new_models.qwen2_vl.vision",
+    "Qwen2VLForVisionEmbedding",
+)
