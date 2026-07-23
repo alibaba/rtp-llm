@@ -7,10 +7,9 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Callable, List, Optional, Tuple
 
+import rtp_llm.models_py.weight_mapper as weight_mapper
 import torch
 import torch.nn as nn
-
-import rtp_llm.models_py.weight_mapper as weight_mapper
 from rtp_llm.models_py.module_base import RtpModule, collect_loaded_tensor_ids
 from rtp_llm.models_py.registry import get_model_class, list_models
 
@@ -338,8 +337,8 @@ class NewModelLoader:
         )
 
     @staticmethod
-    def _checkpoint_name_filter(
-        model: RtpModule, expert_filter: Optional[_ExpertRangeFilter]
+    def _model_checkpoint_name_filter(
+        model: RtpModule,
     ) -> Optional[Callable[[str], bool]]:
         model_filter = model.checkpoint_weight_name_filter()
         if model_filter is not None and not callable(model_filter):
@@ -347,6 +346,17 @@ class NewModelLoader:
                 f"{type(model).__name__}.checkpoint_weight_name_filter() must "
                 "return a callable or None"
             )
+        return model_filter
+
+    @staticmethod
+    def _checkpoint_name_filter(
+        model_filter: Optional[Callable[[str], bool]],
+        expert_filter: Optional[_ExpertRangeFilter],
+    ) -> Optional[Callable[[str], bool]]:
+        if model_filter is not None and (
+            not callable(model_filter) or isinstance(model_filter, nn.Module)
+        ):
+            raise TypeError("model_filter must be callable or None")
         if model_filter is None and expert_filter is None:
             return None
 
@@ -504,10 +514,20 @@ class NewModelLoader:
             )
         started = time.time()
         expert_filter = self._expert_filter()
-        name_filter = self._checkpoint_name_filter(model, expert_filter)
+        model_filter = self._model_checkpoint_name_filter(model)
+        selected_files = weight_mapper.select_safetensor_files(
+            self._resolved_model_path(), checkpoint_files, model_filter
+        )
+        if len(selected_files) != len(checkpoint_files):
+            logger.info(
+                "Model checkpoint filter selected %d/%d shards",
+                len(selected_files),
+                len(checkpoint_files),
+            )
+        name_filter = self._checkpoint_name_filter(model_filter, expert_filter)
         model.load_weights(
             weight_mapper.get_all_weights(
-                checkpoint_files,
+                selected_files,
                 device="cpu",
                 name_filter=name_filter,
                 safetensor_slice_expander=expert_filter,
