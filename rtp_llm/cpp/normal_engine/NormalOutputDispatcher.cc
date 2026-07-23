@@ -105,6 +105,45 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     return absl::OkStatus();
 }
 
+absl::Status NormalOutputDispatcher::dispatchPrefillOnly(const StreamGroups&    stream_groups,
+                                                         const GptModelOutputs& model_output) const {
+    RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    RTP_LLM_CHECK_WITH_INFO(stream_groups.totalDecodeBatchSize() == 0,
+                            "prefill-only aux hidden states dispatch does not support decode streams");
+    RTP_LLM_CHECK_WITH_INFO(model_output.aux_hidden_states.defined(),
+                            "aux_hidden_states_prefill_only requires model_output.aux_hidden_states");
+    RTP_LLM_CHECK_WITH_INFO(model_output.aux_hidden_states_layers.defined(),
+                            "aux_hidden_states_prefill_only requires model_output.aux_hidden_states_layers");
+
+    int token_offset = 0;
+    for (auto& stream : stream_groups.contextStreams()) {
+        const auto token_size = stream->currentExecuteTokenSize();
+        auto       aux_hidden_states =
+            model_output.aux_hidden_states.narrow(0, token_offset, token_size);
+        auto aux_hidden_states_layers = model_output.aux_hidden_states_layers;
+        auto new_tokens = torch::zeros({(int64_t)stream->currentBatchSize(), 1}, torch::kInt32);
+
+        stream->update({new_tokens,
+                        0,
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        aux_hidden_states,
+                        aux_hidden_states_layers,
+                        torch::Tensor(),
+                        false,
+                        false});
+        token_offset += token_size;
+    }
+
+    RTP_LLM_LOG_DEBUG("prefill-only aux hidden states dispatch done");
+    return absl::OkStatus();
+}
+
 void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                                   const MergedOutput&  merge_outputs,
                                                   int                  batch_idx_in,

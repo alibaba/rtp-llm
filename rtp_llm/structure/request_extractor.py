@@ -86,6 +86,15 @@ class RequestExtractor:
             ],
         )
         update_optional(
+            "aux_hidden_states_prefill_only",
+            [
+                "aux_hidden_states_prefill_only",
+                "return_aux_hidden_states_prefill_only",
+                "prefill_only",
+                "prefill_only_aux_hidden_states",
+            ],
+        )
+        update_optional(
             "aux_hidden_states_layers",
             [
                 "aux_hidden_states_layers",
@@ -103,6 +112,11 @@ class RequestExtractor:
         update_optional("max_new_tokens", ["gen_length", "max_new_tokens"])
         if self.is_streaming(kwargs) or (kwargs.get("stream", False) == True):
             generate_config.is_streaming = True
+        if generate_config.aux_hidden_states_prefill_only:
+            generate_config.return_aux_hidden_states = True
+            generate_config.can_use_pd_separation = False
+            generate_config.is_streaming = False
+            generate_config.return_incremental = False
         return generate_config, remain_kwargs
 
     def _format_request(
@@ -236,6 +250,8 @@ class RequestExtractor:
         is_streaming = RequestExtractor.is_streaming(kwargs)
         if generate_config.is_streaming:
             is_streaming = True
+        if generate_config.aux_hidden_states_prefill_only:
+            is_streaming = False
         return Request(
             request_id,
             batch_infer,

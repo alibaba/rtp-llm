@@ -12,6 +12,7 @@ public:
     NormalOutputDispatcher() = default;
 
     absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
+    absl::Status dispatchPrefillOnly(const StreamGroups& stream_groups, const GptModelOutputs& model_output) const;
 
 private:
     void dispatchSingleStream(GenerateStreamPtr    stream,

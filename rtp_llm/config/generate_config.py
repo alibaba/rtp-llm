@@ -124,6 +124,7 @@ class GenerateConfig(BaseModel):
     return_hidden_states: bool = False
     return_all_hidden_states: bool = False
     return_aux_hidden_states: bool = False
+    aux_hidden_states_prefill_only: bool = False
     aux_hidden_states_layers: List[int] = []
     hidden_states_cut_dim: int = 0
     normalized_hidden_states: bool = False
@@ -408,6 +409,15 @@ class GenerateConfig(BaseModel):
                 raise ValueError(
                     "grammar-constrained decoding does not support beam search or num_return_sequences > 1"
                 )
+            if self.aux_hidden_states_prefill_only:
+                check_with_info(
+                    self.return_aux_hidden_states,
+                    "aux_hidden_states_prefill_only requires return_aux_hidden_states",
+                )
+                if self.has_num_beams() or self.num_return_sequences > 1:
+                    raise ValueError(
+                        "aux_hidden_states_prefill_only does not support beam search or num_return_sequences > 1"
+                    )
             self._normalize_grammar_fields()
         except Exception as e:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))

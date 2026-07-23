@@ -45,6 +45,19 @@ void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inpu
     holder.hold_host(inputs.cum_log_probs);
 }
 
+bool shouldDispatchPrefillOnlyAuxHiddenStates(const StreamGroups& stream_groups) {
+    if (stream_groups.empty() || stream_groups.totalDecodeBatchSize() > 0) {
+        return false;
+    }
+    for (const auto& stream : stream_groups.contextStreams()) {
+        const auto& config = stream->generateConfig();
+        if (!config->return_aux_hidden_states || !config->aux_hidden_states_prefill_only) {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 NormalExecutor::ModelFactory NormalExecutor::test_model_factory = nullptr;
@@ -291,6 +304,23 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
             profile_step_finish_();
         }
         return absl::OkStatus();
+    }
+
+    if (shouldDispatchPrefillOnlyAuxHiddenStates(stream_groups)) {
+        RTP_LLM_PROFILE_SCOPE("executor.dispatch_prefill_only_aux_hidden_states");
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        auto    result        = batch_stream_processor_->dispatchPrefillOnly(stream_groups, model_output);
+        executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        if (tps_execute_time_us <= 0) {
+            tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
+        }
+        reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us);
+
+        if (profile_step_finish_) {
+            profile_step_finish_();
+        }
+        return result;
     }
 
     {

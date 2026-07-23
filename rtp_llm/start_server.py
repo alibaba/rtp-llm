@@ -19,6 +19,12 @@ from rtp_llm.config.server_config_setup import (
 )
 from rtp_llm.ops import RoleType, SpeculativeType
 from rtp_llm.server.server_args.server_args import setup_args
+from rtp_llm.utils.aux_hidden_states_oss_uploader import (
+    apply_service_env,
+    build_config_from_env as build_aux_hidden_states_uploader_config,
+    is_upload_enabled as is_aux_hidden_states_upload_enabled,
+    run_uploader as run_aux_hidden_states_uploader,
+)
 from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_ENV,
@@ -90,6 +96,38 @@ def _sync_server_shutdown_timeout(py_env_configs: PyEnvConfigs):
             py_env_configs.server_config.shutdown_timeout
         )
     )
+
+
+def start_aux_hidden_states_oss_uploader_impl(
+    process_manager: ProcessManager = None,
+):
+    if not is_aux_hidden_states_upload_enabled():
+        return None
+
+    uploader_config = build_aux_hidden_states_uploader_config()
+    apply_service_env(uploader_config)
+    logging.info(
+        "start aux hidden states OSS uploader: ready_dir=%s, work_dir=%s, "
+        "oss_prefix=%s",
+        uploader_config.ready_dir,
+        uploader_config.work_dir,
+        uploader_config.oss_prefix,
+    )
+    process = multiprocessing.Process(
+        target=run_aux_hidden_states_uploader,
+        args=(uploader_config,),
+        name="aux_hidden_states_oss_uploader",
+    )
+    process.start()
+
+    if process_manager:
+        process_manager.register_health_check(
+            processes=[process],
+            process_name="aux_hidden_states_oss_uploader",
+            check_ready_fn=process.is_alive,
+            retry_interval_seconds=0.1,
+        )
+    return process
 
 
 @timer_wrapper(description="start backend server")
@@ -523,6 +561,14 @@ def start_server(py_env_configs: PyEnvConfigs):
     startup_warmup_gate_file = _setup_startup_warmup_health_gate(py_env_configs)
 
     try:
+        aux_hidden_states_uploader_process = start_aux_hidden_states_oss_uploader_impl(
+            process_manager
+        )
+        process_manager.add_process(
+            aux_hidden_states_uploader_process,
+            shutdown_group="aux_hidden_states_uploader",
+        )
+
         if py_env_configs.role_config.role_type != RoleType.FRONTEND:
             logging.info("start backend server")
             backend_process = start_backend_server_impl(

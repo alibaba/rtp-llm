@@ -409,6 +409,7 @@ py_library(
     ],
     deps = [
         "//rtp_llm/server:server",
+        ":utils",
         ":uvicorn",
         ":fastapi",
         ":psutil",

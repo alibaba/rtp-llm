@@ -558,6 +558,20 @@ class Pipeline(object):
                 generate_outputs.generate_outputs
             )
             begin_time = current_time_ms()
+            if generate_config.aux_hidden_states_prefill_only:
+                for output in generate_outputs_cache.generate_outputs:
+                    output.finished = True
+                output_lens = [0] * len(generate_outputs_cache.generate_outputs)
+                generate_texts = [""] * len(generate_outputs_cache.generate_outputs)
+                kmonitor.report(
+                    GaugeMetrics.POST_PIPELINE_RT_METRIC,
+                    current_time_ms() - begin_time,
+                )
+                yield GenerateResponse(
+                    generate_outputs=generate_outputs_cache,
+                    generate_texts=generate_texts,
+                )
+                break
             is_incremental = (
                 not generate_config.has_num_beams() and generate_config.is_streaming
             )

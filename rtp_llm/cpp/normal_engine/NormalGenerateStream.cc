@@ -181,6 +181,13 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     finished_ = needFinish();
+    const bool aux_hidden_states_prefill_only =
+        generate_input_->generate_config->aux_hidden_states_prefill_only
+        && generate_input_->generate_config->return_aux_hidden_states && iter_count_ == 1;
+    if (aux_hidden_states_prefill_only) {
+        finished_ = true;
+        fillSubGenerateStatus(StreamState::FINISHED);
+    }
     if (finished_) {
         reportEventWithoutLock(StreamEvents::GenerateDone);
         fillSubGenerateStatus(StreamState::FINISHED);
@@ -200,7 +207,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
                       isStreaming(),
                       update_info.update_remote_generate);
 
-    if (queryPdSep() && update_info.update_remote_generate) {
+    if (queryPdSep() && update_info.update_remote_generate && !(aux_hidden_states_prefill_only && finished_)) {
         RTP_LLM_LOG_DEBUG("stream [%s] hold kv cache for pd-sep", streamLogTag().c_str());
         holdKVCacheForPDSep();
         if (!finished_) {

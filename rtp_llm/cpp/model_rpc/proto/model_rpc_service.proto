@@ -107,6 +107,7 @@ message GenerateConfigPB {
     google.protobuf.StringValue response_format = 63;
     bool return_aux_hidden_states = 64;
     repeated int32 aux_hidden_states_layers = 65;
+    bool aux_hidden_states_prefill_only = 66;
 }
 
 message MMPreprocessConfigPB {
