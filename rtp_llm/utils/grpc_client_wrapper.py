@@ -662,7 +662,14 @@ class GrpcClientWrapper:
                 }
             try:
                 level = int(req.get("level", 1))
-                timeout_ms = int(req.get("timeout_ms", 0))
+                # Default drain timeout when the caller omits timeout_ms: 60 minutes.
+                # The sleep prepare phase blocks on draining in-flight requests up to
+                # this long before giving up and rolling back to RUNNING (graceful
+                # drain never force-aborts in-flight work -- see SleepLifecycleController).
+                # A large default means an online instance told to sleep waits out even
+                # very long in-flight generations instead of rolling back; callers can
+                # still override per request (or pass mode="abort" to cancel in-flight).
+                timeout_ms = int(req.get("timeout_ms", 60 * 60 * 1000))
             except (TypeError, ValueError):
                 return {
                     "error": "sleep level and timeout_ms must be integers",
