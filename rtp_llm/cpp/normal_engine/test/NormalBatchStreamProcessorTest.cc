@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "autil/LockFreeThreadPool.h"
 
 using namespace std;
 
@@ -288,6 +289,113 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     EXPECT_NEAR(0.731058, softmax_probs.data_ptr<float>()[0], 0.0001);
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testParallelDispatch) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 8;
+    model_config.vocab_size  = 4;
+    model_config.num_layers  = 1;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    RuntimeConfig runtime_config;
+
+    auto thread_pool = std::make_shared<autil::LockFreeThreadPool>(4, 16, nullptr, "DispatchTestPool");
+    ASSERT_TRUE(thread_pool->start());
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false, thread_pool);
+
+    auto make_stream = [&](int32_t input_token) {
+        auto query                             = std::make_shared<GenerateInput>();
+        query->input_ids                       = hostIntBuffer({input_token});
+        query->generate_config                 = std::make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 1;
+        query->generate_config->reuse_cache    = false;
+        auto stream =
+            std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    };
+
+    auto         stream1 = make_stream(0);
+    auto         stream2 = make_stream(1);
+    StreamGroups stream_groups({stream1, stream2});
+
+    MergedOutput merge_outputs;
+    merge_outputs.sampler_output.token_ids     = hostIntBuffer({0, 2, 1, 3}).reshape({2, 2});
+    merge_outputs.sampler_output.cum_log_probs = torch::tensor({-0.1f, -0.2f}).to(torch::kCUDA);
+
+    auto status = processor.dispatch(stream_groups, merge_outputs);
+    EXPECT_TRUE(status.ok()) << status.ToString();
+    EXPECT_EQ((std::vector<int>{0, 2}), stream1->completeTokenIdsVec(0));
+    EXPECT_EQ((std::vector<int>{1, 3}), stream2->completeTokenIdsVec(0));
+
+    thread_pool->stop();
+    thread_pool->waitFinish();
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testBeamDispatchReordersReturnedRows) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 8;
+    model_config.vocab_size  = 4;
+    model_config.num_layers  = 1;
+    RuntimeConfig runtime_config;
+
+    auto query                                   = std::make_shared<GenerateInput>();
+    query->input_ids                             = hostIntBuffer({0});
+    query->generate_config                       = std::make_shared<GenerateConfig>();
+    query->generate_config->num_beams            = 2;
+    query->generate_config->max_new_tokens       = 2;
+    query->generate_config->return_logits        = true;
+    query->generate_config->return_hidden_states = true;
+    query->generate_config->reuse_cache          = false;
+
+    auto stream =
+        std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    auto complete_ids                        = stream->completeTokenIds();
+    complete_ids[0][1]                       = 1;
+    complete_ids[1][0]                       = 0;
+    complete_ids[1][1]                       = 2;
+    stream->complete_token_ids_->batch_size_ = 2;
+    stream->setSeqLength(2);
+    stream->setIsContextStream(false);
+    stream->resizeSubGenerateStatus(2);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    StreamGroups stream_groups({stream});
+    MergedOutput merge_outputs;
+    auto         raw_logits =
+        torch::tensor({10.0f, 20.0f, 30.0f, 40.0f, 40.0f, 30.0f, 20.0f, 10.0f}).reshape({2, 4}).to(torch::kCUDA);
+    auto raw_hidden_states                   = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}).reshape({2, 2}).to(torch::kCUDA);
+    merge_outputs.model_output.logits        = raw_logits;
+    merge_outputs.model_output.hidden_states = raw_hidden_states;
+    merge_outputs.sampler_output.token_ids   = hostIntBuffer({0, 2, 3, 0, 1, 2}).reshape({2, 3});
+    merge_outputs.sampler_output.beam_index  = hostIntBuffer({1, 0});
+    merge_outputs.sampler_output.cum_log_probs = torch::tensor({-0.3f, -0.5f}).to(torch::kCUDA);
+
+    NormalOutputDispatcher dispatcher;
+    auto                   status = dispatcher.dispatch(stream_groups, merge_outputs);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    ASSERT_TRUE(stream->hasOutput());
+    auto output_result = stream->nextOutput();
+    ASSERT_TRUE(output_result.ok());
+    ASSERT_EQ(2, output_result.value().generate_outputs.size());
+
+    const auto& first  = output_result.value().generate_outputs[0];
+    const auto& second = output_result.value().generate_outputs[1];
+    ASSERT_TRUE(first.logits.has_value());
+    ASSERT_TRUE(second.logits.has_value());
+    ASSERT_TRUE(first.hidden_states.has_value());
+    ASSERT_TRUE(second.hidden_states.has_value());
+    EXPECT_TRUE(torch::equal(first.logits.value(), raw_logits.narrow(0, 1, 1).cpu()));
+    EXPECT_TRUE(torch::equal(second.logits.value(), raw_logits.narrow(0, 0, 1).cpu()));
+    EXPECT_TRUE(torch::equal(first.hidden_states.value(), raw_hidden_states.narrow(0, 1, 1).cpu()));
+    EXPECT_TRUE(torch::equal(second.hidden_states.value(), raw_hidden_states.narrow(0, 0, 1).cpu()));
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testSelectedTokenProbsWithBeamMapping) {
     NormalOutputDispatcher dispatcher;
     auto                   logits            = torch::tensor({1.0f, 2.0f, 3.0f, 1.0f}).reshape({2, 2}).to(torch::kCUDA);
@@ -527,7 +635,7 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsGatherBatch) {
     model_config.max_seq_len                = 2048;
     model_config.vocab_size                 = 2048;
     model_config.num_layers                 = 2;
-    model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
+    model_config.attn_config.kv_cache_dtype = KvCacheDataType::BASE;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
@@ -611,12 +719,12 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsAndMultimodalGatherBat
     model_config.max_seq_len                   = 2048;
     model_config.vocab_size                    = 2048;
     model_config.num_layers                    = 2;
-    model_config.attn_config.kv_cache_dtype    = KvCacheDataType::INT8;
+    model_config.attn_config.kv_cache_dtype    = KvCacheDataType::BASE;
     model_config.mm_model_config.is_multimodal = true;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
-    cache_config.group_types = {CacheGroupType::FULL};
+    initFullCacheConfig(cache_config, model_config.num_layers);
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
@@ -671,7 +779,7 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsWithReuseLength) {
     model_config.max_seq_len                = 2048;
     model_config.vocab_size                 = 2048;
     model_config.num_layers                 = 2;
-    model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
+    model_config.attn_config.kv_cache_dtype = KvCacheDataType::BASE;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
@@ -714,7 +822,7 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsReuseLengthCapped) {
     model_config.max_seq_len                = 2048;
     model_config.vocab_size                 = 2048;
     model_config.num_layers                 = 2;
-    model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
+    model_config.attn_config.kv_cache_dtype = KvCacheDataType::BASE;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
@@ -759,11 +867,11 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsMixedWithDecodeStreams
     model_config.max_seq_len                = 2048;
     model_config.vocab_size                 = 2048;
     model_config.num_layers                 = 2;
-    model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
+    model_config.attn_config.kv_cache_dtype = KvCacheDataType::BASE;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
-    cache_config.group_types = {CacheGroupType::FULL};
+    initFullCacheConfig(cache_config, model_config.num_layers);
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
@@ -777,7 +885,7 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsMixedWithDecodeStreams
     stream1->setIsContextStream(false);
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
-    addr1.initGroups(1, 3, {0, 0, 0});
+    addr1.initGroups(cache_config.topologyPtr());
     addr1.setBatchBlocks(0, 0, {1, 2, 3, 4});
     stream1->setKVCache(addr1);
 
@@ -826,7 +934,7 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsFP16) {
     model_config.max_seq_len                = 2048;
     model_config.vocab_size                 = 2048;
     model_config.num_layers                 = 2;
-    model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
+    model_config.attn_config.kv_cache_dtype = KvCacheDataType::BASE;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
@@ -870,7 +978,7 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsDirect1DGatherAsSingle
     model_config.max_seq_len                = 2048;
     model_config.vocab_size                 = 2048;
     model_config.num_layers                 = 2;
-    model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
+    model_config.attn_config.kv_cache_dtype = KvCacheDataType::BASE;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
@@ -907,7 +1015,7 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsRejectDirectCountMisma
     model_config.max_seq_len                = 2048;
     model_config.vocab_size                 = 2048;
     model_config.num_layers                 = 2;
-    model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
+    model_config.attn_config.kv_cache_dtype = KvCacheDataType::BASE;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
@@ -938,7 +1046,7 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsRejectDirectLocsWithou
     model_config.max_seq_len                = 2048;
     model_config.vocab_size                 = 2048;
     model_config.num_layers                 = 2;
-    model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
+    model_config.attn_config.kv_cache_dtype = KvCacheDataType::BASE;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
@@ -969,7 +1077,7 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsRejectDirectOverlap) {
     model_config.max_seq_len                = 2048;
     model_config.vocab_size                 = 2048;
     model_config.num_layers                 = 2;
-    model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
+    model_config.attn_config.kv_cache_dtype = KvCacheDataType::BASE;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
@@ -1000,7 +1108,7 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsRejectDirectOutOfRange
     model_config.max_seq_len                = 2048;
     model_config.vocab_size                 = 2048;
     model_config.num_layers                 = 2;
-    model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
+    model_config.attn_config.kv_cache_dtype = KvCacheDataType::BASE;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
@@ -1031,7 +1139,7 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsRejectDirectLocBeforeR
     model_config.max_seq_len                = 2048;
     model_config.vocab_size                 = 2048;
     model_config.num_layers                 = 2;
-    model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
+    model_config.attn_config.kv_cache_dtype = KvCacheDataType::BASE;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
@@ -1063,7 +1171,7 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsEmpty) {
     model_config.max_seq_len                = 2048;
     model_config.vocab_size                 = 2048;
     model_config.num_layers                 = 2;
-    model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
+    model_config.attn_config.kv_cache_dtype = KvCacheDataType::BASE;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;

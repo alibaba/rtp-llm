@@ -100,6 +100,24 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     initCacheManager(warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager done");
 
+    if (params.concurrency_config.engine_async_worker_count > 0) {
+        const auto queue_size = static_cast<size_t>(std::max(1, 2 * params.concurrency_config.concurrency_limit));
+        thread_pool_          = std::make_shared<autil::LockFreeThreadPool>(
+            static_cast<size_t>(params.concurrency_config.engine_async_worker_count),
+            queue_size,
+            nullptr,
+            "EngineThreadPool");
+        if (!thread_pool_->start()) {
+            RTP_LLM_LOG_WARNING("failed to start engine async worker pool; falling back to serial dispatch");
+            thread_pool_.reset();
+        } else {
+            RTP_LLM_LOG_INFO("created engine async worker pool with %ld workers",
+                             params.concurrency_config.engine_async_worker_count);
+        }
+    } else {
+        RTP_LLM_LOG_INFO("engine async worker count is 0; using serial dispatch");
+    }
+
     initExecutor(params, propose_params_);
     if (propose_params_) {
         reserve_step_ = propose_params_->gen_num_per_circle + 1;
@@ -124,7 +142,8 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
         executor_.reset(new MtpExecutor(
             params, propose_params, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_));
     } else {
-        executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, false, false, 0, mla_ops_type_));
+        executor_.reset(
+            new NormalExecutor(params, resource_context_.cache_manager, false, false, 0, mla_ops_type_, thread_pool_));
     }
 }
 
@@ -392,6 +411,11 @@ absl::Status NormalEngine::stop() {
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
+    if (thread_pool_) {
+        thread_pool_->stop();
+        thread_pool_->waitFinish();
+        thread_pool_.reset();
+    }
     return absl::OkStatus();
 }
 
