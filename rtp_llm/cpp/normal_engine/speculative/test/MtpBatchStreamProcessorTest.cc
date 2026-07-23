@@ -1481,9 +1481,35 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     EXPECT_TRUE(lm_output_indexes.is_cuda());
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
 
+    // Normal gather reports the target prefix (the last target-KV row that is
+    // already initialized). Multi-step draft decode runs one position ahead,
+    // but target verification must retain the original prefix and write that
+    // carried token instead of skipping it.
+    vector<int> expect_prefix_lengths   = {1, 2};
     vector<int> expect_sequence_lengths = {2, 3};
+    EXPECT_TRUE(model_input.prefix_lengths.is_cuda());
+    EXPECT_EQ(expect_prefix_lengths, toVec<int>(model_input.prefix_lengths));
     EXPECT_TRUE(model_input.sequence_lengths.is_cuda());
     EXPECT_EQ(expect_sequence_lengths, toVec<int>(model_input.sequence_lengths));
+
+    // The steady-state device path has the same one-token separation. The
+    // published length includes the carried target token; target verify starts
+    // one row earlier while draft decode consumes the published position.
+    GenerateStream::MtpAsyncDeviceState state1;
+    state1.propose_tokens_gpu = torch::tensor({{3}}, torch::kInt32).to(torch::kCUDA);
+    state1.next_seq_len_gpu   = torch::tensor({7}, torch::kInt32).to(torch::kCUDA);
+    stream1->setMtpAsyncDeviceState(std::move(state1));
+
+    GenerateStream::MtpAsyncDeviceState state2;
+    state2.propose_tokens_gpu = torch::tensor({{1}}, torch::kInt32).to(torch::kCUDA);
+    state2.next_seq_len_gpu   = torch::tensor({4}, torch::kInt32).to(torch::kCUDA);
+    stream2->setMtpAsyncDeviceState(std::move(state2));
+
+    model_input.sequence_lengths = torch::tensor({99, 99}, torch::kInt32);
+    processor.prepareDecodeDraftModelInput(stream_groups, model_input, holder);
+
+    EXPECT_EQ((vector<int>{6, 3}), toVec<int>(model_input.prefix_lengths));
+    EXPECT_EQ((vector<int>{7, 4}), toVec<int>(model_input.sequence_lengths));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
