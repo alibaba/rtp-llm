@@ -101,11 +101,16 @@ class QWen3_VL(QwenV3):
         config.config_dtype = config_json.get("torch_dtype", None)
 
         config.attn_config.rope_config.style = 7
-        mrope_section = config_json["rope_scaling"].get("mrope_section", [16, 24, 24])
+        # Qwen3-VL interleaves T/H/W rotary pairs; the model default for a
+        # 128-dim rotary region is 24/20/20 (64 pairs total).
+        mrope_section = config_json["rope_scaling"].get("mrope_section", [24, 20, 20])
         config.attn_config.rope_config.index_factor = len(mrope_section)
         config.attn_config.rope_config.mrope_dim1 = mrope_section[0]
         config.attn_config.rope_config.mrope_dim2 = mrope_section[1]
         config.attn_config.rope_config.mrope_dim3 = mrope_section[2]
+        config.attn_config.rope_config.mrope_interleaved = config_json[
+            "rope_scaling"
+        ].get("mrope_interleaved", True)
         config.mm_model_config.mm_position_ids_style = 2
 
         config.mm_related_params.config["ckpt_path"] = config.ckpt_path
