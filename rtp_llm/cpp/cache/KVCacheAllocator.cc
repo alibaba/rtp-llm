@@ -154,7 +154,6 @@ void KVCacheAllocator::setBlockTreeCache(BlockTreeCache* block_tree_cache) {
         const std::string stable_tag = group->tag();
         group->setEvictCallback([block_tree_cache, stable_tag](size_t need_blocks) {
             const int reclaimed = block_tree_cache->evictForTag(stable_tag, need_blocks);
-            block_tree_cache->waitForPendingTasks();
             return reclaimed > 0 ? static_cast<size_t>(reclaimed) : 0;
         });
     }

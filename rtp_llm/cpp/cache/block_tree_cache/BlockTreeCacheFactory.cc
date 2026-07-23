@@ -28,6 +28,10 @@ namespace {
 
 constexpr size_t kPoolAlignment = 4096;
 
+constexpr double kDefaultDeviceWatermarkRatio = 0.9;
+constexpr double kDefaultHostWatermarkRatio   = 0.9;
+constexpr double kDefaultDiskWatermarkRatio   = 0.9;
+
 size_t alignUp(size_t value, size_t alignment) {
     RTP_LLM_CHECK_WITH_INFO(alignment > 0 && value <= std::numeric_limits<size_t>::max() - (alignment - 1),
                             "BlockTreeCache pool stride overflow: value=%zu alignment=%zu",
@@ -463,6 +467,13 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     config.device_min_free_blocks        = kv_cache_config.device_cache_min_free_blocks > 0 ?
                                                static_cast<size_t>(kv_cache_config.device_cache_min_free_blocks) :
                                                0;
+    if (config.enable_device_cache) {
+        config.watermark_device = {kDefaultDeviceWatermarkRatio, 0};
+    }
+    if (disk_enabled) {
+        config.watermark_host = {kDefaultHostWatermarkRatio, 0};
+        config.watermark_disk = {kDefaultDiskWatermarkRatio, 0};
+    }
     config.memory_cache_size_mb          = kv_cache_config.memory_cache_size_mb;
     config.memory_cache_disk_size_mb     = kv_cache_config.memory_cache_disk_size_mb;
     config.memory_cache_disk_buffered_io = kv_cache_config.memory_cache_disk_buffered_io;

@@ -1150,6 +1150,53 @@ TEST_F(BlockTreeCacheFactoryTest, RejectsDiskCacheWithoutMemoryCacheBeforePublic
     expectFactoryRejects(config, allocator, kv_cache_config);
 }
 
+TEST_F(BlockTreeCacheFactoryTest, AppliesDefaultTierWatermarks) {
+    const auto config = makeSingleConfig();
+
+    // Device-only: the DEVICE ratio fallback is set; HOST/DISK stay disabled.
+    {
+        auto allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
+        ASSERT_NE(cache, nullptr);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_device.ratio, 0.9);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_host.ratio, 0.0);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_disk.ratio, 0.0);
+    }
+
+    // Host enabled without disk: HOST is the terminal tier, no demotion watermark.
+    {
+        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.enable_memory_cache        = true;
+        kv_cache_config.enable_tiered_memory_cache = true;
+        kv_cache_config.memory_cache_size_mb       = 1;
+        auto cache                                 = createBlockTreeCache(config, kv_cache_config, allocator);
+        ASSERT_NE(cache, nullptr);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_device.ratio, 0.9);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_host.ratio, 0.0);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_disk.ratio, 0.0);
+    }
+
+    // Disk enabled: HOST/DISK watermarks keep L2 headroom and avoid a saturated L3.
+    {
+        auto                                  allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_watermark_defaults");
+        KVCacheConfig                            kv_cache_config;
+        kv_cache_config.enable_memory_cache           = true;
+        kv_cache_config.enable_tiered_memory_cache    = true;
+        kv_cache_config.memory_cache_size_mb          = 1;
+        kv_cache_config.enable_memory_cache_disk      = true;
+        kv_cache_config.memory_cache_disk_size_mb     = 1;
+        kv_cache_config.memory_cache_disk_paths       = disk_dir.path;
+        kv_cache_config.memory_cache_disk_buffered_io = true;
+        auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{});
+        ASSERT_NE(cache, nullptr);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_device.ratio, 0.9);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_host.ratio, 0.9);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_disk.ratio, 0.9);
+    }
+}
+
 TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
     if (!block_tree_cache_test::cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
