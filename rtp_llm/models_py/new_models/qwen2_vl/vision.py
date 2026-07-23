@@ -157,12 +157,13 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def _apply_vision_rotary(
-    q: torch.Tensor, k: torch.Tensor, freqs: torch.Tensor
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     original_q_dtype = q.dtype
     original_k_dtype = k.dtype
-    cos = freqs.cos().unsqueeze(1).repeat(1, 1, 2).float()
-    sin = freqs.sin().unsqueeze(1).repeat(1, 1, 2).float()
     q_float = q.float()
     k_float = k.float()
     q = (q_float * cos) + (_rotate_half(q_float) * sin)
@@ -213,7 +214,8 @@ class Qwen2VisionAttention(RtpModule):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rotary_pos_emb: torch.Tensor,
+        rotary_cos: torch.Tensor,
+        rotary_sin: torch.Tensor,
         segment_lengths: tuple[int, ...],
         max_seqlen: int,
     ) -> torch.Tensor:
@@ -222,10 +224,12 @@ class Qwen2VisionAttention(RtpModule):
             seq_length, 3, self.num_heads, self.head_dim
         )
         q, k, v = qkv.permute(1, 0, 2, 3).unbind(0)
-        q, k = _apply_vision_rotary(q, k, rotary_pos_emb)
+        q, k = _apply_vision_rotary(q, k, rotary_cos, rotary_sin)
 
         flash_attn_varlen = (
-            _resolve_flash_attn_varlen() if hidden_states.is_cuda else None
+            _resolve_flash_attn_varlen()
+            if q.is_cuda and q.dtype in (torch.float16, torch.bfloat16)
+            else None
         )
         if flash_attn_varlen is not None:
             output = flash_attn_varlen(
@@ -292,14 +296,16 @@ class Qwen2VisionBlock(RtpModule):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rotary_pos_emb: torch.Tensor,
+        rotary_cos: torch.Tensor,
+        rotary_sin: torch.Tensor,
         segment_lengths: tuple[int, ...],
         max_seqlen: int,
     ) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
             cu_seqlens,
-            rotary_pos_emb,
+            rotary_cos,
+            rotary_sin,
             segment_lengths,
             max_seqlen,
         )
@@ -372,7 +378,7 @@ class Qwen2VisionTransformer(RtpModule):
                     f"grid ({t}, {h}, {w}) must align to spatial_merge_size="
                     f"{merge_size}"
                 )
-            h_positions = torch.arange(h).unsqueeze(1).expand(-1, w)
+            h_positions = torch.arange(h, device=self.device).unsqueeze(1).expand(-1, w)
             h_positions = (
                 h_positions.reshape(
                     h // merge_size,
@@ -383,7 +389,7 @@ class Qwen2VisionTransformer(RtpModule):
                 .permute(0, 2, 1, 3)
                 .flatten()
             )
-            w_positions = torch.arange(w).unsqueeze(0).expand(h, -1)
+            w_positions = torch.arange(w, device=self.device).unsqueeze(0).expand(h, -1)
             w_positions = (
                 w_positions.reshape(
                     h // merge_size,
@@ -397,7 +403,7 @@ class Qwen2VisionTransformer(RtpModule):
             position_ids.append(
                 torch.stack((h_positions, w_positions), dim=-1).repeat(t, 1)
             )
-        indices = torch.cat(position_ids, dim=0).to(self.device)
+        indices = torch.cat(position_ids, dim=0)
         max_grid_size = max(max(h, w) for _, h, w in grid_values)
         return self.rotary_pos_emb(max_grid_size)[indices].flatten(1)
 
@@ -428,6 +434,8 @@ class Qwen2VisionTransformer(RtpModule):
             )
         grid_values = [tuple(int(value) for value in row) for row in grid_thw.tolist()]
         rotary_pos_emb = self._rotary_positions(grid_values)
+        rotary_cos = rotary_pos_emb.cos().unsqueeze(1).repeat(1, 1, 2).float()
+        rotary_sin = rotary_pos_emb.sin().unsqueeze(1).repeat(1, 1, 2).float()
         expected_patches = sum(t * h * w for t, h, w in grid_values)
         if hidden_states.shape[0] != expected_patches:
             raise ValueError(
@@ -446,7 +454,8 @@ class Qwen2VisionTransformer(RtpModule):
             hidden_states = block(
                 hidden_states,
                 cu_seqlens,
-                rotary_pos_emb,
+                rotary_cos,
+                rotary_sin,
                 segment_lengths,
                 max_seqlen,
             )

@@ -24,6 +24,16 @@ _STACKED_EXPERT_RE = re.compile(
 )
 
 
+def _require_callable_name_filter(
+    model_filter: Optional[Callable[[str], bool]], label: str
+) -> Optional[Callable[[str], bool]]:
+    if isinstance(model_filter, nn.Module):
+        raise TypeError(f"{label} must be callable or None, not an nn.Module")
+    if model_filter is not None and not callable(model_filter):
+        raise TypeError(f"{label} must be callable or None")
+    return model_filter
+
+
 class _ExpertRangeFilter:
     """Select only this EP rank's per-expert checkpoint tensors."""
 
@@ -341,25 +351,17 @@ class NewModelLoader:
     def _model_checkpoint_name_filter(
         model: RtpModule,
     ) -> Optional[Callable[[str], bool]]:
-        model_filter = model.checkpoint_weight_name_filter()
-        if model_filter is not None and (
-            not callable(model_filter) or isinstance(model_filter, nn.Module)
-        ):
-            raise TypeError(
-                f"{type(model).__name__}.checkpoint_weight_name_filter() must "
-                "return a callable function or None, not an nn.Module"
-            )
-        return model_filter
+        return _require_callable_name_filter(
+            model.checkpoint_weight_name_filter(),
+            f"{type(model).__name__}.checkpoint_weight_name_filter() return value",
+        )
 
     @staticmethod
     def _checkpoint_name_filter(
         model_filter: Optional[Callable[[str], bool]],
         expert_filter: Optional[_ExpertRangeFilter],
     ) -> Optional[Callable[[str], bool]]:
-        if model_filter is not None and (
-            not callable(model_filter) or isinstance(model_filter, nn.Module)
-        ):
-            raise TypeError("model_filter must be callable or None")
+        model_filter = _require_callable_name_filter(model_filter, "model_filter")
         if model_filter is None and expert_filter is None:
             return None
 
@@ -517,7 +519,8 @@ class NewModelLoader:
             )
         started = time.time()
         expert_filter = self._expert_filter()
-        model_filter = self._model_checkpoint_name_filter(model)
+        model_filter = model.checkpoint_weight_name_filter()
+        name_filter = self._checkpoint_name_filter(model_filter, expert_filter)
         selected_files = weight_mapper.select_safetensor_files(
             self._resolved_model_path(), checkpoint_files, model_filter
         )
@@ -527,7 +530,6 @@ class NewModelLoader:
                 len(selected_files),
                 len(checkpoint_files),
             )
-        name_filter = self._checkpoint_name_filter(model_filter, expert_filter)
         model.load_weights(
             weight_mapper.get_all_weights(
                 selected_files,
