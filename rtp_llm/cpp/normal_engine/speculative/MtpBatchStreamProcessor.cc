@@ -425,6 +425,12 @@ void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&           
                             static_cast<int>(cpu_ids.data_ptr<int64_t>()[batch_idx_out * token_stride + token_stride - 1]) :
                             cpu_ids.data_ptr<int32_t>()[batch_idx_out * token_stride + token_stride - 1];
             spec_update_infos[stream_idx].draft_token = propose_token;
+            if (is_dspark_ && stream->queryPdSep()) {
+                // dspark PD: the wire needs the whole block-proposal row, not
+                // just the last token (no hidden chain to re-draft from).
+                spec_update_infos[stream_idx].draft_tokens_cpu =
+                    cpu_ids.narrow(0, batch_idx_out, 1).reshape({-1}).to(torch::kInt32);
+            }
         } else {
             spec_update_infos[stream_idx].draft_token = -1;
         }

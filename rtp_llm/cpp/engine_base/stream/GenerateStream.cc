@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
@@ -162,9 +163,7 @@ void GenerateStream::decPendingAsyncBookkeepingAndMaybeRelease() {
     int prev = async_bookkeeping_->count.fetch_sub(1, std::memory_order_acq_rel);
     RTP_LLM_CHECK(prev >= 1);
     if (prev == 1) {
-        {
-            std::lock_guard<std::mutex> lk(async_bookkeeping_->mu);
-        }
+        { std::lock_guard<std::mutex> lk(async_bookkeeping_->mu); }
         async_bookkeeping_->cv.notify_all();
         // The last worker performs any deferred release after its update lock
         // has unwound, so releaseResource() can safely re-enter mutex_.
@@ -793,7 +792,17 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     int* spec_tokens       = sp_output_buffer_->tokens.data_ptr<int>();
     spec_tokens[0]         = target_last_token;
     spec_tokens[1]         = update_info.draft_token;
-    propose_token_         = {target_last_token, update_info.draft_token};
+    if (update_info.draft_tokens_cpu.defined()) {
+        // dspark PD-disaggregate: ship the full propose row over the wire
+        // ({target, p1..pk}); multi-step MTP re-drafts on the decode node
+        // from the hidden chain and only needs one draft token.
+        const auto& row = update_info.draft_tokens_cpu;
+        propose_token_.assign(1 + row.numel(), target_last_token);
+        const int32_t* row_ptr = row.data_ptr<int32_t>();
+        std::copy(row_ptr, row_ptr + row.numel(), propose_token_.begin() + 1);
+    } else {
+        propose_token_ = {target_last_token, update_info.draft_token};
+    }
 
     sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
     sp_output_buffer_->all_probs     = update_info.draft_token_probs;

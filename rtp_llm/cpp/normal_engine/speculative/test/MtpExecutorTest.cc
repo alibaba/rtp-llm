@@ -29,6 +29,9 @@ struct MtpExecutorTestConfig {
     size_t num_layers          = 1;
     size_t gen_num_per_cycle   = 4;
     size_t vocab_size_override = 0;  // 0 means use vocab_size
+    // DSpark variant: SP_TYPE_DSPARK requires a valid mask token id.
+    SpeculativeType sp_type              = SP_TYPE_MTP;
+    int64_t         dspark_mask_token_id = -1;
 };
 
 template<typename T>
@@ -316,10 +319,12 @@ public:
         ResourceContext            resource_context;
         SpeculativeExecutionConfig sp_config;
 
-        model_config.max_seq_len    = test_config.max_seq_len;
-        model_config.vocab_size     = test_config.vocab_size;
-        model_config.num_layers     = test_config.num_layers;
-        sp_config.gen_num_per_cycle = test_config.gen_num_per_cycle;
+        model_config.max_seq_len          = test_config.max_seq_len;
+        model_config.vocab_size           = test_config.vocab_size;
+        model_config.num_layers           = test_config.num_layers;
+        sp_config.gen_num_per_cycle       = test_config.gen_num_per_cycle;
+        sp_config.type                    = test_config.sp_type;
+        sp_config.sp_dspark_mask_token_id = test_config.dspark_mask_token_id;
 
         resource_context.cache_manager =
             std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
@@ -358,7 +363,7 @@ public:
         mtp_model_params->push_back(std::move(mtp_params));
 
         auto propose_params = std::make_unique<ProposeModelEngineInitParams>(
-            SP_TYPE_MTP, sp_config.gen_num_per_cycle, std::move(mtp_model_params));
+            test_config.sp_type, sp_config.gen_num_per_cycle, std::move(mtp_model_params));
 
         // Create cache managers
         auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
@@ -907,6 +912,52 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 3}, {3, 1}, {0, 1, 0, 0}, {0.1, 0.11});
     checkOutput(stream2, {3, 2, 1, 3, 0, 2, 2, 1}, {1, 2}, {0.0, 1.0, 0.0, 0.0}, {1.5, 1.55});
+}
+
+TEST_F(MtpExecutorTest, testDSparkGrpcSideChannelSeeding) {
+    // Decode-node seeding for dspark PD separation: the wire carries the whole
+    // block proposal ({target, p1..pk} tokens + [1, k, vocab] probs, dummy
+    // hidden), and prepareGrpcMtpDeviceState must land the FULL [1, k] row in
+    // the device state (multi-step MTP only seeds one token + hidden chain).
+    const int64_t k     = 3;
+    const int64_t vocab = 4;
+
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle    = k;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 3;
+    auto components                  = createMtpExecutorComponents(test_config);
+
+    // Mimic DecodeRpcServer output: CPU tokens [1, k+1] + side-channel tensors.
+    auto stream =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    auto sp_buffer                         = std::make_shared<SpeculativeExecutorStreamOutput>();
+    sp_buffer->propose_step                = k;
+    sp_buffer->tokens                      = torch::tensor({2, 1, 2, 3}, torch::kInt32).reshape({1, k + 1});
+    sp_buffer->side_channel.propose_probs  = torch::rand({1, k, vocab}, torch::kFloat32);
+    sp_buffer->side_channel.propose_hidden = torch::empty({0}, torch::kFloat16);  // dspark wire dummy
+    stream->setSPOutputBuffer(sp_buffer);
+
+    std::list<GenerateStreamPtr> streams{stream};
+    TensorHolder                 holder;
+    components.executor->prepareGrpcMtpDeviceState(streams, holder);
+
+    const auto& propose_gpu = stream->getProposeTokensGpu();
+    ASSERT_TRUE(propose_gpu.defined());
+    EXPECT_EQ((std::vector<int64_t>{1, k}), propose_gpu.sizes().vec());
+    EXPECT_EQ((vector<int>{1, 2, 3}), toVec<int>(propose_gpu));
+
+    // anchor = wire target token, accept_len = 1
+    ASSERT_TRUE(stream->getAcceptTokensGpu().defined());
+    EXPECT_EQ(2, toVec<int>(stream->getAcceptTokensGpu())[0]);
+    EXPECT_EQ((vector<int>{1}), toVec<int>(stream->getAcceptLenGpu()));
+
+    // [1, k, vocab] draft probs reach the device state for rejection sampling
+    ASSERT_TRUE(stream->getDraftAllProbsGpu().defined());
+    EXPECT_EQ((std::vector<int64_t>{1, k, vocab}), stream->getDraftAllProbsGpu().sizes().vec());
+
+    // side channel consumed exactly once
+    EXPECT_FALSE(sp_buffer->side_channel.any());
 }
 
 }  // namespace rtp_llm

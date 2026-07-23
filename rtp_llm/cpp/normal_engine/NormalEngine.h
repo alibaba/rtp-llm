@@ -62,6 +62,7 @@ private:
 
     bool isMTPEagle() override;
     bool isEagle() override;
+    bool isDSpark() override;
 
 private:
     autil::ThreadPtr                              loop_thread_;

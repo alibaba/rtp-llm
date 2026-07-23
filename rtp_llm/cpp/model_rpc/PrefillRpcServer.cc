@@ -112,7 +112,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
     auto input                            = QueryConverter::transQuery(prefill_context.rpc_context.request);
     input->generate_config->pd_separation = true;
-    if (engine_->isMTPEagle()) {
+    if (engine_->isMTPEagle() || engine_->isDSpark()) {
         input->generate_config->force_disable_sp_run = false;
     } else {
         input->generate_config->force_disable_sp_run = true;
@@ -299,6 +299,13 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     if (engine_->isMTPEagle()) {
         RTP_LLM_CHECK_WITH_INFO(stream->getProposeToken().size() > 0,
                                 "mtp remote generate propose token should not be empty");
+    }
+    if (engine_->isDSpark()) {
+        // The dspark decode node verifies the wire proposal as-is, so the full
+        // {target, p1..pk} row must have been assembled by the prefill step.
+        RTP_LLM_CHECK_WITH_INFO(stream->getProposeToken().size() > 1,
+                                "dspark remote generate needs the full propose row, got %zu tokens",
+                                stream->getProposeToken().size());
     }
     generate_request.mutable_propose_token_ids()->CopyFrom(
         {stream->getProposeToken().begin(), stream->getProposeToken().end()});

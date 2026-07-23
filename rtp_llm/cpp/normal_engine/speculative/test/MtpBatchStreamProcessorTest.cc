@@ -846,4 +846,75 @@ TEST_F(MtpBatchStreamProcessorTest, updateMultiStepDraftSamplerOutput) {
     EXPECT_EQ(expect_all_probs, toVec<float>(sampler_output.all_probs));
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testDSparkPdPrefillProposeRow) {
+    // dspark PD separation: a pd_separation stream must get the FULL propose
+    // row {target, p1..pk} into propose_token_ (the gRPC-visible vector); a
+    // PDFUSION stream keeps the legacy {target, last_draft_token} pair.
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+
+    const int64_t k = 3;
+
+    model_config.max_seq_len          = 2048;
+    model_config.vocab_size           = 4;
+    model_config.num_layers           = 1;
+    sp_config.gen_num_per_cycle       = k;
+    sp_config.type                    = SP_TYPE_DSPARK;
+    sp_config.sp_dspark_mask_token_id = 3;
+
+    ResourceContext resource_context;
+    // pd_separation streams pin their KV blocks via the cache manager on the
+    // first-token update path (holdKVCacheForPDSep), so a real manager is
+    // required here (unlike the PDFUSION-only tests above).
+    resource_context.cache_manager =
+        std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                                        /*block_num=*/10,
+                                                                        /*tokens_per_block=*/2,
+                                                                        rtp_llm::TYPE_INT8,
+                                                                        /*local_head_num_kv=*/4,
+                                                                        /*size_per_head=*/32));
+    ASSERT_TRUE(resource_context.cache_manager->init());
+
+    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {2}, 1);
+    stream1->generateConfig()->pd_separation = true;  // PD wire stream
+    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
+
+    std::list<GenerateStreamPtr> streams;
+    streams.emplace_back(stream1);
+    streams.emplace_back(stream2);
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    StreamGroups stream_groups(streams);
+
+    MergedOutput target_output;
+    target_output.sampler_output.token_ids = torch::tensor({2, -1, 1, 1, 2, 3}, torch::kInt32).reshape({2, 3});
+
+    MergedOutput draft_output;
+    // dspark block proposal: [B, k] tokens + [B, k, vocab] probs, no hidden chain
+    draft_output.sampler_output.token_ids = torch::tensor({1L, 2L, 3L, 0L, 1L, 2L}, torch::kInt64).reshape({2, k});
+    draft_output.sampler_output.all_probs = torch::rand({2, k, 4}, torch::kFloat32);
+
+    auto status = processor.dispatchPrefill(stream_groups, std::move(target_output), std::move(draft_output));
+    EXPECT_TRUE(status.ok());
+
+    // stream1 (pd_separation): full row {target=1, 1, 2, 3}
+    EXPECT_EQ((vector<int>{1, 1, 2, 3}), stream1->getProposeToken());
+    // stream2 (PDFUSION): legacy pair {target=3, last draft token=2}
+    EXPECT_EQ((vector<int>{3, 2}), stream2->getProposeToken());
+
+    // [1, k, vocab] probs land per stream for the verify pass
+    auto probs1 = stream1->getSPOutputBuffer()->all_probs;
+    ASSERT_TRUE(probs1.defined());
+    EXPECT_EQ((std::vector<int64_t>{1, k, 4}), probs1.sizes().vec());
+    // dspark keeps no cross-step hidden chain
+    EXPECT_FALSE(stream1->getSPOutputBuffer()->hidden_states.defined());
+}
+
 }  // namespace rtp_llm

@@ -52,6 +52,11 @@ struct StreamSpecUpdateInfo {
     // shape: [propose_step] (the per-stream slice). When defined, PDFUSION
     // path will skip D2H and consume this GPU tensor directly.
     torch::Tensor draft_token_gpu;
+    // CPU mirror of the FULL propose row, [propose_step] int32. Only filled
+    // for dspark PD-disaggregate streams: the dspark draft proposes the whole
+    // block at once and keeps no hidden chain, so the decode node cannot
+    // re-derive the row from one token the way multi-step MTP does.
+    torch::Tensor draft_tokens_cpu;
 
     bool update_remote_generate = true;
     bool force_update_info      = false;

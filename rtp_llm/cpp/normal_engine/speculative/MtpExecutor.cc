@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <cstring>
 #include <sstream>
 #if USING_CUDA || USING_ROCM
 #include "rtp_llm/models_py/bindings/common/kernels/mtp_target_verify_prepare.h"
@@ -364,8 +365,13 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 "dspark phase-1a does not support the async decode switches "
                                 "(RTP_LLM_STREAM_ASYNC/RTP_LLM_DROP_BROAD_SYNC/RTP_LLM_MTP_ASYNC_PREPARE/"
                                 "RTP_LLM_DEVICE_INPUT)");
-        RTP_LLM_CHECK_WITH_INFO(role_type_ == RoleType::PDFUSION,
-                                "dspark phase-1a only supports PDFUSION role, got role_type=%d",
+        // PD separation (step 4): the prefill node ships {target, p1..pk} +
+        // [1, k, vocab] probs over the gRPC side channel; the ctx feature KV
+        // lives in the shared-pool draft layers and rides the standard KV
+        // transfer, so nothing else crosses the wire.
+        RTP_LLM_CHECK_WITH_INFO(role_type_ == RoleType::PDFUSION || role_type_ == RoleType::PREFILL
+                                    || role_type_ == RoleType::DECODE,
+                                "dspark supports PDFUSION/PREFILL/DECODE roles, got role_type=%d",
                                 static_cast<int>(role_type_));
         RTP_LLM_CHECK_WITH_INFO(!params.parallelism_config.prefill_cp_config.is_enabled()
                                     && !params.parallelism_config.prefill_cp_config.is_prefill_enabled(),
@@ -603,7 +609,21 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
         RTP_LLM_CHECK_WITH_INFO(propose_probs_t.defined() && propose_probs_t.numel() > 0,
                                 "[mtp-grpc] propose_probs must be non-empty, stream=%ld",
                                 stream->streamId());
-        if (propose_step_ > 1) {
+        if (is_dspark_) {
+            // The prefill node ships the whole block proposal: {target, p1..pk}
+            // tokens plus [1, k, vocab] draft probs. No hidden chain crosses
+            // the wire (the ctx feature KV rides the standard KV transfer).
+            RTP_LLM_CHECK_WITH_INFO(sp_output_buffer->tokens.size(1) == static_cast<int64_t>(propose_step_) + 1,
+                                    "[dspark-grpc] wire tokens must be [1, k+1], got %ld cols (k=%zu), stream=%ld",
+                                    (long)sp_output_buffer->tokens.size(1),
+                                    propose_step_,
+                                    stream->streamId());
+            RTP_LLM_CHECK_WITH_INFO(propose_probs_t.dim() == 3
+                                        && propose_probs_t.size(1) == static_cast<int64_t>(propose_step_),
+                                    "[dspark-grpc] propose_probs must be [1, k, vocab], got dim=%ld, stream=%ld",
+                                    (long)propose_probs_t.dim(),
+                                    stream->streamId());
+        } else if (propose_step_ > 1) {
             const int64_t hidden_dim   = propose_hidden_t.defined() ? propose_hidden_t.dim() : -1;
             const int64_t hidden_numel = propose_hidden_t.defined() ? propose_hidden_t.numel() : -1;
             const bool    valid_hidden =
@@ -619,15 +639,20 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
         sp_output_buffer->all_probs     = to_cuda_async(propose_probs_t);
         sp_output_buffer->hidden_states = to_cuda_async(propose_hidden_t);
 
-        auto       accept_len_cpu     = torch::ones({1}, pinned_i32);
-        auto       accept_tokens_cpu  = torch::zeros({1, static_cast<int64_t>(propose_step_ + 1)}, pinned_i32);
-        auto       propose_tokens_cpu = torch::empty({1}, pinned_i32);
-        auto       next_seq_len_cpu   = torch::empty({1}, pinned_i32);
-        auto*      token_ptr          = sp_output_buffer->tokens.data_ptr<int32_t>();
-        const auto seq_length         = stream->seqLength();
-        accept_tokens_cpu.data_ptr<int32_t>()[0]  = token_ptr[0];
-        propose_tokens_cpu.data_ptr<int32_t>()[0] = token_ptr[1];
-        next_seq_len_cpu.data_ptr<int32_t>()[0]   = seq_length;
+        auto  accept_len_cpu    = torch::ones({1}, pinned_i32);
+        auto  accept_tokens_cpu = torch::zeros({1, static_cast<int64_t>(propose_step_ + 1)}, pinned_i32);
+        auto  next_seq_len_cpu  = torch::empty({1}, pinned_i32);
+        auto* token_ptr         = sp_output_buffer->tokens.data_ptr<int32_t>();
+        // dspark needs the full [1, k] propose row (block proposal, verified
+        // as-is); multi-step MTP re-drafts locally and seeds one token.
+        auto propose_tokens_cpu = is_dspark_ ? torch::empty({1, static_cast<int64_t>(propose_step_)}, pinned_i32) :
+                                               torch::empty({1}, pinned_i32);
+        std::memcpy(propose_tokens_cpu.data_ptr<int32_t>(),
+                    token_ptr + 1,
+                    static_cast<size_t>(propose_tokens_cpu.numel()) * sizeof(int32_t));
+        const auto seq_length                    = stream->seqLength();
+        accept_tokens_cpu.data_ptr<int32_t>()[0] = token_ptr[0];
+        next_seq_len_cpu.data_ptr<int32_t>()[0]  = seq_length;
 
         auto accept_len_gpu     = to_cuda_async(accept_len_cpu);
         auto accept_tokens_gpu  = to_cuda_async(accept_tokens_cpu);
@@ -1117,7 +1142,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             // NCCL receive below must not write into.
             const auto& aux                = model_output.aux_hidden_states;
             model_input.last_hidden_states = torch::empty_like(aux.reshape({aux.size(0), -1}));
-            const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+            const auto cuda_i32            = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
             model_input.dspark_ctx_starts  = torch::empty({(int64_t)batch_size}, cuda_i32);
             model_input.dspark_ctx_lengths = torch::empty({(int64_t)batch_size}, cuda_i32);
         } else {

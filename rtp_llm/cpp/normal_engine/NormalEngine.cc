@@ -529,6 +529,13 @@ bool NormalEngine::isEagle() {
     return false;
 }
 
+bool NormalEngine::isDSpark() {
+    if (propose_params_) {
+        return propose_params_->sp_type == SP_TYPE_DSPARK;
+    }
+    return false;
+}
+
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
     if (isMTPEagle()) {
         int propose_step   = sp_config.gen_num_per_cycle;
