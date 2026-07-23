@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/api_server/ApiServerMetrics.h"
 #include "rtp_llm/cpp/api_server/ErrorResponse.h"
 #include "rtp_llm/cpp/api_server/AccessLogWrapper.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
@@ -105,6 +106,16 @@ private:
     Type        type_;
     std::string message_;
 };
+
+inline HttpApiServerException streamErrorToHttpException(const ErrorInfo& status) {
+    auto http_error = HttpApiServerException::UNKNOWN_ERROR;
+    if (status.code() == ErrorCode::GENERATE_TIMEOUT) {
+        http_error = HttpApiServerException::GENERATE_TIMEOUT_ERROR;
+    } else if (status.code() == ErrorCode::CANCELLED) {
+        http_error = HttpApiServerException::CANCELLED_ERROR;
+    }
+    return HttpApiServerException(http_error, status.ToString());
+}
 
 template<typename T>
 inline std::string formatException(const T& e) {
