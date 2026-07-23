@@ -155,18 +155,6 @@ public class MetricConstant {
     public static final String CACHE_THEORY_HIT_RATIO = "app.cache.theory.hit.ratio";
 
     /**
-     * Per-engine candidate routing cache-match hit tokens. Tagged by role, engineIp.
-     */
-    public static final String CACHE_ROUTING_CANDIDATE_MATCH_HIT_TOKENS =
-            "app.cache.routing.candidate.match.hit.tokens";
-
-    /**
-     * Per-engine candidate routing cache-match input tokens. Tagged by role, engineIp.
-     */
-    public static final String CACHE_ROUTING_CANDIDATE_MATCH_TOTAL_TOKENS =
-            "app.cache.routing.candidate.match.total.tokens";
-
-    /**
      * Selected-engine routing cache-match hit tokens. Tagged by role, engineIp.
      */
     public static final String CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS =
@@ -177,6 +165,12 @@ public class MetricConstant {
      */
     public static final String CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS =
             "app.cache.routing.selected.match.total.tokens";
+
+    /**
+     * Request-level maximum candidate cache-match hit tokens. Tagged by role and selected engineIp.
+     */
+    public static final String CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS =
+            "app.cache.routing.candidate.max.hit.tokens";
 
     /**
      * Cache request total count

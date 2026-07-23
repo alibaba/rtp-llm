@@ -23,8 +23,7 @@ import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
-import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MATCH_HIT_TOKENS;
-import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MATCH_TOTAL_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
@@ -91,10 +90,9 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_THEORY_HIT_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
-        monitor.register(CACHE_ROUTING_CANDIDATE_MATCH_HIT_TOKENS, FlexMetricType.GAUGE);
-        monitor.register(CACHE_ROUTING_CANDIDATE_MATCH_TOTAL_TOKENS, FlexMetricType.GAUGE);
         monitor.register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.GAUGE);
         monitor.register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.GAUGE);
+        monitor.register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.GAUGE);
         monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS);
 
         // Cache service response time metrics
@@ -170,21 +168,6 @@ public class CacheMetricsReporter {
     }
 
     /**
-     * Report request-level routing cache-match token metrics for candidate engines.
-     */
-    public void reportRoutingCandidateCacheMatchMetrics(RoleType roleType,
-                                                        String engineIp,
-                                                        long hitTokens,
-                                                        long totalTokens) {
-        reportRoutingCacheMatchMetrics(CACHE_ROUTING_CANDIDATE_MATCH_HIT_TOKENS,
-                CACHE_ROUTING_CANDIDATE_MATCH_TOTAL_TOKENS,
-                roleType,
-                engineIp,
-                hitTokens,
-                totalTokens);
-    }
-
-    /**
      * Report request-level routing cache-match token metrics for the selected engine.
      */
     public void reportRoutingSelectedCacheMatchMetrics(RoleType roleType,
@@ -197,6 +180,23 @@ public class CacheMetricsReporter {
                 engineIp,
                 hitTokens,
                 totalTokens);
+    }
+
+    /**
+     * Report the request-level best candidate using the selected engine tags.
+     */
+    public void reportRoutingCandidateMaxCacheMatchMetrics(RoleType roleType,
+                                                           String selectedEngineIp,
+                                                           long hitTokens) {
+        if (roleType == null) {
+            return;
+        }
+
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", roleType.name(),
+                "engineIp", selectedEngineIp == null ? "" : selectedEngineIp
+        );
+        monitor.report(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, tags, hitTokens);
     }
 
     private void reportRoutingCacheMatchMetrics(String hitMetric,

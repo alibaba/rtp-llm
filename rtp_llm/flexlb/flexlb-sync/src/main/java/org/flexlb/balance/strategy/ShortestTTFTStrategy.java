@@ -126,7 +126,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
 
         // Calculate cache match results for each engine
         Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
-        reportCandidateRoutingCacheMatchMetrics(roleType, availableWorkers, cacheMatchResults, balanceContext.getRequest());
+        long candidateMaxHitTokens = reportCandidateRoutingCacheMatchMetrics(
+                availableWorkers, cacheMatchResults, balanceContext.getRequest());
 
         List<ScoredWorker> scoredWorkers = scoreWorkers(availableWorkers, cacheMatchResults, seqLen);
 
@@ -139,7 +140,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
-        return finalizeWorkerSelection(bestWorker, balanceContext, roleType, requestId, seqLen, cacheMatchResults);
+        return finalizeWorkerSelection(
+                bestWorker, balanceContext, roleType, requestId, seqLen, cacheMatchResults, candidateMaxHitTokens);
     }
 
     /**
@@ -228,12 +230,14 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                                                  RoleType roleType,
                                                  long requestId,
                                                  long seqLen,
-                                                 Map<String, Integer> cacheMatchResults) {
+                                                 Map<String, Integer> cacheMatchResults,
+                                                 long candidateMaxHitTokens) {
         WorkerStatus workerStatus = selectedWorker.worker();
 
         logWorkerSelection(selectedWorker, roleType);
         reportCacheHitMetrics(roleType, workerStatus.getIp(), selectedWorker.hitCacheTokens(), seqLen);
-        reportSelectedRoutingCacheMatchMetrics(roleType, workerStatus, cacheMatchResults, balanceContext.getRequest());
+        reportSelectedRoutingCacheMatchMetrics(
+                roleType, workerStatus, cacheMatchResults, balanceContext.getRequest(), candidateMaxHitTokens);
 
         TaskInfo task = createTaskInfo(requestId, balanceContext.getRequest().getSeqLen(), selectedWorker.hitCacheTokens());
         workerStatus.putLocalTask(requestId, task);
@@ -270,34 +274,32 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         engineHealthReporter.reportCacheHitMetrics(roleType, ip, hitCacheTokens, hitRate);
     }
 
-    private void reportCandidateRoutingCacheMatchMetrics(RoleType roleType,
-                                                         List<WorkerStatus> availableWorkers,
+    private long reportCandidateRoutingCacheMatchMetrics(List<WorkerStatus> availableWorkers,
                                                          Map<String, Integer> cacheMatchResults,
                                                          Request request) {
         if (MapUtils.isEmpty(cacheMatchResults) || request == null || request.getSeqLen() <= 0L) {
-            return;
+            return 0L;
         }
 
         Map<String, WorkerStatus> workerStatusByIpPort = availableWorkers.stream()
                 .collect(Collectors.toMap(WorkerStatus::getIpPort, workerStatus -> workerStatus, (left, right) -> left));
+        long candidateMaxHitTokens = 0L;
         for (Map.Entry<String, Integer> entry : cacheMatchResults.entrySet()) {
             String engineIpPort = entry.getKey();
             long hitTokens = calculateRoutingCacheMatchTokens(
                     entry.getValue(),
                     request,
                     workerStatusByIpPort.get(engineIpPort));
-            engineHealthReporter.reportRoutingCandidateCacheMatchMetrics(
-                    roleType,
-                    engineIp(engineIpPort),
-                    hitTokens,
-                    request.getSeqLen());
+            candidateMaxHitTokens = Math.max(candidateMaxHitTokens, hitTokens);
         }
+        return candidateMaxHitTokens;
     }
 
     private void reportSelectedRoutingCacheMatchMetrics(RoleType roleType,
                                                         WorkerStatus selectedWorker,
                                                         Map<String, Integer> cacheMatchResults,
-                                                        Request request) {
+                                                        Request request,
+                                                        long candidateMaxHitTokens) {
         if (selectedWorker == null || cacheMatchResults == null || request == null || request.getSeqLen() <= 0L) {
             return;
         }
@@ -311,6 +313,10 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 selectedWorker.getIp(),
                 hitTokens,
                 request.getSeqLen());
+        engineHealthReporter.reportRoutingCandidateMaxCacheMatchMetrics(
+                roleType,
+                selectedWorker.getIp(),
+                candidateMaxHitTokens);
     }
 
     /**
@@ -538,11 +544,4 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         return Math.min(request.getSeqLen(), hitTokens);
     }
 
-    private String engineIp(String engineIpPort) {
-        if (engineIpPort == null) {
-            return "";
-        }
-        int delimiter = engineIpPort.indexOf(':');
-        return delimiter < 0 ? engineIpPort : engineIpPort.substring(0, delimiter);
-    }
 }

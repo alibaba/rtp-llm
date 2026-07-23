@@ -373,18 +373,18 @@ public class EngineHealthReporter {
         cacheMetricsReporter.reportCacheHitMetrics(roleType, engineIp, hitTokens, hitRatio);
     }
 
-    public void reportRoutingCandidateCacheMatchMetrics(RoleType roleType,
-                                                        String engineIp,
-                                                        long hitTokens,
-                                                        long totalTokens) {
-        cacheMetricsReporter.reportRoutingCandidateCacheMatchMetrics(roleType, engineIp, hitTokens, totalTokens);
-    }
-
     public void reportRoutingSelectedCacheMatchMetrics(RoleType roleType,
                                                        String engineIp,
                                                        long hitTokens,
                                                        long totalTokens) {
         cacheMetricsReporter.reportRoutingSelectedCacheMatchMetrics(roleType, engineIp, hitTokens, totalTokens);
+    }
+
+    public void reportRoutingCandidateMaxCacheMatchMetrics(RoleType roleType,
+                                                           String selectedEngineIp,
+                                                           long hitTokens) {
+        cacheMetricsReporter.reportRoutingCandidateMaxCacheMatchMetrics(
+                roleType, selectedEngineIp, hitTokens);
     }
 
     public void reportArriveDelayTime(BalanceContext ctx) {
