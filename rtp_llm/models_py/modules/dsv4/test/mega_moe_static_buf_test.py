@@ -95,5 +95,66 @@ class TestMegaMoeBufCodeChange(unittest.TestCase):
         self.assertEqual(out.shape, (T, D))
 
 
+class TestMegaBufferGraphBakedGate(unittest.TestCase):
+    """Sleep-time buffer releases must be NO-OPS when CUDA graphs are captured.
+
+    Both Mega MoE buffers (symm ``_mega_buf`` + output staging ``_mega_y``) have
+    their device pointers baked into the captured decode graph, so freeing them at
+    sleep dangles the VA a post-wake replay writes into (illegal access, both
+    ranks -> SIGABRT). When graphs are NOT captured (prefill) they must still be
+    freed as before. GPU-free: seeds fake cache/registry entries and toggles the
+    flag directly.
+    """
+
+    def setUp(self):
+        from rtp_llm.models_py.modules.dsv4.moe import mega_buf
+
+        self.mega_buf = mega_buf
+        self._saved = mega_buf.mega_buffers_graph_baked()
+        self._key = ("cpu", 8, torch.bfloat16)
+        self._buf = torch.empty((4, 8), dtype=torch.bfloat16)
+        mega_buf._MEGA_OUTPUT_CACHE.clear()
+        mega_buf._MEGA_OUTPUT_CACHE[self._key] = self._buf
+
+        class _FakeStrat:
+            pass
+
+        self.strat = _FakeStrat()
+        self.strat._mega_y = self._buf
+        self.strat._mega_buf = object()  # opaque; must not be touched when baked
+        mega_buf._MEGA_STRATEGY_REGISTRY.add(self.strat)
+
+    def tearDown(self):
+        self.mega_buf.set_mega_buffers_graph_baked(self._saved)
+        self.mega_buf._MEGA_OUTPUT_CACHE.clear()
+        try:
+            self.mega_buf._MEGA_STRATEGY_REGISTRY.discard(self.strat)
+        except Exception:
+            pass
+
+    def test_output_release_is_noop_when_graph_baked(self):
+        self.mega_buf.set_mega_buffers_graph_baked(True)
+        self.assertEqual(self.mega_buf.release_mega_output_buffers(), (0, 0.0))
+        # Buffer + per-strategy ref stay resident across sleep.
+        self.assertEqual(len(self.mega_buf._MEGA_OUTPUT_CACHE), 1)
+        self.assertIsNotNone(self.strat._mega_y)
+        # Footprint is still reportable for the sleep-reclaim note.
+        self.assertGreater(self.mega_buf.mega_output_buffer_gib(), 0.0)
+
+    def test_output_release_frees_when_not_graph_baked(self):
+        self.mega_buf.set_mega_buffers_graph_baked(False)
+        entries, gib = self.mega_buf.release_mega_output_buffers()
+        self.assertEqual(entries, 1)
+        self.assertGreater(gib, 0.0)
+        self.assertEqual(len(self.mega_buf._MEGA_OUTPUT_CACHE), 0)
+        self.assertIsNone(self.strat._mega_y)
+
+    def test_symm_release_is_noop_when_graph_baked(self):
+        self.mega_buf.set_mega_buffers_graph_baked(True)
+        # Returns early before dereferencing the opaque _mega_buf / cache.
+        self.assertEqual(self.mega_buf.release_mega_symm_buffers(), 0.0)
+        self.assertIsNotNone(self.strat._mega_buf)
+
+
 if __name__ == "__main__":
     unittest.main()

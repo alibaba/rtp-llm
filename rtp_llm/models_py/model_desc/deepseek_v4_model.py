@@ -316,6 +316,18 @@ class DeepSeekV4Model(GptModelBase):
             device_resource_config=device_resource_config,
         )
 
+        # When the decode forward is captured into a CUDA graph, the Mega MoE
+        # symm + output staging buffers get their device pointers baked into the
+        # graph, so they must stay resident across a sleep/wake cycle (a post-wake
+        # replay writes into them and Python's lazy re-create never runs during
+        # replay). Record it once so the sleep reclaim keeps them instead of
+        # freeing + unmapping their VA. See mega_buf._MEGA_BUFFERS_GRAPH_BAKED.
+        from rtp_llm.models_py.modules.dsv4.moe import mega_buf
+
+        mega_buf.set_mega_buffers_graph_baked(
+            bool(getattr(py_hw_kernel_config, "enable_cuda_graph", False))
+        )
+
         # Build V4Transformer with matching args.
         args = _args_from_model_config(model_config, max_generate_batch_size)
         self._max_generate_batch_size = int(max_generate_batch_size)
