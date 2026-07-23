@@ -1369,6 +1369,34 @@ class AiterDecodeAttnOpTriton(AiterDecodeAttnOpBase):
         )
         return output.view(num_seqs, -1)
 
+def _try_embedding_fast_path(
+    fmha_input: Any,
+    fmha_impl: Any,
+    fmha_params: Any,
+) -> Optional[torch.Tensor]:
+    """Embedding fast path: extract packed QKV from C++ return and call flash_attn_varlen directly.
+
+    C++ returns (packed_qkv, empty_k, empty_v) for embedding models.
+    Skips FP8 inputs which require a dedicated attention path.
+    Returns attention output if fast path is taken, None otherwise.
+    """
+    packed_qkv = fmha_input[0] if isinstance(fmha_input, tuple) else fmha_input
+    if packed_qkv.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+        return None
+
+    token_q_num = getattr(fmha_params, "token_q_num", packed_qkv.shape[0])
+    token_kv_num = getattr(fmha_params, "token_kv_num", packed_qkv.shape[0])
+    q, k, v = split_raw_qkv(
+        packed_qkv, fmha_impl.head_num, fmha_impl.head_num_kv,
+        fmha_impl.head_dim, token_q_num, token_kv_num,
+    )
+    return aiter.flash_attn_varlen_func(
+        q, k, v,
+        fmha_params.cu_seqlens_q, fmha_params.cu_seqlens_k,
+        fmha_params.max_seqlen_q, fmha_params.max_seqlen_k,
+        dropout_p=0.0, causal=fmha_impl.is_causal,
+    ).reshape(token_q_num, fmha_impl.head_num * fmha_impl.head_dim)
+
 
 class AiterPrefillImplAsm(FMHAImplBase):
     """Aiter prefill attention implementation using ASM."""
@@ -1406,13 +1434,17 @@ class AiterPrefillImplAsm(FMHAImplBase):
         layer_idx: int = 0,
     ) -> torch.Tensor:
         if kv_cache is None:
-            # Embedding models still need positional encoding even without a KV cache.
             if self.need_rope_kv_cache:
                 fmha_input = self.rope_kvcache_impl.forward(
                     qkv, kv_cache, self.rope_params
                 )
             else:
                 fmha_input = qkv
+
+            fast_out = _try_embedding_fast_path(fmha_input, self.fmha_impl, self.fmha_params)
+            if fast_out is not None:
+                return fast_out
+
             return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
         # Apply RoPE and KV Cache processing
@@ -1466,13 +1498,17 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
         layer_idx: int = 0,
     ) -> torch.Tensor:
         if kv_cache is None:
-            # Embedding models still need positional encoding even without a KV cache.
             if self.need_rope_kv_cache:
                 fmha_input = self.rope_kvcache_impl.forward(
                     qkv, kv_cache, self.rope_params
                 )
             else:
                 fmha_input = qkv
+
+            fast_out = _try_embedding_fast_path(fmha_input, self.fmha_impl, self.fmha_params)
+            if fast_out is not None:
+                return fast_out
+
             return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
         # Apply RoPE and KV Cache processing
