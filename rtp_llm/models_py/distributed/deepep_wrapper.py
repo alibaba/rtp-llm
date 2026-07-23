@@ -63,6 +63,7 @@ class DeepEPMode(IntEnum):
     NORMAL = auto()
     LOW_LATENCY = auto()
     LOW_LATENCY_M2N = auto()
+    ELASTIC = auto()
 
 
 @dataclass
@@ -101,6 +102,15 @@ class DeepepWrapperConfig:
     ffn_dp_size: int = 0
     ll_num_max_token_per_rank: int = 0
 
+    use_elastic: bool = False
+    elastic_allow_hybrid_mode: bool = True
+    elastic_prefer_overlap_with_compute: bool = True
+    elastic_allow_multiple_reduction: bool = False
+    elastic_do_expand: bool = True
+    elastic_do_cpu_sync: bool = True
+    use_fp8: bool = False
+    max_seq_len: int = 0
+
     @classmethod
     def from_config_adapter(
         cls, config_adapter: MoEConfigAdapter, ll_num_max_token_per_rank: int = 0
@@ -117,6 +127,20 @@ class DeepepWrapperConfig:
         parallelism_config = config_adapter.parallelism_config
         moe_config = config_adapter.moe_config
         ffn_config = parallelism_config.ffn_disaggregate_config
+
+        quant_config = getattr(config_adapter, "quant_config", None)
+        use_fp8 = quant_config is not None and quant_config.get_method() in (
+            "FP8_PER_BLOCK",
+            "FP8_PER_TENSOR_COMPRESSED",
+            "FP8_DYNAMIC_PER_TENSOR",
+        )
+
+        use_elastic = bool(int(os.environ.get("USE_DEEPEP_ELASTIC", "0")))
+        if use_elastic and moe_config.use_deepep_low_latency:
+            logging.warning(
+                "USE_DEEPEP_LOW_LATENCY=1 is IGNORED when USE_DEEPEP_ELASTIC=1. "
+                "Use DEEPEP_ELASTIC_DO_CPU_SYNC=0 to opt-in 3D batched executor path."
+            )
 
         return cls(
             # Parallelism parameters
@@ -144,6 +168,24 @@ class DeepepWrapperConfig:
             ffn_tp_size=(ffn_config.ffn_tp_size if ffn_config else 0),
             ffn_dp_size=(ffn_config.ffn_dp_size if ffn_config else 0),
             ll_num_max_token_per_rank=ll_num_max_token_per_rank,
+            use_elastic=bool(int(os.environ.get("USE_DEEPEP_ELASTIC", "0"))),
+            elastic_allow_hybrid_mode=bool(
+                int(os.environ.get("DEEPEP_ELASTIC_ALLOW_HYBRID", "1"))
+            ),
+            elastic_prefer_overlap_with_compute=bool(
+                int(os.environ.get("DEEPEP_ELASTIC_PREFER_OVERLAP", "1"))
+            ),
+            elastic_allow_multiple_reduction=bool(
+                int(os.environ.get("DEEPEP_ELASTIC_ALLOW_MULTIPLE_REDUCTION", "0"))
+            ),
+            elastic_do_expand=bool(
+                int(os.environ.get("DEEPEP_ELASTIC_DO_EXPAND", "1"))
+            ),
+            elastic_do_cpu_sync=bool(
+                int(os.environ.get("DEEPEP_ELASTIC_DO_CPU_SYNC", "1"))
+            ),
+            use_fp8=use_fp8,
+            max_seq_len=int(getattr(model_config, "max_seq_len", 0)),
         )
 
     def equal(self, other: "DeepepWrapperConfig") -> bool:
@@ -174,6 +216,16 @@ class DeepepWrapperConfig:
             and self.ffn_tp_size == other.ffn_tp_size
             and self.ffn_dp_size == other.ffn_dp_size
             and self.ll_num_max_token_per_rank == other.ll_num_max_token_per_rank
+            and self.use_elastic == other.use_elastic
+            and self.elastic_allow_hybrid_mode == other.elastic_allow_hybrid_mode
+            and self.elastic_prefer_overlap_with_compute
+            == other.elastic_prefer_overlap_with_compute
+            and self.elastic_allow_multiple_reduction
+            == other.elastic_allow_multiple_reduction
+            and self.elastic_do_expand == other.elastic_do_expand
+            and self.elastic_do_cpu_sync == other.elastic_do_cpu_sync
+            and self.use_fp8 == other.use_fp8
+            and self.max_seq_len == other.max_seq_len
         )
 
     @staticmethod
@@ -230,7 +282,28 @@ class DeepepWrapperConfig:
 
     def __str__(self) -> str:
         """Return a string representation of the DeepepWrapperConfig."""
-        return f"DeepepWrapperConfig(ep_rank={self.ep_rank}, ep_size={self.ep_size}, tp_size={self.tp_size}, local_rank={self.local_rank}, world_size={self.world_size}, hidden_size={self.hidden_size}, expert_num={self.expert_num}, moe_k={self.moe_k}, deep_ep_num_sm={self.deep_ep_num_sm}, use_deepep_low_latency={self.use_deepep_low_latency}, use_deepep_internode={self.use_deepep_internode}, ll_num_max_token={self.ll_num_max_token}, enable_ffn_disaggregate={self.enable_ffn_disaggregate}, attention_tp_size={self.attention_tp_size}, attention_dp_size={self.attention_dp_size}, ffn_tp_size={self.ffn_tp_size}, ffn_dp_size={self.ffn_dp_size}, ll_num_max_token_per_rank={self.ll_num_max_token_per_rank})"
+        return (
+            f"DeepepWrapperConfig(ep_rank={self.ep_rank}, ep_size={self.ep_size}, "
+            f"tp_size={self.tp_size}, local_rank={self.local_rank}, "
+            f"world_size={self.world_size}, hidden_size={self.hidden_size}, "
+            f"expert_num={self.expert_num}, moe_k={self.moe_k}, "
+            f"deep_ep_num_sm={self.deep_ep_num_sm}, "
+            f"use_deepep_low_latency={self.use_deepep_low_latency}, "
+            f"use_deepep_internode={self.use_deepep_internode}, "
+            f"ll_num_max_token={self.ll_num_max_token}, "
+            f"enable_ffn_disaggregate={self.enable_ffn_disaggregate}, "
+            f"attention_tp_size={self.attention_tp_size}, "
+            f"attention_dp_size={self.attention_dp_size}, "
+            f"ffn_tp_size={self.ffn_tp_size}, ffn_dp_size={self.ffn_dp_size}, "
+            f"ll_num_max_token_per_rank={self.ll_num_max_token_per_rank}, "
+            f"use_elastic={self.use_elastic}, "
+            f"elastic_allow_hybrid_mode={self.elastic_allow_hybrid_mode}, "
+            f"elastic_prefer_overlap_with_compute={self.elastic_prefer_overlap_with_compute}, "
+            f"elastic_allow_multiple_reduction={self.elastic_allow_multiple_reduction}, "
+            f"elastic_do_expand={self.elastic_do_expand}, "
+            f"elastic_do_cpu_sync={self.elastic_do_cpu_sync}, "
+            f"use_fp8={self.use_fp8})"
+        )
 
 
 class DeepEPWrapper:
@@ -387,6 +460,16 @@ class DeepEPWrapper:
         return self._buffer
 
     @property
+    def elastic_buffer(self):
+        """Get the DeepEPv2 ElasticBuffer (only valid in ELASTIC mode)."""
+        assert (
+            self._mode == DeepEPMode.ELASTIC
+        ), f"elastic_buffer requested in non-elastic mode {self._mode}"
+        if self._buffer is None:
+            raise RuntimeError("DeepEP ElasticBuffer is not initialized")
+        return self._buffer
+
+    @property
     def mode(self) -> DeepEPMode:
         """Get the DeepEP mode."""
         return self._mode
@@ -448,6 +531,9 @@ class DeepEPWrapper:
             Tuple of (DeepEPMode, DeepEPBuffer)
         """
         config = self._config
+
+        if config.use_elastic:
+            return DeepEPMode.ELASTIC, self._init_elastic_buffer(group)
 
         if config.use_deepep_low_latency and config.enable_ffn_disaggregate:
             if self._use_accl_ep:
@@ -603,9 +689,44 @@ class DeepEPWrapper:
 
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
+    def _init_elastic_buffer(self, group: ProcessGroup):
+        from deep_ep import ElasticBuffer
+
+        config = self._config
+        num_max_tokens_per_rank = int(os.environ.get("DEEPEP_ELASTIC_MAX_TOKENS_PER_RANK", "65536"))
+
+        if config.local_rank == 0:
+            print(
+                "[DeepEP] Allocating ElasticBuffer, "
+                f"num_max_tokens_per_rank={num_max_tokens_per_rank}, "
+                f"hidden={config.hidden_size}, num_topk={config.moe_k}, "
+                f"use_fp8={config.use_fp8}, "
+                f"allow_hybrid_mode={config.elastic_allow_hybrid_mode}, "
+                f"prefer_overlap_with_compute={config.elastic_prefer_overlap_with_compute}, "
+                f"allow_multiple_reduction={config.elastic_allow_multiple_reduction}",
+                flush=True,
+            )
+
+        return ElasticBuffer(
+            group=group,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
+            hidden=config.hidden_size,
+            num_topk=config.moe_k,
+            use_fp8_dispatch=config.use_fp8,
+            allow_hybrid_mode=config.elastic_allow_hybrid_mode,
+            prefer_overlap_with_compute=config.elastic_prefer_overlap_with_compute,
+            allow_multiple_reduction=config.elastic_allow_multiple_reduction,
+            explicitly_destroy=True,
+        )
+
     def _destroy_buffer(self) -> None:
         """Destroy the DeepEP buffer and free resources."""
         if self._buffer is not None:
+            if self._mode == DeepEPMode.ELASTIC and hasattr(self._buffer, "destroy"):
+                try:
+                    self._buffer.destroy()
+                except Exception as exc:  # noqa: BLE001
+                    logging.warning(f"ElasticBuffer.destroy() failed: {exc}")
             del self._buffer
             self._buffer = None
         gc.collect()
