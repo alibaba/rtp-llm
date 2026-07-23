@@ -245,6 +245,7 @@ public:
                                 const std::string&      error_msg  = "");
 
     void         reportError(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
+    void         reportErrorWithoutLock(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
     bool         hasEvent(StreamEvents::EventType event) const;
     virtual bool hasError() const;
     ErrorInfo    statusInfo();
