@@ -195,12 +195,10 @@ class ShortestTTFTStrategyTest {
 
         Assertions.assertTrue(result.isSuccess(), "Result should be successful but got: " + result.getMessage());
         Assertions.assertEquals("127.0.0.2", result.getServerIp());
-        Mockito.verify(engineHealthReporter).reportRoutingCandidateCacheMatchMetrics(
-                RoleType.PREFILL, "127.0.0.1", 4096L, 4096L);
-        Mockito.verify(engineHealthReporter).reportRoutingCandidateCacheMatchMetrics(
-                RoleType.PREFILL, "127.0.0.2", 1024L, 4096L);
         Mockito.verify(engineHealthReporter).reportRoutingSelectedCacheMatchMetrics(
                 RoleType.PREFILL, "127.0.0.2", 1024L, 4096L);
+        Mockito.verify(engineHealthReporter).reportRoutingCandidateMaxCacheMatchMetrics(
+                RoleType.PREFILL, "127.0.0.2", 4096L);
     }
 
     private ShortestTTFTStrategy createStrategy(EngineWorkerStatus engineWorkerStatus, ConfigService configService) {
