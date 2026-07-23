@@ -113,6 +113,69 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
+TEST_F(GenerateStreamTest, testBatchSizeWithNumReturnSequences) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    RuntimeConfig runtime_config;
+
+    auto generate_input                                   = std::make_shared<GenerateInput>();
+    generate_input->generate_config                       = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->num_return_sequences = 3;
+    generate_input->input_ids                             = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto stream =
+        std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
+
+    EXPECT_EQ(1, stream->batchSize(0));
+    EXPECT_EQ(3, stream->batchSize(1));
+    EXPECT_EQ(3, stream->batchSize(5));
+    EXPECT_EQ(3, stream->maxBatchSize());
+    EXPECT_TRUE(stream->needTilingForSampling());
+}
+
+TEST_F(GenerateStreamTest, testBatchSizeWithBeamSearch) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    RuntimeConfig runtime_config;
+
+    auto generate_input                        = std::make_shared<GenerateInput>();
+    generate_input->generate_config            = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->num_beams = 4;
+    generate_input->input_ids                  = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto stream =
+        std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
+
+    EXPECT_EQ(1, stream->batchSize(0));
+    EXPECT_EQ(4, stream->batchSize(1));
+    EXPECT_EQ(4, stream->maxBatchSize());
+    EXPECT_FALSE(stream->needTilingForSampling());
+}
+
+TEST_F(GenerateStreamTest, testCompleteTokenIdsUsesRequestBoundAndInitializesAllRows) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 128;
+    RuntimeConfig runtime_config;
+
+    auto generate_input                             = std::make_shared<GenerateInput>();
+    generate_input->generate_config                 = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->num_beams      = 2;
+    generate_input->generate_config->max_new_tokens = 4;
+    generate_input->input_ids                       = torch::tensor({7, 8, 9}, torch::kInt32);
+
+    auto stream =
+        std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
+
+    auto token_ids = stream->completeTokenIds();
+    ASSERT_EQ(2, token_ids.size(0));
+    ASSERT_EQ(7, token_ids.size(1));
+    EXPECT_TRUE(torch::equal(token_ids[0].narrow(0, 0, 3), generate_input->input_ids));
+    EXPECT_TRUE(torch::equal(token_ids[1].narrow(0, 0, 3), generate_input->input_ids));
+}
+
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
