@@ -1,5 +1,7 @@
 #pragma once
 
+#include <tuple>
+
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
@@ -28,6 +30,9 @@ public:
     startHttpServer(py::object model_weights_loader, py::object world_info, py::object tokenizer, py::object render);
     void pause();
     void restart();
+
+    std::tuple<torch::Tensor, torch::Tensor>
+    generate(torch::Tensor input_ids, int64_t max_new_tokens, int64_t eos_token_id, bool return_hidden_states);
 
 private:
     void             _init(int64_t                                       model_rpc_port,
