@@ -54,6 +54,8 @@ class Qwen3VLVisionConfig:
         ):
             raise TypeError("deepstack_visual_indexes must be a sequence of integers")
         indexes = tuple(raw_indexes)
+        if not indexes:
+            raise ValueError("deepstack_visual_indexes must contain at least one layer")
         if any(
             isinstance(index, bool) or not isinstance(index, int) for index in indexes
         ):
@@ -642,6 +644,19 @@ class Qwen3VLForVisionEmbedding(RtpModule):
                     # tensor through FP16 before converting it to the runtime dtype.
                     # Preserve that numerical contract so newloader and legacy
                     # inference produce the same BF16/FP32 features and tokens.
+                    if (
+                        target_dtype != torch.float16
+                        and tensor.dtype
+                        in (torch.bfloat16, torch.float32, torch.float64)
+                        and tensor.numel()
+                        and tensor.detach().abs().amax().item()
+                        > torch.finfo(torch.float16).max
+                    ):
+                        raise ValueError(
+                            f"Qwen3-VL vision weight {name!r} exceeds the "
+                            "FP16-compatible range required by the legacy "
+                            "staging contract"
+                        )
                     tensor = tensor.to(torch.float16).to(target_dtype)
                 yield name, tensor
 

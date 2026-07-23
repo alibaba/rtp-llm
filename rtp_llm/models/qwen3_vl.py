@@ -2,8 +2,6 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
-import torch
-import torch.library as tl
 from PIL import Image
 from transformers import AutoProcessor, Qwen3VLConfig, Qwen3VLVisionModel
 
@@ -11,13 +9,9 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.qwen_v3 import QwenV3, QWenV3Weight
+from rtp_llm.utils.torch_compat import ensure_torch_library_wrap_triton
 
-if not hasattr(tl, "wrap_triton"):
-
-    def wrap_triton(fn):
-        return fn
-
-    tl.wrap_triton = wrap_triton
+ensure_torch_library_wrap_triton()
 
 
 class QWen3_VL(QwenV3):

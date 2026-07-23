@@ -14,11 +14,16 @@ from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.models.qwen3_vl import QWen3_VL
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
+from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
+    reshape_extra_input_to_deepstack,
+)
 from rtp_llm.models_py.new_models.qwen3_vl.vision import Qwen3VLForVisionEmbedding
 from rtp_llm.multimodal.multimodal_mixins.qwen3_vl_mixin import (
     Qwen3_VLImageEmbedding,
     Qwen3_VLMixin,
+    Qwen3_VLMoeLegacyMixin,
 )
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
 def _vision_config():
@@ -215,6 +220,101 @@ class Qwen3VLNewLoaderRoutingTest(unittest.TestCase):
         torch.testing.assert_close(
             newloader_output["image_grid_thw"], legacy_output["image_grid_thw"]
         )
+
+    def test_qwen3_vl_moe_is_explicitly_legacy_only(self):
+        with self.assertRaisesRegex(
+            ValueError, "qwen3_vl_moe is not supported by the new loader"
+        ):
+            Qwen3_VLMoeLegacyMixin(
+                torch.float32,
+                "cpu",
+                types.SimpleNamespace(config={}, vit_weights=None),
+                LoadMethod.SCRATCH,
+                VitConfig(),
+                "/tmp/model",
+                use_new_loader=True,
+            )
+
+        mm_related_params = types.SimpleNamespace(config={}, vit_weights=None)
+        with mock.patch.object(Qwen3_VLMixin, "_init_multimodal") as legacy_init:
+            Qwen3_VLMoeLegacyMixin(
+                torch.float32,
+                "cpu",
+                mm_related_params,
+                LoadMethod.SCRATCH,
+                VitConfig(),
+                "/tmp/model",
+                use_new_loader=False,
+            )
+        legacy_init.assert_called_once_with()
+
+    def test_batched_multi_image_deepstack_roundtrip_matches_single_image(self):
+        class FakeVisual:
+            dtype = torch.float32
+            device = torch.device("cpu")
+            patch_size = 1
+            spatial_merge_size = 1
+
+            def __call__(self, pixel_values, grid_thw):
+                outputs = []
+                offset = 0
+                for grid in grid_thw:
+                    token_count = int(grid.prod().item())
+                    values = pixel_values[offset : offset + token_count, :1]
+                    outputs.append(torch.cat((values, values + 1, values + 2), dim=1))
+                    offset += token_count
+                embeddings = torch.cat(outputs)
+                return embeddings, [embeddings + 10, embeddings + 20]
+
+        embedding = Qwen3_VLImageEmbedding.__new__(Qwen3_VLImageEmbedding)
+        embedding.visual = FakeVisual()
+        embedding.spatial_merge_size = 1
+        data_list = [
+            (
+                torch.tensor([[1.0], [2.0]]),
+                torch.tensor([[1, 1, 2]], dtype=torch.int64),
+            ),
+            (
+                torch.tensor([[3.0], [4.0], [5.0]]),
+                torch.tensor([[1, 1, 3]], dtype=torch.int64),
+            ),
+        ]
+
+        batched = embedding.batched_embedding(
+            data_list, [MMUrlType.IMAGE, MMUrlType.IMAGE]
+        )
+        singles = [embedding.embedding(data) for data in data_list]
+        for actual, expected in zip(batched, singles):
+            torch.testing.assert_close(actual[0], expected[0])
+            torch.testing.assert_close(actual[1], expected[1])
+            torch.testing.assert_close(actual[2], expected[2])
+
+        restored = reshape_extra_input_to_deepstack(
+            [item[2] for item in batched],
+            [item[0] for item in batched],
+        )
+        for expected, deepstack in zip(singles, restored):
+            torch.testing.assert_close(
+                deepstack,
+                expected[2].reshape(2, expected[0].size(0), expected[0].size(1)),
+            )
+
+        self.assertEqual(embedding.batched_embedding([], []), [])
+        with self.assertRaisesRegex(ValueError, "data_list has 2 entries"):
+            embedding.batched_embedding(data_list, [MMUrlType.IMAGE])
+
+    def test_deepstack_transport_rejects_malformed_inputs(self):
+        feature = torch.zeros(2, 3)
+        with self.assertRaisesRegex(ValueError, "extra_input has 0 entries"):
+            reshape_extra_input_to_deepstack([], [feature])
+        with self.assertRaisesRegex(ValueError, "flat 1-D"):
+            reshape_extra_input_to_deepstack([torch.zeros(2, 3)], [feature])
+        with self.assertRaisesRegex(ValueError, "non-empty shape"):
+            reshape_extra_input_to_deepstack([torch.zeros(6)], [torch.empty(0, 3)])
+        with self.assertRaisesRegex(ValueError, "cannot be reshaped"):
+            reshape_extra_input_to_deepstack([torch.zeros(5)], [feature])
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            Qwen3_VLImageEmbedding._unpack_vision_output((torch.zeros(1, 3), []))
 
     def test_config_json_requires_typed_vision_and_text_sections(self):
         for missing, message in (

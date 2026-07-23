@@ -483,6 +483,13 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "integer dtype"):
             model(torch.zeros(4, 8), torch.tensor([[1.0, 2.0, 2.0]]))
 
+    def test_vision_config_rejects_empty_deepstack_indexes(self):
+        config = _vision_model_config()
+        config["vision_config"] = dict(config["vision_config"])
+        config["vision_config"]["deepstack_visual_indexes"] = []
+        with self.assertRaisesRegex(ValueError, "at least one layer"):
+            Qwen3VLForVisionEmbedding(config, _load_config())
+
     def test_vision_loader_matches_legacy_fp16_staging_for_runtime_dtypes(self):
         torch.manual_seed(19)
         source = Qwen3VLForVisionEmbedding(
@@ -524,6 +531,22 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
                         loaded.visual.blocks[0].attn.qkv.weight,
                         before,
                     )
+
+    def test_vision_loader_rejects_fp16_staging_overflow(self):
+        source = Qwen3VLForVisionEmbedding(
+            _vision_model_config(), _load_config()
+        ).eval()
+        weights = _vision_checkpoint(source)
+        key = "model.visual.blocks.0.attn.qkv.weight"
+        weights[key] = torch.full_like(weights[key], 70000, dtype=torch.bfloat16)
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(weights, f"{model_path}/model.safetensors")
+            with self.assertRaisesRegex(ValueError, "FP16-compatible range"):
+                NewModelLoader(
+                    model_config=_vision_model_config(),
+                    load_config=_load_config(torch.bfloat16),
+                    model_path=model_path,
+                ).load()
 
 
 if __name__ == "__main__":
