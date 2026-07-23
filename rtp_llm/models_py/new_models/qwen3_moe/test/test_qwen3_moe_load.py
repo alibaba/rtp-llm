@@ -219,7 +219,8 @@ class MoEWeightDispatchTest(unittest.TestCase):
                 weight_mapper.get_all_weights(
                     ["model.safetensors"],
                     name_filter=NewModelLoader._checkpoint_name_filter(
-                        RtpModule(), rank_one
+                        NewModelLoader._model_checkpoint_name_filter(RtpModule()),
+                        rank_one,
                     ),
                     safetensor_slice_expander=rank_one,
                 )
