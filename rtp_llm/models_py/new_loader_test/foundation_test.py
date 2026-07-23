@@ -20,7 +20,11 @@ from rtp_llm.models_py.registry import (
     register_lazy_model,
     register_model,
 )
-from rtp_llm.models_py.weight_mapper import discover_ckpt_files, get_all_weights
+from rtp_llm.models_py.weight_mapper import (
+    discover_ckpt_files,
+    get_all_weights,
+    select_safetensor_files,
+)
 from safetensors.torch import save_file
 
 
@@ -94,6 +98,10 @@ class FoundationLoaderTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "unsupported runtime"):
                     self._loader(model_path).load()
                 move.assert_not_called()
+
+    def test_combined_checkpoint_filter_rejects_model_instances(self):
+        with self.assertRaisesRegex(TypeError, "model_filter must be callable"):
+            NewModelLoader._checkpoint_name_filter(RtpModule(), None)
 
     def test_staged_modules_move_and_postprocess_one_at_a_time(self):
         events = []
@@ -478,6 +486,138 @@ class FoundationLoaderTest(unittest.TestCase):
                 discover_ckpt_files(model_path),
                 [os.path.realpath(shard1), os.path.realpath(shard2)],
             )
+
+    def test_model_filter_preselects_only_matching_index_shards(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            shard_names = [
+                f"model-{index:05d}-of-00004.safetensors" for index in range(1, 5)
+            ]
+            shard_paths = [os.path.join(model_path, name) for name in shard_names]
+            tensor_names = ["main.weight", "draft.embed", "draft.layer", "other.weight"]
+            for path, name in zip(shard_paths, tensor_names):
+                save_file({name: torch.ones(1)}, path)
+            with open(
+                os.path.join(model_path, "model.safetensors.index.json"), "w"
+            ) as handle:
+                json.dump({"weight_map": dict(zip(tensor_names, shard_names))}, handle)
+
+            with mock.patch(
+                "safetensors.safe_open",
+                side_effect=AssertionError("indexed selection opened shard headers"),
+            ):
+                selected = select_safetensor_files(
+                    model_path,
+                    shard_paths,
+                    lambda name: name.startswith("draft."),
+                )
+
+            self.assertEqual(selected, shard_paths[1:3])
+
+    def test_model_filter_without_index_falls_back_to_headers(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            main = os.path.join(model_path, "model-00001-of-00002.safetensors")
+            draft = os.path.join(model_path, "model-00002-of-00002.safetensors")
+            save_file({"main.weight": torch.ones(1)}, main)
+            save_file({"draft.weight": torch.ones(1)}, draft)
+            self.assertEqual(
+                select_safetensor_files(
+                    model_path,
+                    [main, draft],
+                    lambda name: name.startswith("draft."),
+                ),
+                [draft],
+            )
+
+    def test_model_filter_without_matches_fails(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            shard = os.path.join(model_path, "model.safetensors")
+            save_file({"main.weight": torch.ones(1)}, shard)
+            with open(
+                os.path.join(model_path, "model.safetensors.index.json"), "w"
+            ) as handle:
+                json.dump(
+                    {"weight_map": {"main.weight": os.path.basename(shard)}}, handle
+                )
+
+            with self.assertRaisesRegex(ValueError, "did not match"):
+                select_safetensor_files(
+                    model_path,
+                    [shard],
+                    lambda name: name.startswith("draft."),
+                )
+
+    def test_model_filter_preserves_non_safetensors_files(self):
+        files = ["pytorch_model.bin", "extra.pt"]
+        self.assertEqual(
+            select_safetensor_files("unused", files, lambda name: False),
+            files,
+        )
+
+    def test_model_filter_rejects_index_shard_outside_discovered_set(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            discovered = os.path.join(model_path, "model-00001-of-00002.safetensors")
+            undiscovered = os.path.join(model_path, "model-00002-of-00002.safetensors")
+            save_file({"main.weight": torch.ones(1)}, discovered)
+            save_file({"draft.weight": torch.ones(1)}, undiscovered)
+            with open(
+                os.path.join(model_path, "model.safetensors.index.json"), "w"
+            ) as handle:
+                json.dump(
+                    {"weight_map": {"draft.weight": os.path.basename(undiscovered)}},
+                    handle,
+                )
+            with self.assertRaisesRegex(ValueError, "undiscovered shard"):
+                select_safetensor_files(
+                    model_path,
+                    [discovered],
+                    lambda name: name.startswith("draft."),
+                )
+
+    def test_model_filter_allows_discovered_external_blob_symlink(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            model_path = os.path.join(temp_root, "snapshot")
+            blob_path = os.path.join(temp_root, "blob.safetensors")
+            os.mkdir(model_path)
+            save_file({"draft.weight": torch.ones(1)}, blob_path)
+            shard = os.path.join(model_path, "model-00001-of-00001.safetensors")
+            os.symlink(blob_path, shard)
+            with open(
+                os.path.join(model_path, "model.safetensors.index.json"), "w"
+            ) as handle:
+                json.dump(
+                    {"weight_map": {"draft.weight": os.path.basename(shard)}},
+                    handle,
+                )
+
+            self.assertEqual(
+                select_safetensor_files(
+                    model_path,
+                    [shard],
+                    lambda name: name.startswith("draft."),
+                ),
+                [shard],
+            )
+
+    def test_model_filter_rejects_parent_path_even_if_discovered(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            model_path = os.path.join(temp_root, "snapshot")
+            outside = os.path.join(temp_root, "outside.safetensors")
+            os.mkdir(model_path)
+            save_file({"draft.weight": torch.ones(1)}, outside)
+            with open(
+                os.path.join(model_path, "model.safetensors.index.json"), "w"
+            ) as handle:
+                json.dump(
+                    {"weight_map": {"draft.weight": "../outside.safetensors"}},
+                    handle,
+                )
+
+            with self.assertRaisesRegex(ValueError, "outside model directory"):
+                select_safetensor_files(
+                    model_path,
+                    [outside],
+                    lambda name: name.startswith("draft."),
+                )
 
     def test_pytorch_index_excludes_training_and_adapter_files(self):
         with tempfile.TemporaryDirectory() as model_path:
