@@ -660,7 +660,12 @@ class DeepSeekV4Model(GptModelBase):
         # doing it here (outside graph capture) caches the compiled kernel so
         # subsequent calls inside CUDA graph capture hit the cache and skip
         # JIT — which would otherwise abort via __unexpected (noexcept violation).
-        if device_str.startswith("cuda"):
+        # DSV4_PREWARM_JIT_KERNELS=0 skips every startup kernel prewarm below,
+        # deferring all JIT compilation to the first real request (e.g. when a
+        # remote JIT cache should capture organically-triggered artifacts).
+        if device_str.startswith("cuda") and (
+            os.environ.get("DSV4_PREWARM_JIT_KERNELS", "1") != "0"
+        ):
             from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl_kernels
 
             first_attn = self.v4.layers[0].attn
