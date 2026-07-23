@@ -43,6 +43,15 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     )
 
     pd_separation_group.add_argument(
+        "--max_rpc_timeout_ms",
+        env_name="MAX_RPC_TIMEOUT_MS",
+        bind_to=(pd_separation_config, 'max_rpc_timeout_ms'),
+        type=int,
+        default=0,
+        help="内部模型 RPC 最大超时时间（毫秒），0 表示使用默认值",
+    )
+
+    pd_separation_group.add_argument(
         "--decode_retry_times",
         env_name="DECODE_RETRY_TIMES",
         bind_to=(pd_separation_config, 'decode_retry_times'),

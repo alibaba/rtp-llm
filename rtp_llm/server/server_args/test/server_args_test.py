@@ -32,6 +32,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
+        os.environ["MAX_RPC_TIMEOUT_MS"] = "21600000"
 
         sys.argv = ["prog"]
 
@@ -62,6 +63,9 @@ class ServerArgsSetTest(TestCase):
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, True)  # bool in C++
+        self.assertEqual(
+            py_env_configs.pd_separation_config.max_rpc_timeout_ms, 21600000
+        )
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
 
@@ -91,6 +95,8 @@ class ServerArgsSetTest(TestCase):
             "4",
             "--cache_store_rdma_worker_thread_count",
             "2",
+            "--max_rpc_timeout_ms",
+            "21600000",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -130,6 +136,9 @@ class ServerArgsSetTest(TestCase):
         # Verify cache_store_config
         self.assertEqual(py_env_configs.cache_store_config.rdma_io_thread_count, 4)
         self.assertEqual(py_env_configs.cache_store_config.rdma_worker_thread_count, 2)
+        self.assertEqual(
+            py_env_configs.pd_separation_config.max_rpc_timeout_ms, 21600000
+        )
 
     def test_cmd_args_override_env_vars(self):
         """Test that command line arguments override environment variables."""
@@ -139,6 +148,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["ACT_TYPE"] = "BF16"
         os.environ["TP_SIZE"] = "4"
         os.environ["CONCURRENCY_LIMIT"] = "32"
+        os.environ["MAX_RPC_TIMEOUT_MS"] = "3600000"
 
         # Set command line arguments (should override env vars)
         sys.argv = [
@@ -153,6 +163,8 @@ class ServerArgsSetTest(TestCase):
             "8",
             "--concurrency_limit",
             "64",
+            "--max_rpc_timeout_ms",
+            "21600000",
         ]
 
         # Import and setup args
@@ -171,6 +183,9 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.concurrency_config.concurrency_limit, 64
         )  # Overridden
+        self.assertEqual(
+            py_env_configs.pd_separation_config.max_rpc_timeout_ms, 21600000
+        )
 
     def test_mixed_env_and_cmd_args(self):
         """Test mixed environment variables and command line arguments."""
