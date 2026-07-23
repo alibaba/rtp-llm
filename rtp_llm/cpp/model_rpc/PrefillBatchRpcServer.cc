@@ -382,11 +382,12 @@ grpc::Status PrefillBatchRpcServer::admitGroup(const EnqueueGroupRequestPB* requ
     }
 
     slots.reserve(all_inputs.size());
+    const int group_size = static_cast<int>(all_inputs.size());
     for (const auto* input : all_inputs) {
         auto input_copy = std::make_shared<GenerateInputPB>(*input);
-        // EnqueueGroup owns group membership; legacy stream metadata must not alter fallback scheduling.
-        input_copy->clear_group_id();
-        input_copy->clear_group_size();
+        // Worker status derives batch_id from stream metadata; the batch RPC envelope is authoritative.
+        input_copy->set_group_size(group_size);
+        input_copy->mutable_group_id()->set_value(request->batch_id());
 
         BatchSlot slot;
         slot.input = std::move(input_copy);
