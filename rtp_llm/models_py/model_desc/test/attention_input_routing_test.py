@@ -8,6 +8,7 @@ from torch import nn
 from rtp_llm.models_py.model_desc.block_map import get_group_tags_for_layers
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3_next import (
+    Qwen3NextGatedDeltaNetDecode,
     Qwen3NextMetadata,
     _maybe_write_cp_cache_store,
     _write_cp_cache_store,
@@ -36,6 +37,30 @@ class RoutingModel(GptModelBase):
 
 
 class AttentionInputRoutingTest(unittest.TestCase):
+    def test_qwen3_next_cuda_graph_uses_narrow_block_map_view(self):
+        block_map = torch.arange(12, dtype=torch.int32).reshape(3, 4)
+        attention_inputs = SimpleNamespace(
+            is_cuda_graph=True,
+            kv_cache_kernel_block_id_device=block_map,
+        )
+        decode = object.__new__(Qwen3NextGatedDeltaNetDecode)
+
+        narrowed = decode._get_fla_block_map(attention_inputs)
+
+        self.assertEqual(narrowed.shape, (3, 1))
+        self.assertEqual(narrowed.stride(0), block_map.stride(0))
+        self.assertEqual(narrowed[:, 0].tolist(), [0, 4, 8])
+
+    def test_qwen3_next_non_graph_keeps_full_block_map(self):
+        block_map = torch.arange(12, dtype=torch.int32).reshape(3, 4)
+        attention_inputs = SimpleNamespace(
+            is_cuda_graph=False,
+            kv_cache_kernel_block_id_device=block_map,
+        )
+        decode = object.__new__(Qwen3NextGatedDeltaNetDecode)
+
+        self.assertIs(decode._get_fla_block_map(attention_inputs), block_map)
+
     def test_cp_cache_store_uses_each_layer_tag_metadata(self):
         expected = {}
         layer_inputs = {}

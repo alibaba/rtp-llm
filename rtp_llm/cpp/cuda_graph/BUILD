@@ -11,6 +11,13 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "combo_position_ids_validation",
+    hdrs = ["combo_position_ids_validation.h"],
+    deps = torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "cuda_graph_srcs",
     srcs = [
@@ -27,6 +34,7 @@ filegroup(
     name = "cuda_graph_hdrs",
     srcs = [
         "cuda_graph_base.h",
+        "combo_position_ids_validation.h",
         "cuda_graph_device_shims.h",
         "cuda_graph_utils.h",
         "cuda_graph_runner.h",
@@ -65,6 +73,7 @@ cc_library(
     ],
     deps = torch_deps() + [
         ":cuda_graph_base",
+        ":combo_position_ids_validation",
         ":cuda_graph_hdrs_lib",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:core_utils",

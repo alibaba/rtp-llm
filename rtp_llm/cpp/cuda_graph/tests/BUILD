@@ -1,6 +1,16 @@
 load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
+cc_test(
+    name = "combo_position_ids_validation_test",
+    srcs = ["combo_position_ids_validation_test.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:combo_position_ids_validation",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+)
+
 cc_library(
     name = "test_cuda_graph_runner_libs",
     srcs = [

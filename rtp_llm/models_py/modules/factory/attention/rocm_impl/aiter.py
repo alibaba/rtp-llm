@@ -16,7 +16,13 @@ from rtp_llm.models_py.modules.factory.attention.rocm_impl._attn_utils import (
     split_raw_qkv,
     unpad_kv_vectorized,
 )
-from rtp_llm.ops import AttentionConfigs, FMHAType, KvCacheDataType, ParallelismConfig
+from rtp_llm.ops import (
+    AttentionConfigs,
+    FMHAType,
+    KvCacheDataType,
+    ParallelismConfig,
+    RopeStyle,
+)
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOpAsm,
     FusedRopeKVCacheDecodeOpNonAsm,
@@ -27,6 +33,14 @@ from rtp_llm.ops.compute_ops import (
     PyAttentionInputs,
     paged_attention_atrex,
 )
+
+
+def _mrope_interleaved_supported(attn_configs: AttentionConfigs) -> bool:
+    """Return whether ROCm fused RoPE supports the configured MRoPE layout."""
+    return not (
+        attn_configs.rope_config.style == RopeStyle.Mrope
+        and not attn_configs.rope_config.mrope_interleaved
+    )
 
 
 # Pure Python implementation of FMHAParams
@@ -1397,7 +1411,7 @@ class AiterPrefillImplAsm(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return True
+        return _mrope_interleaved_supported(attn_configs)
 
     def forward(
         self,
@@ -1457,7 +1471,7 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return True
+        return _mrope_interleaved_supported(attn_configs)
 
     def forward(
         self,
@@ -1716,7 +1730,7 @@ class AiterDecodeImplAsm(AiterDecodeImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return True
+        return _mrope_interleaved_supported(attn_configs)
 
     def forward(
         self,
@@ -1763,7 +1777,7 @@ class AiterDecodeImplNonAsm(AiterDecodeImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return True
+        return _mrope_interleaved_supported(attn_configs)
 
     def forward(
         self,
@@ -1809,7 +1823,7 @@ class AiterDecodeImplTriton(AiterDecodeImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return True
+        return _mrope_interleaved_supported(attn_configs)
 
     def forward(
         self,
