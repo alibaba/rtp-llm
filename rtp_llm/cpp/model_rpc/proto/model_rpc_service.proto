@@ -385,6 +385,36 @@ message StatusVersionPB {
 message CacheVersionPB {
     int64 latest_cache_version = 1;
     bool need_cache_keys = 2;
+    bool need_cache_events = 3;
+    uint32 max_cache_events = 4;
+    bool force_cache_event_snapshot = 5;
+    uint64 cache_event_generation = 6;
+}
+
+enum CacheEventTypePB {
+    CACHE_EVENT_STORED = 0;
+    CACHE_EVENT_REMOVED = 1;
+}
+
+message CacheEventPB {
+    int64 version = 1;
+    CacheEventTypePB event_type = 2;
+    int64 cache_key = 3;
+    repeated int32 group_ids = 4;
+}
+
+message CacheSnapshotEntryPB {
+    int64 cache_key = 1;
+    repeated int32 group_ids = 2;
+}
+
+enum CacheEventSnapshotReasonPB {
+    CACHE_EVENT_SNAPSHOT_NONE = 0;
+    CACHE_EVENT_SNAPSHOT_FORCED = 1;
+    CACHE_EVENT_SNAPSHOT_HISTORY_GAP = 2;
+    CACHE_EVENT_SNAPSHOT_FUTURE_CURSOR = 3;
+    CACHE_EVENT_SNAPSHOT_GENERATION_MISMATCH = 4;
+    CACHE_EVENT_SNAPSHOT_INVALID_CURSOR = 5;
 }
 
 message CacheStatusPB {
@@ -393,6 +423,18 @@ message CacheStatusPB {
     int64 block_size = 3;
     int64 version = 4;
     map<int64, bool> cache_keys = 5;
+    int64 cache_event_version = 6;
+    int64 oldest_cache_event_version = 7;
+    bool cache_event_reset_required = 8;
+    bool cache_event_has_more = 9;
+    repeated CacheEventPB cache_events = 10;
+    repeated CacheSnapshotEntryPB cache_event_snapshot = 11;
+    uint32 cache_event_protocol_version = 12;
+    uint64 cache_event_generation = 13;
+    CacheEventSnapshotReasonPB cache_event_snapshot_reason = 14;
+    // Continuation cursor for the next bounded event page. Field 6 remains
+    // the current queue head for observability and backward compatibility.
+    int64 next_cache_event_version = 15;
 }
 
 message UpdateSchedulerInfoRequestPB {

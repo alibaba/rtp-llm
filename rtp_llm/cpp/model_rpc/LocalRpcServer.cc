@@ -259,7 +259,12 @@ LocalRpcServer::GetCacheStatus(grpc::ServerContext* context, const CacheVersionP
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s, request cache version: [%d]",
                       context->peer().c_str(),
                       request->latest_cache_version());
-    KVCacheInfo cache_status = getCacheStatusInfo(request->latest_cache_version(), request->need_cache_keys());
+    KVCacheInfo cache_status = request->need_cache_events() ?
+                                   getCacheEventStatusInfo(request->latest_cache_version(),
+                                                           request->force_cache_event_snapshot(),
+                                                           request->max_cache_events(),
+                                                           request->cache_event_generation()) :
+                                   getCacheStatusInfo(request->latest_cache_version(), request->need_cache_keys());
     response->set_available_kv_cache(cache_status.available_kv_cache);
     response->set_total_kv_cache(cache_status.total_kv_cache);
     response->set_block_size(cache_status.block_size);
@@ -267,6 +272,31 @@ LocalRpcServer::GetCacheStatus(grpc::ServerContext* context, const CacheVersionP
     auto* cache_map = response->mutable_cache_keys();
     for (const auto& key : cache_status.cached_keys) {
         (*cache_map)[static_cast<int64_t>(key)] = true;
+    }
+    response->set_cache_event_version(cache_status.cache_event_version);
+    response->set_next_cache_event_version(cache_status.next_cache_event_version);
+    response->set_oldest_cache_event_version(cache_status.oldest_cache_event_version);
+    response->set_cache_event_generation(cache_status.cache_event_generation);
+    response->set_cache_event_reset_required(cache_status.cache_event_reset_required);
+    response->set_cache_event_has_more(cache_status.cache_event_has_more);
+    response->set_cache_event_snapshot_reason(
+        static_cast<CacheEventSnapshotReasonPB>(cache_status.cache_event_snapshot_reason));
+    response->set_cache_event_protocol_version(cache_status.cache_event_protocol_version);
+    for (const auto& event : cache_status.cache_events) {
+        auto* event_pb = response->add_cache_events();
+        event_pb->set_version(event.version);
+        event_pb->set_event_type(event.type == KVCacheChangeType::STORED ? CACHE_EVENT_STORED : CACHE_EVENT_REMOVED);
+        event_pb->set_cache_key(static_cast<int64_t>(event.cache_key));
+        for (const auto group_id : event.group_ids) {
+            event_pb->add_group_ids(group_id);
+        }
+    }
+    for (const auto& entry : cache_status.cache_event_snapshot) {
+        auto* entry_pb = response->add_cache_event_snapshot();
+        entry_pb->set_cache_key(static_cast<int64_t>(entry.cache_key));
+        for (const auto group_id : entry.group_ids) {
+            entry_pb->add_group_ids(group_id);
+        }
     }
     return grpc::Status::OK;
 }
@@ -394,6 +424,17 @@ WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_ver
 KVCacheInfo LocalRpcServer::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) {
     int64_t     request_begin_time_us = currentTimeUs();
     const auto& cache_info            = engine_->getCacheStatusInfo(latest_version, need_cache_keys);
+    reportCacheStatusTime(request_begin_time_us);
+    return cache_info;
+}
+
+KVCacheInfo LocalRpcServer::getCacheEventStatusInfo(int64_t  latest_version,
+                                                    bool     force_snapshot,
+                                                    size_t   max_cache_events,
+                                                    uint64_t cache_event_generation) {
+    int64_t     request_begin_time_us = currentTimeUs();
+    const auto& cache_info =
+        engine_->getCacheEventStatusInfo(latest_version, force_snapshot, max_cache_events, cache_event_generation);
     reportCacheStatusTime(request_begin_time_us);
     return cache_info;
 }

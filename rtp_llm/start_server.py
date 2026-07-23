@@ -14,6 +14,7 @@ from rtp_llm.utils.time_util import timer_wrapper
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
+from rtp_llm.cache_event_subscriber_launcher import launch_cache_event_subscriber
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
@@ -391,6 +392,19 @@ def start_server(py_env_configs: PyEnvConfigs):
         if not process_manager.run_health_checks():
             logging.error("[START_SERVER] Health checks failed")
             raise Exception("Health checks failed")
+
+        # The subscriber reads the backend GetCacheStatus RPC, so it must not
+        # start until the backend is healthy. It is managed with the other RTP
+        # children: an unexpected exit tears down the process group.
+        if backend_process is not None:
+            subscriber_process = launch_cache_event_subscriber(
+                world_rank=py_env_configs.parallelism_config.world_rank,
+                default_endpoint=(
+                    f"127.0.0.1:{py_env_configs.server_config.rpc_server_port}"
+                ),
+            )
+            if subscriber_process is not None:
+                process_manager.add_process(subscriber_process)
 
     except Exception as e:
         logging.error(f"start failed, trace: {traceback.format_exc()}")

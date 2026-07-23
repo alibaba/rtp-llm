@@ -375,6 +375,18 @@ KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_c
     return resource_context_.cache_manager->getKVCacheInfo(latest_version, need_cache_keys);
 }
 
+KVCacheInfo NormalEngine::getCacheEventStatusInfo(int64_t  latest_version,
+                                                  bool     force_snapshot,
+                                                  size_t   max_cache_events,
+                                                  uint64_t cache_event_generation) {
+    return resource_context_.cache_manager->getKVCacheInfo(latest_version,
+                                                           /*need_cache_keys=*/false,
+                                                           /*need_cache_events=*/true,
+                                                           max_cache_events,
+                                                           force_snapshot,
+                                                           cache_event_generation);
+}
+
 absl::Status NormalEngine::startLoop() {
     if (parallelism_config.tp_rank == 0) {
         RTP_LLM_LOG_INFO("start init system prompt");

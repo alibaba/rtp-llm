@@ -19,17 +19,53 @@ using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;
 typedef int32_t          GroupIdType;
 typedef std::vector<int> LayerIdsType;
 
+enum class KVCacheChangeType : uint8_t {
+    STORED  = 0,
+    REMOVED = 1,
+};
+
+enum class KVCacheSnapshotReason : uint8_t {
+    NONE                = 0,
+    FORCED              = 1,
+    HISTORY_GAP         = 2,
+    FUTURE_CURSOR       = 3,
+    GENERATION_MISMATCH = 4,
+    INVALID_CURSOR      = 5,
+};
+
+struct KVCacheChange {
+    int64_t                  version = -1;
+    KVCacheChangeType        type    = KVCacheChangeType::STORED;
+    CacheKeyType             cache_key{0};
+    std::vector<GroupIdType> group_ids;
+};
+
+struct KVCacheSnapshotEntry {
+    CacheKeyType             cache_key{0};
+    std::vector<GroupIdType> group_ids;
+};
+
 struct BlockAddrInfo {
     void* kv_addr       = nullptr;
     void* kv_scale_addr = nullptr;
 };
 
 struct KVCacheInfo {
-    size_t                    available_kv_cache = 0;
-    size_t                    total_kv_cache     = 0;
-    size_t                    block_size         = 0;
-    std::vector<CacheKeyType> cached_keys;
-    int64_t                   version = -1;
+    size_t                            available_kv_cache = 0;
+    size_t                            total_kv_cache     = 0;
+    size_t                            block_size         = 0;
+    std::vector<CacheKeyType>         cached_keys;
+    int64_t                           version                      = -1;
+    int64_t                           cache_event_version          = -1;
+    uint32_t                          cache_event_protocol_version = 0;
+    int64_t                           next_cache_event_version     = -1;
+    int64_t                           oldest_cache_event_version   = -1;
+    uint64_t                          cache_event_generation       = 0;
+    bool                              cache_event_reset_required   = false;
+    bool                              cache_event_has_more         = false;
+    KVCacheSnapshotReason             cache_event_snapshot_reason  = KVCacheSnapshotReason::NONE;
+    std::vector<KVCacheChange>        cache_events;
+    std::vector<KVCacheSnapshotEntry> cache_event_snapshot;
 };
 
 struct BlockIdPair {

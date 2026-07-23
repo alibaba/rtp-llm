@@ -14,3 +14,8 @@ py_test(
     exec_properties = {'gpu':'H20'},
 )
 
+py_test(
+    name = "cache_event_subscriber_launcher_test",
+    srcs = ["cache_event_subscriber_launcher_test.py"],
+    data = ["//rtp_llm:cache_event_subscriber_launcher.py"],
+)

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <deque>
 #include <mutex>
 #include <memory>
 #include <optional>
@@ -65,10 +66,50 @@ public:
         std::vector<BlockIdxType> group_block_ids;
     };
 
+    enum class CacheEventType : uint8_t {
+        STORED  = 0,
+        REMOVED = 1,
+    };
+
+    enum class CacheSnapshotReason : uint8_t {
+        NONE                = 0,
+        FORCED              = 1,
+        HISTORY_GAP         = 2,
+        FUTURE_CURSOR       = 3,
+        GENERATION_MISMATCH = 4,
+        INVALID_CURSOR      = 5,
+    };
+
+    struct CacheEvent {
+        int64_t                  version = -1;
+        CacheEventType           type    = CacheEventType::STORED;
+        CacheKeyType             cache_key{0};
+        std::vector<GroupIdType> group_ids;
+    };
+
+    struct CacheSnapshotEntry {
+        CacheKeyType             cache_key{0};
+        std::vector<GroupIdType> group_ids;
+    };
+
+    struct CacheEventResult {
+        int64_t current_version = -1;
+        // Cursor that the caller must use for the next page. This differs
+        // from current_version whenever a bounded page has_more.
+        int64_t                         next_version             = -1;
+        int64_t                         oldest_available_version = -1;
+        uint64_t                        generation               = 0;
+        bool                            reset_required           = false;
+        bool                            has_more                 = false;
+        CacheSnapshotReason             snapshot_reason          = CacheSnapshotReason::NONE;
+        std::vector<CacheEvent>         events;
+        std::vector<CacheSnapshotEntry> snapshot;
+    };
+
     using LRUCacheType = LRUCache<CacheKeyType, UnifiedCacheItem>;
 
 public:
-    explicit SharedBlockCache(): lru_cache_(kCacheMaxCapacity) {}
+    explicit SharedBlockCache(size_t max_cache_event_history = 100000, uint64_t cache_event_generation = 0);
 
     void init(int group_num, const std::vector<BlockPoolPtr>& group_pools);
 
@@ -101,9 +142,18 @@ public:
     std::vector<CacheKeyType> allCacheKeys() const;
 
     int64_t version() const;
-    void    setPrefixTreeEnabled(bool enabled);
-    bool    prefixTreeEnabled() const;
-    void    setIndependentGroupEviction(bool enabled, const std::vector<int>& group_ids);
+
+    // Return ordered cache-index mutations after latest_version. A caller that
+    // explicitly requests a snapshot, falls behind the bounded history, or
+    // presents a future cursor receives an authoritative reset snapshot.
+    CacheEventResult cacheEventsSince(int64_t  latest_version,
+                                      size_t   max_events,
+                                      bool     force_snapshot,
+                                      uint64_t expected_generation = 0) const;
+
+    void setPrefixTreeEnabled(bool enabled);
+    bool prefixTreeEnabled() const;
+    void setIndependentGroupEviction(bool enabled, const std::vector<int>& group_ids);
 
 private:
     static const size_t kCacheMaxCapacity = 10000000;
@@ -134,27 +184,30 @@ private:
         }
     };
 
-    void                       upsertTreeNodeLocked(CacheKeyType           cache_key,
-                                                    NamespaceId            namespace_id,
-                                                    const BlockDependency& dependency,
-                                                    bool                   is_resident);
-    void                       detachPendingChildLocked(const NamespacedKey& parent, const NamespacedKey& child);
-    void                       attachPendingChildrenLocked(PrefixTreeNode& node);
-    void                       touchTreeAliasesLocked(CacheKeyType cache_key);
-    void                       touchTreeNodeLocked(PrefixTreeNode& node);
-    void                       eraseLeafLocked(const PrefixTreeNode& node);
-    void                       insertLeafIfEligibleLocked(const PrefixTreeNode& node);
-    void                       refreshLeafLocked(const NamespacedKey& key);
-    void                       removeTreeAliasLocked(const NamespacedKey& key);
-    void                       removeAllTreeAliasesForCacheKeyLocked(CacheKeyType cache_key);
-    void                       markAllTreeAliasesResidentLocked(CacheKeyType cache_key);
-    void                       refreshAllTreeAliasesLocked(CacheKeyType cache_key);
-    bool                       flatItemHasCanonicalDependencyLocked(CacheKeyType cache_key) const;
-    bool                       updateItemDependencyLocked(UnifiedCacheItem&      item,
-                                                          NamespaceId            namespace_id,
-                                                          const BlockDependency& dependency) const;
-    static bool                groupMatchable(const UnifiedCacheItem& item, size_t group_id);
-    static bool                hasUsableGroup(const UnifiedCacheItem& item, int group_id);
+    void                            upsertTreeNodeLocked(CacheKeyType           cache_key,
+                                                         NamespaceId            namespace_id,
+                                                         const BlockDependency& dependency,
+                                                         bool                   is_resident);
+    void                            detachPendingChildLocked(const NamespacedKey& parent, const NamespacedKey& child);
+    void                            attachPendingChildrenLocked(PrefixTreeNode& node);
+    void                            touchTreeAliasesLocked(CacheKeyType cache_key);
+    void                            touchTreeNodeLocked(PrefixTreeNode& node);
+    void                            eraseLeafLocked(const PrefixTreeNode& node);
+    void                            insertLeafIfEligibleLocked(const PrefixTreeNode& node);
+    void                            refreshLeafLocked(const NamespacedKey& key);
+    void                            removeTreeAliasLocked(const NamespacedKey& key);
+    void                            removeAllTreeAliasesForCacheKeyLocked(CacheKeyType cache_key);
+    void                            markAllTreeAliasesResidentLocked(CacheKeyType cache_key);
+    void                            refreshAllTreeAliasesLocked(CacheKeyType cache_key);
+    bool                            flatItemHasCanonicalDependencyLocked(CacheKeyType cache_key) const;
+    bool                            updateItemDependencyLocked(UnifiedCacheItem&      item,
+                                                               NamespaceId            namespace_id,
+                                                               const BlockDependency& dependency) const;
+    static std::vector<GroupIdType> visibleGroupIds(const UnifiedCacheItem& item);
+    bool                            removeItemLocked(CacheKeyType cache_key, UnifiedCacheItem* removed_item);
+    void        recordEventLocked(CacheEventType type, CacheKeyType cache_key, std::vector<GroupIdType> group_ids);
+    static bool groupMatchable(const UnifiedCacheItem& item, size_t group_id);
+    static bool hasUsableGroup(const UnifiedCacheItem& item, int group_id);
     std::vector<NamespacedKey> collectEvictChainLocked(const NamespacedKey& leaf_key) const;
     bool                       chainHasUsableGroupLocked(const std::vector<NamespacedKey>& chain, int group_id) const;
     bool chainHasReachableAncestorGroupLocked(const std::vector<NamespacedKey>& chain, int group_id) const;
@@ -165,12 +218,15 @@ private:
     bool isFlatItemResidentLocked(CacheKeyType cache_key) const;
     bool isIndependentEvictionGroupLocked(int group_id) const;
 
-    LRUCacheType       lru_cache_;
-    mutable std::mutex mu_;
-    int64_t            version_{-1};
-    bool               prefix_tree_enabled_{true};
-    bool               independent_group_eviction_enabled_{false};
-    uint64_t           tree_access_seq_{0};
+    LRUCacheType           lru_cache_;
+    mutable std::mutex     mu_;
+    int64_t                version_{-1};
+    int64_t                cache_event_version_{-1};
+    const uint64_t         cache_event_generation_;
+    std::deque<CacheEvent> cache_event_history_;
+    bool                   prefix_tree_enabled_{true};
+    bool                   independent_group_eviction_enabled_{false};
+    uint64_t               tree_access_seq_{0};
 
     int                                                                                    group_num_ = 0;
     std::vector<BlockPoolPtr>                                                              group_pools_;
@@ -180,6 +236,7 @@ private:
                             pending_children_by_parent_;
     std::set<LeafKey>       leaf_lru_;
     std::unordered_set<int> independent_eviction_group_ids_;
+    const size_t            max_cache_event_history_;
 };
 
 using SharedBlockCachePtr = std::shared_ptr<SharedBlockCache>;

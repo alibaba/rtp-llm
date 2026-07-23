@@ -105,6 +105,14 @@ public:
         return local_server_->getCacheStatusInfo(latest_cache_version, need_cache_keys);
     }
 
+    KVCacheInfo getCacheEventStatusInfo(int64_t  latest_cache_version,
+                                        bool     force_snapshot,
+                                        size_t   max_cache_events,
+                                        uint64_t cache_event_generation) {
+        return local_server_->getCacheEventStatusInfo(
+            latest_cache_version, force_snapshot, max_cache_events, cache_event_generation);
+    }
+
     EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finised_version) {
         return local_server_->getEngineScheduleInfo(latest_finised_version);
     }

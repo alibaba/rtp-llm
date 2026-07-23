@@ -63,6 +63,16 @@ public:
 
     virtual KVCacheInfo getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) = 0;
 
+    virtual KVCacheInfo getCacheEventStatusInfo(int64_t  latest_version,
+                                                bool     force_snapshot,
+                                                size_t   max_cache_events,
+                                                uint64_t cache_event_generation) {
+        // Engines without a native changefeed return the legacy full key map.
+        // LocalRpcServer keeps protocol_version=0 so new subscribers can
+        // safely select their compatibility path.
+        return getCacheStatusInfo(latest_version, /*need_cache_keys=*/true);
+    }
+
     virtual const ResourceContext& resourceContext() const {
         return resource_context_;
     }

@@ -69,6 +69,10 @@ public:
     UpdateSchedulerInfo(grpc::ServerContext* context, const UpdateSchedulerInfoRequestPB* request, EmptyPB* response);
 
     KVCacheInfo getCacheStatusInfo(int64_t latest_cache_version, bool need_cache_keys);
+    KVCacheInfo getCacheEventStatusInfo(int64_t  latest_cache_version,
+                                        bool     force_snapshot,
+                                        size_t   max_cache_events,
+                                        uint64_t cache_event_generation);
 
     WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version);
 

@@ -1,6 +1,7 @@
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
+    "cache_event_subscriber_launcher.py",
     "ops/librtp_compute_ops/__init__.pyi",
 ])
 

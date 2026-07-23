@@ -35,6 +35,108 @@ TEST(SharedBlockCacheTest, EmptyCacheKeepsLegacyVersion) {
     EXPECT_EQ(cache.version(), -1);
 }
 
+TEST(SharedBlockCacheTest, CacheEventsTrackVisibleGroupsOnly) {
+    SharedBlockCache cache;
+    cache.put(1,
+              std::vector<BlockIdxType>{101, 201},
+              /*is_resident=*/false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              rootDep(),
+              std::vector<bool>{true, false});
+
+    auto result = cache.cacheEventsSince(/*latest_version=*/-1, /*max_events=*/0, /*force_snapshot=*/false);
+    ASSERT_EQ(result.events.size(), 1u);
+    EXPECT_EQ(result.events[0].version, 0);
+    EXPECT_EQ(result.events[0].type, SharedBlockCache::CacheEventType::STORED);
+    EXPECT_EQ(result.events[0].cache_key, 1);
+    EXPECT_EQ(result.events[0].group_ids, (std::vector<GroupIdType>{0}));
+
+    cache.put(1,
+              std::vector<BlockIdxType>{NULL_BLOCK_IDX, 201},
+              /*is_resident=*/false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              rootDep(),
+              std::vector<bool>{true, true});
+    result = cache.cacheEventsSince(/*latest_version=*/0, /*max_events=*/0, /*force_snapshot=*/false);
+    ASSERT_EQ(result.events.size(), 1u);
+    EXPECT_EQ(result.events[0].version, 1);
+    EXPECT_EQ(result.events[0].group_ids, (std::vector<GroupIdType>{1}));
+}
+
+TEST(SharedBlockCacheTest, CacheEventsIgnoreDuplicatePutAndReportRemoval) {
+    SharedBlockCache cache;
+    putOne(cache, 1, 101, rootDep());
+    putOne(cache, 1, 101, rootDep());
+
+    auto result = cache.cacheEventsSince(/*latest_version=*/-1, /*max_events=*/0, /*force_snapshot=*/false);
+    ASSERT_EQ(result.events.size(), 1u);
+    EXPECT_EQ(result.events[0].type, SharedBlockCache::CacheEventType::STORED);
+
+    ASSERT_TRUE(cache.remove(1).has_value());
+    result = cache.cacheEventsSince(/*latest_version=*/0, /*max_events=*/0, /*force_snapshot=*/false);
+    ASSERT_EQ(result.events.size(), 1u);
+    EXPECT_EQ(result.events[0].version, 1);
+    EXPECT_EQ(result.events[0].type, SharedBlockCache::CacheEventType::REMOVED);
+    EXPECT_EQ(result.events[0].group_ids, (std::vector<GroupIdType>{0}));
+}
+
+TEST(SharedBlockCacheTest, CacheEventsSupportPagination) {
+    SharedBlockCache cache;
+    putOne(cache, 1, 101, rootDep());
+    putOne(cache, 2, 102, rootDep());
+    putOne(cache, 3, 103, rootDep());
+
+    auto first = cache.cacheEventsSince(/*latest_version=*/-1, /*max_events=*/2, /*force_snapshot=*/false);
+    ASSERT_EQ(first.events.size(), 2u);
+    EXPECT_TRUE(first.has_more);
+    EXPECT_EQ(first.current_version, 2);
+    EXPECT_EQ(first.next_version, 1);
+
+    auto second = cache.cacheEventsSince(first.next_version, /*max_events=*/2, /*force_snapshot=*/false);
+    ASSERT_EQ(second.events.size(), 1u);
+    EXPECT_FALSE(second.has_more);
+    EXPECT_EQ(second.next_version, 2);
+    EXPECT_EQ(second.events[0].cache_key, 3);
+}
+
+TEST(SharedBlockCacheTest, CacheEventsReturnSnapshotForColdStartAndHistoryGap) {
+    SharedBlockCache cache(/*max_cache_event_history=*/2, /*cache_event_generation=*/1234);
+    putOne(cache, 1, 101, rootDep());
+    putOne(cache, 2, 102, rootDep());
+    putOne(cache, 3, 103, rootDep());
+
+    auto cold_start = cache.cacheEventsSince(/*latest_version=*/2, /*max_events=*/0, /*force_snapshot=*/true);
+    EXPECT_TRUE(cold_start.reset_required);
+    EXPECT_EQ(cold_start.generation, 1234u);
+    EXPECT_EQ(cold_start.snapshot_reason, SharedBlockCache::CacheSnapshotReason::FORCED);
+    EXPECT_EQ(cold_start.snapshot.size(), 3u);
+
+    auto gap = cache.cacheEventsSince(/*latest_version=*/-1, /*max_events=*/0, /*force_snapshot=*/false);
+    EXPECT_TRUE(gap.reset_required);
+    EXPECT_EQ(gap.oldest_available_version, 1);
+    EXPECT_EQ(gap.snapshot_reason, SharedBlockCache::CacheSnapshotReason::HISTORY_GAP);
+    EXPECT_EQ(gap.snapshot.size(), 3u);
+
+    auto future = cache.cacheEventsSince(/*latest_version=*/99, /*max_events=*/0, /*force_snapshot=*/false);
+    EXPECT_TRUE(future.reset_required);
+    EXPECT_EQ(future.snapshot_reason, SharedBlockCache::CacheSnapshotReason::FUTURE_CURSOR);
+    EXPECT_EQ(future.snapshot.size(), 3u);
+}
+
+TEST(SharedBlockCacheTest, CacheEventsReturnSnapshotForGenerationMismatch) {
+    SharedBlockCache cache(/*max_cache_event_history=*/10, /*cache_event_generation=*/1234);
+    putOne(cache, 1, 101, rootDep());
+
+    auto result = cache.cacheEventsSince(
+        /*latest_version=*/-1, /*max_events=*/0, /*force_snapshot=*/false, /*expected_generation=*/5678);
+
+    EXPECT_TRUE(result.reset_required);
+    EXPECT_EQ(result.generation, 1234u);
+    EXPECT_EQ(result.snapshot_reason, SharedBlockCache::CacheSnapshotReason::GENERATION_MISMATCH);
+    ASSERT_EQ(result.snapshot.size(), 1u);
+    EXPECT_EQ(result.snapshot[0].cache_key, 1);
+}
+
 TEST(SharedBlockCacheTest, PrefixTreeEvictsCollectedChainInParentFirstOrderWithDependencies) {
     SharedBlockCache cache;
     putOne(cache, 1, 101, rootDep(0));
@@ -247,6 +349,11 @@ TEST(SharedBlockCacheTest, NonMatchableSlotStillEvictsButDoesNotMatchGroup) {
     auto evicted = cache.selectAndEvict(/*min_blocks=*/2);
     ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{1}));
     ASSERT_EQ(evicted.evicted_group_block_ids.at(1), (std::vector<BlockIdxType>{101, 201}));
+
+    const auto events = cache.cacheEventsSince(/*latest_version=*/0, /*max_events=*/0, /*force_snapshot=*/false);
+    ASSERT_EQ(events.events.size(), 1u);
+    EXPECT_EQ(events.events[0].type, SharedBlockCache::CacheEventType::REMOVED);
+    EXPECT_EQ(events.events[0].group_ids, (std::vector<GroupIdType>{0}));
 }
 
 TEST(SharedBlockCacheTest, StateIndependentEvictionDropsDeepestNonLeafStateFirst) {
@@ -279,6 +386,12 @@ TEST(SharedBlockCacheTest, StateIndependentEvictionDropsDeepestNonLeafStateFirst
     EXPECT_EQ(cache.matchGroup(2, 0), 102);
     EXPECT_TRUE(isNullBlockIdx(cache.matchGroup(2, 3)));
     EXPECT_EQ(cache.matchGroup(3, 3), 303);
+
+    const auto events = cache.cacheEventsSince(/*latest_version=*/2, /*max_events=*/0, /*force_snapshot=*/false);
+    ASSERT_EQ(events.events.size(), 1u);
+    EXPECT_EQ(events.events[0].type, SharedBlockCache::CacheEventType::REMOVED);
+    EXPECT_EQ(events.events[0].cache_key, 2);
+    EXPECT_EQ(events.events[0].group_ids, (std::vector<GroupIdType>{3}));
 }
 
 TEST(SharedBlockCacheTest, StateIndependentEvictionScansMultipleLeavesSafely) {
