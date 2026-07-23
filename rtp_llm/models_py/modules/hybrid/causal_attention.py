@@ -17,6 +17,8 @@ if device_type == DeviceType.ROCm:
 else:
     from rtp_llm.models_py.modules.base.cuda.norm import FusedQKRMSNorm
 
+from rtp_llm.models_py.modules.base.common.norm import LayerwiseQKRMSNorm
+
 
 class CausalAttention(nn.Module):
 
@@ -29,6 +31,7 @@ class CausalAttention(nn.Module):
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
         layer_idx: int = 0,
+        qk_norm_type: str = "per_head",
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -63,14 +66,32 @@ class CausalAttention(nn.Module):
         self.o_proj.maybe_cache_quant_scale(self.cache_scale_len)
         self.qk_fuse_norm = None
         if W.q_ln_gamma in weights and W.k_ln_gamma in weights:
-            self.qk_fuse_norm = FusedQKRMSNorm(
-                weights[W.q_ln_gamma],
-                weights[W.k_ln_gamma],
-                attn_config.head_num,
-                attn_config.kv_head_num,
-                attn_config.size_per_head,
-                layernorm_eps,
-            )
+            q_gamma = weights[W.q_ln_gamma]
+            k_gamma = weights[W.k_ln_gamma]
+            if qk_norm_type == "per_layer":
+                self.qk_fuse_norm = LayerwiseQKRMSNorm(
+                    q_gamma,
+                    k_gamma,
+                    attn_config.head_num,
+                    attn_config.kv_head_num,
+                    attn_config.size_per_head,
+                    layernorm_eps,
+                    tp_size=self.tp_size,
+                    tp_rank=parallelism_config.get_attn_tp_rank(),
+                )
+            elif qk_norm_type == "per_head":
+                self.qk_fuse_norm = FusedQKRMSNorm(
+                    q_gamma,
+                    k_gamma,
+                    attn_config.head_num,
+                    attn_config.kv_head_num,
+                    attn_config.size_per_head,
+                    layernorm_eps,
+                )
+            else:
+                raise ValueError(
+                    f"unsupported qk_norm_type={qk_norm_type!r}; expected 'per_head' or 'per_layer'"
+                )
 
     def forward(
         self,

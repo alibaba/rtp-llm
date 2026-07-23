@@ -77,3 +77,4 @@ py_test (
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20'},
 )
+

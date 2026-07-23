@@ -262,6 +262,16 @@ py_test(
 )
 
 py_test(
+    name="minimax_m2_detector_test",
+    srcs=[
+        "minimax_m2_detector_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+)
+
+py_test(
     name = "mtp_streaming_tool_parsing_test",
     srcs = [
         "mtp_streaming_tool_parsing_test.py",

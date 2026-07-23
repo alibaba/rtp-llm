@@ -425,6 +425,27 @@ def h20_oss_suites():
     )
 
 
+    # H20 MiniMax-M2
+    native.test_suite(
+        name = "smoke_h20_minimax_m2",
+        tests = [
+            smoke_test(
+                name="minimax_m2_fp8_pd",
+                task_info="data/model/minimax_m2/q_r_fp8_pd.json",
+                envs={
+                    "prefill": [],
+                    "decode": ["ACCL_LOW_LATENCY_OPTIMIZE=1"],
+                },
+                smoke_args={
+                    "prefill": "--act_type BF16 --quantization FP8_PER_BLOCK --use_deepep_moe 1 --use_deepep_low_latency 0 --enable_trt_fmha 1 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 4 --ep_size 4 --world_size 4 --max_seq_len 65536 --seq_size_per_block 64 --warm_up 0 --reserver_runtime_mem_mb 16384 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 2048 --write_cache_sync 1",
+                    "decode": "--act_type BF16 --quantization FP8_PER_BLOCK --use_deepep_moe 1 --use_deepep_low_latency 1 --enable_trt_fmha 1 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --dp_size 4 --ep_size 4 --world_size 4 --max_seq_len 65536 --seq_size_per_block 64 --warm_up 0 --reserver_runtime_mem_mb 16384 --enable_cuda_graph 1 --decode_capture_config '1,2,3,4' --concurrency_limit 4 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 2048 --write_cache_sync 1",
+                },
+                gpu_type=["H20"],
+            ),
+        ],
+    )
+
+
     # H20 Eagle (Qwen2-14B + draft model)
     native.test_suite(
         name = "smoke_h20_eagle",
