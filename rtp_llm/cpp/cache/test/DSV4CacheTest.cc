@@ -47,8 +47,7 @@ private:
     bool old_core_dump_on_exception_{false};
 };
 
-[[maybe_unused]] auto* const dsv4_cache_test_env =
-    ::testing::AddGlobalTestEnvironment(new DSV4CacheTestEnvironment());
+[[maybe_unused]] auto* const dsv4_cache_test_env = ::testing::AddGlobalTestEnvironment(new DSV4CacheTestEnvironment());
 
 }  // namespace
 
@@ -891,8 +890,7 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
                                                      kv_cache_config,
                                                      sp_config,
                                                      std::nullopt,
-                                                     true,
-                                                     false);
+                                                     true);
 
     ASSERT_EQ(config.layer_num, 43u);
     ASSERT_EQ(config.layer_all_num, 45u);

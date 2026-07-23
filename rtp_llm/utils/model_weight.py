@@ -1176,6 +1176,7 @@ class W:
     # eagle3
     eagle3_fc_proj = "eagle3_fc.weight"
     eagle3_fc_norm_gamma = "eagle3_fc.gamma"
+    eagle3_aux_norm_gamma = "eagle3_aux_norm.gamma"
     eagle3_input_norm_gamma = "eagle3_input.gamma"
 
     # attn
@@ -1499,6 +1500,7 @@ class W:
         multi_tokens_predict_t2d_map: sp_id,
         eagle3_fc_proj: sp_id,
         eagle3_fc_norm_gamma: sp_id,
+        eagle3_aux_norm_gamma: sp_id,
         eagle3_input_norm_gamma: sp_id,
         pre_attn_ln_gamma: sp_id,
         pre_attn_ln_beta: sp_id,

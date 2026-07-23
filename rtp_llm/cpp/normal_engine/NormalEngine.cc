@@ -300,8 +300,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
                                                      kv_cache_config,
                                                      sp_config,
                                                      std::nullopt,
-                                                     isMTPEagle(),
-                                                     isEagle());
+                                                     isMTPEagle());
         } else {
             const int cache_gen_num_per_cycle =
                 sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
@@ -343,8 +342,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
                                                           kv_cache_config,
                                                           sp_config,
                                                           std::nullopt,
-                                                          isMTPEagle(),
-                                                          isEagle());
+                                                          isMTPEagle());
     } else {
         const int cache_gen_num_per_cycle =
             sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
@@ -435,8 +433,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                          kv_cache_config,
                                                          sp_config,
                                                          warm_up_result,
-                                                         isMTPEagle(),
-                                                         isEagle());
+                                                         isMTPEagle());
 
         resource_context_.cache_manager = make_shared<KVCacheManager>(config,
                                                                       false,
@@ -728,8 +725,13 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                 break;
             case RoleType::DECODE:
                 if (streams.empty()) {
-                    streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size));
+                    streams.emplace_back(
+                        MtpExecutor::createMinFakeDecodeStream(propose_step,
+                                                               model_config_,
+                                                               propose_params_->getEngineInitParams().model_config_,
+                                                               runtime_config,
+                                                               resource_context_,
+                                                               mtp_vocab_size));
                 }
                 break;
             case RoleType::PDFUSION: {
@@ -747,8 +749,13 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                         MtpExecutor::createMinFakePrefillStream(1, model_config_, runtime_config, resource_context_));
                 }
                 if (!has_decode) {
-                    streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size));
+                    streams.emplace_back(
+                        MtpExecutor::createMinFakeDecodeStream(propose_step,
+                                                               model_config_,
+                                                               propose_params_->getEngineInitParams().model_config_,
+                                                               runtime_config,
+                                                               resource_context_,
+                                                               mtp_vocab_size));
                 }
                 break;
             }

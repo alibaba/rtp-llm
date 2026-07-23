@@ -777,6 +777,20 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
     return outputs;
 }
 
+torch::Tensor CudaGraphRunner::getMtpTargetHiddenStates(const CudaGraphState& state, int64_t num_tokens) {
+    const size_t graph_key =
+        is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
+    const auto& hidden = graph_instances_.at(graph_key).mem_hold_.mtp_target_hidden_states_;
+    if (!hidden.defined() || num_tokens < 0) {
+        return hidden;
+    }
+    RTP_LLM_CHECK_WITH_INFO(num_tokens <= hidden.size(0),
+                            "requested CUDA graph MTP hidden rows exceed capture: requested=%ld available=%ld",
+                            num_tokens,
+                            hidden.size(0));
+    return hidden.narrow(0, 0, num_tokens);
+}
+
 bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state) {
     state.current_batch_size = inputs.attention_inputs.input_lengths.size(0);
     state.current_seq_len    = inferTotalTokensNoSync(inputs);
@@ -888,6 +902,46 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
         RTP_LLM_LOG_DEBUG("prefill cuda graph replay seq_len key %d", state.current_real_graph_seq_len);
     } else {
         if (!tryGetRealGraphDecodeBatchSize(inputs, state)) {
+            return false;
+        }
+    }
+    if (!canReplayInputHiddens(inputs, state)) {
+        return false;
+    }
+    return true;
+}
+
+bool CudaGraphRunner::canReplayInputHiddens(const PyModelInputs& inputs, const CudaGraphState& state) const {
+    const auto& input_hiddens = inputs.input_hiddens;
+    if (!input_hiddens.defined() || input_hiddens.numel() == 0) {
+        return true;
+    }
+
+    const size_t graph_key =
+        is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
+    const auto graph_it = graph_instances_.find(graph_key);
+    if (graph_it == graph_instances_.end()) {
+        return false;
+    }
+
+    const auto& captured_hiddens = graph_it->second.mem_hold_.py_model_inputs_.input_hiddens;
+    if (!captured_hiddens.defined() || input_hiddens.scalar_type() != captured_hiddens.scalar_type()
+        || input_hiddens.dim() != captured_hiddens.dim()) {
+        return false;
+    }
+
+    if (input_hiddens.dim() == 0) {
+        return input_hiddens.numel() == captured_hiddens.numel();
+    }
+    if (input_hiddens.size(0) > captured_hiddens.size(0)) {
+        return false;
+    }
+    for (int64_t dim = 1; dim < input_hiddens.dim(); ++dim) {
+        if (input_hiddens.size(dim) != captured_hiddens.size(dim)) {
+            RTP_LLM_LOG_DEBUG("skip CUDA graph replay: input_hiddens dimension %ld mismatch, live=%ld captured=%ld",
+                              dim,
+                              input_hiddens.size(dim),
+                              captured_hiddens.size(dim));
             return false;
         }
     }
@@ -1197,6 +1251,17 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     }
     RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);
 
+    auto& mtp_hidden_output = graph_instances_[key].mem_hold_.mtp_target_hidden_states_;
+    if (py::hasattr(py_instance_, "get_mtp_target_hidden_states")) {
+        py::object result = py_instance_.attr("get_mtp_target_hidden_states")(-1);
+        if (!result.is_none()) {
+            auto hidden = result.cast<torch::Tensor>();
+            RTP_LLM_CHECK_WITH_INFO(hidden.defined() && hidden.dim() == 2,
+                                    "CUDA graph MTP target hidden output must be a 2-D tensor");
+            mtp_hidden_output = torch::empty_like(hidden);
+        }
+    }
+
     {
         // sync before capture
         cuda_graph::graphDeviceSynchronize();
@@ -1247,6 +1312,15 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 throw;
             }
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
+            if (mtp_hidden_output.defined()) {
+                py::object result = py_instance_.attr("get_mtp_target_hidden_states")(-1);
+                RTP_LLM_CHECK_WITH_INFO(!result.is_none(),
+                                        "CUDA graph MTP target hidden hook disappeared during capture");
+                auto hidden = result.cast<torch::Tensor>();
+                RTP_LLM_CHECK_WITH_INFO(hidden.sizes() == mtp_hidden_output.sizes(),
+                                        "CUDA graph MTP target hidden shape changed during capture");
+                mtp_hidden_output.copy_(hidden);
+            }
             graph.capture_end();
         }
 

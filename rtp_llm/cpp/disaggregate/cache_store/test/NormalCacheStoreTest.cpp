@@ -5,6 +5,7 @@
 #include "autil/NetUtil.h"
 #include "autil/EnvUtil.h"
 #include <cuda_runtime.h>
+#include <unordered_set>
 
 namespace rtp_llm {
 
@@ -607,6 +608,45 @@ TEST_F(NormalCacheStoreTest, testLoad_canceWhileLoad) {
     mutex.unlock();
 
     set_block_thread.join();
+}
+
+TEST(NormalCacheStoreChunkTest, splitsBlocksWithinOneLayer) {
+    constexpr size_t max_chunk_bytes = 10;
+
+    auto layer = std::make_shared<RequestBlockBuffer>("request-id", "layer-0");
+    for (int i = 0; i < 5; ++i) {
+        layer->addBlock(
+            std::make_shared<BlockBuffer>("block-" + std::to_string(i), std::shared_ptr<void>{}, 4, false, false));
+    }
+
+    auto chunks = cache_store_detail::chunkTcpLoadBuffers({layer}, max_chunk_bytes, 4);
+
+    ASSERT_EQ(chunks.size(), 3);
+    std::unordered_set<std::string> block_keys;
+    for (const auto& chunk : chunks) {
+        ASSERT_LE(chunk->getBlocksSize(), max_chunk_bytes);
+        for (const auto& [key, _] : chunk->getBlocks()) {
+            ASSERT_TRUE(block_keys.insert(key).second);
+        }
+    }
+    ASSERT_EQ(block_keys.size(), layer->getBlocksCount());
+}
+
+TEST(NormalCacheStoreChunkTest, preservesLayerLimit) {
+    std::vector<std::shared_ptr<RequestBlockBuffer>> layers;
+    for (int i = 0; i < 5; ++i) {
+        auto layer = std::make_shared<RequestBlockBuffer>("request-id", "layer-" + std::to_string(i));
+        layer->addBlock(
+            std::make_shared<BlockBuffer>("block-" + std::to_string(i), std::shared_ptr<void>{}, 1, false, false));
+        layers.push_back(std::move(layer));
+    }
+
+    auto chunks = cache_store_detail::chunkTcpLoadBuffers(layers, 100, 2);
+
+    ASSERT_EQ(chunks.size(), 3);
+    for (const auto& chunk : chunks) {
+        ASSERT_LE(chunk->getBlocksCount(), 2);
+    }
 }
 
 TEST_F(NormalCacheStoreTest, testLoadContext_Success) {

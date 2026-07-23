@@ -195,6 +195,17 @@ void PyWrappedModel::releaseBuffers() {
 }
 
 torch::Tensor PyWrappedModel::getMtpTargetHiddenStates(int64_t num_tokens) {
+    if (last_mtp_target_hidden_states_.defined()) {
+        if (num_tokens < 0) {
+            return last_mtp_target_hidden_states_;
+        }
+        RTP_LLM_CHECK_WITH_INFO(num_tokens <= last_mtp_target_hidden_states_.size(0),
+                                "requested MTP target hidden rows exceed latest forward: requested=%ld available=%ld",
+                                num_tokens,
+                                last_mtp_target_hidden_states_.size(0));
+        return last_mtp_target_hidden_states_.narrow(0, 0, num_tokens);
+    }
+
     if (!py_model_) {
         return torch::Tensor();
     }
@@ -203,10 +214,7 @@ torch::Tensor PyWrappedModel::getMtpTargetHiddenStates(int64_t num_tokens) {
         return torch::Tensor();
     }
     py::object result = py_model_.attr("get_mtp_target_hidden_states")(num_tokens);
-    if (result.is_none()) {
-        return torch::Tensor();
-    }
-    return result.cast<torch::Tensor>();
+    return result.is_none() ? torch::Tensor() : result.cast<torch::Tensor>();
 }
 
 torch::Tensor PyWrappedModel::getMtpLastHiddenStates(int64_t num_tokens) {
@@ -1151,6 +1159,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                         bert_embedding_inputs});
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
+        last_mtp_target_hidden_states_ = torch::Tensor();
 
         // Cast the Python object to PyModelOutputs and extract hidden states
         if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
@@ -1164,7 +1173,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
-            hidden_states = py_model_outputs.hidden_states.clone();
+            hidden_states                  = py_model_outputs.hidden_states.clone();
+            last_mtp_target_hidden_states_ = graph_runner_->getMtpTargetHiddenStates(graph_state_, -1);
         } else {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");

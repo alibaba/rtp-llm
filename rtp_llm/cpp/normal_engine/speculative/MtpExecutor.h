@@ -74,6 +74,7 @@ public:
                                                         const ResourceContext& resource_context);
     static GenerateStreamPtr createMinFakeDecodeStream(int                    max_new_tokens,
                                                        const ModelConfig&     model_config,
+                                                       const ModelConfig&     draft_model_config,
                                                        const RuntimeConfig&   runtime_config,
                                                        const ResourceContext& resource_context,
                                                        int                    vocab_size);

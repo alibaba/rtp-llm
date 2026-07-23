@@ -138,14 +138,15 @@ private:
     torch::Tensor                            residual_scale_;
     TensorHolder                             buffer_holder_;
 
-    GraphBase* graph_runner_{nullptr};
-    py::object py_model_;
-    py::object held_attn_pyobj_;
-    bool       enable_cuda_graph_{false};
-    bool       is_prefill_cuda_graph_mode_{false};
-    bool       use_spec_decoding_{false};
-    bool       enable_device_perf_{false};
-    bool       check_nan_{false};
+    GraphBase*    graph_runner_{nullptr};
+    py::object    py_model_;
+    py::object    held_attn_pyobj_;
+    torch::Tensor last_mtp_target_hidden_states_;
+    bool          enable_cuda_graph_{false};
+    bool          is_prefill_cuda_graph_mode_{false};
+    bool          use_spec_decoding_{false};
+    bool          enable_device_perf_{false};
+    bool          check_nan_{false};
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
     std::unique_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;

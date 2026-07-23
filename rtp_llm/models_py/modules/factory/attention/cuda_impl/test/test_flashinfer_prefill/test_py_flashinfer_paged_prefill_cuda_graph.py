@@ -11,6 +11,7 @@ import unittest
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+    PyFlashinferPrefillImplBase,
     PyFlashinferPrefillPagedAttnOp,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_test import (
@@ -26,6 +27,46 @@ from rtp_llm.ops.compute_ops import (
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 PAGE_SIZE = 16
+
+
+class TestPrefillCudaGraphParams(unittest.TestCase):
+    def test_rope_kv_offset_storage_is_stable_across_replay_prepare(self):
+        captured_offset = torch.zeros((2, 3), dtype=torch.int32)
+        replay_offset = torch.arange(6, dtype=torch.int32).reshape(2, 3)
+
+        class FakeFmha:
+            def prepare(self, attn_inputs, forbid_realloc=False):
+                self.call = (attn_inputs, forbid_realloc)
+
+        class FakeRope:
+            def prepare(self, attn_inputs):
+                return type("RopeParams", (), {"kv_cache_offset": replay_offset})()
+
+        class ConcretePrefillImpl(PyFlashinferPrefillImplBase):
+            @staticmethod
+            def support(attn_inputs):
+                return True
+
+            def _create_fmha_impl(self, attn_configs, attn_inputs):
+                raise NotImplementedError
+
+            def _create_rope_kvcache_impl(self, attn_configs):
+                raise NotImplementedError
+
+        impl = ConcretePrefillImpl.__new__(ConcretePrefillImpl)
+        impl.fmha_impl = FakeFmha()
+        impl.rope_kvcache_impl = FakeRope()
+        impl.rope_params = type(
+            "RopeParams", (), {"kv_cache_offset": captured_offset}
+        )()
+
+        original_data_ptr = impl.rope_params.kv_cache_offset.data_ptr()
+        inputs = object()
+        impl.prepare_cuda_graph(inputs)
+
+        self.assertEqual(impl.fmha_impl.call, (inputs, True))
+        self.assertEqual(impl.rope_params.kv_cache_offset.data_ptr(), original_data_ptr)
+        torch.testing.assert_close(impl.rope_params.kv_cache_offset, replay_offset)
 
 
 class TestPrefillPagedCudaGraph(BaseAttentionTest):
@@ -71,6 +112,7 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
             block_ids[i, :nb] = torch.arange(offset, offset + nb)
             offset += nb
         inp.kv_cache_kernel_block_id_host = block_ids
+        inp.kv_cache_kernel_block_id_device = block_ids.to(self.device)
 
         if with_copy_params:
             ms = max_seq_len if max_seq_len > 0 else max(input_lengths)

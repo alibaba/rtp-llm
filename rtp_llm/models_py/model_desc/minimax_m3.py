@@ -2,6 +2,7 @@ import functools
 from typing import Any, Dict, Optional
 
 import torch
+from rtp_kernel.fused_rope_kvcache import convert_offset_to_block_array
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
@@ -11,6 +12,7 @@ from rtp_llm.models_py.model_desc.generic_moe import (
 )
 from rtp_llm.models_py.model_desc.multimodal_generic import MultimodalGenericModel
 from rtp_llm.models_py.modules import CausalAttention
+from rtp_llm.models_py.modules.factory.attention.common import copy_kv_cache_offset
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.modules.hybrid.msa_attention import MSAAttention
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
@@ -185,6 +187,17 @@ def _expand_target_verify_rows(
     return sequence_lengths_plus_1, token_block_table
 
 
+def _update_target_verify_rope_kv_offset(rope_params, block_table) -> None:
+    """Refresh the graph-owned RoPE KV offset from the current block table."""
+    if block_table is None or block_table.numel() == 0:
+        raise RuntimeError("MiniMax-M3 target verify requires a KV block table")
+    if rope_params is None or rope_params.kv_cache_offset is None:
+        raise RuntimeError("MiniMax-M3 target verify RoPE parameters are incomplete")
+
+    new_offset = convert_offset_to_block_array(block_table)
+    copy_kv_cache_offset(rope_params.kv_cache_offset, new_offset)
+
+
 @functools.lru_cache(maxsize=1)
 def _target_verify_impl_class():
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
@@ -284,60 +297,105 @@ def _target_verify_impl_class():
                 )
                 self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
 
-        def _refresh_rope_params(self, attn_inputs):
+        def _refresh_rope_kv_offset(self, attn_inputs):
             if not self.need_rope_kv_cache or self.rope_kvcache_impl is None:
                 return
-            new_params = self.rope_kvcache_impl.prepare(attn_inputs)
-            if self.rope_params is None:
-                self.rope_params = new_params
-                return
-
-            old_params = self.rope_params
-            tensor_fields = (
-                "kv_cache_offset",
-                "padding_offset",
-                "position_ids",
-                "cu_seqlens",
-                "cu_kv_seqlens",
-                "input_lengths",
-                "prefix_lengths",
-                "sequence_lengths",
+            # Other RoPE fields already reference the graph-owned attention
+            # buffers updated by CudaGraphRunner. KV offset is different: it is
+            # produced by a conversion kernel, so its captured storage must be
+            # refreshed explicitly without rebuilding host scalar metadata.
+            _update_target_verify_rope_kv_offset(
+                self.rope_params,
+                attn_inputs.kv_cache_kernel_block_id_device,
             )
-            for field in tensor_fields:
-                old_tensor = getattr(old_params, field)
-                new_tensor = getattr(new_params, field)
-                if old_tensor is None or new_tensor is None:
-                    if old_tensor is not new_tensor:
-                        self.rope_params = new_params
-                        return
-                    continue
-                if (
-                    old_tensor.shape != new_tensor.shape
-                    or old_tensor.dtype != new_tensor.dtype
-                ):
-                    self.rope_params = new_params
-                    return
-
-            for field in tensor_fields:
-                old_tensor = getattr(old_params, field)
-                new_tensor = getattr(new_params, field)
-                if old_tensor is not None:
-                    old_tensor.copy_(new_tensor)
-            old_params.kv_cache_offset_h = new_params.kv_cache_offset_h
-            old_params.max_seq_len = new_params.max_seq_len
-            old_params.max_prefix_length = new_params.max_prefix_length
-            old_params.context_total_kv_length = new_params.context_total_kv_length
-            old_params.decode_plan = new_params.decode_plan
-            old_params.attn_type = new_params.attn_type
 
         def prepare_cuda_graph(self, attn_inputs):
             self.fmha_impl.prepare_for_cuda_graph_replay(attn_inputs)
-            self._refresh_rope_params(attn_inputs)
+            self._refresh_rope_kv_offset(attn_inputs)
 
     return MiniMaxM3TargetVerifyImpl
 
 
 class _MiniMaxM3ModelMixin:
+    def __init__(self, model_config: ModelConfig, *args, **kwargs):
+        super().__init__(model_config, *args, **kwargs)
+        self._mtp_target_hidden_layer_ids = tuple(
+            getattr(
+                model_config,
+                "_minimax_m3_eagle3_aux_hidden_state_layer_ids",
+                (),
+            )
+        )
+        self._mtp_target_hidden_layer_slots = {
+            layer_id: slot
+            for slot, layer_id in enumerate(self._mtp_target_hidden_layer_ids)
+        }
+        self._mtp_target_hidden_states: Optional[torch.Tensor] = None
+        if self._mtp_target_hidden_layer_ids and (
+            any(
+                layer_id < 0 or layer_id > self.layer_num
+                for layer_id in self._mtp_target_hidden_layer_ids
+            )
+            or int(model_config.hc_mult) != len(self._mtp_target_hidden_layer_ids)
+        ):
+            raise ValueError(
+                "invalid MiniMax-M3 EAGLE3 target hidden-state contract: "
+                f"layers={self._mtp_target_hidden_layer_ids}, "
+                f"hc_mult={model_config.hc_mult}, model_layers={self.layer_num}"
+            )
+
+    def _begin_mtp_target_hidden_capture(
+        self, hidden_states: torch.Tensor
+    ) -> Optional[torch.Tensor]:
+        if not self._mtp_target_hidden_layer_ids:
+            return None
+        capture = hidden_states.new_empty(
+            hidden_states.size(0),
+            hidden_states.size(1) * len(self._mtp_target_hidden_layer_ids),
+        )
+        initial_slot = self._mtp_target_hidden_layer_slots.get(0)
+        if initial_slot is not None:
+            capture.narrow(
+                1,
+                initial_slot * hidden_states.size(1),
+                hidden_states.size(1),
+            ).copy_(hidden_states)
+        return capture
+
+    def _capture_mtp_target_hidden(
+        self,
+        capture: torch.Tensor,
+        layer_id: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> None:
+        slot = self._mtp_target_hidden_layer_slots.get(layer_id)
+        if slot is None:
+            return
+        torch.add(
+            hidden_states,
+            residual,
+            out=capture.narrow(
+                1,
+                slot * hidden_states.size(1),
+                hidden_states.size(1),
+            ),
+        )
+
+    def _finish_mtp_target_hidden_capture(self, capture: torch.Tensor) -> None:
+        self._mtp_target_hidden_states = capture
+
+    def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
+        hidden_states = self._mtp_target_hidden_states
+        if hidden_states is None or num_tokens < 0:
+            return hidden_states
+        if num_tokens > hidden_states.size(0):
+            raise RuntimeError(
+                "requested more MiniMax-M3 EAGLE3 hidden rows than produced: "
+                f"requested={num_tokens}, available={hidden_states.size(0)}"
+            )
+        return hidden_states.narrow(0, 0, num_tokens)
+
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> Any:

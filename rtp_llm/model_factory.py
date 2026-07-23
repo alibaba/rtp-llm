@@ -29,6 +29,17 @@ from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, VitSeparat
 from rtp_llm.utils.util import check_with_info
 
 
+def _configure_propose_model_contract(
+    propose_model_cls,
+    sp_config: Any,
+    target_config: ModelConfig,
+    draft_config: ModelConfig,
+) -> None:
+    configure = getattr(propose_model_cls, "configure_speculative_model", None)
+    if configure is not None:
+        configure(sp_config, target_config, draft_config)
+
+
 class ModelFactory:
     @staticmethod
     def get_config_json(ckpt_path: str):
@@ -375,14 +386,19 @@ class ModelFactory:
         if not sp_config.checkpoint_path:
             return None
 
-        # Current SP engine only supports MTP and EAGLE
-        if sp_config.type not in [SpeculativeType.MTP, SpeculativeType.EAGLE]:
+        # These modes all use a learned propose model. Keep the check generic;
+        # architecture-specific setup belongs to the registered model class.
+        if sp_config.type not in [
+            SpeculativeType.MTP,
+            SpeculativeType.EAGLE,
+            SpeculativeType.EAGLE3,
+        ]:
             logging.error(
-                "Speculative engine only supports MTP and EAGLE, but got %s",
+                "Speculative engine only supports MTP, EAGLE and EAGLE3, but got %s",
                 sp_config.type.name,
             )
             raise ValueError(
-                "Speculative engine only supports MTP and EAGLE, but got %s"
+                "Speculative engine only supports MTP, EAGLE and EAGLE3, but got %s"
                 % sp_config.type.name
             )
 
@@ -404,6 +420,13 @@ class ModelFactory:
         propose_model_config.max_seq_len = model_config.max_seq_len
         propose_model_config.quantization = sp_config.quantization
 
+        _configure_propose_model_contract(
+            propose_model_cls,
+            sp_config,
+            model_config,
+            propose_model_config,
+        )
+
         logging.info(
             f"load propose model from tokenizer_path: {propose_model_config.tokenizer_path}, "
             f"ckpt_path: {propose_model_config.ckpt_path}, quantization: {propose_model_config.quantization}"
@@ -416,6 +439,7 @@ class ModelFactory:
             kv_cache_config=engine_config.kv_cache_config,
             profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
             embedding_config=None,  # Propose model doesn't need embedding_config
+            apply_hack_layer_num=False,
         )
 
         return propose_model_config

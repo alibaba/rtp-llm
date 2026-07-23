@@ -28,6 +28,7 @@ _CLASS_TO_MODULE: Dict[str, str] = {
     "JinaBert": "rtp_llm.models.jina_bert.jina_bert",
     "Llama": "rtp_llm.models.llama",
     "MiniMaxM3Eagle1": "rtp_llm.models.minimax_m3_eagle1",
+    "MiniMaxM3Eagle3": "rtp_llm.models.minimax_m3_eagle3",
     "Baichuan": "rtp_llm.models.llama",
     "Llava": "rtp_llm.models.llava",
     "MegatronBert": "rtp_llm.models.megatron_bert",

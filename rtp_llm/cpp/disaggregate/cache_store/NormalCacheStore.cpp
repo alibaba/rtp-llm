@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 
 namespace rtp_llm {
@@ -65,10 +66,9 @@ std::string summarizeBlocks(const std::shared_ptr<RequestBlockBuffer>& request_b
 }
 
 std::vector<std::shared_ptr<RequestBlockBuffer>>
-chunkTcpLoadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers) {
-    constexpr size_t kMaxChunkBytes  = 48ULL * 1024ULL * 1024ULL;
-    constexpr size_t kMaxChunkLayers = 4;
-
+chunkTcpLoadBuffersImpl(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
+                        size_t                                                  max_chunk_bytes,
+                        size_t                                                  max_chunk_layers) {
     std::vector<std::shared_ptr<RequestBlockBuffer>> chunked;
     chunked.reserve(request_block_buffers.size());
 
@@ -108,28 +108,34 @@ chunkTcpLoadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& requ
             continue;
         }
 
-        const auto& request_id  = request_block_buffer->getRequestId();
-        const auto& request_key = request_block_buffer->getRequestKey();
-        const auto  block_bytes = request_block_buffer->getBlocksSize();
-        if (!pending_blocks.empty()
-            && (request_id != pending_request_id || pending_layers >= kMaxChunkLayers
-                || pending_bytes + block_bytes > kMaxChunkBytes)) {
-            flush();
-        }
+        const auto& request_id       = request_block_buffer->getRequestId();
+        const auto& request_key      = request_block_buffer->getRequestKey();
+        auto        blocks           = request_block_buffer->getBlocks();
+        bool        starts_new_layer = true;
 
-        if (pending_blocks.empty()) {
-            pending_request_id = request_id;
-            first_request_key  = request_key;
-        }
-        last_request_key = request_key;
-
-        auto blocks = request_block_buffer->getBlocks();
         pending_blocks.reserve(pending_blocks.size() + blocks.size());
         for (auto& [_, block] : blocks) {
+            const size_t block_bytes = block == nullptr ? 0 : block->len;
+            if (!pending_blocks.empty()
+                && (request_id != pending_request_id || (starts_new_layer && pending_layers >= max_chunk_layers)
+                    || pending_bytes + block_bytes > max_chunk_bytes)) {
+                flush();
+                starts_new_layer = true;
+            }
+
+            if (pending_blocks.empty()) {
+                pending_request_id = request_id;
+                first_request_key  = request_key;
+            }
+            if (starts_new_layer) {
+                last_request_key = request_key;
+                ++pending_layers;
+                starts_new_layer = false;
+            }
+
             pending_blocks.push_back(block);
+            pending_bytes += block_bytes;
         }
-        pending_bytes += block_bytes;
-        ++pending_layers;
     }
     flush();
 
@@ -146,6 +152,16 @@ size_t tcpLoadMaxInflightChunks() {
 }
 
 }  // namespace
+
+std::vector<std::shared_ptr<RequestBlockBuffer>>
+cache_store_detail::chunkTcpLoadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
+                                        size_t                                                  max_chunk_bytes,
+                                        size_t                                                  max_chunk_layers) {
+    if (max_chunk_bytes == 0 || max_chunk_layers == 0) {
+        throw std::invalid_argument("TCP load chunk limits must be positive");
+    }
+    return chunkTcpLoadBuffersImpl(request_block_buffers, max_chunk_bytes, max_chunk_layers);
+}
 
 NormalCacheStore::~NormalCacheStore() {
     if (thread_pool_) {
@@ -442,7 +458,10 @@ NormalCacheStore::loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuff
     std::vector<std::shared_ptr<RequestBlockBuffer>> tcp_chunked_buffers;
     const auto*                                      load_buffers = &request_block_buffers;
     if (!memory_util_->isRdmaMode()) {
-        tcp_chunked_buffers = chunkTcpLoadBuffers(request_block_buffers);
+        constexpr size_t kMaxChunkBytes  = 48ULL * 1024ULL * 1024ULL;
+        constexpr size_t kMaxChunkLayers = 4;
+        tcp_chunked_buffers =
+            cache_store_detail::chunkTcpLoadBuffers(request_block_buffers, kMaxChunkBytes, kMaxChunkLayers);
         if (!tcp_chunked_buffers.empty()) {
             load_buffers = &tcp_chunked_buffers;
         }

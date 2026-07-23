@@ -21,6 +21,7 @@ from rtp_llm.models_py.model_desc.minimax_m3 import (
     MiniMaxM3Model,
     _expand_target_verify_rows,
     _target_verify_width,
+    _update_target_verify_rope_kv_offset,
     _validate_target_verify_replay_shape,
 )
 from rtp_llm.models_py.model_desc.minimax_m3_eagle1 import MiniMaxM3Eagle1Model
@@ -189,6 +190,22 @@ class DecoderAttentionHookTest(unittest.TestCase):
 
 
 class TargetVerifyAttentionContractTest(unittest.TestCase):
+    def test_updates_graph_owned_rope_kv_offset_in_place(self):
+        captured_offset = torch.zeros((2, 1, 2, 3), dtype=torch.int32)
+        converted_offset = torch.arange(12, dtype=torch.int32).reshape(2, 1, 2, 3)
+        rope_params = SimpleNamespace(kv_cache_offset=captured_offset)
+        block_table = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.int32)
+
+        with patch(
+            "rtp_llm.models_py.model_desc.minimax_m3.convert_offset_to_block_array",
+            return_value=converted_offset,
+        ) as convert:
+            _update_target_verify_rope_kv_offset(rope_params, block_table)
+
+        convert.assert_called_once_with(block_table)
+        self.assertIs(rope_params.kv_cache_offset, captured_offset)
+        torch.testing.assert_close(captured_offset, converted_offset)
+
     def test_minimax_uses_shared_attention_contract_outside_target_verify(self):
         self.assertFalse(
             hasattr(MiniMaxM3Model, "prepare_target_verify_attention_inputs")

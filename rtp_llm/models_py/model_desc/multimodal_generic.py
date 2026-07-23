@@ -33,6 +33,7 @@ class MultimodalGenericModel(GenericMoeModel):
                 inputs
             )  # pyright: ignore[reportUnreachable]
         residual = torch.zeros_like(hidden_states)
+        mtp_target_hidden_capture = self._begin_mtp_target_hidden_capture(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, i)
             output = decoder_layer(
@@ -45,6 +46,16 @@ class MultimodalGenericModel(GenericMoeModel):
             hidden_states = output.hidden_states
             residual = output.residual
 
+            if mtp_target_hidden_capture is not None:
+                self._capture_mtp_target_hidden(
+                    mtp_target_hidden_capture,
+                    i + 1,
+                    hidden_states,
+                    residual,
+                )
+
+        if mtp_target_hidden_capture is not None:
+            self._finish_mtp_target_hidden_capture(mtp_target_hidden_capture)
         hidden_states, _ = self.norm(hidden_states, residual)
 
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
