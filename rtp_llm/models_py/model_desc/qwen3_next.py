@@ -407,6 +407,10 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             and block_map.ndim == 2
             and block_map.shape[1] > 1
         ):
+            # CUDA graph capture allocates a fixed-width block table, while the
+            # recurrent FLA decode kernel consumes only the first logical block.
+            # Keep the original row stride in this narrow view: FLA receives it
+            # explicitly and uses it to advance between batch rows.
             return block_map[:, :1]
         return block_map
 

@@ -5,6 +5,8 @@ cc_test(
     name = "combo_position_ids_validation_test",
     srcs = ["combo_position_ids_validation_test.cc"],
     copts = copts(),
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
     deps = [
         "//rtp_llm/cpp/cuda_graph:combo_position_ids_validation",
         "@com_google_googletest//:gtest_main",

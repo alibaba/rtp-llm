@@ -598,28 +598,68 @@ class TestAiterPrefillImplPagedSupport(unittest.TestCase):
             input_lengths=torch.tensor([4], dtype=torch.int32),
         )
 
+    def _make_attn_configs(self, *, mrope=False, interleaved=False):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            rope_config=SimpleNamespace(
+                style=RopeStyle.Mrope if mrope else RopeStyle.Base,
+                mrope_interleaved=interleaved,
+            )
+        )
+
     def test_support_true_for_real_prefix(self):
         """prefix_lengths.max() > 0 => support() returns True."""
         pl = torch.tensor([0, 128, 0, 64], dtype=torch.int32)
-        self.assertTrue(AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl)))
+        self.assertTrue(
+            AiterPrefillImplPaged.support(
+                self._make_attn_configs(), self._make_attn_inputs(pl)
+            )
+        )
 
     def test_support_true_for_capture_filled_prefix(self):
         """MTP draft capture pre-fills prefix_lengths with max_seq_len => support() True."""
         pl = torch.full((4,), 1024, dtype=torch.int32)
-        self.assertTrue(AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl)))
+        self.assertTrue(
+            AiterPrefillImplPaged.support(
+                self._make_attn_configs(), self._make_attn_inputs(pl)
+            )
+        )
 
     def test_support_false_for_zero_prefix(self):
         """All-zero prefix_lengths => support() returns False (ASM/NonAsm preferred)."""
         pl = torch.zeros(4, dtype=torch.int32)
         self.assertFalse(
-            AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl))
+            AiterPrefillImplPaged.support(
+                self._make_attn_configs(), self._make_attn_inputs(pl)
+            )
         )
 
     def test_support_false_for_empty_prefix_lengths(self):
         """Empty prefix_lengths tensor => support() returns False."""
         pl = torch.empty(0, dtype=torch.int32)
         self.assertFalse(
-            AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl))
+            AiterPrefillImplPaged.support(
+                self._make_attn_configs(), self._make_attn_inputs(pl)
+            )
+        )
+
+    def test_support_false_for_non_interleaved_mrope(self):
+        pl = torch.tensor([128], dtype=torch.int32)
+        self.assertFalse(
+            AiterPrefillImplPaged.support(
+                self._make_attn_configs(mrope=True, interleaved=False),
+                self._make_attn_inputs(pl),
+            )
+        )
+
+    def test_support_true_for_interleaved_mrope(self):
+        pl = torch.tensor([128], dtype=torch.int32)
+        self.assertTrue(
+            AiterPrefillImplPaged.support(
+                self._make_attn_configs(mrope=True, interleaved=True),
+                self._make_attn_inputs(pl),
+            )
         )
 
 
@@ -1596,6 +1636,34 @@ class TestFusedRopeKVCacheMropeContract(unittest.TestCase):
     def test_nonasm_decode_q_and_k_cache_match_reference(self):
         self._assert_decode_matches_reference(FusedRopeKVCacheDecodeOpNonAsm)
 
+    def test_decode_validates_position_ids_against_actual_qkv_tokens(self):
+        for op_class in (
+            FusedRopeKVCacheDecodeOpAsm,
+            FusedRopeKVCacheDecodeOpNonAsm,
+        ):
+            (
+                op,
+                params,
+                _attn_inputs,
+                layer_cache,
+                _pool,
+                _per_batch_block_ids,
+                _sequence_lengths,
+                q,
+                k,
+                v,
+            ) = self._build_decode_case(op_class)
+            multi_token_qkv = _pack_qkv(
+                q.repeat_interleave(2, dim=0),
+                k.repeat_interleave(2, dim=0),
+                v.repeat_interleave(2, dim=0),
+            )
+            with self.subTest(op_class=op_class.__name__):
+                with self.assertRaisesRegex(
+                    RuntimeError, "token_num=4, index_factor=3"
+                ):
+                    op.forward(multi_token_qkv, layer_cache, params)
+
     def _assert_cuda_graph_replay_uses_new_position_ids(self, op_class):
         (
             op,
@@ -1714,8 +1782,9 @@ class TestAiterPrefillImplMropePositionIds(unittest.TestCase):
             causal=True,
         )
 
-        self.assertTrue(impl.rope_params.position_ids.defined())
-        self.assertEqual(tuple(impl.rope_params.position_ids.shape), (8, 3))
+        # CKAttn's pybind surface intentionally does not expose position_ids.
+        # Comparing the output against an independently rotated reference is
+        # the public, end-to-end check that all three MRoPE axes were consumed.
         torch.testing.assert_close(actual, ref, atol=1e-2, rtol=1e-2)
 
     def test_asm_mrope_matches_reference(self):

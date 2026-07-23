@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <unordered_map>
 #include <vector>
 #include <pybind11/embed.h>
@@ -154,8 +155,9 @@ private:
     at::TensorOptions                      options_cuda_float_;
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
 
-    std::vector<std::string> kv_cache_group_tags_;
-    int                      position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
+    std::vector<std::string>      kv_cache_group_tags_;
+    int                           position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
+    mutable std::atomic<uint64_t> combo_position_fallback_count_{0};
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();

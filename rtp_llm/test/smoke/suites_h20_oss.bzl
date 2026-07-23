@@ -331,6 +331,12 @@ def h20_oss_suites():
                 gpu_type=["H20"],
             ),
             smoke_test(
+                name="next_bf16_mrope_cuda_graph",
+                task_info="data/model/qwen35/qwen35_bf16_tp2.json",
+                smoke_args="--warm_up 0 --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 1 --decode_capture_config '1,2,3'",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
                 name="next_bf16_tp2_dp2",
                 task_info="data/model/qwen35/qwen35_bf16_tp2_dp2.json",
                 smoke_args="--warm_up 0 --tp_size 2 --dp_size 2 --world_size 4 --act_type BF16 --seq_size_per_block 2048 --reserver_runtime_mem_mb 12000 --use_deepep_moe 1 --use_deepep_low_latency 1",
@@ -480,6 +486,8 @@ def h20_oss_suites():
     native.test_suite(
         name = "smoke_h20_vl",
         tests = [
+            # Golden regression for common RoPE position_id == 0 semantics:
+            # Qwen3-VL image position ids contain zero-valued spatial axes.
             smoke_test(
                 name="qwen3_vl",
                 task_info="data/model/qwen_vl/q_r_3.json",

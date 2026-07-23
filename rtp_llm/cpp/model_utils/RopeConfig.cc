@@ -20,6 +20,8 @@ std::string RopeConfig::DebugRopeConfigStr() const {
     oss << "  mrope_dim2: " << mrope_dim2 << std::endl;
     oss << "  mrope_dim3: " << mrope_dim3 << std::endl;
     oss << "  mrope_interleaved: " << mrope_interleaved << std::endl;
+    oss << "  is_neox_style: " << is_neox_style << std::endl;
+    oss << "  indexer_is_neox_style: " << indexer_is_neox_style << std::endl;
     return oss.str();
 }
 
