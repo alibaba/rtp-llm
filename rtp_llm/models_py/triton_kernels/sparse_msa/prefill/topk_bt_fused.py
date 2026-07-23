@@ -616,11 +616,19 @@ def _sparse_attn_chunked(
     if meta is None:
         qo_lens = [int(v) for v in p["qo_segment_lens"].tolist()]  # CPU tensor
         seqused = [int(v) for v in p["seqused_k"].cpu().tolist()]  # one DtoH sync
+        # kv_indices is laid out by the FULL per-segment KV run (kv_segment_lens,
+        # what build_kv_page_indices consumed), NOT by the causal seqused_k. Under
+        # zigzag/load-balanced CP a segment's seqused_k (= qo_offset + q_len) is
+        # smaller than its full KV run, so sizing the page table / advancing `off`
+        # by seqused_k desyncs the walk and maps later segments to the wrong
+        # physical pages. Size the page run by kv_segment_lens; keep the causal
+        # prefix (= qo_offset) from seqused_k.
+        kv_runs = [int(v) for v in p["kv_segment_lens"].cpu().tolist()]
         chunks, off, gq0 = [], 0, 0
         for b, q_len in enumerate(qo_lens):
             kv_len = seqused[b]
             prefix = kv_len - q_len
-            n = (kv_len + block_size_k - 1) // block_size_k
+            n = (kv_runs[b] + block_size_k - 1) // block_size_k
             # 16-byte aligned [1, n] page table (the cute kernel asserts %16 == 0)
             buf = torch.empty(n + 4, dtype=torch.int32, device=dev)
             shift = ((-buf.data_ptr()) % 16) // 4
