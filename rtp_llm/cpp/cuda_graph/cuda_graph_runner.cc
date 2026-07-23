@@ -686,7 +686,15 @@ void CudaGraphRunner::initCapture() {
         // get real output data type (params already prepared in attn impl __init__/create_params)
         auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
         RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
-        py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
+        try {
+            py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
+        } catch (const py::error_already_set& e) {
+            RTP_LLM_LOG_ERROR("initCapture forward for output datatype failed with Python exception: %s", e.what());
+            throw;
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("initCapture forward for output datatype failed with C++ exception: %s", e.what());
+            throw;
+        }
         RTP_LLM_LOG_INFO("initCapture forward for output datatype end");
         output = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
         capture_mem_hold_.setHiddenStates(output);

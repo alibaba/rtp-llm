@@ -62,7 +62,7 @@ def recurrent_gated_delta_rule_ref(
     return o, hs
 
 
-def test_fused_recurrent_continuous_batching(
+def _run_fused_recurrent_continuous_batching(
     B: int,
     S: int,
     H: int,
@@ -177,10 +177,10 @@ def test_fused_recurrent_narrow_block_map_view():
         dtype=torch.bfloat16,
         sequence_lengths=[10, 11, 12, 13],
     )
-    contiguous_output, contiguous_cache = test_fused_recurrent_continuous_batching(
+    contiguous_output, contiguous_cache = _run_fused_recurrent_continuous_batching(
         **kwargs
     )
-    narrow_output, narrow_cache = test_fused_recurrent_continuous_batching(
+    narrow_output, narrow_cache = _run_fused_recurrent_continuous_batching(
         **kwargs, use_narrow_block_map=True
     )
     assert_close("narrow output", contiguous_output, narrow_output, 0.0)
@@ -196,6 +196,7 @@ if __name__ == "__main__":
     for bs in [1, 2, 4, 8, 16, 32, 64]:
         for seq in [1, 2, 4]:
             logging.info(f"Testing with batch size: {bs}, sequence length: {seq}")
-            test_fused_recurrent_continuous_batching(
+            _run_fused_recurrent_continuous_batching(
                 bs, seq, H, HV, D, scale, gate_logit_normalizer, torch.bfloat16
             )
+    test_fused_recurrent_narrow_block_map_view()
