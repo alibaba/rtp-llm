@@ -1,5 +1,8 @@
 #include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include <mutex>
+#include <string>
+#include <vector>
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -49,30 +52,96 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
         sampler_output.token_ids.defined() ? sampler_output.token_ids.cpu() : torch::Tensor();
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
     const torch::Tensor success_cpu = sampler_output.success.defined() ? sampler_output.success.cpu() : torch::Tensor();
-    int                 batch_idx_in     = 0;
-    int                 batch_idx_out    = 0;
-    int                 token_offset     = 0;
-    bool                return_all_probs = stream_groups.needReturnAllProbs() != ReturnAllProbsMode::NONE;
-    auto                new_tokens_all   = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
+    int                 batch_idx_in        = 0;
+    int                 batch_idx_out       = 0;
+    int                 token_offset        = 0;
+    const size_t        total_batch_size_in = stream_groups.totalSamplerBatchSizeIn();
+    bool                return_all_probs    = stream_groups.needReturnAllProbs() != ReturnAllProbsMode::NONE;
+    auto                new_tokens_all      = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
+
+    std::vector<autil::ThreadPoolBase::Future<void>> futures;
+    if (thread_pool_) {
+        futures.reserve(stream_groups.size());
+    }
+
+    std::mutex               exception_mutex;
+    std::vector<std::string> error_messages;
 
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
         auto token_size      = stream->currentExecuteTokenSize();
 
-        dispatchSingleStream(stream,
-                             merge_outputs,
-                             batch_idx_in,
-                             batch_idx_out,
-                             token_offset,
-                             return_all_probs,
-                             new_tokens_all,
-                             token_ids_cpu,
-                             success_cpu);
+        RTP_LLM_CHECK_WITH_INFO(batch_idx_out + static_cast<int>(next_batch_size)
+                                    <= static_cast<int>(total_batch_size_out),
+                                "batch_idx_out overflow: %d + %d > %d",
+                                batch_idx_out,
+                                static_cast<int>(next_batch_size),
+                                static_cast<int>(total_batch_size_out));
+        RTP_LLM_CHECK_WITH_INFO(batch_idx_in + static_cast<int>(cur_batch_size)
+                                    <= static_cast<int>(total_batch_size_in),
+                                "batch_idx_in overflow: %d + %d > %d",
+                                batch_idx_in,
+                                static_cast<int>(cur_batch_size),
+                                static_cast<int>(total_batch_size_in));
+
+        auto task = [this,
+                     stream,
+                     &merge_outputs,
+                     batch_idx_in,
+                     batch_idx_out,
+                     token_offset,
+                     return_all_probs,
+                     &new_tokens_all,
+                     &token_ids_cpu,
+                     &success_cpu,
+                     &exception_mutex,
+                     &error_messages]() {
+            try {
+                dispatchSingleStream(stream,
+                                     merge_outputs,
+                                     batch_idx_in,
+                                     batch_idx_out,
+                                     token_offset,
+                                     return_all_probs,
+                                     new_tokens_all,
+                                     token_ids_cpu,
+                                     success_cpu);
+            } catch (const std::exception& e) {
+                stream->reportError(ErrorCode::UNKNOWN_ERROR, e.what());
+                std::lock_guard<std::mutex> lock(exception_mutex);
+                error_messages.emplace_back("stream [" + std::to_string(stream->streamId()) + "]: " + e.what());
+            } catch (...) {
+                stream->reportError(ErrorCode::UNKNOWN_ERROR, "unknown exception in dispatch");
+                std::lock_guard<std::mutex> lock(exception_mutex);
+                error_messages.emplace_back("stream [" + std::to_string(stream->streamId()) + "]: unknown exception");
+            }
+        };
+
+        if (thread_pool_) {
+            futures.emplace_back(thread_pool_->async(std::move(task)));
+        } else {
+            task();
+        }
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
         token_offset += token_size;
+    }
+
+    for (auto& future : futures) {
+        future.wait();
+    }
+
+    if (!error_messages.empty()) {
+        std::string combined;
+        for (const auto& message : error_messages) {
+            if (!combined.empty()) {
+                combined += "; ";
+            }
+            combined += message;
+        }
+        return absl::InternalError("dispatch failed: " + combined);
     }
 
     RTP_LLM_LOG_DEBUG("dispatch done");
@@ -115,12 +184,25 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     // construct update info
     torch::Tensor batch_hidden_states;
     if (stream->generateConfig()->return_hidden_states) {
-        batch_hidden_states = model_output.hidden_states.narrow(0, batch_idx_in, cur_batch_size);
+        auto raw_hidden_states = model_output.hidden_states.narrow(0, batch_idx_in, cur_batch_size);
+        if (has_beam_search && src_batch_indices.defined()) {
+            auto src_indices_device = src_batch_indices.to(raw_hidden_states.device(), torch::kLong);
+            batch_hidden_states     = raw_hidden_states.index_select(0, src_indices_device);
+        } else {
+            batch_hidden_states = raw_hidden_states;
+        }
     }
 
+    torch::Tensor raw_logits;
     torch::Tensor batch_logits;
-    if (stream->returnLogits() || stream->calculateSoftmaxProbs() || has_beam_search) {
-        batch_logits = model_output.logits.narrow(0, batch_idx_in, cur_batch_size);
+    if (stream->returnLogits() || stream->calculateSoftmaxProbs()) {
+        raw_logits = model_output.logits.narrow(0, batch_idx_in, cur_batch_size);
+        if (has_beam_search && src_batch_indices.defined()) {
+            auto src_indices_device = src_batch_indices.to(raw_logits.device(), torch::kLong);
+            batch_logits            = raw_logits.index_select(0, src_indices_device);
+        } else {
+            batch_logits = raw_logits;
+        }
     }
 
     torch::Tensor all_probs;
@@ -205,13 +287,15 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     auto new_tokens = new_tokens_all.narrow(0, batch_idx_out, next_batch_size);
     for (size_t i = 0; i < next_batch_size; ++i) {
+        const size_t token_position = has_beam_search ? stream->seqLength() : token_stride - 1;
+        RTP_LLM_CHECK(token_position < token_stride);
         new_tokens.data_ptr<int32_t>()[i] =
-            new_all_token_ids.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
+            new_all_token_ids.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + token_position];
     }
 
     torch::Tensor current_softmax_result;
     if (stream->calculateSoftmaxProbs()) {
-        current_softmax_result = calculateSelectedTokenProbs(batch_logits, new_tokens, src_batch_indices);
+        current_softmax_result = calculateSelectedTokenProbs(raw_logits, new_tokens, src_batch_indices);
     }
 
     for (int i = 0; i < cur_batch_size; ++i) {
