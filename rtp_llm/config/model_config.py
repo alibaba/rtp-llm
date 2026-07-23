@@ -83,6 +83,7 @@ class ModelConfig(CppModelConfig):
         "phy2log_path",
         "lora_infos",
         "headwise_config",
+        "use_new_loader",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -584,6 +585,7 @@ class ModelConfig(CppModelConfig):
         self.render_config: Optional[Any] = None  # RenderConfig for renderer factory
         self.mm_related_params = VitParameters()
         self.quant_config = None
+        self.use_new_loader: bool = False
 
     def apply_override_args(self, json_model_override_args: str) -> None:
         """Apply model override arguments to ModelConfig.
