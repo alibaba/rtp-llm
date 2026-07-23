@@ -257,6 +257,9 @@ def local_rank_start(
 
         backend_manager = BackendManager(py_env_configs)
         if shutdown_pending:
+            # Deferred pre-start SIGTERM: mark shutdown_requested so the
+            # finally block still unmounts FUSE/NFS and hard-exits.
+            shutdown_requested = True
             backend_manager.request_shutdown()
         backend_manager.start()
         # Engine startup overwrites SIGTERM/SIGINT; restore Python handlers so
@@ -264,6 +267,7 @@ def local_rank_start(
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
         if shutdown_pending:
+            shutdown_requested = True
             backend_manager.request_shutdown()
         logging.info("Backend server initialized successfully, sending ready status")
 

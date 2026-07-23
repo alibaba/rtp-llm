@@ -663,9 +663,21 @@ class DeepSeekV4Model(GptModelBase):
         # DSV4_PREWARM_JIT_KERNELS=0 skips every startup kernel prewarm below,
         # deferring all JIT compilation to the first real request (e.g. when a
         # remote JIT cache should capture organically-triggered artifacts).
-        if device_str.startswith("cuda") and (
-            os.environ.get("DSV4_PREWARM_JIT_KERNELS", "1") != "0"
+        prewarm_jit_kernels = os.environ.get("DSV4_PREWARM_JIT_KERNELS", "1") != "0"
+        if not prewarm_jit_kernels and getattr(
+            self.py_hw_kernel_config, "enable_cuda_graph", False
         ):
+            # CUDA graph capture starts right after initialize(); a JIT compile
+            # inside capture aborts (tilelang) or corrupts the graph (triton).
+            # The combination is only safe when the JIT cache is already warm
+            # (e.g. seeded from a remote JIT cache), so warn instead of failing.
+            logging.warning(
+                "[DeepSeekV4Model] DSV4_PREWARM_JIT_KERNELS=0 with "
+                "ENABLE_CUDA_GRAPH=1: CUDA graph capture will JIT-compile any "
+                "kernel missing from the JIT cache and may abort or corrupt the "
+                "graph; only use this combination with a fully warmed JIT cache."
+            )
+        if device_str.startswith("cuda") and prewarm_jit_kernels:
             from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl_kernels
 
             first_attn = self.v4.layers[0].attn
