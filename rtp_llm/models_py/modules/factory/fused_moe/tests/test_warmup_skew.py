@@ -9,7 +9,6 @@ so these tests pin:
     n_hot==0 (no hot tokens) and all-hot boundaries.
 """
 
-import argparse
 import os
 import unittest
 from types import SimpleNamespace
@@ -22,7 +21,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
 from rtp_llm.models_py.modules.factory.fused_moe.defs.warmup_diagnostics import (
-    MoeWarmupDiagnostics,
     diagnostics,
 )
 
@@ -251,48 +249,33 @@ class RuntimeSlotDistributionTest(unittest.TestCase):
 
 class TraceMemoryBindingTest(unittest.TestCase):
     def test_binding_is_importable_and_callable(self):
-        from rtp_llm.ops.compute_ops import is_trace_memory
+        from rtp_llm.ops.compute_ops import get_trace_memory_state, is_trace_memory
 
         self.assertTrue(callable(is_trace_memory))
         self.assertIsInstance(is_trace_memory(), bool)
+        self.assertTrue(callable(get_trace_memory_state))
+        self.assertIn(get_trace_memory_state(), (0, 1, 2))
 
     def test_final_warmup_config_resets_trace_latch(self):
         with (
             patch.object(diagnostics, "warmup_enabled", True),
-            patch.object(diagnostics, "trace_memory_seen", True),
             patch.object(diagnostics, "trace_memory_finished", False),
         ):
             diagnostics.configure_warmup_trace(False)
             self.assertFalse(diagnostics.warmup_enabled)
-            self.assertFalse(diagnostics.trace_memory_seen)
             self.assertTrue(diagnostics.trace_memory_finished)
 
             diagnostics.configure_warmup_trace(True)
             self.assertTrue(diagnostics.warmup_enabled)
-            self.assertFalse(diagnostics.trace_memory_seen)
             self.assertFalse(diagnostics.trace_memory_finished)
-
-    def test_invalid_import_time_warmup_value_uses_default(self):
-        with (
-            patch.object(
-                diagnostics_module,
-                "warmup_requested",
-                side_effect=argparse.ArgumentTypeError("bad warm_up"),
-            ),
-            patch.object(diagnostics_module.logger, "warning") as warning,
-        ):
-            state = MoeWarmupDiagnostics()
-
-        self.assertTrue(state.warmup_enabled)
-        warning.assert_called_once()
 
     def test_ep_warmup_requires_binding(self):
         router = _FakeRouter(ep_size=2, expert_num_per_rank=1)
         with (
             patch.object(diagnostics, "warmup_enabled", True),
-            patch.object(diagnostics, "is_trace_memory", None),
+            patch.object(diagnostics, "get_trace_memory_state", None),
         ):
-            with self.assertRaisesRegex(RuntimeError, "is_trace_memory"):
+            with self.assertRaisesRegex(RuntimeError, "get_trace_memory_state"):
                 FusedMoe(
                     router=router,
                     fused_experts=_SlotExecutor(),
@@ -303,7 +286,7 @@ class TraceMemoryBindingTest(unittest.TestCase):
         router = _FakeRouter(ep_size=2, expert_num_per_rank=1)
         with (
             patch.object(diagnostics, "warmup_enabled", False),
-            patch.object(diagnostics, "is_trace_memory", None),
+            patch.object(diagnostics, "get_trace_memory_state", None),
         ):
             FusedMoe(
                 router=router,
@@ -312,11 +295,10 @@ class TraceMemoryBindingTest(unittest.TestCase):
             )
 
     def test_completed_startup_trace_stops_binding_queries(self):
-        binding = MagicMock(side_effect=[False, True, True, False])
+        binding = MagicMock(side_effect=[0, 1, 1, 2])
         with (
             patch.object(diagnostics, "warmup_enabled", True),
-            patch.object(diagnostics, "is_trace_memory", binding),
-            patch.object(diagnostics, "trace_memory_seen", False),
+            patch.object(diagnostics, "get_trace_memory_state", binding),
             patch.object(diagnostics, "trace_memory_finished", False),
         ):
             self.assertFalse(diagnostics.in_memory_trace(2))
@@ -330,7 +312,7 @@ class TraceMemoryBindingTest(unittest.TestCase):
     def test_finished_trace_does_not_query_binding(self):
         binding = MagicMock()
         with (
-            patch.object(diagnostics, "is_trace_memory", binding),
+            patch.object(diagnostics, "get_trace_memory_state", binding),
             patch.object(diagnostics, "trace_memory_finished", True),
         ):
             self.assertFalse(diagnostics.in_memory_trace(2))

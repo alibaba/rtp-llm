@@ -491,8 +491,12 @@ void cudaProfilerEnd() {
 // ============================================================
 
 namespace {
-// Gates forward peak-memory tracking; only enabled during warmup (setTraceMemory(true)).
-static bool g_trace_memory = false;
+constexpr int kTraceMemoryPending  = 0;
+constexpr int kTraceMemoryActive   = 1;
+constexpr int kTraceMemoryFinished = 2;
+// Startup lifecycle shared with Python: pending -> active -> finished, or pending -> finished when
+// NormalEngine explicitly skips warmup.
+static std::atomic<int> g_trace_memory_state{kTraceMemoryPending};
 #if USING_CUDA
 // Baselines snapshotted right after emptyCache()+resetPeakStats() in setTraceMemory(true).
 // Used to turn absolute readings into the forward's transient deltas (see getGpuExecStatus).
@@ -513,7 +517,7 @@ ExecStatus getGpuExecStatus() {
     mem.used_bytes      = total_bytes - mem.free_bytes;
     mem.available_bytes = mem.free_bytes;
 #if USING_CUDA
-    if (g_trace_memory) {
+    if (isTraceMemory()) {
         // max_consumed_bytes = forward transient growth = torch_peak_increase + non_torch_increase
         // (vLLM-style decomposition). available_bytes downstream already excludes the steady-state
         // (weights/context), so we report only the growth on top of the baseline -- counting the
@@ -543,11 +547,20 @@ torch::Device getTorchCudaDevice() {
 }
 
 bool isTraceMemory() {
-    return g_trace_memory;
+    return g_trace_memory_state.load(std::memory_order_acquire) == kTraceMemoryActive;
+}
+
+int getTraceMemoryState() {
+    return g_trace_memory_state.load(std::memory_order_acquire);
+}
+
+void finishTraceMemory() {
+    g_trace_memory_state.store(kTraceMemoryFinished, std::memory_order_release);
 }
 
 void setTraceMemory(bool trace_memory) {
-    g_trace_memory = trace_memory;
+    g_trace_memory_state.store(trace_memory ? kTraceMemoryActive : kTraceMemoryFinished,
+                               std::memory_order_release);
 #if USING_CUDA
     if (trace_memory) {
         // Release loader-cached free blocks so the baseline is pure steady-state (weights), then
@@ -759,6 +772,9 @@ OverallExpertStats execCreateMoeExpertStates(const ExpertStatsParams& params) {
 void registerExecCtxOps(pybind11::module& m) {
     m.def("get_device_id", &getDeviceId);
     m.def("is_trace_memory", &isTraceMemory, "True while a warmup forward is being memory-traced.");
+    m.def("get_trace_memory_state",
+          &getTraceMemoryState,
+          "Startup warmup trace state: 0=pending, 1=active, 2=finished.");
     m.def("preprocess_gemm_weight_by_key",
           &preprocessGemmWeightByKey,
           py::arg("key"),

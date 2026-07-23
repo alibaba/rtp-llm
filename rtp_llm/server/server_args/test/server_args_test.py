@@ -52,6 +52,19 @@ class PreImportConfigTest(TestCase):
         with self.assertRaises(argparse.ArgumentTypeError):
             warmup_requested(["--warm_up", "invalid"], {})
 
+    def test_invalid_warmup_value_does_not_break_pre_import_configuration(self):
+        env = {}
+        with self.assertLogs(
+            "rtp_llm.utils.pre_import_config", level="WARNING"
+        ) as logs:
+            enabled = configure_expandable_segments_for_warmup(
+                ["--warm_up", "invalid"], env, is_rocm=False
+            )
+
+        self.assertTrue(enabled)
+        self.assertEqual(env["PYTORCH_CUDA_ALLOC_CONF"], "expandable_segments:True")
+        self.assertIn("using default=true", logs.output[0])
+
     def test_sets_allocator_default_only_for_cuda_warmup(self):
         env = {}
         self.assertTrue(
@@ -138,6 +151,44 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.runtime_config.warm_up, True)  # bool in C++
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
+
+    def test_runtime_tuning_args_are_validated_and_exported(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        setup_args(
+            [
+                "--runtime_mem_safety_ratio",
+                "0.08",
+                "--runtime_mem_no_warmup_floor_mb",
+                "3072",
+                "--moe_runtime_mem_log",
+                "true",
+                "--moe_runtime_slot_log",
+                "false",
+                "--moe_runtime_slot_min_slots",
+                "128",
+                "--moe_skew_mult",
+                "1.75",
+                "--moe_skew_add",
+                "0.2",
+            ]
+        )
+
+        self.assertEqual(os.environ["RUNTIME_MEM_SAFETY_RATIO"], "0.08")
+        self.assertEqual(os.environ["RUNTIME_MEM_NO_WARMUP_FLOOR_MB"], "3072")
+        self.assertEqual(os.environ["MOE_RUNTIME_MEM_LOG"], "1")
+        self.assertEqual(os.environ["MOE_RUNTIME_SLOT_LOG"], "0")
+        self.assertEqual(os.environ["MOE_RUNTIME_SLOT_MIN_SLOTS"], "128")
+        self.assertEqual(os.environ["MOE_SKEW_MULT"], "1.75")
+        self.assertEqual(os.environ["MOE_SKEW_ADD"], "0.2")
+
+    def test_runtime_tuning_args_reject_invalid_ranges(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with self.assertRaises(SystemExit):
+            setup_args(["--runtime_mem_safety_ratio", "1.0"])
+        with self.assertRaises(SystemExit):
+            setup_args(["--runtime_mem_no_warmup_floor_mb", "-1"])
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""

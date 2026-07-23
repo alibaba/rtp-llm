@@ -1,4 +1,3 @@
-import argparse
 import logging
 import os
 import sys
@@ -9,7 +8,7 @@ import torch
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.utils.pre_import_config import warmup_requested
+from rtp_llm.utils.pre_import_config import warmup_requested_or_default
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +18,11 @@ class FusedMoeRouter(Protocol):
 
 
 try:
-    from rtp_llm.ops.compute_ops import is_trace_memory as _IS_TRACE_MEMORY
+    from rtp_llm.ops.compute_ops import get_trace_memory_state as _GET_TRACE_MEMORY_STATE
 
     _TRACE_MEMORY_IMPORT_ERROR: Optional[Exception] = None
 except (ImportError, AttributeError) as error:
-    _IS_TRACE_MEMORY = None
+    _GET_TRACE_MEMORY_STATE = None
     _TRACE_MEMORY_IMPORT_ERROR = error
 
 
@@ -31,10 +30,11 @@ class MoeWarmupDiagnostics:
     """Process-local state for startup MoE warmup and opt-in diagnostics."""
 
     def __init__(self) -> None:
-        self.is_trace_memory: Optional[Callable[[], bool]] = _IS_TRACE_MEMORY
+        self.get_trace_memory_state: Optional[Callable[[], int]] = (
+            _GET_TRACE_MEMORY_STATE
+        )
         self.trace_memory_import_error = _TRACE_MEMORY_IMPORT_ERROR
         self.warmup_enabled = self._initial_warmup_enabled()
-        self.trace_memory_seen = False
         self.trace_memory_finished = not self.warmup_enabled
 
         self.nontorch_baseline_mib: Optional[float] = None
@@ -42,7 +42,28 @@ class MoeWarmupDiagnostics:
         self.warmup_skew_logged = False
         self.skew_env_warned = False
 
-        self.runtime_mem_log_enabled = os.environ.get("MOE_RUNTIME_MEM_LOG", "0") == "1"
+        self.runtime_mem_log_enabled = False
+        self.runtime_slot_log_requested = False
+        self.runtime_slot_min_slots = 0
+        self.runtime_slot_peaks: List[float] = []
+        self.runtime_slot_log_unsupported = False
+        self.runtime_slot_config_warned = False
+        self.reload_runtime_settings()
+
+    @staticmethod
+    def _initial_warmup_enabled() -> bool:
+        return warmup_requested_or_default(sys.argv[1:], os.environ)
+
+    def configure_warmup_trace(self, enabled: bool) -> None:
+        """Apply the server's final C++ warmup gate before constructing MoE layers."""
+        self.warmup_enabled = bool(enabled)
+        self.trace_memory_finished = not self.warmup_enabled
+
+    def reload_runtime_settings(self) -> None:
+        """Refresh server-validated diagnostic settings before MoE construction."""
+        self.runtime_mem_log_enabled = (
+            os.environ.get("MOE_RUNTIME_MEM_LOG", "0") == "1"
+        )
         self.runtime_slot_log_requested = (
             os.environ.get("MOE_RUNTIME_SLOT_LOG", "0") == "1"
         )
@@ -52,31 +73,15 @@ class MoeWarmupDiagnostics:
             )
         except ValueError:
             self.runtime_slot_min_slots = 0
-        self.runtime_slot_peaks: List[float] = []
-        self.runtime_slot_log_unsupported = False
-        self.runtime_slot_config_warned = False
-
-    @staticmethod
-    def _initial_warmup_enabled() -> bool:
-        try:
-            return warmup_requested(sys.argv[1:], os.environ)
-        except (argparse.ArgumentTypeError, ValueError) as error:
-            logger.warning(
-                "ignoring invalid pre-import warm_up value and using default=true: %s",
-                error,
-            )
-            return True
-
-    def configure_warmup_trace(self, enabled: bool) -> None:
-        """Apply the server's final C++ warmup gate before constructing MoE layers."""
-        self.warmup_enabled = bool(enabled)
-        self.trace_memory_seen = False
-        self.trace_memory_finished = not self.warmup_enabled
 
     def require_trace_binding(self, ep_size: int) -> None:
-        if ep_size > 1 and self.warmup_enabled and self.is_trace_memory is None:
+        if (
+            ep_size > 1
+            and self.warmup_enabled
+            and self.get_trace_memory_state is None
+        ):
             raise RuntimeError(
-                "EP warmup requires compute_ops.is_trace_memory, but the binding is unavailable: "
+                "EP warmup requires compute_ops.get_trace_memory_state, but the binding is unavailable: "
                 f"{self.trace_memory_import_error}"
             )
 
@@ -102,8 +107,8 @@ class MoeWarmupDiagnostics:
         if self.runtime_slot_config_warned:
             return
         logger.warning(
-            "MOE_RUNTIME_SLOT_LOG is diagnostic-only, must be set consistently in the DP/EP group, "
-            "and performs one collective per MoE layer forward"
+            "MOE_RUNTIME_SLOT_LOG is diagnostic-only and performs Group.DP all_reduce on every "
+            "MoE layer forward; it MUST be identical in the DP/EP group or the collective can hang"
         )
         self.runtime_slot_config_warned = True
 
@@ -211,14 +216,13 @@ class MoeWarmupDiagnostics:
     def in_memory_trace(self, ep_size: int) -> bool:
         if ep_size <= 1 or not self.warmup_enabled or self.trace_memory_finished:
             return False
-        if self.is_trace_memory is None:
+        if self.get_trace_memory_state is None:
             return False
-        active = bool(self.is_trace_memory())
-        if active:
-            self.trace_memory_seen = True
-        elif self.trace_memory_seen:
+        state = int(self.get_trace_memory_state())
+        if state == 2:
             self.trace_memory_finished = True
-        return active
+            return False
+        return state == 1
 
     def skew_reserve(self, mean: float) -> float:
         try:
@@ -320,3 +324,7 @@ diagnostics = MoeWarmupDiagnostics()
 
 def configure_warmup_trace(enabled: bool) -> None:
     diagnostics.configure_warmup_trace(enabled)
+
+
+def reload_runtime_diagnostics() -> None:
+    diagnostics.reload_runtime_settings()

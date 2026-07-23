@@ -1,4 +1,5 @@
 import argparse
+import logging
 import os
 import sys
 from typing import Mapping, MutableMapping, Optional, Sequence
@@ -61,6 +62,23 @@ def warmup_requested(
     return default
 
 
+def warmup_requested_or_default(
+    argv: Sequence[str],
+    environ: Mapping[str, str],
+    default: bool = True,
+) -> bool:
+    """Best-effort pre-import parsing; the full server parser remains authoritative."""
+    try:
+        return warmup_requested(argv, environ, default)
+    except (argparse.ArgumentTypeError, ValueError) as error:
+        logging.getLogger(__name__).warning(
+            "ignoring invalid pre-import warm_up value and using default=%s: %s",
+            str(default).lower(),
+            error,
+        )
+        return default
+
+
 def configure_expandable_segments_for_warmup(
     argv: Optional[Sequence[str]] = None,
     environ: Optional[MutableMapping[str, str]] = None,
@@ -70,7 +88,7 @@ def configure_expandable_segments_for_warmup(
     global _AUTO_ENABLED_FOR_WARMUP
     args = list(sys.argv[1:] if argv is None else argv)
     env = os.environ if environ is None else environ
-    if not warmup_requested(args, env):
+    if not warmup_requested_or_default(args, env):
         return False
 
     if is_rocm is None:

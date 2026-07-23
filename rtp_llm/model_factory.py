@@ -81,6 +81,7 @@ class ModelFactory:
 
         from rtp_llm.models_py.modules.factory.fused_moe.defs.warmup_diagnostics import (
             configure_warmup_trace,
+            reload_runtime_diagnostics,
         )
 
         ffn_disaggregated = bool(
@@ -96,6 +97,7 @@ class ModelFactory:
             and not bool(model_config.mm_model_config.is_multimodal)
             and not ffn_disaggregated
         )
+        reload_runtime_diagnostics()
 
         model = model_cls.from_config(
             model_config=model_config,

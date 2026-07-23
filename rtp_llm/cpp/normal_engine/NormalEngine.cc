@@ -120,6 +120,9 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 #else
     RTP_LLM_LOG_INFO("skip warm up on non-CUDA platform.");
 #endif
+    // Close the startup trace lifecycle even when warmup is disabled by config/platform gates.
+    // Python observes this terminal state once and removes the pybind query from serving forwards.
+    finishTraceMemory();
     initCacheManager(warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager done");
 
