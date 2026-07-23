@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from typing import Any, Dict, List, Optional
 
@@ -10,6 +11,7 @@ from transformers import AutoProcessor, Qwen3VLConfig, Qwen3VLVisionModel
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_factory_register import register_model
+from rtp_llm.models.mrope_utils import apply_mrope_section
 from rtp_llm.models.qwen_v3 import QwenV3, QWenV3Weight
 
 if not hasattr(tl, "wrap_triton"):
@@ -103,14 +105,19 @@ class QWen3_VL(QwenV3):
         config.attn_config.rope_config.style = 7
         # Qwen3-VL interleaves T/H/W rotary pairs; the model default for a
         # 128-dim rotary region is 24/20/20 (64 pairs total).
-        mrope_section = config_json["rope_scaling"].get("mrope_section", [24, 20, 20])
-        config.attn_config.rope_config.index_factor = len(mrope_section)
-        config.attn_config.rope_config.mrope_dim1 = mrope_section[0]
-        config.attn_config.rope_config.mrope_dim2 = mrope_section[1]
-        config.attn_config.rope_config.mrope_dim3 = mrope_section[2]
-        config.attn_config.rope_config.mrope_interleaved = config_json[
-            "rope_scaling"
-        ].get("mrope_interleaved", True)
+        rope_scaling = config_json.get("rope_scaling", {})
+        if "mrope_section" not in rope_scaling:
+            logging.warning(
+                "Qwen3-VL config does not specify mrope_section; using the "
+                "upstream Qwen3-VL 128-dim fallback [24, 20, 20]"
+            )
+        mrope_section = rope_scaling.get("mrope_section", [24, 20, 20])
+        apply_mrope_section(
+            config.attn_config.rope_config,
+            mrope_section,
+            model_name="Qwen3-VL",
+            interleaved=rope_scaling.get("mrope_interleaved", True),
+        )
         config.mm_model_config.mm_position_ids_style = 2
 
         config.mm_related_params.config["ckpt_path"] = config.ckpt_path

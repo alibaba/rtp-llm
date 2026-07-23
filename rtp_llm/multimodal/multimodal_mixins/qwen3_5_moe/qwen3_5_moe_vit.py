@@ -17,6 +17,8 @@ from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
 default_attn_impl = "sdpa"
 try:
     if can_use_flash_attn():
+        from flash_attn import flash_attn_varlen_func  # noqa: F401
+
         default_attn_impl = "flash_attention_2"
 except Exception as e:
     logging.info(

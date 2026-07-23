@@ -205,9 +205,9 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
             py_model_inputs_.combo_position_ids.defined() ?
                 static_cast<long long>(py_model_inputs_.combo_position_ids.numel()) :
                 -1LL);
-        optimizedCopyAsync(inputs.combo_position_ids,
-                           py_model_inputs_.combo_position_ids,
-                           copy_numel * inputs.combo_position_ids.element_size());
+        tryAddD2DCopy(inputs.combo_position_ids,
+                      py_model_inputs_.combo_position_ids,
+                      copy_numel * inputs.combo_position_ids.element_size());
     }
 
     if (!is_prefill_cuda_graph_mode_) {
@@ -442,13 +442,19 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs& inputs, const 
     size_t      copy_numel            = 0;
     const auto& captured_position_ids = graph_it->second.mem_hold_.py_model_inputs_.combo_position_ids;
     if (!validateComboPositionIds(inputs, state, captured_position_ids, copy_numel)) {
-        RTP_LLM_LOG_WARNING(
-            "combo_position_ids are incompatible with CUDA graph key %d: factor=%d, src_numel=%lld, "
-            "dst_numel=%lld; fallback to normal run",
-            graph_key,
-            position_id_len_factor_,
-            inputs.combo_position_ids.defined() ? static_cast<long long>(inputs.combo_position_ids.numel()) : -1LL,
-            captured_position_ids.defined() ? static_cast<long long>(captured_position_ids.numel()) : -1LL);
+        const uint64_t fallback_count = combo_position_fallback_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+        // Log the first fallback and then at powers of two. This keeps the
+        // decode hot path quiet while retaining a monotonic, observable count.
+        if ((fallback_count & (fallback_count - 1)) == 0) {
+            RTP_LLM_LOG_WARNING(
+                "combo_position_ids are incompatible with CUDA graph key %d: factor=%d, src_numel=%lld, "
+                "dst_numel=%lld; fallback to normal run (fallback_count=%llu)",
+                graph_key,
+                position_id_len_factor_,
+                inputs.combo_position_ids.defined() ? static_cast<long long>(inputs.combo_position_ids.numel()) : -1LL,
+                captured_position_ids.defined() ? static_cast<long long>(captured_position_ids.numel()) : -1LL,
+                static_cast<unsigned long long>(fallback_count));
+        }
         return false;
     }
     return true;

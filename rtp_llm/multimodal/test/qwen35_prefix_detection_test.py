@@ -1,12 +1,32 @@
 import unittest
+from types import SimpleNamespace
+
+import torch
 
 from rtp_llm.models.qwen3_next.qwen3_next_weight import Qwen35MoeWeight
 from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.qwen3_5_moe_mixin import (
+    Qwen3_5MoeImageEmbedding,
     Qwen3_5MoeVitWeight,
 )
 
 
 class Qwen35PrefixDetectionTest(unittest.TestCase):
+    def test_image_position_ids_follow_thw_order_and_handle_empty_grid(self):
+        embedding = SimpleNamespace(visual=SimpleNamespace(spatial_merge_size=2))
+        grid_thw = torch.tensor([[2, 4, 2], [0, 4, 2]], dtype=torch.int32)
+
+        position_ids = Qwen3_5MoeImageEmbedding.get_position_ids(embedding, grid_thw)
+
+        self.assertEqual((4, 3), tuple(position_ids[0].shape))
+        torch.testing.assert_close(
+            position_ids[0],
+            torch.tensor(
+                [[0, 0, 0], [0, 1, 0], [1, 0, 0], [1, 1, 0]],
+                dtype=torch.int32,
+            ),
+        )
+        self.assertEqual((0, 3), tuple(position_ids[1].shape))
+
     def test_detects_legacy_checkpoint_prefixes(self):
         llm_weight = object.__new__(Qwen35MoeWeight)
         llm_weight._has_stacked_ckpt = False

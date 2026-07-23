@@ -12,6 +12,7 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelWeightInfo,
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
+from rtp_llm.models.mrope_utils import apply_mrope_section
 from rtp_llm.models.qwen_vl import QWen_VL
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
@@ -254,13 +255,13 @@ class QWen2_VL(QWen_VL):
         rope_config.style = 7
         rope_config.base = int(config_json["rope_theta"])
         # mrope_section is not available in RopeConfig, using default value
-        mrope_section = config_json["rope_scaling"].get("mrope_section", [16, 24, 24])
-        rope_config.index_factor = len(mrope_section)
-        rope_config.mrope_dim1 = mrope_section[0]
-        rope_config.mrope_dim2 = mrope_section[1]
-        rope_config.mrope_dim3 = mrope_section[2]
-        rope_config.mrope_interleaved = config_json.get("rope_scaling", {}).get(
-            "mrope_interleaved", False
+        rope_scaling = config_json.get("rope_scaling", {})
+        mrope_section = rope_scaling.get("mrope_section", [16, 24, 24])
+        apply_mrope_section(
+            rope_config,
+            mrope_section,
+            model_name="Qwen2-VL",
+            interleaved=rope_scaling.get("mrope_interleaved", False),
         )
         rope_config.dim = 128
 

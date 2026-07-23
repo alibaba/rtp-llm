@@ -6,6 +6,7 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
+from rtp_llm.models.mrope_utils import apply_mrope_section
 from rtp_llm.models.qwen3_next.qwen3_next_weight import (
     Qwen3NextWeight,
     Qwen35DenseWeight,
@@ -209,11 +210,12 @@ class Qwen35Moe(Qwen3NextBase):
             config.attn_config.size_per_head * config.partial_rotary_factor
         )
         mrope_section = rope_parameters["mrope_section"]
-        config.attn_config.rope_config.index_factor = len(mrope_section)
-        config.attn_config.rope_config.mrope_dim1 = mrope_section[0]
-        config.attn_config.rope_config.mrope_dim2 = mrope_section[1]
-        config.attn_config.rope_config.mrope_dim3 = mrope_section[2]
-        config.attn_config.rope_config.mrope_interleaved = mrope_interleaved
+        apply_mrope_section(
+            config.attn_config.rope_config,
+            mrope_section,
+            model_name="Qwen3.5",
+            interleaved=mrope_interleaved,
+        )
         config.mm_model_config.mm_position_ids_style = 2
 
     @classmethod

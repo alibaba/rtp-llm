@@ -22,8 +22,8 @@ inline bool validateComboPositionIdsForReplay(int                  position_id_l
         return false;
     }
     if (position_ids.scalar_type() != torch::kInt32 || captured_position_ids.scalar_type() != torch::kInt32
-        || !position_ids.is_contiguous() || !captured_position_ids.is_contiguous()
-        || position_ids.numel() % position_id_len_factor != 0) {
+        || !position_ids.is_cuda() || !captured_position_ids.is_cuda() || !position_ids.is_contiguous()
+        || !captured_position_ids.is_contiguous() || position_ids.numel() % position_id_len_factor != 0) {
         return false;
     }
 

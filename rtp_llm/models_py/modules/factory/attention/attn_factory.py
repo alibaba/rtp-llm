@@ -6,7 +6,13 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAImplBase,
     MlaImplBase,
 )
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType, ParallelismConfig
+from rtp_llm.ops import (
+    AttentionConfigs,
+    FMHAConfig,
+    KvCacheDataType,
+    ParallelismConfig,
+    RopeStyle,
+)
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -178,7 +184,17 @@ def get_fmha_impl(
             # If instantiation fails, continue to next impl
             logging.warning(f"Failed to instantiate {impl_class_name}: {e}")
             continue
-    raise Exception(f"can not find mha type")
+    if (
+        attn_configs.rope_config.style == RopeStyle.Mrope
+        and not attn_configs.rope_config.mrope_interleaved
+    ):
+        raise ValueError(
+            "No registered attention implementation supports non-interleaved MRoPE "
+            "on this backend. Qwen2-VL/Qwen2.5-VL checkpoints use the "
+            "non-interleaved layout by default; do not flip mrope_interleaved because "
+            "that changes RoPE semantics. Use a CUDA backend for these checkpoints."
+        )
+    raise Exception("can not find mha type")
 
 
 class AttnImplFactory(object):

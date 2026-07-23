@@ -35,8 +35,8 @@ from rtp_llm.ops.compute_ops import (
 )
 
 
-def _mrope_interleaved_supported(attn_configs: AttentionConfigs) -> bool:
-    """Return whether ROCm fused RoPE supports the configured MRoPE layout."""
+def _is_mrope_interleaved_supported(attn_configs: AttentionConfigs) -> bool:
+    """Return whether the ROCm fused RoPE path supports this MRoPE layout."""
     return not (
         attn_configs.rope_config.style == RopeStyle.Mrope
         and not attn_configs.rope_config.mrope_interleaved
@@ -64,11 +64,7 @@ class FMHAParams(ParamsBase):
         # Prefill mode
         if is_prefill:
             input_lengths = attn_inputs.input_lengths
-            prefix_lengths = (
-                attn_inputs.prefix_lengths
-                if hasattr(attn_inputs, "prefix_lengths")
-                else None
-            )
+            prefix_lengths = attn_inputs.prefix_lengths
 
             self.max_seq_len = input_lengths.max().item()
             batch_size = input_lengths.size(0)
@@ -1411,7 +1407,7 @@ class AiterPrefillImplAsm(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return _mrope_interleaved_supported(attn_configs)
+        return _is_mrope_interleaved_supported(attn_configs)
 
     def forward(
         self,
@@ -1471,7 +1467,7 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return _mrope_interleaved_supported(attn_configs)
+        return _is_mrope_interleaved_supported(attn_configs)
 
     def forward(
         self,
@@ -1540,7 +1536,9 @@ class AiterPrefillImplPaged(FMHAImplBase):
         pl = attn_inputs.prefix_lengths
         if pl is None or pl.numel() == 0:
             return False
-        return int(pl.max().item()) > 0
+        return int(pl.max().item()) > 0 and _is_mrope_interleaved_supported(
+            attn_configs
+        )
 
     def _update_prefill_params_for_cuda_graph(
         self, attn_inputs: PyAttentionInputs
@@ -1730,7 +1728,7 @@ class AiterDecodeImplAsm(AiterDecodeImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return _mrope_interleaved_supported(attn_configs)
+        return _is_mrope_interleaved_supported(attn_configs)
 
     def forward(
         self,
@@ -1777,7 +1775,7 @@ class AiterDecodeImplNonAsm(AiterDecodeImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return _mrope_interleaved_supported(attn_configs)
+        return _is_mrope_interleaved_supported(attn_configs)
 
     def forward(
         self,
@@ -1823,7 +1821,7 @@ class AiterDecodeImplTriton(AiterDecodeImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return _mrope_interleaved_supported(attn_configs)
+        return _is_mrope_interleaved_supported(attn_configs)
 
     def forward(
         self,
