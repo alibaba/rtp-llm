@@ -10,6 +10,7 @@ from rtp_llm.multimodal.multimodal_mixin_register import (
 )
 from rtp_llm.multimodal.multimodal_mixins import BaseMultiModalMixin
 from rtp_llm.ops import TaskType
+from rtp_llm.utils.new_loader import is_new_loader_enabled
 
 
 class MultimodalMixinFactory:
@@ -31,6 +32,7 @@ class MultimodalMixinFactory:
             engine_config.load_config.load_method,
             vit_config,
             model_config.ckpt_path,
+            use_new_loader=is_new_loader_enabled(model_config),
         )
 
     @staticmethod
