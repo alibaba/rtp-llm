@@ -38,6 +38,7 @@ class DeepGemmHybridExecutorTestBase:
     MAX_GENERATE_BATCH_SIZE = 128
     HIDDEN_SIZE = 2048
     MOE_INTERMEDIATE_SIZE = 768
+    DIFF_THRESHOLD = 0.003
 
     M = (MAX_GENERATE_BATCH_SIZE + TP_SIZE - 1) // TP_SIZE * EP_SIZE
     K = HIDDEN_SIZE
@@ -202,7 +203,7 @@ class DeepGemmHybridExecutorTestBase:
             )
             # print('diff:', diff, combine_payload.fused_expert_output[token_idx : token_idx + num_token], ref_output[i, :num_token])
             token_idx += num_token
-            assert diff < 0.003
+            assert diff < self.DIFF_THRESHOLD, f"diff {diff} >= {self.DIFF_THRESHOLD} for expert {i}"
 
 
 class DeepGemmHybridExecutorTestBase(DeepGemmHybridExecutorTestBase, unittest.TestCase):
