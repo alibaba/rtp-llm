@@ -1371,13 +1371,13 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
         // The actual target-verify token ids are produced by draftModelDecode below.
         model_input_copy.combo_tokens =
             torch::empty({static_cast<int64_t>(batch_size * (propose_step_ + 1))}, cuda_i32);
-#if USING_CUDA
         torch::Tensor sequence_lengths_for_prepare = model_input.sequence_lengths;
         if ((!sequence_lengths_for_prepare.defined()
              || sequence_lengths_for_prepare.numel() < static_cast<int64_t>(batch_size))
             && model_input.prefix_lengths.defined()) {
             sequence_lengths_for_prepare = model_input.prefix_lengths;
         }
+#if USING_CUDA
         const bool can_fuse_target_prepare =
             sequence_lengths_for_prepare.defined() && sequence_lengths_for_prepare.is_cuda()
             && sequence_lengths_for_prepare.scalar_type() == torch::kInt32
@@ -2008,15 +2008,15 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.draft_model_decode(build_spec_lengths_indexes)");
             draft_token_ids_t = torch::stack(draft_token_columns, 1).contiguous();
-            input_lengths     = torch::full({(int64_t)batch_size}, static_cast<int64_t>(propose_step_ + 1), cuda_i32);
+            input_lengths     = torch::full({(int64_t)batch_size}, static_cast<int64_t>(tokens_per_batch), cuda_i32);
             model_input.lm_output_indexes =
-                torch::arange(0, static_cast<int64_t>(batch_size * (propose_step_ + 1)), cuda_i32);
+                torch::arange(0, static_cast<int64_t>(batch_size * tokens_per_batch), cuda_i32);
         }
 #endif
 
         model_input.input_lengths      = std::move(input_lengths);
         model_input.prefix_lengths     = spec_prefix_lengths;
-        model_input.combo_tokens       = draft_token_ids_t.reshape({(int64_t)(batch_size * (propose_step_ + 1))});
+        model_input.combo_tokens       = draft_token_ids_t.reshape({(int64_t)(batch_size * tokens_per_batch)});
         model_input.sequence_lengths   = torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
         model_input.last_hidden_states = torch::Tensor();
         ensureModelInputsOnCuda(model_input, "draft_decode.build_spec_decode_input");

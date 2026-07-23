@@ -27,6 +27,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->return_hidden_states     = config_proto->return_hidden_states();
     generate_config->return_all_hidden_states = config_proto->return_all_hidden_states();
     generate_config->return_aux_hidden_states = config_proto->return_aux_hidden_states();
+    generate_config->aux_hidden_states_prefill_only = config_proto->aux_hidden_states_prefill_only();
     generate_config->aux_hidden_states_layers.assign(config_proto->aux_hidden_states_layers().begin(),
                                                      config_proto->aux_hidden_states_layers().end());
     generate_config->hidden_states_cut_dim    = config_proto->hidden_states_cut_dim();

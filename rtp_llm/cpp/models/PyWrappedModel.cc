@@ -666,7 +666,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
     auto py_model_inputs = PyModelInputs({empty_tensor,
                                           empty_tensor,
                                           attention_inputs_,
-                                          empty_tensor,
+                                          BertEmbeddingInputs{},
                                           inputs.need_aux_hidden_states,
                                           inputs.aux_hidden_states_layer_ids});
 

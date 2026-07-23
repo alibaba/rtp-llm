@@ -402,7 +402,11 @@ class OpenaiEndpoint(object):
                             index=i,
                             message=ChatMessage(
                                 role=choice.delta.role or RoleEnum.assistant,
-                                content=choice.delta.content or None,
+                                content=(
+                                    choice.delta.content
+                                    if choice.delta.content is not None
+                                    else None
+                                ),
                                 function_call=choice.delta.function_call or None,
                                 tool_calls=choice.delta.tool_calls or None,
                             ),
@@ -419,9 +423,10 @@ class OpenaiEndpoint(object):
             else:
                 for i in range(len(all_choices)):
                     if all_choices[i].message.content == None:
-                        all_choices[i].message.content = (
-                            response.choices[i].delta.content or None
-                        )
+                        if response.choices[i].delta.content is not None:
+                            all_choices[i].message.content = (
+                                response.choices[i].delta.content
+                            )
                     else:
                         all_choices[i].message.content += (
                             response.choices[i].delta.content or ""

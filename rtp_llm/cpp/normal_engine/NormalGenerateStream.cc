@@ -29,15 +29,20 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     size_t          output_len = seqLength() - last_output_pos_;
     GenerateOutputs generate_results;
     generate_results.request_id = request_id_;
+    const bool aux_hidden_states_prefill_only =
+        generate_input_->generate_config->aux_hidden_states_prefill_only
+        && generate_input_->generate_config->return_aux_hidden_states && iter_count_ == 1;
 
     for (int i = 0; i < nextBatchSize(); i++) {
         GenerateOutput generate_output;
         generate_output.aux_info.iter_count = iter_count_;
-        generate_output.output_ids          = torch::empty({1, (int64_t)output_len}, torch::kInt32);
+        if (!(aux_hidden_states_prefill_only && output_len == 0)) {
+            generate_output.output_ids = torch::empty({1, (int64_t)output_len}, torch::kInt32);
 
-        // TODO(xinfei.sxf) optimize this copy : only copy last token
-        complete_token_ids_->copyTokensTo(
-            i, generate_output.output_ids.data_ptr<int32_t>(), last_output_pos_, output_len);
+            // TODO(xinfei.sxf) optimize this copy : only copy last token
+            complete_token_ids_->copyTokensTo(
+                i, generate_output.output_ids.data_ptr<int32_t>(), last_output_pos_, output_len);
+        }
         if (returnLogits() && update_info.logits.defined()) {
             torch::Tensor logits_result;
             const auto&   select_tokens_id = generate_input_->generate_config->select_tokens_id;
@@ -181,6 +186,13 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     finished_ = needFinish();
+    const bool aux_hidden_states_prefill_only =
+        generate_input_->generate_config->aux_hidden_states_prefill_only
+        && generate_input_->generate_config->return_aux_hidden_states && iter_count_ == 1;
+    if (aux_hidden_states_prefill_only) {
+        finished_ = true;
+        fillSubGenerateStatus(StreamState::FINISHED);
+    }
     if (finished_) {
         reportEventWithoutLock(StreamEvents::GenerateDone);
         fillSubGenerateStatus(StreamState::FINISHED);
@@ -200,7 +212,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
                       isStreaming(),
                       update_info.update_remote_generate);
 
-    if (queryPdSep() && update_info.update_remote_generate) {
+    if (queryPdSep() && update_info.update_remote_generate && !(aux_hidden_states_prefill_only && finished_)) {
         RTP_LLM_LOG_DEBUG("stream [%s] hold kv cache for pd-sep", streamLogTag().c_str());
         holdKVCacheForPDSep();
         if (!finished_) {
@@ -216,7 +228,8 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    if (seqLength() - last_output_pos_ == 0) {
+    const auto output_len = seqLength() - last_output_pos_;
+    if (output_len == 0 && !aux_hidden_states_prefill_only) {
         return;
     }
 

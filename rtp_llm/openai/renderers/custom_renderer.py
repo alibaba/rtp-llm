@@ -3,7 +3,10 @@ import functools
 import json
 import logging
 import os
-from dataclasses import dataclass, field
+import pathlib
+import time
+import uuid
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
 
@@ -92,7 +95,11 @@ class StreamStatus:
     ):
         self.index += 1
         self.output = output
-        delta_output_ids = output.output_ids.cpu().flatten().tolist()
+        delta_output_ids = (
+            output.output_ids.cpu().flatten().tolist()
+            if output.output_ids is not None
+            else []
+        )
         self.output_ids_list = copy.deepcopy(self.output_ids_list + delta_output_ids)
         self.finish_reason = check_finish_func(
             self.output_ids_list, self.input_token_length
@@ -440,7 +447,7 @@ class CustomChatRenderer:
             output_generator = await self._merge_non_streaming_outputs(output_generator)
 
         async for response in self.render_response_stream(
-            output_generator, request, generate_config
+            output_generator, request, generate_config, request_id=request_id
         ):
             yield response
 
@@ -503,11 +510,13 @@ class CustomChatRenderer:
                     all_output_ids.append(output_ids)
 
             # 合并output_ids
-            merged_output_ids = (
-                torch.cat(all_output_ids, dim=1)
-                if all_output_ids
-                else final_output.output_ids
-            )
+            all_output_ids = [
+                output_ids for output_ids in all_output_ids if output_ids is not None
+            ]
+            if all_output_ids:
+                merged_output_ids = torch.cat(all_output_ids, dim=1)
+            else:
+                merged_output_ids = final_output.output_ids
 
             # 深拷贝final_output并只替换output_ids
             merged_output = copy.deepcopy(final_output)
@@ -613,6 +622,132 @@ class CustomChatRenderer:
             result().input_ids = output.input_ids.tolist()
 
         return final_result
+
+    def _dump_aux_hidden_states_if_enabled(
+        self,
+        request_id: int,
+        generate_config: GenerateConfig,
+        aux_info: Any,
+        aux_hidden_states: Any,
+        aux_hidden_states_layers: Any,
+        input_ids: Any,
+        output_ids: Any,
+    ) -> bool:
+        ready_dir = os.environ.get("AUX_HIDDEN_STATES_READY_DIR", "").strip()
+        if not ready_dir:
+            return False
+        if not generate_config.return_aux_hidden_states or aux_hidden_states is None:
+            return False
+
+        try:
+
+            def to_cpu(value: Any) -> Any:
+                if value is None:
+                    return None
+                detach = getattr(value, "detach", None)
+                if callable(detach):
+                    value = detach()
+                cpu = getattr(value, "cpu", None)
+                if callable(cpu):
+                    return cpu()
+                return value
+
+            output_dir = pathlib.Path(ready_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            basename = (
+                f"aux_hidden_{time.strftime('%Y%m%d_%H%M%S')}_"
+                f"pid{os.getpid()}_req{request_id}_{uuid.uuid4().hex[:8]}.pt"
+            )
+            tmp_path = output_dir / f"{basename}.tmp"
+            ready_path = output_dir / f"{basename}.ready"
+            payload = {
+                "request_id": request_id,
+                "created_at_ms": int(time.time() * 1000),
+                "response": "",
+                "aux_info": asdict(aux_info) if generate_config.aux_info else {},
+                "aux_hidden_states": to_cpu(aux_hidden_states),
+                "aux_hidden_states_layers": to_cpu(aux_hidden_states_layers),
+                "input_ids": to_cpu(input_ids),
+                "output_ids": to_cpu(output_ids),
+                "aux_hidden_states_prefill_only": bool(
+                    generate_config.aux_hidden_states_prefill_only
+                ),
+            }
+            with tmp_path.open("wb") as f:
+                torch.save(payload, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, ready_path)
+            return True
+        except Exception:
+            logging.exception(
+                "failed to dump aux hidden states for request %s", request_id
+            )
+            return False
+
+    async def _generate_aux_hidden_states_prefill_only_response(
+        self,
+        outputs: GenerateOutputs,
+        request: ChatCompletionRequest,
+        generate_config: GenerateConfig,
+        request_id: int,
+        nums_output: int,
+    ) -> StreamResponseObject:
+        if len(outputs.generate_outputs) != nums_output:
+            raise Exception(
+                f"output num {len(outputs.generate_outputs)} != nums_output {nums_output}"
+            )
+
+        input_token_length = 0
+        output_token_length = 0
+        reuse_length = 0
+        aux_info = None
+        dumped = False
+        for i, output in enumerate(outputs.generate_outputs):
+            if i == 0:
+                input_token_length = output.aux_info.input_len
+                reuse_length = output.aux_info.reuse_len
+                aux_info = output.aux_info if request.aux_info else None
+            output_token_length += output.aux_info.output_len
+            dumped = (
+                self._dump_aux_hidden_states_if_enabled(
+                    request_id=request_id,
+                    generate_config=generate_config,
+                    aux_info=output.aux_info,
+                    aux_hidden_states=output.aux_hidden_states,
+                    aux_hidden_states_layers=output.aux_hidden_states_layers,
+                    input_ids=output.input_ids,
+                    output_ids=output.output_ids,
+                )
+                or dumped
+            )
+
+        return StreamResponseObject(
+            choices=[
+                ChatCompletionResponseStreamChoice(
+                    index=i,
+                    delta=DeltaMessage(content=""),
+                    finish_reason=FinisheReason.stop,
+                )
+                for i in range(nums_output)
+            ],
+            usage=UsageInfo(
+                prompt_tokens=input_token_length,
+                total_tokens=input_token_length + output_token_length,
+                completion_tokens=output_token_length,
+                prompt_tokens_details=(
+                    PromptTokensDetails(cached_tokens=reuse_length)
+                    if reuse_length > 0
+                    else None
+                ),
+            ),
+            aux_info=aux_info,
+            extra_outputs=ChatCompletionExtraOutputs(
+                aux_hidden_states_dumped=dumped,
+                aux_hidden_states_prefill_only=True,
+                aux_hidden_states_layers=list(generate_config.aux_hidden_states_layers),
+            ),
+        )
 
     def _process_stop_words(
         self,
@@ -983,6 +1118,7 @@ class CustomChatRenderer:
         output_generator: AsyncGenerator[GenerateOutputs, None],
         request: ChatCompletionRequest,
         generate_config: GenerateConfig,
+        request_id: int = -1,
     ) -> AsyncGenerator[StreamResponseObject, None]:
         stop_word_slice_list = get_stop_word_slices(generate_config.stop_words_str)
         nums_output = request.n if request.n is not None else 1
@@ -1007,6 +1143,17 @@ class CustomChatRenderer:
             )
             for _ in range(nums_output)
         ]
+        if generate_config.aux_hidden_states_prefill_only:
+            async for outputs in output_generator:
+                if index == 0:
+                    yield await self._generate_first(nums_output)
+                index += 1
+                yield await self._generate_aux_hidden_states_prefill_only_response(
+                    outputs, request, generate_config, request_id, nums_output
+                )
+                break
+            return
+
         async for outputs in output_generator:
             if index == 0:
                 yield await self._generate_first(nums_output)

@@ -41,6 +41,11 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     return output_dispatcher_->dispatch(stream_groups, merge_outputs);
 }
 
+absl::Status NormalBatchStreamProcessor::dispatchPrefillOnly(const StreamGroups&    stream_groups,
+                                                             const GptModelOutputs& model_output) const {
+    return output_dispatcher_->dispatchPrefillOnly(stream_groups, model_output);
+}
+
 absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups,
                                                                             TensorHolder&       host_holder) const {
     return model_input_gatherer_->gather(stream_groups, host_holder);

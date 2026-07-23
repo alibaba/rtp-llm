@@ -79,6 +79,7 @@ cc_library(
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/utils:error_code",
+        "//rtp_llm/cpp/utils:profiling_scope",
         "@havenask//aios/autil:json",
     ] + select({
         "//:using_cuda": ["//rtp_llm/models_py/bindings/cuda/ops:standalone_ops"],

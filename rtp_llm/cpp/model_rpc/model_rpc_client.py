@@ -162,6 +162,10 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.return_aux_hidden_states = (
         input_py.generate_config.return_aux_hidden_states
     )
+    if hasattr(generate_config_pb, "aux_hidden_states_prefill_only"):
+        generate_config_pb.aux_hidden_states_prefill_only = (
+            input_py.generate_config.aux_hidden_states_prefill_only
+        )
     generate_config_pb.aux_hidden_states_layers.extend(
         input_py.generate_config.aux_hidden_states_layers
     )

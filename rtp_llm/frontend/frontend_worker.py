@@ -4,7 +4,9 @@ import logging
 import os
 import pathlib
 import sys
+import time
 import traceback
+import uuid
 from functools import partial
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple, Union
 
@@ -37,6 +39,8 @@ class PipelineResponse(BaseModel):
     response: str = ""
     finished: bool = True
     aux_info: Dict[str, Any] = {}
+    aux_hidden_states_dumped: Optional[bool] = None
+    aux_hidden_states_prefill_only: Optional[bool] = None
     hidden_states: Optional[Union[List[float], List[List[float]]]] = None
     aux_hidden_states: Optional[Union[List[float], List[List[float]]]] = None
     aux_hidden_states_layers: Optional[List[int]] = None
@@ -202,8 +206,80 @@ class FrontendWorker:
                 **kwargs,
             )
 
+    def _dump_aux_hidden_states_if_enabled(
+        self,
+        request_id: int,
+        generate_text: str,
+        finished: bool,
+        generate_config: GenerateConfig,
+        aux_info: Any,
+        aux_hidden_states: Any,
+        aux_hidden_states_layers: Any,
+        input_ids: Any,
+        output_ids: Any,
+    ) -> bool:
+        ready_dir = os.environ.get("AUX_HIDDEN_STATES_READY_DIR", "").strip()
+        if not ready_dir:
+            return False
+        if (
+            not finished
+            or not generate_config.return_aux_hidden_states
+            or aux_hidden_states is None
+        ):
+            return False
+
+        try:
+            import torch
+
+            def to_cpu(value: Any) -> Any:
+                if value is None:
+                    return None
+                detach = getattr(value, "detach", None)
+                if callable(detach):
+                    value = detach()
+                cpu = getattr(value, "cpu", None)
+                if callable(cpu):
+                    return cpu()
+                return value
+
+            output_dir = pathlib.Path(ready_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            basename = (
+                f"aux_hidden_{time.strftime('%Y%m%d_%H%M%S')}_"
+                f"pid{os.getpid()}_req{request_id}_{uuid.uuid4().hex[:8]}.pt"
+            )
+            tmp_path = output_dir / f"{basename}.tmp"
+            ready_path = output_dir / f"{basename}.ready"
+            payload = {
+                "request_id": request_id,
+                "created_at_ms": int(time.time() * 1000),
+                "response": generate_text,
+                "aux_info": asdict(aux_info) if generate_config.aux_info else {},
+                "aux_hidden_states": to_cpu(aux_hidden_states),
+                "aux_hidden_states_layers": to_cpu(aux_hidden_states_layers),
+                "input_ids": to_cpu(input_ids),
+                "output_ids": to_cpu(output_ids),
+                "aux_hidden_states_prefill_only": bool(
+                    generate_config.aux_hidden_states_prefill_only
+                ),
+            }
+            with tmp_path.open("wb") as f:
+                torch.save(payload, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, ready_path)
+            return True
+        except Exception:
+            logging.exception(
+                "failed to dump aux hidden states for request %s", request_id
+            )
+            return False
+
     def _format_response(
-        self, gen_responses: GenerateResponse, generate_config: GenerateConfig
+        self,
+        gen_responses: GenerateResponse,
+        generate_config: GenerateConfig,
+        request_id: int = -1,
     ) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
         finished = gen_responses.generate_outputs.generate_outputs[0].finished
@@ -223,8 +299,32 @@ class FrontendWorker:
         loss = gen_responses.generate_outputs.generate_outputs[0].loss
         logits = gen_responses.generate_outputs.generate_outputs[0].logits
 
+        response_text = (
+            "" if generate_config.aux_hidden_states_prefill_only else generate_texts[0]
+        )
+        dumped = self._dump_aux_hidden_states_if_enabled(
+            request_id=request_id,
+            generate_text=response_text,
+            finished=finished or generate_config.aux_hidden_states_prefill_only,
+            generate_config=generate_config,
+            aux_info=aux_info if generate_config.aux_info else None,
+            aux_hidden_states=aux_hidden_states,
+            aux_hidden_states_layers=aux_hidden_states_layers,
+            input_ids=input_ids,
+            output_ids=output_ids,
+        )
+
+        if generate_config.aux_hidden_states_prefill_only:
+            return PipelineResponse(
+                response="",
+                finished=True,
+                aux_info=asdict(aux_info) if generate_config.aux_info else {},
+                aux_hidden_states_dumped=dumped,
+                aux_hidden_states_prefill_only=True,
+            )
+
         response = PipelineResponse(
-            response=generate_texts[0],
+            response=response_text,
             finished=finished,
             aux_info=asdict(aux_info) if generate_config.aux_info else {},
             hidden_states=(
@@ -273,7 +373,10 @@ class FrontendWorker:
         return response
 
     def _format_response_new(
-        self, gen_responses: GenerateResponse, generate_config: GenerateConfig
+        self,
+        gen_responses: GenerateResponse,
+        generate_config: GenerateConfig,
+        request_id: int = -1,
     ) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
         if generate_config.num_return_sequences > 0:
@@ -295,7 +398,7 @@ class FrontendWorker:
             )
             return sequences_pipeline_response
         else:
-            return self._format_response(gen_responses, generate_config)
+            return self._format_response(gen_responses, generate_config, request_id)
 
     async def _yield_generate(
         self,
@@ -318,9 +421,22 @@ class FrontendWorker:
             **kwargs,
         )
         async for generate_response in stream:
-            yield self._format_response_new(generate_response, generate_config)
+            yield self._format_response_new(
+                generate_response, generate_config, request_id=request_id
+            )
 
     def is_streaming(self, req: Dict[str, Any]):
+        config = req.get("generation_config", req.get("generate_config", {})) or {}
+        if any(
+            config.get(key, False)
+            for key in [
+                "aux_hidden_states_prefill_only",
+                "return_aux_hidden_states_prefill_only",
+                "prefill_only",
+                "prefill_only_aux_hidden_states",
+            ]
+        ):
+            return False
         return RequestExtractor.is_streaming(req) or req.get("stream", False)
 
     async def _parallel_batch_async_generators(

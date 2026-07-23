@@ -59,7 +59,8 @@ public:
     bool                          return_incremental       = false;
     bool                          return_hidden_states     = false;
     bool                          return_all_hidden_states = false;
-    bool                          return_aux_hidden_states = false;
+    bool                          return_aux_hidden_states        = false;
+    bool                          aux_hidden_states_prefill_only  = false;
     std::vector<int>              aux_hidden_states_layers;
     bool                          normalized_hidden_states = false;
     bool                          return_output_ids        = false;
@@ -139,6 +140,7 @@ public:
                      << ", return_hidden_states:" << return_hidden_states
                      << ", return_all_hidden_states:" << return_all_hidden_states
                      << ", return_aux_hidden_states:" << return_aux_hidden_states
+                     << ", aux_hidden_states_prefill_only:" << aux_hidden_states_prefill_only
                      << ", aux_hidden_states_layers:" << vectorToString(aux_hidden_states_layers)
                      << ", hidden_states_cut_dim:" << hidden_states_cut_dim
                      << ", normalized_hidden_states:" << normalized_hidden_states
@@ -222,6 +224,7 @@ public:
         JSONIZE(return_hidden_states);
         JSONIZE(return_all_hidden_states);
         JSONIZE(return_aux_hidden_states);
+        JSONIZE(aux_hidden_states_prefill_only);
         JSONIZE(aux_hidden_states_layers);
         JSONIZE(hidden_states_cut_dim);
         JSONIZE(normalized_hidden_states);
