@@ -113,6 +113,22 @@ def _make_rope_attn_configs(
     return cfg
 
 
+def _make_mrope_attn_configs(
+    head_num: int,
+    head_num_kv: int,
+    head_dim: int,
+    dtype: torch.dtype,
+    mrope_section=(16, 24, 24),
+):
+    """Qwen3-VL-style MRoPE configuration for the real ROCm fused op."""
+    cfg = _make_rope_attn_configs(head_num, head_num_kv, head_dim, dtype)
+    rope = cfg.rope_config
+    rope.style = RopeStyle.Mrope
+    rope.index_factor = 3
+    rope.mrope_dim1, rope.mrope_dim2, rope.mrope_dim3 = mrope_section
+    return cfg
+
+
 def _make_rope_prefill_inputs(
     input_lengths: List[int], device: torch.device, dtype: torch.dtype
 ):
@@ -171,6 +187,38 @@ def _apply_base_rope(q: torch.Tensor, k: torch.Tensor, input_lengths: List[int])
         cos_b = cos.unsqueeze(1)
         sin_b = sin.unsqueeze(1)
         return torch.cat([lo * cos_b - hi * sin_b, hi * cos_b + lo * sin_b], dim=-1)
+
+    return rot(q).to(q.dtype), rot(k).to(k.dtype)
+
+
+def _apply_mrope(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    position_ids: torch.Tensor,
+    mrope_section=(16, 24, 24),
+):
+    """Torch reference for token-major three-axis Qwen3-VL MRoPE."""
+    head_dim = q.shape[-1]
+    half = head_dim // 2
+    if sum(mrope_section) != half:
+        raise ValueError("MRoPE sections must cover half of the head dimension")
+
+    axis_by_pair = torch.repeat_interleave(
+        torch.arange(3, device=q.device),
+        torch.tensor(mrope_section, device=q.device),
+    )
+    positions = position_ids.to(device=q.device, dtype=torch.float32)
+    pair_positions = positions[:, axis_by_pair]
+    inv_freq = 10000 ** (
+        -2.0 * torch.arange(half, dtype=torch.float32, device=q.device) / head_dim
+    )
+    angle = pair_positions * inv_freq.unsqueeze(0)
+    cos = torch.cos(angle).unsqueeze(1)
+    sin = torch.sin(angle).unsqueeze(1)
+
+    def rot(x):
+        lo, hi = x[..., :half], x[..., half:]
+        return torch.cat([lo * cos - hi * sin, hi * cos + lo * sin], dim=-1)
 
     return rot(q).to(q.dtype), rot(k).to(k.dtype)
 
@@ -1256,6 +1304,135 @@ class TestAiterPrefillImplNoKvRopeRealOp(unittest.TestCase):
 
     def test_nonasm_no_kv_rope_real_op_matches_reference(self):
         self._check_real_no_kv_rope_path(AiterPrefillImplNonAsm)
+
+
+@unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
+@unittest.skipUnless(_AITER_AVAILABLE, "Requires aiter")
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrapper module")
+class TestAiterPrefillImplMropeRealOp(unittest.TestCase):
+    """Numerical and validation coverage for Qwen3-VL MRoPE position IDs."""
+
+    def setUp(self):
+        torch.manual_seed(2)
+        self.device = torch.device("cuda")
+        self.dtype = torch.bfloat16
+
+    def _check_mrope_matches_reference(self, impl_cls):
+        input_lengths = [3, 2]
+        head_num = 4
+        head_num_kv = 2
+        head_dim = 128
+        cfg = _make_mrope_attn_configs(
+            head_num, head_num_kv, head_dim, dtype=self.dtype
+        )
+        attn_inputs = _make_rope_prefill_inputs(input_lengths, self.device, self.dtype)
+        position_ids = torch.tensor(
+            [
+                [0, 0, 0],
+                [1, 4, 7],
+                [2, 5, 8],
+                [0, 0, 0],
+                [3, 6, 9],
+            ],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        attn_inputs.combo_position_ids = position_ids.flatten()
+        impl = impl_cls(cfg, attn_inputs)
+
+        total_tokens = sum(input_lengths)
+        q = torch.randn(
+            total_tokens, head_num, head_dim, dtype=self.dtype, device=self.device
+        )
+        k = torch.randn(
+            total_tokens, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+        v = torch.randn(
+            total_tokens, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+        qkv = _pack_qkv(q, k, v)
+
+        actual_q, actual_k, actual_v = impl.rope_kvcache_impl.forward(
+            qkv, None, impl.rope_params
+        )
+        ref_q, ref_k = _apply_mrope(q, k, position_ids)
+        ref_k_padded, ref_v_padded = _pad_kv(ref_k, v, attn_inputs.cu_kv_seqlens_device)
+
+        torch.testing.assert_close(actual_q, ref_q, atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(actual_k, ref_k_padded, atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(actual_v, ref_v_padded, atol=1e-2, rtol=1e-2)
+
+    def test_asm_mrope_uses_all_three_position_axes(self):
+        self._check_mrope_matches_reference(AiterPrefillImplAsm)
+
+    def test_nonasm_mrope_uses_all_three_position_axes(self):
+        self._check_mrope_matches_reference(AiterPrefillImplNonAsm)
+
+    def test_prepare_in_place_refreshes_mrope_position_ids(self):
+        input_lengths = [3, 2]
+        head_num = 4
+        head_num_kv = 2
+        head_dim = 128
+        cfg = _make_mrope_attn_configs(
+            head_num, head_num_kv, head_dim, dtype=self.dtype
+        )
+        attn_inputs = _make_rope_prefill_inputs(input_lengths, self.device, self.dtype)
+        first_position_ids = torch.tensor(
+            [
+                [0, 0, 0],
+                [1, 1, 1],
+                [2, 2, 2],
+                [0, 0, 0],
+                [1, 1, 1],
+            ],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        attn_inputs.combo_position_ids = first_position_ids.flatten()
+        impl = AiterPrefillImplAsm(cfg, attn_inputs)
+
+        total_tokens = sum(input_lengths)
+        q = torch.randn(
+            total_tokens, head_num, head_dim, dtype=self.dtype, device=self.device
+        )
+        k = torch.randn(
+            total_tokens, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+        v = torch.randn(
+            total_tokens, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+        qkv = _pack_qkv(q, k, v)
+        first_q, _, _ = impl.rope_kvcache_impl.forward(qkv, None, impl.rope_params)
+
+        replay_inputs = _make_rope_prefill_inputs(
+            input_lengths, self.device, self.dtype
+        )
+        replay_position_ids = torch.tensor(
+            [
+                [0, 3, 6],
+                [1, 4, 7],
+                [2, 5, 8],
+                [0, 2, 4],
+                [1, 3, 5],
+            ],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        replay_inputs.combo_position_ids = replay_position_ids.flatten()
+        impl.rope_params.prepare_in_place(replay_inputs)
+        replay_q, _, _ = impl.rope_kvcache_impl.forward(qkv, None, impl.rope_params)
+        expected_q, _ = _apply_mrope(q, k, replay_position_ids)
+
+        self.assertFalse(torch.equal(first_q, replay_q))
+        torch.testing.assert_close(replay_q, expected_q, atol=1e-2, rtol=1e-2)
+
+    def test_mrope_missing_position_ids_fails_during_prepare(self):
+        cfg = _make_mrope_attn_configs(4, 2, 128, dtype=self.dtype)
+        attn_inputs = _make_rope_prefill_inputs([2], self.device, self.dtype)
+        with self.assertRaisesRegex(
+            RuntimeError, "requires non-empty combo_position_ids"
+        ):
+            AiterPrefillImplAsm(cfg, attn_inputs)
 
 
 if __name__ == "__main__":

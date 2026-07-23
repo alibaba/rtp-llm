@@ -557,6 +557,10 @@ def h20_oss_suites():
                     "llm": "--act_type BF16 --use_local 1 --tp_size 2 --reuse_cache 1",
                     "vit": "--act_type BF16 --use_local 1 --use_local_preprocess 1"
                 },
+                envs = {
+                    "llm": ["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                    "vit": ["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                },
                 gpu_type=["H20"],
                 data=native.glob(['data/model/llava/*.jpg']),
             ),

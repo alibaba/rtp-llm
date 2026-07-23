@@ -77,31 +77,40 @@ class QWen3_VL(QwenV3):
             [config_json["vision_start_token_id"], config_json["vision_end_token_id"]]
         ]
 
-        config_json = config_json["text_config"]
-        config.inter_size = config_json["intermediate_size"]
-        config.attn_config.head_num = config_json["num_attention_heads"]
-        config.attn_config.kv_head_num = config_json.get(
+        vision_config = config_json.get("vision_config")
+        if not isinstance(vision_config, dict):
+            raise ValueError("Qwen3-VL config.json must contain vision_config")
+        config.mm_related_params.config.update(vision_config)
+
+        text_config = config_json.get("text_config")
+        if not isinstance(text_config, dict):
+            raise ValueError("Qwen3-VL config.json must contain text_config")
+        config.inter_size = text_config["intermediate_size"]
+        config.attn_config.head_num = text_config["num_attention_heads"]
+        config.attn_config.kv_head_num = text_config.get(
             "num_key_value_heads", config.attn_config.head_num
         )
         config.attn_config.size_per_head = (
-            int(config_json.get("head_dim"))
-            if "head_dim" in config_json
-            else config_json["hidden_size"] // config.attn_config.head_num
+            int(text_config["head_dim"])
+            if "head_dim" in text_config
+            else text_config["hidden_size"] // config.attn_config.head_num
         )
-        if config_json.get("hidden_size") is not None:
-            config.hidden_size = config_json["hidden_size"]
-        config.num_layers = config_json["num_hidden_layers"]
-        config.attn_config.rope_config.base = config_json.get(
+        if text_config.get("hidden_size") is not None:
+            config.hidden_size = text_config["hidden_size"]
+        config.num_layers = text_config["num_hidden_layers"]
+        config.attn_config.rope_config.base = text_config.get(
             "rope_theta", config.attn_config.rope_config.base
         )
-        config.vocab_size = config_json["vocab_size"]
+        config.vocab_size = text_config["vocab_size"]
         config.attn_config.rope_config.dim = config.attn_config.size_per_head
-        config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
-        config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
-        config.config_dtype = config_json.get("torch_dtype", None)
+        config.layernorm_eps = text_config.get("rms_norm_eps", 1e-06)
+        config.tie_word_embeddings = text_config.get("tie_word_embeddings", False)
+        config.config_dtype = text_config.get(
+            "dtype", text_config.get("torch_dtype", None)
+        )
 
         config.attn_config.rope_config.style = 7
-        mrope_section = config_json["rope_scaling"].get("mrope_section", [16, 24, 24])
+        mrope_section = text_config["rope_scaling"].get("mrope_section", [16, 24, 24])
         config.attn_config.rope_config.index_factor = len(mrope_section)
         config.attn_config.rope_config.mrope_dim1 = mrope_section[0]
         config.attn_config.rope_config.mrope_dim2 = mrope_section[1]
