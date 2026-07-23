@@ -50,6 +50,25 @@ RuntimeMemorySizingResult calculateRuntimeMemorySizing(const RuntimeMemorySizing
     return {safety_headroom_bytes, base_required_bytes + safety_headroom_bytes};
 }
 
+PrefillWarmupBatchSizing calculatePrefillWarmupBatchSizing(size_t max_seq_len,
+                                                           size_t configured_max_batch_tokens,
+                                                           size_t max_context_batch_size) {
+    if (max_seq_len == 0) {
+        throw std::invalid_argument("prefill warmup max_seq_len must be positive");
+    }
+
+    size_t max_batch_tokens = configured_max_batch_tokens;
+    if (max_batch_tokens == 0) {
+        if (max_context_batch_size > std::numeric_limits<size_t>::max() / max_seq_len) {
+            throw std::overflow_error("prefill warmup token budget overflow");
+        }
+        max_batch_tokens = max_context_batch_size * max_seq_len;
+    }
+    const size_t rounded_sequences =
+        max_batch_tokens / max_seq_len + static_cast<size_t>(max_batch_tokens % max_seq_len != 0);
+    return {max_batch_tokens, std::max<size_t>(1, rounded_sequences)};
+}
+
 std::optional<double> parseRuntimeMemorySafetyRatio(std::string_view value) {
     if (value.empty()) {
         return std::nullopt;

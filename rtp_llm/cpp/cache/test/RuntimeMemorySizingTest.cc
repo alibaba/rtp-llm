@@ -88,6 +88,39 @@ TEST(RuntimeMemorySizingTest, RejectsWarmupAdditionOverflow) {
     EXPECT_THROW(calculateRuntimeMemorySizing(input), std::overflow_error);
 }
 
+TEST(PrefillWarmupBatchSizingTest, UsesConfiguredTokenBudgetWithCeilingDivision) {
+    auto result = calculatePrefillWarmupBatchSizing(/*max_seq_len=*/4096,
+                                                    /*configured_max_batch_tokens=*/8192,
+                                                    /*max_context_batch_size=*/8);
+    EXPECT_EQ(result.max_batch_tokens, 8192u);
+    EXPECT_EQ(result.num_sequences, 2u);
+
+    result = calculatePrefillWarmupBatchSizing(/*max_seq_len=*/4096,
+                                               /*configured_max_batch_tokens=*/8193,
+                                               /*max_context_batch_size=*/8);
+    EXPECT_EQ(result.num_sequences, 3u);
+}
+
+TEST(PrefillWarmupBatchSizingTest, UsesContextBatchFallbackAndAlwaysRunsOneSequence) {
+    auto result = calculatePrefillWarmupBatchSizing(/*max_seq_len=*/4096,
+                                                    /*configured_max_batch_tokens=*/0,
+                                                    /*max_context_batch_size=*/8);
+    EXPECT_EQ(result.max_batch_tokens, 32768u);
+    EXPECT_EQ(result.num_sequences, 8u);
+
+    result = calculatePrefillWarmupBatchSizing(/*max_seq_len=*/4096,
+                                               /*configured_max_batch_tokens=*/0,
+                                               /*max_context_batch_size=*/0);
+    EXPECT_EQ(result.max_batch_tokens, 0u);
+    EXPECT_EQ(result.num_sequences, 1u);
+}
+
+TEST(PrefillWarmupBatchSizingTest, RejectsInvalidOrOverflowingInputs) {
+    EXPECT_THROW(calculatePrefillWarmupBatchSizing(0, 1, 1), std::invalid_argument);
+    EXPECT_THROW(calculatePrefillWarmupBatchSizing(2, 0, std::numeric_limits<size_t>::max()),
+                 std::overflow_error);
+}
+
 TEST(RuntimeMemorySizingTest, ParsesSafetyRatio) {
     EXPECT_DOUBLE_EQ(*parseRuntimeMemorySafetyRatio("0"), 0.0);
     EXPECT_DOUBLE_EQ(*parseRuntimeMemorySafetyRatio("0.05"), 0.05);

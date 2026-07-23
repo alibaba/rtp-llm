@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -266,13 +267,12 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     const size_t max_seq_len = (size_t)model_config_.max_seq_len;
     // Real per-forward prefill token budget is max_batch_tokens_size (FIFOScheduler's per-round cap),
     // not max_context_batch_size × max_seq_len. Fall back to that default if it is unset (0).
-    size_t max_batch_tokens = (size_t)runtime_config.fifo_scheduler_config.max_batch_tokens_size;
-    if (max_batch_tokens == 0) {
-        max_batch_tokens = (size_t)runtime_config.fifo_scheduler_config.max_context_batch_size * max_seq_len;
-    }
-    // Cover the budget with full-length (max_seq_len) context streams; always at least one, since a
-    // single request runs whole up to max_seq_len regardless of the token budget.
-    const size_t num_seqs = std::max<size_t>(1, (max_batch_tokens + max_seq_len - 1) / max_seq_len);
+    const auto batch_sizing = calculatePrefillWarmupBatchSizing(
+        max_seq_len,
+        (size_t)runtime_config.fifo_scheduler_config.max_batch_tokens_size,
+        (size_t)runtime_config.fifo_scheduler_config.max_context_batch_size);
+    const size_t max_batch_tokens = batch_sizing.max_batch_tokens;
+    const size_t num_seqs         = batch_sizing.num_sequences;
 
     RTP_LLM_LOG_INFO("[PREFILL_WARMUP] max_seq_len=%ld max_batch_tokens=%ld num_seqs=%ld tokens_per_seq=%ld",
                      max_seq_len,

@@ -30,7 +30,15 @@ struct RuntimeMemorySizingResult {
     size_t runtime_required_bytes = 0;
 };
 
+struct PrefillWarmupBatchSizing {
+    size_t max_batch_tokens = 0;
+    size_t num_sequences    = 0;
+};
+
 RuntimeMemorySizingResult calculateRuntimeMemorySizing(const RuntimeMemorySizingInput& input);
+PrefillWarmupBatchSizing   calculatePrefillWarmupBatchSizing(size_t max_seq_len,
+                                                             size_t configured_max_batch_tokens,
+                                                             size_t max_context_batch_size);
 std::optional<double>      parseRuntimeMemorySafetyRatio(std::string_view value);
 std::optional<int64_t>     parseRuntimeMemoryNoWarmupFloorMiB(std::string_view value);
 

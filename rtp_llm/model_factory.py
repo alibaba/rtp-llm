@@ -79,7 +79,7 @@ class ModelFactory:
         model_config.model_name = model_name
         engine_config.runtime_config.model_name = model_name
 
-        from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.warmup_diagnostics import (
             configure_warmup_trace,
         )
 

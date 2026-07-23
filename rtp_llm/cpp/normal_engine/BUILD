@@ -12,6 +12,7 @@ cc_library(
         "speculative/*.cc",
     ]),
     deps = [
+        "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/engine_base:engine_base",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
