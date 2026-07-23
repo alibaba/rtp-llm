@@ -584,12 +584,58 @@ TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly
     const int gid_linear = 0;
     const int gid_full   = 1;
 
-    // The declarative tree requires complete physical coordinates. Seed a two-key
-    // joint path so reuse stops at position 1 when key 102 is absent.
-    const auto seeded = seedCompleteBlockTreePath(allocator, CacheKeysType{100, 101});
-    ASSERT_TRUE(seeded.success);
-    const auto& full_blocks   = seeded.blocks_by_tag.at(config.tagForGroup(gid_full));
-    const auto& linear_blocks = seeded.blocks_by_tag.at(config.tagForGroup(gid_linear));
+    // Seed through the allocator's normal insert path. First capture the resource
+    // dependency chain, then deliberately replace it with inconsistent metadata:
+    // BlockTree must derive topology only from the ordered cache keys.
+    const CacheKeysType seed_keys{100, 101};
+    auto                seed_resource = makeBatchResource(/*batch_size=*/1, config, seed_keys);
+    seed_resource->cacheResource(0).setCacheKeys(seed_keys);
+    const BlockDependenciesType generated_dependencies = seed_resource->cacheResource(0).blockDependencies();
+    ASSERT_EQ(generated_dependencies.size(), seed_keys.size());
+    for (size_t index = 0; index < generated_dependencies.size(); ++index) {
+        EXPECT_EQ(generated_dependencies[index].ordinal, index);
+        EXPECT_EQ(generated_dependencies[index].has_parent, index > 0);
+        if (index > 0) {
+            EXPECT_EQ(generated_dependencies[index].parent_key, seed_keys[index - 1]);
+        }
+    }
+
+    std::vector<BlockIndicesType> seeded_blocks(static_cast<size_t>(config.groupNums()));
+    const auto                    cache_groups = allocator->cacheGroups();
+    ASSERT_EQ(cache_groups.size(), seeded_blocks.size());
+    for (size_t gid = 0; gid < cache_groups.size(); ++gid) {
+        const auto allocated = cache_groups[gid]->blockPool()->malloc(seed_keys.size());
+        ASSERT_TRUE(allocated.has_value());
+        ASSERT_EQ(allocated->size(), seed_keys.size());
+        seeded_blocks[gid] = *allocated;
+        cache_groups[gid]->blockPool()->incRef(seeded_blocks[gid], BlockRefType::REQUEST);
+        seed_resource->setBatchBlocks(0, static_cast<int>(gid), seeded_blocks[gid]);
+    }
+    seed_resource->cacheResource(0).setBlockDependencies(
+        {BlockDependency{true, 9999, 41}, BlockDependency{false, 0, 7}});
+    allocator->insertIntoCache(InsertInfo{seed_resource, nullptr, /*is_resident=*/false});
+    for (size_t gid = 0; gid < cache_groups.size(); ++gid) {
+        cache_groups[gid]->blockPool()->decRef(seeded_blocks[gid], BlockRefType::REQUEST);
+    }
+    allocator->blockTreeCacheOwner()->onBlocksReleased();
+
+    const auto tree_path = allocator->blockTreeCacheOwner()->tree()->findNode(seed_keys);
+    ASSERT_EQ(tree_path.path.size(), seed_keys.size());
+    for (size_t index = 0; index < tree_path.path.size(); ++index) {
+        EXPECT_EQ(tree_path.path[index]->cache_key, seed_keys[index]);
+        if (generated_dependencies[index].has_parent) {
+            ASSERT_EQ(tree_path.path[index]->parent, tree_path.path[index - 1]);
+            EXPECT_EQ(tree_path.path[index]->parent->cache_key, generated_dependencies[index].parent_key);
+        } else {
+            EXPECT_EQ(tree_path.path[index]->parent, allocator->blockTreeCacheOwner()->tree()->root());
+        }
+    }
+    auto seeded_match = allocator->blockTreeCacheOwner()->match(seed_keys);
+    ASSERT_EQ(seeded_match.matched_blocks, seed_keys.size());
+    allocator->blockTreeCacheOwner()->releaseMatchedBlocks(seeded_match.matched_block_sets);
+
+    const auto& full_blocks   = seeded_blocks[static_cast<size_t>(gid_full)];
+    const auto& linear_blocks = seeded_blocks[static_cast<size_t>(gid_linear)];
 
     // Request has 4 keys, but allocator drops the last for matching.
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102, 103});

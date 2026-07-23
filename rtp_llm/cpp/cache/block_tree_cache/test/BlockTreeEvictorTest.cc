@@ -468,21 +468,24 @@ TEST(BlockTreeEvictorPolicyTest, ReverseCascadeNeitherStartsFromNorTargetsNonCha
 }
 
 TEST_F(BlockTreeEvictorTest, MatchUpdatesIntermediateHistoryWithoutAdmittingIt) {
-    const auto allocated = device_pool_->malloc(2);
+    const auto allocated = device_pool_->malloc(3);
     ASSERT_TRUE(allocated.has_value());
-    ASSERT_EQ(allocated->size(), 2u);
+    ASSERT_EQ(allocated->size(), 3u);
     const BlockIdxType                  parent_block = (*allocated)[0];
     const BlockIdxType                  leaf_block   = (*allocated)[1];
+    const BlockIdxType                  rival_block  = (*allocated)[2];
     std::vector<std::vector<GroupSlot>> slots        = {{makeSlot(Tier::DEVICE, parent_block)},
                                                         {makeSlot(Tier::DEVICE, leaf_block)}};
     auto                                result       = insert({100, 200}, slots);
     ASSERT_EQ(result.inserted_nodes.size(), 2u);
+    auto rival = insert({300}, {{makeSlot(Tier::DEVICE, rival_block)}});
+    ASSERT_NE(rival.leaf, nullptr);
 
     TreeNode* parent = result.inserted_nodes[0].node;
     TreeNode* leaf   = result.inserted_nodes[1].node;
     ASSERT_NE(parent, nullptr);
     ASSERT_NE(leaf, nullptr);
-    ASSERT_EQ(evictor_->candidateStats().device_candidates, 1u);
+    ASSERT_EQ(evictor_->candidateStats().device_candidates, 2u);
 
     evictor_->onMatched({parent, leaf});
 
@@ -491,7 +494,7 @@ TEST_F(BlockTreeEvictorTest, MatchUpdatesIntermediateHistoryWithoutAdmittingIt) 
     EXPECT_EQ(parent_meta.last_access_seq, leaf_meta.last_access_seq);
     EXPECT_EQ(parent_meta.hit_count, 1u);
     EXPECT_EQ(leaf_meta.hit_count, 1u);
-    EXPECT_EQ(evictor_->candidateStats().device_candidates, 1u);
+    EXPECT_EQ(evictor_->candidateStats().device_candidates, 2u);
 
     evictor_->onNodeAboutToRemove(leaf);
     group_->unreferenceBlocks(GroupBlockSet{0, Tier::DEVICE, {{leaf_block}}}, BlockRefType::BLOCK_CACHE);
@@ -499,16 +502,19 @@ TEST_F(BlockTreeEvictorTest, MatchUpdatesIntermediateHistoryWithoutAdmittingIt) 
     tree_->removeNode(leaf);
     evictor_->onTopologyChanged(parent);
 
-    ASSERT_EQ(evictor_->candidateStats().device_candidates, 1u);
+    ASSERT_EQ(evictor_->candidateStats().device_candidates, 2u);
     auto victim = evictor_->chooseVictim(Tier::DEVICE);
     ASSERT_TRUE(victim.has_value());
-    EXPECT_EQ(victim->node, parent);
+    EXPECT_EQ(victim->node, rival.leaf);
     EXPECT_EQ(parent->group_slots[0].candidate_meta.last_access_seq, parent_meta.last_access_seq);
     EXPECT_EQ(parent->group_slots[0].candidate_meta.hit_count, parent_meta.hit_count);
 
     evictor_->onNodeAboutToRemove(parent);
     group_->unreferenceBlocks(GroupBlockSet{0, Tier::DEVICE, {{parent_block}}}, BlockRefType::BLOCK_CACHE);
     parent->group_slots[0].device_blocks.clear();
+    evictor_->onNodeAboutToRemove(rival.leaf);
+    group_->unreferenceBlocks(GroupBlockSet{0, Tier::DEVICE, {{rival_block}}}, BlockRefType::BLOCK_CACHE);
+    rival.leaf->group_slots[0].device_blocks.clear();
 }
 
 TEST_F(BlockTreeEvictorTest, ExistingGroupFillAdmitsChildAndRemovesFullParentCandidate) {
@@ -1322,9 +1328,18 @@ TEST(BlockTreeEvictorPolicyTest, MatchDoesNotChangeFifoAdmissionOrder) {
     evictor.onMatched({first.leaf});
 
     EXPECT_EQ(first.leaf->group_slots[0].candidate_meta.admission_seq, first_admission);
-    auto victim = evictor.chooseVictim(Tier::DEVICE);
-    ASSERT_TRUE(victim.has_value());
-    EXPECT_EQ(victim->node, first.leaf);
+    auto first_victim = evictor.chooseVictim(Tier::DEVICE);
+    ASSERT_TRUE(first_victim.has_value());
+    EXPECT_EQ(first_victim->node, first.leaf);
+
+    // No Host pool is configured, so preparation fails after reserving the
+    // source and rolls it back. FIFO admission and relative victim order must
+    // survive that rollback unchanged.
+    EXPECT_FALSE(evictor.buildPlan(*first_victim).has_value());
+    EXPECT_EQ(first.leaf->group_slots[0].candidate_meta.admission_seq, first_admission);
+    auto retried_victim = evictor.chooseVictim(Tier::DEVICE);
+    ASSERT_TRUE(retried_victim.has_value());
+    EXPECT_EQ(retried_victim->node, first.leaf);
 
     first.leaf->group_slots[0].device_blocks  = {NULL_BLOCK_IDX};
     second.leaf->group_slots[0].device_blocks = {NULL_BLOCK_IDX};

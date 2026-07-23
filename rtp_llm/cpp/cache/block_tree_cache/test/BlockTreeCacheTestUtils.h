@@ -83,6 +83,7 @@ public:
     static void setPerRankBlockTransferEngineForTest(BlockTreeCache&               cache,
                                                      PerRankBlockTransferEnginePtr per_rank_transfer_engine);
     static void runMaintenanceForTest(BlockTreeCache& cache);
+    static bool demoteOneForGroupForTest(BlockTreeCache& cache, int component_group_id, Tier tier);
     static int  reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier = Tier::DEVICE);
     static int  pendingTasksForTest(const BlockTreeCache& cache);
 

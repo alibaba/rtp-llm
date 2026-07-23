@@ -162,6 +162,18 @@ void BlockTreeCacheTestPeer::runMaintenanceForTest(BlockTreeCache& cache) {
     cache.checkWatermark();
 }
 
+bool BlockTreeCacheTestPeer::demoteOneForGroupForTest(BlockTreeCache& cache, int component_group_id, Tier tier) {
+    std::lock_guard<std::mutex> lock(cache.mutex_);
+    if (!cache.config_.isTierEnabled(tier)) {
+        return false;
+    }
+    auto eviction_move = cache.evictor_.chooseVictim(component_group_id, tier);
+    if (!eviction_move.has_value()) {
+        return false;
+    }
+    return cache.submitEvictionLocked(*eviction_move);
+}
+
 int BlockTreeCacheTestPeer::reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier) {
     std::lock_guard<std::mutex> lock(cache.mutex_);
     if (!cache.config_.isTierEnabled(tier)) {

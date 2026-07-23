@@ -180,7 +180,7 @@ CacheConfig makeIncompatibleFullGroupsConfig() {
     return config;
 }
 
-CacheConfig makeCompatibleFullGroupsConfig(CacheEvictPolicy evict_policy) {
+CacheConfig makeCompatibleFullGroupsConfig(CacheEvictPolicy first_evict_policy, CacheEvictPolicy second_evict_policy) {
     CacheConfig config;
     config.dtype                       = DataType::TYPE_FP16;
     config.layer_num                   = 2;
@@ -195,13 +195,15 @@ CacheConfig makeCompatibleFullGroupsConfig(CacheEvictPolicy evict_policy) {
         DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4, "full_a");
     auto second = test::makeResolvedMhaSpec(
         DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4, "full_b");
-    auto policy         = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    policy.evict_policy = evict_policy;
+    auto first_policy          = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    auto second_policy         = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    first_policy.evict_policy  = first_evict_policy;
+    second_policy.evict_policy = second_evict_policy;
     config.fromGroupedSpecs({first, second},
                             {{0}, {1}},
                             {CacheGroupType::FULL, CacheGroupType::FULL},
                             {"full_a", "full_b"},
-                            {policy, policy});
+                            {first_policy, second_policy});
 
     const size_t stride          = first->block_size_bytes();
     config.kv_block_stride_bytes = stride;
@@ -210,6 +212,10 @@ CacheConfig makeCompatibleFullGroupsConfig(CacheEvictPolicy evict_policy) {
     config.layer_to_block_stride_bytes.assign(2, static_cast<int>(stride));
     config.setGroupBlockLayout({8, 8}, {stride, stride}, {0, 0});
     return config;
+}
+
+CacheConfig makeCompatibleFullGroupsConfig(CacheEvictPolicy evict_policy) {
+    return makeCompatibleFullGroupsConfig(evict_policy, evict_policy);
 }
 
 CacheConfig makeCompatibleSwaGroupsConfig(int second_window) {
@@ -646,10 +652,13 @@ TEST_F(BlockTreeCacheFactoryTest, SameTypeGroupsWithDifferentPolicyShapeSeqAndSt
 TEST_F(BlockTreeCacheFactoryTest, OnlyCompatibleChainGroupsAggregate) {
     const auto config    = makeCompatibleFullGroupsConfig(CacheEvictPolicy::CHAIN);
     auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
-    auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
+    KVCacheConfig legacy_conflict;
+    legacy_conflict.enable_independent_group_eviction = true;
+    auto cache                                        = createBlockTreeCache(config, legacy_conflict, allocator);
 
     ASSERT_NE(cache, nullptr);
     ASSERT_EQ(cache->componentGroups().size(), 1u);
+    EXPECT_EQ(cache->componentGroups()[0]->evict_policy, CacheEvictPolicy::CHAIN);
     EXPECT_EQ(cache->componentGroups()[0]->tags(), (std::vector<std::string>{"full_a", "full_b"}));
     ASSERT_EQ(cache->componentGroups()[0]->devicePools().size(), 2u);
 }
@@ -831,12 +840,65 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
 TEST_F(BlockTreeCacheFactoryTest, IndependentGroupsNeverAggregateOrEnterAnotherGroupsCascade) {
     const auto config    = makeCompatibleFullGroupsConfig(CacheEvictPolicy::INDEPENDENT);
     auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
-    auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
+    KVCacheConfig legacy_conflict;
+    legacy_conflict.enable_independent_group_eviction = false;
+    auto cache                                        = createBlockTreeCache(config, legacy_conflict, allocator);
 
     ASSERT_NE(cache, nullptr);
     ASSERT_EQ(cache->componentGroups().size(), 2u);
+    EXPECT_EQ(cache->componentGroups()[0]->evict_policy, CacheEvictPolicy::INDEPENDENT);
+    EXPECT_EQ(cache->componentGroups()[1]->evict_policy, CacheEvictPolicy::INDEPENDENT);
     EXPECT_EQ(cache->componentGroups()[0]->tags(), (std::vector<std::string>{"full_a"}));
     EXPECT_EQ(cache->componentGroups()[1]->tags(), (std::vector<std::string>{"full_b"}));
+}
+
+TEST_F(BlockTreeCacheFactoryTest, EvictPolicyNoneNeverReclaimedByPublicPaths) {
+    const auto config    = makeCompatibleFullGroupsConfig(CacheEvictPolicy::CHAIN, CacheEvictPolicy::NONE);
+    auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
+    ASSERT_NE(cache, nullptr);
+    allocator->setBlockTreeCache(cache.get());
+
+    ASSERT_EQ(cache->componentGroups().size(), 2u);
+    ASSERT_EQ(cache->componentGroups()[0]->tags(), (std::vector<std::string>{"full_a"}));
+    ASSERT_EQ(cache->componentGroups()[1]->tags(), (std::vector<std::string>{"full_b"}));
+    EXPECT_EQ(cache->componentGroups()[0]->evict_policy, CacheEvictPolicy::CHAIN);
+    EXPECT_EQ(cache->componentGroups()[1]->evict_policy, CacheEvictPolicy::NONE);
+
+    const auto blocks = insertOneKeyThroughAllocator(config, allocator, /*key=*/820);
+    ASSERT_EQ(blocks.size(), 2u);
+    const auto normal_pool = allocator->cacheGroups()[0]->blockPool();
+    const auto none_pool   = allocator->cacheGroups()[1]->blockPool();
+    releaseInsertedRequestBlocks(allocator, blocks);
+    cache->onBlocksReleased();
+    ASSERT_EQ(cache->getStats().device_heap_total_size, 1u);
+    ASSERT_EQ(normal_pool->refCount(blocks[0]), 1u);
+    ASSERT_EQ(none_pool->refCount(blocks[1]), 1u);
+
+    EXPECT_EQ(
+        block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::DEVICE),
+        1);
+    cache->waitForPendingTasks();
+    EXPECT_FALSE(normal_pool->isAllocated(blocks[0]));
+    EXPECT_TRUE(none_pool->isAllocated(blocks[1]));
+    EXPECT_EQ(none_pool->refCount(blocks[1]), 1u);
+    EXPECT_EQ(cache->evictForTag("full_b", 1), 0);
+    EXPECT_TRUE(none_pool->isAllocated(blocks[1]));
+
+    const size_t remaining_free = none_pool->freeBlocksNum();
+    const auto   pressure_holds = none_pool->malloc(remaining_free);
+    ASSERT_TRUE(pressure_holds.has_value());
+    none_pool->incRef(*pressure_holds, BlockRefType::REQUEST);
+    EXPECT_EQ(none_pool->freeBlocksNum(), 0u);
+    EXPECT_FALSE(allocator->cacheGroups()[1]->ensureFreeBlocks(1));
+    EXPECT_EQ(none_pool->freeBlocksNum(), 0u);
+    EXPECT_TRUE(none_pool->isAllocated(blocks[1]));
+    EXPECT_EQ(none_pool->refCount(blocks[1]), 1u);
+
+    none_pool->decRef(*pressure_holds, BlockRefType::REQUEST);
+    allocator->setBlockTreeCache(nullptr);
+    cache.reset();
+    EXPECT_EQ(none_pool->freeBlocksNum(), none_pool->totalBlocksNum());
 }
 
 TEST_F(BlockTreeCacheFactoryTest, IndependentInsertKeepsSeparateComponentSlots) {

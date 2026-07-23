@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <functional>
@@ -486,6 +487,173 @@ TEST_F(BlockTreeCacheTest, ThreadSafety) {
 
     auto stats = cache_->getStats();
     EXPECT_EQ(stats.tree_node_count, 4u);
+}
+
+TEST_F(BlockTreeCacheTest, ConcurrentDoubleMatch_LastReleaseReadmitsExactlyOnce) {
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {42};
+    cache_->insert(nullptr, {100}, slots);
+    ASSERT_EQ(cache_->getStats().device_heap_total_size, 1u);
+
+    std::mutex               mutex;
+    std::condition_variable  cv;
+    bool                     start{false};
+    size_t                   matched_count{0};
+    size_t                   released_count{0};
+    std::array<bool, 2>      release_match{false, false};
+    std::array<size_t, 2>    matched_blocks{0, 0};
+    std::vector<std::thread> threads;
+    threads.reserve(2);
+    for (size_t thread_id = 0; thread_id < 2; ++thread_id) {
+        threads.emplace_back([&, thread_id]() {
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                cv.wait(lock, [&] { return start; });
+            }
+            BlockTreeMatchResult result = cache_->match({100});
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                matched_blocks[thread_id] = result.matched_blocks;
+                ++matched_count;
+                cv.notify_all();
+                cv.wait(lock, [&] { return release_match[thread_id]; });
+            }
+            cache_->releaseMatchedBlocks(result.matched_block_sets);
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                ++released_count;
+                cv.notify_all();
+            }
+        });
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        start = true;
+        cv.notify_all();
+    }
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait(lock, [&] { return matched_count == 2; });
+    }
+    EXPECT_EQ(matched_blocks, (std::array<size_t, 2>{1, 1}));
+
+    // Selection lazily drops the now request-pinned candidate. It must stay out
+    // after only one of the two concurrent holders releases it.
+    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 0);
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 0u);
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        release_match[0] = true;
+        cv.notify_all();
+    }
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait(lock, [&] { return released_count == 1; });
+    }
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 0u);
+
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        release_match[1] = true;
+        cv.notify_all();
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    EXPECT_EQ(released_count, 2u);
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 1u);
+    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
+    cache_->waitForPendingTasks();
+    EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
+}
+
+TEST_F(BlockTreeCacheTest, ConcurrentMatchInsertSameAndForkedPrefixes) {
+    constexpr size_t kThreadCount = 6;
+    constexpr size_t kIterations  = 200;
+
+    std::mutex               start_mutex;
+    std::condition_variable  start_cv;
+    bool                     start{false};
+    std::atomic<bool>        consistent{true};
+    std::vector<std::thread> threads;
+    threads.reserve(kThreadCount);
+
+    for (size_t thread_id = 0; thread_id < kThreadCount; ++thread_id) {
+        threads.emplace_back([&, thread_id]() {
+            {
+                std::unique_lock<std::mutex> lock(start_mutex);
+                start_cv.wait(lock, [&] { return start; });
+            }
+            const CacheKeyType fork_key   = static_cast<CacheKeyType>(1000 + thread_id);
+            const BlockIdxType fork_block = static_cast<BlockIdxType>(20 + thread_id);
+            for (size_t iteration = 0; iteration < kIterations; ++iteration) {
+                std::vector<std::vector<GroupSlot>> same_slots(2, std::vector<GroupSlot>(1));
+                same_slots[0][0].device_blocks = {10};
+                same_slots[1][0].device_blocks = {11};
+                cache_->insert(nullptr, {100, 200}, same_slots);
+
+                std::vector<std::vector<GroupSlot>> fork_slots(2, std::vector<GroupSlot>(1));
+                fork_slots[0][0].device_blocks = {10};
+                fork_slots[1][0].device_blocks = {fork_block};
+                cache_->insert(nullptr, {100, fork_key}, fork_slots);
+
+                for (const CacheKeysType& keys : {CacheKeysType{100, 200}, CacheKeysType{100, fork_key}}) {
+                    BlockTreeMatchResult match = cache_->match(keys);
+                    const auto           tag   = match.group_block_indices.find("tag_0");
+                    if (match.matched_blocks != 2 || tag == match.group_block_indices.end() || tag->second.size() != 2
+                        || tag->second[0] != 10) {
+                        consistent.store(false);
+                    }
+                    cache_->releaseMatchedBlocks(match.matched_block_sets);
+                }
+            }
+        });
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(start_mutex);
+        start = true;
+        start_cv.notify_all();
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    EXPECT_TRUE(consistent.load());
+    const CacheStats stats = cache_->getStats();
+    EXPECT_EQ(stats.tree_node_count, kThreadCount + 2u);         // shared parent + same leaf + fork leaves
+    EXPECT_EQ(stats.device_heap_total_size, kThreadCount + 1u);  // every leaf appears exactly once
+
+    const auto& pool = cache_->componentGroups()[0]->devicePools()[0];
+    ASSERT_NE(pool, nullptr);
+    EXPECT_EQ(pool->refCount(10), 1u);
+    EXPECT_EQ(pool->refCount(11), 1u);
+    for (size_t thread_id = 0; thread_id < kThreadCount; ++thread_id) {
+        const CacheKeyType fork_key   = static_cast<CacheKeyType>(1000 + thread_id);
+        const BlockIdxType fork_block = static_cast<BlockIdxType>(20 + thread_id);
+        const auto         found      = cache_->tree()->findNode({100, fork_key});
+        ASSERT_EQ(found.path.size(), 2u);
+        EXPECT_EQ(found.path[0]->group_slots[0].device_blocks, (BlockIndicesType{10}));
+        EXPECT_EQ(found.path[1]->group_slots[0].device_blocks, (BlockIndicesType{fork_block}));
+        EXPECT_EQ(pool->refCount(fork_block), 1u);
+    }
+
+    // Final reclaim: drain leaves first, then the promoted shared parent, until
+    // the tree is empty and every cache hold is released back to the pool.
+    for (size_t attempt = 0; attempt < (kThreadCount + 2) * 2; ++attempt) {
+        if (BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE) == 0) {
+            break;
+        }
+        cache_->waitForPendingTasks();
+    }
+    EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 0u);
+    EXPECT_FALSE(pool->isAllocated(10));
+    EXPECT_FALSE(pool->isAllocated(11));
+    for (size_t thread_id = 0; thread_id < kThreadCount; ++thread_id) {
+        EXPECT_FALSE(pool->isAllocated(static_cast<BlockIdxType>(20 + thread_id)));
+    }
 }
 
 TEST(BlockTreeCacheFinalizationTest, CopyExceptionSettlesCreditsBeforePendingTaskCompletion) {

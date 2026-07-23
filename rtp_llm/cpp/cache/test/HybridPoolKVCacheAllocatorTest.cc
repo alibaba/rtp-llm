@@ -1278,6 +1278,11 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionMarksCanonicalResour
     InsertInfo insert_info{seed_res, seed_tokens, /*is_resident=*/false};
     allocator->insertIntoCache(insert_info);
 
+    const std::string target_tag = "csa_kv";
+    const int         target_gid = config.groupIdForTag(target_tag);
+    ASSERT_GE(target_gid, 0);
+    ASSERT_LT(static_cast<size_t>(target_gid), allocator->groupBlockPools().size());
+
     FreeInfo seed_free{seed_res, seed_tokens};
     allocator->free(seed_free);
 
@@ -1286,6 +1291,55 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionMarksCanonicalResour
     const auto expected_canonical = canonical_source.localCacheKeys(cp_mapper->cpSize() - 1, cp_mapper->cpSize());
     const auto before             = allocator->blockTreeCacheOwner()->getKeySnapshot(expected_canonical.size() + 1);
     EXPECT_EQ(before.keys, expected_canonical);
+
+    const auto& component_groups = allocator->blockTreeCacheOwner()->componentGroups();
+    const auto  target_component =
+        std::find_if(component_groups.begin(), component_groups.end(), [&](const ComponentGroupPtr& component) {
+            return component != nullptr
+                   && std::find(component->tags().begin(), component->tags().end(), target_tag)
+                          != component->tags().end();
+        });
+    ASSERT_NE(target_component, component_groups.end());
+
+    std::vector<size_t> free_before;
+    free_before.reserve(allocator->groupBlockPools().size());
+    for (const auto& pool : allocator->groupBlockPools()) {
+        free_before.push_back(pool->freeBlocksNum());
+    }
+
+    // Trigger reclamation through the production pressure entry: demanding more
+    // free blocks than this CP rank's physical pool currently has forces
+    // KVCacheGroup::ensureFreeBlocks() to run the allocator-registered eviction
+    // callback (stable-tag evictForTag + waitForPendingTasks) and its free
+    // recomputation loop, instead of test code calling evictForTag directly.
+    KVCacheGroupPtr target_group;
+    for (const auto& group : allocator->cacheGroups()) {
+        if (group != nullptr && group->tag() == target_tag) {
+            target_group = group;
+        }
+    }
+    ASSERT_NE(target_group, nullptr);
+    const size_t target_free_before = free_before[static_cast<size_t>(target_gid)];
+    const size_t required_blocks    = target_free_before + expected_canonical.size();
+    ASSERT_TRUE(target_group->ensureFreeBlocks(static_cast<int>(required_blocks)));
+
+    const size_t target_free_after = allocator->groupBlockPools()[static_cast<size_t>(target_gid)]->freeBlocksNum();
+    ASSERT_GT(target_free_after, target_free_before);
+    const size_t reclaimed = target_free_after - target_free_before;
+    EXPECT_EQ(reclaimed, expected_canonical.size());
+
+    for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
+        const auto& pool = allocator->groupBlockPools()[gid];
+        const bool  same_component =
+            std::find((*target_component)->tags().begin(), (*target_component)->tags().end(), config.tagForGroup(gid))
+            != (*target_component)->tags().end();
+        const size_t expected_delta = same_component ? reclaimed : 0u;
+        EXPECT_EQ(pool->freeBlocksNum(), free_before[gid] + expected_delta) << "gid=" << gid;
+    }
+    EXPECT_EQ(allocator->groupBlockPools()[static_cast<size_t>(target_gid)]->freeBlocksNum(),
+              free_before[static_cast<size_t>(target_gid)] + static_cast<size_t>(reclaimed));
+    const auto after_target_reclaim = allocator->blockTreeCacheOwner()->getKeySnapshot(expected_canonical.size() + 1);
+    EXPECT_GT(after_target_reclaim.version, before.version);
 
     // The allocator publishes to BlockTreeCache, so eviction is observed through
     // the tree rather than the legacy allocator pop-resource facade.

@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtil.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
@@ -8,13 +11,32 @@ namespace rtp_llm {
 namespace {
 using block_tree_cache_test::BlockTreeCacheTestPeer;
 
+// Test double that records which nodes FullComponentGroup::isSlotEvictable is
+// asked about while recording is enabled, then forwards to the base class.
+// During a no-eviction insert, refreshCandidate is the only caller of
+// isSlotEvictable, so recording these evaluations lets a test verify exactly
+// which nodes the evictor re-evaluates -- without any production-side hook.
+class CountingFullComponentGroup: public FullComponentGroup {
+public:
+    bool isSlotEvictable(const TreeNode& node, Tier tier) const override {
+        if (recording_) {
+            checked_nodes_.push_back(&node);
+        }
+        return FullComponentGroup::isSlotEvictable(node, tier);
+    }
+
+    mutable bool                         recording_{false};
+    mutable std::vector<const TreeNode*> checked_nodes_;
+};
+
 // Helper: build a BlockTreeCache with a single Full(REUSABLE) group.
 class FullEvictionTest: public ::testing::Test {
 protected:
     void SetUp() override {
         std::unique_ptr<BlockTree> tree       = std::make_unique<BlockTree>(1);
-        auto                       full       = std::make_shared<FullComponentGroup>();
+        auto                       full       = std::make_shared<CountingFullComponentGroup>();
         full->component_group_id              = 0;
+        counting_full_                        = full.get();
         std::vector<ComponentGroupPtr> groups = {full};
         cache_                                = BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree),
                                                             std::move(groups),
@@ -32,6 +54,7 @@ protected:
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
+    CountingFullComponentGroup*     counting_full_{nullptr};
 };
 
 // ---------------------------------------------------------------------------
@@ -53,13 +76,54 @@ TEST_F(FullEvictionTest, OnlyLeafEntersDeviceHeap) {
 // Extending an existing FULL leaf creates only the suffix node in inserted_nodes.
 // The old leaf must be refreshed separately and removed from the FULL heap.
 TEST_F(FullEvictionTest, ExtendingExistingLeafRefreshesDirectParent) {
-    insertPath({100}, 10);
+    insertPath({100, 200, 300, 400}, 10);
     ASSERT_EQ(cache_->getStats().device_heap_total_size, 1u);
 
-    insertPath({100, 200}, 20);
+    const auto before = cache_->tree()->findNode({100, 200, 300, 400});
+    ASSERT_EQ(before.path.size(), 4u);
+    std::vector<CandidateMeta> ancestor_meta_before;
+    for (size_t index = 0; index + 1 < before.path.size(); ++index) {
+        ancestor_meta_before.push_back(before.path[index]->group_slots[0].candidate_meta);
+    }
+    const std::vector<TreeNode*> path_before               = before.path;
+    const TreeNode* const        direct_parent             = before.path.back();
+    const CandidateMeta          direct_parent_meta_before = direct_parent->group_slots[0].candidate_meta;
 
-    EXPECT_EQ(cache_->getStats().tree_node_count, 2u);
-    EXPECT_EQ(cache_->getStats().device_heap_total_size, 1u);  // only [200]
+    // Record every isSlotEvictable evaluation during the extending insert.
+    // Metadata alone cannot distinguish "refresh only the direct parent" from
+    // "scan every ancestor": refreshCandidate does not mutate CandidateMeta and
+    // interior FULL nodes are heap-ineligible anyway, so a regression that
+    // re-walks the whole prefix would keep the other assertions green. With no
+    // eviction pressure, refreshCandidate is the sole caller of isSlotEvictable,
+    // so the counting double captures exactly the re-evaluated nodes.
+    counting_full_->checked_nodes_.clear();
+    counting_full_->recording_ = true;
+    insertPath({100, 200, 300, 400, 500}, 20);
+    counting_full_->recording_ = false;
+
+    EXPECT_EQ(cache_->getStats().tree_node_count, 5u);
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 1u);  // only the new [500] leaf
+    const auto after = cache_->tree()->findNode({100, 200, 300, 400, 500});
+    ASSERT_EQ(after.path.size(), 5u);
+
+    const auto refresh_count = [this](const TreeNode* node) {
+        return std::count(counting_full_->checked_nodes_.begin(), counting_full_->checked_nodes_.end(), node);
+    };
+    EXPECT_EQ(refresh_count(direct_parent), 1) << "direct parent must be re-evaluated exactly once";
+    EXPECT_EQ(refresh_count(after.path.back()), 1) << "new leaf is admitted exactly once";
+    for (size_t index = 0; index + 1 < path_before.size(); ++index) {
+        EXPECT_EQ(refresh_count(path_before[index]), 0) << "ancestor=" << index << " must not be re-scanned";
+    }
+
+    EXPECT_EQ(after.path[3]->group_slots[0].candidate_meta.last_access_seq, direct_parent_meta_before.last_access_seq);
+    EXPECT_EQ(after.path[3]->group_slots[0].candidate_meta.admission_seq, direct_parent_meta_before.admission_seq);
+    EXPECT_EQ(after.path[3]->group_slots[0].candidate_meta.hit_count, direct_parent_meta_before.hit_count);
+    for (size_t index = 0; index < ancestor_meta_before.size(); ++index) {
+        const CandidateMeta& after_meta = after.path[index]->group_slots[0].candidate_meta;
+        EXPECT_EQ(after_meta.last_access_seq, ancestor_meta_before[index].last_access_seq) << "ancestor=" << index;
+        EXPECT_EQ(after_meta.admission_seq, ancestor_meta_before[index].admission_seq) << "ancestor=" << index;
+        EXPECT_EQ(after_meta.hit_count, ancestor_meta_before[index].hit_count) << "ancestor=" << index;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +271,7 @@ TEST_F(FullEvictionTest, MatchRefreshesLruOrder) {
 // it must not count as another access or change the ordering metadata.
 TEST_F(FullEvictionTest, MatchReleaseDoesNotMutateHeat) {
     insertPath({100}, 10);
+    insertPath({200}, 20);
 
     auto match = cache_->match({100});
     ASSERT_EQ(match.matched_blocks, 1u);
@@ -221,6 +286,17 @@ TEST_F(FullEvictionTest, MatchReleaseDoesNotMutateHeat) {
     EXPECT_EQ(meta_after_release.last_access_seq, meta_after_match.last_access_seq);
     EXPECT_EQ(meta_after_release.admission_seq, meta_after_match.admission_seq);
     EXPECT_EQ(meta_after_release.hit_count, meta_after_match.hit_count);
+
+    // Releasing the hotter node must not refresh it again: the untouched rival
+    // remains the next LRU victim.
+    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
+    cache_->waitForPendingTasks();
+    auto hot_match  = cache_->match({100});
+    auto cold_match = cache_->match({200});
+    EXPECT_EQ(hot_match.matched_blocks, 1u);
+    EXPECT_EQ(cold_match.matched_blocks, 0u);
+    cache_->releaseMatchedBlocks(hot_match.matched_block_sets);
+    cache_->releaseMatchedBlocks(cold_match.matched_block_sets);
 }
 
 // An insert that completely overlaps an existing path creates no inserted_nodes.

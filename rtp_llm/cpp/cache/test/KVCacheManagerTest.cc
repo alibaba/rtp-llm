@@ -216,6 +216,13 @@ static CacheConfig makeDSV4ConfigWithConcurrencyPool(uint32_t full_block_num, ui
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
     auto config      = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
     config.block_num = full_block_num;
+    auto policies    = config.groupPoliciesSnapshot();
+    for (auto& policy : policies) {
+        if (policy.group_type == CacheGroupType::SWA) {
+            policy.explicit_block_num = 2u * swa_batch_size;
+        }
+    }
+    config.setGroupPolicies(policies);
     std::vector<uint32_t> block_nums(static_cast<size_t>(config.groupNums()), full_block_num);
     for (int gid = 0; gid < config.groupNums(); ++gid) {
         block_nums[static_cast<size_t>(gid)] = isFullGroup(config, gid) ? full_block_num : (2u * swa_batch_size);
@@ -1478,8 +1485,8 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     // This test simulates full DSV4 inference including SWA group eviction.
     //
     // Tight stress layout:
-    //   FULL groups (0,1,2): large paged pool (block_num=8, 7 usable)
-    //   SWA  groups (3,4,5,6): small independent pool with 3 usable blocks
+    //   FULL groups (0,1,2): large paged pool (block_num=16, 15 usable)
+    //   SWA  groups (3,4,5,6): small independent pool (block_num=6, 5 usable)
     //
     // SWA pools are sized by concurrency, NOT by global block_num. This test verifies that
     // eviction is triggered independently on SWA groups when concurrent requests exhaust
@@ -1490,7 +1497,14 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     //   Phase 2: 3rd request triggers eviction on SWA groups
     //   Phase 3: Decode-phase incrKVBlock triggers further FULL/SWA eviction + removeSkippedBlocks
     //   Phase 4: Free and verify pool recovery
-    auto manager_config = makeDSV4ConfigWithConcurrencyPool(/*full_block_num=*/8, /*swa_batch_size=*/4);
+    auto manager_config = makeDSV4ConfigWithConcurrencyPool(/*full_block_num=*/16, /*swa_batch_size=*/3);
+    auto group_policies = manager_config.groupPoliciesSnapshot();
+    for (auto& policy : group_policies) {
+        if (policy.group_type == CacheGroupType::SWA) {
+            policy.evict_policy = CacheEvictPolicy::INDEPENDENT;
+        }
+    }
+    manager_config.setGroupPolicies(group_policies);
     auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
     ASSERT_TRUE(manager->init());
 
@@ -1499,7 +1513,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
 
     // Verify differentiated pool sizes.
     const size_t free_before = manager->freeBlocksNum();
-    EXPECT_EQ(free_before, 3u * 7u + 4u * 7u);
+    EXPECT_EQ(free_before, 3u * 15u + 4u * 5u);
 
     // Helper: create tokens with unique offset for distinct cache keys.
     auto makeTokens = [&](int offset) {
@@ -1524,6 +1538,31 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     manager->insertIntoCache(insert_a);
     manager->free(FreeInfo{res_a, tokens_a});
 
+    const CacheKeysType keys_a = res_a->cacheKeys(0);
+    ASSERT_FALSE(keys_a.empty());
+    struct FullPrefixSnapshot {
+        size_t                                 component_group_id;
+        std::vector<std::vector<BlockIdxType>> blocks_per_node;
+    };
+    std::vector<FullPrefixSnapshot> full_prefix_before_swa_pressure;
+    {
+        const auto find_a = manager->blockTreeCache()->tree()->findNode(keys_a);
+        ASSERT_EQ(find_a.path.size(), keys_a.size());
+        const auto& components = manager->blockTreeCache()->componentGroups();
+        for (size_t component_group_id = 0; component_group_id < components.size(); ++component_group_id) {
+            const auto& component = components[component_group_id];
+            if (component->group_type != CacheGroupType::FULL) {
+                continue;
+            }
+            FullPrefixSnapshot snapshot{component_group_id, {}};
+            for (TreeNode* node : find_a.path) {
+                snapshot.blocks_per_node.push_back(node->group_slots[component_group_id].device_blocks);
+            }
+            full_prefix_before_swa_pressure.push_back(std::move(snapshot));
+        }
+    }
+    ASSERT_FALSE(full_prefix_before_swa_pressure.empty());
+
     auto       res_b    = makeDSV4BatchResource(manager_config);
     auto       tokens_b = makeTokens(/*offset=*/10000);
     MallocInfo malloc_b{res_b, tokens_b};
@@ -1537,6 +1576,53 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     const size_t free_after_cache = manager->freeBlocksNum();
     EXPECT_LT(free_after_cache, free_before);
 
+    // Pin down the SWA-side pre-pressure state precisely. The aggregate free
+    // drop above could come entirely from FULL caching, so verify each
+    // independent SWA pool has fewer free blocks than the 2 the next request
+    // needs (forcing ensureFreeBlocks to evict) and snapshot every cached SWA
+    // slot with its LRU order to prove the eviction directly in Phase 2.
+    const CacheKeysType keys_b = res_b->cacheKeys(0);
+    ASSERT_FALSE(keys_b.empty());
+    struct SwaCachedSlotSnapshot {
+        size_t                    component_group_id;
+        TreeNode*                 node;
+        std::vector<BlockIdxType> device_blocks;
+        uint64_t                  last_access_seq;
+    };
+    std::vector<SwaCachedSlotSnapshot> swa_cached_before;
+    std::vector<size_t>                swa_component_ids;
+    {
+        const auto& components = manager->blockTreeCache()->componentGroups();
+        const auto  find_a     = manager->blockTreeCache()->tree()->findNode(keys_a);
+        const auto  find_b     = manager->blockTreeCache()->tree()->findNode(keys_b);
+        ASSERT_EQ(find_a.path.size(), keys_a.size());
+        ASSERT_EQ(find_b.path.size(), keys_b.size());
+        for (size_t component_group_id = 0; component_group_id < components.size(); ++component_group_id) {
+            const auto& component = components[component_group_id];
+            if (component->group_type != CacheGroupType::SWA) {
+                continue;
+            }
+            swa_component_ids.push_back(component_group_id);
+            for (const auto& pool : component->devicePools()) {
+                ASSERT_LT(pool->freeBlocksNum(), 2u)
+                    << "SWA pool must not satisfy the next request without eviction, component_group_id="
+                    << component_group_id;
+            }
+            for (const auto* path : {&find_a.path, &find_b.path}) {
+                for (TreeNode* node : *path) {
+                    const GroupSlot& slot = node->group_slots[component_group_id];
+                    if (!slot.has_value(Tier::DEVICE)) {
+                        continue;
+                    }
+                    swa_cached_before.push_back(SwaCachedSlotSnapshot{
+                        component_group_id, node, slot.device_blocks, slot.candidate_meta.last_access_seq});
+                }
+            }
+        }
+    }
+    ASSERT_FALSE(swa_component_ids.empty());
+    ASSERT_FALSE(swa_cached_before.empty());
+
     // === Phase 2: 3rd request triggers eviction on SWA groups ===
     auto       res_c    = makeDSV4BatchResource(manager_config);
     auto       tokens_c = makeTokens(/*offset=*/20000);
@@ -1544,10 +1630,68 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     malloc_c.reuse_cache         = true;
     malloc_c.enable_device_cache = false;
 
-    // FULL needs 3, has exactly 3 free → no FULL eviction yet.
-    // SWA needs 2, only 1 free → ensureFreeBlocks evicts 1 from SWA cache.
+    // FULL needs 3 and still has ample capacity → no FULL eviction.
+    // Each reusable SWA pool has fewer than 2 free blocks (see the <2 assertion
+    // above), so it cannot satisfy the 2-block request → ensureFreeBlocks must
+    // evict from the SWA cache.
     auto result_c = manager->malloc(malloc_c);
     ASSERT_TRUE(result_c.success) << "3rd allocation must succeed via SWA eviction";
+
+    // Independently exhausting and evicting the SWA pools must not disturb the
+    // older request's FULL prefix. Validate the FULL component path directly so
+    // a missing SWA tail cannot hide preservation behind the joint ready boundary.
+    {
+        const auto find_a = manager->blockTreeCache()->tree()->findNode(keys_a);
+        ASSERT_EQ(find_a.path.size(), keys_a.size());
+        const auto& components = manager->blockTreeCache()->componentGroups();
+        for (const FullPrefixSnapshot& snapshot : full_prefix_before_swa_pressure) {
+            ASSERT_LT(snapshot.component_group_id, components.size());
+            const auto& component = components[snapshot.component_group_id];
+            auto        validator = component->createMatchValidator();
+            ASSERT_EQ(snapshot.blocks_per_node.size(), find_a.path.size());
+            for (size_t path_index = 0; path_index < find_a.path.size(); ++path_index) {
+                const GroupSlot& slot = find_a.path[path_index]->group_slots[snapshot.component_group_id];
+                ASSERT_TRUE(validator->validate(find_a.path[path_index], slot));
+                ASSERT_EQ(slot.device_blocks, snapshot.blocks_per_node[path_index]);
+                ASSERT_EQ(slot.device_blocks.size(), component->devicePools().size());
+                for (size_t pool_index = 0; pool_index < slot.device_blocks.size(); ++pool_index) {
+                    EXPECT_EQ(component->devicePools()[pool_index]->refCount(slot.device_blocks[pool_index]), 1u);
+                }
+            }
+        }
+    }
+
+    // Direct proof of the SWA eviction itself: at least one cached SWA slot was
+    // evicted, the evicted set is exactly an LRU-first prefix (every evicted
+    // slot is older than every surviving one within its component group), and
+    // surviving slots keep their exact device blocks.
+    {
+        size_t evicted_count = 0;
+        for (const SwaCachedSlotSnapshot& snapshot : swa_cached_before) {
+            const GroupSlot& slot = snapshot.node->group_slots[snapshot.component_group_id];
+            if (!slot.has_value(Tier::DEVICE)) {
+                ++evicted_count;
+                continue;
+            }
+            EXPECT_EQ(slot.device_blocks, snapshot.device_blocks)
+                << "surviving SWA slot changed, component_group_id=" << snapshot.component_group_id;
+        }
+        ASSERT_GT(evicted_count, 0u) << "third allocation must evict from the SWA cache";
+        for (const SwaCachedSlotSnapshot& evicted : swa_cached_before) {
+            if (evicted.node->group_slots[evicted.component_group_id].has_value(Tier::DEVICE)) {
+                continue;
+            }
+            for (const SwaCachedSlotSnapshot& survivor : swa_cached_before) {
+                if (survivor.component_group_id != evicted.component_group_id
+                    || !survivor.node->group_slots[survivor.component_group_id].has_value(Tier::DEVICE)) {
+                    continue;
+                }
+                EXPECT_LT(evicted.last_access_seq, survivor.last_access_seq)
+                    << "evicted SWA slot must be LRU-older than every survivor, component_group_id="
+                    << evicted.component_group_id;
+            }
+        }
+    }
 
     // Verify block structure.
     ASSERT_EQ(res_c->groupNums(), kDsv4PoolNum);
@@ -1568,7 +1712,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     // --- Incr to 4*spb ---
     // Non-HCA SWA state starts from the reusable linear-step allocation and then keeps the active tail window.
     // HCA_STATE skips reuse and keeps only its active tail block.
-    // FULL pool after Phase 2: 4 cached + 3 request = 7 used, 0 free → ensureFreeBlocks evicts 1.
+    // FULL has enough headroom to grow without conflating this SWA-focused case with FULL eviction.
     tokens_c->setSeqLength(4 * spb);
     MallocInfo incr1{res_c, tokens_c};
     incr1.reuse_cache         = false;
