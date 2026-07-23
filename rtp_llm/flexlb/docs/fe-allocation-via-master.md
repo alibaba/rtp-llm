@@ -118,6 +118,15 @@ coordination to engage — that is what gives it the `FePool` bean. Normal deplo
 (dispatcher and master co-located in one JVM). If the elected master does not run the dispatcher,
 it has no FE view, stamps no `fe_url`, and — because there is no fallback — the batch chunks fail.
 
+**Single-role only.** The `/batch_schedule` resolve (`DefaultRouter.batchSchedule`) supports a
+single-role deployment only — it rejects a multi-role fleet (configured, or detected, `roleTypes`
+size > 1) with `INVALID_REQUEST`. Because FE is now sourced solely from that resolve with no
+fallback, a multi-role deployment fails **every** splittable batch with `CHUNK_NO_FE`. (Before this
+change, non-preAssignable endpoints skipped the master entirely and fanned out off the per-instance
+local pool, so FE selection still worked under multi-role.) Dispatcher batch-fanout is therefore
+supported only on single-role deployments — do not enable it on a multi-role (e.g. PD/VL-split)
+fleet.
+
 ## Consequences
 
 - **Availability:** a slave that transiently cannot reach the master, or a master with no FE view,
@@ -136,6 +145,28 @@ it has no FE view, stamps no `fe_url`, and — because there is no fallback — 
   resolving locally no-ops the stamp → those chunks fail visibly with `CHUNK_NO_FE` (self-healing on
   retry); a slave promoted after receiving a master-stamped response re-stamps with its now-master
   cursor — still one valid cursor advancing once, no collision.
+
+## Operations
+
+- **Rollback.** There is **no runtime switch** for this behavior — `FanoutService` no longer holds a
+  local `FePool`, so FE selection cannot be toggled back to per-instance at runtime. Rolling back the
+  "FE-from-master, no-fallback" behavior means deploying a build from before this change; treat it as a
+  code-level, not config-level, rollback when planning a release.
+- **Primary alert = `CHUNK_NO_FE`.** Alert on the `no_fe_assignment` chunk-failure rate/ratio, not on
+  the log. It is the single authoritative signal that "the master is not assigning FEs". The empty-pool
+  WARN is rate-limited (`suppressed=N` carries magnitude); the unexpected-exception ERROR is
+  deliberately unthrottled (per-occurrence, with stack, so a real bug cannot hide behind the throttled
+  WARN). Both are diagnostic only.
+- **`preassign.rt` semantics changed under the same name.** The metric name is unchanged for dashboard
+  continuity, but it now fires for **every** splittable batch (not only when `preAssignBe` is on), so
+  its sample volume rises; and its `RESULT_EMPTY` tag now means "the master returned no targets → those
+  chunks will fail with `CHUNK_NO_FE`" — a failure precursor, not the benign "no pre-assignment" it
+  meant before. Update any dashboard/alert that keyed off the old volume or the old `RESULT_EMPTY`
+  meaning.
+- **`CHUNK_NO_FE` triage order.** (1) Is the elected master running the dispatcher
+  (`dispatch.fe-pool-service-id` set)? (2) Is the FE `FePool` snapshot non-empty (FE discovery healthy)?
+  (3) Can slaves reach the master? — transport errors/timeouts collapse to empty targets, the same
+  symptom. A master re-election in flight self-heals on retry.
 
 ## Code
 
@@ -156,12 +187,17 @@ it has no FE view, stamps no `fe_url`, and — because there is no fallback — 
 - `HttpLoadBalanceServerTest` — master stamps from local pool; a forwarding slave does not restamp.
 - `BatchScheduleClientTest` — master-local in-process resolution stamps `fe_url` from the master
   cursor; a slave's forwarded (already-stamped) response is not restamped.
-- `FanoutServiceTest` — uses master `fe_url`; null/short assignment fails the chunk with the FE
-  client never invoked (proves no fallback).
+- `MasterFeAssignerTest` — the single stamp point's guard/exception branches directly: null/empty
+  targets no-op; an absent `FePool` bean (the deployment precondition failure) leaves `fe_url` null;
+  a slave does not restamp; the empty-pool and unexpected-exception paths are swallowed leaving
+  `fe_url` null (never aborting the schedule).
+- `FanoutServiceTest` — uses master `fe_url`; null/short/whole-batch-null assignment fails the chunk
+  with the FE client never invoked (proves no fallback).
 - `BatchHandlerContractTest` — a non-preAssignable endpoint still calls the master for FE but skips
   BE stamping.
-- `DispatcherE2ETest` — end-to-end fanout over three FEs, now assigned per chunk index by the
-  mock master.
+- `DispatcherE2ETest` — end-to-end fanout over three FEs, assigned per chunk index by the mock
+  master; and a master-assigns-no-FE case that fails the whole batch while contacting no FE
+  (end-to-end no-fallback lock).
 
 All verified with the mutation discipline (reintroducing a fallback, dropping the stamp, dropping a
 guard, or re-adding the BE-toggle gate each turns a test red).

@@ -2,6 +2,7 @@ package org.flexlb.dispatcher;
 
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
+import org.flexlb.util.Logger;
 import org.flexlb.util.RateLimitedWarn;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
@@ -35,6 +36,14 @@ import java.util.concurrent.TimeUnit;
  * An empty FE snapshot (pool throws) is swallowed the same way — leaving {@code fe_url} null — so BE
  * assignment (already computed) still returns; the affected chunks then fail visibly in the
  * dispatcher ({@code CHUNK_NO_FE}) rather than aborting the whole schedule.
+ *
+ * <p><b>Wiring contract:</b> this bean is deliberately an unconditional {@link Component} — do
+ * <em>not</em> add {@code @ConditionalOnProperty} to it. {@link org.flexlb.httpserver.HttpLoadBalanceServer}
+ * (itself unconditional, present on every flexlb node) takes it as a required constructor
+ * dependency; conditioning this bean would break that node's wiring wherever the dispatcher is not
+ * enabled. The optional part — the dispatcher's {@link FePool} — is expressed through the
+ * {@link ObjectProvider}, not by conditioning this bean: {@link #assign} no-ops when the pool is
+ * absent (a master node that does not run the dispatcher).
  */
 @Component
 public class MasterFeAssigner {
@@ -72,9 +81,20 @@ public class MasterFeAssigner {
             for (BatchScheduleTarget target : targets) {
                 target.setFeUrl(pool.next());
             }
-        } catch (RuntimeException e) {
+        } catch (IllegalStateException e) {
+            // Expected operational failure, not a bug: FePool.next() throws IllegalStateException
+            // when its snapshot is empty (an FE outage / discovery gap). It fires on every request
+            // while the pool is empty, so throttle it. The affected chunks fail downstream with
+            // CHUNK_NO_FE; the schedule (BE assignment already computed) is not aborted.
             feAssignWarn.warn("[BatchSchedule] FE assignment skipped (empty/failed FE pool); affected "
                     + "chunks fail with CHUNK_NO_FE, no local fallback: {}", e.toString());
+        } catch (RuntimeException e) {
+            // Unexpected: anything other than the empty-pool contract is a programming error, not an
+            // FE outage. Log it loud (ERROR, unthrottled, with stack) so a real bug can't hide behind
+            // the throttled "pool empty" WARN — but still swallow rather than abort: BE assignment is
+            // already computed and the affected chunks fail visibly with CHUNK_NO_FE (no fallback).
+            Logger.error("[BatchSchedule] unexpected error stamping FE assignment (bug?); affected "
+                    + "chunks fail with CHUNK_NO_FE, no local fallback", e);
         }
     }
 }

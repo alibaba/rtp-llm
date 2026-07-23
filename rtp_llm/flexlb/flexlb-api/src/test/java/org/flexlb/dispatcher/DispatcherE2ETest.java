@@ -405,6 +405,51 @@ class DispatcherE2ETest {
     }
 
     @Test
+    void masterAssigningNoFeFailsWholeBatchAndContactsNoFe() throws Exception {
+        // End-to-end regression lock for the "no local fallback" contract at the assembled-dispatcher
+        // layer: when the master returns no targets, BatchHandler derives an all-null preAssignedFeUrls
+        // and every chunk fails with CHUNK_NO_FE. The load-bearing proof is that NO FE is contacted at
+        // all — if anyone reintroduces a local FePool fallback in the fanout path, some FE would get a
+        // request and this turns red. No FE responses are enqueued precisely because none must be hit.
+        WebTestClient client = buildClient(/*subBatchSize=*/2, /*preAssignBe=*/false,
+                /*targets=*/List.of(), /*masterReturnsNoTargets=*/true);
+
+        ObjectNode body = mapper.createObjectNode();
+        body.put("model", "qwen");
+        var requests = body.putArray("requests");
+        for (int i = 0; i < 4; i++) {
+            ObjectNode req = requests.addObject();
+            req.put("custom_id", "c" + i);
+            req.putArray("messages").addObject().put("role", "user").put("content", "hi");
+        }
+
+        // Unlike a propagated FE client error (which surfaces the FE's own 4xx), a missing master FE
+        // assignment carries no FE HTTP status — it is a dispatcher-side inability to route, so it
+        // surfaces as 5xx.
+        JsonNode resp = client.post().uri("/dispatcher/v1/batch/chat/completions")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body)
+                .exchange()
+                .expectStatus().is5xxServerError()
+                .expectBody(JsonNode.class)
+                .returnResult().getResponseBody();
+
+        assertNotNull(resp);
+        assertEquals("all_sub_batches_failed", resp.get("error").asText());
+        assertEquals(4, resp.get("failed_count").asInt());
+        assertEquals(2, resp.get("total_chunks").asInt());
+        assertTrue(resp.get("failed_reasons").isArray() && resp.get("failed_reasons").size() > 0,
+                "all-failed body must carry at least one failure reason");
+        assertTrue(resp.get("failed_reasons").toString().contains("fe_unavailable"),
+                "a chunk with no master FE assignment categorizes as fe_unavailable (no FE HTTP "
+                        + "status), distinct from fe_client_error/fe_server_error");
+        // The whole point of "no fallback": nothing was dispatched anywhere.
+        assertEquals(0, fe1.getRequestCount(), "no chunk may reach any FE when the master assigns none");
+        assertEquals(0, fe2.getRequestCount());
+        assertEquals(0, fe3.getRequestCount());
+    }
+
+    @Test
     void snapshotEndpointReturnsCurrentFePoolThroughRealRouter() {
         // Wires the real DispatcherSnapshotHandler through the real DispatchRouter and HTTP
         // transport to verify the route is registered (and not shadowed by the /dispatcher/**
@@ -521,6 +566,13 @@ class DispatcherE2ETest {
     private WebTestClient buildClient(int subBatchSize,
                                       boolean preAssignBe,
                                       List<org.flexlb.dao.loadbalance.BatchScheduleTarget> targets) {
+        return buildClient(subBatchSize, preAssignBe, targets, /*masterReturnsNoTargets=*/false);
+    }
+
+    private WebTestClient buildClient(int subBatchSize,
+                                      boolean preAssignBe,
+                                      List<org.flexlb.dao.loadbalance.BatchScheduleTarget> targets,
+                                      boolean masterReturnsNoTargets) {
         List<String> urls = List.of(baseUrl(fe1), baseUrl(fe2), baseUrl(fe3));
         FePool pool = DispatcherTestSupport.fePool(urls);
 
@@ -538,6 +590,12 @@ class DispatcherE2ETest {
         BatchScheduleClient batchScheduleClient = new BatchScheduleClient(null, null) {
             @Override
             public reactor.core.publisher.Mono<List<org.flexlb.dao.loadbalance.BatchScheduleTarget>> requestTargets(int count) {
+                if (masterReturnsNoTargets) {
+                    // The master resolved no FE for this batch (empty targets — e.g. it has no FE
+                    // view, or a slave could not reach it). Every chunk then gets a null fe_url; the
+                    // "no fallback" contract requires the whole batch to fail without contacting any FE.
+                    return reactor.core.publisher.Mono.just(List.of());
+                }
                 // FE selection is now master-sourced (no local pool in FanoutService): return one
                 // target per chunk, cycling fe_url across the three FEs so fanout still routes
                 // chunk i → fe(i % 3) — the same distribution the old FePool round-robin produced,

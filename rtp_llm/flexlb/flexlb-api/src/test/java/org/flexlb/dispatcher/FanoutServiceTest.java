@@ -299,6 +299,32 @@ class FanoutServiceTest {
     }
 
     @Test
+    void wholeBatchWithNoMasterFeFailsEveryChunkAndContactsNoFe() {
+        // The master returned no FE for the batch at all (empty targets upstream → preAssignedFeUrls
+        // all null). Every chunk must fail with CHUNK_NO_FE and — the load-bearing "no fallback"
+        // proof — NOT ONE chunk may be dispatched to any FE. Distinct from the single-null and
+        // short-list cases: this pins the "master assigns nothing for the whole batch" shape.
+        // Mutation guard: reintroduce a local fallback and feClient would be called + chunks succeed.
+        FeClient feClient = mock(FeClient.class);
+        DispatcherTestSupport.RecordingMetrics metrics = DispatcherTestSupport.recordingMetrics();
+        FanoutService svc = new FanoutService(feClient, metrics);
+
+        List<JSONObject> chunks = List.of(chunk("p0"), chunk("p1"), chunk("p2"));
+        List<SubBatchResult> subs = svc.dispatchChunks(
+                        "/batch_infer", chunks, Collections.nCopies(chunks.size(), null),
+                        BATCH_INFER, new HttpHeaders(), null)
+                .block();
+
+        assertNotNull(subs);
+        assertEquals(3, subs.size(), "every chunk must still resolve to a (failed) result");
+        assertTrue(subs.stream().noneMatch(SubBatchResult::success), "no chunk may succeed, no fallback");
+        verifyNoInteractions(feClient);
+        assertEquals(3, metrics.chunkReports.size(), "one report per chunk");
+        assertTrue(metrics.chunkReports.stream().allMatch(r -> "no_fe_assignment".equals(r.reason())),
+                "every uncovered chunk must meter as no_fe_assignment, never a serialization pick failure");
+    }
+
+    @Test
     void fanoutWriteNullsControlsNullPreservationInChunkPayload() {
         // /v1/embeddings sets fanoutWriteNulls=true so a user-supplied explicit null reaches FE
         // byte-for-byte; /batch_infer sets it false and drops the null (the common-wire-shape win).
