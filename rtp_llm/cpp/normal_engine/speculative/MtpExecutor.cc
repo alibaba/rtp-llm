@@ -1913,7 +1913,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
 
-    StreamGroups    stream_groups(streams);
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     GptModelOutputs draft_prefill_model_output;
@@ -1946,6 +1945,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // before gathering host-derived state, then keep the new base grpc MTP
     // device-state preparation path.
     waitPreviousBookkeepingAndKvSwaps(streams);
+    // StreamGroups snapshots host-side stream state (batch sizes, execute-token
+    // counts, sequence lengths, and context/decode classification) in its
+    // constructor.  Building it before the wait races specUpdate() in the
+    // previous bookkeeping worker and permanently retains a mixed old/new
+    // snapshot for this decode step.
+    StreamGroups stream_groups(streams);
     prepareGrpcMtpDeviceState(streams, buffer_holder_);
 
     {
