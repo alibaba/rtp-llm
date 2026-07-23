@@ -587,26 +587,19 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
         if (sp_output_buffer == nullptr) {
             continue;
         }
-        auto& tensors_holder = sp_output_buffer->tensors_holder;
-        if (tensors_holder.empty()) {
-            continue;
-        }
-        if (tensors_holder.size() != 2) {
-            RTP_LLM_LOG_WARNING("[mtp-grpc] skip grpc input: tensors_holder_size=%zu, stream=%ld",
-                                tensors_holder.size(),
-                                stream->streamId());
-            tensors_holder.clear();
+        auto& side_channel = sp_output_buffer->side_channel;
+        if (!side_channel.any()) {
             continue;
         }
         if (!sp_output_buffer->tokens.defined() || sp_output_buffer->tokens.dim() != 2
             || sp_output_buffer->tokens.size(0) < 1 || sp_output_buffer->tokens.size(1) < 2) {
             RTP_LLM_LOG_WARNING("[mtp-grpc] skip grpc input: invalid tokens, stream=%ld", stream->streamId());
-            tensors_holder.clear();
+            side_channel.clear();
             continue;
         }
 
-        const auto& propose_probs_t  = tensors_holder[0];
-        const auto& propose_hidden_t = tensors_holder[1];
+        const auto& propose_probs_t  = side_channel.propose_probs;
+        const auto& propose_hidden_t = side_channel.propose_hidden;
         RTP_LLM_CHECK_WITH_INFO(propose_probs_t.defined() && propose_probs_t.numel() > 0,
                                 "[mtp-grpc] propose_probs must be non-empty, stream=%ld",
                                 stream->streamId());
@@ -653,7 +646,7 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
             .next_real_seq_len      = seq_length,
         });
 
-        tensors_holder.clear();
+        side_channel.clear();
     }
 
     return;

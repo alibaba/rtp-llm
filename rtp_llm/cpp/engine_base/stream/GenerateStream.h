@@ -57,6 +57,25 @@ struct StreamSpecUpdateInfo {
     bool force_update_info      = false;
 };
 
+// Speculative tensors handed over from the prefill node in PD-disaggregate
+// mode (gRPC side channel). Explicit tags replace the old positional
+// vector<Tensor> protocol (index 0 = probs, index 1 = hidden).
+// Reserved next: confidence (phase-2 confidence head); keep the proto field
+// numbering in model_rpc_service.proto in sync when adding members.
+struct SpSideChannelTensors {
+public:
+    torch::Tensor propose_probs;
+    torch::Tensor propose_hidden;
+
+    bool any() const {
+        return propose_probs.defined() || propose_hidden.defined();
+    }
+    void clear() {
+        propose_probs  = torch::Tensor();
+        propose_hidden = torch::Tensor();
+    }
+};
+
 struct SpeculativeExecutorStreamOutput {
 public:
     std::string debugString() const {
@@ -84,8 +103,9 @@ public:
     torch::Tensor hidden_states;
     torch::Tensor all_probs;
 
-    // hold tensors from grpc
-    std::vector<torch::Tensor> tensors_holder;
+    // tensors from the PD-disaggregate grpc side channel; consumed (and
+    // cleared) by the first decode step on the decode node
+    SpSideChannelTensors side_channel;
 };
 using SpeculativeExecutorStreamOutputPtr = std::shared_ptr<SpeculativeExecutorStreamOutput>;
 

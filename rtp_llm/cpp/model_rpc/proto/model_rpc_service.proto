@@ -261,6 +261,8 @@ message GenerateRequestPB {
     repeated int32 position_ids = 9;
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
+    // field 12 reserved for propose_confidence (dspark phase-2 confidence
+    // head); keep in sync with SpSideChannelTensors in GenerateStream.h
 }
 
 // in tp case, decode master broadcast to decode worker

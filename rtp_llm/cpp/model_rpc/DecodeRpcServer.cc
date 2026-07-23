@@ -231,11 +231,10 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                                                 torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
         memcpy(sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
 
-        auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
-        auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
-
-        sp_output_buffer->tensors_holder.push_back(std::move(propose_probs_t));
-        sp_output_buffer->tensors_holder.push_back(std::move(propose_hidden_t));
+        sp_output_buffer->side_channel.propose_probs =
+            pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
+        sp_output_buffer->side_channel.propose_hidden =
+            pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
         generate_stream->setSPOutputBuffer(sp_output_buffer);
     }
 

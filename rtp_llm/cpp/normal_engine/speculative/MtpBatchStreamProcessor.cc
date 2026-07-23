@@ -205,13 +205,13 @@ void logMtpStateFallback(const GenerateStreamPtr& stream, const char* reason) {
     const auto& mtp_state        = stream->getMtpAsyncDeviceState();
     auto        sp_output_buffer = stream->getSPOutputBuffer();
     RTP_LLM_LOG_INFO("[mtp-async-fallback] reason=%s stream=%ld epoch=%lu fallback_count=%lu success_count=%lu "
-                     "tensors_holder_size=%zu seq_len=%d",
+                     "side_channel_pending=%d seq_len=%d",
                      reason,
                      stream->streamId(),
                      mtp_state.epoch,
                      count,
                      g_mtp_device_state_success_count.load(std::memory_order_relaxed),
-                     sp_output_buffer ? sp_output_buffer->tensors_holder.size() : 0,
+                     sp_output_buffer ? static_cast<int>(sp_output_buffer->side_channel.any()) : 0,
                      stream->seqLength());
 }
 
