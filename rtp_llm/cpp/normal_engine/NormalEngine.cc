@@ -77,6 +77,19 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
 #if USING_CUDA
+    // Independent of warm_up flag
+    if (!params.py_model.is_none() && !model_config_.mm_model_config.is_multimodal
+        && !ffn_disaggregate_config.enable_ffn_disaggregate) {
+        py::gil_scoped_acquire gil;
+        if (py::hasattr(params.py_model, "kernel_warmup")) {
+            try {
+                params.py_model.attr("kernel_warmup")();
+            } catch (const py::error_already_set& e) {
+                RTP_LLM_LOG_WARNING("Kernel warmup failed (non-fatal): %s", e.what());
+            }
+        }
+    }
+
     if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal)
         && !ffn_disaggregate_config.enable_ffn_disaggregate) {
         // warm up
