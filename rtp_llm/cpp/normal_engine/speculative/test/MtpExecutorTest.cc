@@ -268,10 +268,14 @@ public:
     GenerateStreamPtr createContextStream(const ModelConfig&     model_config,
                                           const RuntimeConfig&   runtime_config,
                                           const ResourceContext& resource_context,
-                                          const vector<int>&     input_ids) {
+                                          const vector<int>&     input_ids,
+                                          bool                   do_sample   = true,
+                                          std::optional<int>     random_seed = std::nullopt) {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
         query->input_ids       = torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
         query->generate_config = make_shared<GenerateConfig>();
+        query->generate_config->do_sample   = do_sample;
+        query->generate_config->random_seed = random_seed;
         GenerateStreamPtr stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         return stream;
@@ -455,6 +459,70 @@ public:
         return output;
     }
 };
+
+TEST_F(MtpExecutorTest, testSpeculativeSamplerGreedyDoesNotConsumeRng) {
+    MtpExecutorTestConfig test_config;
+    test_config.vocab_size        = 10;
+    test_config.gen_num_per_cycle = 4;
+    auto components               = createMtpExecutorComponents(test_config);
+
+    auto stream = createContextStream(
+        components.model_config, components.runtime_config, components.resource_context, {0}, false, 42);
+    auto baseline_stream = createContextStream(
+        components.model_config, components.runtime_config, components.resource_context, {0}, false, 42);
+
+    auto          device = getTorchCudaDevice();
+    SamplerOutput draft_output;
+    draft_output.token_ids = torch::tensor({1, 2, 3, 4}, torch::kInt32).reshape({1, 4}).to(device);
+    draft_output.all_probs =
+        torch::full({1, 4, 10}, 0.1f, torch::TensorOptions().device(device).dtype(torch::kFloat32));
+
+    SamplerOutput target_output;
+    target_output.token_ids = torch::tensor({1, 2, 9, 4, 5}, torch::kInt32).reshape({5, 1}).to(device);
+    target_output.all_probs =
+        torch::full({1, 5, 10}, 0.1f, torch::TensorOptions().device(device).dtype(torch::kFloat32));
+
+    spec::SpeculativeSampler sampler(test_config.gen_num_per_cycle);
+    auto                     result = sampler.forward({stream}, draft_output, target_output);
+
+    ASSERT_EQ(result.accept_len, vector<int>({3}));
+    ASSERT_EQ(toVec<int32_t>(result.accept_tokens[0]), vector<int32_t>({1, 2, 9}));
+
+    auto rand_options = torch::TensorOptions().device(device).dtype(torch::kFloat32);
+    auto actual_next  = torch::rand({8}, stream->getGenerator(), std::nullopt, rand_options);
+    auto expect_next  = torch::rand({8}, baseline_stream->getGenerator(), std::nullopt, rand_options);
+    EXPECT_TRUE(torch::equal(actual_next, expect_next));
+}
+
+TEST_F(MtpExecutorTest, testSpeculativeSamplerMixedBatchKeepsPerStreamMode) {
+    MtpExecutorTestConfig test_config;
+    test_config.vocab_size        = 10;
+    test_config.gen_num_per_cycle = 4;
+    auto components               = createMtpExecutorComponents(test_config);
+
+    auto greedy_stream = createContextStream(
+        components.model_config, components.runtime_config, components.resource_context, {0}, false, 42);
+    auto sampling_stream = createContextStream(
+        components.model_config, components.runtime_config, components.resource_context, {0}, true, 42);
+
+    auto          device = getTorchCudaDevice();
+    SamplerOutput draft_output;
+    draft_output.token_ids = torch::tensor({1, 2, 3, 4, 5, 6, 7, 8}, torch::kInt32).reshape({2, 4}).to(device);
+    draft_output.all_probs =
+        torch::full({2, 4, 10}, 0.1f, torch::TensorOptions().device(device).dtype(torch::kFloat32));
+
+    SamplerOutput target_output;
+    target_output.token_ids = torch::tensor({1, 9, 3, 4, 5, 5, 6, 7, 8, 9}, torch::kInt32).reshape({10, 1}).to(device);
+    target_output.all_probs =
+        torch::full({2, 5, 10}, 0.1f, torch::TensorOptions().device(device).dtype(torch::kFloat32));
+
+    spec::SpeculativeSampler sampler(test_config.gen_num_per_cycle);
+    auto                     result = sampler.forward({greedy_stream, sampling_stream}, draft_output, target_output);
+
+    ASSERT_EQ(result.accept_len, vector<int>({2, 5}));
+    ASSERT_EQ(toVec<int32_t>(result.accept_tokens[0]), vector<int32_t>({1, 9}));
+    ASSERT_EQ(toVec<int32_t>(result.accept_tokens[1]), vector<int32_t>({5, 6, 7, 8, 9}));
+}
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     MtpExecutorTestConfig test_config;

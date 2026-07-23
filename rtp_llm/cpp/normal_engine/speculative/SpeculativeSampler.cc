@@ -53,39 +53,89 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     auto draft_token_probs  = draft_sampler_output.all_probs;
     auto target_token_probs = target_sampler_output.all_probs;
 
-    // prepare data for chain speculative sampling
+    // Prepare per-stream sampling mode. Greedy verification must compare the
+    // draft and target tokens directly and must not depend on random numbers.
+    auto do_sample_h  = torch::empty({batch_size}, torch::TensorOptions().device(host_device).dtype(torch::kBool));
+    bool has_sampling = false;
+    bool has_greedy   = false;
+    int  stream_idx   = 0;
+    for (const auto& stream : streams) {
+        const bool do_sample                       = stream->generateConfig()->do_sample;
+        do_sample_h.data_ptr<bool>()[stream_idx++] = do_sample;
+        has_sampling                               = has_sampling || do_sample;
+        has_greedy                                 = has_greedy || !do_sample;
+    }
+
     auto          draft_token_ids_d_t    = draft_token_ids.to(target_device).clone();
     auto          draft_token_probs_d_t  = draft_token_probs;
     auto          target_token_probs_d_t = target_token_probs;
+    auto          target_token_ids_d_t   = target_token_ids.to(target_device).contiguous();
     auto          rand_options           = torch::TensorOptions().device(target_device).dtype(torch::kFloat);
-    torch::Tensor uniform_samples_d      = torch::rand({(long)batch_size, (long)propose_step_ + 1}, rand_options);
+    torch::Tensor uniform_samples_d;
+    if (has_sampling && !has_greedy) {
+        uniform_samples_d = torch::rand({(long)batch_size, (long)propose_step_ + 1}, rand_options);
+    } else {
+        uniform_samples_d = torch::zeros({(long)batch_size, (long)propose_step_ + 1}, rand_options);
+    }
 
-    // Override per-stream uniform samples with seeded generator when random_seed is set,
-    // ensuring deterministic acceptance for reproducible iter_count.
-    {
+    // Sampling rows retain the existing rejection-sampling behavior. Greedy
+    // rows neither consume their generator nor receive unseeded random values.
+    if (has_sampling) {
         int idx = 0;
         for (const auto& stream : streams) {
-            auto gen = stream->getGenerator();
-            if (gen.defined()) {
-                uniform_samples_d[idx] = torch::rand({(long)propose_step_ + 1}, gen, std::nullopt, rand_options);
+            if (do_sample_h.data_ptr<bool>()[idx]) {
+                auto gen = stream->getGenerator();
+                if (gen.defined()) {
+                    uniform_samples_d[idx].copy_(
+                        torch::rand({(long)propose_step_ + 1}, gen, std::nullopt, rand_options));
+                } else if (has_greedy) {
+                    uniform_samples_d[idx].copy_(torch::rand({(long)propose_step_ + 1}, rand_options));
+                }
             }
             idx++;
         }
     }
-    torch::Tensor output_token_ids_d     = torch::zeros({(long)batch_size, (long)propose_step_ + 1},
+    torch::Tensor output_token_ids_d = torch::zeros({(long)batch_size, (long)propose_step_ + 1},
                                                     torch::TensorOptions().device(target_device).dtype(torch::kInt32));
     torch::Tensor output_accepted_token_num_d =
         torch::zeros({(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32));
     torch::Tensor output_emitted_token_num_d =
         torch::zeros({(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32));
 
-    execChainSpeculativeSampling({draft_token_probs_d_t,
-                                  draft_token_ids_d_t,
-                                  uniform_samples_d,
-                                  target_token_probs_d_t,
-                                  output_token_ids_d,
-                                  output_accepted_token_num_d,
-                                  output_emitted_token_num_d});
+    if (has_sampling) {
+        execChainSpeculativeSampling({draft_token_probs_d_t,
+                                      draft_token_ids_d_t,
+                                      uniform_samples_d,
+                                      target_token_probs_d_t,
+                                      output_token_ids_d,
+                                      output_accepted_token_num_d,
+                                      output_emitted_token_num_d});
+    }
+
+    if (has_greedy) {
+        auto greedy_output_token_ids_d = has_sampling ? torch::zeros_like(output_token_ids_d) : output_token_ids_d;
+        auto greedy_emitted_token_num_d =
+            has_sampling ? torch::zeros_like(output_emitted_token_num_d) : output_emitted_token_num_d;
+        auto greedy_do_sample_d =
+            torch::zeros({batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kBool));
+
+        execRejectionSampling({draft_token_probs_d_t,
+                               draft_token_ids_d_t,
+                               uniform_samples_d,
+                               target_token_probs_d_t,
+                               target_token_ids_d_t,
+                               greedy_output_token_ids_d,
+                               greedy_emitted_token_num_d,
+                               greedy_do_sample_d});
+
+        if (has_sampling) {
+            auto do_sample_d = do_sample_h.to(target_device, true);
+            output_token_ids_d =
+                torch::where(do_sample_d.reshape({batch_size, 1}), output_token_ids_d, greedy_output_token_ids_d);
+            output_emitted_token_num_d =
+                torch::where(do_sample_d, output_emitted_token_num_d, greedy_emitted_token_num_d);
+        }
+    }
 
     // back to host
     torch::Tensor output_token_ids_h         = output_token_ids_d.to(host_device, true);
@@ -99,7 +149,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         }
     }
 
-    int stream_idx = 0;
+    stream_idx = 0;
     for (const GenerateStreamPtr& stream : streams) {
         torch::Tensor accept_tokens;
         size_t        accept_len = 0;
