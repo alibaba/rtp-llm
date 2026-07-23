@@ -5,14 +5,11 @@ import sys
 import time
 import traceback
 
-# Importing this helper also triggers the package initializer, which applies the same idempotent
-# configuration before its torch imports for both module and direct-script server entrypoints.
+# Importing this helper triggers the package initializer, which applies allocator configuration
+# before its torch imports for both module and direct-script server entrypoints.
 from rtp_llm.utils.pre_import_config import (
-    configure_expandable_segments_for_warmup,
     expandable_segments_auto_enabled_for_warmup,
 )
-
-configure_expandable_segments_for_warmup()
 
 import requests
 import torch

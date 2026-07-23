@@ -9,10 +9,18 @@ _AUTO_ENABLED_FOR_WARMUP = False
 
 
 def is_start_server_entrypoint(argv: Sequence[str]) -> bool:
-    for index, arg in enumerate(argv[:-1]):
-        if arg == "-m" and argv[index + 1] == "rtp_llm.start_server":
-            return True
-    return any(os.path.basename(arg) == "start_server.py" for arg in argv)
+    # Only inspect the executable/script prefix. Server argument values must not be able to turn a
+    # normal package import into an allocator configuration side effect.
+    for index, arg in enumerate(argv):
+        if arg == "-m":
+            return (
+                index + 1 < len(argv)
+                and argv[index + 1] == "rtp_llm.start_server"
+            )
+        basename = os.path.basename(arg)
+        if basename.endswith(".py"):
+            return basename == "start_server.py"
+    return False
 
 
 def _parse_bool(value: str) -> bool:

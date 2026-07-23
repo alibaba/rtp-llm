@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string_view>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/WarmUpResult.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -30,6 +31,8 @@ struct RuntimeMemorySizingResult {
 };
 
 RuntimeMemorySizingResult calculateRuntimeMemorySizing(const RuntimeMemorySizingInput& input);
+std::optional<double>      parseRuntimeMemorySafetyRatio(std::string_view value);
+std::optional<int64_t>     parseRuntimeMemoryNoWarmupFloorMiB(std::string_view value);
 
 class MemoryEvaluationHelper {
 public:

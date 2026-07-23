@@ -23,7 +23,15 @@ class PreImportConfigTest(TestCase):
         )
         self.assertTrue(is_start_server_entrypoint(["/tmp/start_server.py"]))
         self.assertTrue(is_start_server_entrypoint(["python", "/tmp/start_server.py"]))
+        self.assertTrue(
+            is_start_server_entrypoint(["python", "-u", "/tmp/start_server.py"])
+        )
         self.assertFalse(is_start_server_entrypoint(["python", "other.py"]))
+        self.assertFalse(
+            is_start_server_entrypoint(
+                ["python", "other.py", "--config", "/tmp/start_server.py"]
+            )
+        )
 
     def test_warmup_cli_overrides_environment(self):
         self.assertFalse(warmup_requested(["--warm_up", "0"], {"WARM_UP": "1"}))

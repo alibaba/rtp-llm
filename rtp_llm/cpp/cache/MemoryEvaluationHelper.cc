@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -8,6 +9,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #if USING_CUDA
 #include <cuda_runtime.h>
@@ -18,7 +20,6 @@
 
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "autil/EnvUtil.h"
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #endif
@@ -41,10 +42,42 @@ RuntimeMemorySizingResult calculateRuntimeMemorySizing(const RuntimeMemorySizing
 
     const size_t base_required_bytes =
         std::max({input.configured_reserve_bytes, input.warmup_required_bytes, input.sampler_required_bytes});
+    // This is intentionally additive: warmup reserves max(configured, measured, sampler) plus
+    // headroom for runtime variation that is not represented by the warmup measurement.
     if (base_required_bytes > std::numeric_limits<size_t>::max() - safety_headroom_bytes) {
         throw std::overflow_error("runtime memory sizing overflow");
     }
     return {safety_headroom_bytes, base_required_bytes + safety_headroom_bytes};
+}
+
+std::optional<double> parseRuntimeMemorySafetyRatio(std::string_view value) {
+    if (value.empty()) {
+        return std::nullopt;
+    }
+    const std::string owned_value(value);
+    char*             end = nullptr;
+    errno                 = 0;
+    const double ratio    = std::strtod(owned_value.c_str(), &end);
+    if (errno == ERANGE || end != owned_value.c_str() + owned_value.size() || !std::isfinite(ratio)
+        || ratio < 0.0 || ratio >= 1.0) {
+        return std::nullopt;
+    }
+    return ratio;
+}
+
+std::optional<int64_t> parseRuntimeMemoryNoWarmupFloorMiB(std::string_view value) {
+    if (value.empty()) {
+        return std::nullopt;
+    }
+    const std::string owned_value(value);
+    char*             end = nullptr;
+    errno                 = 0;
+    const long long floor = std::strtoll(owned_value.c_str(), &end, 10);
+    if (errno == ERANGE || end != owned_value.c_str() + owned_value.size() || floor < 0
+        || static_cast<uint64_t>(floor) > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+        return std::nullopt;
+    }
+    return static_cast<int64_t>(floor);
 }
 
 namespace {
@@ -64,20 +97,23 @@ double getRuntimeMemorySafetyRatio() {
     if (raw_value == nullptr) {
         return kDefaultRuntimeMemorySafetyRatio;
     }
-
-    const std::string value(raw_value);
-    size_t            parsed_chars = 0;
-    double            ratio        = 0.0;
-    try {
-        ratio = std::stod(value, &parsed_chars);
-    } catch (const std::exception& e) {
-        RTP_LLM_CHECK_WITH_INFO(false, "invalid RUNTIME_MEM_SAFETY_RATIO '%s': %s", raw_value, e.what());
-        return kDefaultRuntimeMemorySafetyRatio;
-    }
-    RTP_LLM_CHECK_WITH_INFO(parsed_chars == value.size() && std::isfinite(ratio) && ratio >= 0.0 && ratio < 1.0,
+    const auto ratio = parseRuntimeMemorySafetyRatio(raw_value);
+    RTP_LLM_CHECK_WITH_INFO(ratio.has_value(),
                             "RUNTIME_MEM_SAFETY_RATIO must be a finite number in [0, 1), got '%s'",
                             raw_value);
-    return ratio;
+    return *ratio;
+}
+
+int64_t getRuntimeMemoryNoWarmupFloorMiB() {
+    const char* raw_value = std::getenv("RUNTIME_MEM_NO_WARMUP_FLOOR_MB");
+    if (raw_value == nullptr) {
+        return kDefaultRuntimeNoWarmupFloorMiB;
+    }
+    const auto floor = parseRuntimeMemoryNoWarmupFloorMiB(raw_value);
+    RTP_LLM_CHECK_WITH_INFO(floor.has_value(),
+                            "RUNTIME_MEM_NO_WARMUP_FLOOR_MB must be a non-negative integer, got '%s'",
+                            raw_value);
+    return *floor;
 }
 }  // namespace
 
@@ -111,10 +147,6 @@ size_t MemoryEvaluationHelper::getDefaultRuntimeMemorySize(const RuntimeConfig& 
         checkedMiBToBytes(runtime_config.reserve_runtime_mem_mb, "reserve_runtime_mem_mb");
     RTP_LLM_LOG_INFO("RuntimeConfig has reserve_runtime_mem_mb=%ld", runtime_config.reserve_runtime_mem_mb);
 
-    // NOTE: the old "max(2048 MiB, 5% of total)" floor has been removed. Runtime headroom is now an
-    // additive safety margin on top of the measured forward peak (see RUNTIME_MEM_SAFETY_RATIO in
-    // getKVCacheMemorySize), so it no longer vanishes once the warmup peak exceeds the floor.
-    // reserve_runtime_mem_mb is kept only as an optional manual lower bound.
     (void)parallelism_config;
 
     if (model_config.mm_model_config.is_multimodal) {
@@ -161,20 +193,12 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
         }
 
         warmup_required_bytes = warm_up_result->max_used_memory;
-
-        RTP_LLM_LOG_INFO(
-            "devices reserved %ld MiB memory, warm up consumed %ld MiB max memory, env runtime memory %ld MiB, final runtime memory %ld MiB",
-            device_reserved_memory_bytes / 1024 / 1024,
-            warm_up_result->max_used_memory / 1024 / 1024,
-            env_runtime_required_bytes / 1024 / 1024,
-            std::max(env_runtime_required_bytes, warmup_required_bytes) / 1024 / 1024);
     }
 
     size_t sample_need_mem =
         (size_t)runtime_config.max_generate_batch_size * model_config.vocab_size * 4 * 8;  // just estimated value
     const double  safety_ratio = getRuntimeMemorySafetyRatio();
-    const int64_t no_warmup_floor_mb =
-        autil::EnvUtil::getEnv("RUNTIME_MEM_NO_WARMUP_FLOOR_MB", kDefaultRuntimeNoWarmupFloorMiB);
+    const int64_t no_warmup_floor_mb = getRuntimeMemoryNoWarmupFloorMiB();
     const size_t no_warmup_floor_bytes  = checkedMiBToBytes(no_warmup_floor_mb, "RUNTIME_MEM_NO_WARMUP_FLOOR_MB");
     const auto   sizing                 = calculateRuntimeMemorySizing({warm_up_result.has_value(),
                                                       env_runtime_required_bytes,

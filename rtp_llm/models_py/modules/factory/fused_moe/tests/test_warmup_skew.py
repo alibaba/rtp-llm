@@ -11,10 +11,14 @@ so these tests pin:
 
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
 
+from rtp_llm.models_py.modules.factory.fused_moe.defs import (
+    fused_moe as fused_moe_module,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     FusedMoe,
     _default_slot_share,
@@ -27,11 +31,13 @@ class _FakeRouter:
     def __init__(
         self, ep_size, expert_num_per_rank, ep_rank=0, tp_size=1, dp_size=None
     ):
-        self.ep_size = ep_size
-        self.expert_num_per_rank = expert_num_per_rank
-        self.ep_rank = ep_rank
-        self.tp_size = tp_size
-        self.dp_size = dp_size if dp_size is not None else ep_size
+        self.config = SimpleNamespace(
+            ep_size=ep_size,
+            expert_num=ep_size * expert_num_per_rank,
+            ep_rank=ep_rank,
+            tp_size=tp_size,
+            dp_size=dp_size if dp_size is not None else ep_size,
+        )
 
 
 class _SlotExecutor:
@@ -93,12 +99,10 @@ class WarmupSkewTopkIdsTest(unittest.TestCase):
         out = moe._warmup_skew_topk_ids(topk_ids)
         self.assertTrue(torch.equal(out, topk_ids))
 
-    def test_missing_local_experts_returns_unchanged(self):
+    def test_invalid_expert_layout_is_rejected(self):
         router = _FakeRouter(ep_size=4, expert_num_per_rank=0)
-        moe = FusedMoe(router=router, fused_experts=_SlotExecutor(), expert_num=8)
-        topk_ids = torch.zeros((3, 2), dtype=torch.int64)
-        out = moe._warmup_skew_topk_ids(topk_ids)
-        self.assertTrue(torch.equal(out, topk_ids))
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            FusedMoe(router=router, fused_experts=_SlotExecutor(), expert_num=8)
 
     def test_slot_executor_hot_and_cold_routing(self):
         ep_size, n_local = 4, 2
@@ -159,6 +163,63 @@ class RuntimeSlotDistributionTest(unittest.TestCase):
         _log_runtime_slot_distribution(_FakeRouter(2, 2), topk_ids)
 
         topk_ids.reshape.assert_not_called()
+
+
+class TraceMemoryBindingTest(unittest.TestCase):
+    def test_binding_is_importable_and_callable(self):
+        from rtp_llm.ops.compute_ops import is_trace_memory
+
+        self.assertTrue(callable(is_trace_memory))
+        self.assertIsInstance(is_trace_memory(), bool)
+
+    def test_ep_warmup_requires_binding(self):
+        router = _FakeRouter(ep_size=2, expert_num_per_rank=1)
+        with (
+            patch.object(fused_moe_module, "_WARMUP_ENABLED", True),
+            patch.object(fused_moe_module, "_IS_TRACE_MEMORY", None),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "is_trace_memory"):
+                FusedMoe(
+                    router=router,
+                    fused_experts=_SlotExecutor(),
+                    expert_num=2,
+                )
+
+    def test_disabled_warmup_skips_binding_requirement(self):
+        router = _FakeRouter(ep_size=2, expert_num_per_rank=1)
+        with (
+            patch.object(fused_moe_module, "_WARMUP_ENABLED", False),
+            patch.object(fused_moe_module, "_IS_TRACE_MEMORY", None),
+        ):
+            FusedMoe(
+                router=router,
+                fused_experts=_SlotExecutor(),
+                expert_num=2,
+            )
+
+    def test_completed_startup_trace_stops_binding_queries(self):
+        binding = MagicMock(side_effect=[False, True, True, False])
+        with (
+            patch.object(fused_moe_module, "_IS_TRACE_MEMORY", binding),
+            patch.object(fused_moe_module, "_TRACE_MEMORY_SEEN", False),
+            patch.object(fused_moe_module, "_TRACE_MEMORY_FINISHED", False),
+        ):
+            self.assertFalse(fused_moe_module._in_memory_trace())
+            self.assertTrue(fused_moe_module._in_memory_trace())
+            self.assertTrue(fused_moe_module._in_memory_trace())
+            self.assertFalse(fused_moe_module._in_memory_trace())
+            self.assertFalse(fused_moe_module._in_memory_trace())
+
+        self.assertEqual(binding.call_count, 4)
+
+    def test_finished_trace_does_not_query_binding(self):
+        binding = MagicMock()
+        with (
+            patch.object(fused_moe_module, "_IS_TRACE_MEMORY", binding),
+            patch.object(fused_moe_module, "_TRACE_MEMORY_FINISHED", True),
+        ):
+            self.assertFalse(fused_moe_module._in_memory_trace())
+        binding.assert_not_called()
 
 
 if __name__ == "__main__":

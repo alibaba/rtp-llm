@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <limits>
+#include <string>
 
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
@@ -85,6 +86,27 @@ TEST(RuntimeMemorySizingTest, RejectsWarmupAdditionOverflow) {
     input.safety_ratio             = 0.5;
 
     EXPECT_THROW(calculateRuntimeMemorySizing(input), std::overflow_error);
+}
+
+TEST(RuntimeMemorySizingTest, ParsesSafetyRatio) {
+    EXPECT_DOUBLE_EQ(*parseRuntimeMemorySafetyRatio("0"), 0.0);
+    EXPECT_DOUBLE_EQ(*parseRuntimeMemorySafetyRatio("0.05"), 0.05);
+    EXPECT_DOUBLE_EQ(*parseRuntimeMemorySafetyRatio("0.999"), 0.999);
+
+    for (const char* value : {"", "abc", "0.1x", "nan", "inf", "-0.1", "1"}) {
+        EXPECT_FALSE(parseRuntimeMemorySafetyRatio(value).has_value()) << value;
+    }
+}
+
+TEST(RuntimeMemorySizingTest, ParsesNoWarmupFloorMiB) {
+    EXPECT_EQ(*parseRuntimeMemoryNoWarmupFloorMiB("0"), 0);
+    EXPECT_EQ(*parseRuntimeMemoryNoWarmupFloorMiB("2048"), 2048);
+    EXPECT_EQ(*parseRuntimeMemoryNoWarmupFloorMiB(std::to_string(std::numeric_limits<int64_t>::max())),
+              std::numeric_limits<int64_t>::max());
+
+    for (const char* value : {"", "abc", "2.5", "2048MiB", "-1"}) {
+        EXPECT_FALSE(parseRuntimeMemoryNoWarmupFloorMiB(value).has_value()) << value;
+    }
 }
 
 TEST(MemoryGrowthTest, SeparatesTorchAndNonTorchGrowth) {
