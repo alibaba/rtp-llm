@@ -129,6 +129,16 @@ register_lazy_model(
     "Qwen3NextForCausalLM",
 )
 register_lazy_model(
+    "qwen3_next_mtp",
+    "rtp_llm.models_py.new_models.qwen3_next",
+    "Qwen3NextMTPForCausalLM",
+)
+register_lazy_model(
+    "qwen35_moe_mtp",
+    "rtp_llm.models_py.new_models.qwen3_next",
+    "Qwen35MoeMTPForCausalLM",
+)
+register_lazy_model(
     "qwen_2",
     "rtp_llm.models_py.new_models.qwen2",
     "Qwen2ForCausalLM",

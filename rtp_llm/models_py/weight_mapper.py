@@ -188,7 +188,9 @@ def get_all_weights(
             yield name, tensor
 
 
-def _files_from_index(model_path: str, index_name: str) -> Optional[List[str]]:
+def _read_checkpoint_index(
+    model_path: str, index_name: str
+) -> Optional[Tuple[str, Mapping[str, object]]]:
     index_path = os.path.join(model_path, index_name)
     if not os.path.isfile(index_path):
         return None
@@ -202,48 +204,131 @@ def _files_from_index(model_path: str, index_name: str) -> Optional[List[str]]:
     weight_map = payload.get("weight_map") if isinstance(payload, dict) else None
     if not isinstance(weight_map, dict) or not weight_map:
         raise ValueError(f"Checkpoint index {index_path} has no non-empty weight_map")
+    return index_path, weight_map
+
+
+def _resolve_index_shard_path(
+    model_root: str,
+    index_path: str,
+    shard_name: object,
+    expected_suffix: str,
+) -> str:
+    if not isinstance(shard_name, str) or not shard_name.endswith(expected_suffix):
+        raise ValueError(
+            f"Checkpoint index {index_path} contains invalid shard {shard_name!r}"
+        )
+    path_parts = re.split(r"[\\/]", shard_name)
+    if os.path.isabs(shard_name) or ntpath.isabs(shard_name) or os.pardir in path_parts:
+        raise ValueError(
+            f"Checkpoint index {index_path} references a path outside model "
+            f"directory: {shard_name!r}"
+        )
+
+    normalized_name = os.path.normpath(shard_name)
+    shard_path = os.path.join(model_root, normalized_name)
+    try:
+        inside_model = os.path.commonpath([model_root, shard_path]) == model_root
+    except ValueError:
+        inside_model = False
+    if not inside_model:
+        raise ValueError(
+            f"Checkpoint index {index_path} references a path outside model "
+            f"directory: {shard_name!r}"
+        )
+    if not _is_model_weight_file(normalized_name, allow_consolidated=True):
+        raise ValueError(
+            f"Checkpoint index {index_path} references non-model file {shard_name!r}"
+        )
+    if not os.path.isfile(shard_path):
+        raise FileNotFoundError(
+            f"Checkpoint index {index_path} references missing shard {shard_name!r}"
+        )
+    return shard_path
+
+
+def select_safetensor_files(
+    model_path: str,
+    checkpoint_files: Sequence[str],
+    name_filter: Optional[Callable[[str], bool]],
+) -> List[str]:
+    """Select shards containing at least one accepted checkpoint tensor.
+
+    The model predicate must be rank-invariant. Rank-specific expert slicing is
+    intentionally applied later so a future collective loader cannot diverge
+    across ranks while opening shards.
+    """
+    files = list(checkpoint_files)
+    if name_filter is None or not files:
+        return files
+    if not callable(name_filter):
+        raise TypeError("name_filter must be callable")
+    if not all(path.lower().endswith(".safetensors") for path in files):
+        return files
+
+    discovered = {os.path.realpath(path): path for path in files}
+    selected_identities = set()
+    index = _read_checkpoint_index(model_path, _SAFETENSORS_INDEX)
+    if index is not None:
+        index_path, weight_map = index
+        model_root = os.path.realpath(model_path)
+        shard_identities = {}
+        for name, shard_name in weight_map.items():
+            if not isinstance(name, str):
+                raise ValueError(
+                    f"Checkpoint index {index_path} contains non-string tensor name"
+                )
+            if not isinstance(shard_name, str):
+                raise ValueError(
+                    f"Checkpoint index {index_path} contains invalid shard "
+                    f"{shard_name!r}"
+                )
+            if shard_name not in shard_identities:
+                shard_path = _resolve_index_shard_path(
+                    model_root,
+                    index_path,
+                    shard_name,
+                    ".safetensors",
+                )
+                shard_identities[shard_name] = os.path.realpath(shard_path)
+            identity = shard_identities[shard_name]
+            if name_filter(name):
+                if identity not in discovered:
+                    raise ValueError(
+                        f"Checkpoint index {index_path} references undiscovered shard "
+                        f"{shard_name!r}"
+                    )
+                selected_identities.add(identity)
+    else:
+        from safetensors import safe_open
+
+        for path in files:
+            with safe_open(path, framework="pt", device="cpu") as handle:
+                if any(name_filter(name) for name in handle.keys()):
+                    selected_identities.add(os.path.realpath(path))
+
+    selected = [path for path in files if os.path.realpath(path) in selected_identities]
+    if not selected:
+        raise ValueError("Checkpoint filter did not match any safetensors shard")
+    return selected
+
+
+def _files_from_index(model_path: str, index_name: str) -> Optional[List[str]]:
+    index = _read_checkpoint_index(model_path, index_name)
+    if index is None:
+        return None
+    index_path, weight_map = index
 
     expected_suffix = ".safetensors" if index_name == _SAFETENSORS_INDEX else ".bin"
     model_root = os.path.realpath(model_path)
     files = []
     seen = set()
     for shard_name in weight_map.values():
-        if not isinstance(shard_name, str) or not shard_name.endswith(expected_suffix):
-            raise ValueError(
-                f"Checkpoint index {index_path} contains invalid shard {shard_name!r}"
-            )
-        # Validate index text lexically. A symlink already present under model_root
-        # is a trusted filesystem entry and may point to a content-addressed blob.
-        path_parts = re.split(r"[\\/]", shard_name)
-        if (
-            os.path.isabs(shard_name)
-            or ntpath.isabs(shard_name)
-            or os.pardir in path_parts
-        ):
-            raise ValueError(
-                f"Checkpoint index {index_path} references a path outside model directory: "
-                f"{shard_name!r}"
-            )
-
-        normalized_name = os.path.normpath(shard_name)
-        shard_path = os.path.join(model_root, normalized_name)
-        try:
-            inside_model = os.path.commonpath([model_root, shard_path]) == model_root
-        except ValueError:
-            inside_model = False
-        if not inside_model:
-            raise ValueError(
-                f"Checkpoint index {index_path} references a path outside model directory: "
-                f"{shard_name!r}"
-            )
-        if not _is_model_weight_file(normalized_name, allow_consolidated=True):
-            raise ValueError(
-                f"Checkpoint index {index_path} references non-model file {shard_name!r}"
-            )
-        if not os.path.isfile(shard_path):
-            raise FileNotFoundError(
-                f"Checkpoint index {index_path} references missing shard {shard_name!r}"
-            )
+        shard_path = _resolve_index_shard_path(
+            model_root,
+            index_path,
+            shard_name,
+            expected_suffix,
+        )
         shard_identity = os.path.realpath(shard_path)
         if shard_identity not in seen:
             seen.add(shard_identity)
