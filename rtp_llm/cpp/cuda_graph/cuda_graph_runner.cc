@@ -278,6 +278,8 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         int last_valid_kv =
             last_valid_q
             + inputs.attention_inputs.prefix_lengths.slice(0, 0, state.current_batch_size).sum().item<int>();
+        py_model_inputs_.attention_inputs.total_tokens            = last_valid_q;
+        py_model_inputs_.attention_inputs.context_total_kv_length = last_valid_kv;
         py_model_inputs_.attention_inputs.cu_seqlens_host.slice(0, state.current_batch_size + 1, max_bs_ + 1)
             .fill_(last_valid_q);
         py_model_inputs_.attention_inputs.cu_seqlens.slice(0, state.current_batch_size + 1, max_bs_ + 1)
