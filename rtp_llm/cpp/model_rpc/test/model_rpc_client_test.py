@@ -40,6 +40,8 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
 )
 from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
 
+LONG_DURATION_US = (1 << 31) + 12345
+
 
 class FakeStub:
 
@@ -51,6 +53,9 @@ class FakeStub:
         output_pb1.output_ids.shape.extend([1, 1])
         output_pb1.output_ids.int32_data = struct.pack("<i", 0)
         aux_info = output_pb1.aux_info.add()
+        aux_info.cost_time_us = LONG_DURATION_US
+        aux_info.first_token_cost_time_us = LONG_DURATION_US - 1
+        aux_info.wait_time_us = LONG_DURATION_US - 2
         aux_info.iter_count = 1
         aux_info.output_len = 1
         output_pb1.logits.data_type = TensorPB.DataType.FP32
@@ -165,6 +170,11 @@ class ModelRpcClientTest(TestCase):
         logits_0 = res[0].logits.tolist()
         self.assertAlmostEqual(logits_0[0][0], 0.0, places=6)
         self.assertAlmostEqual(logits_0[0][1], 0.0, places=6)
+        self.assertEqual(res[0].aux_info.cost_time, LONG_DURATION_US / 1000.0)
+        self.assertEqual(
+            res[0].aux_info.first_token_cost_time, (LONG_DURATION_US - 1) / 1000.0
+        )
+        self.assertEqual(res[0].aux_info.wait_time, (LONG_DURATION_US - 2) / 1000.0)
 
         # res[1] 是第二个token
         self.assertTrue(hasattr(res[1], "logits"))

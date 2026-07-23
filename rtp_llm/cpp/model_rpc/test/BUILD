@@ -23,6 +23,23 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
+py_test(
+    name = "aux_info_wire_test",
+    srcs = ["aux_info_wire_test.py"],
+    data = [":aux_info_wire_fixture"],
+    deps = [
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+    ],
+)
+
+cc_binary(
+    name = "aux_info_wire_fixture",
+    srcs = ["AuxInfoWireFixture.cc"],
+    deps = [
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+    ],
+)
+
 test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
     "//rtp_llm/cpp/models:models",

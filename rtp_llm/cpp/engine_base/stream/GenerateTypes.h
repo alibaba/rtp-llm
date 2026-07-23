@@ -77,7 +77,7 @@ public:
 };
 
 struct AuxInfo {
-    int32_t                      cost_time_us             = 0;
+    int64_t                      cost_time_us             = 0;
     int32_t                      iter_count               = 0;
     int32_t                      input_len                = 0;
     int32_t                      total_reuse_len          = 0;
@@ -86,8 +86,8 @@ struct AuxInfo {
     int32_t                      output_len               = 0;
     int32_t                      step_output_len          = 0;
     bool                         pd_sep                   = false;
-    int32_t                      first_token_cost_time_us = 0;
-    int32_t                      wait_time_us             = 0;
+    int64_t                      first_token_cost_time_us = 0;
+    int64_t                      wait_time_us             = 0;
     int32_t                      local_reuse_len          = 0;
     int32_t                      remote_reuse_len         = 0;
     int32_t                      memory_reuse_len         = 0;
