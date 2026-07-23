@@ -4,6 +4,7 @@ import os
 from typing import Any, Optional, Type, Union
 
 import torch
+
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
@@ -29,6 +30,7 @@ from rtp_llm.ops import (
     ParallelismConfig,
 )
 from rtp_llm.utils.database import CkptDatabase
+from rtp_llm.utils.new_loader import is_new_loader_enabled
 from rtp_llm.utils.time_util import timer_wrapper
 
 
@@ -318,9 +320,7 @@ class BaseModel(object):
             self.custom_module.init(self.weight)
 
     def _use_new_loader(self) -> bool:
-        return os.environ.get("USE_NEW_LOADER", "0") == "1" or bool(
-            getattr(self.model_config, "use_new_loader", False)
-        )
+        return is_new_loader_enabled(self.model_config)
 
     def _new_loader_quant_type(self) -> str:
         quant_config = getattr(self.model_config, "quant_config", None)

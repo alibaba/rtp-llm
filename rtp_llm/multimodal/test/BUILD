@@ -77,3 +77,17 @@ py_test(
         "//rtp_llm:testlib",
     ],
 )
+
+py_test(
+    name = "qwen2_vl_newloader_routing_test",
+    srcs = ["qwen2_vl_newloader_routing_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:multimodal",
+        "//rtp_llm:safetensors",
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+        "//rtp_llm/model_loader:loader",
+        "//rtp_llm/models_py:qwen2_vl_vision_loader",
+    ],
+)

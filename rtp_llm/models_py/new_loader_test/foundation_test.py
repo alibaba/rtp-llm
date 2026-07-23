@@ -9,6 +9,8 @@ from unittest import mock
 
 import torch
 import torch.nn as nn
+from safetensors.torch import save_file
+
 from rtp_llm.models_py.model_loader import (
     NewLoaderConfig,
     NewLoaderLoadMethod,
@@ -25,7 +27,6 @@ from rtp_llm.models_py.weight_mapper import (
     get_all_weights,
     select_safetensor_files,
 )
-from safetensors.torch import save_file
 
 
 class _Block(RtpModule):
@@ -102,6 +103,20 @@ class FoundationLoaderTest(unittest.TestCase):
     def test_combined_checkpoint_filter_rejects_model_instances(self):
         with self.assertRaisesRegex(TypeError, "model_filter must be callable"):
             NewModelLoader._checkpoint_name_filter(RtpModule(), None)
+
+    def test_model_filter_rejects_module_before_shard_preselection(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(_weights(), os.path.join(model_path, "model.safetensors"))
+            with mock.patch.object(
+                _FoundationModel,
+                "checkpoint_weight_name_filter",
+                return_value=RtpModule(),
+            ), mock.patch(
+                "rtp_llm.models_py.model_loader.weight_mapper.select_safetensor_files"
+            ) as select_files:
+                with self.assertRaisesRegex(TypeError, "not an nn.Module"):
+                    self._loader(model_path).load()
+                select_files.assert_not_called()
 
     def test_staged_modules_move_and_postprocess_one_at_a_time(self):
         events = []
