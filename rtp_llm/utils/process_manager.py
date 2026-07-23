@@ -7,6 +7,12 @@ from multiprocessing import Process
 from typing import Callable, Dict, List, Optional
 
 
+class HealthCheckFatalError(Exception):
+    """Raised by check_ready_fn to indicate a permanent startup failure
+    that should not be retried (e.g. backend explicitly reported failure)."""
+    pass
+
+
 class ProcessManager:
     """Process manager for managing and monitoring processes"""
 
@@ -231,6 +237,12 @@ class ProcessManager:
                         self.health_check_status[process_name]["checked"] = True
                     logging.info(f"{process_name} is ready")
                     return
+            except HealthCheckFatalError as e:
+                logging.error(f"{process_name} startup failed permanently: {str(e)}")
+                with self.health_check_lock:
+                    self.health_check_status[process_name]["ready"] = False
+                    self.health_check_status[process_name]["checked"] = True
+                return
             except Exception as e:
                 logging.debug(f"{process_name} health check exception: {str(e)}")
             time.sleep(retry_interval)
