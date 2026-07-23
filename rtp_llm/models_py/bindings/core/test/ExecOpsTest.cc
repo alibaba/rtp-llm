@@ -628,7 +628,6 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSuccessDoesNotLogBlockKeys) {
     layer_cache.kv_cache_base      = torch::zeros({2, 16}, torch::kUInt8);
     layer_cache.seq_size_per_block = tokens_per_block;
     layer_cache.layer_id           = 0;
-    layer_cache.group_id           = 0;
     layer_cache.tag                = "default";
 
     ASSERT_NO_THROW(WriteCacheStoreOp(torch::tensor({8}, torch::kInt32),

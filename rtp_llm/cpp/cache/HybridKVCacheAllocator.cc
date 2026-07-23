@@ -20,25 +20,26 @@ inline CacheKeysType cpCanonicalCacheKeys(const std::shared_ptr<CPSlotMapper>& m
     return (mapper && mapper->isSharded()) ? mapper->canonicalCacheKeys(full) : full;
 }
 
-inline bool cpBlockRoundRobinGroup(const std::shared_ptr<CPSlotMapper>& mapper, const CacheConfig& config, int gid) {
-    return mapper && mapper->isSharded() && gid >= 0 && mapper->blockRoundRobinGroup(config, static_cast<size_t>(gid));
+inline bool
+cpBlockRoundRobinGroup(const std::shared_ptr<CPSlotMapper>& mapper, const CacheConfig& config, int group_index) {
+    return mapper && mapper->isSharded() && group_index >= 0
+           && mapper->blockRoundRobinGroup(config.topology().groups().at(static_cast<size_t>(group_index)));
 }
 
 inline int cpEffectiveSeqLenForGroup(const std::shared_ptr<CPSlotMapper>& mapper,
                                      const CacheConfig&                   config,
-                                     int                                  gid,
+                                     int                                  group_index,
                                      int                                  seq_len) {
-    return cpBlockRoundRobinGroup(mapper, config, gid) ?
-               mapper->effectiveSeqLenForAlloc(config, static_cast<size_t>(gid), seq_len) :
-               seq_len;
+    return cpBlockRoundRobinGroup(mapper, config, group_index) ? mapper->effectiveSeqLenForAlloc(seq_len) : seq_len;
 }
 
 inline int cpLogicalSeqSizeForGroup(const std::shared_ptr<CPSlotMapper>& mapper,
                                     const CacheConfig&                   config,
-                                    int                                  gid,
+                                    int                                  group_index,
                                     int                                  fallback) {
-    return (mapper && mapper->isSharded() && gid >= 0) ?
-               static_cast<int>(mapper->logicalSeqSizePerBlock(config, static_cast<size_t>(gid))) :
+    return (mapper && mapper->isSharded() && group_index >= 0) ?
+               static_cast<int>(
+                   mapper->logicalSeqSizePerBlock(config.topology().groups().at(static_cast<size_t>(group_index)))) :
                fallback;
 }
 
@@ -58,24 +59,25 @@ BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) 
 
 }  // namespace
 
-bool HybridKVCacheAllocator::skipReuseCacheGroup(int gid) const {
-    return gid >= 0 && static_cast<size_t>(gid) < kv_cache_groups_.size()
-           && !kv_cache_groups_[static_cast<size_t>(gid)]->prefixReuseEnabled();
+bool HybridKVCacheAllocator::skipReuseCacheGroup(int group_index) const {
+    return group_index >= 0 && static_cast<size_t>(group_index) < kv_cache_groups_.size()
+           && !kv_cache_groups_[static_cast<size_t>(group_index)]->prefixReuseEnabled();
 }
 
-std::vector<int> HybridKVCacheAllocator::independentEvictionGroupIds() const {
-    std::vector<int> group_ids;
-    for (size_t gid = 0; gid < kv_cache_groups_.size(); ++gid) {
-        if (kv_cache_groups_[gid]->evictPolicy() == CacheEvictPolicy::INDEPENDENT) {
-            group_ids.push_back(static_cast<int>(gid));
+std::vector<std::string> HybridKVCacheAllocator::independentEvictionGroupTags() const {
+    std::vector<std::string> tags;
+    for (size_t group_index = 0; group_index < kv_cache_groups_.size(); ++group_index) {
+        if (kv_cache_groups_[group_index]->evictPolicy() == CacheEvictPolicy::INDEPENDENT) {
+            tags.push_back(kv_cache_groups_[group_index]->tag());
         }
     }
-    return group_ids;
+    return tags;
 }
 
-bool HybridKVCacheAllocator::cpCompactSwaGroup(int gid, const std::shared_ptr<CPSlotMapper>& mapper) const {
-    return mapper && mapper->isSharded() && gid >= 0 && static_cast<size_t>(gid) < kv_cache_groups_.size()
-           && mapper->compactLastRankGroup(config_, static_cast<size_t>(gid));
+bool HybridKVCacheAllocator::cpCompactSwaGroup(int group_index, const std::shared_ptr<CPSlotMapper>& mapper) const {
+    return mapper && mapper->isSharded() && group_index >= 0
+           && static_cast<size_t>(group_index) < kv_cache_groups_.size()
+           && mapper->compactLastRankGroup(config_.topology().groups().at(static_cast<size_t>(group_index)));
 }
 
 HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&                 config,
@@ -96,24 +98,24 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     int                           min_full_reuse_blocks = static_cast<int>(cache_keys.size());
     std::vector<BlockIndicesType> full_matched_blocks(kv_cache_groups_.size());
 
-    for (int gid : full_group_ids_) {
-        auto match_result     = kv_cache_groups_[static_cast<size_t>(gid)]->match(cache_keys);
+    for (int group_index : full_group_indices_) {
+        auto match_result     = kv_cache_groups_[static_cast<size_t>(group_index)]->match(cache_keys);
         min_full_reuse_blocks = std::min(min_full_reuse_blocks, static_cast<int>(match_result.reuse_blocks));
-        full_matched_blocks[static_cast<size_t>(gid)] = std::move(match_result.block_indices);
+        full_matched_blocks[static_cast<size_t>(group_index)] = std::move(match_result.block_indices);
     }
 
     int                           pos = min_full_reuse_blocks - 1;
-    std::vector<BlockIdxType>     linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
-    std::vector<BlockIndicesType> swa_tail_blocks(swa_group_ids_.size());
-    const bool                    has_tail_groups = !linear_group_ids_.empty() || !swa_group_ids_.empty();
+    std::vector<BlockIdxType>     linear_tail_blocks(linear_group_indices_.size(), NULL_BLOCK_IDX);
+    std::vector<BlockIndicesType> swa_tail_blocks(swa_group_indices_.size());
+    const bool                    has_tail_groups = !linear_group_indices_.empty() || !swa_group_indices_.empty();
     for (; pos >= 0 && has_tail_groups; --pos) {
         bool                          all_tail_groups_matched = true;
-        std::vector<BlockIdxType>     candidate_linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
-        std::vector<BlockIndicesType> candidate_swa_tail_blocks(swa_group_ids_.size());
-        for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
-            const int gid = linear_group_ids_[i];
-            auto      result =
-                kv_cache_groups_[static_cast<size_t>(gid)]->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
+        std::vector<BlockIdxType>     candidate_linear_tail_blocks(linear_group_indices_.size(), NULL_BLOCK_IDX);
+        std::vector<BlockIndicesType> candidate_swa_tail_blocks(swa_group_indices_.size());
+        for (size_t i = 0; i < linear_group_indices_.size(); ++i) {
+            const int group_index = linear_group_indices_[i];
+            auto      result      = kv_cache_groups_[static_cast<size_t>(group_index)]->matchSingleKey(
+                cache_keys[static_cast<size_t>(pos)]);
             if (result.block_indices.empty()) {
                 all_tail_groups_matched = false;
                 break;
@@ -123,13 +125,13 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
         if (!all_tail_groups_matched) {
             continue;
         }
-        for (size_t i = 0; i < swa_group_ids_.size(); ++i) {
-            const int gid = swa_group_ids_[i];
-            if (skipReuseCacheGroup(gid)) {
+        for (size_t i = 0; i < swa_group_indices_.size(); ++i) {
+            const int group_index = swa_group_indices_[i];
+            if (skipReuseCacheGroup(group_index)) {
                 continue;
             }
-            auto result =
-                kv_cache_groups_[static_cast<size_t>(gid)]->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
+            auto result = kv_cache_groups_[static_cast<size_t>(group_index)]->matchSingleKey(
+                cache_keys[static_cast<size_t>(pos)]);
             if (result.block_indices.empty()) {
                 all_tail_groups_matched = false;
                 break;
@@ -148,12 +150,12 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
         return 0;
     }
 
-    for (int gid : full_group_ids_) {
-        BlockIndicesType full_blocks = full_matched_blocks[static_cast<size_t>(gid)];
+    for (int group_index : full_group_indices_) {
+        BlockIndicesType full_blocks = full_matched_blocks[static_cast<size_t>(group_index)];
         if (static_cast<int>(full_blocks.size()) > reuse_blocks_len) {
             full_blocks.resize(static_cast<size_t>(reuse_blocks_len));
         }
-        kv_resource.mutableBlockIds(0, gid).assign(std::move(full_blocks));
+        kv_resource.mutableBlockIdsByIndex(0, static_cast<size_t>(group_index)).assign(std::move(full_blocks));
     }
 
     // LINEAR/SWA arrays are sized in logical-block units (cp_size× larger
@@ -162,24 +164,26 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     // namespace, so its index is `(reuse_blocks_len * cp_size) - 1` in
     // logical units, NOT `reuse_blocks_len - 1`.
     const int logical_reuse_len = reuse_blocks_len * cp_scale;
-    for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
-        const int gid = linear_group_ids_[i];
-        kv_resource.mutableBlockIds(0, gid).assign(
-            BlockIndicesType(static_cast<size_t>(logical_reuse_len), NULL_BLOCK_IDX));
-        kv_resource.mutableBlockIds(0, gid).setAt(static_cast<size_t>(logical_reuse_len - 1), linear_tail_blocks[i]);
+    for (size_t i = 0; i < linear_group_indices_.size(); ++i) {
+        const int group_index = linear_group_indices_[i];
+        kv_resource.mutableBlockIdsByIndex(0, static_cast<size_t>(group_index))
+            .assign(BlockIndicesType(static_cast<size_t>(logical_reuse_len), NULL_BLOCK_IDX));
+        kv_resource.mutableBlockIdsByIndex(0, static_cast<size_t>(group_index))
+            .setAt(static_cast<size_t>(logical_reuse_len - 1), linear_tail_blocks[i]);
     }
-    for (size_t i = 0; i < swa_group_ids_.size(); ++i) {
-        const int gid             = swa_group_ids_[i];
-        const int group_reuse_len = cpCompactSwaGroup(gid, cp_mapper) ? reuse_blocks_len : logical_reuse_len;
-        kv_resource.mutableBlockIds(0, gid).assign(
-            BlockIndicesType(static_cast<size_t>(group_reuse_len), NULL_BLOCK_IDX));
-        if (skipReuseCacheGroup(gid)) {
+    for (size_t i = 0; i < swa_group_indices_.size(); ++i) {
+        const int group_index     = swa_group_indices_[i];
+        const int group_reuse_len = cpCompactSwaGroup(group_index, cp_mapper) ? reuse_blocks_len : logical_reuse_len;
+        kv_resource.mutableBlockIdsByIndex(0, static_cast<size_t>(group_index))
+            .assign(BlockIndicesType(static_cast<size_t>(group_reuse_len), NULL_BLOCK_IDX));
+        if (skipReuseCacheGroup(group_index)) {
             continue;
         }
         const size_t tail_begin =
             static_cast<size_t>(std::max(group_reuse_len - static_cast<int>(swa_tail_blocks[i].size()), 0));
         for (size_t j = 0; j < swa_tail_blocks[i].size(); ++j) {
-            kv_resource.mutableBlockIds(0, gid).setAt(tail_begin + j, swa_tail_blocks[i][j]);
+            kv_resource.mutableBlockIdsByIndex(0, static_cast<size_t>(group_index))
+                .setAt(tail_begin + j, swa_tail_blocks[i][j]);
         }
     }
     return reuse_blocks_len;
@@ -195,10 +199,11 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     // reuse_unit_tokens is computed against the canonical (paged FULL) group's
     // block_size: cache_keys reuse only happens for paged groups so virtual block
     // size = canonical block_size * cp_size; non-paged groups don't enter reuse.
+    const int             reuse_group_index = full_group_indices_.empty() ? -1 : full_group_indices_.front();
     const KVCacheGroupPtr reuse_group =
-        full_group_ids_.empty() ? KVCacheGroupPtr{} : kv_cache_groups_[static_cast<size_t>(full_group_ids_.front())];
+        reuse_group_index < 0 ? KVCacheGroupPtr{} : kv_cache_groups_[static_cast<size_t>(reuse_group_index)];
     const int reuse_unit_tokens =
-        (reuse_group ? cpLogicalSeqSizeForGroup(cp_mapper, config_, reuse_group->group_id(), seqSizePerBlock()) :
+        (reuse_group ? cpLogicalSeqSizeForGroup(cp_mapper, config_, reuse_group_index, seqSizePerBlock()) :
                        seqSizePerBlock());
 
     const auto&                   cache_keys         = kv_resource->cacheKeys(0);
@@ -223,8 +228,8 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         reuse_blocks           = reuseCache(match_keys, *kv_resource, cp_mapper);
         match_cost_time_us     = currentTimeUs() - begin_us;
 
-        for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            const auto&      blocks = kv_resource->blocks(0, gid);
+        for (int group_index = 0; group_index < kv_resource->groupNums(); ++group_index) {
+            const auto&      blocks = kv_resource->blocksByIndex(0, static_cast<size_t>(group_index));
             BlockIndicesType valid;
             valid.reserve(blocks.size());
             for (auto b : blocks) {
@@ -233,8 +238,8 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                 }
             }
             if (!valid.empty()) {
-                referenceBlocksInGroup(gid, valid);
-                referenced_blocks[static_cast<size_t>(gid)] = std::move(valid);
+                referenceBlocksInGroup(group_index, valid);
+                referenced_blocks[static_cast<size_t>(group_index)] = std::move(valid);
             }
         }
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(reuse_blocks);
@@ -246,13 +251,14 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     }
 
     std::vector<size_t> original_sizes(static_cast<size_t>(kv_resource->groupNums()));
-    for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-        original_sizes[static_cast<size_t>(gid)] = kv_resource->blocksNum(0, gid);
+    for (int group_index = 0; group_index < kv_resource->groupNums(); ++group_index) {
+        original_sizes[static_cast<size_t>(group_index)] =
+            kv_resource->blocksNumByIndex(0, static_cast<size_t>(group_index));
     }
-    for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-        auto&     block_ids_0   = kv_resource->mutableBlockIds(0, gid);
-        const int group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, config_, gid, common_seq_len);
-        if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
+    for (int group_index = 0; group_index < kv_resource->groupNums(); ++group_index) {
+        auto&     block_ids_0   = kv_resource->mutableBlockIdsByIndex(0, static_cast<size_t>(group_index));
+        const int group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, config_, group_index, common_seq_len);
+        if (!kv_cache_groups_[static_cast<size_t>(group_index)]->malloc(
                 block_ids_0, group_seq_len, malloc_info.reuse_cache, 0)) {
             rollbackInitMalloc(*kv_resource, referenced_blocks, original_sizes);
             return {false, 0};
@@ -260,9 +266,10 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     }
 
     for (int b = 1; b < batch_size; ++b) {
-        for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            kv_cache_groups_[static_cast<size_t>(gid)]->reference(kv_resource->mutableBlockIds(b, gid),
-                                                                  kv_resource->blocks(0, gid));
+        for (int group_index = 0; group_index < kv_resource->groupNums(); ++group_index) {
+            kv_cache_groups_[static_cast<size_t>(group_index)]->reference(
+                kv_resource->mutableBlockIdsByIndex(b, static_cast<size_t>(group_index)),
+                kv_resource->blocksByIndex(0, static_cast<size_t>(group_index)));
         }
     }
     return {true, reuse_blocks * reuse_unit_tokens, match_cost_time_us};
@@ -280,8 +287,9 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
     for (int b = 0; b < batch_size; ++b) {
         original_sizes[static_cast<size_t>(b)].resize(static_cast<size_t>(kv_resource->groupNums()));
         backfilled_positions[static_cast<size_t>(b)].resize(static_cast<size_t>(kv_resource->groupNums()));
-        for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            original_sizes[static_cast<size_t>(b)][static_cast<size_t>(gid)] = kv_resource->blocksNum(b, gid);
+        for (int group_index = 0; group_index < kv_resource->groupNums(); ++group_index) {
+            original_sizes[static_cast<size_t>(b)][static_cast<size_t>(group_index)] =
+                kv_resource->blocksNumByIndex(b, static_cast<size_t>(group_index));
         }
     }
 
@@ -289,15 +297,15 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
     int  failed_batch = -1;
     int  failed_group = -1;
     for (int b = 0; b < batch_size; ++b) {
-        for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            auto&     block_ids        = kv_resource->mutableBlockIds(b, gid);
-            const int group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, gid, raw_seq_len);
-            auto&     filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(gid)];
-            if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
+        for (int group_index = 0; group_index < kv_resource->groupNums(); ++group_index) {
+            auto&     block_ids        = kv_resource->mutableBlockIdsByIndex(b, static_cast<size_t>(group_index));
+            const int group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, group_index, raw_seq_len);
+            auto&     filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(group_index)];
+            if (!kv_cache_groups_[static_cast<size_t>(group_index)]->malloc(
                     block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step, &filled_positions)) {
                 all_success  = false;
                 failed_batch = b;
-                failed_group = gid;
+                failed_group = group_index;
                 break;
             }
         }
@@ -311,20 +319,23 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
             return {true, 0};
         }
         for (int b = 0; b < batch_size; ++b) {
-            for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-                kv_cache_groups_[static_cast<size_t>(gid)]->removeSkippedBlocks(
-                    kv_resource->mutableBlockIds(b, gid), malloc_info.reuse_cache, reserve_step);
+            for (int group_index = 0; group_index < kv_resource->groupNums(); ++group_index) {
+                kv_cache_groups_[static_cast<size_t>(group_index)]->removeSkippedBlocks(
+                    kv_resource->mutableBlockIdsByIndex(b, static_cast<size_t>(group_index)),
+                    malloc_info.reuse_cache,
+                    reserve_step);
             }
         }
         return {true, 0};
     }
 
     for (int b = 0; b <= failed_batch && b < batch_size; ++b) {
-        for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            auto&            block_ids        = kv_resource->mutableBlockIds(b, gid);
-            const auto       original_size    = original_sizes[static_cast<size_t>(b)][static_cast<size_t>(gid)];
-            const auto&      filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(gid)];
-            const auto&      blocks           = block_ids.blocks();
+        for (int group_index = 0; group_index < kv_resource->groupNums(); ++group_index) {
+            auto&       block_ids     = kv_resource->mutableBlockIdsByIndex(b, static_cast<size_t>(group_index));
+            const auto  original_size = original_sizes[static_cast<size_t>(b)][static_cast<size_t>(group_index)];
+            const auto& filled_positions =
+                backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(group_index)];
+            const auto&      blocks = block_ids.blocks();
             BlockIndicesType blocks_to_free;
             blocks_to_free.reserve(filled_positions.size() + blocks.size() - std::min(original_size, blocks.size()));
             for (size_t pos : filled_positions) {
@@ -344,7 +355,7 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
                 }
             }
             if (!blocks_to_free.empty()) {
-                freeBlocksInGroup(gid, blocks_to_free);
+                freeBlocksInGroup(group_index, blocks_to_free);
             }
             for (size_t pos : filled_positions) {
                 block_ids.setAt(pos, NULL_BLOCK_IDX);
@@ -362,8 +373,9 @@ void HybridKVCacheAllocator::free(const FreeInfo& free_info) {
         return;
     }
     for (int batch_id = 0; batch_id < kv_cache_resource->batchSize(); ++batch_id) {
-        for (int gid = 0; gid < kv_cache_resource->groupNums(); ++gid) {
-            kv_cache_groups_[static_cast<size_t>(gid)]->free(kv_cache_resource->blocks(batch_id, gid));
+        for (int group_index = 0; group_index < kv_cache_resource->groupNums(); ++group_index) {
+            kv_cache_groups_[static_cast<size_t>(group_index)]->free(
+                kv_cache_resource->blocksByIndex(batch_id, static_cast<size_t>(group_index)));
         }
     }
     kv_cache_resource->clearBlocks();
@@ -395,31 +407,34 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
             // metadata here.
             const size_t max_keys = full_keys.size();
             for (size_t pos = max_keys; pos > 0; --pos) {
-                const size_t              i = pos - 1;
-                std::vector<BlockIdxType> group_block_ids(static_cast<size_t>(group_nums), NULL_BLOCK_IDX);
-                bool                      has_valid = false;
-                for (int gid = 0; gid < group_nums; ++gid) {
-                    if (skipReuseCacheGroup(gid)) {
+                const size_t                      i = pos - 1;
+                SharedBlockCache::IndexedBlockIds group_block_ids(static_cast<size_t>(group_nums), NULL_BLOCK_IDX);
+                SharedBlockCache::IndexedMatches  matchable_groups(static_cast<size_t>(group_nums), 0);
+                bool                              has_group = false;
+                for (int group_index = 0; group_index < group_nums; ++group_index) {
+                    if (skipReuseCacheGroup(group_index)) {
                         continue;
                     }
-                    const auto& blocks = kv_cache_resource->blocks(batch_id, gid);
+                    const auto& blocks = kv_cache_resource->blocksByIndex(batch_id, static_cast<size_t>(group_index));
                     if (i >= blocks.size()) {
                         continue;
                     }
                     if (!isNullBlockIdx(blocks[i])) {
-                        group_block_ids[static_cast<size_t>(gid)] = blocks[i];
-                        has_valid                                 = true;
+                        group_block_ids[static_cast<size_t>(group_index)]  = blocks[i];
+                        matchable_groups[static_cast<size_t>(group_index)] = 1;
+                        has_group                                          = true;
                     }
                 }
-                if (has_valid) {
+                if (has_group) {
                     const auto dependency = i < full_dependencies.size() ?
                                                 full_dependencies[i] :
                                                 BlockDependency{false, 0, static_cast<uint32_t>(i)};
-                    shared_block_cache_->put(full_keys[i],
-                                             group_block_ids,
-                                             insert_info.is_resident,
-                                             SharedBlockCache::kGpuLogicalNamespace,
-                                             dependency);
+                    shared_block_cache_->putIndexed(full_keys[i],
+                                                    group_block_ids,
+                                                    insert_info.is_resident,
+                                                    SharedBlockCache::kGpuLogicalNamespace,
+                                                    dependency,
+                                                    matchable_groups);
                 }
             }
             continue;
@@ -451,13 +466,13 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
         }
         const size_t token_len = token_ids.size() - 1;
 
-        for (int gid = 0; gid < group_nums; ++gid) {
-            if (skipReuseCacheGroup(gid)) {
+        for (int group_index = 0; group_index < group_nums; ++group_index) {
+            if (skipReuseCacheGroup(group_index)) {
                 continue;
             }
-            const int            raw_group_seq = kv_cache_groups_[static_cast<size_t>(gid)]->seqSizePerBlock();
-            const bool           gp_sharded    = cpBlockRoundRobinGroup(cp_mapper, config_, gid);
-            const bool           compact_swa   = cpCompactSwaGroup(gid, cp_mapper);
+            const int            raw_group_seq = kv_cache_groups_[static_cast<size_t>(group_index)]->seqSizePerBlock();
+            const bool           gp_sharded    = cpBlockRoundRobinGroup(cp_mapper, config_, group_index);
+            const bool           compact_swa   = cpCompactSwaGroup(group_index, cp_mapper);
             const bool           use_cp_keys   = cp_active && (gp_sharded || compact_swa);
             const CacheKeysType& src_keys      = use_cp_keys ? cp_keys : full_keys;
             const auto&          dependencies  = use_cp_keys ? cp_dependencies : full_dependencies;
@@ -466,11 +481,14 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
             if (src_keys.empty()) {
                 continue;
             }
-            const int    group_seq_size  = cpLogicalSeqSizeForGroup(cp_mapper, config_, gid, raw_group_seq);
+            const int    group_seq_size  = cpLogicalSeqSizeForGroup(cp_mapper, config_, group_index, raw_group_seq);
             const size_t full_blocks_num = token_len / static_cast<size_t>(group_seq_size);
             const size_t n               = std::min(src_keys.size(), full_blocks_num);
-            const auto&  blocks          = kv_cache_resource->blocks(batch_id, gid);
+            const auto&  blocks          = kv_cache_resource->blocksByIndex(batch_id, static_cast<size_t>(group_index));
             const size_t loop_end        = std::min(n, blocks.size());
+            SharedBlockCache::IndexedBlockIds group_block_ids(static_cast<size_t>(group_nums), NULL_BLOCK_IDX);
+            SharedBlockCache::IndexedMatches  matchable_groups(static_cast<size_t>(group_nums), 0);
+            matchable_groups[static_cast<size_t>(group_index)] = 1;
 
             // Reverse iterate so prefix-base keys land at MRU end (matches non-CP path).
             for (size_t pos = loop_end; pos > 0; --pos) {
@@ -478,13 +496,12 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                 if (isNullBlockIdx(blocks[i])) {
                     continue;
                 }
-                std::vector<BlockIdxType> group_block_ids(static_cast<size_t>(group_nums), NULL_BLOCK_IDX);
-                std::vector<bool>         matchable_groups(static_cast<size_t>(group_nums), true);
-                group_block_ids[static_cast<size_t>(gid)] = blocks[i];
+                group_block_ids[static_cast<size_t>(group_index)] = blocks[i];
                 const auto dependency =
                     i < dependencies.size() ? dependencies[i] : BlockDependency{false, 0, static_cast<uint32_t>(i)};
-                shared_block_cache_->put(
+                shared_block_cache_->putIndexed(
                     src_keys[i], group_block_ids, insert_info.is_resident, namespace_id, dependency, matchable_groups);
+                group_block_ids[static_cast<size_t>(group_index)] = NULL_BLOCK_IDX;
             }
         }
     }
@@ -526,11 +543,11 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
         const size_t              pos             = it->second;
         bool                      any_valid_block = false;
         std::vector<BlockIdxType> blocks_for_key(static_cast<size_t>(kvcache_resource.groupNums()), NULL_BLOCK_IDX);
-        for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
-            const auto& src_blocks                   = kvcache_resource.blocks(gid);
-            const auto  block                        = pos < src_blocks.size() ? src_blocks[pos] : NULL_BLOCK_IDX;
-            blocks_for_key[static_cast<size_t>(gid)] = block;
-            any_valid_block                          = any_valid_block || (!isNullBlockIdx(block) && block > 0);
+        for (int group_index = 0; group_index < kvcache_resource.groupNums(); ++group_index) {
+            const auto& src_blocks = kvcache_resource.groupBlocks().at(static_cast<size_t>(group_index))->blocks();
+            const auto  block      = pos < src_blocks.size() ? src_blocks[pos] : NULL_BLOCK_IDX;
+            blocks_for_key[static_cast<size_t>(group_index)] = block;
+            any_valid_block                                  = any_valid_block || (!isNullBlockIdx(block) && block > 0);
         }
         const bool preserve_connector_tail = is_connector && !kvcache_resource.lastBlockAligned()
                                              && pos + 1 == resource_keys.size() && !selected_keys.empty();
@@ -542,8 +559,9 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
             pos < source_dependencies.size() ?
                 source_dependencies[pos] :
                 BlockDependency{false, 0, static_cast<uint32_t>(selected_dependencies.size())});
-        for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
-            selected_blocks[static_cast<size_t>(gid)].push_back(blocks_for_key[static_cast<size_t>(gid)]);
+        for (int group_index = 0; group_index < kvcache_resource.groupNums(); ++group_index) {
+            selected_blocks[static_cast<size_t>(group_index)].push_back(
+                blocks_for_key[static_cast<size_t>(group_index)]);
         }
     }
 
@@ -553,31 +571,32 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
 
     selected_resource->cacheKeys() = std::move(selected_keys);
     selected_resource->setBlockDependencies(std::move(selected_dependencies));
-    for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
+    for (int group_index = 0; group_index < kvcache_resource.groupNums(); ++group_index) {
         BlockIndicesType valid;
-        for (auto b : selected_blocks[static_cast<size_t>(gid)]) {
+        for (auto b : selected_blocks[static_cast<size_t>(group_index)]) {
             if (!isNullBlockIdx(b) && b > 0) {
                 valid.push_back(b);
             }
         }
         if (!valid.empty()) {
-            referenceBlocksInGroup(gid, valid, is_connector);
+            referenceBlocksInGroup(group_index, valid, is_connector);
         }
-        selected_resource->mutableBlockIds(gid).assign(std::move(selected_blocks[static_cast<size_t>(gid)]));
+        (*selected_resource->groupBlocks().at(static_cast<size_t>(group_index)))
+            .assign(std::move(selected_blocks[static_cast<size_t>(group_index)]));
     }
     return selected_resource;
 }
 
 void HybridKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector) {
-    for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
+    for (int group_index = 0; group_index < kvcache_resource.groupNums(); ++group_index) {
         BlockIndicesType valid;
-        for (auto b : kvcache_resource.blocks(gid)) {
+        for (auto b : kvcache_resource.groupBlocks().at(static_cast<size_t>(group_index))->blocks()) {
             if (!isNullBlockIdx(b) && b > 0) {
                 valid.push_back(b);
             }
         }
         if (!valid.empty()) {
-            freeBlocksInGroup(gid, valid, is_connector);
+            freeBlocksInGroup(group_index, valid, is_connector);
         }
     }
 }
@@ -608,9 +627,9 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  batch
     for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
         const int fork_count = batch_fork_count[old_batch_idx];
         if (fork_count > 1 && copy_last_block) {
-            for (int gid = 0; gid < group_nums; ++gid) {
-                if (!batch_kv_cache_resource->blocks(old_batch_idx, gid).empty()) {
-                    new_blocks_num[static_cast<size_t>(gid)] += fork_count - 1;
+            for (int group_index = 0; group_index < group_nums; ++group_index) {
+                if (!batch_kv_cache_resource->blocksByIndex(old_batch_idx, static_cast<size_t>(group_index)).empty()) {
+                    new_blocks_num[static_cast<size_t>(group_index)] += fork_count - 1;
                 }
             }
         }
@@ -622,11 +641,12 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  batch
     std::vector<BlockIndicesType>                      replacement_blocks(static_cast<size_t>(group_nums));
     std::vector<BlockIndicesType>                      allocated_replacements(static_cast<size_t>(group_nums));
     std::vector<std::unordered_map<BlockIdxType, int>> transferred_ref_counts(static_cast<size_t>(group_nums));
-    for (int gid = 0; gid < group_nums; ++gid) {
+    for (int group_index = 0; group_index < group_nums; ++group_index) {
         std::unordered_set<BlockIdxType>      retained_blocks;
         std::unordered_map<BlockIdxType, int> dropped_block_counts;
         for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
-            for (const auto block : batch_kv_cache_resource->blocks(old_batch_idx, gid)) {
+            for (const auto block :
+                 batch_kv_cache_resource->blocksByIndex(old_batch_idx, static_cast<size_t>(group_index))) {
                 if (isNullBlockIdx(block) || block <= 0) {
                     continue;
                 }
@@ -638,15 +658,16 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  batch
             }
         }
 
-        auto&     replacements = replacement_blocks[static_cast<size_t>(gid)];
-        auto&     transferred  = transferred_ref_counts[static_cast<size_t>(gid)];
-        const int need         = new_blocks_num[static_cast<size_t>(gid)];
+        auto&     replacements = replacement_blocks[static_cast<size_t>(group_index)];
+        auto&     transferred  = transferred_ref_counts[static_cast<size_t>(group_index)];
+        const int need         = new_blocks_num[static_cast<size_t>(group_index)];
         for (int old_batch_idx = 0; old_batch_idx < old_batch_size && static_cast<int>(replacements.size()) < need;
              ++old_batch_idx) {
             if (batch_fork_count[old_batch_idx] != 0) {
                 continue;
             }
-            const auto& dropped = batch_kv_cache_resource->blocks(old_batch_idx, gid);
+            const auto& dropped =
+                batch_kv_cache_resource->blocksByIndex(old_batch_idx, static_cast<size_t>(group_index));
             if (dropped.empty()) {
                 continue;
             }
@@ -660,35 +681,35 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  batch
     }
 
     auto rollback_replacements = [&]() {
-        for (int gid = 0; gid < group_nums; ++gid) {
-            auto& blocks = allocated_replacements[static_cast<size_t>(gid)];
+        for (int group_index = 0; group_index < group_nums; ++group_index) {
+            auto& blocks = allocated_replacements[static_cast<size_t>(group_index)];
             if (!blocks.empty()) {
-                kv_cache_groups_[static_cast<size_t>(gid)]->free(blocks);
+                kv_cache_groups_[static_cast<size_t>(group_index)]->free(blocks);
                 blocks.clear();
             }
         }
     };
-    for (int gid = 0; gid < group_nums; ++gid) {
-        const int need_blocks = new_blocks_num[static_cast<size_t>(gid)];
-        auto&     reserved    = replacement_blocks[static_cast<size_t>(gid)];
+    for (int group_index = 0; group_index < group_nums; ++group_index) {
+        const int need_blocks = new_blocks_num[static_cast<size_t>(group_index)];
+        auto&     reserved    = replacement_blocks[static_cast<size_t>(group_index)];
         reserved.reserve(static_cast<size_t>(need_blocks));
         for (int i = static_cast<int>(reserved.size()); i < need_blocks; ++i) {
             BlockIds   one_block;
-            const bool ok = kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
-                one_block, kv_cache_groups_[static_cast<size_t>(gid)]->seqSizePerBlock());
+            const bool ok = kv_cache_groups_[static_cast<size_t>(group_index)]->malloc(
+                one_block, kv_cache_groups_[static_cast<size_t>(group_index)]->seqSizePerBlock());
             const auto& blocks = one_block.blocks();
             if (ok && blocks.size() == 1 && !isNullBlockIdx(blocks.front())) {
                 reserved.push_back(blocks.front());
-                allocated_replacements[static_cast<size_t>(gid)].push_back(blocks.front());
+                allocated_replacements[static_cast<size_t>(group_index)].push_back(blocks.front());
                 continue;
             }
             if (!blocks.empty()) {
-                allocated_replacements[static_cast<size_t>(gid)].insert(
-                    allocated_replacements[static_cast<size_t>(gid)].end(), blocks.begin(), blocks.end());
+                allocated_replacements[static_cast<size_t>(group_index)].insert(
+                    allocated_replacements[static_cast<size_t>(group_index)].end(), blocks.begin(), blocks.end());
             }
             RTP_LLM_LOG_WARNING(
                 "reserve replacement block failed for hybrid kv cache update, group=%d need=%d reserved=%zu",
-                gid,
+                group_index,
                 need_blocks,
                 reserved.size());
             rollback_replacements();
@@ -700,10 +721,11 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  batch
         if (batch_fork_count[old_batch_idx] != 0) {
             continue;
         }
-        for (int gid = 0; gid < group_nums; ++gid) {
+        for (int group_index = 0; group_index < group_nums; ++group_index) {
             BlockIndicesType to_free;
-            auto&            transferred = transferred_ref_counts[static_cast<size_t>(gid)];
-            for (const auto block : batch_kv_cache_resource->blocks(old_batch_idx, gid)) {
+            auto&            transferred = transferred_ref_counts[static_cast<size_t>(group_index)];
+            for (const auto block :
+                 batch_kv_cache_resource->blocksByIndex(old_batch_idx, static_cast<size_t>(group_index))) {
                 if (isNullBlockIdx(block) || block <= 0) {
                     continue;
                 }
@@ -715,7 +737,7 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  batch
                 }
             }
             if (!to_free.empty()) {
-                kv_cache_groups_[static_cast<size_t>(gid)]->free(to_free);
+                kv_cache_groups_[static_cast<size_t>(group_index)]->free(to_free);
             }
         }
     }
@@ -734,41 +756,43 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  batch
             batch_kv_cache_resource->moveBatchResource(new_batch_idx, std::move(old_resources[old_batch_idx]));
         } else {
             batch_kv_cache_resource->setBatchCacheKeys(new_batch_idx, old_resources[old_batch_idx].cacheKeys());
-            for (int gid = 0; gid < group_nums; ++gid) {
-                auto& block_ids = batch_kv_cache_resource->mutableBlockIds(new_batch_idx, gid);
-                kv_cache_groups_[static_cast<size_t>(gid)]->reference(block_ids,
-                                                                      old_resources[old_batch_idx].blocks(gid));
+            for (int group_index = 0; group_index < group_nums; ++group_index) {
+                auto& block_ids =
+                    batch_kv_cache_resource->mutableBlockIdsByIndex(new_batch_idx, static_cast<size_t>(group_index));
+                kv_cache_groups_[static_cast<size_t>(group_index)]->reference(
+                    block_ids,
+                    old_resources[old_batch_idx].groupBlocks().at(static_cast<size_t>(group_index))->blocks());
 
                 if (copy_last_block && !block_ids.blocks().empty()) {
                     const int  old_block       = block_ids.popBack();
                     const bool old_block_valid = !isNullBlockIdx(old_block) && old_block > 0;
                     if (old_block_valid) {
-                        kv_cache_groups_[static_cast<size_t>(gid)]->free({old_block});
+                        kv_cache_groups_[static_cast<size_t>(group_index)]->free({old_block});
                     }
 
-                    auto&      reserved     = replacement_blocks[static_cast<size_t>(gid)];
-                    const auto reserved_idx = next_replacement[static_cast<size_t>(gid)]++;
+                    auto&      reserved     = replacement_blocks[static_cast<size_t>(group_index)];
+                    const auto reserved_idx = next_replacement[static_cast<size_t>(group_index)]++;
                     RTP_LLM_CHECK_WITH_INFO(reserved_idx < reserved.size(),
                                             "missing reserved replacement block for hybrid kv cache update, group=%d",
-                                            gid);
+                                            group_index);
                     const int new_block = reserved[reserved_idx];
                     block_ids.add({new_block});
                     if (old_block_valid && !isNullBlockIdx(new_block) && new_block > 0) {
-                        block_update_mapping.push_back(
-                            {config_.topology().groupById(static_cast<size_t>(gid)).tag, old_block, new_block});
+                        block_update_mapping.push_back({groupTag(group_index), old_block, new_block});
                     }
                 }
             }
         }
         --fork_count;
     }
-    for (int gid = 0; gid < group_nums; ++gid) {
+    for (int group_index = 0; group_index < group_nums; ++group_index) {
         RTP_LLM_CHECK_WITH_INFO(
-            next_replacement[static_cast<size_t>(gid)] == replacement_blocks[static_cast<size_t>(gid)].size(),
+            next_replacement[static_cast<size_t>(group_index)]
+                == replacement_blocks[static_cast<size_t>(group_index)].size(),
             "unused replacement blocks after hybrid kv cache update, group=%d used=%zu reserved=%zu",
-            gid,
-            next_replacement[static_cast<size_t>(gid)],
-            replacement_blocks[static_cast<size_t>(gid)].size());
+            group_index,
+            next_replacement[static_cast<size_t>(group_index)],
+            replacement_blocks[static_cast<size_t>(group_index)].size());
     }
     return true;
 }
@@ -795,29 +819,29 @@ bool HybridKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& mall
     return accepted;
 }
 
-void HybridKVCacheAllocator::rollbackBlockIdsToSize(int gid, BlockIds& block_ids, size_t original_size) {
+void HybridKVCacheAllocator::rollbackBlockIdsToSize(int group_index, BlockIds& block_ids, size_t original_size) {
     if (block_ids.blocksNum() <= original_size) {
         return;
     }
     const auto blocks_to_free = validBlocksAfter(block_ids.blocks(), original_size);
     block_ids.resize(original_size);
     if (!blocks_to_free.empty()) {
-        freeBlocksInGroup(gid, blocks_to_free);
+        freeBlocksInGroup(group_index, blocks_to_free);
     }
 }
 
 void HybridKVCacheAllocator::rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
                                                 const std::vector<BlockIndicesType>& referenced_blocks,
                                                 const std::vector<size_t>&           original_sizes) {
-    for (int gid = 0; gid < kv_resource.groupNums(); ++gid) {
-        auto& block_ids = kv_resource.mutableBlockIds(0, gid);
-        if (!original_sizes.empty() && static_cast<size_t>(gid) < original_sizes.size()
-            && block_ids.blocksNum() > original_sizes[static_cast<size_t>(gid)]) {
-            rollbackBlockIdsToSize(gid, block_ids, original_sizes[static_cast<size_t>(gid)]);
+    for (int group_index = 0; group_index < kv_resource.groupNums(); ++group_index) {
+        auto& block_ids = kv_resource.mutableBlockIdsByIndex(0, static_cast<size_t>(group_index));
+        if (!original_sizes.empty() && static_cast<size_t>(group_index) < original_sizes.size()
+            && block_ids.blocksNum() > original_sizes[static_cast<size_t>(group_index)]) {
+            rollbackBlockIdsToSize(group_index, block_ids, original_sizes[static_cast<size_t>(group_index)]);
         }
-        if (static_cast<size_t>(gid) < referenced_blocks.size()
-            && !referenced_blocks[static_cast<size_t>(gid)].empty()) {
-            freeBlocksInGroup(gid, referenced_blocks[static_cast<size_t>(gid)]);
+        if (static_cast<size_t>(group_index) < referenced_blocks.size()
+            && !referenced_blocks[static_cast<size_t>(group_index)].empty()) {
+            freeBlocksInGroup(group_index, referenced_blocks[static_cast<size_t>(group_index)]);
         }
         block_ids.resize(0);
     }
@@ -829,47 +853,46 @@ void HybridKVCacheAllocator::rollbackIncrMalloc(BatchKVCacheResource&           
                                                 int                                     failed_batch) {
     const int last_touched_batch = std::min(failed_batch, kv_resource.batchSize() - 1);
     for (int b = 0; b <= last_touched_batch; ++b) {
-        for (int gid = 0; gid < kv_resource.groupNums(); ++gid) {
-            auto&        block_ids    = kv_resource.mutableBlockIds(b, gid);
-            const size_t original_num = original_sizes[static_cast<size_t>(b)][static_cast<size_t>(gid)];
-            rollbackBlockIdsToSize(gid, block_ids, original_num);
+        for (int group_index = 0; group_index < kv_resource.groupNums(); ++group_index) {
+            auto&        block_ids    = kv_resource.mutableBlockIdsByIndex(b, static_cast<size_t>(group_index));
+            const size_t original_num = original_sizes[static_cast<size_t>(b)][static_cast<size_t>(group_index)];
+            rollbackBlockIdsToSize(group_index, block_ids, original_num);
         }
     }
 }
 
-MemoryType HybridKVCacheAllocator::memoryTypeForGroup(int gid) const {
-    (void)gid;
+MemoryType HybridKVCacheAllocator::memoryTypeForGroup(int group_index) const {
+    (void)group_index;
     return allocation_type_ == AllocationType::DEVICE ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
 }
 
-void HybridKVCacheAllocator::copyBlockMappingForGroup(int                             gid,
+void HybridKVCacheAllocator::copyBlockMappingForGroup(int                             group_index,
                                                       const std::vector<BlockIdPair>& block_update_mapping) const {
     if (block_update_mapping.empty()) {
         return;
     }
 
-    const auto   memory_type         = memoryTypeForGroup(gid);
+    const auto&  group               = config_.topology().groups().at(static_cast<size_t>(group_index));
+    const auto   memory_type         = memoryTypeForGroup(group_index);
     const auto   copy_type           = BatchCopyParams::get_copy_type(memory_type, memory_type);
-    const auto&  spec                = config_.specForGroup(static_cast<size_t>(gid));
+    const auto&  spec                = group.spec;
     const size_t kv_block_size_bytes = spec->block_size_bytes();
     const size_t scale_block_bytes   = spec->scale_block_size_bytes();
     const size_t buffers_per_layer   = scale_block_bytes > 0 ? 2 : 1;
 
     BatchCopyParams copy_params;
-    copy_params.reserve(copy_type,
-                        config_.layerIdsForGroup(static_cast<size_t>(gid)).size() * block_update_mapping.size()
-                            * buffers_per_layer);
+    copy_params.reserve(copy_type, group.layer_ids.size() * block_update_mapping.size() * buffers_per_layer);
 
     for (const auto& [src_block_index, dest_block_index] : block_update_mapping) {
-        for (int layer_id : config_.layerIdsForGroup(static_cast<size_t>(gid))) {
+        for (int layer_id : group.layer_ids) {
             auto src_addr_info =
-                kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, src_block_index);
+                kv_cache_groups_[static_cast<size_t>(group_index)]->convertIndexToAddr(layer_id, src_block_index);
             auto dst_addr_info =
-                kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, dest_block_index);
+                kv_cache_groups_[static_cast<size_t>(group_index)]->convertIndexToAddr(layer_id, dest_block_index);
 
             RTP_LLM_CHECK_WITH_INFO(src_addr_info.kv_addr && dst_addr_info.kv_addr,
                                     "failed to get block address for group %d layer %d src_block %d dst_block %d",
-                                    gid,
+                                    group_index,
                                     layer_id,
                                     src_block_index,
                                     dest_block_index);
@@ -900,11 +923,11 @@ int HybridKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
 
     int common_blocks_total = 0;
     int extra_blocks_total  = 0;
-    for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
-        const auto group            = kv_cache_groups_[static_cast<size_t>(gid)];
-        const int  group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, config_, gid, raw_common_seq_len);
-        const int  group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, gid, raw_seq_len);
-        const auto need             = kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocks(
+    for (int group_index = 0; group_index < static_cast<int>(kv_cache_groups_.size()); ++group_index) {
+        const auto group            = kv_cache_groups_[static_cast<size_t>(group_index)];
+        const int  group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, config_, group_index, raw_common_seq_len);
+        const int  group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, group_index, raw_seq_len);
+        const auto need             = kv_cache_groups_[static_cast<size_t>(group_index)]->getNeedBlocks(
             group_common_seq, group_seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
         common_blocks_total += need.common_blocks;
         extra_blocks_total += need.extra_blocks;
@@ -918,9 +941,13 @@ int HybridKVCacheAllocator::estimatePeakNeedBlocks(const KVCacheResource& kv_cac
                                                    int                    reserve_step,
                                                    bool                   enable_reuse_cache) const {
     int need_blocks = 0;
-    for (int gid = 0; gid < kv_cache_resource.groupNums(); ++gid) {
-        need_blocks += kv_cache_groups_[static_cast<size_t>(gid)]->estimatePeakNeedBlocks(
-            seq_len, kv_cache_resource.blocks(gid), remaining_tokens, reserve_step, enable_reuse_cache);
+    for (int group_index = 0; group_index < kv_cache_resource.groupNums(); ++group_index) {
+        need_blocks += kv_cache_groups_[static_cast<size_t>(group_index)]->estimatePeakNeedBlocks(
+            seq_len,
+            kv_cache_resource.groupBlocks().at(static_cast<size_t>(group_index))->blocks(),
+            remaining_tokens,
+            reserve_step,
+            enable_reuse_cache);
     }
     return need_blocks;
 }
@@ -949,20 +976,20 @@ void HybridKVCacheAllocator::checkCPShardedMallocResult(const MallocInfo& malloc
     const int   reserve_step = malloc_info.complete_token_ids->getReserveStep();
 
     for (int batch_id = 0; batch_id < kv_resource->batchSize(); ++batch_id) {
-        for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            if (!cpBlockRoundRobinGroup(cp_slot_mapper_, config_, gid)) {
+        for (int group_index = 0; group_index < kv_resource->groupNums(); ++group_index) {
+            if (!cpBlockRoundRobinGroup(cp_slot_mapper_, config_, group_index)) {
                 continue;
             }
-            const int effective_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, gid, seq_len);
+            const int effective_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, group_index, seq_len);
             const int expected_blocks =
-                kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(effective_seq_len, 0, reserve_step);
-            const int actual_blocks = kv_resource->blocksNum(batch_id, gid);
+                kv_cache_groups_[static_cast<size_t>(group_index)]->needBlocksNum(effective_seq_len, 0, reserve_step);
+            const int actual_blocks = kv_resource->blocksNumByIndex(batch_id, static_cast<size_t>(group_index));
             RTP_LLM_CHECK_WITH_INFO(actual_blocks == expected_blocks,
                                     "CP invariant violated: batch=%d group=%d blocks=%d != expected_local_blocks=%d "
                                     "(seq_len=%d, effective_seq_len=%d, reserve_step=%d, cp_size=%d, "
                                     "block_size=%d, cacheKeys=%zu)",
                                     batch_id,
-                                    gid,
+                                    group_index,
                                     actual_blocks,
                                     expected_blocks,
                                     seq_len,
@@ -979,11 +1006,11 @@ int HybridKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr&
                                                   int                            seq_len,
                                                   int                            reserve_step) const {
     int need_blocks = 0;
-    for (int gid = 0; gid < batch_kv_cache_resource->groupNums(); ++gid) {
-        const int effective_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, gid, seq_len);
-        const int cur_blocks        = batch_kv_cache_resource->blocksNum(0, gid);
-        need_blocks +=
-            kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(effective_seq_len, cur_blocks, reserve_step);
+    for (int group_index = 0; group_index < batch_kv_cache_resource->groupNums(); ++group_index) {
+        const int effective_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, group_index, seq_len);
+        const int cur_blocks        = batch_kv_cache_resource->blocksNumByIndex(0, static_cast<size_t>(group_index));
+        need_blocks += kv_cache_groups_[static_cast<size_t>(group_index)]->needBlocksNum(
+            effective_seq_len, cur_blocks, reserve_step);
     }
     return need_blocks;
 }

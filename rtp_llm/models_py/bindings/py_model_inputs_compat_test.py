@@ -22,8 +22,8 @@ class _RoutingCache:
 
     def get_layer_cache_groups(self, layer_id: int) -> list[LayerKVCache]:
         return [
-            LayerKVCache(torch.ones(1), 1, layer_id, group_id, tag)
-            for group_id, tag in enumerate(self._layer_tags[layer_id])
+            LayerKVCache(torch.ones(1), 1, layer_id, tag)
+            for tag in self._layer_tags[layer_id]
         ]
 
 
@@ -154,7 +154,6 @@ class PyModelInputsCompatTest(unittest.TestCase):
             base,
             16,
             layer_id=3,
-            group_id=2,
             tag="full",
             kv_scale_base=scale,
         )
@@ -163,7 +162,6 @@ class PyModelInputsCompatTest(unittest.TestCase):
         self.assertEqual(scale.data_ptr(), layer.kv_scale_base.data_ptr())
         self.assertEqual(16, layer.seq_size_per_block)
         self.assertEqual(3, layer.layer_id)
-        self.assertEqual(2, layer.group_id)
         self.assertEqual("full", layer.tag)
 
     def test_attention_inputs_mapping_is_selected_by_layer_tag(self) -> None:

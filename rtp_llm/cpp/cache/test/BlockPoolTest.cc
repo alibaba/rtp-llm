@@ -110,20 +110,20 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/4);
 
     ASSERT_GT(cache_cfg.groupNums(), 0);
-    ASSERT_EQ(cache_cfg.layerIdsForGroup(0).size(), static_cast<size_t>(cache_cfg.layer_all_num));
+    ASSERT_EQ(cache_cfg.topology().groups().at(0).layer_ids.size(), static_cast<size_t>(cache_cfg.layer_all_num));
 
     ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 2u);
     ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
     ASSERT_NE(cache_cfg.mtp_sub_configs[1], nullptr);
     ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->groupNums(), 1);
     ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->groupNums(), 1);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->specForGroup(0)->block_size_bytes(),
-              cache_cfg.mtp_sub_configs[1]->specForGroup(0)->block_size_bytes());
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->topology().groups().at(0).spec->block_size_bytes(),
+              cache_cfg.mtp_sub_configs[1]->topology().groups().at(0).spec->block_size_bytes());
 
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->layerIdsForGroup(0).size(), 1u);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->layerIdsForGroup(0).size(), 1u);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->layerIdsForGroup(0)[0], 0);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->layerIdsForGroup(0)[0], 0);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->topology().groups().at(0).layer_ids.size(), 1u);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->topology().groups().at(0).layer_ids.size(), 1u);
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->topology().groups().at(0).layer_ids[0], 0);
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->topology().groups().at(0).layer_ids[0], 0);
 
     RuntimeConfig runtime_config;
     cache_cfg.finalizeBlockNums(/*global_block_num=*/3, runtime_config);

@@ -32,10 +32,11 @@ void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<Lay
                             new_layers.size(),
                             expected_layers);
 
-    for (size_t gid = 0; gid < new_groups.size(); ++gid) {
-        auto& group = new_groups[gid];
-        RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "CacheConfig::setTopology got null spec at group %zu", gid);
-        RTP_LLM_CHECK_WITH_INFO(!group.tag.empty(), "CacheConfig::setTopology requires tag for group %zu", gid);
+    for (size_t group_index = 0; group_index < new_groups.size(); ++group_index) {
+        auto& group = new_groups[group_index];
+        RTP_LLM_CHECK_WITH_INFO(
+            group.spec != nullptr, "CacheConfig::setTopology got null spec at group %zu", group_index);
+        RTP_LLM_CHECK_WITH_INFO(!group.tag.empty(), "CacheConfig::setTopology requires tag for group %zu", group_index);
         RTP_LLM_CHECK_WITH_INFO(group.spec->tag == group.tag,
                                 "CacheConfig::setTopology tag=%s does not match spec tag=%s",
                                 group.tag.c_str(),
@@ -45,7 +46,7 @@ void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<Lay
         RTP_LLM_CHECK_WITH_INFO(expected_group_type != CacheGroupType::LINEAR
                                     || group.policy.group_type == CacheGroupType::LINEAR,
                                 "CacheConfig::setTopology group %zu tag=%s policy type %s does not match spec type %d",
-                                gid,
+                                group_index,
                                 group.tag.c_str(),
                                 cacheGroupTypeName(group.policy.group_type),
                                 static_cast<int>(group.spec->type));
@@ -81,9 +82,9 @@ void CacheConfig::setGroupPolicies(const std::vector<CacheGroupPolicy>& policies
                             policies.size(),
                             topology().groups().size());
     auto groups = topology().groups();
-    for (size_t gid = 0; gid < policies.size(); ++gid) {
-        groups[gid].policy                    = policies[gid];
-        groups[gid].kernel_seq_size_per_block = 0;
+    for (size_t group_index = 0; group_index < policies.size(); ++group_index) {
+        groups[group_index].policy                    = policies[group_index];
+        groups[group_index].kernel_seq_size_per_block = 0;
     }
     setTopology(std::move(groups), topology().layers());
 }
@@ -105,10 +106,10 @@ void CacheConfig::setGroupBlockLayout(const std::vector<uint32_t>& block_nums,
                             kv_scale_stride_bytes.size(),
                             group_num);
     auto groups = topology().groups();
-    for (size_t gid = 0; gid < group_num; ++gid) {
-        groups[gid].block_num             = block_nums[gid];
-        groups[gid].kv_block_stride_bytes = kv_block_stride_bytes[gid];
-        groups[gid].kv_scale_stride_bytes = kv_scale_stride_bytes[gid];
+    for (size_t group_index = 0; group_index < group_num; ++group_index) {
+        groups[group_index].block_num             = block_nums[group_index];
+        groups[group_index].kv_block_stride_bytes = kv_block_stride_bytes[group_index];
+        groups[group_index].kv_scale_stride_bytes = kv_scale_stride_bytes[group_index];
     }
     group_block_layout_initialized = true;
     setTopology(std::move(groups), topology().layers());
@@ -137,23 +138,20 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
         layer_to_block_stride_bytes.resize(total_layers, 0);
     }
 
-    const auto                              target_group_num = target_groups.size();
-    std::unordered_map<std::string, size_t> propose_gid_by_tag;
-    for (size_t gid = 0; gid < propose_config.topology().groups().size(); ++gid) {
-        propose_gid_by_tag.emplace(propose_config.tagForGroup(gid), gid);
+    const auto                      target_group_num = target_groups.size();
+    std::unordered_set<std::string> propose_tags;
+    for (const auto& group : propose_config.topology().groups()) {
+        propose_tags.emplace(group.tag);
     }
 
     std::vector<GroupBase> sub_groups;
     std::vector<LayerBase> sub_layers(static_cast<size_t>(mtp_layer_num));
     sub_groups.reserve(target_group_num);
 
-    for (size_t target_gid = 0; target_gid < target_group_num; ++target_gid) {
-        const auto&  tag               = tagForGroup(target_gid);
-        const auto   propose_it        = propose_gid_by_tag.find(tag);
-        const bool   has_propose_group = propose_it != propose_gid_by_tag.end();
-        const auto&  source_config     = has_propose_group ? propose_config : *this;
-        const size_t source_gid        = has_propose_group ? propose_it->second : target_gid;
-        const auto&  source_group      = source_config.topology().groupById(source_gid);
+    for (size_t target_group_index = 0; target_group_index < target_group_num; ++target_group_index) {
+        const auto& tag               = target_groups[target_group_index].tag;
+        const bool  has_propose_group = propose_tags.find(tag) != propose_tags.end();
+        const auto& source_group      = has_propose_group ? propose_config.group(tag) : group(tag);
 
         if (has_propose_group) {
             RTP_LLM_CHECK_WITH_INFO(
@@ -174,16 +172,17 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
 
             const size_t expected_existing_layers =
                 static_cast<size_t>(group_layer_num) + static_cast<size_t>(module_index) * mtp_layer_num;
-            RTP_LLM_CHECK_WITH_INFO(target_groups[target_gid].layer_ids.size() == expected_existing_layers,
-                                    "CacheConfig::mergeMTPModule tag=%s gid=%zu physical group alignment mismatch: "
-                                    "existing_layers=%zu expected=%zu module=%d group_layer_num=%d module_layers=%u",
-                                    tag.c_str(),
-                                    target_gid,
-                                    target_groups[target_gid].layer_ids.size(),
-                                    expected_existing_layers,
-                                    module_index,
-                                    group_layer_num,
-                                    mtp_layer_num);
+            RTP_LLM_CHECK_WITH_INFO(
+                target_groups[target_group_index].layer_ids.size() == expected_existing_layers,
+                "CacheConfig::mergeMTPModule tag=%s group_index=%zu physical group alignment mismatch: "
+                "existing_layers=%zu expected=%zu module=%d group_layer_num=%d module_layers=%u",
+                tag.c_str(),
+                target_group_index,
+                target_groups[target_group_index].layer_ids.size(),
+                expected_existing_layers,
+                module_index,
+                group_layer_num,
+                mtp_layer_num);
         }
 
         GroupBase sub_group = source_group;
@@ -194,7 +193,7 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
             continue;
         }
 
-        for (int local_layer_id : propose_config.layerIdsForGroup(source_gid)) {
+        for (int local_layer_id : source_group.layer_ids) {
             if (local_layer_id < 0 || local_layer_id >= static_cast<int>(mtp_layer_num)) {
                 continue;
             }
@@ -213,7 +212,7 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
             sub_layer.layer_id = local_layer_id;
             sub_layer.group_tags.push_back(tag);
 
-            target_groups[target_gid].layer_ids.push_back(static_cast<int>(global_layer_id));
+            target_groups[target_group_index].layer_ids.push_back(static_cast<int>(global_layer_id));
             target_layers[global_layer].group_tags.push_back(tag);
 
             RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(local_layer_id) < sub_cfg->layer_to_block_stride_bytes.size(),
@@ -277,31 +276,32 @@ void CacheConfig::fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
         new_layers[layer_id].layer_id = static_cast<int>(layer_id);
     }
 
-    for (size_t gid = 0; gid < group_num; ++gid) {
-        const auto& spec = specs[gid];
-        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CacheConfig::fromGroupedSpecs got null spec at group %zu", gid);
-        std::string tag = tags.empty() ? spec->tag : tags[gid];
+    for (size_t group_index = 0; group_index < group_num; ++group_index) {
+        const auto& spec = specs[group_index];
+        RTP_LLM_CHECK_WITH_INFO(
+            spec != nullptr, "CacheConfig::fromGroupedSpecs got null spec at group %zu", group_index);
+        std::string tag = tags.empty() ? spec->tag : tags[group_index];
         if (tag.empty() && group_num == 1) {
             tag = "default";
         }
         RTP_LLM_CHECK_WITH_INFO(
-            !tag.empty(), "CacheConfig::fromGroupedSpecs requires non-empty tag for cache spec %zu", gid);
+            !tag.empty(), "CacheConfig::fromGroupedSpecs requires non-empty tag for cache spec %zu", group_index);
         auto stored_spec = spec->clone();
         stored_spec->tag = tag;
 
         GroupBase group;
         group.tag    = tag;
         group.spec   = stored_spec;
-        group.policy = has_explicit_policies ? policies[gid] : defaultCacheGroupPolicy(types[gid]);
-        RTP_LLM_CHECK_WITH_INFO(group.policy.group_type == types[gid],
-                                "CacheConfig::fromGroupedSpecs policy type mismatch gid=%zu policy=%d type=%d",
-                                gid,
+        group.policy = has_explicit_policies ? policies[group_index] : defaultCacheGroupPolicy(types[group_index]);
+        RTP_LLM_CHECK_WITH_INFO(group.policy.group_type == types[group_index],
+                                "CacheConfig::fromGroupedSpecs policy type mismatch group_index=%zu policy=%d type=%d",
+                                group_index,
                                 static_cast<int>(group.policy.group_type),
-                                static_cast<int>(types[gid]));
-        group.layer_ids = layers_by_group[gid];
+                                static_cast<int>(types[group_index]));
+        group.layer_ids = layers_by_group[group_index];
         new_groups.push_back(group);
 
-        for (int layer_id : layers_by_group[gid]) {
+        for (int layer_id : layers_by_group[group_index]) {
             RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < new_layers.size(),
                                     "CacheConfig::fromGroupedSpecs tag=%s has invalid layer id %d for layer_num=%u",
                                     tag.c_str(),
@@ -343,20 +343,20 @@ void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConf
     size_t     reserve = 0;
     const auto step    = static_cast<uint32_t>(std::max(1, linear_step));
     auto       groups  = topology().groups();
-    for (size_t gid = 0; gid < groups.size(); ++gid) {
-        const auto explicit_independent_blocks = groups[gid].policy.explicit_block_num;
+    for (size_t group_index = 0; group_index < groups.size(); ++group_index) {
+        const auto explicit_independent_blocks = groups[group_index].policy.explicit_block_num;
         uint32_t   rule_blocks                 = global_block_num;
         if (explicit_independent_blocks > 0) {
             rule_blocks = explicit_independent_blocks;
-        } else if (groups[gid].policy.group_type == CacheGroupType::SWA) {
+        } else if (groups[group_index].policy.group_type == CacheGroupType::SWA) {
             rule_blocks = global_block_num / step + (global_block_num % step != 0 ? 1u : 0u);
         }
-        groups[gid].block_num = rule_blocks;
+        groups[group_index].block_num = rule_blocks;
 
         // Only groups that opt in reserve paged-pool budget for explicit blocks.
-        if (explicit_independent_blocks > 0 && groups[gid].policy.charge_to_paged_budget) {
-            reserve += static_cast<size_t>(rule_blocks) * groups[gid].layer_ids.size()
-                       * (groups[gid].kv_block_stride_bytes + groups[gid].kv_scale_stride_bytes);
+        if (explicit_independent_blocks > 0 && groups[group_index].policy.charge_to_paged_budget) {
+            reserve += static_cast<size_t>(rule_blocks) * groups[group_index].layer_ids.size()
+                       * (groups[group_index].kv_block_stride_bytes + groups[group_index].kv_scale_stride_bytes);
         }
     }
     explicitly_sized_pool_reserve_bytes = reserve;
@@ -396,13 +396,17 @@ std::string CacheConfig::debugString(size_t indent) const {
 
     const auto                    group_policies   = groupPoliciesSnapshot();
     const auto                    group_block_nums = groupBlockNumsSnapshot();
-    const auto                    group_layer_ids  = layerGroupIdsSnapshot();
     const auto                    group_tags       = groupTagsSnapshot();
     const auto&                   topology_groups  = topology().groups();
     std::vector<std::vector<int>> layers_by_group;
     layers_by_group.reserve(topology_groups.size());
     for (const auto& group : topology_groups) {
         layers_by_group.push_back(group.layer_ids);
+    }
+    std::vector<std::vector<std::string>> layer_group_tags;
+    layer_group_tags.reserve(topology().layers().size());
+    for (const auto& layer : topology().layers()) {
+        layer_group_tags.push_back(layer.group_tags);
     }
 
     os << indent1 << "# Attention Configuration:\n";
@@ -455,8 +459,22 @@ std::string CacheConfig::debugString(size_t indent) const {
         }
     }
     os << "]\n";
-    OUTPUT_FIELD_EXPR("layer_to_group_ids.size()", group_layer_ids.size());
-    os << indent1 << "layer_to_group_ids=" << rtp_llm::vectorsToString(group_layer_ids) << "\n";
+    OUTPUT_FIELD_EXPR("layer_to_group_tags.size()", layer_group_tags.size());
+    os << indent1 << "layer_to_group_tags=[";
+    for (size_t layer_index = 0; layer_index < layer_group_tags.size(); ++layer_index) {
+        if (layer_index > 0) {
+            os << ",";
+        }
+        os << "[";
+        for (size_t tag_index = 0; tag_index < layer_group_tags[layer_index].size(); ++tag_index) {
+            if (tag_index > 0) {
+                os << ",";
+            }
+            os << layer_group_tags[layer_index][tag_index];
+        }
+        os << "]";
+    }
+    os << "]\n";
     os << "\n";
 
     os << indent1 << "# MTP Configurations:\n";

@@ -37,11 +37,10 @@ static CompleteTokenIdsPtr makeTokenIds(int batch_size, int seq_len, int block_s
     return ids;
 }
 
-static BatchKVCacheResourcePtr makeResource(int batch_size, int layer_num) {
+static BatchKVCacheResourcePtr makeResource(int batch_size, const CacheConfig& config) {
     auto res = std::make_shared<BatchKVCacheResource>();
     res->resetBatchSize(batch_size);
-    std::vector<std::vector<int>> layer_group_ids(static_cast<size_t>(layer_num), std::vector<int>{0});
-    res->initGroups(makeTestCacheTopology(/*group_num=*/1, layer_num, layer_group_ids));
+    res->initGroups(config.topologyPtr());
     return res;
 }
 
@@ -140,7 +139,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCa
     auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
-    auto resource  = makeResource(1, config.layer_num);
+    auto resource  = makeResource(1, config);
     auto token_ids = makeTokenIds(1, /*seq_len=*/1, seq_size_per_block);
 
     MallocInfo info{resource, token_ids};
@@ -150,12 +149,12 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCa
 
     auto result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
-    EXPECT_EQ(resource->blocksNum(0, 0), 1);
+    EXPECT_EQ(resource->blocksNum(0, "default"), 1);
 
     token_ids->setSeqLength(2);
     result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
-    EXPECT_EQ(resource->blocksNum(0, 0), 1);
+    EXPECT_EQ(resource->blocksNum(0, "default"), 1);
     EXPECT_EQ(resource->cacheKeys(0).size(), 0);
 }
 
@@ -180,7 +179,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocAutoInjectReducesBlockCoun
     ASSERT_TRUE(mgr->init());
 
     const int seq_len   = 16;
-    auto      resource  = makeResource(1, config.layer_num);
+    auto      resource  = makeResource(1, config);
     auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
 
     MallocInfo info{resource, token_ids};
@@ -189,7 +188,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocAutoInjectReducesBlockCoun
 
     // virtual_block_size = 4 * 2 = 8
     // effectiveSeqLenForAlloc(16) = ceil(16/8) * 4 = 8 tokens worth => ceil(8/4) = 2 blocks
-    EXPECT_EQ(resource->blocksNum(0, 0), 2);
+    EXPECT_EQ(resource->blocksNum(0, "default"), 2);
 }
 
 // Without CP sharding, the same seq_len should allocate more blocks.
@@ -211,7 +210,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocWithoutCPAllocatesFullBloc
     ASSERT_TRUE(mgr->init());
 
     const int seq_len   = 16;
-    auto      resource  = makeResource(1, config.layer_num);
+    auto      resource  = makeResource(1, config);
     auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
 
     MallocInfo info{resource, token_ids};
@@ -219,7 +218,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocWithoutCPAllocatesFullBloc
     ASSERT_TRUE(result.success);
 
     // Without CP: ceil(16/4) = 4 blocks
-    EXPECT_EQ(resource->blocksNum(0, 0), 4);
+    EXPECT_EQ(resource->blocksNum(0, "default"), 4);
 }
 
 // Allocator-level cp_slot_mapper should drive malloc sharding.
@@ -241,7 +240,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_AllocatorMapperControlsMalloc) {
     ASSERT_TRUE(mgr->init());
 
     const int seq_len   = 64;
-    auto      resource  = makeResource(1, config.layer_num);
+    auto      resource  = makeResource(1, config);
     auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
 
     auto explicit_mapper = std::make_shared<CPSlotMapper>(0, 4, seq_size_per_block);
@@ -254,7 +253,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_AllocatorMapperControlsMalloc) {
     auto result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
 
-    EXPECT_EQ(resource->blocksNum(0, 0), 4);
+    EXPECT_EQ(resource->blocksNum(0, "default"), 4);
 }
 
 // insertIntoCache() should also use the manager-level mapper.
@@ -278,7 +277,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
     // effectiveSeqLenForAlloc(16) = ceil(16/8) * 4 = 8 tokens worth => ceil(8/4) = 2 blocks
 
     const int seq_len   = 16;
-    auto      resource  = makeResource(1, config.layer_num);
+    auto      resource  = makeResource(1, config);
     auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
 
     MallocInfo malloc_info{resource, token_ids};
@@ -293,7 +292,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
     EXPECT_NO_THROW(mgr->insertIntoCache(insert_info));
 
     // Now try to malloc again with the same token_ids -- should get reuse hit.
-    auto       resource2 = makeResource(1, config.layer_num);
+    auto       resource2 = makeResource(1, config);
     MallocInfo malloc_info2{resource2, token_ids};
     malloc_info2.reuse_cache         = true;
     malloc_info2.enable_device_cache = true;

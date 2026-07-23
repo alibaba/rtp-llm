@@ -52,8 +52,8 @@ void addTaggedGpuBlocks(MemoryOperationRequestPB::CopyItem&                     
 
 TEST(KVCacheMemoryProtocolTest, TaggedBlocksAreReorderedByLocalLayerAndTag) {
     std::vector<KVCacheMemoryConnector::LayerTagSlot> slots = {
-        {0, "linear", 0, 16},
-        {0, "full", 1, 32},
+        {0, "linear", 16},
+        {0, "full", 32},
     };
     MemoryOperationRequestPB::CopyItem item;
     auto*                              full = item.add_tagged_gpu_blocks();
@@ -73,8 +73,8 @@ TEST(KVCacheMemoryProtocolTest, TaggedBlocksAreReorderedByLocalLayerAndTag) {
 
 TEST(KVCacheMemoryProtocolTest, TaglessBlocksAreAlwaysRejected) {
     std::vector<KVCacheMemoryConnector::LayerTagSlot> slots = {
-        {0, "linear", 0, 16},
-        {0, "full", 1, 32},
+        {0, "linear", 16},
+        {0, "full", 32},
     };
     MemoryOperationRequestPB::CopyItem item;
 
@@ -112,11 +112,11 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     group_policies[5].enable_prefix_reuse  = false;
     group_policies[5].active_tail_blocks   = 1;
     group_policies[5].validate_tail_blocks = false;
-    for (size_t gid : {3u, 4u, 5u, 6u}) {
-        group_policies[gid].evict_policy = CacheEvictPolicy::INDEPENDENT;
+    for (size_t group_index : {3u, 4u, 5u, 6u}) {
+        group_policies[group_index].evict_policy = CacheEvictPolicy::INDEPENDENT;
     }
-    for (size_t gid : {3u, 4u, 6u}) {
-        group_policies[gid].enable_prefix_reuse = true;
+    for (size_t group_index : {3u, 4u, 6u}) {
+        group_policies[group_index].enable_prefix_reuse = true;
     }
     const std::vector<size_t>     group_kv_block_stride_bytes = {64, 16, 32, 48, 80, 40, 96};
     const std::vector<size_t>     group_kv_scale_stride_bytes(kDsv4PoolNum, 0);
@@ -124,17 +124,17 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     std::vector<std::vector<int>> layers_by_group(kDsv4PoolNum);
     config.layer_to_block_stride_bytes = std::vector<int>(config.layer_all_num, 0);
 
-    auto make_spec = [&](size_t gid) -> KVCacheSpecPtr {
-        return makeResolvedOpaqueSpec(group_types[gid] != CacheGroupType::FULL,
-                                      group_tags[gid],
+    auto make_spec = [&](size_t group_index) -> KVCacheSpecPtr {
+        return makeResolvedOpaqueSpec(group_types[group_index] != CacheGroupType::FULL,
+                                      group_tags[group_index],
                                       config.dtype,
-                                      group_kv_block_stride_bytes[gid],
+                                      group_kv_block_stride_bytes[group_index],
                                       static_cast<uint32_t>(config.seq_size_per_block));
     };
 
-    auto add_tag = [&](size_t layer, const std::string& tag, int gid) {
+    auto add_tag = [&](size_t layer, const std::string& tag, int group_index) {
         (void)tag;
-        layers_by_group[static_cast<size_t>(gid)].push_back(static_cast<int>(layer));
+        layers_by_group[static_cast<size_t>(group_index)].push_back(static_cast<int>(layer));
     };
 
     for (size_t layer = 0; layer < config.layer_all_num; ++layer) {
@@ -154,8 +154,8 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
 
     std::vector<KVCacheSpecPtr> specs;
     specs.reserve(kDsv4PoolNum);
-    for (size_t gid = 0; gid < kDsv4PoolNum; ++gid) {
-        specs.push_back(make_spec(gid));
+    for (size_t group_index = 0; group_index < kDsv4PoolNum; ++group_index) {
+        specs.push_back(make_spec(group_index));
     }
     config.fromGroupedSpecs(specs, layers_by_group, group_types, group_tags);
     config.setGroupPolicies(group_policies);
@@ -231,40 +231,20 @@ void verifyBlockInfosContent(const std::vector<BlockInfo>& infos, char c) {
 
 class FakeTypedKVCacheAllocator: public KVCacheAllocator {
 public:
-    explicit FakeTypedKVCacheAllocator(const CacheConfig& config,
-                                       size_t             payload_gap_bytes = 0,
-                                       std::set<int>      host_groups       = {}):
-        KVCacheAllocator(config, AllocationType::DEVICE),
-        host_groups_(std::move(host_groups)),
-        payload_gap_bytes_(payload_gap_bytes) {
-        const auto cuda_options    = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
-        const auto host_options    = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
-        const auto layer_group_ids = config.layerGroupIdsSnapshot();
-        const auto kv_strides      = config.groupKvBlockStrideBytesSnapshot();
-        const auto scale_strides   = config.groupKvScaleStrideBytesSnapshot();
+    explicit FakeTypedKVCacheAllocator(const CacheConfig& config, size_t payload_gap_bytes = 0):
+        KVCacheAllocator(config, AllocationType::DEVICE), payload_gap_bytes_(payload_gap_bytes) {
+        const auto cuda_options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
         for (int layer = 0; layer < static_cast<int>(config.layer_all_num); ++layer) {
-            if (static_cast<size_t>(layer) >= layer_group_ids.size()) {
-                continue;
-            }
-            const auto& layer_groups = layer_group_ids[static_cast<size_t>(layer)];
-            for (const int gid : layer_groups) {
-                if (gid < 0 || static_cast<size_t>(gid) >= kv_strides.size()) {
-                    continue;
-                }
-                const size_t stride =
-                    kv_strides[static_cast<size_t>(gid)]
-                    + (static_cast<size_t>(gid) < scale_strides.size() ? scale_strides[static_cast<size_t>(gid)] : 0);
+            for (const auto& tag : config.topology().layer(layer).group_tags) {
+                const auto&  group  = config.group(tag);
+                const size_t stride = group.kv_block_stride_bytes + group.kv_scale_stride_bytes;
                 if (stride == 0) {
                     continue;
                 }
-                const bool host_group = host_groups_.count(gid) > 0;
-                auto       tensor = torch::empty({static_cast<int64_t>(config.block_num), static_cast<int64_t>(stride)},
-                                           host_group ? host_options : cuda_options);
-                if (host_group) {
-                    tensor = tensor.pin_memory();
-                }
-                tensors_[key(layer, gid)] = std::move(tensor);
-                strides_[key(layer, gid)] = stride;
+                auto tensor =
+                    torch::empty({static_cast<int64_t>(config.block_num), static_cast<int64_t>(stride)}, cuda_options);
+                tensors_[key(layer, tag)] = std::move(tensor);
+                strides_[key(layer, tag)] = stride;
             }
         }
     }
@@ -273,24 +253,23 @@ public:
     void insertIntoCache(const InsertInfo&) override {}
 
     BlockAddrInfo convertIndexToAddr(int layer_id, int block_id) const override {
-        return convertIndexToAddr(layer_id, 0, block_id);
-    }
-
-    BlockAddrInfo convertIndexToAddr(int layer_id, int group_id, int block_id) const override {
-        const auto buffers = convertIndexToBuffer(layer_id, group_id, block_id);
+        const auto& tag     = config_.soleGroupForLayer(layer_id).tag;
+        const auto  buffers = convertIndexToBufferByTag(layer_id, tag, block_id);
         return buffers.empty() ? BlockAddrInfo{} : BlockAddrInfo{buffers[0].addr, nullptr};
     }
 
     std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const override {
-        return convertIndexToBuffer(layer_id, 0, block_id);
+        return convertIndexToBufferByTag(layer_id, config_.soleGroupForLayer(layer_id).tag, block_id);
     }
 
     std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id, int, int) const override {
         return convertIndexToBuffer(layer_id, block_id);
     }
 
-    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int group_id, int block_id) const override {
-        const auto k         = key(layer_id, group_id);
+    std::vector<BlockInfo>
+    convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const override {
+        config_.groupForLayer(layer_id, tag);
+        const auto k         = key(layer_id, tag);
         const auto tensor_it = tensors_.find(k);
         const auto stride_it = strides_.find(k);
         if (tensor_it == tensors_.end() || stride_it == strides_.end() || block_id < 0
@@ -310,23 +289,14 @@ public:
         }};
     }
 
-    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int group_id, int block_id, int, int) const override {
-        return convertIndexToBuffer(layer_id, group_id, block_id);
-    }
-
     BlockAddrInfo convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const override {
-        return convertIndexToAddr(layer_id, config_.groupIdForLayerTag(layer_id, tag), block_id);
-    }
-
-    std::vector<BlockInfo>
-    convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const override {
-        return convertIndexToBuffer(layer_id, config_.groupIdForLayerTag(layer_id, tag), block_id);
+        const auto buffers = convertIndexToBufferByTag(layer_id, tag, block_id);
+        return buffers.empty() ? BlockAddrInfo{} : BlockAddrInfo{buffers[0].addr, nullptr};
     }
 
     std::vector<BlockInfo> convertIndexToBufferByTag(
         int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override {
-        return convertIndexToBuffer(
-            layer_id, config_.groupIdForLayerTag(layer_id, tag), block_id, partition_count, partition_id);
+        return convertIndexToBufferByTag(layer_id, tag, block_id);
     }
 
     std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource&, const CacheKeysType&, bool) override {
@@ -361,8 +331,8 @@ public:
     }
 
 private:
-    static std::pair<int, int> key(int layer_id, int group_id) {
-        return {layer_id, group_id};
+    static std::pair<int, std::string> key(int layer_id, std::string_view tag) {
+        return {layer_id, std::string(tag)};
     }
 
     bool doInit() override {
@@ -383,10 +353,9 @@ private:
 
     void decrKVCacheRef(const KVCacheResource&, bool) override {}
 
-    std::map<std::pair<int, int>, torch::Tensor> tensors_;
-    std::map<std::pair<int, int>, size_t>        strides_;
-    std::set<int>                                host_groups_;
-    size_t                                       payload_gap_bytes_ = 0;
+    std::map<std::pair<int, std::string>, torch::Tensor> tensors_;
+    std::map<std::pair<int, std::string>, size_t>        strides_;
+    size_t                                               payload_gap_bytes_ = 0;
 };
 
 }  // namespace
@@ -408,11 +377,12 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeKindRequiredUsesRuntimeNullSlots) {
     initResourceGroupsForConfig(resource, config);
     resource.resizeBlocks(/*reserver_blocks=*/2, NULL_BLOCK_IDX);
 
-    for (int gid = 0; gid <= 2; ++gid) {
-        resource.mutableBlockIds(gid).setAt(0, static_cast<BlockIdxType>(10 + gid));
+    const std::vector<std::string> compressed_tags{"csa_kv", "hca_kv", "indexer_kv"};
+    for (size_t tag_index = 0; tag_index < compressed_tags.size(); ++tag_index) {
+        resource.mutableBlockIds(compressed_tags[tag_index]).setAt(0, static_cast<BlockIdxType>(10 + tag_index));
     }
-    resource.mutableBlockIds(0).setAt(1, 0);
-    resource.mutableBlockIds(6).setAt(1, 66);
+    resource.mutableBlockIds("csa_kv").setAt(1, 0);
+    resource.mutableBlockIds("swa_kv").setAt(1, 66);
 
     const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
 
@@ -425,14 +395,15 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeKindRequiredUsesRuntimeNullSlots) {
         connector->prefixSlotValidMask(layer_attn_blocks, slots, 0, CacheBlockKind::COMPRESSED_KV);
     ASSERT_EQ(compressed_mask.size(), slots.size());
     for (size_t i = 0; i < slots.size(); ++i) {
-        const bool expected = slots[i].group_id >= 0 && slots[i].group_id <= 2;
+        const bool expected =
+            std::find(compressed_tags.begin(), compressed_tags.end(), slots[i].tag) != compressed_tags.end();
         EXPECT_EQ(compressed_mask[i] != 0, expected) << i;
     }
 
     const auto state_mask = connector->prefixSlotValidMask(layer_attn_blocks, slots, 1, CacheBlockKind::STATE_SWA_KV);
     ASSERT_EQ(state_mask.size(), slots.size());
     for (size_t i = 0; i < slots.size(); ++i) {
-        EXPECT_EQ(state_mask[i] != 0, slots[i].group_id == config.groupIdForTag("swa_kv")) << i;
+        EXPECT_EQ(state_mask[i] != 0, slots[i].tag == "swa_kv") << i;
     }
 }
 
@@ -457,22 +428,16 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWritePlanSkipsHCAStateAndKeepsRunti
         ASSERT_NE(slot.tag, "hca_state");
     }
 
-    const int hca_layer     = 3;
-    const int hca_kv_gid    = config.groupIdForLayerTag(hca_layer, "hca_kv");
-    const int hca_state_gid = config.groupIdForLayerTag(hca_layer, "hca_state");
-    const int swa_gid       = config.groupIdForLayerTag(hca_layer, "swa_kv");
-    ASSERT_EQ(hca_kv_gid, config.groupIdForTag("hca_kv"));
-    ASSERT_EQ(hca_state_gid, config.groupIdForTag("hca_state"));
-    ASSERT_EQ(swa_gid, config.groupIdForTag("swa_kv"));
+    const int hca_layer = 3;
 
     KVCacheResource resource;
     resource.cacheKeys() = {901, 902};
     initResourceGroupsForConfig(resource, config);
     resource.resizeBlocks(/*reserver_blocks=*/2, NULL_BLOCK_IDX);
 
-    resource.mutableBlockIds(hca_layer, hca_kv_gid).assign({11, 12});
-    resource.mutableBlockIds(hca_layer, hca_state_gid).assign({51, 52});
-    resource.mutableBlockIds(hca_layer, swa_gid).assign({61, NULL_BLOCK_IDX});
+    resource.mutableBlockIdsForLayer(hca_layer, "hca_kv").assign({11, 12});
+    resource.mutableBlockIdsForLayer(hca_layer, "hca_state").assign({51, 52});
+    resource.mutableBlockIdsForLayer(hca_layer, "swa_kv").assign({61, NULL_BLOCK_IDX});
     resource.ensureLinearBlockDependencies();
 
     const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
@@ -495,16 +460,16 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWritePlanSkipsHCAStateAndKeepsRunti
     EXPECT_EQ(plan->copy_infos[2].cache_key, 902);
     EXPECT_EQ(plan->copy_infos[2].kind, CacheBlockKind::COMPRESSED_KV);
 
-    auto slot_index = [&](int group_id) -> size_t {
+    auto slot_index = [&](std::string_view tag) -> size_t {
         for (size_t i = 0; i < slots.size(); ++i) {
-            if (slots[i].layer_id == hca_layer && slots[i].group_id == group_id) {
+            if (slots[i].layer_id == hca_layer && slots[i].tag == tag) {
                 return i;
             }
         }
         return slots.size();
     };
-    const size_t hca_kv_slot = slot_index(hca_kv_gid);
-    const size_t swa_slot    = slot_index(swa_gid);
+    const size_t hca_kv_slot = slot_index("hca_kv");
+    const size_t swa_slot    = slot_index("swa_kv");
     ASSERT_LT(hca_kv_slot, slots.size());
     ASSERT_LT(swa_slot, slots.size());
 
@@ -535,15 +500,13 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadRejectsCompressedOnlyWhenStateS
     const auto slots = connector->layerTagSlots();
     ASSERT_TRUE(connector->supportsTypedPrefixCacheLayout(slots));
 
-    const int       hca_layer  = 3;
-    const int       hca_kv_gid = config.groupIdForLayerTag(hca_layer, "hca_kv");
-    const int       swa_gid    = config.groupIdForLayerTag(hca_layer, "swa_kv");
+    const int       hca_layer = 3;
     KVCacheResource resource;
     resource.cacheKeys() = {901, 902};
     initResourceGroupsForConfig(resource, config);
     resource.resizeBlocks(/*reserver_blocks=*/2, NULL_BLOCK_IDX);
-    resource.mutableBlockIds(hca_layer, hca_kv_gid).assign({11, 12});
-    resource.mutableBlockIds(hca_layer, swa_gid).assign({61, 62});
+    resource.mutableBlockIdsForLayer(hca_layer, "hca_kv").assign({11, 12});
+    resource.mutableBlockIdsForLayer(hca_layer, "swa_kv").assign({61, 62});
     resource.ensureLinearBlockDependencies();
 
     const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
@@ -593,15 +556,13 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadAllowsStateOnlyWhenCompressedNo
     const auto slots = connector->layerTagSlots();
     ASSERT_TRUE(connector->supportsTypedPrefixCacheLayout(slots));
 
-    const int       hca_layer  = 3;
-    const int       hca_kv_gid = config.groupIdForLayerTag(hca_layer, "hca_kv");
-    const int       swa_gid    = config.groupIdForLayerTag(hca_layer, "swa_kv");
+    const int       hca_layer = 3;
     KVCacheResource resource;
     resource.cacheKeys() = {901, 902};
     initResourceGroupsForConfig(resource, config);
     resource.resizeBlocks(/*reserver_blocks=*/2, NULL_BLOCK_IDX);
-    resource.mutableBlockIds(hca_layer, hca_kv_gid).assign({0, NULL_BLOCK_IDX});
-    resource.mutableBlockIds(hca_layer, swa_gid).assign({61, 62});
+    resource.mutableBlockIdsForLayer(hca_layer, "hca_kv").assign({0, NULL_BLOCK_IDX});
+    resource.mutableBlockIdsForLayer(hca_layer, "swa_kv").assign({61, 62});
     resource.ensureLinearBlockDependencies();
 
     const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
@@ -701,11 +662,11 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeBlockZeroAndNullSlotsAreNotCopiedFo
 
     const auto& valid_slot      = slots[state_slots[0]];
     const auto  valid_gpu_block = static_cast<BlockIdxType>(7);
-    setBlockInfosContent(allocator->convertIndexToBuffer(valid_slot.layer_id, valid_slot.group_id, valid_gpu_block),
+    setBlockInfosContent(allocator->convertIndexToBufferByTag(valid_slot.layer_id, valid_slot.tag, valid_gpu_block),
                          'V');
-    setBlockInfosContent(allocator->convertIndexToBuffer(slots[state_slots[1]].layer_id,
-                                                         slots[state_slots[1]].group_id,
-                                                         /*block_id=*/0),
+    setBlockInfosContent(allocator->convertIndexToBufferByTag(slots[state_slots[1]].layer_id,
+                                                              slots[state_slots[1]].tag,
+                                                              /*block_id=*/0),
                          'Z');
     set_prefix_slot(mem_block, state_slots[0], 'M');
     set_prefix_slot(mem_block, state_slots[1], 'M');
@@ -739,21 +700,21 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeBlockZeroAndNullSlotsAreNotCopiedFo
     set_prefix_slot(mem_block, state_slots[0], 'A');
     set_prefix_slot(mem_block, state_slots[1], 'B');
     set_prefix_slot(mem_block, state_slots[2], 'C');
-    setBlockInfosContent(allocator->convertIndexToBuffer(valid_slot.layer_id, valid_slot.group_id, valid_gpu_block),
+    setBlockInfosContent(allocator->convertIndexToBufferByTag(valid_slot.layer_id, valid_slot.tag, valid_gpu_block),
                          'x');
-    setBlockInfosContent(allocator->convertIndexToBuffer(slots[state_slots[1]].layer_id,
-                                                         slots[state_slots[1]].group_id,
-                                                         /*block_id=*/0),
+    setBlockInfosContent(allocator->convertIndexToBufferByTag(slots[state_slots[1]].layer_id,
+                                                              slots[state_slots[1]].tag,
+                                                              /*block_id=*/0),
                          'z');
 
     request.set_copy_direction(MemoryOperationRequestPB::H2D);
     response.Clear();
     ASSERT_TRUE(connector->copyCache(request, response));
     EXPECT_TRUE(response.success());
-    verifyBlockInfosContent(allocator->convertIndexToBuffer(valid_slot.layer_id, valid_slot.group_id, valid_gpu_block),
+    verifyBlockInfosContent(allocator->convertIndexToBufferByTag(valid_slot.layer_id, valid_slot.tag, valid_gpu_block),
                             'A');
     verifyBlockInfosContent(
-        allocator->convertIndexToBuffer(slots[state_slots[1]].layer_id, slots[state_slots[1]].group_id, 0), 'z');
+        allocator->convertIndexToBufferByTag(slots[state_slots[1]].layer_id, slots[state_slots[1]].tag, 0), 'z');
 }
 
 TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeD2HMergeSourceKeepsOldSlotsAndOverlaysNewSlots) {
@@ -828,7 +789,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeD2HMergeSourceKeepsOldSlotsAndOverl
 
     const auto& new_slot      = slots[state_slots[1]];
     const auto  new_gpu_block = static_cast<BlockIdxType>(7);
-    setBlockInfosContent(allocator->convertIndexToBuffer(new_slot.layer_id, new_slot.group_id, new_gpu_block), 'N');
+    setBlockInfosContent(allocator->convertIndexToBufferByTag(new_slot.layer_id, new_slot.tag, new_gpu_block), 'N');
 
     MemoryOperationRequestPB request;
     request.set_copy_direction(MemoryOperationRequestPB::D2H);
@@ -1147,12 +1108,11 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWriteAllocationFailureDoesNotDouble
     resource.setCacheKeys(cache_keys);
     resource.ensureLinearBlockDependencies();
 
-    const auto layer_group_ids = config.layerGroupIdsSnapshot();
-    for (size_t layer = 0; layer < layer_group_ids.size(); ++layer) {
-        for (const int gid : layer_group_ids[layer]) {
-            auto& blocks = resource.mutableBlockIds(static_cast<int>(layer), gid);
-            blocks.setAt(0, static_cast<BlockIdxType>(10 + gid));
-            blocks.setAt(1, static_cast<BlockIdxType>(20 + gid));
+    for (const auto& layer : config.topology().layers()) {
+        for (size_t tag_index = 0; tag_index < layer.group_tags.size(); ++tag_index) {
+            auto& blocks = resource.mutableBlockIdsForLayer(layer.layer_id, layer.group_tags[tag_index]);
+            blocks.setAt(0, static_cast<BlockIdxType>(10 + tag_index));
+            blocks.setAt(1, static_cast<BlockIdxType>(20 + tag_index));
         }
     }
 

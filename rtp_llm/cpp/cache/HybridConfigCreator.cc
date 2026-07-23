@@ -148,7 +148,7 @@ std::vector<GroupBase> buildTaggedGroups(const LayerKVCacheSpecs& runtime_specs,
     if (has_full_group
         && (groups[0].policy.group_type != CacheGroupType::FULL || groups[0].spec == nullptr
             || groups[0].spec->tag != "full")) {
-        RTP_LLM_LOG_WARNING("hybrid full cache group is expected at gid 0 with tag=full, got tag=%s type=%d",
+        RTP_LLM_LOG_WARNING("hybrid full cache group is expected at group_index 0 with tag=full, got tag=%s type=%d",
                             groups[0].spec == nullptr ? "<null>" : groups[0].spec->tag.c_str(),
                             static_cast<int>(groups[0].policy.group_type));
     }
@@ -189,8 +189,8 @@ void setupTopologyFromGroups(CacheConfig& config, std::vector<GroupBase> groups)
         layers[layer_id].layer_id = static_cast<int>(layer_id);
     }
 
-    for (size_t gid = 0; gid < groups.size(); ++gid) {
-        const auto& group = groups[gid];
+    for (size_t group_index = 0; group_index < groups.size(); ++group_index) {
+        const auto& group = groups[group_index];
         for (int layer_id : group.layer_ids) {
             RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layers.size(),
                                     "hybrid tag=%s has invalid layer id %d",

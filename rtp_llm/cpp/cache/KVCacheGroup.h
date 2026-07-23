@@ -27,26 +27,22 @@ class KVCacheGroup {
 public:
     KVCacheGroup(GroupBase                           cache_group,
                  BlockPoolPtr                        block_pool,
-                 int                                 group_id,
                  SharedBlockCache*                   shared_cache     = nullptr,
                  const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
         cache_group_(std::move(cache_group)),
         block_pool_(std::move(block_pool)),
         shared_cache_(shared_cache),
-        metrics_reporter_(metrics_reporter),
-        group_id_(group_id) {}
+        metrics_reporter_(metrics_reporter) {}
 
     // Transition-only constructor for HybridPool and existing focused tests.
     KVCacheGroup(const LayerIdsType&                 layer_ids,
                  KVCacheSpecPtr                      kvcache_spec,
                  BlockPoolPtr                        block_pool,
-                 int                                 group_id,
                  CacheGroupPolicy                    policy           = CacheGroupPolicy{},
                  SharedBlockCache*                   shared_cache     = nullptr,
                  const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
         KVCacheGroup(makeLegacyCacheGroup(layer_ids, std::move(kvcache_spec), policy),
                      std::move(block_pool),
-                     group_id,
                      shared_cache,
                      metrics_reporter) {}
 
@@ -97,7 +93,6 @@ public:
     int                     seqSizePerBlock() const;
     const std::string&      tag() const;
     const GroupBase&        config() const;
-    int                     group_id() const;
     const CacheGroupPolicy& policy() const;
     bool                    prefixReuseEnabled() const;
     CacheEvictPolicy        evictPolicy() const;
@@ -115,7 +110,7 @@ protected:
     static GroupBase
     makeLegacyCacheGroup(const LayerIdsType& layer_ids, KVCacheSpecPtr spec, const CacheGroupPolicy& policy) {
         GroupBase group;
-        group.tag                       = spec == nullptr ? std::string{} : spec->tag;
+        group.tag                       = spec == nullptr || spec->tag.empty() ? "default" : spec->tag;
         group.spec                      = std::move(spec);
         group.policy                    = policy;
         group.layer_ids                 = layer_ids;
@@ -130,7 +125,6 @@ protected:
     BlockPoolPtr                 block_pool_;
     SharedBlockCache*            shared_cache_     = nullptr;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
-    int                          group_id_         = -1;
 
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_tensors;
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_scale_tensors;

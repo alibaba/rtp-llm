@@ -69,7 +69,7 @@ private:
     struct LayerTagSlot {
         int         layer_id{-1};
         std::string tag;
-        int         group_id{-1};
+        size_t      group_index{0};
         size_t      stride_bytes{0};
     };
     struct CopyInfoPerKey {

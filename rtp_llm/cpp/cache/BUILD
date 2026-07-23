@@ -135,13 +135,11 @@ cc_library(
 cc_library(
     name = "block_pool",
     srcs = [
-        "BlockCache.cc",
         "BlockPool.cc",
         "MemoryLayoutStrategy.cc",
         "SharedBlockCache.cc",
     ],
     hdrs = [
-        "BlockCache.h",
         "BlockPool.h",
         "BlockPoolConfig.h",
         "BlockPoolConfigHelper.h",

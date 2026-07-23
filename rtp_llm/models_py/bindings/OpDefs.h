@@ -36,7 +36,6 @@ struct LayerKVCache {
     torch::Tensor kv_scale_base;
     int           seq_size_per_block = 0;
     int           layer_id           = -1;
-    int           group_id           = -1;
     std::string   tag                = "default";
 
     LayerKVCache() = default;
@@ -44,14 +43,12 @@ struct LayerKVCache {
     LayerKVCache(torch::Tensor kv_cache_base,
                  int           seq_size_per_block,
                  int           layer_id      = -1,
-                 int           group_id      = -1,
                  std::string   tag           = "default",
                  torch::Tensor kv_scale_base = {}):
         kv_cache_base(std::move(kv_cache_base)),
         kv_scale_base(std::move(kv_scale_base)),
         seq_size_per_block(seq_size_per_block),
         layer_id(layer_id),
-        group_id(group_id),
         tag(std::move(tag)) {}
 };
 
@@ -161,13 +158,8 @@ private:
                                 layer_id,
                                 group.tag.c_str());
 
-        const int    group_id = static_cast<int>(grouped_layout_.topology().groupIdForTag(group.tag));
-        LayerKVCache result(buffers.kv_addr,
-                            static_cast<int>(group.seq_size_per_block),
-                            layer_id,
-                            group_id,
-                            group.tag,
-                            buffers.kv_scale_addr);
+        LayerKVCache result(
+            buffers.kv_addr, static_cast<int>(group.seq_size_per_block), layer_id, group.tag, buffers.kv_scale_addr);
 
         const auto spec_type = group.spec->type;
         if (group.policy.group_type != rtp_llm::CacheGroupType::FULL

@@ -566,19 +566,19 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
 
     inputs.attention_inputs_by_tag.clear();
     if (kv_cache_group_tags_.size() > 1) {
-        for (size_t group_id = 0; group_id < kv_cache_group_tags_.size(); ++group_id) {
+        for (size_t group_index = 0; group_index < kv_cache_group_tags_.size(); ++group_index) {
             auto tagged_inputs = inputs.attention_inputs;
-            if (group_id > 0) {
+            if (group_index > 0) {
                 tagged_inputs.kv_cache_kernel_block_id_device =
                     torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
                 tagged_inputs.kv_cache_kernel_block_id =
                     torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
             }
             const auto [it, inserted] =
-                inputs.attention_inputs_by_tag.emplace(kv_cache_group_tags_[group_id], std::move(tagged_inputs));
+                inputs.attention_inputs_by_tag.emplace(kv_cache_group_tags_[group_index], std::move(tagged_inputs));
             (void)it;
             RTP_LLM_CHECK_WITH_INFO(
-                inserted, "duplicate CUDA graph KV cache tag=%s", kv_cache_group_tags_[group_id].c_str());
+                inserted, "duplicate CUDA graph KV cache tag=%s", kv_cache_group_tags_[group_index].c_str());
         }
     }
 }

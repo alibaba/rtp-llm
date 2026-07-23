@@ -166,22 +166,14 @@ private:
         return total;
     }
     size_t memoryCacheBlockBytes(const CacheConfig& cfg) const {
-        size_t     total           = 0;
-        const auto layer_group_ids = cfg.layerGroupIdsSnapshot();
-        for (size_t layer = 0; layer < static_cast<size_t>(cfg.layer_all_num); ++layer) {
-            if (layer >= layer_group_ids.size()) {
-                continue;
-            }
-            for (int gid : layer_group_ids[layer]) {
-                if (gid < 0 || gid >= cfg.groupNums()) {
+        size_t total = 0;
+        for (const auto& layer : cfg.topology().layers()) {
+            for (const auto& tag : layer.group_tags) {
+                const auto& group = cfg.group(tag);
+                if (!group.policy.enable_prefix_reuse) {
                     continue;
                 }
-                const auto policy = cfg.policyForGroup(static_cast<size_t>(gid));
-                if (!policy.enable_prefix_reuse) {
-                    continue;
-                }
-                total += cfg.kvBlockStrideBytesForGroup(static_cast<size_t>(gid))
-                         + cfg.kvScaleStrideBytesForGroup(static_cast<size_t>(gid));
+                total += group.kv_block_stride_bytes + group.kv_scale_stride_bytes;
             }
         }
         return total;
@@ -414,7 +406,7 @@ private:
         const size_t layer_num = static_cast<size_t>(cache_config_.layer_all_num);
         res->initGroups(cache_config_.topologyPtr());
         const auto default_blocks = makeGroupBlockIndices(per_layer_block_indices, cache_keys.size());
-        res->mutableBlockIds(0).assign(default_blocks);
+        res->mutableBlockIds("default").assign(default_blocks);
         for (size_t layer = 0; layer < layer_num; ++layer) {
             auto layer_blocks = std::make_shared<BlockIds>();
             if (layer < per_layer_block_indices.size()) {
@@ -447,7 +439,7 @@ private:
         if (block_indices.size() < cache_keys.size()) {
             block_indices.resize(cache_keys.size(), NULL_BLOCK_IDX);
         }
-        res->mutableBlockIds(0).assign(block_indices);
+        res->mutableBlockIds("default").assign(block_indices);
         res->setDeviceReuseBlockNum(reuse_len);
         res->setLastBlockAligned(true);
         return res;

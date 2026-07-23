@@ -8,17 +8,20 @@ namespace rtp_llm {
 
 void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology) {
     RTP_LLM_CHECK_WITH_INFO(topology != nullptr, "KVCacheResource::initGroups requires a topology");
-    tag_to_group_id_.clear();
+    group_tags_.clear();
+    tag_to_group_index_.clear();
     layer_group_tags_.clear();
     group_block_ids.clear();
     layer_group_block_ids.clear();
 
     const auto& groups = topology->groups();
+    group_tags_.reserve(groups.size());
+    tag_to_group_index_.reserve(groups.size());
     group_block_ids.reserve(groups.size());
-    for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
-        const auto& group = groups[group_id];
-        tag_to_group_id_.emplace(group.tag, static_cast<int>(group_id));
-
+    for (const auto& group : groups) {
+        const size_t group_index = group_tags_.size();
+        group_tags_.push_back(group.tag);
+        tag_to_group_index_.emplace(group.tag, group_index);
         const size_t blocks_per_kv_block = group.seq_size_per_block / group.kernel_seq_size_per_block;
         const size_t stored_blocks_per_kv_block =
             group.policy.group_type == CacheGroupType::FULL ? std::max<size_t>(1, blocks_per_kv_block) : 1;
@@ -33,8 +36,8 @@ void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology) 
         auto& group_blocks = layer_group_block_ids[static_cast<size_t>(layer.layer_id)];
         group_blocks.assign(groups.size(), nullptr);
         for (const auto& tag : layer.group_tags) {
-            const auto group_id    = topology->groupIdForTag(tag);
-            group_blocks[group_id] = group_block_ids[group_id];
+            const size_t group_index  = topology->groupIndex(tag);
+            group_blocks[group_index] = group_block_ids[group_index];
         }
     }
 }
@@ -157,75 +160,65 @@ void BlockIds::syncKernelBlocks() {
 }
 
 void KVCacheResource::resizeBlocks(int reserver_blocks, int value) {
-    for (auto& group : group_block_ids) {
-        group->resize(reserver_blocks, value);
+    for (auto& blocks : group_block_ids) {
+        blocks->resize(reserver_blocks, value);
     }
 }
 
-int KVCacheResource::blocksNum(int group_id) const {
-    RTP_LLM_CHECK(group_block_ids.size() > static_cast<size_t>(group_id));
-    return static_cast<int>(group_block_ids[group_id]->blocksNum());
+size_t KVCacheResource::groupIndex(std::string_view tag) const {
+    const auto it = tag_to_group_index_.find(std::string(tag));
+    RTP_LLM_CHECK_WITH_INFO(
+        it != tag_to_group_index_.end(), "KVCacheResource missing tag=%s", std::string(tag).c_str());
+    return it->second;
+}
+
+BlockIds& KVCacheResource::mutableBlockIdsByIndex(size_t group_index) const {
+    RTP_LLM_CHECK_WITH_INFO(group_index < group_block_ids.size(),
+                            "KVCacheResource invalid group_index=%zu size=%zu",
+                            group_index,
+                            group_block_ids.size());
+    return *group_block_ids[group_index];
+}
+
+BlockIds& KVCacheResource::mutableBlockIdsForLayerByIndex(int layer_id, size_t group_index) const {
+    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layer_group_block_ids.size(),
+                            "KVCacheResource invalid layer_id=%d size=%zu",
+                            layer_id,
+                            layer_group_block_ids.size());
+    const auto& groups = layer_group_block_ids[static_cast<size_t>(layer_id)];
+    RTP_LLM_CHECK_WITH_INFO(group_index < groups.size() && groups[group_index] != nullptr,
+                            "KVCacheResource layer=%d does not own group_index=%zu",
+                            layer_id,
+                            group_index);
+    return *groups[group_index];
 }
 
 int KVCacheResource::blocksNum(std::string_view tag) const {
-    return blocksNum(groupIdForTag(tag));
-}
-
-const BlockIndicesType& KVCacheResource::blocks(int group_id) const {
-    RTP_LLM_CHECK(group_block_ids.size() > static_cast<size_t>(group_id));
-    return group_block_ids[group_id]->blocks();
+    return static_cast<int>(mutableBlockIdsByIndex(groupIndex(tag)).blocksNum());
 }
 
 const BlockIndicesType& KVCacheResource::blocks(std::string_view tag) const {
-    return blocks(groupIdForTag(tag));
-}
-
-const BlockIndicesType& KVCacheResource::blocks(int layer_id, int group_id) const {
-    return mutableBlockIds(layer_id, group_id).blocks();
+    return mutableBlockIdsByIndex(groupIndex(tag)).blocks();
 }
 
 const BlockIndicesType& KVCacheResource::blocksForLayer(int layer_id, std::string_view tag) const {
-    return mutableBlockIdsForLayer(layer_id, tag).blocks();
-}
-
-const BlockIndicesType& KVCacheResource::kernelBlocks(int group_id) const {
-    RTP_LLM_CHECK(group_block_ids.size() > static_cast<size_t>(group_id));
-    return group_block_ids[group_id]->kernelBlocks();
+    return mutableBlockIdsForLayerByIndex(layer_id, groupIndex(tag)).blocks();
 }
 
 const BlockIndicesType& KVCacheResource::kernelBlocks(std::string_view tag) const {
-    return kernelBlocks(groupIdForTag(tag));
-}
-
-const BlockIndicesType& KVCacheResource::kernelBlocks(int layer_id, int group_id) const {
-    return mutableBlockIds(layer_id, group_id).kernelBlocks();
+    return mutableBlockIdsByIndex(groupIndex(tag)).kernelBlocks();
 }
 
 const BlockIndicesType& KVCacheResource::kernelBlocksForLayer(int layer_id, std::string_view tag) const {
-    return mutableBlockIdsForLayer(layer_id, tag).kernelBlocks();
-}
-
-BlockIds& KVCacheResource::mutableBlockIds(int group_id) const {
-    RTP_LLM_CHECK(group_block_ids.size() > static_cast<size_t>(group_id));
-    return *group_block_ids[group_id];
+    return mutableBlockIdsForLayerByIndex(layer_id, groupIndex(tag)).kernelBlocks();
 }
 
 BlockIds& KVCacheResource::mutableBlockIds(std::string_view tag) const {
-    return mutableBlockIds(groupIdForTag(tag));
-}
-
-BlockIds& KVCacheResource::mutableBlockIds(int layer_id, int group_id) const {
-    RTP_LLM_CHECK(static_cast<size_t>(layer_id) < layer_group_block_ids.size());
-    RTP_LLM_CHECK(static_cast<size_t>(group_id) < layer_group_block_ids[static_cast<size_t>(layer_id)].size());
-    auto block_ids = layer_group_block_ids[static_cast<size_t>(layer_id)][static_cast<size_t>(group_id)];
-    RTP_LLM_CHECK_WITH_INFO(
-        block_ids != nullptr, "KVCacheResource: missing block ids for layer %d group_id %d", layer_id, group_id);
-    return *block_ids;
+    return mutableBlockIdsByIndex(groupIndex(tag));
 }
 
 BlockIds& KVCacheResource::mutableBlockIdsForLayer(int layer_id, std::string_view tag) const {
-    const int group_id = groupIdForLayerTag(layer_id, tag);
-    return mutableBlockIds(layer_id, group_id);
+    return mutableBlockIdsForLayerByIndex(layer_id, groupIndex(tag));
 }
 
 const BlockIds& KVCacheResource::blockIds(std::string_view tag) const {
@@ -234,23 +227,6 @@ const BlockIds& KVCacheResource::blockIds(std::string_view tag) const {
 
 const BlockIds& KVCacheResource::blockIdsForLayer(int layer_id, std::string_view tag) const {
     return mutableBlockIdsForLayer(layer_id, tag);
-}
-
-int KVCacheResource::groupIdForTag(std::string_view tag) const {
-    const auto value = std::string(tag);
-    const auto it    = tag_to_group_id_.find(value);
-    RTP_LLM_CHECK_WITH_INFO(it != tag_to_group_id_.end(), "KVCacheResource missing tag=%s", value.c_str());
-    return it->second;
-}
-
-int KVCacheResource::groupIdForLayerTag(int layer_id, std::string_view tag) const {
-    const auto& tags  = groupTagsForLayer(layer_id);
-    const auto  value = std::string(tag);
-    RTP_LLM_CHECK_WITH_INFO(std::find(tags.begin(), tags.end(), value) != tags.end(),
-                            "KVCacheResource layer=%d does not own tag=%s",
-                            layer_id,
-                            value.c_str());
-    return groupIdForTag(tag);
 }
 
 const std::vector<std::string>& KVCacheResource::groupTagsForLayer(int layer_id) const {
@@ -281,6 +257,10 @@ int KVCacheResource::groupNums() const {
     return static_cast<int>(group_block_ids.size());
 }
 
+const std::vector<std::string>& KVCacheResource::groupTags() const {
+    return group_tags_;
+}
+
 GroupBlockIds& KVCacheResource::groupBlocks() {
     return group_block_ids;
 }
@@ -296,41 +276,18 @@ LayerBlockIds KVCacheResource::layerBlocks() const {
     LayerBlockIds layer_blocks;
     layer_blocks.reserve(layer_group_block_ids.size());
     for (size_t layer = 0; layer < layer_group_block_ids.size(); ++layer) {
-        const auto&               group_blocks = layer_group_block_ids[layer];
-        std::shared_ptr<BlockIds> selected_blocks;
-        int                       selected_group_id = -1;
-        int                       mapped_group_num  = 0;
-        for (size_t group_id = 0; group_id < group_blocks.size(); ++group_id) {
-            if (group_blocks[group_id] == nullptr) {
-                continue;
-            }
-            selected_blocks   = group_blocks[group_id];
-            selected_group_id = static_cast<int>(group_id);
-            ++mapped_group_num;
-        }
-        RTP_LLM_CHECK_WITH_INFO(mapped_group_num == 1 && selected_blocks != nullptr,
-                                "KVCacheResource::layerBlocks requires exactly one group per layer, layer=%zu "
-                                "mapped_group_num=%d selected_group=%d group_num=%zu",
-                                layer,
-                                mapped_group_num,
-                                selected_group_id,
-                                group_blocks.size());
-        layer_blocks.push_back(std::move(selected_blocks));
+        const auto& group_blocks = layer_group_block_ids[layer];
+        const auto  group_it     = std::find_if(
+            group_blocks.begin(), group_blocks.end(), [](const auto& blocks) { return blocks != nullptr; });
+        RTP_LLM_CHECK_WITH_INFO(
+            group_it != group_blocks.end(), "KVCacheResource::layerBlocks missing group for layer=%zu", layer);
+        layer_blocks.push_back(*group_it);
     }
     return layer_blocks;
 }
 
 const LayerAttnBlockIds& KVCacheResource::layerGroupBlocks() const {
     return layer_group_block_ids;
-}
-
-int KVCacheResource::groupId(int layer_id, int group_id) const {
-    RTP_LLM_CHECK(static_cast<size_t>(layer_id) < layer_group_block_ids.size());
-    if (group_id < 0 || static_cast<size_t>(group_id) >= layer_group_block_ids[static_cast<size_t>(layer_id)].size()
-        || !layer_group_block_ids[static_cast<size_t>(layer_id)][static_cast<size_t>(group_id)]) {
-        return -1;
-    }
-    return group_id;
 }
 
 CacheKeysType& KVCacheResource::cacheKeys() {
@@ -433,21 +390,20 @@ void KVCacheResource::setLastBlockAligned(bool last_block_aligned) {
 
 std::string KVCacheResource::debugString() const {
     std::stringstream debug_string;
-    const int         group_nums = static_cast<int>(group_block_ids.size());
-    for (int group_id = 0; group_id < group_nums; group_id++) {
-        debug_string << "group:[" << group_id << "], block:[";
-        auto& block_indices = blocks(group_id);
-        for (auto& block : block_indices) {
+    for (size_t group_index = 0; group_index < group_block_ids.size(); ++group_index) {
+        const auto& tag = group_tags_[group_index];
+        debug_string << "group:[" << tag << "], block:[";
+        const auto& block_indices = group_block_ids[group_index]->blocks();
+        for (const auto block : block_indices) {
             debug_string << block << ", ";
         }
         debug_string << "], ";
     }
-
     return debug_string.str();
 }
 
-void KVCacheResource::swapBlocks(size_t group_id, size_t rhs, size_t lhs) {
-    group_block_ids[group_id]->swap(rhs, lhs);
+void KVCacheResource::swapBlocks(std::string_view tag, size_t rhs, size_t lhs) {
+    mutableBlockIdsByIndex(groupIndex(tag)).swap(rhs, lhs);
 }
 
 }  // namespace rtp_llm

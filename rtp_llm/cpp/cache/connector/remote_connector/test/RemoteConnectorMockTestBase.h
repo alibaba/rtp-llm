@@ -148,8 +148,8 @@ protected:
         UriStrVec res;
         size_t    pos_idx = 0;
         for (size_t i = 0; i < cache_keys.size(); i++) {
-            for (auto group_id : full_group_ids_) {
-                std::string full_group_name = "F" + cache_config_.tagForGroup(static_cast<size_t>(group_id));
+            for (const auto& tag : full_group_tags_) {
+                std::string full_group_name = "F" + tag;
                 for (int r = 0; r < tp_size_; r++) {
                     std::string uri = uri_prefix + "uri_" + full_group_name + "_" + std::to_string(r) + "_"
                                       + std::to_string(cache_keys[i]);
@@ -158,8 +158,8 @@ protected:
             }
             if (!other_pos_vec.empty()) {
                 if (i == other_pos_vec[pos_idx]) {
-                    for (auto group_id : other_group_ids_) {
-                        std::string other_group_name = "L" + cache_config_.tagForGroup(static_cast<size_t>(group_id));
+                    for (const auto& tag : other_group_tags_) {
+                        std::string other_group_name = "L" + tag;
                         for (int r = 0; r < tp_size_; r++) {
                             std::string uri = uri_prefix + "uri_" + other_group_name + "_" + std::to_string(r) + "_"
                                               + std::to_string(cache_keys[i]);
@@ -179,8 +179,8 @@ protected:
         kv_cache_manager::Locations locations;
         locations.resize(cache_keys.size(), {});
         for (size_t i = 0; i < cache_keys.size(); i++) {
-            for (auto group_id : full_group_ids_) {
-                std::string full_group_name = "F" + cache_config_.tagForGroup(static_cast<size_t>(group_id));
+            for (const auto& tag : full_group_tags_) {
+                std::string full_group_name = "F" + tag;
                 for (int r = 0; r < tp_size_; r++) {
                     std::string uri = uri_prefix + "uri_" + full_group_name + "_" + std::to_string(r) + "_"
                                       + std::to_string(cache_keys[i]);
@@ -190,8 +190,8 @@ protected:
             }
         }
         for (auto pos : other_pos_vec) {
-            for (auto group_id : other_group_ids_) {
-                std::string other_group_name = "L" + cache_config_.tagForGroup(static_cast<size_t>(group_id));
+            for (const auto& tag : other_group_tags_) {
+                std::string other_group_name = "L" + tag;
                 for (int r = 0; r < tp_size_; r++) {
                     std::string uri = uri_prefix + "uri_" + other_group_name + "_" + std::to_string(r) + "_"
                                       + std::to_string(cache_keys[pos]);
@@ -209,6 +209,15 @@ protected:
         return result;
     }
 
+    void addNextGroupBlockIds(KVCacheResource& resource, const BlockIndicesType& block_indices) {
+        std::vector<std::string> tags;
+        tags.insert(tags.end(), full_group_tags_.begin(), full_group_tags_.end());
+        tags.insert(tags.end(), other_group_tags_.begin(), other_group_tags_.end());
+        const auto group_index = resource.group_block_ids.size();
+        ASSERT_LT(group_index, tags.size());
+        resource.group_block_ids.push_back(makeGroupBlockIds(block_indices));
+    }
+
     CacheConfig                cache_config_;
     KVCacheConfig              kv_cache_config_;
     RuntimeConfig              runtime_config_;
@@ -220,9 +229,9 @@ protected:
     std::vector<std::string>                            server_addrs_;
     inline static MockClientFactory*                    mock_client_factory_ = nullptr;
     std::vector<kv_cache_manager::MockMetaClient*>      meta_clients_;
-    inline static kv_cache_manager::MockTransferClient* transfer_client_ = nullptr;
-    inline static const std::vector<int32_t>            full_group_ids_  = {0};
-    std::vector<int32_t>                                other_group_ids_ = {};
+    inline static kv_cache_manager::MockTransferClient* transfer_client_  = nullptr;
+    inline static const std::vector<std::string>        full_group_tags_  = {"default"};
+    std::vector<std::string>                            other_group_tags_ = {};
 
     constexpr static const char* fake_address_ = "fake_address";
     using MatchLocationReturnType              = std::pair<ClientErrorCode, Locations>;

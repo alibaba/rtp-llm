@@ -82,9 +82,9 @@ GroupedCacheLayerLayout makeLayout(std::vector<GroupBase>          groups,
     EXPECT_EQ(groups.size(), buffers.size());
     auto topology = CacheTopology::create(std::move(groups), {{0, std::move(layer_tags)}});
     GroupedCacheLayerLayout::GroupLayouts layouts;
-    for (size_t group_id = 0; group_id < topology->groups().size(); ++group_id) {
-        layouts.emplace(topology->groupById(group_id).tag,
-                        CacheLayerLayout(std::vector<BlockBufferPtrInfo>{std::move(buffers[group_id])}));
+    for (size_t group_index = 0; group_index < topology->groups().size(); ++group_index) {
+        layouts.emplace(topology->groups().at(group_index).tag,
+                        CacheLayerLayout(std::vector<BlockBufferPtrInfo>{std::move(buffers[group_index])}));
     }
     return GroupedCacheLayerLayout(std::move(topology), std::move(layouts));
 }
@@ -109,7 +109,6 @@ TEST(KVCacheLayoutViewTest, MhaUsesGroupHeadsAndSpecPayloadForKernelView) {
     EXPECT_EQ(layer.kv_scale_base.sizes().vec(), (std::vector<int64_t>{12, 4}));
     EXPECT_EQ(layer.kv_cache_base.data_ptr(), base.data_ptr());
     EXPECT_EQ(by_tag.kv_cache_base.data_ptr(), layer.kv_cache_base.data_ptr());
-    EXPECT_EQ(by_tag.group_id, 0);
     EXPECT_EQ(by_tag.tag, "full");
     EXPECT_EQ(cache.groupTags(), std::vector<std::string>{"full"});
     EXPECT_EQ(cache.layerCount(), 1u);

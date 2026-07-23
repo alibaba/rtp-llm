@@ -47,7 +47,7 @@ TEST(CacheTopologyTest, SupportsDistinctOneToOneGroupsAndOneToManyLayers) {
     EXPECT_ANY_THROW(topology->soleGroupForLayer(2));
 }
 
-TEST(CacheTopologyTest, CompatibilitySnapshotsAreLazyStableAndReadOnly) {
+TEST(CacheTopologyTest, OrderedSnapshotsAreLazyStableAndReadOnly) {
     auto topology = CacheTopology::create({makeGroup("full", {0}), makeGroup("linear", {0}, CacheGroupType::LINEAR)},
                                           {{0, {"full", "linear"}}});
 
@@ -58,8 +58,7 @@ TEST(CacheTopologyTest, CompatibilitySnapshotsAreLazyStableAndReadOnly) {
     EXPECT_EQ(tags_first, (std::vector<std::string>{"full", "linear"}));
     EXPECT_EQ(spec_types,
               (std::vector<KVCacheSpecType>{KVCacheSpecType::MultiHeadAttention, KVCacheSpecType::MultiHeadAttention}));
-    EXPECT_EQ(topology->layerGroupIdsSnapshot(), (std::vector<std::vector<int>>{{0, 1}}));
-    EXPECT_EQ(topology->layerTagToGroupIdSnapshot().front().at("linear"), 1);
+    EXPECT_EQ(topology->layer(0).group_tags, (std::vector<std::string>{"full", "linear"}));
 }
 
 TEST(CacheTopologyTest, TagIdentityDoesNotDependOnNumericGroupOrder) {
@@ -68,7 +67,10 @@ TEST(CacheTopologyTest, TagIdentityDoesNotDependOnNumericGroupOrder) {
     auto reversed = CacheTopology::create({makeGroup("linear", {0}, CacheGroupType::LINEAR), makeGroup("full", {0})},
                                           {{0, {"full", "linear"}}});
 
-    EXPECT_NE(first->groupIdForTag("full"), reversed->groupIdForTag("full"));
+    EXPECT_EQ(first->groupIndex("full"), 0u);
+    EXPECT_EQ(first->groupIndex("linear"), 1u);
+    EXPECT_EQ(reversed->groupIndex("linear"), 0u);
+    EXPECT_EQ(reversed->groupIndex("full"), 1u);
     EXPECT_EQ(first->group("full").policy.group_type, reversed->group("full").policy.group_type);
     EXPECT_EQ(first->group("linear").policy.group_type, reversed->group("linear").policy.group_type);
     EXPECT_EQ(first->groupForLayer(0, "full").tag, reversed->groupForLayer(0, "full").tag);

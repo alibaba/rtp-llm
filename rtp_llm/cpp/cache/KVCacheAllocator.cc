@@ -157,27 +157,6 @@ uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_lay
         config_.layer_num, static_cast<int>(model_id - 1), sub->layer_num, local_layer_id);
 }
 
-BlockAddrInfo KVCacheAllocator::convertIndexToAddr(int layer_id, int group_id, int block_id) const {
-    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology group id=%d", group_id);
-    return convertIndexToAddrByTag(layer_id, config_.topology().groupById(static_cast<size_t>(group_id)).tag, block_id);
-}
-
-std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(int layer_id, int group_id, int block_id) const {
-    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology group id=%d", group_id);
-    return convertIndexToBufferByTag(
-        layer_id, config_.topology().groupById(static_cast<size_t>(group_id)).tag, block_id);
-}
-
-std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(
-    int layer_id, int group_id, int block_id, int partition_count, int partition_id) const {
-    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology group id=%d", group_id);
-    return convertIndexToBufferByTag(layer_id,
-                                     config_.topology().groupById(static_cast<size_t>(group_id)).tag,
-                                     block_id,
-                                     partition_count,
-                                     partition_id);
-}
-
 BlockAddrInfo KVCacheAllocator::convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const {
     (void)config_.groupForLayer(layer_id, tag);
     return convertIndexToAddr(layer_id, block_id);
@@ -220,9 +199,10 @@ void KVCacheAllocator::blockBatchCopy(const torch::Tensor& copy_mapping) {
     std::vector<TaggedBlockIdPair> tagged_mappings;
     tagged_mappings.reserve(static_cast<size_t>(copy_mapping.size(0)));
     for (int64_t i = 0; i < copy_mapping.size(0); ++i) {
-        RTP_LLM_CHECK_WITH_INFO(
-            mappings[i].group_id >= 0, "cache block copy mapping has invalid group_id=%d", mappings[i].group_id);
-        tagged_mappings.push_back({config_.topology().groupById(static_cast<size_t>(mappings[i].group_id)).tag,
+        RTP_LLM_CHECK_WITH_INFO(mappings[i].group_index >= 0,
+                                "cache block copy mapping has invalid group_index=%d",
+                                mappings[i].group_index);
+        tagged_mappings.push_back({config_.topology().groups().at(static_cast<size_t>(mappings[i].group_index)).tag,
                                    mappings[i].src,
                                    mappings[i].dst});
     }
@@ -319,8 +299,8 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
     batch_resource->initGroups(config_.topologyPtr());
     batch_resource->setLastBlockAligned(true);
 
-    for (int gid = 0; gid < config_.groupNums(); ++gid) {
-        batch_resource->mutableBlockIds(0, gid).resize(evict_result.evicted_keys.size(), NULL_BLOCK_IDX);
+    for (const auto& group : config_.topology().groups()) {
+        batch_resource->mutableBlockIds(0, group.tag).resize(evict_result.evicted_keys.size(), NULL_BLOCK_IDX);
     }
 
     CacheKeysType         evicted_keys;
@@ -343,9 +323,9 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
             }
             evicted_dependencies.push_back(dependency);
         }
-        for (int gid = 0; gid < static_cast<int>(group_block_ids.size()) && gid < config_.groupNums(); ++gid) {
-            if (!isNullBlockIdx(group_block_ids[gid])) {
-                batch_resource->mutableBlockIds(0, gid).setAt(evicted_idx, group_block_ids[gid]);
+        for (const auto& [tag, block_id] : group_block_ids) {
+            if (!isNullBlockIdx(block_id)) {
+                batch_resource->mutableBlockIds(0, tag).setAt(evicted_idx, block_id);
             }
         }
     }
@@ -363,8 +343,8 @@ void KVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_ca
     BlockIndicesType                 blocks_to_free;
     std::unordered_set<BlockIdxType> seen_blocks;
     for (int batch_id = 0; batch_id < batch_kv_cache_resource->batchSize(); ++batch_id) {
-        for (int gid = 0; gid < batch_kv_cache_resource->groupNums(); ++gid) {
-            for (const auto block_idx : batch_kv_cache_resource->blocks(batch_id, gid)) {
+        for (const auto& block_ids : batch_kv_cache_resource->groupBlocks(batch_id)) {
+            for (const auto block_idx : block_ids->blocks()) {
                 if (isNullBlockIdx(block_idx) || !seen_blocks.insert(block_idx).second) {
                     continue;
                 }
@@ -394,11 +374,15 @@ size_t KVCacheAllocator::notInUseBlocksNum() const {
 }
 
 size_t KVCacheAllocator::availableTokensNum() const {
-    return block_pool_ ? (block_pool_->availableBlocksNum() * logicalSeqSizePerBlockForCapacity(/*gid=*/0)) : 0;
+    return block_pool_ ? (block_pool_->availableBlocksNum()
+                          * logicalSeqSizePerBlockForCapacity(config_.topology().groups().front().tag)) :
+                         0;
 }
 
 size_t KVCacheAllocator::totalTokensNum() const {
-    return block_pool_ ? (block_pool_->totalBlocksNum() * logicalSeqSizePerBlockForCapacity(/*gid=*/0)) : 0;
+    return block_pool_ ? (block_pool_->totalBlocksNum()
+                          * logicalSeqSizePerBlockForCapacity(config_.topology().groups().front().tag)) :
+                         0;
 }
 
 size_t KVCacheAllocator::totalBlocksNum() const {
@@ -409,20 +393,20 @@ size_t KVCacheAllocator::maxAvailableTokensNum() const {
     return totalTokensNum();
 }
 
-bool KVCacheAllocator::cpShardThisGroupForCapacity(size_t gid) const {
-    return cp_slot_mapper_ && cp_slot_mapper_->isSharded() && cp_slot_mapper_->blockRoundRobinGroup(config_, gid);
+bool KVCacheAllocator::cpShardThisGroupForCapacity(std::string_view tag) const {
+    return cp_slot_mapper_ && cp_slot_mapper_->isSharded() && cp_slot_mapper_->blockRoundRobinGroup(config_, tag);
 }
 
-size_t KVCacheAllocator::logicalSeqSizePerBlockForCapacity(size_t gid) const {
+size_t KVCacheAllocator::logicalSeqSizePerBlockForCapacity(std::string_view tag) const {
     if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
-        return cp_slot_mapper_->logicalSeqSizePerBlock(config_, gid);
+        return cp_slot_mapper_->logicalSeqSizePerBlock(config_, tag);
     }
-    return config_.seqSizePerBlockForGroup(gid);
+    return config_.group(std::string(tag)).seq_size_per_block;
 }
 
-int KVCacheAllocator::cpEffectiveSeqLenForAlloc(size_t gid, int seq_len) const {
+int KVCacheAllocator::cpEffectiveSeqLenForAlloc(std::string_view tag, int seq_len) const {
     return (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) ?
-               cp_slot_mapper_->effectiveSeqLenForAlloc(config_, gid, seq_len) :
+               cp_slot_mapper_->effectiveSeqLenForAlloc(config_, tag, seq_len) :
                seq_len;
 }
 
@@ -443,7 +427,7 @@ std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots()
     return {};
 }
 
-std::vector<int> KVCacheAllocator::independentEvictionGroupIds() const {
+std::vector<std::string> KVCacheAllocator::independentEvictionGroupTags() const {
     return {};
 }
 

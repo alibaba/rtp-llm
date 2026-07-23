@@ -127,7 +127,6 @@ class LayerKVCache:
         kv_cache_base: torch.Tensor,
         seq_size_per_block: int,
         layer_id: int = -1,
-        group_id: int = -1,
         tag: str = "default",
         kv_scale_base: torch.Tensor | None = None,
     ) -> None: ...
@@ -151,12 +150,6 @@ class LayerKVCache:
     def layer_id(self) -> int:
         """
         Global layer id
-        """
-
-    @property
-    def group_id(self) -> int:
-        """
-        Cache group id (-1 = default)
         """
 
     @property

@@ -6,6 +6,7 @@
 #include <memory>
 #include <numeric>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -18,6 +19,16 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm::test {
+
+// Test-only helper for assertions over positional tensor/vector layouts.
+// Cache identity remains tag-based; the returned value is only an array index.
+inline size_t groupIndexForTag(const CacheConfig& config, std::string_view tag) {
+    const auto& groups = config.topology().groups();
+    const auto  it =
+        std::find_if(groups.begin(), groups.end(), [tag](const GroupBase& group) { return group.tag == tag; });
+    RTP_LLM_CHECK_WITH_INFO(it != groups.end(), "test cache topology missing tag=%s", std::string(tag).c_str());
+    return static_cast<size_t>(std::distance(groups.begin(), it));
+}
 
 inline constexpr uint32_t DSV4_FP8_KV_ENTRY_BYTES            = 584;
 inline constexpr uint32_t DSV4_FP8_INDEXER_ENTRY_BYTES       = 132;
@@ -59,35 +70,36 @@ inline std::shared_ptr<MHAKVCacheSpec> makeResolvedMhaSpec(rtp_llm::DataType  dt
     return std::dynamic_pointer_cast<MHAKVCacheSpec>(SpecBuilder::build(desc, ctx));
 }
 
-inline std::shared_ptr<const CacheTopology> makeTestCacheTopology(int                                  group_num,
-                                                                  int                                  layer_num,
-                                                                  const std::vector<std::vector<int>>& layer_group_ids,
-                                                                  size_t kernel_blocks_per_kv_block              = 1,
-                                                                  const std::vector<CacheGroupType>& group_types = {}) {
+inline std::shared_ptr<const CacheTopology>
+makeTestCacheTopology(int                                  group_num,
+                      int                                  layer_num,
+                      const std::vector<std::vector<int>>& layer_group_indices,
+                      size_t                               kernel_blocks_per_kv_block = 1,
+                      const std::vector<CacheGroupType>&   group_types                = {}) {
     RTP_LLM_CHECK_WITH_INFO(group_num > 0, "test topology requires at least one group");
     RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "test topology requires at least one layer");
-    RTP_LLM_CHECK_WITH_INFO(layer_group_ids.size() == static_cast<size_t>(layer_num),
+    RTP_LLM_CHECK_WITH_INFO(layer_group_indices.size() == static_cast<size_t>(layer_num),
                             "test topology layer map size=%zu layer_num=%d",
-                            layer_group_ids.size(),
+                            layer_group_indices.size(),
                             layer_num);
     RTP_LLM_CHECK_WITH_INFO(group_types.empty() || group_types.size() == static_cast<size_t>(group_num),
                             "test topology group type size=%zu group_num=%d",
                             group_types.size(),
                             group_num);
 
-    std::vector<std::vector<int>> group_layer_ids(static_cast<size_t>(group_num));
+    std::vector<std::vector<int>> group_layer_indices(static_cast<size_t>(group_num));
     std::vector<LayerBase>        layers;
     layers.reserve(static_cast<size_t>(layer_num));
     for (int layer_id = 0; layer_id < layer_num; ++layer_id) {
         LayerBase layer;
         layer.layer_id = layer_id;
-        for (int group_id : layer_group_ids[static_cast<size_t>(layer_id)]) {
-            RTP_LLM_CHECK_WITH_INFO(group_id >= 0 && group_id < group_num,
-                                    "test topology invalid group_id=%d for layer=%d",
-                                    group_id,
+        for (int group_index : layer_group_indices[static_cast<size_t>(layer_id)]) {
+            RTP_LLM_CHECK_WITH_INFO(group_index >= 0 && group_index < group_num,
+                                    "test topology invalid group_index=%d for layer=%d",
+                                    group_index,
                                     layer_id);
-            group_layer_ids[static_cast<size_t>(group_id)].push_back(layer_id);
-            layer.group_tags.push_back("group" + std::to_string(group_id));
+            group_layer_indices[static_cast<size_t>(group_index)].push_back(layer_id);
+            layer.group_tags.push_back("group" + std::to_string(group_index));
         }
         layers.push_back(std::move(layer));
     }
@@ -95,16 +107,16 @@ inline std::shared_ptr<const CacheTopology> makeTestCacheTopology(int           
     const size_t           blocks_per_kv_block = std::max<size_t>(1, kernel_blocks_per_kv_block);
     std::vector<GroupBase> groups;
     groups.reserve(static_cast<size_t>(group_num));
-    for (int group_id = 0; group_id < group_num; ++group_id) {
-        const auto tag  = "group" + std::to_string(group_id);
+    for (int group_index = 0; group_index < group_num; ++group_index) {
+        const auto tag  = "group" + std::to_string(group_index);
         auto       spec = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, blocks_per_kv_block, tag);
 
         GroupBase group;
         group.tag                       = tag;
         group.spec                      = std::move(spec);
         group.policy                    = defaultCacheGroupPolicy(group_types.empty() ? CacheGroupType::FULL :
-                                                                     group_types[static_cast<size_t>(group_id)]);
-        group.layer_ids                 = std::move(group_layer_ids[static_cast<size_t>(group_id)]);
+                                                                     group_types[static_cast<size_t>(group_index)]);
+        group.layer_ids                 = std::move(group_layer_indices[static_cast<size_t>(group_index)]);
         group.block_num                 = 16;
         group.seq_size_per_block        = blocks_per_kv_block;
         group.kernel_seq_size_per_block = 1;
@@ -541,20 +553,20 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     types.reserve(static_cast<size_t>(group_cnt));
     tags.reserve(static_cast<size_t>(group_cnt));
 
-    for (int gid = 0; gid < group_cnt; ++gid) {
+    for (int group_index = 0; group_index < group_cnt; ++group_index) {
         std::vector<int> group_layers;
         group_layers.reserve(static_cast<size_t>(config.group_layer_num));
         for (int local = 0; local < config.group_layer_num; ++local) {
-            group_layers.push_back(gid * config.group_layer_num + local);
+            group_layers.push_back(group_index * config.group_layer_num + local);
         }
-        if (gid == 0) {
+        if (group_index == 0) {
             specs.push_back(linear_spec);
             types.push_back(CacheGroupType::LINEAR);
             tags.push_back("linear");
         } else {
             specs.push_back(full_spec);
             types.push_back(CacheGroupType::FULL);
-            tags.push_back("full" + std::to_string(gid));
+            tags.push_back("full" + std::to_string(group_index));
         }
         layers_by_group.push_back(std::move(group_layers));
     }

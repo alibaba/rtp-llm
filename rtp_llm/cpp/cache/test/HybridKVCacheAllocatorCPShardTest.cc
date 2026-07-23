@@ -25,7 +25,7 @@ namespace test {
 
 namespace {
 
-// Two-group hybrid: gid=0 linear (won't be exercised here), gid=1 full (the CP-shard target).
+// Two-group hybrid: linear is not exercised here; full is the CP-shard target.
 CacheConfig makeCPHybridConfig() {
     CacheConfig config;
     config.dtype                     = rtp_llm::DataType::TYPE_FP16;
@@ -86,14 +86,12 @@ BatchKVCacheResourcePtr makeBatchRes(int batch_size, const CacheConfig& config, 
 }
 
 // Cache (key, group-block) pairs into SharedBlockCache and drop request refs so blocks are reusable.
-std::vector<BlockIdxType> seedCache(
-    BlockPoolPtr block_pool, SharedBlockCachePtr shared_cache, int group_num, int group_id, const CacheKeysType& keys) {
+std::vector<BlockIdxType>
+seedCache(BlockPoolPtr block_pool, SharedBlockCachePtr shared_cache, std::string_view tag, const CacheKeysType& keys) {
     auto blocks = block_pool->malloc(static_cast<int>(keys.size()));
     EXPECT_EQ(blocks.size(), keys.size());
     for (size_t i = 0; i < keys.size(); ++i) {
-        std::vector<BlockIdxType> group_block_ids(static_cast<size_t>(group_num), NULL_BLOCK_IDX);
-        group_block_ids[static_cast<size_t>(group_id)] = blocks[i];
-        shared_cache->put(keys[i], group_block_ids, true);
+        shared_cache->put(keys[i], {{std::string(tag), blocks[i]}}, true);
     }
     block_pool->requestFree(blocks);
     return blocks;
@@ -117,8 +115,8 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, NullMapperIsPassthrough) {
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
-    const int gid_full  = 1;
-    auto      batch_res = makeBatchRes(/*batch_size=*/1, config, CacheKeysType{100, 101, 102, 103});
+    const std::string full_tag  = "full";
+    auto              batch_res = makeBatchRes(/*batch_size=*/1, config, CacheKeysType{100, 101, 102, 103});
     // seq_len=16 => 4 slots @ block_size=4
     auto       tokens = makeTokens(/*batch=*/1, /*seq_len=*/16, /*sspb=*/4);
     MallocInfo info{batch_res, tokens};
@@ -127,7 +125,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, NullMapperIsPassthrough) {
     // cp_slot_mapper intentionally left null.
     auto result = allocator->malloc(info);
     ASSERT_TRUE(result.success);
-    EXPECT_EQ(batch_res->blocksNum(0, gid_full), 4);
+    EXPECT_EQ(batch_res->blocksNum(0, full_tag), 4);
 }
 
 // 2) With cp_slot_mapper(cp_rank=0, cp_size=2, block_size=4): a 4-block request allocates ceil(4/2)=2
@@ -138,9 +136,9 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocHalvesFullGroup) {
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
-    const int gid_full  = 1;
-    auto      batch_res = makeBatchRes(1, config, CacheKeysType{100, 101, 102, 103});
-    auto      tokens    = makeTokens(1, 16, 4);  // 4 logical blocks worth
+    const std::string full_tag  = "full";
+    auto              batch_res = makeBatchRes(1, config, CacheKeysType{100, 101, 102, 103});
+    auto              tokens    = makeTokens(1, 16, 4);  // 4 logical blocks worth
 
     MallocInfo info{batch_res, tokens};
     info.enable_device_cache = false;
@@ -148,7 +146,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocHalvesFullGroup) {
     allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
     auto result = allocator->malloc(info);
     ASSERT_TRUE(result.success);
-    EXPECT_EQ(batch_res->blocksNum(0, gid_full), 2)
+    EXPECT_EQ(batch_res->blocksNum(0, full_tag), 2)
         << "cp_size=2 should halve allocation to ceil(4/2)=2 physical blocks per rank";
 }
 
@@ -165,15 +163,14 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ReuseHitOnLastRankCanonicalKey) {
     ASSERT_NE(block_pool, nullptr);
     ASSERT_NE(shared_cache, nullptr);
 
-    const int gid_linear = 0;
-    const int gid_full   = 1;
-    const int group_num  = 2;
+    const std::string linear_tag = "linear";
+    const std::string full_tag   = "full";
     // Full keys for 4 blocks: {100,101,102,103}.
     // localCacheKeys(cp_rank=cp_size-1=1, cp_size=2) selects indices {1,3} => {101, 103}.
     // initMallocForCommonLen drops the last for matching => match_keys = {101}.
     // Joint match requires the linear group's tail to also resolve, so seed both groups with key 101.
-    seedCache(block_pool, shared_cache, group_num, gid_full, CacheKeysType{101});
-    seedCache(block_pool, shared_cache, group_num, gid_linear, CacheKeysType{101});
+    seedCache(block_pool, shared_cache, full_tag, CacheKeysType{101});
+    seedCache(block_pool, shared_cache, linear_tag, CacheKeysType{101});
 
     auto batch_res = makeBatchRes(1, config, CacheKeysType{100, 101, 102, 103});
     auto tokens    = makeTokens(1, 16, 4);
@@ -188,7 +185,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ReuseHitOnLastRankCanonicalKey) {
     // Expect 1 reuse virtual-block * virtualBlockSize(=8 tokens).
     EXPECT_EQ(result.reuse_len, 8);
     // Per-rank physical blocks for full group still = ceil(4/2) = 2.
-    EXPECT_EQ(batch_res->blocksNum(0, gid_full), 2);
+    EXPECT_EQ(batch_res->blocksNum(0, full_tag), 2);
 }
 
 // 4) When reuse is disabled, cp_slot_mapper still translates seq_len for malloc and skips the match.
@@ -201,8 +198,8 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocSkipsReuseWhenDisabled) {
     auto block_pool   = allocator->getBlockPool();
     auto shared_cache = allocator->sharedBlockCache();
 
-    const int gid_full = 1;
-    seedCache(block_pool, shared_cache, /*group_num=*/2, gid_full, CacheKeysType{101});
+    const std::string full_tag = "full";
+    seedCache(block_pool, shared_cache, full_tag, CacheKeysType{101});
 
     auto batch_res = makeBatchRes(1, config, CacheKeysType{100, 101, 102, 103});
     auto tokens    = makeTokens(1, 16, 4);
@@ -214,7 +211,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocSkipsReuseWhenDisabled) {
     auto result = allocator->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, 0);
-    EXPECT_EQ(batch_res->blocksNum(0, gid_full), 2);
+    EXPECT_EQ(batch_res->blocksNum(0, full_tag), 2);
 }
 
 // 5) insertIntoCache uses last-rank canonical keys and virtualBlockSize when sharded:
@@ -229,8 +226,8 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, InsertIntoCacheUsesCanonicalKeysAndVir
     auto shared_cache = allocator->sharedBlockCache();
     ASSERT_NE(shared_cache, nullptr);
 
-    const int gid_full  = 1;
-    auto      batch_res = makeBatchRes(1, config, CacheKeysType{100, 101, 102, 103});
+    const std::string full_tag  = "full";
+    auto              batch_res = makeBatchRes(1, config, CacheKeysType{100, 101, 102, 103});
 
     // seq_len=16 => allocator computes 4 logical blocks; cp_size=2 keeps 2 per rank.
     auto       tokens = makeTokens(1, 16, 4);
@@ -239,7 +236,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, InsertIntoCacheUsesCanonicalKeysAndVir
     malloc_info.reuse_cache         = false;
     allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
     ASSERT_TRUE(allocator->malloc(malloc_info).success);
-    ASSERT_EQ(batch_res->blocksNum(0, gid_full), 2);
+    ASSERT_EQ(batch_res->blocksNum(0, full_tag), 2);
 
     // CompleteTokenIds reflects token-len 16, so token_len-1 = 15. virtualBlockSize=8 =>
     // full_blocks_num = floor(15/8) = 1. n = min(local_keys.size()=2, 1) = 1.
@@ -247,10 +244,10 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, InsertIntoCacheUsesCanonicalKeysAndVir
     InsertInfo insert_info{batch_res, tokens, /*is_resident=*/false};
     allocator->insertIntoCache(insert_info);
 
-    EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(101, gid_full)));
-    EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(100, gid_full)));
-    EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(102, gid_full)));
-    EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(103, gid_full)));
+    EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(101, full_tag)));
+    EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(100, full_tag)));
+    EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(102, full_tag)));
+    EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(103, full_tag)));
 }
 
 // 6) Two-malloc smoke: cp_size=4 sharding, request occupies 8 logical blocks ⇒ 2 per rank.
@@ -260,8 +257,8 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocCpSize4) {
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
-    const int     gid_full = 1;
-    CacheKeysType keys;
+    const std::string full_tag = "full";
+    CacheKeysType     keys;
     for (int i = 0; i < 8; ++i) {
         keys.push_back(200 + i);
     }
@@ -274,7 +271,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocCpSize4) {
     allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/2, /*cp_size=*/4, /*block_size=*/4));
     auto result = allocator->malloc(info);
     ASSERT_TRUE(result.success);
-    EXPECT_EQ(batch_res->blocksNum(0, gid_full), 2);  // ceil(8/4)=2
+    EXPECT_EQ(batch_res->blocksNum(0, full_tag), 2);  // ceil(8/4)=2
 }
 
 }  // namespace test

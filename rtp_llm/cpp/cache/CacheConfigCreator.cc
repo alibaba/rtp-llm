@@ -42,12 +42,12 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     }
 
     budget.explicit_pool_reserve_bytes = config.explicitly_sized_pool_reserve_bytes;
-    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        if (config.usesExplicitIndependentBlocks(gid)) {
+    for (const auto& group : config.topology().groups()) {
+        if (config.usesExplicitIndependentBlocks(group.tag)) {
             continue;
         }
-        const auto group_bytes = config.blockSizeBytesForGroup(gid);
-        switch (config.typeForGroup(gid)) {
+        const auto group_bytes = config.blockSizeBytes(group.tag);
+        switch (group.policy.group_type) {
             case CacheGroupType::FULL:
             case CacheGroupType::LINEAR:
                 budget.paged_block_bytes += group_bytes;

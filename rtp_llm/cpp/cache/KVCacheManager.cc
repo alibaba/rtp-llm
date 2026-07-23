@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <numeric>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -99,7 +100,12 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
 
 std::shared_ptr<const CacheTopology> projectTopology(const CacheTopology&       source,
                                                      const std::vector<size_t>& global_layer_ids) {
-    std::vector<GroupBase> groups = source.groups();
+    std::vector<GroupBase>                  groups = source.groups();
+    std::unordered_map<std::string, size_t> tag_to_group_index;
+    tag_to_group_index.reserve(groups.size());
+    for (size_t group_index = 0; group_index < groups.size(); ++group_index) {
+        tag_to_group_index.emplace(groups[group_index].tag, group_index);
+    }
     for (auto& group : groups) {
         group.layer_ids.clear();
     }
@@ -112,7 +118,7 @@ std::shared_ptr<const CacheTopology> projectTopology(const CacheTopology&       
         layer.layer_id   = static_cast<int>(local_layer_id);
         layer.group_tags = source_layer.group_tags;
         for (const auto& tag : layer.group_tags) {
-            groups[source.groupIdForTag(tag)].layer_ids.push_back(static_cast<int>(local_layer_id));
+            groups.at(tag_to_group_index.at(tag)).layer_ids.push_back(static_cast<int>(local_layer_id));
         }
         layers.push_back(std::move(layer));
     }
@@ -242,7 +248,7 @@ bool KVCacheManager::init() {
     allocator_->setSharedBlockCache(shared_cache);
     RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
     shared_cache->setIndependentGroupEviction(enable_independent_group_eviction,
-                                              allocator_->independentEvictionGroupIds());
+                                              allocator_->independentEvictionGroupTags());
 
     if (metrics_reporter_) {
         stop_.store(false, std::memory_order_relaxed);
@@ -361,19 +367,6 @@ std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(int block_index, int
 std::vector<BlockInfo>
 KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const {
     return allocator_->convertIndexToBuffer(layer_id, block_index, partition_count, partition_id);
-}
-
-BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id, int group_id) const {
-    return allocator_->convertIndexToAddr(layer_id, group_id, block_index);
-}
-
-std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, int group_id) const {
-    return allocator_->convertIndexToBuffer(layer_id, group_id, block_index);
-}
-
-std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(
-    int block_index, int layer_id, int group_id, int partition_count, int partition_id) const {
-    return allocator_->convertIndexToBuffer(layer_id, group_id, block_index, partition_count, partition_id);
 }
 
 BlockAddrInfo KVCacheManager::convertIndexToAddrByTag(int block_index, int layer_id, const std::string& tag) const {
@@ -648,11 +641,11 @@ bool KVCacheManager::writeKVBlockForTest(int                  block_index,
                                          const torch::Tensor& k_buffer,
                                          const torch::Tensor& v_buffer) {
     // Basic size/type validation to prevent out-of-bounds copy
-    auto&  spec             = config_.specForGroup(0);
-    size_t expected_k_bytes = spec->k_block_size_bytes();
-    size_t expected_v_bytes = spec->v_block_size_bytes();
-    size_t src_k_bytes      = k_buffer.nbytes();
-    size_t src_v_bytes      = v_buffer.nbytes();
+    const auto& spec             = config_.topology().soleGroupForLayer(layer_id).spec;
+    size_t      expected_k_bytes = spec->k_block_size_bytes();
+    size_t      expected_v_bytes = spec->v_block_size_bytes();
+    size_t      src_k_bytes      = k_buffer.nbytes();
+    size_t      src_v_bytes      = v_buffer.nbytes();
     if (src_k_bytes < expected_k_bytes || src_v_bytes < expected_v_bytes) {
         RTP_LLM_LOG_ERROR("writeKVBlockForTest src bytes too small: k[%zu]<[%zu] or v[%zu]<[%zu]",
                           src_k_bytes,

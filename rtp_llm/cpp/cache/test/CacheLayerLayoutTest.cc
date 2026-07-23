@@ -45,8 +45,6 @@ TEST(CacheLayerLayoutTest, SingleGroupCoversAllLayersAndTagMatchesSlotApi) {
 
     EXPECT_FALSE(layout.group("full").empty());
     EXPECT_EQ(layout.group("full").activeLayerCount(), 3u);
-    EXPECT_EQ(layout.groupId("full"), 0u);
-    EXPECT_EQ(layout.at("full", 1).kv_addr.data_ptr(), layout.at(0, 1).kv_addr.data_ptr());
     EXPECT_EQ(layout.at(1).kv_addr.data_ptr(), layout.at("full", 1).kv_addr.data_ptr());
 }
 
@@ -93,7 +91,6 @@ TEST(CacheLayerLayoutTest, InvalidTagSlotAndLayerFailFast) {
     GroupedCacheLayerLayout layout(topology, std::move(groups));
 
     EXPECT_ANY_THROW(layout.group("missing"));
-    EXPECT_ANY_THROW(layout.group(1));
     EXPECT_ANY_THROW(layout.group("full").at(1));
     EXPECT_ANY_THROW(layout.group("full").hasLayer(1));
 }

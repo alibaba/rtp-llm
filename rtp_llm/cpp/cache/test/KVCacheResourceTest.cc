@@ -85,32 +85,32 @@ TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
     resource.initGroups(makeTestCacheTopology(
         /*group_num=*/2,
         /*layer_num=*/3,
-        /*layer_group_ids=*/{{0}, {1}, {0}},
+        /*layer_group_indices=*/{{0}, {1}, {0}},
         /*kernel_blocks_per_kv_block=*/4,
         /*group_types=*/{CacheGroupType::FULL, CacheGroupType::LINEAR}));
 
     ASSERT_EQ(resource.groupNums(), 2);
     auto multi_group_layer_blocks = resource.layerBlocks();
     ASSERT_EQ(multi_group_layer_blocks.size(), 3u);
-    EXPECT_EQ(multi_group_layer_blocks[0], resource.groupBlocks()[0]);
-    EXPECT_EQ(multi_group_layer_blocks[1], resource.groupBlocks()[1]);
-    EXPECT_EQ(multi_group_layer_blocks[2], resource.groupBlocks()[0]);
+    EXPECT_EQ(multi_group_layer_blocks[0], resource.groupBlocks().at(0));
+    EXPECT_EQ(multi_group_layer_blocks[1], resource.groupBlocks().at(1));
+    EXPECT_EQ(multi_group_layer_blocks[2], resource.groupBlocks().at(0));
     ASSERT_EQ(resource.layerGroupBlocks().size(), 3u);
 
     KVCacheResource single_group_resource;
     single_group_resource.initGroups(makeTestCacheTopology(/*group_num=*/1,
                                                            /*layer_num=*/3,
-                                                           /*layer_group_ids=*/{{0}, {0}, {0}},
+                                                           /*layer_group_indices=*/{{0}, {0}, {0}},
                                                            /*kernel_blocks_per_kv_block=*/4,
                                                            /*group_types=*/{CacheGroupType::FULL}));
     auto layer_blocks = single_group_resource.layerBlocks();
     ASSERT_EQ(layer_blocks.size(), 3u);
-    ASSERT_EQ(layer_blocks[0], single_group_resource.groupBlocks()[0]);
-    ASSERT_EQ(layer_blocks[1], single_group_resource.groupBlocks()[0]);
-    ASSERT_EQ(layer_blocks[2], single_group_resource.groupBlocks()[0]);
+    ASSERT_EQ(layer_blocks[0], single_group_resource.groupBlocks().at(0));
+    ASSERT_EQ(layer_blocks[1], single_group_resource.groupBlocks().at(0));
+    ASSERT_EQ(layer_blocks[2], single_group_resource.groupBlocks().at(0));
 
-    auto& g0 = resource.mutableBlockIds(0);
-    auto& g1 = resource.mutableBlockIds(1);
+    auto& g0 = resource.mutableBlockIds("group0");
+    auto& g1 = resource.mutableBlockIds("group1");
 
     ASSERT_EQ(g0.kernelBlocksPerKvBlock(), 4u);
     ASSERT_EQ(g1.kernelBlocksPerKvBlock(), 1u);
@@ -118,18 +118,18 @@ TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
     g0.add(BlockIndicesType{1});
     g1.add(BlockIndicesType{1});
 
-    ASSERT_EQ(resource.blocks(0), (BlockIndicesType{1}));
-    ASSERT_EQ(resource.kernelBlocks(0), (BlockIndicesType{4, 5, 6, 7}));
+    ASSERT_EQ(resource.blocks("group0"), (BlockIndicesType{1}));
+    ASSERT_EQ(resource.kernelBlocks("group0"), (BlockIndicesType{4, 5, 6, 7}));
 
-    ASSERT_EQ(resource.blocks(1), (BlockIndicesType{1}));
-    ASSERT_EQ(resource.kernelBlocks(1), (BlockIndicesType{1}));
+    ASSERT_EQ(resource.blocks("group1"), (BlockIndicesType{1}));
+    ASSERT_EQ(resource.kernelBlocks("group1"), (BlockIndicesType{1}));
 }
 
 TEST(KVCacheResourceTest, LayerBlocksRejectsMultipleGroupsForOneLayer) {
     KVCacheResource resource;
     resource.initGroups(makeTestCacheTopology(/*group_num=*/2,
                                               /*layer_num=*/1,
-                                              /*layer_group_ids=*/{{0, 1}},
+                                              /*layer_group_indices=*/{{0, 1}},
                                               /*kernel_blocks_per_kv_block=*/1,
                                               /*group_types=*/{CacheGroupType::FULL, CacheGroupType::LINEAR}));
 
@@ -229,22 +229,22 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
     batch.resetBatchSize(2);
     batch.initGroups(makeTestCacheTopology(/*group_num=*/2,
                                            /*layer_num=*/3,
-                                           /*layer_group_ids=*/{{0}, {1}, {0}},
+                                           /*layer_group_indices=*/{{0}, {1}, {0}},
                                            /*kernel_blocks_per_kv_block=*/4,
                                            /*group_types=*/{CacheGroupType::FULL, CacheGroupType::LINEAR}));
 
     ASSERT_EQ(batch.batchSize(), 2);
     ASSERT_EQ(batch.groupNums(), 2);
 
-    batch.setBatchBlocks(/*batch_id=*/0, /*group_id=*/0, BlockIndicesType{1, 2});
-    ASSERT_EQ(batch.blocks(0, 0), (BlockIndicesType{1, 2}));
-    ASSERT_EQ(batch.kernelBlocks(0, 0), (BlockIndicesType{4, 5, 6, 7, 8, 9, 10, 11}));
+    batch.setBatchBlocks(/*batch_id=*/0, "group0", BlockIndicesType{1, 2});
+    ASSERT_EQ(batch.blocks(0, "group0"), (BlockIndicesType{1, 2}));
+    ASSERT_EQ(batch.kernelBlocks(0, "group0"), (BlockIndicesType{4, 5, 6, 7, 8, 9, 10, 11}));
 
-    batch.setBatchBlocks(/*batch_id=*/0, /*group_id=*/1, BlockIndicesType{9, 10});
-    ASSERT_EQ(batch.blocks(0, 1), (BlockIndicesType{9, 10}));
-    ASSERT_EQ(batch.kernelBlocks(0, 1), (BlockIndicesType{9, 10}));
+    batch.setBatchBlocks(/*batch_id=*/0, "group1", BlockIndicesType{9, 10});
+    ASSERT_EQ(batch.blocks(0, "group1"), (BlockIndicesType{9, 10}));
+    ASSERT_EQ(batch.kernelBlocks(0, "group1"), (BlockIndicesType{9, 10}));
 
-    auto all_g0 = batch.getAllBatchBlocks(/*group_id=*/0);
+    auto all_g0 = batch.getAllBatchBlocks("group0");
     ASSERT_EQ(all_g0.size(), 2u);
     ASSERT_EQ(all_g0[0], (BlockIndicesType{1, 2}));
 
@@ -270,13 +270,13 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
     KVCacheResource moved;
     moved.initGroups(makeTestCacheTopology(/*group_num=*/1,
                                            /*layer_num=*/1,
-                                           /*layer_group_ids=*/{{0}},
+                                           /*layer_group_indices=*/{{0}},
                                            /*kernel_blocks_per_kv_block=*/2,
                                            /*group_types=*/{CacheGroupType::FULL}));
-    moved.mutableBlockIds(0).add(BlockIndicesType{3});
+    moved.mutableBlockIds("group0").add(BlockIndicesType{3});
     batch.moveBatchResource(0, std::move(moved));
     ASSERT_EQ(batch.cacheResource(0).groupNums(), 1);
-    ASSERT_EQ(batch.cacheResource(0).kernelBlocks(0), (BlockIndicesType{6, 7}));
+    ASSERT_EQ(batch.cacheResource(0).kernelBlocks("group0"), (BlockIndicesType{6, 7}));
 }
 
 }  // namespace test

@@ -86,12 +86,13 @@ GatherModelInputContext createGatherContext(const NormalModelInputGathererConfig
     return ctx;
 }
 
-void copyKvCacheBlocksToModelInput(GptModelInputs&             model_input,
-                                   const BatchKVCacheResource& kv_cache,
-                                   int                         stream_batch_idx,
-                                   int                         model_batch_idx,
-                                   size_t                      max_blocks_num,
-                                   size_t                      kernel_blocks_per_kv_block) {
+void copyKvCacheBlocksToModelInput(GptModelInputs&                 model_input,
+                                   const BatchKVCacheResource&     kv_cache,
+                                   const std::vector<std::string>& group_tags,
+                                   int                             stream_batch_idx,
+                                   int                             model_batch_idx,
+                                   size_t                          max_blocks_num,
+                                   size_t                          kernel_blocks_per_kv_block) {
     if (!model_input.kv_cache_kernel_block_id.defined() || max_blocks_num == 0) {
         return;
     }
@@ -103,16 +104,46 @@ void copyKvCacheBlocksToModelInput(GptModelInputs&             model_input,
     int32_t*     kernel_dst_base = model_input.kv_cache_kernel_block_id.data_ptr<int32_t>();
     int32_t*     store_dst_base  = model_input.kv_cache_block_id.data_ptr<int32_t>();
 
-    for (int gid = 0; gid < kv_cache.groupNums(); ++gid) {
-        auto&    kernel_blocks = kv_cache.kernelBlocks(stream_batch_idx, gid);
-        int32_t* kernel_dst    = kernel_dst_base
-                              + (static_cast<size_t>(gid) * batch + static_cast<size_t>(model_batch_idx))
-                                    * max_blocks_num * kernel_blocks_per_kv_block;
+    const auto& resource     = kv_cache.cacheResource(stream_batch_idx);
+    const auto& group_blocks = resource.groupBlocks();
+    const auto& local_tags   = resource.groupTags();
+    RTP_LLM_CHECK(group_blocks.size() == local_tags.size());
+    for (size_t local_group_index = 0; local_group_index < group_blocks.size(); ++local_group_index) {
+        const auto& tag       = local_tags[local_group_index];
+        const auto& block_ids = group_blocks[local_group_index];
+        RTP_LLM_CHECK_WITH_INFO(block_ids != nullptr, "stream cache group tag=%s has null block ids", tag.c_str());
+        if (model_input.warmup && tag == "__warmup__") {
+            const auto all_zero = [](const auto& blocks) {
+                return std::all_of(blocks.begin(), blocks.end(), [](const auto block_id) { return block_id == 0; });
+            };
+            RTP_LLM_CHECK_WITH_INFO(all_zero(block_ids->blocks()) && all_zero(block_ids->kernelBlocks()),
+                                    "synthetic warmup cache must contain only zero block ids");
+            continue;
+        }
+        const auto group_it = std::find(group_tags.begin(), group_tags.end(), tag);
+        RTP_LLM_CHECK_WITH_INFO(
+            group_it != group_tags.end(), "stream cache references unknown group tag=%s", tag.c_str());
+        const size_t group_index = static_cast<size_t>(std::distance(group_tags.begin(), group_it));
+
+        const auto& kernel_blocks = block_ids->kernelBlocks();
+        RTP_LLM_CHECK_WITH_INFO(kernel_blocks.size() <= max_blocks_num * kernel_blocks_per_kv_block,
+                                "stream cache kernel blocks overflow for tag=%s: blocks=%zu capacity=%zu",
+                                tag.c_str(),
+                                kernel_blocks.size(),
+                                max_blocks_num * kernel_blocks_per_kv_block);
+        int32_t* kernel_dst = kernel_dst_base
+                              + (group_index * batch + static_cast<size_t>(model_batch_idx)) * max_blocks_num
+                                    * kernel_blocks_per_kv_block;
         std::memcpy(kernel_dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));
 
-        auto&    physical_blocks = kv_cache.blocks(stream_batch_idx, gid);
+        const auto& physical_blocks = block_ids->blocks();
+        RTP_LLM_CHECK_WITH_INFO(physical_blocks.size() <= max_blocks_num,
+                                "stream cache physical blocks overflow for tag=%s: blocks=%zu capacity=%zu",
+                                tag.c_str(),
+                                physical_blocks.size(),
+                                max_blocks_num);
         int32_t* store_dst =
-            store_dst_base + (static_cast<size_t>(gid) * batch + static_cast<size_t>(model_batch_idx)) * max_blocks_num;
+            store_dst_base + (group_index * batch + static_cast<size_t>(model_batch_idx)) * max_blocks_num;
         std::memcpy(store_dst, physical_blocks.data(), physical_blocks.size() * sizeof(int32_t));
     }
 }
@@ -193,8 +224,8 @@ void addCacheUpdateCopy(GatherModelInputContext&              ctx,
         const auto it = std::find(group_tags.begin(), group_tags.end(), mapping.tag);
         RTP_LLM_CHECK_WITH_INFO(
             it != group_tags.end(), "cache update mapping references unknown tag=%s", mapping.tag.c_str());
-        *ctx.kv_cache_update_mapping++ =
-            GroupBlockIdPair{static_cast<GroupIdType>(std::distance(group_tags.begin(), it)), mapping.src, mapping.dst};
+        *ctx.kv_cache_update_mapping++ = GroupBlockIdPair{
+            static_cast<GroupIndexType>(std::distance(group_tags.begin(), it)), mapping.src, mapping.dst};
     }
 }
 
@@ -305,8 +336,13 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
             }
             ctx.lm_output_indexes[ctx.batch_idx] = ctx.batch_idx;
             ctx.lm_output_lengths[ctx.batch_idx] = 1;
-            copyKvCacheBlocksToModelInput(
-                model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
+            copyKvCacheBlocksToModelInput(model_input,
+                                          kv_cache,
+                                          config_.kv_cache_group_tags,
+                                          i,
+                                          ctx.batch_idx,
+                                          ctx.max_blocks_num,
+                                          config_.kernel_blocks_per_kv_block);
             ctx.batch_idx += 1;
         }
         addCacheUpdateCopy(ctx, stream->streamCacheResource().getKVBlockUpdateMapping(), config_.kv_cache_group_tags);
@@ -381,8 +417,13 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                 }
             }
 
-            copyKvCacheBlocksToModelInput(
-                model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
+            copyKvCacheBlocksToModelInput(model_input,
+                                          kv_cache,
+                                          config_.kv_cache_group_tags,
+                                          i,
+                                          ctx.batch_idx,
+                                          ctx.max_blocks_num,
+                                          config_.kernel_blocks_per_kv_block);
 
             if (ctx.max_blocks_num && config_.role_type == RoleType::PREFILL && stream->hasCacheKeys()) {
                 RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(stream->cacheKeys(i).size())

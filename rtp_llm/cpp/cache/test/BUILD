@@ -148,18 +148,6 @@ cc_library(
 )
 
 cc_test(
-    name = "block_cache_test",
-    srcs = [
-        "BlockCacheTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = block_cache_test_deps,
-    env = {},
-    exec_properties = {'gpu':'H20'},
-)
-
-cc_test(
     name = "shared_block_cache_test",
     srcs = [
         "SharedBlockCacheTest.cc",

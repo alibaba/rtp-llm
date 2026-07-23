@@ -26,35 +26,31 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<LayerKVCache>(m, "LayerKVCache")
         .def(pybind11::init<>())
-        .def(
-            pybind11::init([](torch::Tensor    kv_cache_base,
-                              int              seq_size_per_block,
-                              int              layer_id,
-                              int              group_id,
-                              std::string      tag,
-                              pybind11::object kv_scale_base) {
-                torch::Tensor scale;
-                if (!kv_scale_base.is_none()) {
-                    scale = kv_scale_base.cast<torch::Tensor>();
-                }
-                return LayerKVCache(
-                    std::move(kv_cache_base), seq_size_per_block, layer_id, group_id, std::move(tag), std::move(scale));
-            }),
-            pybind11::arg("kv_cache_base"),
-            pybind11::arg("seq_size_per_block"),
-            pybind11::arg("layer_id")      = -1,
-            pybind11::arg("group_id")      = -1,
-            pybind11::arg("tag")           = "default",
-            pybind11::arg("kv_scale_base") = pybind11::none())
+        .def(pybind11::init([](torch::Tensor    kv_cache_base,
+                               int              seq_size_per_block,
+                               int              layer_id,
+                               std::string      tag,
+                               pybind11::object kv_scale_base) {
+                 torch::Tensor scale;
+                 if (!kv_scale_base.is_none()) {
+                     scale = kv_scale_base.cast<torch::Tensor>();
+                 }
+                 return LayerKVCache(
+                     std::move(kv_cache_base), seq_size_per_block, layer_id, std::move(tag), std::move(scale));
+             }),
+             pybind11::arg("kv_cache_base"),
+             pybind11::arg("seq_size_per_block"),
+             pybind11::arg("layer_id")      = -1,
+             pybind11::arg("tag")           = "default",
+             pybind11::arg("kv_scale_base") = pybind11::none())
         .def_readwrite("kv_cache_base", &LayerKVCache::kv_cache_base, "Key/value cache tensor (per-layer view)")
         .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id")
-        .def_readonly("group_id", &LayerKVCache::group_id, "Cache group id (-1 = default)")
         .def_readonly("tag", &LayerKVCache::tag, "Cache group tag");
 
     pybind11::class_<KVCache>(m, "KVCache")
-        .def_property_readonly("group_tags", &KVCache::groupTags, "Cache group tags in topology group id order")
+        .def_property_readonly("group_tags", &KVCache::groupTags, "Cache group tags in topology order")
         .def_property_readonly("layer_count", &KVCache::layerCount, "Number of model-local cache layers")
         .def("get_layer_cache",
              static_cast<LayerKVCache (KVCache::*)(int) const>(&KVCache::getLayerCache),

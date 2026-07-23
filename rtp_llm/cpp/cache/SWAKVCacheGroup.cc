@@ -131,7 +131,7 @@ MatchResult SWAKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
     if (!shared_cache_) {
         return result;
     }
-    auto block_idx = shared_cache_->matchGroup(cache_key, group_id());
+    auto block_idx = shared_cache_->matchGroup(cache_key, tag());
     if (!isNullBlockIdx(block_idx)) {
         result.block_indices = {block_idx};
     }

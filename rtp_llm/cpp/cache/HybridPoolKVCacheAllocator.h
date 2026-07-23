@@ -20,10 +20,6 @@ public:
     std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const override;
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override;
-    BlockAddrInfo          convertIndexToAddr(int layer_id, int group_id, int block_id) const override;
-    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int group_id, int block_id) const override;
-    std::vector<BlockInfo> convertIndexToBuffer(
-        int layer_id, int group_id, int block_id, int partition_count, int partition_id) const override;
     BlockAddrInfo          convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const override;
     std::vector<BlockInfo> convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const override;
     std::vector<BlockInfo> convertIndexToBufferByTag(
@@ -59,15 +55,16 @@ private:
     bool   doInit() override;
     size_t reservableAvailableBlocksNum() const override;
 
-    void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const override;
-    void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) override;
+    void
+    referenceBlocksInGroup(int group_index, const BlockIndicesType& blocks, bool is_connector = false) const override;
+    void freeBlocksInGroup(int group_index, const BlockIndicesType& blocks, bool is_connector = false) override;
     bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const override;
 
-    int    validateGroupIdForLayer(int layer_id, int group_id) const;
-    int    defaultGroupIdForLayer(int layer_id) const;
-    size_t minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
-    size_t totalReservableAvailableBlocks() const;
-    size_t reserveBlocksForPool(size_t gid, size_t reserve_blocks, size_t total_reservable_available_blocks) const;
+    const BlockPoolPtr& groupPool(std::string_view tag) const;
+    size_t              minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
+    size_t              totalReservableAvailableBlocks() const;
+    size_t
+    reserveBlocksForPool(size_t group_index, size_t reserve_blocks, size_t total_reservable_available_blocks) const;
 
     std::vector<BlockPoolPtr> group_block_pools_;
     RoleType                  role_type_{RoleType::PDFUSION};
