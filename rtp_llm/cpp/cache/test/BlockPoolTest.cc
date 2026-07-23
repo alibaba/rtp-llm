@@ -80,6 +80,17 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
     return cfg;
 }
 
+static rtp_llm::CacheConfig
+makeMtpCacheConfigWithAggregateScaleStride(uint32_t main_layers, int mtp_module_num, uint32_t block_num) {
+    auto cfg = makeMtpCacheConfigByCreateSpConfig(main_layers, mtp_module_num, block_num);
+    RTP_LLM_CHECK_WITH_INFO(!cfg.mtp_sub_configs.empty() && cfg.mtp_sub_configs[0] != nullptr,
+                            "MTP sub config is required");
+    auto& sub_config = *cfg.mtp_sub_configs[0];
+    RTP_LLM_CHECK_WITH_INFO(!sub_config.cache_specs.empty(), "MTP cache spec is required");
+    sub_config.kv_scale_stride_bytes = sub_config.cache_specs[0]->scale_block_size_bytes() + 256;
+    return cfg;
+}
+
 }  // namespace
 
 // Initialization Test
@@ -196,6 +207,58 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
               sc_k_off);
     EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[3].addr) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_scale_addr),
               sc_v_off);
+}
+
+TEST_F(BlockPoolTest, MTPLayoutKeepsSparseMlaScaleStride) {
+    auto cache_cfg =
+        makeMtpCacheConfigWithAggregateScaleStride(/*main_layers=*/2, /*mtp_module_num=*/1, /*block_num=*/4);
+
+    ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 1u);
+    ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
+    ASSERT_GT(cache_cfg.mtp_sub_configs[0]->kv_scale_stride_bytes, 0u);
+
+    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
+    ASSERT_EQ(pool_cfg.memory_layouts.size(), 2u);
+
+    const auto& mtp_layout = pool_cfg.memory_layouts[1];
+    EXPECT_TRUE(mtp_layout.hasScale());
+    EXPECT_EQ(mtp_layout.kv_scale_stride_bytes, cache_cfg.mtp_sub_configs[0]->kv_scale_stride_bytes);
+    EXPECT_EQ(mtp_layout.kv_scale_pool_size_bytes,
+              cache_cfg.mtp_sub_configs[0]->kv_scale_stride_bytes * cache_cfg.block_num);
+
+    block_pool_ = std::make_shared<BlockPool>(pool_cfg);
+    ASSERT_TRUE(block_pool_->init());
+
+    const auto scale_tensors = block_pool_->allLayerScaleCacheBase();
+    ASSERT_EQ(scale_tensors.size(), static_cast<size_t>(cache_cfg.layer_all_num));
+    ASSERT_GT(scale_tensors.size(), static_cast<size_t>(cache_cfg.layer_num));
+    EXPECT_TRUE(scale_tensors[cache_cfg.layer_num].defined());
+    EXPECT_GT(scale_tensors[cache_cfg.layer_num].numel(), 0);
+}
+
+TEST_F(BlockPoolTest, MTPLayoutUsesSharedBlockNumWhenSubConfigDiffers) {
+    auto cache_cfg =
+        makeMtpCacheConfigWithAggregateScaleStride(/*main_layers=*/2, /*mtp_module_num=*/1, /*block_num=*/4);
+
+    ASSERT_EQ(cache_cfg.block_num, 4u);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 1u);
+    ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
+    cache_cfg.mtp_sub_configs[0]->block_num = 9;
+
+    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
+    ASSERT_EQ(pool_cfg.memory_layouts.size(), 2u);
+    EXPECT_EQ(pool_cfg.block_num, cache_cfg.block_num);
+    EXPECT_EQ(pool_cfg.memory_layouts[0].block_num, cache_cfg.block_num);
+    EXPECT_EQ(pool_cfg.memory_layouts[1].block_num, cache_cfg.block_num);
+
+    const auto& mtp_layout = pool_cfg.memory_layouts[1];
+    EXPECT_EQ(mtp_layout.kv_block_pool_size_bytes,
+              mtp_layout.layer_num * cache_cfg.block_num * mtp_layout.kv_block_stride_bytes);
+    EXPECT_EQ(mtp_layout.kv_scale_pool_size_bytes,
+              mtp_layout.layer_num * cache_cfg.block_num * mtp_layout.kv_scale_stride_bytes);
+
+    block_pool_ = std::make_shared<BlockPool>(pool_cfg);
+    ASSERT_TRUE(block_pool_->init());
 }
 
 // Allocation Test
