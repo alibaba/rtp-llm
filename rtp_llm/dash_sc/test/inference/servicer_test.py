@@ -824,6 +824,65 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             3,
         )
 
+    async def test_glm5_uses_own_eos_token_for_phase2(self) -> None:
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1, 11, 154820, 99], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20, 21], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2])]
+        )
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+        tok.eos_token_id = 154820
+        env_cfg = _GenerateEnvCfg()
+        runtime = build_think_runtime(tok, env_cfg, "glm_5")
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=runtime,
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertTrue(runtime.phase2_enabled)
+        self.assertEqual(runtime.terminate_token_id, 154820)
+        self.assertEqual(visitor.enqueue_called, 2)
+        # DSV4's token id 1 is ordinary GLM5 output; GLM5's own EOS triggers.
+        self.assertEqual(_gen_ids(chunks[0]), [128821, 10, 1, 11])
+        self.assertEqual(_gen_ids(chunks[1]), [128822, 271])
+        self.assertEqual(_gen_ids(chunks[2]), [20, 21])
+
     async def test_phase2_finished_at_max_new_tokens_reports_length(self) -> None:
         req = self._minimal_request()
         phase1 = GenerateOutputs(

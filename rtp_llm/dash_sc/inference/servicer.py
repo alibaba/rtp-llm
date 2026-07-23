@@ -247,6 +247,10 @@ def _is_deepseek_v4(model_type: Optional[str]) -> bool:
     return str(model_type or "").replace("-", "_").lower() == "deepseek_v4"
 
 
+def _is_glm5(model_type: Optional[str]) -> bool:
+    return str(model_type or "").replace("-", "_").lower() in {"glm_5", "glm_5_mtp"}
+
+
 def _matched_echo_prefix_ids(
     input_ids_list: list[int], echo_prefix_ids: Optional[list[int]]
 ) -> list[int]:
@@ -279,9 +283,10 @@ class _ThinkRuntime:
       ``close_token_id``     first id of ``eos_tokens`` (the ``</think>`` token);
                              ``None`` when ``eos_tokens`` is empty
       ``terminate_token_id`` token id that signals "stop thinking immediately" mid-
-                             stream (DSV4: 1). ``None`` disables the token-terminate
-                             branch (the regular ``</think>`` path keeps working).
-      ``phase2_enabled``     ``is_dsv4 and bool(empty_tokens)``. ``terminate_token_id``
+                             stream (DSV4: configured id; GLM5: tokenizer EOS).
+                             ``None`` disables the token-terminate branch.
+      ``phase2_enabled``     enabled for DSV4/GLM5 when ``empty_tokens`` exist.
+                             ``terminate_token_id``
                              is intentionally *not* part of this gate — even with the
                              token-terminate branch off, dsv4 still needs the
                              phase-2-on-close machinery.
@@ -336,6 +341,8 @@ def build_think_runtime(
         if terminate_token_id is not None and int(terminate_token_id) > 0
         else None
     )
+    if _is_glm5(model_type) and term_id is not None:
+        term_id = eos_tid
     if tokenizer is None or generate_env_config is None:
         return _ThinkRuntime(
             terminate_token_id=term_id,
@@ -350,7 +357,9 @@ def build_think_runtime(
         _encode_tag(tokenizer, think_start_tag + _EMPTY_THINK_BODY + think_end_tag)
     )
     close_token_id = int(eos_tokens[0]) if eos_tokens else None
-    phase2_enabled = _is_deepseek_v4(model_type) and bool(empty_tokens)
+    phase2_enabled = (_is_deepseek_v4(model_type) or _is_glm5(model_type)) and bool(
+        empty_tokens
+    )
     return _ThinkRuntime(
         bos_tokens=bos_tokens,
         eos_tokens=eos_tokens,
