@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
+#include <string>
 
 #if USING_CUDA
 #include <cuda_runtime.h>
@@ -56,17 +58,38 @@ size_t checkedMiBToBytes(int64_t value, const char* name) {
                             value);
     return static_cast<size_t>(value) * kBytesPerMiB;
 }
+
+double getRuntimeMemorySafetyRatio() {
+    const char* raw_value = std::getenv("RUNTIME_MEM_SAFETY_RATIO");
+    if (raw_value == nullptr) {
+        return kDefaultRuntimeMemorySafetyRatio;
+    }
+
+    const std::string value(raw_value);
+    size_t            parsed_chars = 0;
+    double            ratio        = 0.0;
+    try {
+        ratio = std::stod(value, &parsed_chars);
+    } catch (const std::exception& e) {
+        RTP_LLM_CHECK_WITH_INFO(false, "invalid RUNTIME_MEM_SAFETY_RATIO '%s': %s", raw_value, e.what());
+        return kDefaultRuntimeMemorySafetyRatio;
+    }
+    RTP_LLM_CHECK_WITH_INFO(parsed_chars == value.size() && std::isfinite(ratio) && ratio >= 0.0 && ratio < 1.0,
+                            "RUNTIME_MEM_SAFETY_RATIO must be a finite number in [0, 1), got '%s'",
+                            raw_value);
+    return ratio;
+}
 }  // namespace
 
 // Helper function to update memory size if below minimum requirement
 void MemoryEvaluationHelper::updateMemoryIfNeeded(size_t& current_size, size_t min_required, const char* scenario) {
     if (current_size < min_required) {
-        current_size = min_required;
-        RTP_LLM_LOG_INFO("%s needs at least %ld MiB memory for runtime by default, "
-                         "but only %ld MiB memory reserved. adjust to minimal value.",
+        const size_t original_size = current_size;
+        current_size               = min_required;
+        RTP_LLM_LOG_INFO("%s runtime memory reserve adjusted from %ld MiB to %ld MiB",
                          scenario,
-                         min_required / 1024 / 1024,
-                         current_size / 1024 / 1024);
+                         original_size / 1024 / 1024,
+                         min_required / 1024 / 1024);
     }
 }
 
@@ -149,17 +172,18 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
 
     size_t sample_need_mem =
         (size_t)runtime_config.max_generate_batch_size * model_config.vocab_size * 4 * 8;  // just estimated value
-    const double  safety_ratio           = autil::EnvUtil::getEnv("RUNTIME_MEM_SAFETY_RATIO", 0.05);
-    const int64_t no_warmup_floor_mb     = autil::EnvUtil::getEnv("RUNTIME_MEM_NO_WARMUP_FLOOR_MB", 2048L);
-    const size_t  no_warmup_floor_bytes  = checkedMiBToBytes(no_warmup_floor_mb, "RUNTIME_MEM_NO_WARMUP_FLOOR_MB");
-    const auto    sizing                 = calculateRuntimeMemorySizing({warm_up_result.has_value(),
+    const double  safety_ratio = getRuntimeMemorySafetyRatio();
+    const int64_t no_warmup_floor_mb =
+        autil::EnvUtil::getEnv("RUNTIME_MEM_NO_WARMUP_FLOOR_MB", kDefaultRuntimeNoWarmupFloorMiB);
+    const size_t no_warmup_floor_bytes  = checkedMiBToBytes(no_warmup_floor_mb, "RUNTIME_MEM_NO_WARMUP_FLOOR_MB");
+    const auto   sizing                 = calculateRuntimeMemorySizing({warm_up_result.has_value(),
                                                       env_runtime_required_bytes,
                                                       warmup_required_bytes,
                                                       sample_need_mem,
                                                       total_gpu_bytes,
                                                       safety_ratio,
                                                       no_warmup_floor_bytes});
-    const size_t  runtime_required_bytes = sizing.runtime_required_bytes;
+    const size_t runtime_required_bytes = sizing.runtime_required_bytes;
 
     RTP_LLM_LOG_INFO("sampler needs %ld MiB memory, final runtime needs %ld MiB memory.",
                      sample_need_mem / 1024 / 1024,

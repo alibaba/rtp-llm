@@ -5,6 +5,7 @@ from typing import Mapping, MutableMapping, Optional, Sequence
 
 _TRUE_VALUES = {"yes", "true", "t", "1", "on"}
 _FALSE_VALUES = {"no", "false", "f", "0", "off"}
+_AUTO_ENABLED_FOR_WARMUP = False
 
 
 def is_start_server_entrypoint(argv: Sequence[str]) -> bool:
@@ -54,6 +55,7 @@ def configure_expandable_segments_for_warmup(
     is_rocm: Optional[bool] = None,
 ) -> bool:
     """Set the allocator default for CUDA warmup without overriding user configuration."""
+    global _AUTO_ENABLED_FOR_WARMUP
     args = list(sys.argv[1:] if argv is None else argv)
     env = os.environ if environ is None else environ
     if not warmup_requested(args, env):
@@ -66,4 +68,11 @@ def configure_expandable_segments_for_warmup(
 
     before = env.get("PYTORCH_CUDA_ALLOC_CONF")
     env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    return before is None
+    auto_enabled = before is None
+    if environ is None and auto_enabled:
+        _AUTO_ENABLED_FOR_WARMUP = True
+    return auto_enabled
+
+
+def expandable_segments_auto_enabled_for_warmup() -> bool:
+    return _AUTO_ENABLED_FOR_WARMUP

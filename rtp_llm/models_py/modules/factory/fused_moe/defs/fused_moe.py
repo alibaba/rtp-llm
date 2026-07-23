@@ -152,7 +152,11 @@ def _log_runtime_slot_distribution(router: Any, topk_ids: torch.Tensor) -> None:
 
 
 def _in_memory_trace() -> bool:
-    """Return whether this forward is the memory-traced warmup."""
+    """Return whether this forward is inside the C++ RAII-guarded warmup trace scope.
+
+    The C++ warmup sets the process-global flag immediately before creating its temporary
+    executor and restores it to false after destroying that executor, including exception paths.
+    """
     global _TRACE_MEMORY_WARNED
     if _IS_TRACE_MEMORY is None:
         # Binding genuinely missing: disable skew but make the degradation visible once, since a

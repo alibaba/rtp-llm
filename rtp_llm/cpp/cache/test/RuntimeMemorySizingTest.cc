@@ -3,6 +3,7 @@
 #include <limits>
 
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
+#include "rtp_llm/models_py/bindings/core/DeviceData.h"
 
 namespace rtp_llm {
 namespace {
@@ -84,6 +85,32 @@ TEST(RuntimeMemorySizingTest, RejectsWarmupAdditionOverflow) {
     input.safety_ratio             = 0.5;
 
     EXPECT_THROW(calculateRuntimeMemorySizing(input), std::overflow_error);
+}
+
+TEST(MemoryGrowthTest, SeparatesTorchAndNonTorchGrowth) {
+    const auto growth = calculateMemoryGrowth(
+        /*reserved_baseline_bytes=*/2 * GiB,
+        /*reserved_peak_bytes=*/5 * GiB,
+        /*reserved_current_bytes=*/3 * GiB,
+        /*cuda_used_baseline_bytes=*/3 * GiB,
+        /*cuda_used_current_bytes=*/6 * GiB);
+
+    EXPECT_EQ(growth.torch_peak_increase_bytes, 3 * GiB);
+    EXPECT_EQ(growth.non_torch_increase_bytes, 2 * GiB);
+    EXPECT_EQ(growth.max_consumed_bytes, 5 * GiB);
+}
+
+TEST(MemoryGrowthTest, ClampsCounterRegressionsToZero) {
+    const auto growth = calculateMemoryGrowth(
+        /*reserved_baseline_bytes=*/4 * GiB,
+        /*reserved_peak_bytes=*/3 * GiB,
+        /*reserved_current_bytes=*/5 * GiB,
+        /*cuda_used_baseline_bytes=*/8 * GiB,
+        /*cuda_used_current_bytes=*/7 * GiB);
+
+    EXPECT_EQ(growth.torch_peak_increase_bytes, 0u);
+    EXPECT_EQ(growth.non_torch_increase_bytes, 0u);
+    EXPECT_EQ(growth.max_consumed_bytes, 0u);
 }
 
 }  // namespace

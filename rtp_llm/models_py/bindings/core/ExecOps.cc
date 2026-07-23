@@ -523,24 +523,14 @@ ExecStatus getGpuExecStatus() {
         const size_t torch_cur  = static_cast<size_t>(stats.reserved_bytes[0].current);
         mem.allocated_bytes     = static_cast<size_t>(stats.allocated_bytes[0].current);
 
-        // (1) torch transient peak: activations / workspaces routed through the caching allocator.
-        const size_t torch_peak_increase =
-            torch_peak > g_reserved_baseline_bytes ? torch_peak - g_reserved_baseline_bytes : 0;
-
-        // (2) non-torch growth: NCCL / attention buffers / library scratch allocated OUTSIDE torch.
-        // Measured as the increase of (device_used - torch_reserved) since the baseline -- the part
-        // of device memory that the torch allocator does not account for. torch peak is a high-water
-        // mark while non-torch is read end-of-forward (these allocations are typically persistent),
-        // matching vLLM's accounting.
-        const size_t non_torch_now      = mem.used_bytes > torch_cur ? mem.used_bytes - torch_cur : 0;
-        const size_t non_torch_baseline = g_cuda_used_baseline_bytes > g_reserved_baseline_bytes ?
-                                              g_cuda_used_baseline_bytes - g_reserved_baseline_bytes :
-                                              0;
-        const size_t non_torch_increase = non_torch_now > non_torch_baseline ? non_torch_now - non_torch_baseline : 0;
-
-        mem.torch_peak_increase_bytes = torch_peak_increase;
-        mem.non_torch_increase_bytes  = non_torch_increase;
-        mem.max_consumed_bytes        = torch_peak_increase + non_torch_increase;
+        // cudaMemGetInfo is device-global, so this decomposition assumes the warmup rank has
+        // exclusive use of its GPU during the measurement window. External allocations would be
+        // attributed to non-torch growth.
+        const auto growth = calculateMemoryGrowth(
+            g_reserved_baseline_bytes, torch_peak, torch_cur, g_cuda_used_baseline_bytes, mem.used_bytes);
+        mem.torch_peak_increase_bytes = growth.torch_peak_increase_bytes;
+        mem.non_torch_increase_bytes  = growth.non_torch_increase_bytes;
+        mem.max_consumed_bytes        = growth.max_consumed_bytes;
     }
 #endif
     ExecStatus status;

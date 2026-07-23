@@ -45,6 +45,28 @@ void releaseHostMemoryCache() {
 #endif
 }
 
+#if USING_CUDA
+class WarmupTraceScope {
+public:
+    explicit WarmupTraceScope(std::unique_ptr<Executor>& executor): executor_(executor) {}
+
+    void startTracing() {
+        rtp_llm::setTraceMemory(true);
+    }
+
+    ~WarmupTraceScope() {
+        executor_.reset();
+        rtp_llm::setTraceMemory(false);
+    }
+
+    WarmupTraceScope(const WarmupTraceScope&) = delete;
+    WarmupTraceScope& operator=(const WarmupTraceScope&) = delete;
+
+private:
+    std::unique_ptr<Executor>& executor_;
+};
+#endif
+
 }  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
@@ -261,13 +283,15 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     auto fake_input                                   = makeFakeInput(max_seq_len - 1);
     fake_input->generate_config->num_return_sequences = num_seqs;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
-    rtp_llm::setTraceMemory(true);
-    executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
-    THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
-    const auto peak_status  = getGpuExecStatus().device_memory_status;
+    MemoryStatus peak_status;
+    {
+        WarmupTraceScope trace_scope(executor_);
+        trace_scope.startTracing();
+        executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
+        THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
+        peak_status = getGpuExecStatus().device_memory_status;
+    }
     const auto max_consumed = peak_status.max_consumed_bytes;
-    rtp_llm::setTraceMemory(false);
-    (void)executor_.reset(nullptr);
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
     const auto device_status = getGpuExecStatus();
@@ -305,16 +329,16 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
 
-    rtp_llm::setTraceMemory(true);
-
-    executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, mla_ops_type_));
-    THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
-    const auto peak_status = getGpuExecStatus().device_memory_status;
+    MemoryStatus peak_status;
+    {
+        WarmupTraceScope trace_scope(executor_);
+        trace_scope.startTracing();
+        executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, mla_ops_type_));
+        THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
+        peak_status = getGpuExecStatus().device_memory_status;
+    }
 
     const auto max_consumed = peak_status.max_consumed_bytes;
-    rtp_llm::setTraceMemory(false);
-    (void)executor_.reset(nullptr);
-
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
     const auto device_status = getGpuExecStatus();

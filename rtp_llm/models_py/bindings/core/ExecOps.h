@@ -60,7 +60,8 @@ void cudaProfilerEnd();
 ExecStatus    getGpuExecStatus();
 torch::Device getTorchCudaDevice();
 void          setTraceMemory(bool trace_memory);
-// True while a warmup forward is being memory-traced (between setTraceMemory(true/false)).
+// True only inside the RAII-guarded warmup forward (between setTraceMemory(true/false)); the guard
+// restores false on both success and exception paths.
 // Exposed to Python (compute_ops.is_trace_memory) so the MoE module can force worst-case
 // routing during warmup, making the measured peak already cover the skewed case.
 bool isTraceMemory();

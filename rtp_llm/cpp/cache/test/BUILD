@@ -54,6 +54,7 @@ cc_test(
     copts = copts(),
     deps = [
         "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/models_py/bindings/core:device_data",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
