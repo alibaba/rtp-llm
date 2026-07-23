@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -91,6 +92,36 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto builder = GenerateStreamBuilder();
     auto stream1 = builder.createContextStream({{1, 2, 3, 4, 5}, {}});
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
+}
+
+TEST_F(GenerateStreamTest, testNumReturnSequencesTileAfterContextBatch) {
+    std::shared_ptr<GenerateInput> query         = make_shared<GenerateInput>();
+    query->input_ids                             = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
+    query->generate_config                       = make_shared<GenerateConfig>();
+    query->generate_config->num_return_sequences = 20;
+    query->generate_config->return_softmax_probs = true;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 2048;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+
+    ASSERT_TRUE(stream->isContextStream());
+    EXPECT_EQ(1, stream->currentBatchSize());
+    EXPECT_EQ(20, stream->nextBatchSize());
+    EXPECT_EQ(20, stream->maxBatchSize());
+    EXPECT_TRUE(stream->needTilingForSampling());
+    EXPECT_EQ(5, stream->currentExecuteTokenSize());
+    EXPECT_EQ(20 * 2048, stream->getSoftmaxProbs().numel());
+
+    std::list<GenerateStreamPtr> streams{stream};
+    StreamGroups                 stream_groups(streams);
+    EXPECT_EQ(1, stream_groups.totalContextBatchSize());
+    EXPECT_EQ(1, stream_groups.totalModelBatchSize());
+    EXPECT_EQ(5, stream_groups.modelExecuteTokenSize());
+    EXPECT_EQ(20, stream_groups.totalSamplerBatchSizeIn());
+    EXPECT_EQ(20, stream_groups.totalSamplerBatchSizeOut());
 }
 
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {

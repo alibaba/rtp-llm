@@ -229,6 +229,55 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     }
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testNumReturnSequencesTilesSamplerInputOnly) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 8;
+    model_config.num_layers  = 2;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+    RuntimeConfig runtime_config;
+
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    std::shared_ptr<GenerateInput> query         = make_shared<GenerateInput>();
+    query->input_ids                             = hostIntBuffer({1, 2, 3});
+    query->generate_config                       = make_shared<GenerateConfig>();
+    query->generate_config->num_return_sequences = 3;
+    query->generate_config->return_cum_log_probs = true;
+    GenerateStreamPtr stream =
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    std::list<GenerateStreamPtr> streams{stream};
+    StreamGroups                 stream_groups(streams);
+    ASSERT_EQ(1, stream_groups.totalModelBatchSize());
+    ASSERT_EQ(3, stream_groups.totalSamplerBatchSizeIn());
+    ASSERT_EQ(3, stream_groups.totalSamplerBatchSizeOut());
+
+    auto merge_input_status = processor.gatherModelInput(stream_groups);
+    ASSERT_TRUE(merge_input_status.ok());
+    EXPECT_EQ(std::vector<int>({1, 2, 3}), toVec<int>(merge_input_status.value().combo_tokens));
+
+    GptModelOutputs model_output;
+    model_output.logits       = torch::tensor({0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f}).reshape({1, 8});
+    auto sampler_input_status = processor.gatherSamplerInput(stream_groups, merge_input_status.value(), model_output);
+    ASSERT_TRUE(sampler_input_status.ok());
+    const auto& sampler_inputs = sampler_input_status.value();
+    EXPECT_EQ(3, sampler_inputs.batch_size);
+    EXPECT_EQ(3, sampler_inputs.batch_size_out);
+    EXPECT_EQ(std::vector<float>({0.0f, 0.0f, 0.0f}), toVec<float>(sampler_inputs.cum_log_probs));
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_EQ(std::vector<int>({1, 2, 3}), toVec<int>(sampler_inputs.token_ids[i].narrow(0, 0, 3)));
+        EXPECT_EQ(std::vector<float>({0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f}),
+                  toVec<float>(sampler_inputs.logits[i]));
+    }
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     ResourceContext resource_context;
     ModelConfig     model_config;

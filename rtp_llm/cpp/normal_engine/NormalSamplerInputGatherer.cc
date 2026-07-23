@@ -14,10 +14,10 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
     (void)model_inputs;
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_CHECK(!stream_groups.empty());
-    auto all_streams          = stream_groups.allStreams();
-    auto total_batch_size_in  = stream_groups.totalSamplerBatchSizeIn();
-    auto total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
-    ReturnAllProbsMode return_all_probs = stream_groups.needReturnAllProbs();
+    auto               all_streams          = stream_groups.allStreams();
+    auto               total_batch_size_in  = stream_groups.totalSamplerBatchSizeIn();
+    auto               total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
+    ReturnAllProbsMode return_all_probs     = stream_groups.needReturnAllProbs();
 
     SamplerInputs sampler_inputs = allocateSamplerInputs(stream_groups, total_batch_size_in, total_batch_size_out);
     fillSamplerCommonInputs(sampler_inputs, all_streams);
@@ -43,7 +43,7 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
                    complete_token_ids.data_ptr<int32_t>() + cur_batch * complete_seq_len,
                    seq_len * sizeof(int));
             reinterpret_cast<bool*>(sampler_inputs.finished_mask.data_ptr())[batch_idx] =
-                stream->isSubGenerateDoneWithoutLock(i);
+                stream->isSubGenerateDoneWithoutLock(cur_batch);
             batch_idx += 1;
         }
         need_tiling |= stream->needTilingForSampling();
@@ -167,13 +167,19 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
         } else {
             sampler_batch_size = stream->currentBatchSize();
         }
-        if (sampler_inputs.cum_log_probs.defined()) {
-            const auto& cum_log_probs = stream->cumLogProbs();
-            memcpy(sampler_inputs.cum_log_probs.data_ptr<float>() + batch_idx,
-                   cum_log_probs.data_ptr<float>(),
-                   cum_log_probs.numel() * sizeof(float));
+        const auto& cum_log_probs = stream->cumLogProbs();
+        auto*       cum_log_probs_out =
+            sampler_inputs.cum_log_probs.defined() ? sampler_inputs.cum_log_probs.data_ptr<float>() : nullptr;
+        auto* cum_log_probs_in  = sampler_inputs.cum_log_probs.defined() ? cum_log_probs.data_ptr<float>() : nullptr;
+        auto  cum_log_probs_num = sampler_inputs.cum_log_probs.defined() ? cum_log_probs.numel() : 0;
+        if (cum_log_probs_out != nullptr) {
+            RTP_LLM_CHECK(cum_log_probs_num > 0);
         }
         for (int i = 0; i < sampler_batch_size; ++i) {
+            if (cum_log_probs_out != nullptr) {
+                auto cur_batch               = std::min<int64_t>(i, cum_log_probs_num - 1);
+                cum_log_probs_out[batch_idx] = cum_log_probs_in[cur_batch];
+            }
             input_lengths[batch_idx]      = stream->inputLength();
             sequence_lengths[batch_idx]   = stream->seqLength() + propose_step;
             num_beams_in[batch_idx]       = stream->currentNumBeams();
@@ -201,11 +207,19 @@ void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&        
                                                           std::list<GenerateStreamPtr>& all_streams,
                                                           bool                          score_batch) const {
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
-    std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, idx = 0](auto& stream) mutable {
-        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
-            state_ptr->insert(processor, idx, idx + stream->currentBatchSize());
+    std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, score_batch, idx = 0](auto& stream) mutable {
+        int sampler_batch_size;
+        if (score_batch) {
+            sampler_batch_size = stream->scoreLen();
+        } else if (stream->needTilingForSampling()) {
+            sampler_batch_size = stream->nextBatchSize();
+        } else {
+            sampler_batch_size = stream->currentBatchSize();
         }
-        idx += stream->currentBatchSize();
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            state_ptr->insert(processor, idx, idx + sampler_batch_size);
+        }
+        idx += sampler_batch_size;
     });
     sampler_inputs.logits_processor_states_ptr = state_ptr;
 }

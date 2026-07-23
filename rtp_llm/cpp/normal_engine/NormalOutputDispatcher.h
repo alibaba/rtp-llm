@@ -17,6 +17,7 @@ private:
     void dispatchSingleStream(GenerateStreamPtr    stream,
                               const MergedOutput&  merge_outputs,
                               int                  batch_idx_in,
+                              int                  sampler_batch_idx_in,
                               int                  batch_idx_out,
                               int                  token_offset,
                               bool                 return_all_probs,
