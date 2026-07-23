@@ -1,24 +1,48 @@
+#include <algorithm>
+#include <chrono>
+#include <mutex>
+
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 
 namespace rtp_llm {
 
 ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
-    // TODO(xinfei.sxf) 某些case下会出现1s的等待
-    while ((!hasError()) && getStatus() != StreamState::FINISHED && generate_outputs_queue_.isEmpty()) {
-        checkTimeout();
-        generate_outputs_queue_.waitNotEmpty();
-    }
-    if (hasError()) {
-        return statusInfo();
-    }
-    if (generate_outputs_queue_.isEmpty()) {
-        if (isFinished()) {
-            return ErrorInfo(ErrorCode::FINISHED, "finished");
-        } else {
-            return ErrorInfo(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty");
+    std::unique_lock<std::mutex> lock(*mutex_);
+
+    // 判断与等待共用 mutex_ 同步边界：在锁内读取 error_info / status，消除与写线程（reportEvent 持锁写）
+    // 的数据竞争；用带 stream 状态谓词的 cv 等待，杜绝丢唤醒。命中条件：已报错 / 已结束 / 队列有输出。
+    auto stream_ready = [this]() {
+        return generate_status_->error_info.hasError() || generate_status_->getStatus() == StreamState::FINISHED
+               || !generate_outputs_queue_.isEmpty();
+    };
+
+    const int64_t timeout_ms = getTimeoutMs();
+    while (!stream_ready()) {
+        // 兜底周期：即便极端情况下漏掉一次 notify，也最多 1s 后重新自检，避免永久阻塞；正常由 notify 立即唤醒。
+        int64_t wait_ms = 1000;
+        if (timeout_ms > 0) {
+            const int64_t running_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
+            if (running_ms >= timeout_ms) {
+                // 持锁内联超时上报：不可调用会再次加锁的 checkTimeout()，否则 mutex_ 自死锁。
+                reportEventWithoutLock(StreamEvents::Error,
+                                       ErrorCode::GENERATE_TIMEOUT,
+                                       "query has been running " + std::to_string(running_ms)
+                                           + " ms, timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout");
+                break;
+            }
+            wait_ms = std::min<int64_t>(wait_ms, timeout_ms - running_ms);
         }
+        cv_->wait_for(lock, std::chrono::milliseconds(wait_ms), stream_ready);
     }
-    return generate_outputs_queue_.getAndPopFront();
+
+    // 仍在锁内判定结果，保证读取 error_info 的同步性。错误优先于排空（与原实现一致）。
+    if (generate_status_->error_info.hasError()) {
+        return generate_status_->error_info;
+    }
+    if (!generate_outputs_queue_.isEmpty()) {
+        return generate_outputs_queue_.getAndPopFront();
+    }
+    return ErrorInfo(ErrorCode::FINISHED, "finished");
 }
 
 bool NormalGenerateStream::hasOutput() {
@@ -158,6 +182,8 @@ void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_resu
         reportEventWithoutLock(StreamEvents::Error, ErrorCode::OUTPUT_QUEUE_FULL, "output queue is full");
     } else {
         generate_outputs_queue_.push(std::move(generate_results));
+        // 唤醒在 cv_ 上等待输出的消费者（nextOutput）。本函数经 updateOutput 在持有 mutex_ 时调用。
+        cv_->notify_all();
     }
 }
 
