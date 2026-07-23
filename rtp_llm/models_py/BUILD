@@ -113,14 +113,25 @@ py_library(
 )
 
 py_library(
-    name = "new_weight_loader",
+    name = "new_loader_core",
     srcs = [
         "__init__.py",
         "model_loader.py",
-        "model_desc/module_base.py",
         "module_base.py",
         "registry.py",
         "weight_mapper.py",
+    ],
+    deps = [
+        "//rtp_llm:safetensors",
+        "//rtp_llm:torch",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "new_weight_loader",
+    srcs = [
+        "model_desc/module_base.py",
     ] + glob([
         "layers/*.py",
         "new_models/*.py",
@@ -133,6 +144,7 @@ py_library(
         "quant_methods/*.py",
     ]),
     deps = [
+        ":new_loader_core",
         ":kernels",
         ":modules",
         "//rtp_llm:_ft_pickler",
@@ -156,17 +168,12 @@ py_library(
 py_library(
     name = "qwen2_vl_vision_loader",
     srcs = [
-        "__init__.py",
-        "model_loader.py",
-        "module_base.py",
         "new_models/__init__.py",
         "new_models/qwen2_vl/__init__.py",
         "new_models/qwen2_vl/vision.py",
-        "registry.py",
-        "weight_mapper.py",
     ],
     deps = [
-        "//rtp_llm:safetensors",
+        ":new_loader_core",
         "//rtp_llm:torch",
         "//rtp_llm:utils",
     ] + select({

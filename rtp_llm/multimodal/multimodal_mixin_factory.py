@@ -1,5 +1,4 @@
 import logging
-import os
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.model_config import ModelConfig
@@ -11,12 +10,7 @@ from rtp_llm.multimodal.multimodal_mixin_register import (
 )
 from rtp_llm.multimodal.multimodal_mixins import BaseMultiModalMixin
 from rtp_llm.ops import TaskType
-
-
-def _new_loader_requested(model_config: ModelConfig) -> bool:
-    return os.environ.get("USE_NEW_LOADER", "0") == "1" or bool(
-        getattr(model_config, "use_new_loader", False)
-    )
+from rtp_llm.utils.new_loader import is_new_loader_enabled
 
 
 class MultimodalMixinFactory:
@@ -38,7 +32,7 @@ class MultimodalMixinFactory:
             engine_config.load_config.load_method,
             vit_config,
             model_config.ckpt_path,
-            use_new_loader=_new_loader_requested(model_config),
+            use_new_loader=is_new_loader_enabled(model_config),
         )
 
     @staticmethod

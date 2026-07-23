@@ -10,6 +10,15 @@ py_test(
 )
 
 py_test(
+    name = "test_qwen2_vl_vision_loader_import",
+    srcs = ["test_qwen2_vl_vision_loader_import.py"],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm/models_py:qwen2_vl_vision_loader",
+    ],
+)
+
+py_test(
     name = "test_qwen2_vl_gpu",
     srcs = ["test_qwen2_vl_gpu.py"],
     exec_properties = {
