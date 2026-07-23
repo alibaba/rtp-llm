@@ -141,6 +141,7 @@ py_library(
         "new_models/qwen3/*.py",
         "new_models/qwen3_moe/*.py",
         "new_models/qwen3_next/*.py",
+        "new_models/qwen3_vl/*.py",
         "quant_methods/*.py",
     ]),
     deps = [
@@ -171,6 +172,25 @@ py_library(
         "new_models/__init__.py",
         "new_models/qwen2_vl/__init__.py",
         "new_models/qwen2_vl/vision.py",
+    ],
+    deps = [
+        ":new_loader_core",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+    ] + select({
+        "@//:using_cuda12_9_x86": flashattn,
+        "@//:using_cuda12_arm": flashattn,
+        "//conditions:default": [],
+    }),
+    visibility = ["//rtp_llm:__subpackages__"],
+)
+
+py_library(
+    name = "qwen3_vl_vision_loader",
+    srcs = [
+        "new_models/__init__.py",
+        "new_models/qwen3_vl/__init__.py",
+        "new_models/qwen3_vl/vision.py",
     ],
     deps = [
         ":new_loader_core",
