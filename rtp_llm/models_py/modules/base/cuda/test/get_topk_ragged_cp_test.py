@@ -6,14 +6,11 @@ single rank with one chunk so that generate_q_indices yields valid indices
 for index_select on local q_fp8.
 """
 
+from pathlib import Path
 from unittest import SkipTest, TestCase, main
 
 import torch
 
-from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp
-from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
-    generate_q_indices,
-)
 from rtp_llm.ops.compute_ops import (
     LayerKVCache,
     PyAttentionInputs,
@@ -26,15 +23,117 @@ def _check_cuda_deep_gemm():
     try:
         if not torch.cuda.is_available():
             return False
-        import deep_gemm  # noqa: F401
+        import deep_gemm
 
-        return True
+        package_dir = Path(deep_gemm.__file__).resolve().parent
+        return (package_dir / "include" / "deep_gemm").is_dir()
     except ImportError:
         return False
 
 
 CUDA_DEEPGEMM_OK = _check_cuda_deep_gemm()
-SKIP_REASON = "CUDA and deep_gemm required for IndexerOp._get_topk_ragged_cp"
+SKIP_REASON = (
+    "CUDA and a complete deep_gemm JIT package are required for "
+    "IndexerOp._get_topk_ragged_cp"
+)
+
+
+class CPGatherIndexerKQuantCacheTest(TestCase):
+    head_dim = 128
+    cache_block_size = 4
+    cache_stride = 132
+
+    def setUp(self):
+        if not torch.cuda.is_available():
+            raise SkipTest("CUDA is required")
+        self.device = torch.device("cuda:0")
+        torch.cuda.set_device(self.device)
+
+    def _make_cache(self):
+        cache = torch.zeros(
+            (2, self.cache_block_size, self.cache_stride),
+            dtype=torch.uint8,
+            device=self.device,
+        )
+        flat = cache.flatten()
+        for block in range(cache.size(0)):
+            block_base = block * cache.stride(0)
+            for token in range(self.cache_block_size):
+                value = block * 10 + token + 1
+                start = block_base + token * self.head_dim
+                flat[start : start + self.head_dim] = value
+                scale_byte_offset = (
+                    block_base
+                    + self.cache_block_size * self.head_dim
+                    + token * 4
+                )
+                flat[scale_byte_offset : scale_byte_offset + 4].view(
+                    torch.float32
+                ).fill_(float(value) / 10.0)
+        return cache
+
+    def _gather(self, block_table, cu_seq_lens, num_tokens):
+        dst_k = torch.full(
+            (num_tokens, self.head_dim),
+            0xA5,
+            dtype=torch.uint8,
+            device=self.device,
+        )
+        dst_scale = torch.full(
+            (num_tokens, 4),
+            0xA5,
+            dtype=torch.uint8,
+            device=self.device,
+        )
+        rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+            self._make_cache(),
+            dst_k,
+            dst_scale,
+            torch.tensor(block_table, dtype=torch.int32, device=self.device),
+            torch.tensor(cu_seq_lens, dtype=torch.int32, device=self.device),
+        )
+        torch.cuda.synchronize()
+        return dst_k, dst_scale.view(torch.float32)
+
+    def test_gathers_logical_pages_from_physical_block_table(self):
+        dst_k, dst_scale = self._gather([[1, 0]], [0, 6], num_tokens=6)
+
+        expected_values = torch.tensor(
+            [11, 12, 13, 14, 1, 2], dtype=torch.uint8, device=self.device
+        )
+        torch.testing.assert_close(dst_k[:, 0], expected_values)
+        torch.testing.assert_close(
+            dst_scale[:, 0], expected_values.to(torch.float32) / 10.0
+        )
+
+    def test_invalid_physical_blocks_are_zero_filled(self):
+        for block_id in (-1, 2):
+            with self.subTest(block_id=block_id):
+                dst_k, dst_scale = self._gather(
+                    [[block_id]], [0, 2], num_tokens=2
+                )
+                self.assertEqual(torch.count_nonzero(dst_k).item(), 0)
+                self.assertEqual(torch.count_nonzero(dst_scale).item(), 0)
+
+    def test_tokens_beyond_logical_block_table_are_zero_filled(self):
+        dst_k, dst_scale = self._gather([[0]], [0, 6], num_tokens=6)
+
+        torch.testing.assert_close(
+            dst_k[:4, 0],
+            torch.tensor([1, 2, 3, 4], dtype=torch.uint8, device=self.device),
+        )
+        self.assertEqual(torch.count_nonzero(dst_k[4:]).item(), 0)
+        self.assertEqual(torch.count_nonzero(dst_scale[4:]).item(), 0)
+
+    def test_tokens_outside_sequence_ranges_are_zero_filled(self):
+        dst_k, dst_scale = self._gather([[0]], [1, 3], num_tokens=3)
+
+        self.assertEqual(torch.count_nonzero(dst_k[0]).item(), 0)
+        self.assertEqual(torch.count_nonzero(dst_scale[0]).item(), 0)
+        torch.testing.assert_close(
+            dst_k[1:, 0],
+            torch.tensor([1, 2], dtype=torch.uint8, device=self.device),
+        )
 
 
 class GetTopkRaggedCPTest(TestCase):
@@ -43,6 +142,13 @@ class GetTopkRaggedCPTest(TestCase):
     def setUp(self):
         if not CUDA_DEEPGEMM_OK:
             raise SkipTest(SKIP_REASON)
+        from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp
+        from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
+            generate_q_indices,
+        )
+
+        self.IndexerOp = IndexerOp
+        self.generate_q_indices = generate_q_indices
         self.device = torch.device("cuda:0")
         torch.cuda.set_device(self.device)
         torch.manual_seed(42)
@@ -62,7 +168,7 @@ class GetTopkRaggedCPTest(TestCase):
         total_tokens = 8
         chunk_lengths = [8]
 
-        op = IndexerOp(
+        op = self.IndexerOp(
             index_n_heads=index_n_heads,
             index_head_dim=index_head_dim,
             index_topk=index_topk,
@@ -133,7 +239,7 @@ class GetTopkRaggedCPTest(TestCase):
         fmha_params.expanded_seq_lens = expanded_seq_lens
         fmha_params.topk_indices_offset = topk_indices_offset
 
-        q0_idx_list, _q1_idx_list = generate_q_indices(chunk_lengths)
+        q0_idx_list, _q1_idx_list = self.generate_q_indices(chunk_lengths)
         n0 = len(q0_idx_list)
 
         # Precompute indexed params (simulates what create_params does)
@@ -193,7 +299,7 @@ class GetTopkRaggedCPTest(TestCase):
         total_kv_tokens = input_tokens + prefix_length  # 72
         chunk_lengths = [8]
 
-        op = IndexerOp(
+        op = self.IndexerOp(
             index_n_heads=index_n_heads,
             index_head_dim=index_head_dim,
             index_topk=index_topk,
@@ -273,7 +379,7 @@ class GetTopkRaggedCPTest(TestCase):
         fmha_params.expanded_seq_lens = expanded_seq_lens
         fmha_params.topk_indices_offset = topk_indices_offset
 
-        q0_idx_list, _q1_idx_list = generate_q_indices(chunk_lengths)
+        q0_idx_list, _q1_idx_list = self.generate_q_indices(chunk_lengths)
         n0 = len(q0_idx_list)
 
         # Precompute indexed params (simulates what create_params does)

@@ -134,6 +134,15 @@ indexer_k_quant_and_cache_kernel(const scalar_t* __restrict__ k,            // [
 }
 
 // Gather indexer K quantized cache kernel
+__device__ __forceinline__ void zero_gather_indexer_k_quant_cache(
+    char* dst_k, char* dst_scale, const int64_t dst_offset, const int quant_block_size, const bool write_scale) {
+    constexpr int VEC_SIZE                                  = sizeof(float4) / sizeof(char);
+    reinterpret_cast<float4*>(dst_k)[dst_offset / VEC_SIZE] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    if (write_scale) {
+        reinterpret_cast<float*>(dst_scale)[dst_offset / quant_block_size] = 0.0f;
+    }
+}
+
 template<int BLOCK_Y_SIZE>
 __global__ void
 cp_gather_indexer_k_quant_cache_kernel(const char* __restrict__ kv_cache,  // [num_blocks, block_size, cache_stride]
@@ -148,6 +157,7 @@ cp_gather_indexer_k_quant_cache_kernel(const char* __restrict__ kv_cache,  // [n
                                        const int64_t cache_token_stride,     // stride for each token in kv_cache
                                        const int64_t cache_block_size,       // num_tokens for each block in kv_cache
                                        const int     num_blocks,             // number of blocks
+                                       const int     cache_num_blocks,       // number of physical cache blocks
                                        const int     num_tokens,             // number of tokens
                                        const int     quant_block_size        // quantization block size
 ) {
@@ -155,11 +165,18 @@ cp_gather_indexer_k_quant_cache_kernel(const char* __restrict__ kv_cache,  // [n
     const int     token_idx = blockIdx.x * blockDim.y + threadIdx.y;
     const int     head_idx  = (blockIdx.y * blockDim.x + threadIdx.x) * VEC_SIZE;
 
+    const bool valid_token = token_idx < num_tokens;
+
     // Find batch index within a block
     __shared__ int batch_idx[BLOCK_Y_SIZE];
+    if (threadIdx.x == 0) {
+        batch_idx[threadIdx.y] = -1;
+    }
+    __syncthreads();
+
     for (int iter = 0; iter < (batch_size + blockDim.x - 1) / blockDim.x; iter++) {
         int tid = iter * blockDim.x + threadIdx.x;
-        if (tid < batch_size) {
+        if (valid_token && tid < batch_size) {
             const int seq_start = cu_seq_lens[tid];
             const int seq_end   = cu_seq_lens[tid + 1];
             if (token_idx >= seq_start && token_idx < seq_end) {
@@ -168,17 +185,34 @@ cp_gather_indexer_k_quant_cache_kernel(const char* __restrict__ kv_cache,  // [n
         }
     }
 
-    __syncwarp();
+    __syncthreads();
 
-    if (head_idx >= head_dim || token_idx >= num_tokens) {
+    if (!valid_token || head_idx >= head_dim) {
         return;
     }
-    const int     inbatch_seq_idx = token_idx - cu_seq_lens[batch_idx[threadIdx.y]];
-    const int     block_idx = block_table[batch_idx[threadIdx.y] * num_blocks + inbatch_seq_idx / cache_block_size];
+    const int64_t dst_inblock_offset = token_idx * token_stride + head_idx;
+    const int     batch              = batch_idx[threadIdx.y];
+    if (batch < 0) {
+        zero_gather_indexer_k_quant_cache(dst_k, dst_scale, dst_inblock_offset, quant_block_size, threadIdx.x == 0);
+        return;
+    }
+
+    const int inbatch_seq_idx = token_idx - cu_seq_lens[batch];
+    const int block_table_idx = inbatch_seq_idx / cache_block_size;
+    if (inbatch_seq_idx < 0 || block_table_idx < 0 || block_table_idx >= num_blocks) {
+        zero_gather_indexer_k_quant_cache(dst_k, dst_scale, dst_inblock_offset, quant_block_size, threadIdx.x == 0);
+        return;
+    }
+
+    const int block_idx = block_table[batch * num_blocks + block_table_idx];
+    if (block_idx < 0 || block_idx >= cache_num_blocks) {
+        zero_gather_indexer_k_quant_cache(dst_k, dst_scale, dst_inblock_offset, quant_block_size, threadIdx.x == 0);
+        return;
+    }
+
     const int64_t src_block_offset     = block_idx * block_stride;
     const int64_t cache_inblock_offset = (inbatch_seq_idx % cache_block_size) * head_dim + head_idx;
     const int64_t src_inblock_offset   = src_block_offset + cache_inblock_offset;
-    const int64_t dst_inblock_offset   = token_idx * token_stride + head_idx;
 
     reinterpret_cast<float4*>(dst_k)[dst_inblock_offset / VEC_SIZE] =
         reinterpret_cast<const float4*>(kv_cache)[src_inblock_offset / VEC_SIZE];
@@ -253,6 +287,7 @@ void indexer_k_quant_and_cache(torch::Tensor&     k,                 // [num_tok
                      kv_cache.stride(1),                                                                               \
                      kv_cache.size(1),                                                                                 \
                      block_table.size(1),                                                                              \
+                     kv_cache.size(0),                                                                                 \
                      num_tokens,                                                                                       \
                      quant_block_size);
 
