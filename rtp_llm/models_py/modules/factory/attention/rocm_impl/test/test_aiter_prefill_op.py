@@ -50,7 +50,12 @@ try:
         RopeConfig,
         RopeStyle,
     )
-    from rtp_llm.ops.compute_ops import get_typemeta
+    from rtp_llm.ops.compute_ops import (
+        FusedRopeKVCacheDecodeOpAsm,
+        FusedRopeKVCacheDecodeOpNonAsm,
+        LayerKVCache,
+        get_typemeta,
+    )
 
     _OPS_IMPORTABLE = True
 except ImportError:
@@ -163,6 +168,58 @@ def _make_rope_prefill_inputs(
         padding_offset, dtype=torch.int32, device=device
     )
     return attn_inputs
+
+
+def _make_mrope_decode_inputs(
+    sequence_lengths: List[int],
+    position_ids: torch.Tensor,
+    device: torch.device,
+    dtype: torch.dtype,
+    tokens_per_block: int = 16,
+):
+    """Build one-token-per-sequence inputs for the real ROCm decode RoPE op."""
+    batch_size = len(sequence_lengths)
+    attn_inputs = PyAttentionInputs()
+    attn_inputs.is_prefill = False
+    attn_inputs.dtype = get_typemeta(torch.empty(1, dtype=dtype))
+    attn_inputs.input_lengths = torch.ones(
+        batch_size, dtype=torch.int32, device="cpu"
+    ).pin_memory()
+    attn_inputs.sequence_lengths = torch.tensor(
+        sequence_lengths, dtype=torch.int32, device="cpu"
+    ).pin_memory()
+    attn_inputs.prefix_lengths = torch.zeros(
+        batch_size, dtype=torch.int32, device="cpu"
+    )
+    attn_inputs.padding_offset = torch.zeros(
+        batch_size, dtype=torch.int32, device=device
+    )
+    attn_inputs.cu_seqlens_device = torch.arange(
+        batch_size + 1, dtype=torch.int32, device=device
+    )
+    attn_inputs.cu_kv_seqlens_device = torch.tensor(
+        [0] + [sum(sequence_lengths[:idx]) + idx for idx in range(1, batch_size + 1)],
+        dtype=torch.int32,
+        device=device,
+    )
+    max_blocks = max(
+        (sequence_length + 1 + tokens_per_block - 1) // tokens_per_block
+        for sequence_length in sequence_lengths
+    )
+    block_table = torch.zeros((batch_size, max_blocks), dtype=torch.int32, device="cpu")
+    next_block = 0
+    for batch_idx, sequence_length in enumerate(sequence_lengths):
+        block_count = (sequence_length + 1 + tokens_per_block - 1) // tokens_per_block
+        block_table[batch_idx, :block_count] = torch.arange(
+            next_block, next_block + block_count, dtype=torch.int32
+        )
+        next_block += block_count
+    attn_inputs.kv_cache_kernel_block_id = block_table
+    attn_inputs.kv_cache_kernel_block_id_device = block_table.to(device)
+    attn_inputs.combo_position_ids = (
+        position_ids.to(device=device, dtype=torch.int32).contiguous().view(-1)
+    )
+    return attn_inputs, next_block
 
 
 def _apply_base_rope(q: torch.Tensor, k: torch.Tensor, input_lengths: List[int]):
@@ -1433,6 +1490,94 @@ class TestAiterPrefillImplMropeRealOp(unittest.TestCase):
             RuntimeError, "requires non-empty combo_position_ids"
         ):
             AiterPrefillImplAsm(cfg, attn_inputs)
+
+
+@unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention operators")
+class TestRocmDecodeMropeRealOp(unittest.TestCase):
+    """Numerical coverage for the distinct ROCm decode MRoPE kernels."""
+
+    def setUp(self):
+        torch.manual_seed(3)
+        self.device = torch.device("cuda")
+        self.dtype = torch.bfloat16
+
+    def _check_decode_matches_reference(
+        self,
+        op_cls,
+        sequence_lengths: List[int],
+        position_ids: torch.Tensor,
+    ):
+        head_num = 4
+        head_num_kv = 2
+        head_dim = 128
+        tokens_per_block = 16
+        cfg = _make_mrope_attn_configs(
+            head_num, head_num_kv, head_dim, dtype=self.dtype
+        )
+        cfg.max_seq_len = 64
+        attn_inputs, block_count = _make_mrope_decode_inputs(
+            sequence_lengths,
+            position_ids,
+            self.device,
+            self.dtype,
+            tokens_per_block,
+        )
+        op = op_cls(cfg)
+        params = op.prepare(attn_inputs)
+        token_num = len(sequence_lengths)
+        q = torch.randn(
+            token_num, head_num, head_dim, dtype=self.dtype, device=self.device
+        )
+        k = torch.randn(
+            token_num, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+        v = torch.randn(
+            token_num, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+        qkv = _pack_qkv(q, k, v)
+        kv_cache = LayerKVCache()
+        kv_cache.kv_cache_base = torch.zeros(
+            block_count,
+            2,
+            head_num_kv,
+            tokens_per_block,
+            head_dim,
+            dtype=self.dtype,
+            device=self.device,
+        )
+
+        actual_q = op.forward(qkv, kv_cache, params)
+        expected_q, _ = _apply_mrope(q, k, position_ids)
+        torch.testing.assert_close(actual_q, expected_q, atol=1e-2, rtol=1e-2)
+
+    def test_asm_single_sequence_uses_all_three_position_axes(self):
+        self._check_decode_matches_reference(
+            FusedRopeKVCacheDecodeOpAsm,
+            [3],
+            torch.tensor([[2, 5, 7]], dtype=torch.int32),
+        )
+
+    def test_nonasm_single_sequence_uses_all_three_position_axes(self):
+        self._check_decode_matches_reference(
+            FusedRopeKVCacheDecodeOpNonAsm,
+            [3],
+            torch.tensor([[2, 5, 7]], dtype=torch.int32),
+        )
+
+    def test_asm_multi_sequence_uses_token_major_position_ids(self):
+        self._check_decode_matches_reference(
+            FusedRopeKVCacheDecodeOpAsm,
+            [3, 5],
+            torch.tensor([[2, 5, 7], [4, 1, 9]], dtype=torch.int32),
+        )
+
+    def test_nonasm_multi_sequence_uses_token_major_position_ids(self):
+        self._check_decode_matches_reference(
+            FusedRopeKVCacheDecodeOpNonAsm,
+            [3, 5],
+            torch.tensor([[2, 5, 7], [4, 1, 9]], dtype=torch.int32),
+        )
 
 
 if __name__ == "__main__":

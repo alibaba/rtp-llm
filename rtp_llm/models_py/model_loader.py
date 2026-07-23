@@ -344,6 +344,10 @@ class NewModelLoader:
                 f"model_config num_experts must be non-negative, got {num_experts}"
             )
         if num_experts == 0:
+            logger.debug(
+                "Expert checkpoint filtering is disabled because the model "
+                "reports zero experts"
+            )
             return None
         return _ExpertRangeFilter(
             num_experts,
@@ -527,7 +531,7 @@ class NewModelLoader:
                 "checkpoints; use a global HF checkpoint"
             )
         started = time.time()
-        model_filter = model.checkpoint_weight_name_filter()
+        model_filter = self._model_checkpoint_name_filter(model)
         name_filter = self._checkpoint_name_filter(model_filter, expert_filter)
         selected_files = weight_mapper.select_safetensor_files(
             self._resolved_model_path(), checkpoint_files, model_filter

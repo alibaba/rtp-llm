@@ -120,6 +120,24 @@ inline __device__ void convert_to_fp8(__hip_fp8x2_e4m3_fnuz* v, const uint32_t u
     *v                              = *reinterpret_cast<const __hip_fp8x2_e4m3_fnuz*>(&raw_fp8x2);
 }
 
+inline __device__ int get_rope_position_id(const RopeConfig& rope_config,
+                                           const int*        position_ids,
+                                           const int         token_idx,
+                                           const int         rotary_pair_idx) {
+    if (position_ids == nullptr) {
+        return -1;
+    }
+    int position_axis = 0;
+    if (rope_config.style == RopeStyle::Mrope) {
+        const int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
+        const int pair_idx = rotary_pair_idx % rope_dim;
+        position_axis      = pair_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2 ?
+                                 2 :
+                                 (pair_idx >= rope_config.mrope_dim1 ? 1 : 0);
+    }
+    return position_ids[token_idx * rope_config.index_factor + position_axis];
+}
+
 template<typename T, typename Tcache, bool PREFIX_PROMPT, bool USE_PAGED_FMHA, RopeStyle ROPE_STYLE>
 __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                            q_buf,
                                                               T*                            k_buf,
@@ -215,21 +233,9 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
             v      = add(v, v_bias);
         }
     }
-    int position_id = -1;
-    if (rope_config.style == RopeStyle::Mrope && position_ids) {
-        int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
-        int now_idx = tidx % rope_dim, now_dim = 0;
-        if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
-            now_dim = 2;
-        } else if (now_idx >= rope_config.mrope_dim1) {
-            now_dim = 1;
-        }
-        position_id = position_ids[token_idx * rope_config.index_factor + now_dim];
-    } else if (position_ids) {
-        position_id = position_ids[token_idx * rope_config.index_factor];
-    }
-    const int pre_len   = cu_seqlens[batch_idx];
-    const int input_len = cu_seqlens[batch_idx + 1] - pre_len;
+    const int position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
+    const int pre_len     = cu_seqlens[batch_idx];
+    const int input_len   = cu_seqlens[batch_idx + 1] - pre_len;
     context_rope<T, Vec_t, ROPE_STYLE>(rope_config,
                                        q,
                                        k,
@@ -385,21 +391,27 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
 // V3 must match its caller's layout or the FMHA reader will see garbage V.
 // =====================================================================================
 template<bool V_VEC_LAYOUT>
-__global__ void add_fusedQKV_bias_transpose_prefill_v3_all_heads(
-    __nv_bfloat16*                 q_buf,
-    __nv_bfloat16*                 k_buf,
-    __nv_bfloat16*                 v_buf,
-    const __nv_bfloat16*           QKV,
-    const __nv_bfloat16* __restrict qkv_bias,
-    const int*           __restrict padding_offset,
-    const float2*        __restrict cos_sin_cache,
-    PrefixPromptBatchWeightsParam   param,
-    int token_num, int head_num, int head_num_kv, int head_dim, int seq_len,
-    int rot_dim, float rope_base, float rope_scale,
-    bool store_kv, bool store_cache) {
-    constexpr int VEC = 8;
-    constexpr int K_TOK = 4;
-    extern __shared__ __nv_bfloat16 smem[];   // [K_TOK][head_dim] BF16
+__global__ void add_fusedQKV_bias_transpose_prefill_v3_all_heads(__nv_bfloat16*       q_buf,
+                                                                 __nv_bfloat16*       k_buf,
+                                                                 __nv_bfloat16*       v_buf,
+                                                                 const __nv_bfloat16* QKV,
+                                                                 const __nv_bfloat16* __restrict qkv_bias,
+                                                                 const int* __restrict padding_offset,
+                                                                 const float2* __restrict cos_sin_cache,
+                                                                 PrefixPromptBatchWeightsParam param,
+                                                                 int                           token_num,
+                                                                 int                           head_num,
+                                                                 int                           head_num_kv,
+                                                                 int                           head_dim,
+                                                                 int                           seq_len,
+                                                                 int                           rot_dim,
+                                                                 float                         rope_base,
+                                                                 float                         rope_scale,
+                                                                 bool                          store_kv,
+                                                                 bool                          store_cache) {
+    constexpr int                   VEC   = 8;
+    constexpr int                   K_TOK = 4;
+    extern __shared__ __nv_bfloat16 smem[];  // [K_TOK][head_dim] BF16
 
     const int tok_local = threadIdx.y;
     const int token_idx = blockIdx.x * K_TOK + tok_local;
@@ -425,21 +437,21 @@ __global__ void add_fusedQKV_bias_transpose_prefill_v3_all_heads(
     const int  d_part  = is_lo ? (d + half_r) : (d - half_r);
     const int  rope_d  = is_lo ? d : d_part;
 
-    const int  token_padding_offset = padding_offset ? padding_offset[safe_token_idx] : 0;
-    const int  tgt_token_idx = safe_token_idx + token_padding_offset;
-    const int  batch_idx = tgt_token_idx / seq_len;
-    const int  dst_kv_seq_idx = tgt_token_idx % seq_len;
+    const int token_padding_offset = padding_offset ? padding_offset[safe_token_idx] : 0;
+    const int tgt_token_idx        = safe_token_idx + token_padding_offset;
+    const int batch_idx            = tgt_token_idx / seq_len;
+    const int dst_kv_seq_idx       = tgt_token_idx % seq_len;
     // V3 dispatch guard enforces prefix==0, so batch-local seq_idx is the
     // absolute RoPE position — no external position_ids needed.
-    const int  pos_id = dst_kv_seq_idx;
+    const int pos_id = dst_kv_seq_idx;
 
-    const int n      = head_num    * head_dim;
-    const int kv_n   = head_num_kv * head_dim;
-    const int hidden = n + 2 * kv_n;
+    const int n       = head_num * head_dim;
+    const int kv_n    = head_num_kv * head_dim;
+    const int hidden  = n + 2 * kv_n;
     const int row_off = safe_token_idx * hidden;
 
-    auto load8  = [](const __nv_bfloat16* p) { return *reinterpret_cast<const int4*>(p); };
-    auto store8 = [](__nv_bfloat16* p, int4 v) { *reinterpret_cast<int4*>(p) = v; };
+    auto           load8    = [](const __nv_bfloat16* p) { return *reinterpret_cast<const int4*>(p); };
+    auto           store8   = [](__nv_bfloat16* p, int4 v) { *reinterpret_cast<int4*>(p) = v; };
     __nv_bfloat16* smem_row = smem + tok_local * head_dim;
 
     // ---- inv_freq (per thread, shared across all heads) ----
@@ -449,49 +461,52 @@ __global__ void add_fusedQKV_bias_transpose_prefill_v3_all_heads(
     // (__powf ~6 ULP, __sincosf ~2-3 ULP) drift enough across many layers/heads
     // to flip greedy decoding at marginal logit positions (observed regression
     // in Eagle speculative decoding on Qwen2-14B).
-    float inv_freq_lo[VEC/2], inv_freq_hi[VEC/2];
+    float inv_freq_lo[VEC / 2], inv_freq_hi[VEC / 2];
     if (in_rope && !cos_sin_cache) {
         const float inv_rot_dim = 1.0f / float(rot_dim);
-        #pragma unroll
-        for (int i = 0; i < VEC/2; ++i) {
-            inv_freq_lo[i] = powf(rope_base, -float(2 * (rope_d + 2*i))     * inv_rot_dim);
-            inv_freq_hi[i] = powf(rope_base, -float(2 * (rope_d + 2*i + 1)) * inv_rot_dim);
+#pragma unroll
+        for (int i = 0; i < VEC / 2; ++i) {
+            inv_freq_lo[i] = powf(rope_base, -float(2 * (rope_d + 2 * i)) * inv_rot_dim);
+            inv_freq_hi[i] = powf(rope_base, -float(2 * (rope_d + 2 * i + 1)) * inv_rot_dim);
         }
     }
 
     // ---- cs_lo/cs_hi (per token, shared across all heads of this block) ----
-    float2 cs_lo[VEC/2], cs_hi[VEC/2];
+    float2 cs_lo[VEC / 2], cs_hi[VEC / 2];
     if (in_rope) {
-        #pragma unroll
-        for (int i = 0; i < VEC/2; ++i) {
+#pragma unroll
+        for (int i = 0; i < VEC / 2; ++i) {
             if (cos_sin_cache) {
-                cs_lo[i] = cos_sin_cache[pos_id * half_r + rope_d + 2*i];
-                cs_hi[i] = cos_sin_cache[pos_id * half_r + rope_d + 2*i + 1];
+                cs_lo[i] = cos_sin_cache[pos_id * half_r + rope_d + 2 * i];
+                cs_hi[i] = cos_sin_cache[pos_id * half_r + rope_d + 2 * i + 1];
             } else {
                 // Compute angle in float, but evaluate sincos in double to
                 // match V1 (rotary_position_embedding.h:340 declares
                 // `double sin_i, cos_i;` for ROCm before calling sincos).
-                float angle0 = float(pos_id) * inv_freq_lo[i] / rope_scale;
-                float angle1 = float(pos_id) * inv_freq_hi[i] / rope_scale;
+                float  angle0 = float(pos_id) * inv_freq_lo[i] / rope_scale;
+                float  angle1 = float(pos_id) * inv_freq_hi[i] / rope_scale;
                 double s0, c0, s1, c1;
                 sincos((double)angle0, &s0, &c0);
                 sincos((double)angle1, &s1, &c1);
-                cs_lo[i].x = (float)c0; cs_lo[i].y = (float)s0;
-                cs_hi[i].x = (float)c1; cs_hi[i].y = (float)s1;
+                cs_lo[i].x = (float)c0;
+                cs_lo[i].y = (float)s0;
+                cs_hi[i].x = (float)c1;
+                cs_hi[i].y = (float)s1;
             }
         }
     }
 
     // ---- Process all Q heads ----
     for (int h = 0; h < head_num; ++h) {
-        const int q_off = h * head_dim;
-        int4 q_pack = load8(&QKV[row_off + q_off + d]);
-        auto* q2 = reinterpret_cast<__nv_bfloat162*>(&q_pack);
+        const int q_off  = h * head_dim;
+        int4      q_pack = load8(&QKV[row_off + q_off + d]);
+        auto*     q2     = reinterpret_cast<__nv_bfloat162*>(&q_pack);
         if (qkv_bias) {
-            int4 qb_pack = load8(&qkv_bias[q_off + d]);
-            auto* qb2 = reinterpret_cast<__nv_bfloat162*>(&qb_pack);
-            #pragma unroll
-            for (int i = 0; i < VEC/2; ++i) q2[i] = __hadd2(q2[i], qb2[i]);
+            int4  qb_pack = load8(&qkv_bias[q_off + d]);
+            auto* qb2     = reinterpret_cast<__nv_bfloat162*>(&qb_pack);
+#pragma unroll
+            for (int i = 0; i < VEC / 2; ++i)
+                q2[i] = __hadd2(q2[i], qb2[i]);
         }
         // Partner exchange via smem. Only rotary-region threads (in_rope=true)
         // need to read their partner; passthrough threads still write so the
@@ -500,82 +515,82 @@ __global__ void add_fusedQKV_bias_transpose_prefill_v3_all_heads(
         __syncthreads();
         int4 q_out_pack = q_pack;  // passthrough default
         if (in_rope) {
-            int4 q_partner_pack = load8(&smem_row[d_part]);
-            auto* qp2 = reinterpret_cast<__nv_bfloat162*>(&q_partner_pack);
-            auto* qo2 = reinterpret_cast<__nv_bfloat162*>(&q_out_pack);
-            #pragma unroll
-            for (int i = 0; i < VEC/2; ++i) {
+            int4  q_partner_pack = load8(&smem_row[d_part]);
+            auto* qp2            = reinterpret_cast<__nv_bfloat162*>(&q_partner_pack);
+            auto* qo2            = reinterpret_cast<__nv_bfloat162*>(&q_out_pack);
+#pragma unroll
+            for (int i = 0; i < VEC / 2; ++i) {
                 float2 cs0 = cs_lo[i], cs1 = cs_hi[i];
-                float s0 = __bfloat162float(__low2bfloat16(q2[i]));
-                float s1 = __bfloat162float(__high2bfloat16(q2[i]));
-                float p0 = __bfloat162float(__low2bfloat16(qp2[i]));
-                float p1 = __bfloat162float(__high2bfloat16(qp2[i]));
-                float o0 = is_lo ? (s0*cs0.x - p0*cs0.y) : (s0*cs0.x + p0*cs0.y);
-                float o1 = is_lo ? (s1*cs1.x - p1*cs1.y) : (s1*cs1.x + p1*cs1.y);
-                qo2[i] = __floats2bfloat162_rn(o0, o1);
+                float  s0 = __bfloat162float(__low2bfloat16(q2[i]));
+                float  s1 = __bfloat162float(__high2bfloat16(q2[i]));
+                float  p0 = __bfloat162float(__low2bfloat16(qp2[i]));
+                float  p1 = __bfloat162float(__high2bfloat16(qp2[i]));
+                float  o0 = is_lo ? (s0 * cs0.x - p0 * cs0.y) : (s0 * cs0.x + p0 * cs0.y);
+                float  o1 = is_lo ? (s1 * cs1.x - p1 * cs1.y) : (s1 * cs1.x + p1 * cs1.y);
+                qo2[i]    = __floats2bfloat162_rn(o0, o1);
             }
         }
         if (active) {
             store8(&q_buf[(size_t)token_idx * n + q_off + d], q_out_pack);
         }
-        __syncthreads();   // before next head reuses smem
+        __syncthreads();  // before next head reuses smem
     }
 
     // ---- Process all K, V heads ----
-    KVBlockArray kv_block_array;
+    KVBlockArray   kv_block_array;
     __nv_bfloat16 *k_cache = nullptr, *v_cache = nullptr;
     if (store_cache && active) {
         kv_block_array = param.kv_block_array;
-        k_cache = reinterpret_cast<__nv_bfloat16*>(
-            kv_block_array.getKBlockPtr(batch_idx, dst_kv_seq_idx));
-        v_cache = reinterpret_cast<__nv_bfloat16*>(
-            kv_block_array.getVBlockPtr(batch_idx, dst_kv_seq_idx));
+        k_cache        = reinterpret_cast<__nv_bfloat16*>(kv_block_array.getKBlockPtr(batch_idx, dst_kv_seq_idx));
+        v_cache        = reinterpret_cast<__nv_bfloat16*>(kv_block_array.getVBlockPtr(batch_idx, dst_kv_seq_idx));
     }
     for (int h = 0; h < head_num_kv; ++h) {
         const int k_off = n + h * head_dim;
         const int v_off = n + kv_n + h * head_dim;
 
         // K
-        int4 k_pack = load8(&QKV[row_off + k_off + d]);
-        auto* k2 = reinterpret_cast<__nv_bfloat162*>(&k_pack);
+        int4  k_pack = load8(&QKV[row_off + k_off + d]);
+        auto* k2     = reinterpret_cast<__nv_bfloat162*>(&k_pack);
         if (qkv_bias) {
-            int4 kb_pack = load8(&qkv_bias[k_off + d]);
-            auto* kb2 = reinterpret_cast<__nv_bfloat162*>(&kb_pack);
-            #pragma unroll
-            for (int i = 0; i < VEC/2; ++i) k2[i] = __hadd2(k2[i], kb2[i]);
+            int4  kb_pack = load8(&qkv_bias[k_off + d]);
+            auto* kb2     = reinterpret_cast<__nv_bfloat162*>(&kb_pack);
+#pragma unroll
+            for (int i = 0; i < VEC / 2; ++i)
+                k2[i] = __hadd2(k2[i], kb2[i]);
         }
         store8(&smem_row[d], k_pack);
         __syncthreads();
         int4 k_out_pack = k_pack;  // passthrough default
         if (in_rope) {
-            int4 k_partner_pack = load8(&smem_row[d_part]);
-            auto* kp2 = reinterpret_cast<__nv_bfloat162*>(&k_partner_pack);
-            auto* ko2 = reinterpret_cast<__nv_bfloat162*>(&k_out_pack);
-            #pragma unroll
-            for (int i = 0; i < VEC/2; ++i) {
+            int4  k_partner_pack = load8(&smem_row[d_part]);
+            auto* kp2            = reinterpret_cast<__nv_bfloat162*>(&k_partner_pack);
+            auto* ko2            = reinterpret_cast<__nv_bfloat162*>(&k_out_pack);
+#pragma unroll
+            for (int i = 0; i < VEC / 2; ++i) {
                 float2 cs0 = cs_lo[i], cs1 = cs_hi[i];
-                float s0 = __bfloat162float(__low2bfloat16(k2[i]));
-                float s1 = __bfloat162float(__high2bfloat16(k2[i]));
-                float p0 = __bfloat162float(__low2bfloat16(kp2[i]));
-                float p1 = __bfloat162float(__high2bfloat16(kp2[i]));
-                float o0 = is_lo ? (s0*cs0.x - p0*cs0.y) : (s0*cs0.x + p0*cs0.y);
-                float o1 = is_lo ? (s1*cs1.x - p1*cs1.y) : (s1*cs1.x + p1*cs1.y);
-                ko2[i] = __floats2bfloat162_rn(o0, o1);
+                float  s0 = __bfloat162float(__low2bfloat16(k2[i]));
+                float  s1 = __bfloat162float(__high2bfloat16(k2[i]));
+                float  p0 = __bfloat162float(__low2bfloat16(kp2[i]));
+                float  p1 = __bfloat162float(__high2bfloat16(kp2[i]));
+                float  o0 = is_lo ? (s0 * cs0.x - p0 * cs0.y) : (s0 * cs0.x + p0 * cs0.y);
+                float  o1 = is_lo ? (s1 * cs1.x - p1 * cs1.y) : (s1 * cs1.x + p1 * cs1.y);
+                ko2[i]    = __floats2bfloat162_rn(o0, o1);
             }
         }
         if (active && store_kv) {
             store8(&k_buf[(size_t)token_idx * kv_n + h * head_dim + d], k_out_pack);
         }
-        __syncthreads();   // before next iteration uses smem
+        __syncthreads();  // before next iteration uses smem
 
         // V (no RoPE)
-        int4 v_pack = load8(&QKV[row_off + v_off + d]);
-        auto* v2 = reinterpret_cast<__nv_bfloat162*>(&v_pack);
+        int4  v_pack = load8(&QKV[row_off + v_off + d]);
+        auto* v2     = reinterpret_cast<__nv_bfloat162*>(&v_pack);
         if (qkv_bias) {
-            int4 vb_pack = load8(&qkv_bias[v_off + d]);
-            auto* vb2 = reinterpret_cast<__nv_bfloat162*>(&vb_pack);
-            #pragma unroll
-            for (int i = 0; i < VEC/2; ++i) v2[i] = __hadd2(v2[i], vb2[i]);
+            int4  vb_pack = load8(&qkv_bias[v_off + d]);
+            auto* vb2     = reinterpret_cast<__nv_bfloat162*>(&vb_pack);
+#pragma unroll
+            for (int i = 0; i < VEC / 2; ++i)
+                v2[i] = __hadd2(v2[i], vb2[i]);
         }
         if (active && store_kv) {
             store8(&v_buf[(size_t)token_idx * kv_n + h * head_dim + d], v_pack);
@@ -583,17 +598,15 @@ __global__ void add_fusedQKV_bias_transpose_prefill_v3_all_heads(
 
         // Cache write
         if (store_cache && active) {
-            const int inK = kv_block_array.getKLocalIdx<KvCacheDataType::BASE>(
-                dst_kv_seq_idx, h, head_dim, d);
+            const int inK = kv_block_array.getKLocalIdx<KvCacheDataType::BASE>(dst_kv_seq_idx, h, head_dim, d);
             *reinterpret_cast<int4*>(&k_cache[inK]) = k_out_pack;
-            const __nv_bfloat16* v_src = reinterpret_cast<const __nv_bfloat16*>(&v_pack);
-            #pragma unroll
+            const __nv_bfloat16* v_src              = reinterpret_cast<const __nv_bfloat16*>(&v_pack);
+#pragma unroll
             for (int vi = 0; vi < VEC; ++vi) {
-                const int inV = V_VEC_LAYOUT
-                    ? kv_block_array.getVLocalIdx<KvCacheDataType::BASE>(
-                          dst_kv_seq_idx, h, head_dim, d + vi)
-                    : kv_block_array.getVLocalIdx(
-                          dst_kv_seq_idx, h, head_dim, d + vi);
+                const int inV =
+                    V_VEC_LAYOUT ?
+                        kv_block_array.getVLocalIdx<KvCacheDataType::BASE>(dst_kv_seq_idx, h, head_dim, d + vi) :
+                        kv_block_array.getVLocalIdx(dst_kv_seq_idx, h, head_dim, d + vi);
                 v_cache[inV] = v_src[vi];
             }
         }
@@ -603,46 +616,105 @@ __global__ void add_fusedQKV_bias_transpose_prefill_v3_all_heads(
 // Compile-time dispatcher: only BF16 specialization actually launches v3.
 template<typename T>
 struct V3OptKernelDispatch {
-    static bool try_launch(T*, T*, T*, const T*, const T*,
-                           const int*, const float2*,
+    static bool try_launch(T*,
+                           T*,
+                           T*,
+                           const T*,
+                           const T*,
+                           const int*,
+                           const float2*,
                            PrefixPromptBatchWeightsParam&,
-                           int, int, int, int, int, int, float, float, bool, bool, bool, cudaStream_t) {
+                           int,
+                           int,
+                           int,
+                           int,
+                           int,
+                           int,
+                           float,
+                           float,
+                           bool,
+                           bool,
+                           bool,
+                           cudaStream_t) {
         return false;
     }
 };
 template<>
 struct V3OptKernelDispatch<__nv_bfloat16> {
-    static bool try_launch(__nv_bfloat16* q_buf, __nv_bfloat16* k_buf, __nv_bfloat16* v_buf,
-                           const __nv_bfloat16* QKV, const __nv_bfloat16* qkv_bias,
-                           const int* padding_offset, const float2* cos_sin_cache,
+    static bool try_launch(__nv_bfloat16*                 q_buf,
+                           __nv_bfloat16*                 k_buf,
+                           __nv_bfloat16*                 v_buf,
+                           const __nv_bfloat16*           QKV,
+                           const __nv_bfloat16*           qkv_bias,
+                           const int*                     padding_offset,
+                           const float2*                  cos_sin_cache,
                            PrefixPromptBatchWeightsParam& param,
-                           int token_num, int head_num, int head_num_kv, int head_dim, int seq_len,
-                           int rot_dim, float rope_base, float rope_scale,
-                           bool store_kv, bool store_cache, bool v_vec_layout, cudaStream_t stream) {
+                           int                            token_num,
+                           int                            head_num,
+                           int                            head_num_kv,
+                           int                            head_dim,
+                           int                            seq_len,
+                           int                            rot_dim,
+                           float                          rope_base,
+                           float                          rope_scale,
+                           bool                           store_kv,
+                           bool                           store_cache,
+                           bool                           v_vec_layout,
+                           cudaStream_t                   stream) {
         constexpr int VEC = 8, K_TOK = 4;
-        if (head_dim % VEC != 0) return false;
-        if (head_dim % 2 != 0) return false;
+        if (head_dim % VEC != 0)
+            return false;
+        if (head_dim % 2 != 0)
+            return false;
         // Partial rotary requires rot_dim aligned to VEC*2 so each thread is
         // either fully in the rotary region or fully passthrough, and the
         // partner index (rope_d ± half_r) stays inside the rotary region.
-        if (rot_dim % (VEC * 2) != 0) return false;
-        if (rot_dim > head_dim) return false;
+        if (rot_dim % (VEC * 2) != 0)
+            return false;
+        if (rot_dim > head_dim)
+            return false;
         dim3 block(head_dim / VEC, K_TOK);
         // v3: one block per token-chunk, iterates ALL heads inside
-        dim3 grid((token_num + K_TOK - 1) / K_TOK, 1);
+        dim3   grid((token_num + K_TOK - 1) / K_TOK, 1);
         size_t smem = K_TOK * head_dim * sizeof(__nv_bfloat16);
         if (v_vec_layout) {
-            add_fusedQKV_bias_transpose_prefill_v3_all_heads<true>
-                <<<grid, block, smem, stream>>>(
-                    q_buf, k_buf, v_buf, QKV, qkv_bias, padding_offset, cos_sin_cache,
-                    param, token_num, head_num, head_num_kv, head_dim, seq_len,
-                    rot_dim, rope_base, rope_scale, store_kv, store_cache);
+            add_fusedQKV_bias_transpose_prefill_v3_all_heads<true><<<grid, block, smem, stream>>>(q_buf,
+                                                                                                  k_buf,
+                                                                                                  v_buf,
+                                                                                                  QKV,
+                                                                                                  qkv_bias,
+                                                                                                  padding_offset,
+                                                                                                  cos_sin_cache,
+                                                                                                  param,
+                                                                                                  token_num,
+                                                                                                  head_num,
+                                                                                                  head_num_kv,
+                                                                                                  head_dim,
+                                                                                                  seq_len,
+                                                                                                  rot_dim,
+                                                                                                  rope_base,
+                                                                                                  rope_scale,
+                                                                                                  store_kv,
+                                                                                                  store_cache);
         } else {
-            add_fusedQKV_bias_transpose_prefill_v3_all_heads<false>
-                <<<grid, block, smem, stream>>>(
-                    q_buf, k_buf, v_buf, QKV, qkv_bias, padding_offset, cos_sin_cache,
-                    param, token_num, head_num, head_num_kv, head_dim, seq_len,
-                    rot_dim, rope_base, rope_scale, store_kv, store_cache);
+            add_fusedQKV_bias_transpose_prefill_v3_all_heads<false><<<grid, block, smem, stream>>>(q_buf,
+                                                                                                   k_buf,
+                                                                                                   v_buf,
+                                                                                                   QKV,
+                                                                                                   qkv_bias,
+                                                                                                   padding_offset,
+                                                                                                   cos_sin_cache,
+                                                                                                   param,
+                                                                                                   token_num,
+                                                                                                   head_num,
+                                                                                                   head_num_kv,
+                                                                                                   head_dim,
+                                                                                                   seq_len,
+                                                                                                   rot_dim,
+                                                                                                   rope_base,
+                                                                                                   rope_scale,
+                                                                                                   store_kv,
+                                                                                                   store_cache);
         }
         return true;
     }
@@ -676,7 +748,7 @@ void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_bu
                                              const bool                     store_cache,
                                              const float2*                  cos_sin_cache,
                                              cudaStream_t                   stream) {
-    auto&  param = *param_ptr;
+    auto& param = *param_ptr;
 
     // ---- v3 fast path (default ON) ----
     // Hand-tuned BF16 kernel: vec=8 + 4 tokens/block + smem partner exchange + cos/sin
@@ -692,27 +764,36 @@ void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_bu
     // in BHSD ([batch, head_kv, seq, dim]) layout, while V3 uses THD ([token,
     // head_kv, dim]). Production NonAsm uses store_kv=false (K/V only flow into
     // paged cache), so V3 fires by writing only to the paged cache.
-    if (use_paged_fmha
-        && param.max_prefix_prompt_length == 0
-        && store_q && !store_qkv && !store_kv && store_cache
+    if (use_paged_fmha && param.max_prefix_prompt_length == 0 && store_q && !store_qkv && !store_kv && store_cache
         && rope_config.style == RopeStyle::Base
         && rope_config.dim <= size_per_head  // partial rotary supported (rot_dim<=head_dim)
-        && rope_config.scale == 1.0f  // V3 scale path lacks precision tests; fall back to V1
-        && !use_logn_attn
-        && QuantizedQKV == nullptr
+        && rope_config.scale == 1.0f         // V3 scale path lacks precision tests; fall back to V1
+        && !use_logn_attn && QuantizedQKV == nullptr
         && qkv_bias == nullptr  // bias path is implemented but untested; fall back
         && param.kv_block_array.cache_type == KvCacheDataType::BASE) {
         // V1 invoker (NonAsm path) writes V cache in non-templated layout
         // [numHeads, dimsPerHead, mTokensPerBlock]. Pass v_vec_layout=false so
         // V3's V cache write matches what the NonAsm CK FMHA reader expects.
-        if (V3OptKernelDispatch<T>::try_launch(q_buf, k_buf, v_buf, QKV, qkv_bias,
-                                                padding_offset, cos_sin_cache,
-                                                param,
-                                                token_num, head_num, head_num_kv, size_per_head,
-                                                seq_len,
-                                                rope_config.dim, rope_config.base, rope_config.scale,
-                                                store_kv, store_cache, /*v_vec_layout=*/false,
-                                                stream)) {
+        if (V3OptKernelDispatch<T>::try_launch(q_buf,
+                                               k_buf,
+                                               v_buf,
+                                               QKV,
+                                               qkv_bias,
+                                               padding_offset,
+                                               cos_sin_cache,
+                                               param,
+                                               token_num,
+                                               head_num,
+                                               head_num_kv,
+                                               size_per_head,
+                                               seq_len,
+                                               rope_config.dim,
+                                               rope_config.base,
+                                               rope_config.scale,
+                                               store_kv,
+                                               store_cache,
+                                               /*v_vec_layout=*/false,
+                                               stream)) {
             return;
         }
     }
@@ -849,21 +930,9 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
             v      = add(v, v_bias);
         }
     }
-    int position_id = -1;
-    if (rope_config.style == RopeStyle::Mrope && position_ids) {
-        int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
-        int now_idx = tidx % rope_dim, now_dim = 0;
-        if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
-            now_dim = 2;
-        } else if (now_idx >= rope_config.mrope_dim1) {
-            now_dim = 1;
-        }
-        position_id = position_ids[token_idx * rope_config.index_factor + now_dim];
-    } else if (position_ids) {
-        position_id = position_ids[token_idx * rope_config.index_factor];
-    }
-    const int pre_len   = cu_seqlens[batch_idx];
-    const int input_len = cu_seqlens[batch_idx + 1] - pre_len;
+    const int position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
+    const int pre_len     = cu_seqlens[batch_idx];
+    const int input_len   = cu_seqlens[batch_idx + 1] - pre_len;
     context_rope<T, Vec_t, ROPE_STYLE>(rope_config,
                                        q,
                                        k,
@@ -1027,7 +1096,7 @@ void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,
                                            const float2*                  cos_sin_cache,
                                            const bool                     pad_query,
                                            cudaStream_t                   stream) {
-    auto&  param = *param_ptr;
+    auto& param = *param_ptr;
 
     // ---- v3 fast path (default ON, ASM-side invoker) ----
     // Mirrors the V3 dispatch in invokeAddFusedQKVBiasTransposePrefillV1. Required
@@ -1044,15 +1113,10 @@ void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,
     // store_kv is excluded because the in-tree ASM kernel writes packed K/V in
     // BHSD layout while V3 uses THD; in production store_kv=false anyway, so
     // V3 only writes to the paged cache.
-    if (use_paged_fmha
-        && !pad_query
-        && param.max_prefix_prompt_length == 0
-        && store_q && !store_qkv && !store_kv && store_cache
-        && rope_config.style == RopeStyle::Base
+    if (use_paged_fmha && !pad_query && param.max_prefix_prompt_length == 0 && store_q && !store_qkv && !store_kv
+        && store_cache && rope_config.style == RopeStyle::Base
         && rope_config.dim <= size_per_head  // partial rotary supported
-        && rope_config.scale == 1.0f
-        && !use_logn_attn
-        && QuantizedQKV == nullptr
+        && rope_config.scale == 1.0f && !use_logn_attn && QuantizedQKV == nullptr
         && qkv_bias == nullptr  // bias path is implemented but untested; fall back
         && param.kv_block_array.cache_type == KvCacheDataType::BASE) {
         // ASM invoker writes V cache via getVLocalIdx<KvCacheDataType::BASE>
@@ -1060,14 +1124,26 @@ void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,
         // Pass v_vec_layout=true so V3 produces the layout the ASM-flash FMHA
         // reader expects — using the V1-style flat layout here corrupts V cache
         // and yields garbage attention output (root cause of the precision bug).
-        if (V3OptKernelDispatch<T>::try_launch(q_buf, k_buf, v_buf, QKV, qkv_bias,
-                                                padding_offset, cos_sin_cache,
-                                                param,
-                                                token_num, head_num, head_num_kv, size_per_head,
-                                                seq_len,
-                                                rope_config.dim, rope_config.base, rope_config.scale,
-                                                store_kv, store_cache, /*v_vec_layout=*/true,
-                                                stream)) {
+        if (V3OptKernelDispatch<T>::try_launch(q_buf,
+                                               k_buf,
+                                               v_buf,
+                                               QKV,
+                                               qkv_bias,
+                                               padding_offset,
+                                               cos_sin_cache,
+                                               param,
+                                               token_num,
+                                               head_num,
+                                               head_num_kv,
+                                               size_per_head,
+                                               seq_len,
+                                               rope_config.dim,
+                                               rope_config.base,
+                                               rope_config.scale,
+                                               store_kv,
+                                               store_cache,
+                                               /*v_vec_layout=*/true,
+                                               stream)) {
             return;
         }
     }
@@ -1200,7 +1276,7 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel_v1(T*                 
 
     // refer to the implementation of hipify decode attention
     const auto batch_beam_idx = blockIdx.y;
-    const int  position_id    = position_ids == nullptr ? -1 : position_ids[token_idx * rope_config.index_factor];
+    const int  position_id    = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
 
     const int input_len = (input_lengths == nullptr) ? 0 : input_lengths[batch_beam_idx];
     const int timestep  = tlength;
@@ -1360,7 +1436,7 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
 
     // refer to the implementation of hipify decode attention
     const auto batch_beam_idx = blockIdx.y;
-    const int  position_id    = position_ids == nullptr ? -1 : position_ids[token_idx * rope_config.index_factor];
+    const int  position_id    = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
 
     const int input_len = (input_lengths == nullptr) ? 0 : input_lengths[batch_beam_idx];
     const int timestep  = tlength;

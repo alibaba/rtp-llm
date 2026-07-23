@@ -317,6 +317,85 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
 
         torch.testing.assert_close(outputs.hidden_states, model.embed_tokens(input_ids))
 
+    def test_language_forward_injects_multimodal_features_and_deepstack(self):
+        class IdentityLayer(torch.nn.Module):
+            def forward(self, hidden_states, fmha_impl, kv_cache=None):
+                return hidden_states
+
+        class EmbeddingInjector:
+            def __init__(self):
+                self.input_at_mm_location = None
+
+            def __call__(self, hidden_states, features, locations):
+                loc = int(locations.item())
+                self.input_at_mm_location = hidden_states[loc].clone()
+                output = hidden_states.clone()
+                output[loc] = features[0]
+                return output
+
+        class DeepstackInjector:
+            def __init__(self):
+                self.calls = []
+
+            def __call__(self, hidden_states, deepstack, locations, layer_id):
+                self.calls.append((tuple(locations), layer_id))
+                output = hidden_states.clone()
+                output[locations[0]] += deepstack[layer_id]
+                return output
+
+        model = Qwen3VLForCausalLM.__new__(Qwen3VLForCausalLM)
+        torch.nn.Module.__init__(model)
+        model.embed_tokens = torch.nn.Embedding(8, 4)
+        with torch.no_grad():
+            model.embed_tokens.weight.copy_(
+                torch.arange(32, dtype=torch.float32).reshape(8, 4)
+            )
+        model.layers = torch.nn.ModuleList([IdentityLayer(), IdentityLayer()])
+        model.norm = torch.nn.Identity()
+        model.kv_cache = None
+        embedding_injector = EmbeddingInjector()
+        deepstack_injector = DeepstackInjector()
+        model.multimodal_embedding_injector = embedding_injector
+        model.multimodal_deepstack_injector = deepstack_injector
+
+        input_ids = torch.tensor([1, 99, 2])
+        text_mask = torch.tensor([True, False, True])
+        mm_feature = torch.tensor([10.0, 20.0, 30.0, 40.0])
+        mm_feature_locs = torch.tensor([1])
+        deepstack = [
+            torch.tensor([1.0, 2.0, 3.0, 4.0]),
+            torch.tensor([5.0, 6.0, 7.0, 8.0]),
+        ]
+        inputs = types.SimpleNamespace(
+            input_ids=input_ids,
+            embedding_inputs=types.SimpleNamespace(text_tokens_mask=text_mask),
+            multimodal_inputs=types.SimpleNamespace(
+                multimodal_features=[mm_feature],
+                mm_features_locs=mm_feature_locs,
+                mm_extra_input=[object()],
+            ),
+            attention_inputs=object(),
+        )
+        fmha_impl = types.SimpleNamespace(fmha_params=None)
+
+        with mock.patch(
+            "rtp_llm.models_py.new_models.qwen3_vl.model."
+            "reshape_extra_input_to_deepstack",
+            return_value=deepstack,
+        ), mock.patch(
+            "rtp_llm.models_py.new_models.qwen3_vl.model." "select_block_map_for_layer"
+        ) as select_block_map:
+            outputs = model(inputs, fmha_impl)
+
+        torch.testing.assert_close(
+            embedding_injector.input_at_mm_location, torch.zeros(4)
+        )
+        expected = model.embed_tokens(torch.tensor([1, 0, 2])).detach()
+        expected[1] = mm_feature + deepstack[0] + deepstack[1]
+        torch.testing.assert_close(outputs.hidden_states, expected)
+        self.assertEqual(deepstack_injector.calls, [((1,), 0), ((1,), 1)])
+        self.assertEqual(select_block_map.call_count, 2)
+
     def test_vision_loader_matches_independent_cpu_reference(self):
         torch.manual_seed(7)
         source = Qwen3VLForVisionEmbedding(
