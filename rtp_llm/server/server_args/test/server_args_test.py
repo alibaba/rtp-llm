@@ -3,9 +3,68 @@ import os
 import sys
 from unittest import TestCase, main
 
+from rtp_llm.utils.pre_import_config import (
+    configure_expandable_segments_for_warmup,
+    is_start_server_entrypoint,
+    warmup_requested,
+)
+
 
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
+
+
+class PreImportConfigTest(TestCase):
+    def test_identifies_supported_server_entrypoints(self):
+        self.assertTrue(
+            is_start_server_entrypoint(
+                ["python", "-m", "rtp_llm.start_server", "--warm_up", "1"]
+            )
+        )
+        self.assertTrue(is_start_server_entrypoint(["/tmp/start_server.py"]))
+        self.assertTrue(is_start_server_entrypoint(["python", "/tmp/start_server.py"]))
+        self.assertFalse(is_start_server_entrypoint(["python", "other.py"]))
+
+    def test_warmup_cli_overrides_environment(self):
+        self.assertFalse(warmup_requested(["--warm_up", "0"], {"WARM_UP": "1"}))
+        self.assertTrue(warmup_requested(["--warm_up=on"], {"WARM_UP": "0"}))
+
+    def test_warmup_environment_and_default(self):
+        self.assertFalse(warmup_requested([], {"WARM_UP": "false"}))
+        self.assertTrue(warmup_requested([], {}))
+
+    def test_rejects_invalid_warmup_value(self):
+        with self.assertRaises(ValueError):
+            warmup_requested(["--warm_up", "invalid"], {})
+
+    def test_sets_allocator_default_only_for_cuda_warmup(self):
+        env = {}
+        self.assertTrue(
+            configure_expandable_segments_for_warmup([], env, is_rocm=False)
+        )
+        self.assertEqual(env["PYTORCH_CUDA_ALLOC_CONF"], "expandable_segments:True")
+
+        env = {}
+        self.assertFalse(
+            configure_expandable_segments_for_warmup(
+                ["--warm_up", "0"], env, is_rocm=False
+            )
+        )
+        self.assertNotIn("PYTORCH_CUDA_ALLOC_CONF", env)
+
+    def test_preserves_user_allocator_configuration(self):
+        env = {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False"}
+        self.assertFalse(
+            configure_expandable_segments_for_warmup([], env, is_rocm=False)
+        )
+        self.assertEqual(env["PYTORCH_CUDA_ALLOC_CONF"], "expandable_segments:False")
+
+    def test_skips_allocator_default_on_rocm(self):
+        env = {"WARM_UP": "1"}
+        self.assertFalse(
+            configure_expandable_segments_for_warmup([], env, is_rocm=True)
+        )
+        self.assertNotIn("PYTORCH_CUDA_ALLOC_CONF", env)
 
 
 class ServerArgsSetTest(TestCase):

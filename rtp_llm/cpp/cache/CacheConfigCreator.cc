@@ -228,7 +228,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     uint32_t block_num = computeBlockNum(
         config, model_config, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
-                            "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
+                            "kv cache needs at least 1 block but %u, each block needs %ld MiB memory",
                             block_num,
                             static_cast<long>(config.block_size_bytes / 1024 / 1024));
 
@@ -236,6 +236,12 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     config.block_num            = static_cast<int>(block_num);
     config.finalizeBlockNums(block_num, runtime_config);
     RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_num, kv_cache_seq_len);
+    RTP_LLM_LOG_INFO("[KV_ALLOC] final block_num=%u block_size=%ld MiB total_kv=%ld MiB (%.2f GiB), stores %ld tokens",
+                     block_num,
+                     config.block_size_bytes / 1024 / 1024,
+                     static_cast<size_t>(block_num) * config.block_size_bytes / 1024 / 1024,
+                     static_cast<size_t>(block_num) * config.block_size_bytes / 1024.0 / 1024.0 / 1024.0,
+                     kv_cache_seq_len);
     if (kv_cache_seq_len < model_config.max_seq_len) {
         RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "
                             "this is dangerous, consider decrease max_seq_len",

@@ -1,3 +1,5 @@
+import logging
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, final
@@ -14,6 +16,180 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import (
     ExecutorType,
     RouterType,
 )
+
+logger = logging.getLogger(__name__)
+
+try:
+    from rtp_llm.ops.compute_ops import is_trace_memory as _IS_TRACE_MEMORY
+
+    _TRACE_MEMORY_IMPORT_ERROR: Optional[Exception] = None
+except (ImportError, AttributeError) as e:
+    _IS_TRACE_MEMORY = None
+    _TRACE_MEMORY_IMPORT_ERROR = e
+
+_NONTORCH_BASELINE_MIB: Optional[float] = None
+_NONTORCH_RUNTIME_PEAK_MIB = 0.0
+_WARMUP_SKEW_LOGGED = False
+
+# Warn-once flags so a persistent misconfiguration surfaces without spamming the log.
+_TRACE_MEMORY_WARNED = False
+_SKEW_ENV_WARNED = False
+
+# Optional runtime diagnostic; disabled because it adds a collective per MoE layer.
+_MOE_RUNTIME_MEM_LOG = os.environ.get("MOE_RUNTIME_MEM_LOG", "0") == "1"
+_MOE_RUNTIME_SLOT_LOG = os.environ.get("MOE_RUNTIME_SLOT_LOG", "0") == "1"
+_RUNTIME_DIAGNOSTICS_ENABLED = _MOE_RUNTIME_MEM_LOG or _MOE_RUNTIME_SLOT_LOG
+try:
+    _MOE_RUNTIME_SLOT_MIN_SLOTS = max(
+        0, int(os.environ.get("MOE_RUNTIME_SLOT_MIN_SLOTS", "0"))
+    )
+except ValueError:
+    _MOE_RUNTIME_SLOT_MIN_SLOTS = 0
+_RUNTIME_SLOT_PEAKS: List[float] = []
+_RUNTIME_SLOT_LOG_UNSUPPORTED = False
+
+
+def _nontorch_mib() -> float:
+    free_b, total_b = torch.cuda.mem_get_info()
+    reserved_b = torch.cuda.memory_reserved()
+    return max(0, total_b - free_b - reserved_b) / 1048576.0
+
+
+def _nontorch_mib_safe() -> Optional[float]:
+    # Single capture-guarded entry point for the two non-torch memory snapshots (warmup baseline and
+    # runtime peak). A host-side driver query (cudaMemGetInfo / memory_reserved) issued while a CUDA
+    # graph is capturing would corrupt/abort the capture, and decode warmup captures its graph while
+    # trace-memory is on. Return None during capture so callers skip the snapshot instead of crashing
+    # the capture; the reserved-load skew still runs so the captured graph reflects the worst case.
+    if torch.cuda.is_current_stream_capturing():
+        return None
+    return _nontorch_mib()
+
+
+def _log_runtime_nontorch_peak() -> None:
+    # Off by default: this runs on the runtime hot path (every MoE layer, every step) and each call
+    # issues cudaMemGetInfo + memory_reserved driver queries. Gate it behind an explicit opt-in so
+    # production pays nothing unless a developer is diagnosing non-torch memory growth.
+    if not _MOE_RUNTIME_MEM_LOG:
+        return
+    global _NONTORCH_RUNTIME_PEAK_MIB
+    # None while a CUDA graph is capturing (decode runs under CUDA graph): the driver query is
+    # unsafe there, so skip this diagnostic step rather than abort the capture.
+    current_mib = _nontorch_mib_safe()
+    if current_mib is None:
+        return
+    if current_mib <= _NONTORCH_RUNTIME_PEAK_MIB + 50.0:
+        return
+    _NONTORCH_RUNTIME_PEAK_MIB = current_mib
+    baseline_mib = _NONTORCH_BASELINE_MIB or 0.0
+    logger.info(
+        "[NONTORCH] runtime_peak=%.0f MiB growth_from_warmup=%.0f MiB",
+        current_mib,
+        max(0.0, current_mib - baseline_mib),
+    )
+
+
+def _log_runtime_slot_distribution(router: Any, topk_ids: torch.Tensor) -> None:
+    """Log global runtime EP slot-share peaks for TP=1 and DP=EP."""
+    if not _MOE_RUNTIME_SLOT_LOG:
+        return
+    if torch.cuda.is_current_stream_capturing():
+        return
+
+    ep_size = int(getattr(router, "ep_size", 1))
+    tp_size = int(getattr(router, "tp_size", 1))
+    dp_size = int(getattr(router, "dp_size", 1))
+    n_local = int(getattr(router, "expert_num_per_rank", 0) or 0)
+    if ep_size <= 1 or n_local <= 0:
+        return
+
+    global _RUNTIME_SLOT_LOG_UNSUPPORTED
+    if tp_size != 1 or dp_size != ep_size:
+        if not _RUNTIME_SLOT_LOG_UNSUPPORTED:
+            logger.warning(
+                "[RUNTIME_SLOT] unsupported topology: TP=%d DP=%d EP=%d; "
+                "exact logging currently requires TP=1 and DP=EP",
+                tp_size,
+                dp_size,
+                ep_size,
+            )
+            _RUNTIME_SLOT_LOG_UNSUPPORTED = True
+        return
+
+    valid_ids = topk_ids.reshape(-1)
+    valid_ids = valid_ids[(valid_ids >= 0) & (valid_ids < ep_size * n_local)]
+    rank_ids = torch.div(valid_ids, n_local, rounding_mode="floor")
+    rank_slots = torch.bincount(rank_ids, minlength=ep_size).to(torch.int64)
+
+    from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+
+    all_reduce(rank_slots, Group.DP_AND_TP)
+    slots = [int(x) for x in rank_slots.cpu().tolist()]
+    total_slots = sum(slots)
+    if total_slots <= 0 or total_slots < _MOE_RUNTIME_SLOT_MIN_SLOTS:
+        return
+    shares = [x / total_slots for x in slots]
+
+    global _RUNTIME_SLOT_PEAKS
+    if len(_RUNTIME_SLOT_PEAKS) != ep_size:
+        _RUNTIME_SLOT_PEAKS = [0.0] * ep_size
+    improved = [i for i, share in enumerate(shares) if share > _RUNTIME_SLOT_PEAKS[i]]
+    if not improved:
+        return
+    for i in improved:
+        _RUNTIME_SLOT_PEAKS[i] = shares[i]
+
+    if int(getattr(router, "ep_rank", 0)) == 0:
+        logger.warning(
+            "[RUNTIME_SLOT] new_peak ranks=%s current_slots=%s current_shares=%s "
+            "peak_shares=%s total_slots=%d",
+            improved,
+            slots,
+            [round(x, 6) for x in shares],
+            [round(x, 6) for x in _RUNTIME_SLOT_PEAKS],
+            total_slots,
+        )
+
+
+def _in_memory_trace() -> bool:
+    """Return whether this forward is the memory-traced warmup."""
+    global _TRACE_MEMORY_WARNED
+    if _IS_TRACE_MEMORY is None:
+        # Binding genuinely missing: disable skew but make the degradation visible once, since a
+        # silently-skipped warmup skew under-measures MoE memory and risks runtime OOM.
+        if not _TRACE_MEMORY_WARNED:
+            logger.warning(
+                "is_trace_memory binding unavailable, MoE warmup skew disabled: %s",
+                _TRACE_MEMORY_IMPORT_ERROR,
+            )
+            _TRACE_MEMORY_WARNED = True
+        return False
+    return bool(_IS_TRACE_MEMORY())
+
+
+def _skew_reserve(mean: float) -> float:
+    """Add configurable headroom for persistent hot-expert skew."""
+    global _SKEW_ENV_WARNED
+    try:
+        mult = float(os.environ.get("MOE_SKEW_MULT", "1.5"))
+        add = float(os.environ.get("MOE_SKEW_ADD", "0.1"))
+    except ValueError:
+        if not _SKEW_ENV_WARNED:
+            logger.warning(
+                "invalid MOE_SKEW_MULT/MOE_SKEW_ADD env value, using defaults 1.5/0.1"
+            )
+            _SKEW_ENV_WARNED = True
+        mult, add = 1.5, 0.1
+    return min(1.0, mean * mult + add)
+
+
+def _default_slot_share(ep_size: int, expert_num: int, top_k: int) -> float:
+    """Reserved local-slot share for slot-based executors."""
+    if ep_size <= 1:
+        return 1.0
+    if expert_num <= top_k:
+        return 1.0
+    return _skew_reserve(1.0 / ep_size)
 
 
 @dataclass
@@ -173,6 +349,65 @@ class FusedMoe(torch.nn.Module):
     def topk_ids_dtype(self) -> torch.dtype:
         return self.fused_experts.topk_ids_dtype
 
+    def _warmup_skew_params(
+        self, ep_size: int, expert_num: int, topk: int
+    ) -> Tuple[float, int]:
+        """Return the reserved hot-token fraction and rank-0 slots per hot token.
+
+        All supported executors are slot-based (memory scales with local expert slots), so the
+        reserved load uses the slot-share model C(ep) with all top_k slots routed to rank 0.
+        """
+        q = _default_slot_share(ep_size, expert_num, topk)
+        s = topk
+        q = max(1.0 / ep_size, min(1.0, q))
+        return q, s
+
+    def _warmup_skew_topk_ids(self, topk_ids: torch.Tensor) -> torch.Tensor:
+        """Route the reserved warmup load to rank 0."""
+        router = self.router
+        ep_size = int(getattr(router, "ep_size", 1))
+        n_local = getattr(router, "expert_num_per_rank", None)
+        if ep_size <= 1 or not n_local:
+            return topk_ids
+        n_local = int(n_local)
+
+        num_tokens, topk = topk_ids.shape[0], topk_ids.shape[1]
+        expert_num = ep_size * n_local
+
+        q, s = self._warmup_skew_params(ep_size, expert_num, topk)
+        n_hot = int(round(num_tokens * q))
+        global _WARMUP_SKEW_LOGGED
+        if not _WARMUP_SKEW_LOGGED:
+            logger.warning(
+                "[MOE_WARMUP] executor=%s mode=slot ep_size=%d experts=%d "
+                "top_k=%d skew_fraction=%.6f hot_tokens=%d total_tokens=%d",
+                type(self.fused_experts).__name__,
+                ep_size,
+                expert_num,
+                topk,
+                q,
+                n_hot,
+                num_tokens,
+            )
+            _WARMUP_SKEW_LOGGED = True
+        dev, dt = topk_ids.device, topk_ids.dtype
+        cols = torch.arange(topk, device=dev)
+
+        off_rank = 1 + (cols % (ep_size - 1))
+        off_ids = (off_rank * n_local + (cols % n_local)).clamp_(max=expert_num - 1)
+
+        out = topk_ids.clone()
+        if n_hot > 0:
+            hot = off_ids.to(dt).unsqueeze(0).repeat(n_hot, 1)
+            r0_idx = torch.arange(n_hot, device=dev)
+            for j in range(s):
+                hot[:, j] = ((r0_idx * s + j) % n_local).to(dt)
+            out[:n_hot] = hot
+        n_cold = num_tokens - n_hot
+        if n_cold > 0:
+            out[n_hot:] = off_ids.to(dt).unsqueeze(0)
+        return out
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -189,6 +424,26 @@ class FusedMoe(torch.nn.Module):
     ) -> torch.Tensor:
 
         a1 = hidden_states
+
+        is_warmup = _in_memory_trace()
+        if is_warmup:
+            # Include reserved MoE skew in the measured warmup peak.
+            global _NONTORCH_BASELINE_MIB
+            if _NONTORCH_BASELINE_MIB is None:
+                # Skipped while a CUDA graph is capturing (returns None); a non-capturing warmup
+                # forward runs first and fills the baseline. The skew below must run regardless so
+                # the captured graph reserves the worst-case (rank-0) hot-expert load.
+                baseline = _nontorch_mib_safe()
+                if baseline is not None:
+                    _NONTORCH_BASELINE_MIB = baseline
+                    logger.info(
+                        "[NONTORCH] warmup_baseline=%.0f MiB",
+                        _NONTORCH_BASELINE_MIB,
+                    )
+            topk_ids = self._warmup_skew_topk_ids(topk_ids)
+        elif _RUNTIME_DIAGNOSTICS_ENABLED:
+            _log_runtime_nontorch_peak()
+            _log_runtime_slot_distribution(self.router, topk_ids)
 
         expert_payload = self.router.prepare(
             a1,

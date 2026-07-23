@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -8,6 +9,23 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 
 namespace rtp_llm {
+
+struct RuntimeMemorySizingInput {
+    bool   has_warmup               = false;
+    size_t configured_reserve_bytes = 0;
+    size_t warmup_required_bytes    = 0;
+    size_t sampler_required_bytes   = 0;
+    size_t total_gpu_bytes          = 0;
+    double safety_ratio             = 0.05;
+    size_t no_warmup_floor_bytes    = 2L * 1024 * 1024 * 1024;
+};
+
+struct RuntimeMemorySizingResult {
+    size_t safety_headroom_bytes  = 0;
+    size_t runtime_required_bytes = 0;
+};
+
+RuntimeMemorySizingResult calculateRuntimeMemorySizing(const RuntimeMemorySizingInput& input);
 
 class MemoryEvaluationHelper {
 public:

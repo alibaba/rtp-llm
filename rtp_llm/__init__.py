@@ -1,4 +1,15 @@
+import sys
 import time
+
+from rtp_llm.utils.pre_import_config import (
+    configure_expandable_segments_for_warmup,
+    is_start_server_entrypoint,
+)
+
+# `python -m rtp_llm.start_server` imports this package before the start_server module. Configure
+# the allocator here so the setting precedes torch imports performed by the package initializer.
+if is_start_server_entrypoint(getattr(sys, "orig_argv", sys.argv)):
+    configure_expandable_segments_for_warmup()
 
 st = time.time()
 try:
