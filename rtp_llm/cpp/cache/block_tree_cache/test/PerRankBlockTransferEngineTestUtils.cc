@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/test/CopyEngineTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/PerRankBlockTransferEngineTestUtils.h"
 
 #include <gtest/gtest.h>
 
@@ -12,7 +12,7 @@
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
-namespace rtp_llm::copy_engine_test {
+namespace rtp_llm::block_transfer_engine_test {
 namespace {
 
 std::string makeTempDir(const char* name) {
@@ -43,7 +43,7 @@ void removeTempDir(const std::string& path) {
 std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count, bool enable_pinned) {
     auto config                  = std::make_shared<HostBlockPoolConfig>();
     config->pool_type            = BlockPoolType::HOST;
-    config->pool_name            = "copy_engine_host";
+    config->pool_name            = "per_rank_transfer_engine_host";
     config->physical_block_count = usable_count + 1;
     config->payload_bytes        = payload_bytes;
     config->stride_bytes         = ((payload_bytes + 4095) / 4096) * 4096;
@@ -143,12 +143,14 @@ TransferDescriptor makeDescriptor(Tier                             source_tier,
     return desc;
 }
 
-void expectStatus(const std::shared_ptr<CopyEngine>& engine, const TransferDescriptor& desc, CopyStatus expected) {
+void expectStatus(const std::shared_ptr<PerRankBlockTransferEngine>& engine,
+                  const TransferDescriptor&                          desc,
+                  TransferStatus                                     expected) {
     auto handle = engine->submit(desc);
     EXPECT_TRUE(handle.valid());
     EXPECT_TRUE(handle.done());
     EXPECT_EQ(handle.status(), expected);
-    EXPECT_EQ(handle.ok(), expected == CopyStatus::OK);
+    EXPECT_EQ(handle.ok(), expected == TransferStatus::OK);
 }
 
-}  // namespace rtp_llm::copy_engine_test
+}  // namespace rtp_llm::block_transfer_engine_test

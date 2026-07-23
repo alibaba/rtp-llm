@@ -13,7 +13,9 @@
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTransferConverter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -987,7 +989,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsEmptyMemoryRequestWithoutCoordi
 static void appendValidTaggedTransfer(const std::shared_ptr<KVCacheManager>& manager, FunctionRequestPB& request) {
     ASSERT_NE(manager->blockTreeCache(), nullptr);
     const TransferDescriptor descriptor = TransferDescriptor::deviceToHost(/*group_id=*/0, {1}, /*host_block=*/1);
-    ASSERT_TRUE(BlockTreeTransferConverter::appendTransfer(
+    ASSERT_TRUE(BlockTransferRequestConverter::appendTransfer(
         descriptor, manager->blockTreeCache()->componentGroups(), *request.mutable_mem_request()));
 }
 
@@ -1089,8 +1091,8 @@ TEST_F(KVCacheManagerTest, MultiRankZeroUsesDedicatedBroadcastManager) {
         cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
     ASSERT_TRUE(manager->init());
     ASSERT_NE(manager->blockTreeCache(), nullptr);
-    ASSERT_NE(manager->blockTreeCache()->broadcast_manager_, nullptr);
-    EXPECT_EQ(manager->blockTreeCache()->broadcast_manager_->workerNum(), 2u);
+    ASSERT_NE(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_, nullptr);
+    EXPECT_EQ(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_->workerNum(), 2u);
 
     FunctionRequestPB request;
     appendValidTaggedTransfer(manager, request);
@@ -1116,7 +1118,7 @@ TEST_F(KVCacheManagerTest, NonZeroMultiRankHasNoLocalBroadcastManager) {
         cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
     ASSERT_TRUE(manager->init());
     ASSERT_NE(manager->blockTreeCache(), nullptr);
-    EXPECT_EQ(manager->blockTreeCache()->broadcast_manager_, nullptr);
+    EXPECT_EQ(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_, nullptr);
 }
 
 TEST_F(KVCacheManagerTest, MultiRankZeroRejectsMismatchedBroadcastAddressCount) {

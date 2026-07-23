@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <exception>
 #include <functional>
 #include <limits>
@@ -8,12 +10,12 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockCacheTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTransferConverter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
-#include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -113,17 +115,18 @@ private:
 
 BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>         tree,
                                std::vector<ComponentGroupPtr>     component_groups,
-                               std::vector<Component>             components,
+                               std::shared_ptr<const std::vector<Component>> components,
                                BlockTreeCacheConfig               config,
                                std::shared_ptr<StorageBackend>    storage_backend,
-                               std::shared_ptr<BroadcastManager>  broadcast_manager,
+                               std::unique_ptr<BlockTransferDispatcher>      transfer_dispatcher,
+                               std::unique_ptr<BlockCacheTaskPool>           task_pool,
                                std::vector<std::string>           per_tag_tags,
                                std::vector<DeviceKVCacheGroupPtr> per_tag_device_groups,
                                std::vector<PerTagMapping>         per_tag_mapping):
     config_(std::move(config)),
     tree_(std::move(tree)),
     component_groups_(std::move(component_groups)),
-    components_(std::make_shared<const std::vector<Component>>(std::move(components))),
+    components_(std::move(components)),
     per_tag_tags_(std::move(per_tag_tags)),
     per_tag_device_groups_(std::move(per_tag_device_groups)),
     per_tag_mapping_(std::move(per_tag_mapping)),
@@ -131,7 +134,8 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>         tree,
         [this](const LoadBackTicket& ticket) { return commitLoadBack(ticket); },
         [this](const LoadBackTicket& ticket) { abortLoadBack(ticket); })),
     storage_backend_(std::move(storage_backend)),
-    broadcast_manager_(std::move(broadcast_manager)),
+    transfer_dispatcher_(std::move(transfer_dispatcher)),
+    task_pool_(std::move(task_pool)),
     evictor_(
         component_groups_,
         [this](const TransferDescriptor& descriptor) { return executeTransfer(descriptor); },
@@ -140,6 +144,10 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>         tree,
 bool BlockTreeCache::init() {
     if (initialized_) {
         RTP_LLM_LOG_ERROR("BlockTreeCache::init: cache is already initialized");
+        return false;
+    }
+    if (transfer_dispatcher_ == nullptr || task_pool_ == nullptr) {
+        RTP_LLM_LOG_ERROR("BlockTreeCache::init: transfer dispatcher and task pool must be initialized");
         return false;
     }
     if (!validateConfiguration()) {
@@ -153,14 +161,9 @@ bool BlockTreeCache::init() {
         RTP_LLM_LOG_ERROR("BlockTreeCache::init: failed to initialize BlockTreeEvictor");
         return false;
     }
-    copy_engine_ = std::make_shared<CopyEngine>(component_groups_, components_);
-
-    thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(
-        static_cast<size_t>(config_.eviction_thread_pool_size), 1000, nullptr, "BlockTreeEvictionPool");
-    if (!thread_pool_->start()) {
-        RTP_LLM_LOG_ERROR("BlockTreeCache::init: failed to start eviction thread pool, size=%d",
+    if (!task_pool_->start()) {
+        RTP_LLM_LOG_ERROR("BlockTreeCache::init: failed to start task pool, size=%d",
                           config_.eviction_thread_pool_size);
-        thread_pool_.reset();
         return false;
     }
     RTP_LLM_LOG_INFO("BlockTreeCache: initialized with %zu component groups, %zu components, "
@@ -371,6 +374,10 @@ bool BlockTreeCache::validateConfiguration() const {
 BlockTreeCache::~BlockTreeCache() {
     RTP_LLM_LOG_INFO("BlockTreeCache: destroying, closing load-back tickets...");
     load_back_ticket_registry_->shutdown();
+    if (!initialized_) {
+        RTP_LLM_LOG_INFO("BlockTreeCache: destroyed");
+        return;
+    }
     RTP_LLM_LOG_INFO("BlockTreeCache: load-back tickets closed, waiting for pending tasks...");
     waitForPendingTasks();
     {
@@ -380,10 +387,7 @@ BlockTreeCache::~BlockTreeCache() {
             "BlockTreeCache: in-flight DEVICE release credits remain after pending tasks drained: %zu",
             in_flight_device_release_credits_.size());
     }
-    if (thread_pool_) {
-        thread_pool_->stop(autil::ThreadPool::STOP_AFTER_QUEUE_EMPTY);
-        thread_pool_->join();
-    }
+    task_pool_->shutdown();
     if (initialized_) {
         drainTreeHolds();
     }
@@ -451,79 +455,8 @@ void BlockTreeCache::drainTreeHolds() {
     }
 }
 
-CopyStatus BlockTreeCache::executeTransfer(const TransferDescriptor& descriptor) {
-    if (!copy_engine_) {
-        RTP_LLM_LOG_WARNING("BlockTreeCache::executeTransfer: copy engine is not initialized");
-        return CopyStatus::INVALID_ARGS;
-    }
-
-    TransferHandle handle = copy_engine_->submit(descriptor);
-    return handle.status();
-}
-
-bool BlockTreeCache::broadcastTransfer(const ::MemoryOperationRequestPB& request, int timeout_ms) const {
-    if (!broadcast_manager_) {
-        RTP_LLM_LOG_WARNING("BlockTreeCache::broadcastTransfer: broadcast manager is not initialized");
-        return false;
-    }
-    if (request.copy_items_size() == 0 || timeout_ms <= 0) {
-        RTP_LLM_LOG_WARNING("BlockTreeCache::broadcastTransfer: invalid request, item_count=%d, timeout_ms=%d",
-                            request.copy_items_size(),
-                            timeout_ms);
-        return false;
-    }
-
-    const size_t worker_count = broadcast_manager_->workerNum();
-    if (worker_count == 0) {
-        RTP_LLM_LOG_WARNING("BlockTreeCache::broadcastTransfer: no worker configured");
-        return false;
-    }
-
-    FunctionRequestPB         function_request;
-    MemoryOperationRequestPB* memory_request = function_request.mutable_mem_request();
-    if (memory_request == nullptr) {
-        RTP_LLM_LOG_WARNING("BlockTreeCache::broadcastTransfer: failed to create memory request");
-        return false;
-    }
-    memory_request->CopyFrom(request);
-    std::vector<FunctionRequestPB> requests(worker_count, function_request);
-
-    std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>> broadcast_result =
-        broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-            requests,
-            timeout_ms,
-            [](const std::shared_ptr<RpcService::Stub>&    stub,
-               const std::shared_ptr<grpc::ClientContext>& context,
-               const FunctionRequestPB&                    rpc_request,
-               grpc::CompletionQueue*                      completion_queue) {
-                return stub->AsyncExecuteFunction(context.get(), rpc_request, completion_queue);
-            });
-    if (!broadcast_result) {
-        RTP_LLM_LOG_WARNING("BlockTreeCache::broadcastTransfer: failed to start broadcast");
-        return false;
-    }
-
-    broadcast_result->waitDone();
-    if (!broadcast_result->success()) {
-        RTP_LLM_LOG_WARNING("BlockTreeCache::broadcastTransfer: worker RPC failed");
-        return false;
-    }
-
-    const std::vector<FunctionResponsePB> responses = broadcast_result->responses();
-    if (responses.size() != worker_count) {
-        RTP_LLM_LOG_WARNING("BlockTreeCache::broadcastTransfer: response count mismatch, expected=%zu, actual=%zu",
-                            worker_count,
-                            responses.size());
-        return false;
-    }
-    for (size_t rank = 0; rank < responses.size(); ++rank) {
-        const FunctionResponsePB& response = responses[rank];
-        if (!response.has_mem_response() || !response.mem_response().success()) {
-            RTP_LLM_LOG_WARNING("BlockTreeCache::broadcastTransfer: worker transfer failed, rank=%zu", rank);
-            return false;
-        }
-    }
-    return true;
+TransferStatus BlockTreeCache::executeTransfer(const TransferDescriptor& descriptor) {
+    return transfer_dispatcher_->executePerRank(descriptor);
 }
 
 BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
@@ -888,19 +821,7 @@ BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(size_t limit) const {
 }
 
 void BlockTreeCache::waitForPendingTasks() {
-    std::unique_lock<std::mutex> lock(wait_mutex_);
-    bool                         wait_observer_invoked = false;
-    wait_cv_.wait(lock, [this, &wait_observer_invoked] {
-        const int pending_tasks = pending_tasks_.load();
-        if (pending_tasks > 0 && !wait_observer_invoked) {
-            wait_observer_invoked                          = true;
-            const auto pending_task_wait_observer_for_test = pending_task_wait_observer_for_test_;
-            if (pending_task_wait_observer_for_test) {
-                pending_task_wait_observer_for_test();
-            }
-        }
-        return pending_tasks <= 0;
-    });
+    task_pool_->waitForIdle();
 }
 
 void BlockTreeCache::onBlocksReleased() {
@@ -921,18 +842,6 @@ bool BlockTreeCache::cancelLoadBack(const std::shared_ptr<AsyncContext>& context
     }
     std::lock_guard<std::mutex> lock(mutex_);
     return !load_back_context->done() && load_back_context->requestCancel();
-}
-
-void BlockTreeCache::taskStarted() {
-    pending_tasks_++;
-}
-
-void BlockTreeCache::taskFinished() {
-    int remaining = --pending_tasks_;
-    if (remaining <= 0) {
-        std::lock_guard<std::mutex> lock(wait_mutex_);
-        wait_cv_.notify_all();
-    }
 }
 
 void BlockTreeCache::prepareMatchedBlocks(const std::vector<TreeNode*>&                 matched_path,
@@ -1224,27 +1133,13 @@ std::shared_ptr<AsyncContext> BlockTreeCache::commitLoadBack(const LoadBackTicke
     auto lb_ctx = std::make_shared<LoadBackAsyncContext>();
     lb_ctx->addTask();
 
-    autil::LambdaWorkItem* work_item                = new autil::LambdaWorkItem([this, async_items, lb_ctx]() {
-        performLoadBack(std::move(*async_items), lb_ctx);
-        taskFinished();
-    });
-    auto                   work_item_cleanup_action = [&work_item]() { work_item->destroy(); };
-    ScopeRollback<decltype(work_item_cleanup_action)> work_item_cleanup_guard(std::move(work_item_cleanup_action));
-
-    taskStarted();
-    auto                                         task_cleanup_action = [this]() { taskFinished(); };
-    ScopeRollback<decltype(task_cleanup_action)> task_cleanup_guard(std::move(task_cleanup_action));
-
-    const autil::ThreadPool::ERROR_TYPE error = thread_pool_->pushWorkItem(work_item);
-    if (error != autil::ThreadPool::ERROR_NONE) {
-        work_item_cleanup_guard.run();
+    const bool submitted =
+        task_pool_->submit([this, async_items, lb_ctx]() { performLoadBack(std::move(*async_items), lb_ctx); });
+    if (!submitted) {
         rollback_guard.run();
         lb_ctx->onTaskComplete(false);
-        task_cleanup_guard.run();
         return lb_ctx;
     }
-    work_item_cleanup_guard.dismiss();
-    task_cleanup_guard.dismiss();
     rollback_guard.dismiss();
     return lb_ctx;
 }
@@ -1302,42 +1197,6 @@ void BlockTreeCache::abortLoadBackUnsafe(const LoadBackTicket::PendingLoadBackIt
         evictor_.refreshAllCandidates(*tree_);
         checkWatermark();
     }
-}
-
-bool BlockTreeCache::executeLoadBackTransferBatch(const std::vector<TransferDescriptor>& descriptors, int timeout_ms) {
-    if (descriptors.empty()) {
-        return true;
-    }
-
-    if (broadcast_manager_ == nullptr) {
-        for (const TransferDescriptor& descriptor : descriptors) {
-            const CopyStatus status = executeTransfer(descriptor);
-            if (status != CopyStatus::OK) {
-                RTP_LLM_LOG_WARNING("BlockTreeCache::executeLoadBackTransferBatch: local transfer failed, "
-                                    "group=%d source=%s target=%s status=%d",
-                                    descriptor.component_group_id,
-                                    tierName(descriptor.source_tier),
-                                    tierName(descriptor.target_tier),
-                                    static_cast<int>(status));
-                return false;
-            }
-        }
-        return true;
-    }
-
-    MemoryOperationRequestPB request;
-    for (const TransferDescriptor& descriptor : descriptors) {
-        const bool appended = BlockTreeTransferConverter::appendTransfer(descriptor, component_groups_, request);
-        if (!appended) {
-            RTP_LLM_LOG_WARNING("BlockTreeCache::executeLoadBackTransferBatch: failed to encode transfer, "
-                                "group=%d source=%s target=%s",
-                                descriptor.component_group_id,
-                                tierName(descriptor.source_tier),
-                                tierName(descriptor.target_tier));
-            return false;
-        }
-    }
-    return broadcastTransfer(request, timeout_ms);
 }
 
 void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::shared_ptr<AsyncContext> ctx) {
@@ -1412,10 +1271,11 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
     bool copy_success = prepared;
     if (copy_success) {
         copy_success =
-            executeLoadBackTransferBatch(disk_to_host_descriptors, config_.memory_cache_disk_sync_timeout_ms);
+            transfer_dispatcher_->executeMultiRank(disk_to_host_descriptors, config_.memory_cache_disk_sync_timeout_ms);
     }
     if (copy_success) {
-        copy_success = executeLoadBackTransferBatch(host_to_device_descriptors, config_.memory_cache_sync_timeout_ms);
+        copy_success =
+            transfer_dispatcher_->executeMultiRank(host_to_device_descriptors, config_.memory_cache_sync_timeout_ms);
     }
 
     for (size_t item_index = 0; item_index < items.size(); ++item_index) {
@@ -1618,16 +1478,12 @@ bool BlockTreeCache::submitEvictionLocked(EvictionMove&                     evic
 
     auto plan_ptr                  = std::make_shared<BlockTreeEvictor::EvictionPlan>(std::move(*plan));
     auto in_flight_release_credits = accepted_release_credits;
-    taskStarted();
-    auto* work_item =
-        new autil::LambdaWorkItem([this, plan_ptr, in_flight_release_credits = std::move(in_flight_release_credits)]() {
+    const bool submitted =
+        task_pool_->submit([this, plan_ptr, in_flight_release_credits = std::move(in_flight_release_credits)]() {
             performEvictionCopy(*plan_ptr, in_flight_release_credits);
         });
-    auto err = thread_pool_->pushWorkItem(work_item);
-    if (err != autil::ThreadPool::ERROR_NONE) {
-        work_item->destroy();
+    if (!submitted) {
         evictor_.rollbackPreparedPlan(*plan_ptr);
-        taskFinished();
         return false;
     }
     reserveInFlightDeviceReleaseCreditsLocked(accepted_release_credits);
@@ -1644,22 +1500,6 @@ void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan&  
     copy_results.cascade_success.assign(plan.cascade_moves.size(), false);
 
     auto worker_finalization_action = [this, &plan, &release_credits, &copy_results]() noexcept {
-        bool task_finish_attempted = false;
-        auto task_finish_action    = [this, &task_finish_attempted]() noexcept {
-            if (task_finish_attempted) {
-                return;
-            }
-            task_finish_attempted = true;
-            try {
-                taskFinished();
-            } catch (const std::exception& error) {
-                RTP_LLM_LOG_ERROR("BlockTreeCache: accepted eviction task finalization failed: %s", error.what());
-            } catch (...) {
-                RTP_LLM_LOG_ERROR("BlockTreeCache: accepted eviction task finalization failed with unknown exception");
-            }
-        };
-        ScopeRollback<decltype(task_finish_action)> task_finish_guard(std::move(task_finish_action));
-
         bool credit_settlement_attempted = false;
         auto credit_settlement_action    = [this, &release_credits, &credit_settlement_attempted]() noexcept {
             if (credit_settlement_attempted) {
@@ -1774,23 +1614,20 @@ void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan&  
                 RTP_LLM_LOG_ERROR("BlockTreeCache: remote eviction write-through failed with unknown exception");
             }
         }
-
-        // This is deliberately last and no-throw: pending-task decrement is attempted exactly once
-        // after the credit settlement attempt, even when terminalization or settlement reports failure.
-        task_finish_guard.run();
     };
     ScopeRollback<decltype(worker_finalization_action)> worker_finalization_guard(
         std::move(worker_finalization_action));
 
     try {
-        if (broadcast_manager_ == nullptr) {
+        if (!transfer_dispatcher_->hasMultiRankEngine()) {
             copy_results = evictor_.performCopy(plan);
         } else {
-            MemoryOperationRequestPB request;
-            const bool               request_ready = buildEvictionTransferRequest(plan, request);
-            const bool copy_success      = request_ready && broadcastTransfer(request, evictionTransferTimeoutMs(plan));
-            copy_results.primary_success = copy_success;
-            copy_results.cascade_success.assign(plan.cascade_moves.size(), copy_success);
+            std::vector<TransferDescriptor> descriptors;
+            const bool                      batch_ready = buildEvictionTransferBatch(plan, descriptors);
+            const bool                      transfer_success =
+                batch_ready && transfer_dispatcher_->executeMultiRank(descriptors, evictionTransferTimeoutMs(plan));
+            copy_results.primary_success = transfer_success;
+            copy_results.cascade_success.assign(plan.cascade_moves.size(), transfer_success);
         }
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("BlockTreeCache: eviction copy failed with exception: %s", error.what());
@@ -1799,20 +1636,24 @@ void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan&  
     }
 }
 
-bool BlockTreeCache::buildEvictionTransferRequest(const BlockTreeEvictor::EvictionPlan& plan,
-                                                  MemoryOperationRequestPB&             request) const {
+bool BlockTreeCache::buildEvictionTransferBatch(const BlockTreeEvictor::EvictionPlan& plan,
+                                                std::vector<TransferDescriptor>&      descriptors) const {
+    descriptors.clear();
+    descriptors.reserve(1 + plan.cascade_moves.size());
+
     TransferDescriptor primary_descriptor;
-    if (!BlockTreeEvictor::buildTransferDescriptor(plan.primary, primary_descriptor)
-        || !BlockTreeTransferConverter::appendTransfer(primary_descriptor, component_groups_, request)) {
+    if (!BlockTreeEvictor::buildTransferDescriptor(plan.primary, primary_descriptor)) {
         return false;
     }
+    descriptors.push_back(std::move(primary_descriptor));
 
     for (const EvictionMove& cascade_move : plan.cascade_moves) {
         TransferDescriptor cascade_descriptor;
-        if (!BlockTreeEvictor::buildTransferDescriptor(cascade_move, cascade_descriptor)
-            || !BlockTreeTransferConverter::appendTransfer(cascade_descriptor, component_groups_, request)) {
+        if (!BlockTreeEvictor::buildTransferDescriptor(cascade_move, cascade_descriptor)) {
+            descriptors.clear();
             return false;
         }
+        descriptors.push_back(std::move(cascade_descriptor));
     }
     return true;
 }

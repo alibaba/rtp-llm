@@ -11,7 +11,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/EvictionHeap.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/StorageBackend.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/TransferTypes.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
 
@@ -27,7 +27,7 @@ struct CandidateStats {
 // provides group-specific evictability and block/slot lifecycle operations.
 class BlockTreeEvictor {
 public:
-    using ExecuteTransferFn = std::function<CopyStatus(const TransferDescriptor&)>;
+    using ExecuteTransferFn = std::function<TransferStatus(const TransferDescriptor&)>;
 
     struct EvictionPlan {
         EvictionMove              primary;

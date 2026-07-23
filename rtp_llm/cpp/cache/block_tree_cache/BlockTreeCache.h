@@ -1,16 +1,10 @@
 #pragma once
 
-#include <atomic>
-#include <condition_variable>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
-
-#include "autil/LambdaWorkItem.h"
-#include "autil/LockFreeThreadPool.h"
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
@@ -20,15 +14,13 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/LoadBackTicket.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/SWAComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/StorageBackend.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/CopyEngine.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/TransferTypes.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/device_group/DeviceKVCacheGroup.h"
-
-class MemoryOperationRequestPB;
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
 
-class BroadcastManager;
+class BlockCacheTaskPool;
+class BlockTransferDispatcher;
 class HybridKVCacheAllocator;
 struct CacheStats {
     size_t tree_node_count{0};
@@ -125,7 +117,7 @@ struct BlockTreeCacheConfig {
 
 // BlockTreeCache: eviction workflow coordinator.
 // Owns BlockTree, ComponentGroups, HostBlockPool (L2), BlockTreeDiskBlockPool (L3),
-// CopyEngine (schema-aware data-movement utility), StorageBackend, thread pool.
+// StorageBackend, and the cache workflow collaborators injected by the factory.
 // Each storage tier (Device/Host/Disk/Remote) can be independently enabled/disabled.
 class BlockTreeCache {
 public:
@@ -141,10 +133,11 @@ public:
 
     BlockTreeCache(std::unique_ptr<BlockTree>         tree,
                    std::vector<ComponentGroupPtr>     component_groups,
-                   std::vector<Component>             components,
+                   std::shared_ptr<const std::vector<Component>> components,
                    BlockTreeCacheConfig               config,
                    std::shared_ptr<StorageBackend>    storage_backend,
-                   std::shared_ptr<BroadcastManager>  broadcast_manager,
+                   std::unique_ptr<BlockTransferDispatcher>      transfer_dispatcher,
+                   std::unique_ptr<BlockCacheTaskPool>           task_pool,
                    std::vector<std::string>           per_tag_tags,
                    std::vector<DeviceKVCacheGroupPtr> per_tag_device_groups,
                    std::vector<PerTagMapping>         per_tag_mapping);
@@ -167,7 +160,7 @@ public:
     // Release path-lock references acquired during match().
     void releaseMatchedBlocks(const std::vector<GroupBlockSet>& sets);
 
-    CopyStatus executeTransfer(const TransferDescriptor& descriptor);
+    TransferStatus executeTransfer(const TransferDescriptor& descriptor);
 
     // ---- Configuration mutators (for runtime adjustment) ----
     void setTierWatermark(Tier tier, double ratio, size_t capacity) {
@@ -209,9 +202,6 @@ public:
     const std::vector<Component>& components() const {
         return *components_;
     }
-    CopyEnginePtr copyEngine() const {
-        return copy_engine_;
-    }
     std::shared_ptr<StorageBackend> storageBackend() const {
         return storage_backend_;
     }
@@ -248,8 +238,6 @@ private:
                     const CacheKeysType&                       cache_keys,
                     const std::vector<std::vector<GroupSlot>>& slots,
                     bool                                       allow_sparse_slots);
-    void taskStarted();
-    void taskFinished();
     void drainTreeHolds();
     void checkWatermark();
     bool reclaimOneForGroup(int component_group_id, Tier tier);
@@ -262,10 +250,9 @@ private:
     void settleInFlightDeviceReleaseCreditsLocked(const std::vector<DeviceReleaseCredit>& release_credits);
     void performEvictionCopy(const BlockTreeEvictor::EvictionPlan&   plan,
                              const std::vector<DeviceReleaseCredit>& release_credits);
-    bool buildEvictionTransferRequest(const BlockTreeEvictor::EvictionPlan& plan,
-                                      ::MemoryOperationRequestPB&           request) const;
+    bool buildEvictionTransferBatch(const BlockTreeEvictor::EvictionPlan& plan,
+                                    std::vector<TransferDescriptor>&      descriptors) const;
     int  evictionTransferTimeoutMs(const BlockTreeEvictor::EvictionPlan& plan) const;
-    bool broadcastTransfer(const ::MemoryOperationRequestPB& request, int timeout_ms) const;
 
     struct LoadBackItem {
         TreeNode*                 node{nullptr};
@@ -298,7 +285,6 @@ private:
                              size_t                                      prepared_item_count,
                              bool                                        partial_item_claimed        = false,
                              bool                                        partial_target_holder_added = false);
-    bool executeLoadBackTransferBatch(const std::vector<TransferDescriptor>& descriptors, int timeout_ms);
     void performLoadBack(std::vector<LoadBackItem> items, std::shared_ptr<AsyncContext> ctx);
 
     BlockTreeCacheConfig                          config_;
@@ -313,18 +299,12 @@ private:
     // component_group_id -> local_pool_index -> stable declarative tag.
     std::vector<std::vector<std::string>>      device_group_tags_;
     std::shared_ptr<LoadBackTicketRegistry>    load_back_ticket_registry_;
-    CopyEnginePtr                              copy_engine_;
     std::shared_ptr<StorageBackend>            storage_backend_;
-    std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
-    std::shared_ptr<BroadcastManager>          broadcast_manager_;
+    std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher_;
+    std::unique_ptr<BlockCacheTaskPool>      task_pool_;
     BlockTreeEvictor                           evictor_;
     bool                                       initialized_{false};
 
-    std::atomic<int>        pending_tasks_{0};
-    std::mutex              wait_mutex_;
-    std::condition_variable wait_cv_;
-    // Installed only by the shutdown test peer; production keeps this empty.
-    std::function<void()> pending_task_wait_observer_for_test_;
     mutable std::mutex    mutex_;
     // Protected by mutex_. Credits remain reserved from async queue acceptance
     // until the matching plan completes or rolls back.

@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTransferConverter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 
 #include <algorithm>
 #include <unordered_map>
@@ -10,19 +10,19 @@
 
 namespace rtp_llm {
 
-bool BlockTreeTransferConverter::hasSourceMemory(const CopyItem& item) {
+bool BlockTransferRequestConverter::hasSourceMemory(const CopyItem& item) {
     return item.src_mem_block_presence_case() == CopyItem::kSrcMemBlock;
 }
 
-bool BlockTreeTransferConverter::hasSourceDisk(const CopyItem& item) {
+bool BlockTransferRequestConverter::hasSourceDisk(const CopyItem& item) {
     return item.src_disk_slot_presence_case() == CopyItem::kSrcDiskSlot;
 }
 
-bool BlockTreeTransferConverter::hasTargetDisk(const CopyItem& item) {
+bool BlockTransferRequestConverter::hasTargetDisk(const CopyItem& item) {
     return item.disk_slot_presence_case() == CopyItem::kDiskSlot;
 }
 
-std::vector<std::string> BlockTreeTransferConverter::normalizedTags(const CopyItem& item) {
+std::vector<std::string> BlockTransferRequestConverter::normalizedTags(const CopyItem& item) {
     std::vector<std::string> tags(item.component_group_tags().begin(), item.component_group_tags().end());
     if (tags.empty() || std::any_of(tags.begin(), tags.end(), [](const std::string& tag) { return tag.empty(); })) {
         return {};
@@ -35,7 +35,7 @@ std::vector<std::string> BlockTreeTransferConverter::normalizedTags(const CopyIt
 }
 
 const ComponentGroup*
-BlockTreeTransferConverter::findComponentGroup(const std::vector<std::string>&       normalized_tags,
+BlockTransferRequestConverter::findComponentGroup(const std::vector<std::string>&       normalized_tags,
                                                const std::vector<ComponentGroupPtr>& component_groups) {
     if (normalized_tags.empty()) {
         return nullptr;
@@ -58,7 +58,7 @@ BlockTreeTransferConverter::findComponentGroup(const std::vector<std::string>&  
     return match;
 }
 
-bool BlockTreeTransferConverter::validDeviceBlocks(const std::vector<BlockIdxType>& blocks,
+bool BlockTransferRequestConverter::validDeviceBlocks(const std::vector<BlockIdxType>& blocks,
                                                    const ComponentGroup&            component_group) {
     if (blocks.size() != component_group.layout().componentCount() || blocks.empty()) {
         return false;
@@ -82,17 +82,17 @@ bool BlockTreeTransferConverter::validDeviceBlocks(const std::vector<BlockIdxTyp
     return has_valid_block;
 }
 
-bool BlockTreeTransferConverter::validHostBlock(BlockIdxType block, const ComponentGroup& component_group) {
+bool BlockTransferRequestConverter::validHostBlock(BlockIdxType block, const ComponentGroup& component_group) {
     const auto host_pool = component_group.hostPool();
     return host_pool != nullptr && host_pool->validBlock(block);
 }
 
-bool BlockTreeTransferConverter::validDiskBlock(BlockIdxType block, const ComponentGroup& component_group) {
+bool BlockTransferRequestConverter::validDiskBlock(BlockIdxType block, const ComponentGroup& component_group) {
     const auto disk_pool = component_group.diskPool();
     return disk_pool != nullptr && disk_pool->validBlock(block);
 }
 
-bool BlockTreeTransferConverter::directionFor(const TransferDescriptor&                descriptor,
+bool BlockTransferRequestConverter::directionFor(const TransferDescriptor&                descriptor,
                                               const ComponentGroup&                    component_group,
                                               MemoryOperationRequestPB::CopyDirection& request_direction) {
     if (descriptor.source_tier == Tier::DEVICE && descriptor.target_tier == Tier::HOST) {
@@ -118,7 +118,7 @@ bool BlockTreeTransferConverter::directionFor(const TransferDescriptor&         
     return false;
 }
 
-void BlockTreeTransferConverter::setDeviceBlocks(const std::vector<BlockIdxType>& blocks,
+void BlockTransferRequestConverter::setDeviceBlocks(const std::vector<BlockIdxType>& blocks,
                                                  const ComponentGroup&            component_group,
                                                  CopyItem&                        item) {
     RTP_LLM_CHECK(blocks.size() == component_group.tags().size());
@@ -132,7 +132,7 @@ void BlockTreeTransferConverter::setDeviceBlocks(const std::vector<BlockIdxType>
     }
 }
 
-bool BlockTreeTransferConverter::decodeDeviceBlocks(const CopyItem&            item,
+bool BlockTransferRequestConverter::decodeDeviceBlocks(const CopyItem&            item,
                                                     const ComponentGroup&      component_group,
                                                     std::vector<BlockIdxType>& blocks) {
     if (item.tagged_gpu_blocks_size() != static_cast<int>(component_group.tags().size())) {
@@ -157,7 +157,7 @@ bool BlockTreeTransferConverter::decodeDeviceBlocks(const CopyItem&            i
     return blocks_by_tag.size() == component_group.tags().size() && validDeviceBlocks(blocks, component_group);
 }
 
-bool BlockTreeTransferConverter::decodeDeviceHostTransfer(const MemoryOperationRequestPB& request,
+bool BlockTransferRequestConverter::decodeDeviceHostTransfer(const MemoryOperationRequestPB& request,
                                                           const CopyItem&                 item,
                                                           const ComponentGroup&           component_group,
                                                           TransferDescriptor&             descriptor) {
@@ -182,7 +182,7 @@ bool BlockTreeTransferConverter::decodeDeviceHostTransfer(const MemoryOperationR
     return false;
 }
 
-bool BlockTreeTransferConverter::decodeHostDiskTransfer(const MemoryOperationRequestPB& request,
+bool BlockTransferRequestConverter::decodeHostDiskTransfer(const MemoryOperationRequestPB& request,
                                                         const CopyItem&                 item,
                                                         const ComponentGroup&           component_group,
                                                         TransferDescriptor&             descriptor) {
@@ -210,7 +210,7 @@ bool BlockTreeTransferConverter::decodeHostDiskTransfer(const MemoryOperationReq
     return false;
 }
 
-bool BlockTreeTransferConverter::appendTransfer(const TransferDescriptor&             descriptor,
+bool BlockTransferRequestConverter::appendTransfer(const TransferDescriptor&             descriptor,
                                                 const std::vector<ComponentGroupPtr>& component_groups,
                                                 MemoryOperationRequestPB&             request) {
     const ComponentGroup* component_group = nullptr;
@@ -267,7 +267,7 @@ bool BlockTreeTransferConverter::appendTransfer(const TransferDescriptor&       
     return true;
 }
 
-bool BlockTreeTransferConverter::decodeTransfer(const MemoryOperationRequestPB&       request,
+bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestPB&       request,
                                                 int                                   item_index,
                                                 const std::vector<ComponentGroupPtr>& component_groups,
                                                 TransferDescriptor&                   descriptor) {

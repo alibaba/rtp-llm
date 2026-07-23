@@ -11,7 +11,7 @@
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTransferConverter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
@@ -237,7 +237,7 @@ bool KVCacheManager::init() {
                                             && !runtime_config_.worker_grpc_addrs.empty();
     std::shared_ptr<BroadcastManager> broadcast_manager;
     if (requires_broadcast_manager) {
-        broadcast_manager = createBlockTreeBroadcastManager();
+        broadcast_manager = createMultiRankBlockTransferManager();
         if (!broadcast_manager) {
             return false;
         }
@@ -259,7 +259,7 @@ bool KVCacheManager::init() {
     return true;
 }
 
-std::shared_ptr<BroadcastManager> KVCacheManager::createBlockTreeBroadcastManager() const {
+std::shared_ptr<BroadcastManager> KVCacheManager::createMultiRankBlockTransferManager() const {
     const size_t expected_worker_count = static_cast<size_t>(parallelism_config_.tp_size);
     if (runtime_config_.worker_grpc_addrs.size() != expected_worker_count) {
         RTP_LLM_LOG_ERROR("KVCacheManager: worker grpc address count mismatch, expected=%zu, actual=%zu",
@@ -582,13 +582,13 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
 
     for (int item_index = 0; item_index < memory_request.copy_items_size(); ++item_index) {
         TransferDescriptor descriptor;
-        if (!BlockTreeTransferConverter::decodeTransfer(
+        if (!BlockTransferRequestConverter::decodeTransfer(
                 memory_request, item_index, block_tree_cache_->componentGroups(), descriptor)) {
             RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid tagged transfer item, index=%d", item_index);
             return false;
         }
-        const CopyStatus status = block_tree_cache_->executeTransfer(descriptor);
-        if (status != CopyStatus::OK) {
+        const TransferStatus status = block_tree_cache_->executeTransfer(descriptor);
+        if (status != TransferStatus::OK) {
             RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: tagged transfer failed, index=%d status=%d",
                                 item_index,
                                 static_cast<int>(status));

@@ -11,14 +11,14 @@
 
 namespace rtp_llm {
 
-enum class CopyStatus {
+enum class TransferStatus {
     OK,
     INVALID_ARGS,
     DEVICE_IO_ERROR,
     DISK_IO_ERROR,
 };
 
-using CopyCompletionCallback = std::function<void(CopyStatus)>;
+using TransferCompletionCallback = std::function<void(TransferStatus)>;
 
 struct DeviceHostCopyOptions {
     size_t staged_sm_min_tile_count{16};
@@ -31,16 +31,16 @@ class TransferHandle {
 public:
     TransferHandle() = default;
 
-    static TransferHandle completed(CopyStatus status, uint64_t request_id = 0);
+    static TransferHandle completed(TransferStatus status, uint64_t request_id = 0);
 
     uint64_t   requestId() const;
     void       wait() const;
     bool       done() const;
-    CopyStatus status() const;
+    TransferStatus status() const;
     bool       ok() const {
-        return status() == CopyStatus::OK;
+        return status() == TransferStatus::OK;
     }
-    void onComplete(CopyCompletionCallback callback) const;
+    void onComplete(TransferCompletionCallback callback) const;
     bool valid() const {
         return state_ != nullptr;
     }
@@ -52,7 +52,7 @@ private:
 
     std::shared_ptr<State> state_;
 
-    friend class CopyEngine;
+    friend class PerRankBlockTransferEngine;
 };
 
 struct TransferDescriptor {

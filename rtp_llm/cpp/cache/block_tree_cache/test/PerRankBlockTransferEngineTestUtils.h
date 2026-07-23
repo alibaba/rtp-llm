@@ -5,12 +5,12 @@
 #include <string>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/CopyEngine.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockIO.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
 
-namespace rtp_llm::copy_engine_test {
+namespace rtp_llm::block_transfer_engine_test {
 
 std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count, bool enable_pinned);
 
@@ -29,7 +29,7 @@ std::shared_ptr<BlockTreeDiskBlockPool> makeDiskPool(size_t                     
                                                      size_t                       usable_count,
                                                      const std::string&           work_dir,
                                                      std::unique_ptr<DiskBlockIO> io        = nullptr,
-                                                     const std::string&           pool_name = "copy_engine_disk");
+                                                     const std::string& pool_name    = "per_rank_transfer_engine_disk");
 
 BlockIdxType poolMalloc(IBlockPool& pool);
 
@@ -48,6 +48,8 @@ TransferDescriptor makeDescriptor(Tier                             source_tier,
                                   BlockIdxType                     disk_block = NULL_BLOCK_IDX,
                                   int                              group_id   = 0);
 
-void expectStatus(const std::shared_ptr<CopyEngine>& engine, const TransferDescriptor& desc, CopyStatus expected);
+void expectStatus(const std::shared_ptr<PerRankBlockTransferEngine>& engine,
+                  const TransferDescriptor&                          desc,
+                  TransferStatus                                     expected);
 
-}  // namespace rtp_llm::copy_engine_test
+}  // namespace rtp_llm::block_transfer_engine_test

@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/HostDiskTransferExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/HostDiskTransferExecutor.h"
 
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
@@ -24,23 +24,23 @@ const char* HostDiskTransferExecutor::blockIOStatusName(BlockIOStatus status) {
     return "UNKNOWN";
 }
 
-CopyStatus HostDiskTransferExecutor::blockIOStatusToCopyStatus(BlockIOStatus status) {
+TransferStatus HostDiskTransferExecutor::blockIOStatusToTransferStatus(BlockIOStatus status) {
     switch (status) {
         case BlockIOStatus::OK:
-            return CopyStatus::OK;
+            return TransferStatus::OK;
         case BlockIOStatus::INVALID_BLOCK:
         case BlockIOStatus::INVALID_SIZE:
         case BlockIOStatus::ALIGNMENT_ERROR:
-            return CopyStatus::INVALID_ARGS;
+            return TransferStatus::INVALID_ARGS;
         case BlockIOStatus::IO_ERROR:
-            return CopyStatus::DISK_IO_ERROR;
+            return TransferStatus::DISK_IO_ERROR;
         case BlockIOStatus::PARTIAL_FAILURE:
-            return CopyStatus::DISK_IO_ERROR;
+            return TransferStatus::DISK_IO_ERROR;
     }
-    return CopyStatus::DISK_IO_ERROR;
+    return TransferStatus::DISK_IO_ERROR;
 }
 
-CopyStatus HostDiskTransferExecutor::hostToDisk(const TransferDescriptor& desc, const ComponentGroup& group) const {
+TransferStatus HostDiskTransferExecutor::hostToDisk(const TransferDescriptor& desc, const ComponentGroup& group) const {
     const auto  host_block = desc.host_block;
     const auto  disk_block = desc.disk_block;
     auto&       host_pool  = *group.hostPool();
@@ -48,19 +48,19 @@ CopyStatus HostDiskTransferExecutor::hostToDisk(const TransferDescriptor& desc, 
     const void* host_base  = host_pool.blockBuffer(host_block).addr;
     if (!host_base) {
         RTP_LLM_LOG_WARNING("null host buffer");
-        return CopyStatus::DISK_IO_ERROR;
+        return TransferStatus::DISK_IO_ERROR;
     }
     const size_t bytes  = group.layout().payloadBytes();
     const auto   status = disk_pool.write(disk_block, host_base, bytes);
     if (status != BlockIOStatus::OK) {
         RTP_LLM_LOG_WARNING(
             "write failed, host=%d, disk=%d, status=%s", host_block, disk_block, blockIOStatusName(status));
-        return blockIOStatusToCopyStatus(status);
+        return blockIOStatusToTransferStatus(status);
     }
-    return CopyStatus::OK;
+    return TransferStatus::OK;
 }
 
-CopyStatus HostDiskTransferExecutor::diskToHost(const TransferDescriptor& desc, const ComponentGroup& group) const {
+TransferStatus HostDiskTransferExecutor::diskToHost(const TransferDescriptor& desc, const ComponentGroup& group) const {
     const auto disk_block = desc.disk_block;
     const auto host_block = desc.host_block;
     auto&      host_pool  = *group.hostPool();
@@ -68,16 +68,16 @@ CopyStatus HostDiskTransferExecutor::diskToHost(const TransferDescriptor& desc, 
     void*      host_base  = host_pool.blockBuffer(host_block).addr;
     if (!host_base) {
         RTP_LLM_LOG_WARNING("null host buffer");
-        return CopyStatus::DISK_IO_ERROR;
+        return TransferStatus::DISK_IO_ERROR;
     }
     const size_t bytes  = group.layout().payloadBytes();
     const auto   status = disk_pool.read(disk_block, host_base, bytes);
     if (status != BlockIOStatus::OK) {
         RTP_LLM_LOG_WARNING(
             "read failed, disk=%d, host=%d, status=%s", disk_block, host_block, blockIOStatusName(status));
-        return blockIOStatusToCopyStatus(status);
+        return blockIOStatusToTransferStatus(status);
     }
-    return CopyStatus::OK;
+    return TransferStatus::OK;
 }
 
 }  // namespace rtp_llm

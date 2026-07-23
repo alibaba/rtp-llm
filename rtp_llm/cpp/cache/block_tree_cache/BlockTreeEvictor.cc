@@ -689,7 +689,7 @@ bool BlockTreeEvictor::executeTierCopy(const EvictionMove& eviction_move) {
         return false;
     }
 
-    return execute_transfer_(descriptor) == CopyStatus::OK;
+    return execute_transfer_(descriptor) == TransferStatus::OK;
 }
 
 bool BlockTreeEvictor::buildTransferDescriptor(const EvictionMove& eviction_move, TransferDescriptor& descriptor) {

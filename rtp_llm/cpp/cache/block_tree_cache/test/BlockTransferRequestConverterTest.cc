@@ -5,7 +5,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTransferConverter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
 
 namespace rtp_llm {
@@ -95,17 +95,17 @@ std::unordered_map<std::string, BlockIdxType> taggedBlocks(const MemoryOperation
 
 void expectDecodeFailureWithoutMutation(const MemoryOperationRequestPB& request) {
     TransferDescriptor output = TransferDescriptor::deviceToHost(4, {7}, 8);
-    EXPECT_FALSE(BlockTreeTransferConverter::decodeTransfer(request, 0, componentGroups(), output));
+    EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(request, 0, componentGroups(), output));
     EXPECT_EQ(output.component_group_id, 4);
     EXPECT_EQ(output.device_blocks, (std::vector<BlockIdxType>{7}));
     EXPECT_EQ(output.host_block, 8);
 }
 
-TEST(BlockTreeTransferConverterTest, ConvertsDeviceToHost) {
+TEST(BlockTransferRequestConverterTest, ConvertsDeviceToHost) {
     const TransferDescriptor input = TransferDescriptor::deviceToHost(2, {11, 12}, 21);
     MemoryOperationRequestPB request;
 
-    ASSERT_TRUE(BlockTreeTransferConverter::appendTransfer(input, componentGroups(), request));
+    ASSERT_TRUE(BlockTransferRequestConverter::appendTransfer(input, componentGroups(), request));
     ASSERT_EQ(request.copy_items_size(), 1);
     EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::D2H);
     const MemoryOperationRequestPB::CopyItem& item = request.copy_items(0);
@@ -114,7 +114,7 @@ TEST(BlockTreeTransferConverterTest, ConvertsDeviceToHost) {
     EXPECT_EQ(taggedBlocks(item), (std::unordered_map<std::string, BlockIdxType>{{"zeta", 11}, {"alpha", 12}}));
 
     TransferDescriptor output;
-    ASSERT_TRUE(BlockTreeTransferConverter::decodeTransfer(request, 0, componentGroups(), output));
+    ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(request, 0, componentGroups(), output));
     EXPECT_EQ(output.component_group_id, 2);
     EXPECT_EQ(output.source_tier, Tier::DEVICE);
     EXPECT_EQ(output.target_tier, Tier::HOST);
@@ -122,16 +122,16 @@ TEST(BlockTreeTransferConverterTest, ConvertsDeviceToHost) {
     EXPECT_EQ(output.device_blocks, (std::vector<BlockIdxType>{11, 12}));
 }
 
-TEST(BlockTreeTransferConverterTest, ConvertsHostToDevice) {
+TEST(BlockTransferRequestConverterTest, ConvertsHostToDevice) {
     const TransferDescriptor input = TransferDescriptor::hostToDevice(1, 31, {41, NULL_BLOCK_IDX});
     MemoryOperationRequestPB request;
 
-    ASSERT_TRUE(BlockTreeTransferConverter::appendTransfer(input, componentGroups(), request));
+    ASSERT_TRUE(BlockTransferRequestConverter::appendTransfer(input, componentGroups(), request));
     EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::H2D);
     EXPECT_EQ(wireTags(request.copy_items(0)), (std::vector<std::string>{"group_1_pool_0", "group_1_pool_1"}));
 
     TransferDescriptor output;
-    ASSERT_TRUE(BlockTreeTransferConverter::decodeTransfer(request, 0, componentGroups(), output));
+    ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(request, 0, componentGroups(), output));
     EXPECT_EQ(output.component_group_id, 1);
     EXPECT_EQ(output.source_tier, Tier::HOST);
     EXPECT_EQ(output.target_tier, Tier::DEVICE);
@@ -139,11 +139,11 @@ TEST(BlockTreeTransferConverterTest, ConvertsHostToDevice) {
     EXPECT_EQ(output.device_blocks, (std::vector<BlockIdxType>{41, NULL_BLOCK_IDX}));
 }
 
-TEST(BlockTreeTransferConverterTest, ConvertsHostToDisk) {
+TEST(BlockTransferRequestConverterTest, ConvertsHostToDisk) {
     const TransferDescriptor input = TransferDescriptor::hostToDisk(3, 51, 61);
     MemoryOperationRequestPB request;
 
-    ASSERT_TRUE(BlockTreeTransferConverter::appendTransfer(input, componentGroups(), request));
+    ASSERT_TRUE(BlockTransferRequestConverter::appendTransfer(input, componentGroups(), request));
     const MemoryOperationRequestPB::CopyItem& item = request.copy_items(0);
     EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::H2DISK);
     EXPECT_EQ(item.backing_type(), MemoryOperationRequestPB::DISK);
@@ -153,7 +153,7 @@ TEST(BlockTreeTransferConverterTest, ConvertsHostToDisk) {
     EXPECT_EQ(wireTags(item), (std::vector<std::string>{"group_3_pool_0"}));
 
     TransferDescriptor output;
-    ASSERT_TRUE(BlockTreeTransferConverter::decodeTransfer(request, 0, componentGroups(), output));
+    ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(request, 0, componentGroups(), output));
     EXPECT_EQ(output.component_group_id, 3);
     EXPECT_EQ(output.source_tier, Tier::HOST);
     EXPECT_EQ(output.target_tier, Tier::DISK);
@@ -161,11 +161,11 @@ TEST(BlockTreeTransferConverterTest, ConvertsHostToDisk) {
     EXPECT_EQ(output.disk_block, 61);
 }
 
-TEST(BlockTreeTransferConverterTest, ConvertsDiskToHost) {
+TEST(BlockTransferRequestConverterTest, ConvertsDiskToHost) {
     const TransferDescriptor input = TransferDescriptor::diskToHost(4, 71, 81);
     MemoryOperationRequestPB request;
 
-    ASSERT_TRUE(BlockTreeTransferConverter::appendTransfer(input, componentGroups(), request));
+    ASSERT_TRUE(BlockTransferRequestConverter::appendTransfer(input, componentGroups(), request));
     const MemoryOperationRequestPB::CopyItem& item = request.copy_items(0);
     EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::DISK2H);
     EXPECT_EQ(item.backing_type(), MemoryOperationRequestPB::MEMORY);
@@ -175,7 +175,7 @@ TEST(BlockTreeTransferConverterTest, ConvertsDiskToHost) {
     EXPECT_EQ(wireTags(item), (std::vector<std::string>{"group_4_pool_0"}));
 
     TransferDescriptor output;
-    ASSERT_TRUE(BlockTreeTransferConverter::decodeTransfer(request, 0, componentGroups(), output));
+    ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(request, 0, componentGroups(), output));
     EXPECT_EQ(output.component_group_id, 4);
     EXPECT_EQ(output.source_tier, Tier::DISK);
     EXPECT_EQ(output.target_tier, Tier::HOST);
@@ -183,26 +183,26 @@ TEST(BlockTreeTransferConverterTest, ConvertsDiskToHost) {
     EXPECT_EQ(output.host_block, 81);
 }
 
-TEST(BlockTreeTransferConverterTest, PreservesGroupForIdenticalBlockIds) {
+TEST(BlockTransferRequestConverterTest, PreservesGroupForIdenticalBlockIds) {
     MemoryOperationRequestPB request;
     const TransferDescriptor first  = TransferDescriptor::deviceToHost(0, {7}, 8);
     const TransferDescriptor second = TransferDescriptor::deviceToHost(2, {7, NULL_BLOCK_IDX}, 8);
 
-    ASSERT_TRUE(BlockTreeTransferConverter::appendTransfer(first, componentGroups(), request));
-    ASSERT_TRUE(BlockTreeTransferConverter::appendTransfer(second, componentGroups(), request));
+    ASSERT_TRUE(BlockTransferRequestConverter::appendTransfer(first, componentGroups(), request));
+    ASSERT_TRUE(BlockTransferRequestConverter::appendTransfer(second, componentGroups(), request));
     ASSERT_EQ(request.copy_items_size(), 2);
     EXPECT_EQ(wireTags(request.copy_items(0)), (std::vector<std::string>{"group_0_pool_0"}));
     EXPECT_EQ(wireTags(request.copy_items(1)), (std::vector<std::string>{"alpha", "zeta"}));
 
     TransferDescriptor first_output;
     TransferDescriptor second_output;
-    ASSERT_TRUE(BlockTreeTransferConverter::decodeTransfer(request, 0, componentGroups(), first_output));
-    ASSERT_TRUE(BlockTreeTransferConverter::decodeTransfer(request, 1, componentGroups(), second_output));
+    ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(request, 0, componentGroups(), first_output));
+    ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(request, 1, componentGroups(), second_output));
     EXPECT_EQ(first_output.component_group_id, 0);
     EXPECT_EQ(second_output.component_group_id, 2);
 }
 
-TEST(BlockTreeTransferConverterTest, RejectsMissingOrInvalidGroup) {
+TEST(BlockTransferRequestConverterTest, RejectsMissingOrInvalidGroup) {
     MemoryOperationRequestPB request;
     request.set_copy_direction(MemoryOperationRequestPB::D2H);
     MemoryOperationRequestPB::CopyItem* item = request.add_copy_items();
@@ -213,23 +213,23 @@ TEST(BlockTreeTransferConverterTest, RejectsMissingOrInvalidGroup) {
     tagged_block->set_block_id(3);
 
     TransferDescriptor output;
-    EXPECT_FALSE(BlockTreeTransferConverter::decodeTransfer(request, 0, componentGroups(), output));
+    EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(request, 0, componentGroups(), output));
 
     const TransferDescriptor invalid = TransferDescriptor::deviceToHost(-1, {3}, 2);
     MemoryOperationRequestPB invalid_request;
-    EXPECT_FALSE(BlockTreeTransferConverter::appendTransfer(invalid, componentGroups(), invalid_request));
+    EXPECT_FALSE(BlockTransferRequestConverter::appendTransfer(invalid, componentGroups(), invalid_request));
     EXPECT_EQ(invalid_request.copy_items_size(), 0);
 }
 
-TEST(BlockTreeTransferConverterTest, RejectsBlocksInvalidForBlockPools) {
+TEST(BlockTransferRequestConverterTest, RejectsBlocksInvalidForBlockPools) {
     const TransferDescriptor invalid_device_block = TransferDescriptor::deviceToHost(0, {128}, 1);
     const TransferDescriptor invalid_host_block   = TransferDescriptor::deviceToHost(0, {1}, 0);
     const TransferDescriptor invalid_disk_block   = TransferDescriptor::hostToDisk(0, 1, 128);
     MemoryOperationRequestPB request;
 
-    EXPECT_FALSE(BlockTreeTransferConverter::appendTransfer(invalid_device_block, componentGroups(), request));
-    EXPECT_FALSE(BlockTreeTransferConverter::appendTransfer(invalid_host_block, componentGroups(), request));
-    EXPECT_FALSE(BlockTreeTransferConverter::appendTransfer(invalid_disk_block, componentGroups(), request));
+    EXPECT_FALSE(BlockTransferRequestConverter::appendTransfer(invalid_device_block, componentGroups(), request));
+    EXPECT_FALSE(BlockTransferRequestConverter::appendTransfer(invalid_host_block, componentGroups(), request));
+    EXPECT_FALSE(BlockTransferRequestConverter::appendTransfer(invalid_disk_block, componentGroups(), request));
     EXPECT_EQ(request.copy_items_size(), 0);
 
     request.set_copy_direction(MemoryOperationRequestPB::D2H);
@@ -241,12 +241,12 @@ TEST(BlockTreeTransferConverterTest, RejectsBlocksInvalidForBlockPools) {
     tagged_block->set_tag("group_0_pool_0");
     tagged_block->set_block_id(0);
     TransferDescriptor output;
-    EXPECT_FALSE(BlockTreeTransferConverter::decodeTransfer(request, 0, componentGroups(), output));
+    EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(request, 0, componentGroups(), output));
 }
 
-TEST(BlockTreeTransferConverterTest, RejectsInvalidTagSetsBeforeDescriptorMutation) {
+TEST(BlockTransferRequestConverterTest, RejectsInvalidTagSetsBeforeDescriptorMutation) {
     MemoryOperationRequestPB valid;
-    ASSERT_TRUE(BlockTreeTransferConverter::appendTransfer(
+    ASSERT_TRUE(BlockTransferRequestConverter::appendTransfer(
         TransferDescriptor::deviceToHost(2, {11, 12}, 21), componentGroups(), valid));
 
     MemoryOperationRequestPB empty = valid;
@@ -267,9 +267,9 @@ TEST(BlockTreeTransferConverterTest, RejectsInvalidTagSetsBeforeDescriptorMutati
     expectDecodeFailureWithoutMutation(non_exact);
 }
 
-TEST(BlockTreeTransferConverterTest, RejectsTaggedBlockSetMismatchBeforeDescriptorMutation) {
+TEST(BlockTransferRequestConverterTest, RejectsTaggedBlockSetMismatchBeforeDescriptorMutation) {
     MemoryOperationRequestPB valid;
-    ASSERT_TRUE(BlockTreeTransferConverter::appendTransfer(
+    ASSERT_TRUE(BlockTransferRequestConverter::appendTransfer(
         TransferDescriptor::hostToDevice(2, 21, {11, 12}), componentGroups(), valid));
 
     MemoryOperationRequestPB unknown_tag = valid;
@@ -286,13 +286,13 @@ TEST(BlockTreeTransferConverterTest, RejectsTaggedBlockSetMismatchBeforeDescript
     expectDecodeFailureWithoutMutation(incomplete);
 }
 
-TEST(BlockTreeTransferConverterTest, RejectsMixedDirections) {
+TEST(BlockTransferRequestConverterTest, RejectsMixedDirections) {
     MemoryOperationRequestPB request;
     const TransferDescriptor d2h = TransferDescriptor::deviceToHost(0, {1}, 2);
     const TransferDescriptor h2d = TransferDescriptor::hostToDevice(0, 2, {1});
 
-    ASSERT_TRUE(BlockTreeTransferConverter::appendTransfer(d2h, componentGroups(), request));
-    EXPECT_FALSE(BlockTreeTransferConverter::appendTransfer(h2d, componentGroups(), request));
+    ASSERT_TRUE(BlockTransferRequestConverter::appendTransfer(d2h, componentGroups(), request));
+    EXPECT_FALSE(BlockTransferRequestConverter::appendTransfer(h2d, componentGroups(), request));
     EXPECT_EQ(request.copy_items_size(), 1);
 }
 

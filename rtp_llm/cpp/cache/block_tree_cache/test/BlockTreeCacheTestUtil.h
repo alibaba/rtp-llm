@@ -5,7 +5,11 @@
 #include <utility>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockCacheTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
@@ -21,12 +25,24 @@ public:
         std::vector<BlockTreeCache::PerTagMapping> per_tag_mapping = preparePerTagMapping(component_groups, components);
         std::vector<std::string>                   per_tag_tags = preparePerTagTags(component_groups, per_tag_mapping);
         std::vector<DeviceKVCacheGroupPtr>         per_tag_device_groups(per_tag_mapping.size());
+        auto components_ptr  = std::make_shared<const std::vector<Component>>(std::move(components));
+        auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(component_groups, components_ptr);
+        std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
+        if (broadcast_manager != nullptr) {
+            multi_rank_engine =
+                std::make_shared<MultiRankBlockTransferEngine>(component_groups, std::move(broadcast_manager));
+        }
+        auto transfer_dispatcher =
+            std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), std::move(multi_rank_engine));
+        auto task_pool = std::make_unique<BlockCacheTaskPool>(
+            static_cast<size_t>(config.eviction_thread_pool_size), 1000, "BlockTreeEvictionPool");
         std::unique_ptr<BlockTreeCache>            cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                                                  std::move(component_groups),
-                                                                                 std::move(components),
+                                                                                 std::move(components_ptr),
                                                                                  std::move(config),
                                                                                  std::move(storage_backend),
-                                                                                 std::move(broadcast_manager),
+                                                                                 std::move(transfer_dispatcher),
+                                                                                 std::move(task_pool),
                                                                                  std::move(per_tag_tags),
                                                                                  std::move(per_tag_device_groups),
                                                                                  std::move(per_tag_mapping));

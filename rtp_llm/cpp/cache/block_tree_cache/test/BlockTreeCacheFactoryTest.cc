@@ -16,7 +16,7 @@
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/SWAComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/test/CopyEngineTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -511,7 +511,7 @@ TEST_F(BlockTreeCacheFactoryTest, HybridPoolBindsIndependentPoolsAndNonContiguou
     }
 }
 
-TEST_F(BlockTreeCacheFactoryTest, CopyEnginePreservesNonContiguousGlobalLayerProjectionRoundTrip) {
+TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguousGlobalLayerProjectionRoundTrip) {
     const auto    config    = makeHybridConfig(/*independent_pools=*/true);
     auto          allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
     KVCacheConfig kv_cache_config;
@@ -554,12 +554,12 @@ TEST_F(BlockTreeCacheFactoryTest, CopyEnginePreservesNonContiguousGlobalLayerPro
 
     EXPECT_EQ(cache->executeTransfer(
                   TransferDescriptor::deviceToHost(component->component_group_id, {device_block}, host_block)),
-              CopyStatus::OK);
+              TransferStatus::OK);
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x00);
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x00);
     EXPECT_EQ(cache->executeTransfer(
                   TransferDescriptor::hostToDevice(component->component_group_id, host_block, {device_block})),
-              CopyStatus::OK);
+              TransferStatus::OK);
 
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x31);
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x72);
@@ -747,9 +747,9 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkCountsPrimaryAnd
     ASSERT_EQ(cache->componentGroups()[0]->devicePools()[0].get(), backing.get());
     ASSERT_EQ(cache->componentGroups()[1]->devicePools()[0].get(), backing.get());
 
-    auto scripted_copy =
-        std::make_shared<block_tree_cache_test::ScriptedCopyEngine>(cache->componentGroups(), cache->components());
-    block_tree_cache_test::BlockTreeCacheTestPeer::setCopyEngineForTest(*cache, scripted_copy);
+    auto scripted_copy = std::make_shared<block_tree_cache_test::ScriptedPerRankBlockTransferEngine>(
+        cache->componentGroups(), cache->components());
+    block_tree_cache_test::BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, scripted_copy);
 
     std::vector<std::vector<BlockIdxType>> request_blocks;
     for (CacheKeyType key : {800, 801, 802}) {
@@ -800,10 +800,10 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
     ASSERT_NE(cache, nullptr);
     allocator->setBlockTreeCache(cache.get());
 
-    auto scripted_copy =
-        std::make_shared<block_tree_cache_test::ScriptedCopyEngine>(cache->componentGroups(), cache->components());
-    block_tree_cache_test::BlockTreeCacheTestPeer::setCopyEngineForTest(*cache, scripted_copy);
-    scripted_copy->enqueue(CopyStatus::DEVICE_IO_ERROR);
+    auto scripted_copy = std::make_shared<block_tree_cache_test::ScriptedPerRankBlockTransferEngine>(
+        cache->componentGroups(), cache->components());
+    block_tree_cache_test::BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, scripted_copy);
+    scripted_copy->enqueue(TransferStatus::DEVICE_IO_ERROR);
 
     const auto blocks  = insertOneKeyThroughAllocator(config, allocator, /*key=*/810);
     auto       backing = allocator->cacheGroups().front()->blockPool();
@@ -1170,10 +1170,8 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
         specs.push_back(test::makeResolvedMhaSpec(
             DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/1, tag));
     }
-    cache_config.fromGroupedSpecs(specs,
-                                  {{0}, {1}, {2}},
-                                  {CacheGroupType::FULL, CacheGroupType::FULL, CacheGroupType::SWA},
-                                  group_tags);
+    cache_config.fromGroupedSpecs(
+        specs, {{0}, {1}, {2}}, {CacheGroupType::FULL, CacheGroupType::FULL, CacheGroupType::SWA}, group_tags);
     auto policies                   = cache_config.groupPoliciesSnapshot();
     policies[2].enable_prefix_reuse = true;
     policies[2].sliding_window_size = 2;
@@ -1191,7 +1189,7 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
     ASSERT_TRUE(allocator->init());
     ASSERT_EQ(allocator->groupBlockPools().size(), 3u);
 
-    copy_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_full_swa");
+    block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_full_swa");
     KVCacheConfig                  kv_cache_config;
     kv_cache_config.enable_device_cache           = true;
     kv_cache_config.enable_memory_cache           = true;
@@ -1241,10 +1239,10 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
 
         EXPECT_EQ(factory_cache->executeTransfer(TransferDescriptor::deviceToHost(
                       group->component_group_id, device_blocks.per_node[0], host_block)),
-                  CopyStatus::OK);
+                  TransferStatus::OK);
         EXPECT_EQ(factory_cache->executeTransfer(
                       TransferDescriptor::hostToDisk(group->component_group_id, host_block, disk_block)),
-                  CopyStatus::OK);
+                  TransferStatus::OK);
 
         group->unreferenceBlocks(device_blocks);
         group->releaseSingleBlock(Tier::HOST, host_block);

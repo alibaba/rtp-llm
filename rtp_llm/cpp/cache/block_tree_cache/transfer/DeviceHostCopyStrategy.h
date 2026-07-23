@@ -7,7 +7,7 @@
 #include <mutex>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/TransferTypes.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
 
@@ -54,28 +54,24 @@ enum class StrategyStatus {
 
 struct StrategyResult {
     StrategyStatus status{StrategyStatus::NOT_APPLICABLE};
-    CopyStatus     copy_status{CopyStatus::OK};
+    TransferStatus copy_status{TransferStatus::OK};
 
     static StrategyResult done() {
-        return {StrategyStatus::DONE, CopyStatus::OK};
+        return {StrategyStatus::DONE, TransferStatus::OK};
     }
     static StrategyResult notApplicable() {
-        return {StrategyStatus::NOT_APPLICABLE, CopyStatus::OK};
+        return {StrategyStatus::NOT_APPLICABLE, TransferStatus::OK};
     }
-    static StrategyResult failed(CopyStatus s) {
+    static StrategyResult failed(TransferStatus s) {
         return {StrategyStatus::FAILED, s};
     }
 };
-
-// --- Strategy interface ---
 
 class DeviceHostCopyStrategy {
 public:
     virtual ~DeviceHostCopyStrategy()                                                                       = default;
     virtual StrategyResult tryExecute(const DeviceHostCopyPlan& plan, const DeviceHostCopyOptions& options) = 0;
 };
-
-// --- Concrete strategies ---
 
 class StagedSmDeviceHostCopyStrategy: public DeviceHostCopyStrategy {
 public:

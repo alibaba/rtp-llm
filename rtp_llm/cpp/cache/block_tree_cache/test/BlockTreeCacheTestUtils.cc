@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockCacheTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtil.h"
 
 #include <gtest/gtest.h>
@@ -9,13 +11,13 @@
 #include <numeric>
 #include <utility>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/test/CopyEngineTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm::block_tree_cache_test {
 
 std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count) {
-    return copy_engine_test::makeHostPool(payload_bytes, usable_count, /*enable_pinned=*/true);
+    return block_transfer_engine_test::makeHostPool(payload_bytes, usable_count, /*enable_pinned=*/true);
 }
 
 DiskBlockIOStatus MemoryDiskBlockIO::openAndPreallocate(const std::string&, size_t bytes, bool) {
@@ -67,7 +69,8 @@ std::string MemoryDiskBlockIO::debugString() const {
 
 std::shared_ptr<BlockTreeDiskBlockPool>
 makeDiskPool(size_t payload_bytes, size_t usable_count, std::unique_ptr<DiskBlockIO> io) {
-    return copy_engine_test::makeDiskPool(payload_bytes, usable_count, "/tmp", std::move(io), "block_tree_cache_disk");
+    return block_transfer_engine_test::makeDiskPool(
+        payload_bytes, usable_count, "/tmp", std::move(io), "block_tree_cache_disk");
 }
 
 bool cudaAvailable() {
@@ -123,7 +126,7 @@ makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs, size_t usable_co
 }
 
 BlockIdxType poolMalloc(IBlockPool& pool) {
-    return copy_engine_test::poolMalloc(pool);
+    return block_transfer_engine_test::poolMalloc(pool);
 }
 
 std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::unique_ptr<BlockTree>        tree,
@@ -140,17 +143,18 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::unique_ptr<BlockT
                                                       std::move(broadcast_manager));
 }
 
-void BlockTreeCacheTestPeer::setCopyEngineForTest(BlockTreeCache& cache, CopyEnginePtr copy_engine) {
+void BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(
+    BlockTreeCache& cache, PerRankBlockTransferEnginePtr per_rank_transfer_engine) {
     std::lock_guard<std::mutex> lock(cache.mutex_);
-    if (copy_engine == nullptr) {
-        ADD_FAILURE() << "test CopyEngine must not be null";
+    if (per_rank_transfer_engine == nullptr) {
+        ADD_FAILURE() << "test PerRankBlockTransferEngine must not be null";
         return;
     }
-    if (cache.pending_tasks_.load() != 0 || cache.tree_->nodeCount() != 0) {
-        ADD_FAILURE() << "test CopyEngine must be installed before any cache work starts";
+    if (cache.task_pool_ == nullptr || cache.task_pool_->pending_tasks_.load() != 0 || cache.tree_->nodeCount() != 0) {
+        ADD_FAILURE() << "test PerRankBlockTransferEngine must be installed before any cache work starts";
         return;
     }
-    cache.copy_engine_ = std::move(copy_engine);
+    cache.transfer_dispatcher_->per_rank_engine_ = std::move(per_rank_transfer_engine);
 }
 
 void BlockTreeCacheTestPeer::runMaintenanceForTest(BlockTreeCache& cache) {
@@ -207,50 +211,49 @@ bool BlockTreeCacheTestPeer::ScopedQueueRejectionGuard::restore() {
 }
 
 int BlockTreeCacheTestPeer::pendingTasksForTest(const BlockTreeCache& cache) {
-    return cache.pending_tasks_.load();
+    return cache.task_pool_ == nullptr ? 0 : cache.task_pool_->pending_tasks_.load();
 }
 
 bool BlockTreeCacheTestPeer::armQueueRejectionForTest(BlockTreeCache& cache) {
     cache.waitForPendingTasks();
-    if (cache.pending_tasks_.load() != 0) {
+    if (cache.task_pool_ != nullptr && cache.task_pool_->pending_tasks_.load() != 0) {
         ADD_FAILURE() << "queue-rejection guard requires zero pending cache tasks";
         return false;
     }
-    if (cache.thread_pool_ == nullptr) {
-        ADD_FAILURE() << "queue-rejection guard requires an initialized thread pool";
+    if (cache.task_pool_ == nullptr) {
+        ADD_FAILURE() << "queue-rejection guard requires an initialized task pool";
         return false;
     }
-    cache.thread_pool_->stop(autil::ThreadPool::STOP_AFTER_QUEUE_EMPTY);
-    cache.thread_pool_->join();
+    cache.task_pool_->shutdown();
     return true;
 }
 
 bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& cache) {
     try {
-        auto replacement = std::make_shared<autil::LockFreeThreadPool>(
-            static_cast<size_t>(cache.config_.eviction_thread_pool_size), 1000, nullptr, "BlockTreeEvictionPool");
+        auto replacement = std::make_unique<BlockCacheTaskPool>(
+            static_cast<size_t>(cache.config_.eviction_thread_pool_size), 1000, "BlockTreeEvictionPool");
         if (!replacement->start()) {
-            ADD_FAILURE() << "queue-rejection guard failed to start replacement thread pool";
-            cache.thread_pool_.reset();
+            ADD_FAILURE() << "queue-rejection guard failed to start replacement task pool";
+            cache.task_pool_.reset();
             return false;
         }
-        cache.thread_pool_ = std::move(replacement);
+        cache.task_pool_ = std::move(replacement);
         return true;
     } catch (const std::exception& error) {
         ADD_FAILURE() << "queue-rejection guard failed to restore thread pool: " << error.what();
     } catch (...) {
         ADD_FAILURE() << "queue-rejection guard failed to restore thread pool with unknown exception";
     }
-    cache.thread_pool_.reset();
+    cache.task_pool_.reset();
     return false;
 }
 
-ScriptedCopyEngine::ScriptedCopyEngine(const std::vector<ComponentGroupPtr>& groups,
+ScriptedPerRankBlockTransferEngine::ScriptedPerRankBlockTransferEngine(const std::vector<ComponentGroupPtr>& groups,
                                        const std::vector<Component>&         components):
-    CopyEngine(groups, std::make_shared<const std::vector<Component>>(components)) {}
+    PerRankBlockTransferEngine(groups, std::make_shared<const std::vector<Component>>(components)) {}
 
-TransferHandle ScriptedCopyEngine::submit(const TransferDescriptor& descriptor) {
-    CopyStatus status = CopyStatus::OK;
+TransferHandle ScriptedPerRankBlockTransferEngine::submit(const TransferDescriptor& descriptor) {
+    TransferStatus status = TransferStatus::OK;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         descriptors_.push_back(descriptor);
@@ -259,29 +262,29 @@ TransferHandle ScriptedCopyEngine::submit(const TransferDescriptor& descriptor) 
             statuses_.pop_front();
         }
     }
-    if (status == CopyStatus::OK) {
-        return CopyEngine::submit(descriptor);
+    if (status == TransferStatus::OK) {
+        return PerRankBlockTransferEngine::submit(descriptor);
     }
     return TransferHandle::completed(status);
 }
 
-void ScriptedCopyEngine::enqueue(CopyStatus status) {
+void ScriptedPerRankBlockTransferEngine::enqueue(TransferStatus status) {
     std::lock_guard<std::mutex> lock(mutex_);
     statuses_.push_back(status);
 }
 
-void ScriptedCopyEngine::clear() {
+void ScriptedPerRankBlockTransferEngine::clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     statuses_.clear();
     descriptors_.clear();
 }
 
-std::vector<TransferDescriptor> ScriptedCopyEngine::descriptors() const {
+std::vector<TransferDescriptor> ScriptedPerRankBlockTransferEngine::descriptors() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return descriptors_;
 }
 
-size_t ScriptedCopyEngine::submitCount() const {
+size_t ScriptedPerRankBlockTransferEngine::submitCount() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return descriptors_.size();
 }
@@ -369,9 +372,9 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
     }
 
     environment->components.resize(3);
-    environment->components[0]      = copy_engine_test::makeSchemaComponent(0, 0, "tag_0", {kComponentBytes});
-    environment->components[1]      = copy_engine_test::makeSchemaComponent(1, 0, "tag_1", {kComponentBytes});
-    environment->components[2]      = copy_engine_test::makeSchemaComponent(2, 1, "tag_2", {kComponentBytes});
+    environment->components[0]      = block_transfer_engine_test::makeSchemaComponent(0, 0, "tag_0", {kComponentBytes});
+    environment->components[1]      = block_transfer_engine_test::makeSchemaComponent(1, 0, "tag_1", {kComponentBytes});
+    environment->components[2]      = block_transfer_engine_test::makeSchemaComponent(2, 1, "tag_2", {kComponentBytes});
     environment->components[2].type = CacheGroupType::SWA;
 
     auto full                = std::make_shared<FullComponentGroup>();
@@ -400,8 +403,8 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
     config.enable_load_back        = options.enable_load_back;
     config.enable_reverse_eviction = options.enable_reverse_eviction;
 
-    environment->scripted_copy_engine =
-        std::make_shared<ScriptedCopyEngine>(environment->groups, environment->components);
+    environment->scripted_per_rank_transfer_engine =
+        std::make_shared<ScriptedPerRankBlockTransferEngine>(environment->groups, environment->components);
 
     std::vector<ComponentGroupPtr> cache_groups = environment->groups;
     environment->cache                          = makeBlockTreeCacheForTest(
@@ -410,7 +413,8 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
         ADD_FAILURE() << "failed to initialize BlockTreeCache test environment";
         return nullptr;
     }
-    BlockTreeCacheTestPeer::setCopyEngineForTest(*environment->cache, environment->scripted_copy_engine);
+    BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache,
+                                                                 environment->scripted_per_rank_transfer_engine);
 
     environment->keys.resize(options.path_length);
     std::iota(environment->keys.begin(), environment->keys.end(), static_cast<CacheKeyType>(100));

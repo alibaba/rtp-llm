@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/DeviceHostTransferExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
 
 #include <cstring>
 #include <map>
@@ -19,20 +19,20 @@ DeviceHostTransferExecutor::DeviceHostTransferExecutor(DeviceHostCopyOptions opt
 
 DeviceHostTransferExecutor::~DeviceHostTransferExecutor() = default;
 
-CopyStatus DeviceHostTransferExecutor::execute(const TransferDescriptor&     desc,
+TransferStatus DeviceHostTransferExecutor::execute(const TransferDescriptor&     desc,
                                                const ComponentGroup&         group,
                                                const std::vector<Component>& components) {
     bool device_to_host = (desc.source_tier == Tier::DEVICE && desc.target_tier == Tier::HOST);
     return lowerAndExecute(desc, group, components, device_to_host);
 }
 
-CopyStatus DeviceHostTransferExecutor::lowerAndExecute(const TransferDescriptor&     desc,
+TransferStatus DeviceHostTransferExecutor::lowerAndExecute(const TransferDescriptor&     desc,
                                                        const ComponentGroup&         group,
                                                        const std::vector<Component>& components,
                                                        bool                          device_to_host) {
-    CopyStatus lower_status = CopyStatus::OK;
+    TransferStatus lower_status = TransferStatus::OK;
     auto       plan         = lowerPlan(desc, group, components, device_to_host, lower_status);
-    if (lower_status != CopyStatus::OK) {
+    if (lower_status != TransferStatus::OK) {
         return lower_status;
     }
 
@@ -40,7 +40,7 @@ CopyStatus DeviceHostTransferExecutor::lowerAndExecute(const TransferDescriptor&
         RTP_LLM_LOG_WARNING("%s copy plan has no copyable device block group=%d",
                             device_to_host ? "D2H" : "H2D",
                             desc.component_group_id);
-        return CopyStatus::INVALID_ARGS;
+        return TransferStatus::INVALID_ARGS;
     }
 
     for (const auto& zero_tile : plan.zero_tiles) {
@@ -50,22 +50,22 @@ CopyStatus DeviceHostTransferExecutor::lowerAndExecute(const TransferDescriptor&
     auto device_plans = splitByDevice(plan);
     for (const auto& device_plan : device_plans) {
         auto status = executeStrategies(device_plan);
-        if (status != CopyStatus::OK) {
+        if (status != TransferStatus::OK) {
             return status;
         }
     }
-    return CopyStatus::OK;
+    return TransferStatus::OK;
 }
 
 DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescriptor&     desc,
                                                          const ComponentGroup&         group,
                                                          const std::vector<Component>& components,
                                                          bool                          device_to_host,
-                                                         CopyStatus&                   out_status) const {
+                                                         TransferStatus&               out_status) const {
     DeviceHostCopyPlan plan;
     plan.device_to_host     = device_to_host;
     plan.component_group_id = desc.component_group_id;
-    out_status              = CopyStatus::OK;
+    out_status              = TransferStatus::OK;
 
     const auto host_block = desc.host_block;
     auto&      host_pool  = *group.hostPool();
@@ -73,7 +73,7 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
     void* host_base = host_pool.blockBuffer(host_block).addr;
     if (!host_base) {
         RTP_LLM_LOG_WARNING("null host address for block %d", host_block);
-        out_status = CopyStatus::DEVICE_IO_ERROR;
+        out_status = TransferStatus::DEVICE_IO_ERROR;
         return plan;
     }
 
@@ -121,7 +121,7 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
                                     component_index,
                                     slice.layer_idx,
                                     device_block);
-                out_status = CopyStatus::DEVICE_IO_ERROR;
+                out_status = TransferStatus::DEVICE_IO_ERROR;
                 return plan;
             }
             DeviceHostCopyTile tile;
@@ -143,7 +143,7 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
                                 component_index,
                                 slice.layer_idx,
                                 device_block);
-            out_status = CopyStatus::INVALID_ARGS;
+            out_status = TransferStatus::INVALID_ARGS;
             return plan;
         }
     }
@@ -152,12 +152,12 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
     return plan;
 }
 
-CopyStatus DeviceHostTransferExecutor::executeStrategies(const DeviceHostCopyPlan& plan) {
+TransferStatus DeviceHostTransferExecutor::executeStrategies(const DeviceHostCopyPlan& plan) {
     for (auto& strategy : strategies_) {
         auto result = strategy->tryExecute(plan, options_);
         switch (result.status) {
             case StrategyStatus::DONE:
-                return CopyStatus::OK;
+                return TransferStatus::OK;
             case StrategyStatus::FAILED:
                 return result.copy_status;
             case StrategyStatus::NOT_APPLICABLE:
@@ -165,7 +165,7 @@ CopyStatus DeviceHostTransferExecutor::executeStrategies(const DeviceHostCopyPla
         }
     }
     RTP_LLM_LOG_WARNING("no strategy handled copy plan group=%d", plan.component_group_id);
-    return CopyStatus::DEVICE_IO_ERROR;
+    return TransferStatus::DEVICE_IO_ERROR;
 }
 
 std::vector<DeviceHostCopyPlan> DeviceHostTransferExecutor::splitByDevice(const DeviceHostCopyPlan& plan) {

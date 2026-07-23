@@ -7,12 +7,17 @@
 #include <string>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockCacheTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/CopyEngine.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockIO.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
+
+namespace rtp_llm {
+class BroadcastManager;
+}
 
 namespace rtp_llm::block_tree_cache_test {
 
@@ -75,7 +80,8 @@ public:
         bool            armed_{false};
     };
 
-    static void setCopyEngineForTest(BlockTreeCache& cache, CopyEnginePtr copy_engine);
+    static void setPerRankBlockTransferEngineForTest(BlockTreeCache&               cache,
+                                                     PerRankBlockTransferEnginePtr per_rank_transfer_engine);
     static void runMaintenanceForTest(BlockTreeCache& cache);
     static int  reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier = Tier::DEVICE);
     static int  pendingTasksForTest(const BlockTreeCache& cache);
@@ -85,13 +91,14 @@ private:
     static bool restoreQueueAfterRejectionForTest(BlockTreeCache& cache);
 };
 
-class ScriptedCopyEngine: public CopyEngine {
+class ScriptedPerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
-    ScriptedCopyEngine(const std::vector<ComponentGroupPtr>& groups, const std::vector<Component>& components);
+    ScriptedPerRankBlockTransferEngine(const std::vector<ComponentGroupPtr>& groups,
+                                       const std::vector<Component>&         components);
 
     TransferHandle submit(const TransferDescriptor& descriptor) override;
 
-    void enqueue(CopyStatus status);
+    void enqueue(TransferStatus status);
     void clear();
 
     std::vector<TransferDescriptor> descriptors() const;
@@ -99,7 +106,7 @@ public:
 
 private:
     mutable std::mutex              mutex_;
-    std::deque<CopyStatus>          statuses_;
+    std::deque<TransferStatus>      statuses_;
     std::vector<TransferDescriptor> descriptors_;
 };
 
@@ -143,7 +150,7 @@ public:
     std::vector<std::shared_ptr<BlockTreeDiskBlockPool>> disk_pools;
     std::vector<Component>                               components;
     std::vector<GroupBlockSet>                           request_blocks;
-    std::shared_ptr<ScriptedCopyEngine>                  scripted_copy_engine;
+    std::shared_ptr<ScriptedPerRankBlockTransferEngine>  scripted_per_rank_transfer_engine;
     std::unique_ptr<BlockTreeCache>                      cache;
 
 private:

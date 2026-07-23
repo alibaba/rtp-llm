@@ -164,7 +164,7 @@ public:
 private:
     void                              allocateAndSync();
     void                              reportMetricsLoop();
-    std::shared_ptr<BroadcastManager> createBlockTreeBroadcastManager() const;
+    std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
 
     // 成员变量
     CacheConfig         config_;

@@ -29,8 +29,8 @@ public:
     }
 
     static void setPendingTaskWaitObserver(BlockTreeCache& cache, const std::function<void()>& observer) {
-        std::lock_guard<std::mutex> lock(cache.wait_mutex_);
-        cache.pending_task_wait_observer_for_test_ = observer;
+        std::lock_guard<std::mutex> lock(cache.task_pool_->wait_mutex_);
+        cache.task_pool_->pending_task_wait_observer_for_test_ = observer;
     }
 };
 }  // namespace rtp_llm::block_tree_cache_test
@@ -112,12 +112,13 @@ private:
     bool                    released_{false};
 };
 
-class BarrierThrowingCopyEngine final: public CopyEngine {
+class BarrierThrowingPerRankBlockTransferEngine final: public PerRankBlockTransferEngine {
 public:
-    BarrierThrowingCopyEngine(const std::vector<ComponentGroupPtr>& groups,
+    BarrierThrowingPerRankBlockTransferEngine(const std::vector<ComponentGroupPtr>& groups,
                               const std::vector<Component>&         components,
                               std::shared_ptr<CallbackBarrier>      barrier):
-        CopyEngine(groups, std::make_shared<const std::vector<Component>>(components)), barrier_(std::move(barrier)) {}
+        PerRankBlockTransferEngine(groups, std::make_shared<const std::vector<Component>>(components)),
+        barrier_(std::move(barrier)) {}
 
     TransferHandle submit(const TransferDescriptor&) override {
         barrier_->enterAndWait();
@@ -383,18 +384,22 @@ TEST(BlockTreeCacheConstructionTest, OutOfRangeComponentGroupIdFailsInitializati
     full->component_group_id              = 1;
     std::vector<ComponentGroupPtr> groups = {full};
     std::vector<Component>         components;
+    auto components_ptr      = std::make_shared<const std::vector<Component>>(std::move(components));
+    auto per_rank_engine     = std::make_shared<PerRankBlockTransferEngine>(groups, components_ptr);
+    auto transfer_dispatcher = std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine));
+    auto task_pool           = std::make_unique<BlockCacheTaskPool>(2, 1000, "BlockTreeEvictionPool");
 
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                   std::move(groups),
-                                                  std::move(components),
+                                                  std::move(components_ptr),
                                                   BlockTreeCacheConfig{},
                                                   nullptr,
-                                                  nullptr,
+                                                  std::move(transfer_dispatcher),
+                                                  std::move(task_pool),
                                                   std::vector<std::string>{"tag_0"},
                                                   std::vector<DeviceKVCacheGroupPtr>{nullptr},
                                                   std::vector<BlockTreeCache::PerTagMapping>{{0, 0}});
     EXPECT_FALSE(cache->init());
-    EXPECT_EQ(cache->copyEngine(), nullptr);
     EXPECT_FALSE(cache->isInitialized());
     cache.reset();
     EXPECT_EQ(cache, nullptr);
@@ -405,6 +410,33 @@ TEST(BlockTreeCacheConstructionTest, NullComponentGroupFailsInitializationAndDes
     auto                           tree   = std::make_unique<BlockTree>(1);
     std::vector<ComponentGroupPtr> groups = {nullptr};
     std::vector<Component>         components;
+    auto components_ptr      = std::make_shared<const std::vector<Component>>(std::move(components));
+    auto per_rank_engine     = std::make_shared<PerRankBlockTransferEngine>(groups, components_ptr);
+    auto transfer_dispatcher = std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine));
+    auto task_pool           = std::make_unique<BlockCacheTaskPool>(2, 1000, "BlockTreeEvictionPool");
+
+    auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
+                                                  std::move(groups),
+                                                  std::move(components_ptr),
+                                                  BlockTreeCacheConfig{},
+                                                  nullptr,
+                                                  std::move(transfer_dispatcher),
+                                                  std::move(task_pool),
+                                                  std::vector<std::string>{"tag_0"},
+                                                  std::vector<DeviceKVCacheGroupPtr>{nullptr},
+                                                  std::vector<BlockTreeCache::PerTagMapping>{{0, 0}});
+    EXPECT_FALSE(cache->init());
+    EXPECT_FALSE(cache->isInitialized());
+    cache.reset();
+    EXPECT_EQ(cache, nullptr);
+}
+
+TEST(BlockTreeCacheConstructionTest, MissingCollaboratorsFailInitializationAndDestructionReturnsNormally) {
+    auto tree                             = std::make_unique<BlockTree>(1);
+    auto full                             = std::make_shared<FullComponentGroup>();
+    full->component_group_id              = 0;
+    std::vector<ComponentGroupPtr> groups = {full};
+    auto components = std::make_shared<const std::vector<Component>>();
 
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                   std::move(groups),
@@ -412,12 +444,11 @@ TEST(BlockTreeCacheConstructionTest, NullComponentGroupFailsInitializationAndDes
                                                   BlockTreeCacheConfig{},
                                                   nullptr,
                                                   nullptr,
+                                                  nullptr,
                                                   std::vector<std::string>{"tag_0"},
                                                   std::vector<DeviceKVCacheGroupPtr>{nullptr},
                                                   std::vector<BlockTreeCache::PerTagMapping>{{0, 0}});
     EXPECT_FALSE(cache->init());
-    EXPECT_EQ(cache->copyEngine(), nullptr);
-    EXPECT_FALSE(cache->isInitialized());
     cache.reset();
     EXPECT_EQ(cache, nullptr);
 }
@@ -473,9 +504,9 @@ TEST(BlockTreeCacheFinalizationTest, CopyExceptionSettlesCreditsBeforePendingTas
     ASSERT_NE(environment->cache, nullptr);
 
     auto barrier = std::make_shared<CallbackBarrier>();
-    auto copy_engine =
-        std::make_shared<BarrierThrowingCopyEngine>(environment->groups, environment->components, barrier);
-    BlockTreeCacheTestPeer::setCopyEngineForTest(*environment->cache, copy_engine);
+    auto per_rank_transfer_engine = std::make_shared<BarrierThrowingPerRankBlockTransferEngine>(
+        environment->groups, environment->components, barrier);
+    BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache, per_rank_transfer_engine);
 
     environment->insertRequestPath();
     environment->releaseRequestRefs();
@@ -983,13 +1014,18 @@ TEST_F(BlockTreeCacheTest, MatchKeepsAggregatedDevicePoolsSeparate) {
 
     std::vector<ComponentGroupPtr>             component_groups = {full};
     std::vector<BlockTreeCache::PerTagMapping> per_tag_mapping  = {{0, 0}, {0, 1}};
+    auto components_ptr      = std::make_shared<const std::vector<Component>>(std::move(components));
+    auto per_rank_engine     = std::make_shared<PerRankBlockTransferEngine>(component_groups, components_ptr);
+    auto transfer_dispatcher = std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine));
+    auto task_pool           = std::make_unique<BlockCacheTaskPool>(2, 1000, "BlockTreeEvictionPool");
     std::unique_ptr<BlockTreeCache>            cache =
         std::make_unique<BlockTreeCache>(std::move(tree),
                                          std::move(component_groups),
-                                         std::move(components),
+                                         std::move(components_ptr),
                                          BlockTreeCacheConfig{},
                                          std::shared_ptr<StorageBackend>{},
-                                         std::shared_ptr<BroadcastManager>{},
+                                         std::move(transfer_dispatcher),
+                                         std::move(task_pool),
                                          makeTestTags(2),
                                          std::vector<DeviceKVCacheGroupPtr>{nullptr, nullptr},
                                          std::move(per_tag_mapping));
@@ -1053,12 +1089,17 @@ TEST_F(BlockTreeCacheTest, ReorderedPoolsPreserveTagAddressedMatchResults) {
         std::vector<ComponentGroupPtr>             component_groups = {full};
         std::vector<BlockTreeCache::PerTagMapping> per_tag_mapping  = {{0, 0}, {0, 1}};
         const std::vector<std::string>             per_tag_tags     = full->tags();
+        auto components_ptr      = std::make_shared<const std::vector<Component>>(std::move(components));
+        auto per_rank_engine     = std::make_shared<PerRankBlockTransferEngine>(component_groups, components_ptr);
+        auto transfer_dispatcher = std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine));
+        auto task_pool           = std::make_unique<BlockCacheTaskPool>(2, 1000, "BlockTreeEvictionPool");
         auto cache = std::make_unique<BlockTreeCache>(std::make_unique<BlockTree>(1),
                                                       std::move(component_groups),
-                                                      std::move(components),
+                                                      std::move(components_ptr),
                                                       BlockTreeCacheConfig{},
                                                       std::shared_ptr<StorageBackend>{},
-                                                      std::shared_ptr<BroadcastManager>{},
+                                                      std::move(transfer_dispatcher),
+                                                      std::move(task_pool),
                                                       per_tag_tags,
                                                       std::vector<DeviceKVCacheGroupPtr>{nullptr, nullptr},
                                                       std::move(per_tag_mapping));
@@ -1439,12 +1480,17 @@ makeMappingValidationCache(std::vector<BlockTreeCache::PerTagMapping> per_tag_ma
 
     std::vector<ComponentGroupPtr>     groups = {full};
     std::vector<DeviceKVCacheGroupPtr> per_tag_device_groups(per_tag_mapping.size());
+    auto components_ptr      = std::make_shared<const std::vector<Component>>(std::move(components));
+    auto per_rank_engine     = std::make_shared<PerRankBlockTransferEngine>(groups, components_ptr);
+    auto transfer_dispatcher = std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine));
+    auto task_pool           = std::make_unique<BlockCacheTaskPool>(2, 1000, "BlockTreeEvictionPool");
     auto                               cache = std::make_unique<BlockTreeCache>(std::make_unique<BlockTree>(1),
                                                   std::move(groups),
-                                                  std::move(components),
+                                                  std::move(components_ptr),
                                                   std::move(config),
                                                   nullptr,
-                                                  nullptr,
+                                                  std::move(transfer_dispatcher),
+                                                  std::move(task_pool),
                                                   per_tag_tags,
                                                   std::move(per_tag_device_groups),
                                                   std::move(per_tag_mapping));
@@ -1611,8 +1657,9 @@ TEST_F(BlockTreeCacheTest, LoadBackPreparedPrefixFailureRollsBackAllSourceAndTar
         std::make_unique<BlockTree>(2), std::move(component_groups), std::vector<Component>{}, std::move(config));
     ASSERT_NE(cache, nullptr);
 
-    auto copy_engine = std::make_shared<ScriptedCopyEngine>(cache->componentGroups(), cache->components());
-    BlockTreeCacheTestPeer::setCopyEngineForTest(*cache, copy_engine);
+    auto per_rank_transfer_engine =
+        std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->componentGroups(), cache->components());
+    BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, per_rank_transfer_engine);
 
     const BlockIdxType first_source  = first_group->allocateSingleBlock(Tier::HOST);
     const BlockIdxType second_source = second_group->allocateSingleBlock(Tier::HOST);
@@ -1665,7 +1712,7 @@ TEST_F(BlockTreeCacheTest, LoadBackPreparedPrefixFailureRollsBackAllSourceAndTar
     ASSERT_TRUE(second_device_pool->isAllocated(second_target));
 
     EXPECT_EQ(result.load_back_ticket->commit(), nullptr);
-    EXPECT_EQ(copy_engine->submitCount(), 0u);
+    EXPECT_EQ(per_rank_transfer_engine->submitCount(), 0u);
 
     // The first item's acquired target holder and both of its source planning
     // holds are gone; the unprepared trailing item's source hold is also gone.
@@ -1717,8 +1764,9 @@ TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackCoreHoldersAndRetainsR
         std::make_unique<BlockTree>(1), std::move(groups), std::vector<Component>{}, std::move(config));
     ASSERT_NE(cache, nullptr);
 
-    auto copy_engine = std::make_shared<ScriptedCopyEngine>(cache->componentGroups(), cache->components());
-    BlockTreeCacheTestPeer::setCopyEngineForTest(*cache, copy_engine);
+    auto per_rank_transfer_engine =
+        std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->componentGroups(), cache->components());
+    BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, per_rank_transfer_engine);
 
     const BlockIdxType source_block = full->allocateSingleBlock(Tier::HOST);
     ASSERT_NE(source_block, NULL_BLOCK_IDX);
@@ -1750,7 +1798,7 @@ TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackCoreHoldersAndRetainsR
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
-    EXPECT_EQ(copy_engine->submitCount(), 0u);
+    EXPECT_EQ(per_rank_transfer_engine->submitCount(), 0u);
     EXPECT_EQ(host_pool->refCount(source_block), source_ref_before);
     EXPECT_EQ(device_pool->refCount(request_target), 1u);
 
@@ -1799,8 +1847,9 @@ TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackMixedDeviceAndHostItem
         std::make_unique<BlockTree>(2), std::move(groups), std::vector<Component>{}, std::move(config));
     ASSERT_NE(cache, nullptr);
 
-    auto copy_engine = std::make_shared<ScriptedCopyEngine>(cache->componentGroups(), cache->components());
-    BlockTreeCacheTestPeer::setCopyEngineForTest(*cache, copy_engine);
+    auto per_rank_transfer_engine =
+        std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->componentGroups(), cache->components());
+    BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, per_rank_transfer_engine);
 
     GroupBlockSet resident_holder = resident_group->allocateBlocks(Tier::DEVICE, 1);
     ASSERT_EQ(resident_holder.per_node.size(), 1u);
@@ -1837,7 +1886,7 @@ TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackMixedDeviceAndHostItem
     ASSERT_NE(context, nullptr);
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
-    EXPECT_EQ(copy_engine->submitCount(), 0u);
+    EXPECT_EQ(per_rank_transfer_engine->submitCount(), 0u);
     EXPECT_EQ(resident_device_pool->refCount(resident_block), 1u);
     EXPECT_EQ(host_pool->refCount(host_block), 1u);
     EXPECT_EQ(target_device_pool->refCount(request_target), 1u);
@@ -2080,9 +2129,9 @@ TEST_F(BlockTreeCacheTest, ShutdownDrainsOnlyHoldsRemainingAfterPartialMixedTier
     auto                           cache  = BlockTreeCacheTestUtil::makeBlockTreeCache(
         std::make_unique<BlockTree>(1), std::move(groups), std::vector<Component>{}, std::move(config));
     ASSERT_NE(cache, nullptr);
-    auto copy_engine =
-        std::make_shared<ScriptedCopyEngine>(std::vector<ComponentGroupPtr>{full}, std::vector<Component>{});
-    BlockTreeCacheTestPeer::setCopyEngineForTest(*cache, copy_engine);
+    auto per_rank_transfer_engine = std::make_shared<ScriptedPerRankBlockTransferEngine>(
+        std::vector<ComponentGroupPtr>{full}, std::vector<Component>{});
+    BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, per_rank_transfer_engine);
 
     GroupBlockSet device_holder = full->allocateBlocks(Tier::DEVICE, 1);
     ASSERT_EQ(device_holder.per_node.size(), 1u);
@@ -2108,7 +2157,7 @@ TEST_F(BlockTreeCacheTest, ShutdownDrainsOnlyHoldsRemainingAfterPartialMixedTier
 
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
     cache->waitForPendingTasks();
-    EXPECT_EQ(copy_engine->submitCount(), 0u);
+    EXPECT_EQ(per_rank_transfer_engine->submitCount(), 0u);
     EXPECT_EQ(device_pool->freeBlocksNum(), device_free_before);
     EXPECT_FALSE(device_pool->isAllocated(device_block));
     EXPECT_EQ(host_pool->freeBlocksNum(), host_free_before - 1);
@@ -2116,7 +2165,7 @@ TEST_F(BlockTreeCacheTest, ShutdownDrainsOnlyHoldsRemainingAfterPartialMixedTier
 
     cache.reset();
 
-    EXPECT_EQ(copy_engine->submitCount(), 0u);
+    EXPECT_EQ(per_rank_transfer_engine->submitCount(), 0u);
     EXPECT_EQ(device_pool->freeBlocksNum(), device_free_before);
     EXPECT_EQ(host_pool->freeBlocksNum(), host_free_before);
     EXPECT_EQ(disk_pool->freeBlocksNum(), disk_free_before);
@@ -2190,8 +2239,8 @@ TEST_F(BlockTreeCacheTest, LoadBackTicketOutlivesHostAndDiskCacheShutdown) {
 
 TEST_F(BlockTreeCacheTest, LoadBackTicketKeepsExplicitLogicalDepthIndependentOfItemPositions) {
     size_t abort_calls = 0;
-    auto   registry    = std::make_shared<LoadBackTicketRegistry>(
-        [](const LoadBackTicket&) { return std::shared_ptr<AsyncContext>{}; },
+    auto   registry =
+        std::make_shared<LoadBackTicketRegistry>([](const LoadBackTicket&) { return std::shared_ptr<AsyncContext>{}; },
         [&](const LoadBackTicket& ticket) {
             const auto& items = ticket.items();
             ++abort_calls;

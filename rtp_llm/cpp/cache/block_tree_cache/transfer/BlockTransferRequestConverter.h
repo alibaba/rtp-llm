@@ -3,12 +3,12 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/TransferTypes.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
 namespace rtp_llm {
 
-class BlockTreeTransferConverter {
+class BlockTransferRequestConverter {
 public:
     static bool appendTransfer(const TransferDescriptor&             descriptor,
                                const std::vector<ComponentGroupPtr>& component_groups,

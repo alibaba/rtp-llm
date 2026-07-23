@@ -16,6 +16,8 @@
 #include "rtp_llm/cpp/cache/SingleConfigCreator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/config/MTPModelConfigHelper.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
@@ -31,15 +33,15 @@ namespace test {
 using TestSingleTypeKVCacheAllocator = BlockTreeCacheTestAllocator<SingleTypeKVCacheAllocator>;
 using PendingLoadBackItem            = LoadBackTicket::PendingLoadBackItem;
 
-class CountingSingleTypeCopyEngine: public CopyEngine {
+class CountingSingleTypePerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
-    CountingSingleTypeCopyEngine(const std::vector<ComponentGroupPtr>& groups,
+    CountingSingleTypePerRankBlockTransferEngine(const std::vector<ComponentGroupPtr>& groups,
                                  const std::vector<Component>&         components):
-        CopyEngine(groups, std::make_shared<const std::vector<Component>>(components)) {}
+        PerRankBlockTransferEngine(groups, std::make_shared<const std::vector<Component>>(components)) {}
 
     TransferHandle submit(const TransferDescriptor&) override {
         ++submit_count_;
-        return TransferHandle::completed(CopyStatus::OK);
+        return TransferHandle::completed(TransferStatus::OK);
     }
 
     size_t submitCount() const {
@@ -750,9 +752,9 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LowerTierHitFollowedByOuterIncrFailureNev
 
         const auto& cache = allocator_->blockTreeCacheOwner();
         ASSERT_NE(cache, nullptr);
-        auto copy_engine =
-            std::make_shared<CountingSingleTypeCopyEngine>(cache->componentGroups(), cache->components());
-        cache->copy_engine_ = copy_engine;
+        auto per_rank_transfer_engine = std::make_shared<CountingSingleTypePerRankBlockTransferEngine>(
+            cache->componentGroups(), cache->components());
+        cache->transfer_dispatcher_->per_rank_engine_ = per_rank_transfer_engine;
 
         const BlockIdxType source_block = seedSingleTypeLowerTier(*cache, source_tier, /*key=*/100);
         ASSERT_NE(source_block, NULL_BLOCK_IDX);
@@ -786,7 +788,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LowerTierHitFollowedByOuterIncrFailureNev
         EXPECT_EQ(result.async_context, nullptr);
         EXPECT_EQ(commit_count, 0u);
         EXPECT_EQ(abort_count, 1u);
-        EXPECT_EQ(copy_engine->submitCount(), 0u);
+        EXPECT_EQ(per_rank_transfer_engine->submitCount(), 0u);
         EXPECT_EQ(resource->curBlocksNum(), 0);
         EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
 
@@ -821,8 +823,9 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadBackE
 
     const auto& cache = allocator_->blockTreeCacheOwner();
     ASSERT_NE(cache, nullptr);
-    auto copy_engine    = std::make_shared<CountingSingleTypeCopyEngine>(cache->componentGroups(), cache->components());
-    cache->copy_engine_ = copy_engine;
+    auto per_rank_transfer_engine =
+        std::make_shared<CountingSingleTypePerRankBlockTransferEngine>(cache->componentGroups(), cache->components());
+    cache->transfer_dispatcher_->per_rank_engine_ = per_rank_transfer_engine;
     ASSERT_NE(seedSingleTypeLowerTier(*cache, Tier::HOST, /*key=*/100), NULL_BLOCK_IDX);
 
     auto   registry            = cache->load_back_ticket_registry_;
@@ -843,7 +846,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadBackE
     result.async_context->waitDone();
     EXPECT_TRUE(result.async_context->success()) << result.async_context->errorInfo().ToString();
     EXPECT_EQ(commit_count, 1u);
-    EXPECT_GT(copy_engine->submitCount(), 0u);
+    EXPECT_GT(per_rank_transfer_engine->submitCount(), 0u);
 
     const auto find = cache->tree()->findNode(CacheKeysType{100});
     ASSERT_NE(find.matched_node, nullptr);

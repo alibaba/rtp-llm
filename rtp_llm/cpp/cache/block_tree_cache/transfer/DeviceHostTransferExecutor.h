@@ -5,8 +5,8 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/DeviceHostCopyStrategy.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/TransferTypes.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyStrategy.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
 
@@ -15,11 +15,11 @@ public:
     explicit DeviceHostTransferExecutor(DeviceHostCopyOptions options = {});
     ~DeviceHostTransferExecutor();
 
-    CopyStatus
+    TransferStatus
     execute(const TransferDescriptor& desc, const ComponentGroup& group, const std::vector<Component>& components);
 
 private:
-    CopyStatus lowerAndExecute(const TransferDescriptor&     desc,
+    TransferStatus lowerAndExecute(const TransferDescriptor&     desc,
                                const ComponentGroup&         group,
                                const std::vector<Component>& components,
                                bool                          device_to_host);
@@ -28,9 +28,9 @@ private:
                                  const ComponentGroup&         group,
                                  const std::vector<Component>& components,
                                  bool                          device_to_host,
-                                 CopyStatus&                   out_status) const;
+                                 TransferStatus&               out_status) const;
 
-    CopyStatus executeStrategies(const DeviceHostCopyPlan& plan);
+    TransferStatus executeStrategies(const DeviceHostCopyPlan& plan);
 
     static std::vector<DeviceHostCopyPlan> splitByDevice(const DeviceHostCopyPlan& plan);
 

@@ -26,6 +26,24 @@ test_deps = [
 ] + cuda13_torch_link_deps + torch_deps() + no_block_copy_link_deps()
 
 cc_test(
+    name = "block_cache_task_pool_test",
+    srcs = ["BlockCacheTaskPoolTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache:block_cache_task_pool",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "block_transfer_dispatcher_test",
+    srcs = ["BlockTransferDispatcherTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+)
+
+cc_test(
     name = "component_group_layout_test",
     srcs = ["ComponentGroupLayoutTest.cc"],
     copts = test_copts,
@@ -34,9 +52,9 @@ cc_test(
 )
 
 cc_library(
-    name = "copy_engine_test_utils",
-    srcs = ["CopyEngineTestUtils.cc"],
-    hdrs = ["CopyEngineTestUtils.h"],
+    name = "block_transfer_engine_test_utils",
+    srcs = ["PerRankBlockTransferEngineTestUtils.cc"],
+    hdrs = ["PerRankBlockTransferEngineTestUtils.h"],
     deps = [
         "//rtp_llm/cpp/cache/block_tree_cache",
         "@com_google_googletest//:gtest",
@@ -44,29 +62,29 @@ cc_library(
 )
 
 cc_test(
-    name = "copy_engine_device_host_test",
+    name = "per_rank_transfer_engine_device_host_test",
     testonly = True,
-    srcs = ["CopyEngineDeviceHostTest.cc"],
+    srcs = ["PerRankBlockTransferEngineDeviceHostTest.cc"],
     copts = test_copts,
     tags = ["exclusive"],
-    deps = test_deps + [":copy_engine_test_utils"],
+    deps = test_deps + [":block_transfer_engine_test_utils"],
     env = {},
 )
 
 cc_test(
-    name = "copy_engine_host_disk_test",
+    name = "per_rank_transfer_engine_host_disk_test",
     testonly = True,
-    srcs = ["CopyEngineHostDiskTest.cc"],
+    srcs = ["PerRankBlockTransferEngineHostDiskTest.cc"],
     copts = test_copts,
-    deps = test_deps + [":copy_engine_test_utils"],
+    deps = test_deps + [":block_transfer_engine_test_utils"],
     env = {},
 )
 
 test_suite(
-    name = "copy_engine_test",
+    name = "block_transfer_engine_test",
     tests = [
-        ":copy_engine_device_host_test",
-        ":copy_engine_host_disk_test",
+        ":per_rank_transfer_engine_device_host_test",
+        ":per_rank_transfer_engine_host_disk_test",
     ],
 )
 
@@ -111,7 +129,7 @@ cc_test(
     tags = ["exclusive"],
     deps = pool_test_deps + [
         ":block_tree_cache_test_utils",
-        ":copy_engine_test_utils",
+        ":block_transfer_engine_test_utils",
         "//rtp_llm/cpp/cache:kv_cache_allocator",
         "//rtp_llm/cpp/testing:device_test_utils",
     ],
@@ -209,7 +227,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base/system_prompt/test:__pkg__",
     ],
     deps = [
-        ":copy_engine_test_utils",
+        ":block_transfer_engine_test_utils",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
         "@com_google_googletest//:gtest",
@@ -240,9 +258,9 @@ cc_test(
 )
 
 cc_test(
-    name = "block_tree_cache_broadcast_test",
+    name = "multi_rank_block_transfer_engine_test",
     testonly = True,
-    srcs = ["BlockTreeCacheBroadcastTest.cc"],
+    srcs = ["MultiRankBlockTransferEngineTest.cc"],
     copts = test_copts,
     tags = ["exclusive"],
     deps = test_deps + [
@@ -254,8 +272,8 @@ cc_test(
 )
 
 cc_test(
-    name = "block_tree_transfer_converter_test",
-    srcs = ["BlockTreeTransferConverterTest.cc"],
+    name = "block_transfer_request_converter_test",
+    srcs = ["BlockTransferRequestConverterTest.cc"],
     copts = test_copts,
     deps = test_deps,
     env = {},

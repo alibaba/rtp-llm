@@ -8,7 +8,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/TransferTypes.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"

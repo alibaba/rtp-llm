@@ -222,9 +222,9 @@ public:
             [this](const TransferDescriptor& descriptor) {
                 transfer_group_ids_.push_back(descriptor.component_group_id);
                 if (transfer_statuses_.empty()) {
-                    return CopyStatus::OK;
+                    return TransferStatus::OK;
                 }
-                const CopyStatus status = transfer_statuses_.front();
+                const TransferStatus status = transfer_statuses_.front();
                 transfer_statuses_.pop_front();
                 return status;
             },
@@ -262,7 +262,7 @@ public:
         return GroupBlockSet{group_id, Tier::HOST, {{host_blocks_[static_cast<size_t>(group_id)]}}, {node_}};
     }
 
-    void setTransferStatuses(std::initializer_list<CopyStatus> statuses) {
+    void setTransferStatuses(std::initializer_list<TransferStatus> statuses) {
         transfer_statuses_.assign(statuses.begin(), statuses.end());
         transfer_group_ids_.clear();
     }
@@ -297,7 +297,7 @@ public:
     std::unique_ptr<BlockTree>                           tree_;
     std::unique_ptr<BlockTreeEvictor>                    evictor_;
     TreeNode*                                            node_{nullptr};
-    std::deque<CopyStatus>                               transfer_statuses_;
+    std::deque<TransferStatus>                           transfer_statuses_;
     std::vector<int>                                     transfer_group_ids_;
 };
 
@@ -316,7 +316,7 @@ protected:
             groups_,
             [this](const TransferDescriptor&) {
                 ++transfer_calls_;
-                return CopyStatus::OK;
+                return TransferStatus::OK;
             },
             false);
         ASSERT_TRUE(initEvictor(*evictor_));
@@ -1049,7 +1049,7 @@ TEST(BlockTreeEvictorCascadeTest, CascadeTargetExhaustionRestoresOnlyFailedSibli
 TEST(BlockTreeEvictorCascadeTest, PrimaryCopyFailureSuppressesCascadesAndRollsBackFullPlan) {
     CascadeTestEnvironment environment;
     ASSERT_TRUE(environment.init());
-    environment.setTransferStatuses({CopyStatus::DEVICE_IO_ERROR, CopyStatus::OK, CopyStatus::OK});
+    environment.setTransferStatuses({TransferStatus::DEVICE_IO_ERROR, TransferStatus::OK, TransferStatus::OK});
 
     auto plan = environment.buildPlan(0);
     ASSERT_TRUE(plan.has_value());
@@ -1076,7 +1076,7 @@ TEST(BlockTreeEvictorCascadeTest, PrimaryCopyFailureSuppressesCascadesAndRollsBa
 TEST(BlockTreeEvictorCascadeTest, CascadeCopyResultsPublishAndRollbackIndependently) {
     CascadeTestEnvironment environment;
     ASSERT_TRUE(environment.init());
-    environment.setTransferStatuses({CopyStatus::OK, CopyStatus::DEVICE_IO_ERROR, CopyStatus::OK});
+    environment.setTransferStatuses({TransferStatus::OK, TransferStatus::DEVICE_IO_ERROR, TransferStatus::OK});
 
     auto plan = environment.buildPlan(0);
     ASSERT_TRUE(plan.has_value());
