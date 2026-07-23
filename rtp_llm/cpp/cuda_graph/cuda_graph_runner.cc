@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/cuda_graph/combo_position_ids_validation.h"
 
 #include <algorithm>
 #include <cstring>
@@ -194,6 +195,21 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
                              py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device);
     }
 
+    if (position_id_len_factor_ > 0) {
+        size_t copy_numel = 0;
+        RTP_LLM_CHECK_WITH_INFO(
+            validateComboPositionIds(inputs, state, py_model_inputs_.combo_position_ids, copy_numel),
+            "invalid combo_position_ids before CUDA graph replay: factor=%d, src_numel=%lld, dst_numel=%lld",
+            position_id_len_factor_,
+            inputs.combo_position_ids.defined() ? static_cast<long long>(inputs.combo_position_ids.numel()) : -1LL,
+            py_model_inputs_.combo_position_ids.defined() ?
+                static_cast<long long>(py_model_inputs_.combo_position_ids.numel()) :
+                -1LL);
+        optimizedCopyAsync(inputs.combo_position_ids,
+                           py_model_inputs_.combo_position_ids,
+                           copy_numel * inputs.combo_position_ids.element_size());
+    }
+
     if (!is_prefill_cuda_graph_mode_) {
         // D2D copies — collected for single batched kernel launch
         tryAddD2DCopy(inputs.attention_inputs.sequence_lengths_plus_1_device,
@@ -202,21 +218,6 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         tryAddD2DCopy(inputs.attention_inputs.decode_cu_seqlens_device,
                       py_model_inputs_.attention_inputs.decode_cu_seqlens_device,
                       (state.current_batch_size + 1) * sizeof(int));
-
-        if (inputs.combo_position_ids.defined() && inputs.combo_position_ids.numel() > 0
-            && inputs.combo_position_ids.has_storage()) {
-            if (!py_model_inputs_.combo_position_ids.defined()) {
-                RTP_LLM_LOG_WARNING("combo_position_ids not defined in graph but present in input, skipping copy");
-            } else {
-                const size_t copy_size   = inputs.combo_position_ids.numel() * sizeof(int);
-                const size_t target_size = py_model_inputs_.combo_position_ids.numel() * sizeof(int);
-                RTP_LLM_CHECK_WITH_INFO(target_size >= copy_size,
-                                        "combo_position_ids target tensor size (%zu) is smaller than needed (%zu)",
-                                        target_size,
-                                        copy_size);
-                optimizedCopyAsync(inputs.combo_position_ids, py_model_inputs_.combo_position_ids, copy_size);
-            }
-        }
     } else {
         // D2D copy
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
@@ -421,6 +422,38 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
     return true;
 }
 
+bool CudaGraphRunner::validateComboPositionIds(const PyModelInputs&  inputs,
+                                               const CudaGraphState& state,
+                                               const torch::Tensor&  captured_position_ids,
+                                               size_t&               copy_numel) const {
+    const int token_count = is_prefill_cuda_graph_mode_ ? state.current_seq_len : state.seq_len_sum;
+    return validateComboPositionIdsForReplay(
+        position_id_len_factor_, token_count, inputs.combo_position_ids, captured_position_ids, copy_numel);
+}
+
+bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs& inputs, const CudaGraphState& state) const {
+    const int  graph_key = is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
+    const auto graph_it  = graph_instances_.find(graph_key);
+    if (graph_it == graph_instances_.end()) {
+        RTP_LLM_LOG_WARNING("CUDA graph key %d was not captured, fallback to normal run", graph_key);
+        return false;
+    }
+
+    size_t      copy_numel            = 0;
+    const auto& captured_position_ids = graph_it->second.mem_hold_.py_model_inputs_.combo_position_ids;
+    if (!validateComboPositionIds(inputs, state, captured_position_ids, copy_numel)) {
+        RTP_LLM_LOG_WARNING(
+            "combo_position_ids are incompatible with CUDA graph key %d: factor=%d, src_numel=%lld, "
+            "dst_numel=%lld; fallback to normal run",
+            graph_key,
+            position_id_len_factor_,
+            inputs.combo_position_ids.defined() ? static_cast<long long>(inputs.combo_position_ids.numel()) : -1LL,
+            captured_position_ids.defined() ? static_cast<long long>(captured_position_ids.numel()) : -1LL);
+        return false;
+    }
+    return true;
+}
+
 bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.canRun");
     if (kv_cache_group_tags_.size() > 1) {
@@ -449,7 +482,7 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
         if (inputs.attention_inputs.is_target_verify) {
             // Target-verify must also respect captured decode range.
             // Otherwise we may replay an uncaptured graph key.
-            return tryGetRealGraphDecodeBatchSize(inputs, state);
+            return tryGetRealGraphDecodeBatchSize(inputs, state) && canReplaySelectedGraph(inputs, state);
         }
         return false;
     }
@@ -469,7 +502,7 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
             return false;
         }
     }
-    return true;
+    return canReplaySelectedGraph(inputs, state);
 }
 
 void CudaGraphRunner::initKernelInternalMemory() {
@@ -519,8 +552,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     // (non-Mrope models pay zero memory and the captured graph never references it).
     if (position_id_len_factor_ > 0) {
         inputs.combo_position_ids =
-            torch::ones({int(max_bs_) * num_tokens_per_bs_ * position_id_len_factor_}, options_cpu_int32_);
-        inputs.combo_position_ids                  = inputs.combo_position_ids.pin_memory();
+            torch::ones({int(max_bs_) * num_tokens_per_bs_ * position_id_len_factor_}, options_cuda_int32_);
         inputs.attention_inputs.combo_position_ids = inputs.combo_position_ids;
     }
 
@@ -556,7 +588,8 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.padding_offset = inputs.attention_inputs.padding_offset.pin_memory();
     inputs.attention_inputs.dtype          = model_data_type_;
     inputs.attention_inputs.is_s_padded    = true;
-    inputs.attention_inputs.sequence_lengths_plus_1_device = torch::zeros({int(max_bs_)}, options_cuda_int32_);
+    auto sequence_lengths_plus_1           = inputs.attention_inputs.sequence_lengths.add(1).pin_memory();
+    inputs.attention_inputs.sequence_lengths_plus_1_device = sequence_lengths_plus_1.cuda();
     // Step=1 is intentional: when num_tokens_per_bs_ > 1 (target verify), is_prefill is set to true
     // so the factory selects PREFILL impls (which use cu_seqlens, not decode_cu_seqlens).
     // XQADecodeImpl/XQAWrapper (the consumers of decode_cu_seqlens_host) are never reached in that path.

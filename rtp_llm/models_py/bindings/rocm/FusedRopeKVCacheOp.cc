@@ -12,6 +12,58 @@
 
 namespace rtp_llm {
 
+namespace {
+
+void validateMropeConfig(const AttentionConfigs& attn_configs) {
+    const RopeConfig& rope_config = attn_configs.rope_config;
+    if (rope_config.style != RopeStyle::Mrope) {
+        return;
+    }
+    if (!rope_config.mrope_interleaved) {
+        throw std::runtime_error("ROCm FusedRopeKVCache does not support MRoPE with mrope_interleaved=false. "
+                                 "Use mrope_interleaved=true or disable the fused rope path.");
+    }
+    if (rope_config.index_factor != 3) {
+        throw std::runtime_error("ROCm FusedRopeKVCache MRoPE requires index_factor=3, got "
+                                 + std::to_string(rope_config.index_factor));
+    }
+    if (rope_config.dim <= 0 || rope_config.dim % 2 != 0) {
+        throw std::runtime_error("ROCm FusedRopeKVCache MRoPE requires a positive even rope dim, got "
+                                 + std::to_string(rope_config.dim));
+    }
+    if (rope_config.dim > attn_configs.size_per_head) {
+        throw std::runtime_error("ROCm FusedRopeKVCache MRoPE rope dim exceeds size_per_head: rope dim="
+                                 + std::to_string(rope_config.dim)
+                                 + ", size_per_head=" + std::to_string(attn_configs.size_per_head));
+    }
+    if (rope_config.mrope_dim1 < 0 || rope_config.mrope_dim2 < 0 || rope_config.mrope_dim3 < 0) {
+        throw std::runtime_error("ROCm FusedRopeKVCache MRoPE sections must be non-negative");
+    }
+
+    const int64_t section_sum = static_cast<int64_t>(rope_config.mrope_dim1)
+                                + static_cast<int64_t>(rope_config.mrope_dim2)
+                                + static_cast<int64_t>(rope_config.mrope_dim3);
+    const int rotary_pair_count = rope_config.dim / 2;
+    if (section_sum != rotary_pair_count) {
+        throw std::runtime_error("ROCm FusedRopeKVCache MRoPE section sum must equal rope dim / 2: got "
+                                 + std::to_string(section_sum) + ", expected " + std::to_string(rotary_pair_count));
+    }
+
+    // Qwen3/3.5 interleaves pair indices as T,H,W,T,H,W,... and leaves
+    // unclaimed H/W slots on the temporal axis. Each requested section must
+    // therefore fit the number of corresponding slots in the rotary region.
+    const int max_height_pairs = (rotary_pair_count + 1) / 3;
+    const int max_width_pairs  = rotary_pair_count / 3;
+    if (rope_config.mrope_dim2 > max_height_pairs || rope_config.mrope_dim3 > max_width_pairs) {
+        throw std::runtime_error("ROCm FusedRopeKVCache MRoPE sections exceed interleaved H/W capacity: H="
+                                 + std::to_string(rope_config.mrope_dim2) + " (max " + std::to_string(max_height_pairs)
+                                 + "), W=" + std::to_string(rope_config.mrope_dim3) + " (max "
+                                 + std::to_string(max_width_pairs) + ")");
+    }
+}
+
+}  // namespace
+
 static at::ScalarType get_fp8_dtype() {
     hipDeviceProp_t prop;
     int             device_id = 0;
@@ -84,22 +136,9 @@ void prepareInPlace(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inp
     updateKvCacheOffset(params, attn_inputs.kv_cache_kernel_block_id_device);
 }
 
-static void rejectMropeWithoutPositionIds(const RopeConfig& rope_config, const char* where) {
-    // ROCm prefill/decode dispatch always passes position_ids=nullptr (combo_position_ids
-    // is not plumbed through this path yet). Mrope needs real per-axis position ids — without
-    // them the kernel silently uses position_id=-1, producing wrong RoPE positions.
-    if (rope_config.style == RopeStyle::Mrope) {
-        throw std::runtime_error(std::string(where)
-                                 + ": RopeStyle::Mrope requires combo_position_ids, but ROCm "
-                                   "fused RoPE+KV-cache path does not plumb position_ids yet. "
-                                   "Run this model on the CUDA path or extend this op to accept "
-                                   "position_ids before enabling Mrope.");
-    }
-}
-
 FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs) {
-    rejectMropeWithoutPositionIds(attn_configs.rope_config, "FusedRopeKVCachePrefillOp");
+    validateMropeConfig(attn_configs_);
 }
 
 FusedRopeKVCachePrefillOpAsm::FusedRopeKVCachePrefillOpAsm(const AttentionConfigs& attn_configs):
@@ -144,14 +183,29 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
         attn_params->prefix_lengths = attn_inputs.prefix_lengths;
     }
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
-    attn_params->position_ids = attn_inputs.combo_position_ids;
+    attn_params->position_ids              = attn_inputs.combo_position_ids;
+    // MRoPE requires combo_position_ids with index_factor axes
+    if (attn_configs_.rope_config.style == RopeStyle::Mrope) {
+        int expected_factor = attn_configs_.rope_config.index_factor;
+        if (!attn_params->position_ids.defined() || attn_params->position_ids.numel() == 0) {
+            throw std::runtime_error("MRoPE prefill requires combo_position_ids but it is undefined or empty");
+        }
+        int token_num    = int(attn_inputs.input_lengths.sum().item<int64_t>());
+        int min_expected = token_num * expected_factor;
+        if (attn_params->position_ids.numel() < min_expected) {
+            throw std::runtime_error("MRoPE prefill combo_position_ids too small: got "
+                                     + std::to_string(attn_params->position_ids.numel()) + ", expected at least "
+                                     + std::to_string(min_expected) + " (token_num=" + std::to_string(token_num)
+                                     + ", index_factor=" + std::to_string(expected_factor) + ")");
+        }
+    }
 
-// Ensure position_ids is on CUDA device (e.g., MROPE position_ids may be on CPU)
+    // Ensure position_ids is on CUDA device (e.g., MROPE position_ids may be on CPU)
     if (attn_params->position_ids.defined() && !attn_params->position_ids.is_cuda()) {
         attn_params->position_ids =
             attn_params->position_ids.to(torch::kCUDA, /*non_blocking=*/false, /*copy=*/true).contiguous();
     }
-    
+
     int max_prefix_length = 0;
     if (has_prefix && attn_params->prefix_lengths.defined() && attn_params->prefix_lengths.numel() > 0) {
         max_prefix_length = attn_params->prefix_lengths.max().item<int32_t>();
@@ -353,7 +407,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
 
 FusedRopeKVCacheDecodeOpBase::FusedRopeKVCacheDecodeOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs) {
-    rejectMropeWithoutPositionIds(attn_configs.rope_config, "FusedRopeKVCacheDecodeOp");
+    validateMropeConfig(attn_configs_);
 }
 
 FusedRopeKVCacheDecodeOpAsm::FusedRopeKVCacheDecodeOpAsm(const AttentionConfigs& attn_configs):
@@ -392,6 +446,21 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
     attn_params->prefix_lengths            = attn_inputs.prefix_lengths;
     attn_params->padding_offset            = attn_inputs.padding_offset;
     attn_params->position_ids              = attn_inputs.combo_position_ids;
+    // MRoPE requires combo_position_ids with index_factor axes
+    if (attn_configs_.rope_config.style == RopeStyle::Mrope) {
+        int expected_factor = attn_configs_.rope_config.index_factor;
+        if (!attn_params->position_ids.defined() || attn_params->position_ids.numel() == 0) {
+            throw std::runtime_error("MRoPE requires combo_position_ids but it is undefined or empty");
+        }
+        int token_num    = int(attn_inputs.sequence_lengths.numel());
+        int min_expected = token_num * expected_factor;
+        if (attn_params->position_ids.numel() < min_expected) {
+            throw std::runtime_error("MRoPE combo_position_ids too small: got "
+                                     + std::to_string(attn_params->position_ids.numel()) + ", expected at least "
+                                     + std::to_string(min_expected) + " (token_num=" + std::to_string(token_num)
+                                     + ", index_factor=" + std::to_string(expected_factor) + ")");
+        }
+    }
     // Ensure position_ids is on CUDA device (e.g., MROPE position_ids may be on CPU)
     if (attn_params->position_ids.defined() && !attn_params->position_ids.is_cuda()) {
         attn_params->position_ids =
