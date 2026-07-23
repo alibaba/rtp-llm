@@ -1,18 +1,5 @@
-import argparse
-
 from rtp_llm.ops import CPRotateMethod
-
-
-def str2bool(v):
-    if v is None:
-        return None
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ("yes", "true", "t", "1", "on"):
-        return True
-    if v.lower() in ("no", "false", "f", "0", "off"):
-        return False
-    raise argparse.ArgumentTypeError("Boolean value expected.")
+from rtp_llm.utils.pre_import_config import str2bool
 
 
 def str2_cp_rotate_method(value):

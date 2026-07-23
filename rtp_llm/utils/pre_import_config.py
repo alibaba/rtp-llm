@@ -1,10 +1,9 @@
+import argparse
 import os
 import sys
 from typing import Mapping, MutableMapping, Optional, Sequence
 
 
-_TRUE_VALUES = {"yes", "true", "t", "1", "on"}
-_FALSE_VALUES = {"no", "false", "f", "0", "off"}
 _AUTO_ENABLED_FOR_WARMUP = False
 
 
@@ -23,13 +22,18 @@ def is_start_server_entrypoint(argv: Sequence[str]) -> bool:
     return False
 
 
-def _parse_bool(value: str) -> bool:
+def str2bool(value):
+    """Shared bool parser for pre-import setup and the full server argument parser."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
     normalized = value.lower()
-    if normalized in _TRUE_VALUES:
+    if normalized in ("yes", "true", "t", "1", "on"):
         return True
-    if normalized in _FALSE_VALUES:
+    if normalized in ("no", "false", "f", "0", "off"):
         return False
-    raise ValueError(f"invalid boolean value for warm_up: {value}")
+    raise argparse.ArgumentTypeError("Boolean value expected.")
 
 
 def warmup_requested(
@@ -51,9 +55,9 @@ def warmup_requested(
         index += 1
 
     if cli_value is not None:
-        return _parse_bool(cli_value)
+        return str2bool(cli_value)
     if "WARM_UP" in environ:
-        return _parse_bool(environ["WARM_UP"])
+        return str2bool(environ["WARM_UP"])
     return default
 
 

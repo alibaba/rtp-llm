@@ -114,7 +114,6 @@ uint32_t computeBlockNum(CacheConfig&                                     config
                          const ModelConfig&                               model_config,
                          const RuntimeConfig&                             runtime_config,
                          const KVCacheConfig&                             kv_cache_config,
-                         const ParallelismConfig&                         parallelism_config,
                          const std::optional<WarmUpResult>&               warm_up_result,
                          const std::optional<SpeculativeExecutionConfig>& sp_config) {
     if (kv_cache_config.test_block_num > 0) {
@@ -124,7 +123,7 @@ uint32_t computeBlockNum(CacheConfig&                                     config
     }
 
     const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
-        runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
+        runtime_config, kv_cache_config, model_config, warm_up_result, sp_config);
     config.finalizeBlockNums(0, runtime_config);
 
     const auto block_budget = blockBudgetForConfig(config);
@@ -226,7 +225,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     setupKernelSeqSize(config, kv_cache_config, "cache");
 
     uint32_t block_num = computeBlockNum(
-        config, model_config, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
+        config, model_config, runtime_config, kv_cache_config, warm_up_result, sp_config);
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %u, each block needs %ld MiB memory",
                             block_num,
@@ -311,7 +310,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         block_num = kv_cache_config.test_block_num;
     } else {
         const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
-            runtime_config, kv_cache_config, score_model_config, parallelism_config, warm_up_result, sp_config);
+            runtime_config, kv_cache_config, score_model_config, warm_up_result, sp_config);
 
         if (explicit_pool_reserve > 0) {
             RTP_LLM_CHECK_WITH_INFO(

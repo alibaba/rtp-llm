@@ -29,14 +29,31 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
 
 class _FakeRouter:
     def __init__(
-        self, ep_size, expert_num_per_rank, ep_rank=0, tp_size=1, dp_size=None
+        self,
+        ep_size,
+        expert_num_per_rank,
+        ep_rank=0,
+        tp_size=1,
+        dp_size=None,
+        expert_num=None,
     ):
+        dp_size = dp_size if dp_size is not None else ep_size
         self.config = SimpleNamespace(
             ep_size=ep_size,
-            expert_num=ep_size * expert_num_per_rank,
+            expert_num=(
+                ep_size * expert_num_per_rank
+                if expert_num is None
+                else expert_num
+            ),
             ep_rank=ep_rank,
             tp_size=tp_size,
-            dp_size=dp_size if dp_size is not None else ep_size,
+            dp_size=dp_size,
+            world_size=tp_size * dp_size,
+            parallelism_config=SimpleNamespace(
+                ffn_disaggregate_config=SimpleNamespace(
+                    enable_ffn_disaggregate=False
+                )
+            ),
         )
 
 
@@ -70,6 +87,16 @@ class SkewFractionMathTest(unittest.TestCase):
                 else:
                     os.environ[key] = prev
 
+    def test_skew_reserve_invalid_env_uses_defaults(self):
+        with (
+            patch.dict(
+                os.environ,
+                {"MOE_SKEW_MULT": "invalid", "MOE_SKEW_ADD": "invalid"},
+            ),
+            patch.object(fused_moe_module, "_SKEW_ENV_WARNED", False),
+        ):
+            self.assertAlmostEqual(_skew_reserve(0.2), 0.4, places=6)
+
     def test_default_slot_share(self):
         self.assertEqual(_default_slot_share(1, 8, 2), 1.0)
         # experts <= top_k: every rank is guaranteed hit
@@ -102,6 +129,15 @@ class WarmupSkewTopkIdsTest(unittest.TestCase):
     def test_invalid_expert_layout_is_rejected(self):
         router = _FakeRouter(ep_size=4, expert_num_per_rank=0)
         with self.assertRaisesRegex(ValueError, "does not match"):
+            FusedMoe(router=router, fused_experts=_SlotExecutor(), expert_num=8)
+
+    def test_non_divisible_expert_layout_is_rejected(self):
+        router = _FakeRouter(
+            ep_size=3,
+            expert_num_per_rank=0,
+            expert_num=8,
+        )
+        with self.assertRaisesRegex(ValueError, "divisible"):
             FusedMoe(router=router, fused_experts=_SlotExecutor(), expert_num=8)
 
     def test_slot_executor_hot_and_cold_routing(self):
@@ -152,10 +188,6 @@ class WarmupSkewTopkIdsTest(unittest.TestCase):
 
 
 class RuntimeSlotDistributionTest(unittest.TestCase):
-    @patch(
-        "rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe._MOE_RUNTIME_SLOT_LOG",
-        True,
-    )
     @patch("torch.cuda.is_current_stream_capturing", return_value=True)
     def test_capture_returns_before_tensor_or_collective_work(self, _capturing):
         topk_ids = MagicMock()
@@ -164,6 +196,52 @@ class RuntimeSlotDistributionTest(unittest.TestCase):
 
         topk_ids.reshape.assert_not_called()
 
+    @patch("torch.cuda.is_current_stream_capturing", return_value=False)
+    @patch(
+        "rtp_llm.models_py.distributed.collective_torch.all_reduce",
+        side_effect=lambda tensor, _group: tensor,
+    )
+    def test_updates_global_slot_share_peaks(self, all_reduce, _capturing):
+        topk_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int64)
+        with (
+            patch.object(fused_moe_module, "_RUNTIME_SLOT_PEAKS", []),
+            patch.object(fused_moe_module.logger, "warning") as warning,
+        ):
+            _log_runtime_slot_distribution(_FakeRouter(2, 2), topk_ids)
+
+            self.assertEqual(fused_moe_module._RUNTIME_SLOT_PEAKS, [0.5, 0.5])
+            self.assertIn("new_peak", warning.call_args.args[0])
+        all_reduce.assert_called_once()
+
+    @patch("torch.cuda.is_current_stream_capturing", return_value=False)
+    def test_unsupported_topology_warns_before_tensor_work(self, _capturing):
+        topk_ids = MagicMock()
+        router = _FakeRouter(2, 2, tp_size=2, dp_size=1)
+        with (
+            patch.object(fused_moe_module, "_RUNTIME_SLOT_LOG_UNSUPPORTED", False),
+            patch.object(fused_moe_module.logger, "warning") as warning,
+        ):
+            _log_runtime_slot_distribution(router, topk_ids)
+
+        topk_ids.reshape.assert_not_called()
+        self.assertIn("unsupported topology", warning.call_args.args[0])
+
+    def test_inconsistent_rank_flags_fail_before_runtime(self):
+        router = _FakeRouter(2, 2)
+        reduced_flag = torch.tensor([1], dtype=torch.int64)
+        with (
+            patch.object(fused_moe_module, "_RUNTIME_SLOT_LOG_RESOLVED", None),
+            patch("torch.distributed.is_initialized", return_value=True),
+            patch("torch.cuda.current_device", return_value=0),
+            patch("torch.tensor", return_value=reduced_flag),
+            patch(
+                "torch.distributed.all_reduce",
+                side_effect=lambda tensor, **_kwargs: tensor,
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "identically"):
+                fused_moe_module._resolve_runtime_slot_log(router, True)
+
 
 class TraceMemoryBindingTest(unittest.TestCase):
     def test_binding_is_importable_and_callable(self):
@@ -171,6 +249,22 @@ class TraceMemoryBindingTest(unittest.TestCase):
 
         self.assertTrue(callable(is_trace_memory))
         self.assertIsInstance(is_trace_memory(), bool)
+
+    def test_final_warmup_config_resets_trace_latch(self):
+        with (
+            patch.object(fused_moe_module, "_WARMUP_ENABLED", True),
+            patch.object(fused_moe_module, "_TRACE_MEMORY_SEEN", True),
+            patch.object(fused_moe_module, "_TRACE_MEMORY_FINISHED", False),
+        ):
+            fused_moe_module.configure_warmup_trace(False)
+            self.assertFalse(fused_moe_module._WARMUP_ENABLED)
+            self.assertFalse(fused_moe_module._TRACE_MEMORY_SEEN)
+            self.assertTrue(fused_moe_module._TRACE_MEMORY_FINISHED)
+
+            fused_moe_module.configure_warmup_trace(True)
+            self.assertTrue(fused_moe_module._WARMUP_ENABLED)
+            self.assertFalse(fused_moe_module._TRACE_MEMORY_SEEN)
+            self.assertFalse(fused_moe_module._TRACE_MEMORY_FINISHED)
 
     def test_ep_warmup_requires_binding(self):
         router = _FakeRouter(ep_size=2, expert_num_per_rank=1)

@@ -79,6 +79,24 @@ class ModelFactory:
         model_config.model_name = model_name
         engine_config.runtime_config.model_name = model_name
 
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+            configure_warmup_trace,
+        )
+
+        ffn_disaggregated = bool(
+            engine_config.parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate
+        )
+        cuda_warmup_supported = (
+            torch.version.cuda is not None
+            and getattr(torch.version, "hip", None) is None
+        )
+        configure_warmup_trace(
+            cuda_warmup_supported
+            and bool(engine_config.runtime_config.warm_up)
+            and not bool(model_config.mm_model_config.is_multimodal)
+            and not ffn_disaggregated
+        )
+
         model = model_cls.from_config(
             model_config=model_config,
             parallelism_config=engine_config.parallelism_config,

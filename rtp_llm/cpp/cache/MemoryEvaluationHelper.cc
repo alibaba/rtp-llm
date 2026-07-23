@@ -139,15 +139,12 @@ rtp_llm::DataType MemoryEvaluationHelper::getDataTypeForCache(const ModelConfig&
     return dtype;
 }
 
-size_t MemoryEvaluationHelper::getDefaultRuntimeMemorySize(const RuntimeConfig&     runtime_config,
-                                                           const ParallelismConfig& parallelism_config,
-                                                           const ModelConfig&       model_config,
+size_t MemoryEvaluationHelper::getDefaultRuntimeMemorySize(const RuntimeConfig& runtime_config,
+                                                           const ModelConfig&   model_config,
                                                            const std::optional<SpeculativeExecutionConfig>& sp_config) {
     size_t reserve_runtime_mem_bytes =
         checkedMiBToBytes(runtime_config.reserve_runtime_mem_mb, "reserve_runtime_mem_mb");
     RTP_LLM_LOG_INFO("RuntimeConfig has reserve_runtime_mem_mb=%ld", runtime_config.reserve_runtime_mem_mb);
-
-    (void)parallelism_config;
 
     if (model_config.mm_model_config.is_multimodal) {
         const auto minimal_runtime_required = 2L * 1024 * 1024 * 1024;  // 2 GiB
@@ -165,7 +162,6 @@ size_t MemoryEvaluationHelper::getDefaultRuntimeMemorySize(const RuntimeConfig& 
 size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&                             runtime_config,
                                                     const KVCacheConfig&                             kv_cache_config,
                                                     const ModelConfig&                               model_config,
-                                                    const ParallelismConfig&                         parallelism_config,
                                                     const std::optional<WarmUpResult>&               warm_up_result,
                                                     const std::optional<SpeculativeExecutionConfig>& sp_config) {
     const auto   gpu_mem                      = getGpuExecStatus().device_memory_status;
@@ -178,8 +174,8 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
         return kv_cache_config.kv_cache_mem_mb * 1024 * 1024;
     }
 
-    size_t env_runtime_required_bytes = MemoryEvaluationHelper::getDefaultRuntimeMemorySize(
-        runtime_config, parallelism_config, model_config, sp_config);
+    size_t env_runtime_required_bytes =
+        MemoryEvaluationHelper::getDefaultRuntimeMemorySize(runtime_config, model_config, sp_config);
 
     size_t warmup_required_bytes = 0;
     if (warm_up_result) {

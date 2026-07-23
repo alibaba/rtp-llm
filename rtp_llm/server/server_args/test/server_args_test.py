@@ -1,3 +1,4 @@
+import argparse
 import importlib
 import os
 import sys
@@ -6,6 +7,7 @@ from unittest import TestCase, main
 from rtp_llm.utils.pre_import_config import (
     configure_expandable_segments_for_warmup,
     is_start_server_entrypoint,
+    str2bool,
     warmup_requested,
 )
 
@@ -15,6 +17,11 @@ class ServerArgsPyEnvConfigsTest(TestCase):
 
 
 class PreImportConfigTest(TestCase):
+    def test_server_parser_reuses_pre_import_bool_parser(self):
+        from rtp_llm.server.server_args.util import str2bool as server_str2bool
+
+        self.assertIs(server_str2bool, str2bool)
+
     def test_identifies_supported_server_entrypoints(self):
         self.assertTrue(
             is_start_server_entrypoint(
@@ -42,7 +49,7 @@ class PreImportConfigTest(TestCase):
         self.assertTrue(warmup_requested([], {}))
 
     def test_rejects_invalid_warmup_value(self):
-        with self.assertRaises(ValueError):
+        with self.assertRaises(argparse.ArgumentTypeError):
             warmup_requested(["--warm_up", "invalid"], {})
 
     def test_sets_allocator_default_only_for_cuda_warmup(self):

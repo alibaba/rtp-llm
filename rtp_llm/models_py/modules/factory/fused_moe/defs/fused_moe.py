@@ -47,7 +47,6 @@ _RUNTIME_SLOT_CONFIG_WARNED = False
 # enter a collective per MoE layer; keep it disabled except during controlled diagnosis.
 _MOE_RUNTIME_MEM_LOG = os.environ.get("MOE_RUNTIME_MEM_LOG", "0") == "1"
 _MOE_RUNTIME_SLOT_LOG = os.environ.get("MOE_RUNTIME_SLOT_LOG", "0") == "1"
-_RUNTIME_DIAGNOSTICS_ENABLED = _MOE_RUNTIME_MEM_LOG or _MOE_RUNTIME_SLOT_LOG
 try:
     _MOE_RUNTIME_SLOT_MIN_SLOTS = max(
         0, int(os.environ.get("MOE_RUNTIME_SLOT_MIN_SLOTS", "0"))
@@ -56,6 +55,65 @@ except ValueError:
     _MOE_RUNTIME_SLOT_MIN_SLOTS = 0
 _RUNTIME_SLOT_PEAKS: List[float] = []
 _RUNTIME_SLOT_LOG_UNSUPPORTED = False
+_RUNTIME_SLOT_LOG_RESOLVED: Optional[bool] = None
+
+
+def configure_warmup_trace(enabled: bool) -> None:
+    """Apply the server's final C++ warmup gate before constructing MoE layers."""
+    global _TRACE_MEMORY_FINISHED, _TRACE_MEMORY_SEEN, _WARMUP_ENABLED
+    _WARMUP_ENABLED = bool(enabled)
+    _TRACE_MEMORY_SEEN = False
+    _TRACE_MEMORY_FINISHED = not _WARMUP_ENABLED
+
+
+def _resolve_runtime_slot_log(
+    router: "FusedMoeDataRouter", local_enabled: bool
+) -> bool:
+    """Validate the diagnostic flag once before any runtime slot collective."""
+    global _RUNTIME_SLOT_LOG_RESOLVED
+    if _RUNTIME_SLOT_LOG_RESOLVED is not None:
+        return _RUNTIME_SLOT_LOG_RESOLVED
+
+    config = router.config
+    ep_size = int(config.ep_size)
+    tp_size = int(config.tp_size)
+    dp_size = int(config.dp_size)
+    ffn_disaggregated = bool(
+        config.parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate
+    )
+    if ep_size <= 1:
+        return False
+    if ffn_disaggregated:
+        if local_enabled:
+            raise RuntimeError(
+                "MOE_RUNTIME_SLOT_LOG is not supported with FFN disaggregation"
+            )
+        return False
+    if tp_size != 1 or dp_size != ep_size:
+        return local_enabled
+
+    if not torch.distributed.is_initialized():
+        if local_enabled:
+            raise RuntimeError(
+                "MOE_RUNTIME_SLOT_LOG requires an initialized distributed process group"
+            )
+        return False
+
+    enabled_count = torch.tensor(
+        [int(local_enabled)],
+        dtype=torch.int64,
+        device=torch.device("cuda", torch.cuda.current_device()),
+    )
+    torch.distributed.all_reduce(enabled_count, op=torch.distributed.ReduceOp.SUM)
+    enabled_ranks = int(enabled_count.item())
+    world_size = int(config.world_size)
+    if enabled_ranks not in (0, world_size):
+        raise RuntimeError(
+            "MOE_RUNTIME_SLOT_LOG must be configured identically on every rank: "
+            f"enabled on {enabled_ranks}/{world_size} ranks"
+        )
+    _RUNTIME_SLOT_LOG_RESOLVED = enabled_ranks == world_size
+    return _RUNTIME_SLOT_LOG_RESOLVED
 
 
 def _nontorch_mib() -> float:
@@ -102,8 +160,8 @@ def _log_runtime_slot_distribution(
     router: "FusedMoeDataRouter", topk_ids: torch.Tensor
 ) -> None:
     """Log global runtime EP slot-share peaks for TP=1 and DP=EP."""
-    if not _MOE_RUNTIME_SLOT_LOG:
-        return
+    # The per-rank env flag is resolved collectively during FusedMoe construction. The remaining
+    # pre-collective exits depend only on shared topology or the symmetric graph-capture phase.
     if torch.cuda.is_current_stream_capturing():
         return
 
@@ -381,8 +439,11 @@ class FusedMoe(torch.nn.Module):
                 f"{_TRACE_MEMORY_IMPORT_ERROR}"
             )
 
+        self.runtime_slot_log_enabled = _resolve_runtime_slot_log(
+            router, _MOE_RUNTIME_SLOT_LOG
+        )
         global _RUNTIME_SLOT_CONFIG_WARNED
-        if _MOE_RUNTIME_SLOT_LOG and not _RUNTIME_SLOT_CONFIG_WARNED:
+        if self.runtime_slot_log_enabled and not _RUNTIME_SLOT_CONFIG_WARNED:
             logger.warning(
                 "MOE_RUNTIME_SLOT_LOG is diagnostic-only, must be set consistently on all ranks, "
                 "and performs one collective per MoE layer forward"
@@ -483,9 +544,11 @@ class FusedMoe(torch.nn.Module):
                         _NONTORCH_BASELINE_MIB,
                     )
             topk_ids = self._warmup_skew_topk_ids(topk_ids)
-        elif _RUNTIME_DIAGNOSTICS_ENABLED:
-            _log_runtime_nontorch_peak()
-            _log_runtime_slot_distribution(self.router, topk_ids)
+        elif _MOE_RUNTIME_MEM_LOG or self.runtime_slot_log_enabled:
+            if _MOE_RUNTIME_MEM_LOG:
+                _log_runtime_nontorch_peak()
+            if self.runtime_slot_log_enabled:
+                _log_runtime_slot_distribution(self.router, topk_ids)
 
         expert_payload = self.router.prepare(
             a1,
