@@ -264,9 +264,6 @@ cc_library(
         "@//:using_cuda12_9": [
             "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp4_quant",
         ],
-        "@//:using_cuda13_x86": [
-            "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp4_quant",
-        ],
         "//conditions:default": [],
     }),
 )
@@ -326,7 +323,14 @@ cc_library(
             "RegisterCudaOps.cc",
         ],
     }),
-    copts = copts() + ["-fno-strict-aliasing"],
+    copts = copts() + ["-fno-strict-aliasing"] + select({
+        # GLM-5 MegaMoE uses DeepGEMM's FP8xFP4 kernels, not the native
+        # rtp_compute_ops CUTLASS FP4 GEMM/quant bindings.  Keep those
+        # bindings out of the CUDA 13 x86 wheel so their .cu files are not
+        # compiled.
+        "@//:using_cuda13_x86": ["-UENABLE_FP4"],
+        "//conditions:default": [],
+    }),
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         ":bf16_gemm_op",
@@ -339,9 +343,6 @@ cc_library(
         ],
     }) + select({
         "@//:using_cuda12_9": [
-            "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
-        ],
-        "@//:using_cuda13_x86": [
             "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
         ],
         "//conditions:default": [],
