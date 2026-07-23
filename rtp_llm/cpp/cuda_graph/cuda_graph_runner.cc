@@ -550,29 +550,29 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs& inputs, const 
         return false;
     }
 
-    const auto& source_device_groups   = inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group;
-    const auto& source_host_groups     = inputs.attention_inputs.kv_cache_kernel_block_id_by_group;
-    const auto& captured_device_groups = captured_attn.kv_cache_kernel_block_id_device_by_group;
-    const auto& captured_host_groups   = captured_attn.kv_cache_kernel_block_id_by_group;
-    if (source_device_groups.size() != source_host_groups.size()
-        || source_device_groups.size() != captured_device_groups.size()
-        || source_device_groups.size() != captured_host_groups.size()) {
-        RTP_LLM_LOG_WARNING("CUDA graph hybrid block table group mismatch: source_device=%zu, source_host=%zu, "
-                            "captured_device=%zu, captured_host=%zu; fallback to normal run",
-                            source_device_groups.size(),
-                            source_host_groups.size(),
-                            captured_device_groups.size(),
-                            captured_host_groups.size());
+    const auto& source_groups   = inputs.attention_inputs_by_tag;
+    const auto& captured_groups = graph_it->second.mem_hold_.py_model_inputs_.attention_inputs_by_tag;
+    if (source_groups.size() != captured_groups.size()) {
+        RTP_LLM_LOG_WARNING("CUDA graph hybrid block table group mismatch: source=%zu, captured=%zu; fallback to "
+                            "normal run",
+                            source_groups.size(),
+                            captured_groups.size());
         return false;
     }
-    for (size_t group = 0; group < source_device_groups.size(); ++group) {
-        if (!validateBlockTableForCudaGraph(source_device_groups[group],
-                                            captured_device_groups[group],
+    for (const auto& [tag, source_group] : source_groups) {
+        const auto captured_it = captured_groups.find(tag);
+        if (captured_it == captured_groups.end()) {
+            RTP_LLM_LOG_WARNING("CUDA graph hybrid block table is missing tag=%s; fallback to normal run", tag.c_str());
+            return false;
+        }
+        const auto& captured_group = captured_it->second;
+        if (!validateBlockTableForCudaGraph(source_group.kv_cache_kernel_block_id_device,
+                                            captured_group.kv_cache_kernel_block_id_device,
                                             state.current_batch_size,
                                             true,
                                             "hybrid device")
-            || !validateBlockTableForCudaGraph(source_host_groups[group],
-                                               captured_host_groups[group],
+            || !validateBlockTableForCudaGraph(source_group.kv_cache_kernel_block_id,
+                                               captured_group.kv_cache_kernel_block_id,
                                                state.current_batch_size,
                                                false,
                                                "hybrid host")) {
