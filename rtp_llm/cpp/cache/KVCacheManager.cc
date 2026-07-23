@@ -473,7 +473,12 @@ size_t KVCacheManager::maxAvailableTokensNum() const {
     return allocator_->maxAvailableTokensNum();
 }
 
-KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
+KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t  latest_version,
+                                           bool     need_cache_keys,
+                                           bool     need_cache_events,
+                                           size_t   max_cache_events,
+                                           bool     force_cache_event_snapshot,
+                                           uint64_t cache_event_generation) const {
     KVCacheInfo info;
     info.version = latest_version;
 
@@ -482,15 +487,18 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
         return info;
     }
 
+    auto shared_cache = allocator_->sharedBlockCache();
+    if (shared_cache) {
+        info.version = shared_cache->version();
+    }
+
     if (need_cache_keys) {
         std::unordered_set<CacheKeyType> all_keys;
         // device cache keys
         std::vector<CacheKeyType> device_cache_keys;
-        auto                      shared_cache = allocator_->sharedBlockCache();
         if (shared_cache) {
             device_cache_keys = shared_cache->allCacheKeys();
             all_keys.insert(device_cache_keys.begin(), device_cache_keys.end());
-            info.version = shared_cache->version();
         }
         // memory cache keys
         RTP_LLM_CHECK_WITH_INFO(coordinator_ != nullptr,
@@ -499,6 +507,33 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
         all_keys.insert(mem_cache_keys.begin(), mem_cache_keys.end());
 
         info.cached_keys.assign(all_keys.begin(), all_keys.end());
+    }
+
+    if (need_cache_events && shared_cache) {
+        const auto event_result = shared_cache->cacheEventsSince(
+            latest_version, max_cache_events, force_cache_event_snapshot, cache_event_generation);
+        info.cache_event_protocol_version = 2;
+        info.cache_event_version          = event_result.current_version;
+        info.next_cache_event_version     = event_result.next_version;
+        info.oldest_cache_event_version   = event_result.oldest_available_version;
+        info.cache_event_generation       = event_result.generation;
+        info.cache_event_reset_required   = event_result.reset_required;
+        info.cache_event_has_more         = event_result.has_more;
+        info.cache_event_snapshot_reason  = static_cast<KVCacheSnapshotReason>(event_result.snapshot_reason);
+        info.cache_events.reserve(event_result.events.size());
+        for (const auto& event : event_result.events) {
+            info.cache_events.push_back(KVCacheChange{
+                event.version,
+                event.type == SharedBlockCache::CacheEventType::STORED ? KVCacheChangeType::STORED :
+                                                                         KVCacheChangeType::REMOVED,
+                event.cache_key,
+                event.group_ids,
+            });
+        }
+        info.cache_event_snapshot.reserve(event_result.snapshot.size());
+        for (const auto& entry : event_result.snapshot) {
+            info.cache_event_snapshot.push_back(KVCacheSnapshotEntry{entry.cache_key, entry.group_ids});
+        }
     }
 
     const size_t block_size_tokens = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?

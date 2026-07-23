@@ -1,12 +1,28 @@
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 
 #include <algorithm>
+#include <atomic>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
+namespace {
+
+uint64_t newCacheEventGeneration() {
+    static std::atomic<uint64_t> sequence{1};
+    const auto                   timestamp  = static_cast<uint64_t>(currentTimeUs());
+    const auto                   generation = (timestamp << 16) ^ sequence.fetch_add(1, std::memory_order_relaxed);
+    return generation == 0 ? 1 : generation;
+}
+
+}  // namespace
+
+SharedBlockCache::SharedBlockCache(size_t max_cache_event_history, uint64_t cache_event_generation):
+    lru_cache_(kCacheMaxCapacity),
+    cache_event_generation_(cache_event_generation == 0 ? newCacheEventGeneration() : cache_event_generation),
+    max_cache_event_history_(max_cache_event_history) {}
 
 void SharedBlockCache::init(int group_num, const std::vector<BlockPoolPtr>& group_pools) {
     std::lock_guard<std::mutex> lock(mu_);
@@ -35,8 +51,9 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
     if (lru_cache_.contains(cache_key)) {
         auto [success, existing_item] = lru_cache_.get(cache_key);
         if (success) {
-            const auto now_us   = currentTimeUs();
-            const bool resident = existing_item.is_resident || is_resident;
+            std::vector<GroupIdType> newly_visible_groups;
+            const auto               now_us   = currentTimeUs();
+            const bool               resident = existing_item.is_resident || is_resident;
             if (resident != existing_item.is_resident) {
                 existing_item.is_resident = resident;
             }
@@ -60,6 +77,9 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
                     existing_item.group_block_created_time_us[gid] = now_us;
                     existing_item.matchable_groups[gid] =
                         matchable_groups.empty() || gid >= matchable_groups.size() ? true : matchable_groups[gid];
+                    if (existing_item.matchable_groups[gid]) {
+                        newly_visible_groups.push_back(static_cast<GroupIdType>(gid));
+                    }
                     updated = true;
                     if (static_cast<int>(gid) < group_num_) {
                         group_pools_[gid]->blockCacheReference(group_block_ids[gid]);
@@ -67,13 +87,15 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
                 } else if (!matchable_groups.empty() && gid < matchable_groups.size() && matchable_groups[gid]
                            && !existing_item.matchable_groups[gid]) {
                     existing_item.matchable_groups[gid] = true;
-                    updated                             = true;
+                    newly_visible_groups.push_back(static_cast<GroupIdType>(gid));
+                    updated = true;
                 }
             }
             if (updated || existing_item.is_resident || dependency_updated) {
                 lru_cache_.put(cache_key, existing_item);
                 ++version_;
             }
+            recordEventLocked(CacheEventType::STORED, cache_key, std::move(newly_visible_groups));
             if (existing_item.is_resident) {
                 markAllTreeAliasesResidentLocked(cache_key);
             }
@@ -103,6 +125,7 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
 
     lru_cache_.put(cache_key, item);
     ++version_;
+    recordEventLocked(CacheEventType::STORED, cache_key, visibleGroupIds(item));
     upsertTreeNodeLocked(cache_key, namespace_id, dependency, item.is_resident);
     refreshAllTreeAliasesLocked(cache_key);
 
@@ -166,7 +189,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
             std::vector<NamespacedKey> ordered_chain(chain.rbegin(), chain.rend());
             for (const auto& tree_key : ordered_chain) {
                 UnifiedCacheItem removed_item;
-                if (!lru_cache_.remove(tree_key.cache_key, &removed_item)) {
+                if (!removeItemLocked(tree_key.cache_key, &removed_item)) {
                     removeAllTreeAliasesForCacheKeyLocked(tree_key.cache_key);
                     continue;
                 }
@@ -211,7 +234,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
     size_t selected_blocks = 0;
     for (const auto cache_key : lru_keys) {
         UnifiedCacheItem removed_item;
-        if (!lru_cache_.remove(cache_key, &removed_item)) {
+        if (!removeItemLocked(cache_key, &removed_item)) {
             continue;
         }
         removeAllTreeAliasesForCacheKeyLocked(cache_key);
@@ -283,7 +306,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
                 std::vector<NamespacedKey> ordered_chain(chain.rbegin(), chain.rend());
                 for (const auto& tree_key : ordered_chain) {
                     UnifiedCacheItem removed_item;
-                    if (!lru_cache_.remove(tree_key.cache_key, &removed_item)) {
+                    if (!removeItemLocked(tree_key.cache_key, &removed_item)) {
                         removeAllTreeAliasesForCacheKeyLocked(tree_key.cache_key);
                         continue;
                     }
@@ -334,7 +357,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
         if (!has_target_group) {
             continue;
         }
-        if (!lru_cache_.remove(cache_key, &removed_item)) {
+        if (!removeItemLocked(cache_key, &removed_item)) {
             continue;
         }
         removeAllTreeAliasesForCacheKeyLocked(cache_key);
@@ -418,7 +441,7 @@ std::optional<SharedBlockCache::UnifiedCacheItem> SharedBlockCache::remove(Cache
     std::lock_guard<std::mutex> lock(mu_);
 
     UnifiedCacheItem removed_item;
-    if (!lru_cache_.remove(cache_key, &removed_item)) {
+    if (!removeItemLocked(cache_key, &removed_item)) {
         return std::nullopt;
     }
     removeAllTreeAliasesForCacheKeyLocked(cache_key);
@@ -453,6 +476,61 @@ std::vector<CacheKeyType> SharedBlockCache::allCacheKeys() const {
 int64_t SharedBlockCache::version() const {
     std::lock_guard<std::mutex> lock(mu_);
     return version_;
+}
+
+SharedBlockCache::CacheEventResult SharedBlockCache::cacheEventsSince(int64_t  latest_version,
+                                                                      size_t   max_events,
+                                                                      bool     force_snapshot,
+                                                                      uint64_t expected_generation) const {
+    std::lock_guard<std::mutex> lock(mu_);
+
+    CacheEventResult result;
+    result.current_version = cache_event_version_;
+    result.next_version    = latest_version;
+    result.generation      = cache_event_generation_;
+    result.oldest_available_version =
+        cache_event_history_.empty() ? cache_event_version_ + 1 : cache_event_history_.front().version;
+
+    const bool generation_mismatch = expected_generation != 0 && expected_generation != result.generation;
+    const bool invalid_cursor      = latest_version < -1;
+    const bool history_gap         = latest_version < result.oldest_available_version - 1;
+    const bool future_cursor       = latest_version > result.current_version;
+    if (force_snapshot || generation_mismatch || invalid_cursor || history_gap || future_cursor) {
+        result.reset_required = true;
+        if (force_snapshot) {
+            result.snapshot_reason = CacheSnapshotReason::FORCED;
+        } else if (generation_mismatch) {
+            result.snapshot_reason = CacheSnapshotReason::GENERATION_MISMATCH;
+        } else if (invalid_cursor) {
+            result.snapshot_reason = CacheSnapshotReason::INVALID_CURSOR;
+        } else if (history_gap) {
+            result.snapshot_reason = CacheSnapshotReason::HISTORY_GAP;
+        } else {
+            result.snapshot_reason = CacheSnapshotReason::FUTURE_CURSOR;
+        }
+        result.snapshot.reserve(lru_cache_.size());
+        for (const auto& [cache_key, item] : lru_cache_.items()) {
+            auto group_ids = visibleGroupIds(item);
+            if (!group_ids.empty()) {
+                result.snapshot.push_back(CacheSnapshotEntry{cache_key, std::move(group_ids)});
+            }
+        }
+        result.next_version = result.current_version;
+        return result;
+    }
+
+    for (const auto& event : cache_event_history_) {
+        if (event.version <= latest_version) {
+            continue;
+        }
+        if (max_events > 0 && result.events.size() >= max_events) {
+            result.has_more = true;
+            break;
+        }
+        result.events.push_back(event);
+        result.next_version = event.version;
+    }
+    return result;
 }
 
 void SharedBlockCache::setPrefixTreeEnabled(bool enabled) {
@@ -693,6 +771,39 @@ bool SharedBlockCache::updateItemDependencyLocked(UnifiedCacheItem&      item,
     return true;
 }
 
+std::vector<GroupIdType> SharedBlockCache::visibleGroupIds(const UnifiedCacheItem& item) {
+    std::vector<GroupIdType> group_ids;
+    group_ids.reserve(item.group_block_ids.size());
+    for (size_t gid = 0; gid < item.group_block_ids.size(); ++gid) {
+        if (!isNullBlockIdx(item.group_block_ids[gid]) && groupMatchable(item, gid)) {
+            group_ids.push_back(static_cast<GroupIdType>(gid));
+        }
+    }
+    return group_ids;
+}
+
+bool SharedBlockCache::removeItemLocked(CacheKeyType cache_key, UnifiedCacheItem* removed_item) {
+    if (!lru_cache_.remove(cache_key, removed_item)) {
+        return false;
+    }
+    ++version_;
+    recordEventLocked(CacheEventType::REMOVED, cache_key, visibleGroupIds(*removed_item));
+    return true;
+}
+
+void SharedBlockCache::recordEventLocked(CacheEventType           type,
+                                         CacheKeyType             cache_key,
+                                         std::vector<GroupIdType> group_ids) {
+    if (group_ids.empty()) {
+        return;
+    }
+    ++cache_event_version_;
+    cache_event_history_.push_back(CacheEvent{cache_event_version_, type, cache_key, std::move(group_ids)});
+    while (cache_event_history_.size() > max_cache_event_history_) {
+        cache_event_history_.pop_front();
+    }
+}
+
 bool SharedBlockCache::groupMatchable(const UnifiedCacheItem& item, size_t group_id) {
     return group_id >= item.matchable_groups.size() || item.matchable_groups[group_id];
 }
@@ -846,6 +957,7 @@ void SharedBlockCache::removeGroupFromItemLocked(CacheKeyType cache_key, int gro
     result.evicted_lifetime_ms[cache_key] = std::max<int64_t>(0, (currentTimeUs() - created_time_us) / 1000);
     result.evicted_independent_group[cache_key] = group_id;
 
+    const bool was_visible                              = groupMatchable(item, static_cast<size_t>(group_id));
     item.group_block_ids[static_cast<size_t>(group_id)] = NULL_BLOCK_IDX;
     if (static_cast<size_t>(group_id) < item.matchable_groups.size()) {
         item.matchable_groups[static_cast<size_t>(group_id)] = false;
@@ -864,6 +976,9 @@ void SharedBlockCache::removeGroupFromItemLocked(CacheKeyType cache_key, int gro
         removeAllTreeAliasesForCacheKeyLocked(cache_key);
     }
     ++version_;
+    if (was_visible) {
+        recordEventLocked(CacheEventType::REMOVED, cache_key, {static_cast<GroupIdType>(group_id)});
+    }
 }
 
 bool SharedBlockCache::hasFlatItemLocked(CacheKeyType cache_key) const {

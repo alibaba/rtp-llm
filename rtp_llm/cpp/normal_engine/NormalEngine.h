@@ -36,6 +36,10 @@ public:
     absl::Status                      stop() override;
 
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
+    KVCacheInfo  getCacheEventStatusInfo(int64_t  latest_version,
+                                         bool     force_snapshot,
+                                         size_t   max_cache_events,
+                                         uint64_t cache_event_generation) override;
     absl::Status step();
     absl::Status startLoop();
     int64_t      getLastScheduleTime() override;

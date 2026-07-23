@@ -106,7 +106,12 @@ public:
     size_t                  availableTokensNum() const;
     size_t                  totalBlocksNum() const;
     size_t                  maxAvailableTokensNum() const;
-    KVCacheInfo             getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    KVCacheInfo             getKVCacheInfo(int64_t  latest_version,
+                                           bool     need_cache_keys,
+                                           bool     need_cache_events          = false,
+                                           size_t   max_cache_events           = 0,
+                                           bool     force_cache_event_snapshot = false,
+                                           uint64_t cache_event_generation     = 0) const;
 
     // 系统资源管理
     void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
