@@ -40,7 +40,7 @@ size_t fallbackFixedPoolHbmBytes(const CacheConfig& config) {
             if (!isDsv4FixedRegion(region)) {
                 continue;
             }
-            const bool explicit_hca = region == KVCacheRegionName::HCA_STATE && config.dsv4_hca_state_pool_blocks > 0;
+            const bool explicit_hca   = region == KVCacheRegionName::HCA_STATE && config.dsv4_hca_state_pool_blocks > 0;
             const bool explicit_fixed = config.dsv4_fixed_pool_blocks > 0;
             if (!explicit_hca && !explicit_fixed) {
                 bytes += config.group_block_size_bytes[gid];
@@ -154,8 +154,8 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                              config.fixed_pool_reserve_bytes / 1024 / 1024,
                              paged_budget / 1024 / 1024);
         }
-        const int  joint_step       = std::max(1, config.linear_step);
-        block_num = paged_budget / effectivePagedBlockBytes(config, joint_step);
+        const int joint_step = std::max(1, config.linear_step);
+        block_num            = paged_budget / effectivePagedBlockBytes(config, joint_step);
     }
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
@@ -183,8 +183,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                                const KVCacheConfig&               kv_cache_config,
                                                const SpeculativeExecutionConfig&  sp_config,
                                                const std::optional<WarmUpResult>& warm_up_result,
-                                               bool                               is_mtp,
-                                               bool                               is_eagle) {
+                                               bool                               is_mtp) {
     CacheConfig score_config = CacheConfigCreator::createBasicConfig(
         score_model_config, parallelism_config, kv_cache_config, false, sp_config.gen_num_per_cycle);
     CacheConfig propose_config = CacheConfigCreator::createBasicConfig(
@@ -229,10 +228,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
 
     int num_mtp_modules = 1;
     if (is_mtp) {
-        num_mtp_modules = sp_config.gen_num_per_cycle;
-        if (is_eagle) {
-            num_mtp_modules = 1;
-        }
+        const bool uses_recurrent_draft_model = sp_config.type == SP_TYPE_EAGLE || sp_config.type == SP_TYPE_EAGLE3;
+        num_mtp_modules                       = uses_recurrent_draft_model ? 1 : sp_config.gen_num_per_cycle;
     }
 
     // DSV4 fixed-pool residency toggle (mirror createConfig) must precede
