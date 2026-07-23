@@ -683,6 +683,13 @@ void KVCacheManager::allocateAndSync() {
     if (config_.use_independent_block_pools) {
         config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);
     }
+    for (const auto& mtp_sub_config : config_.mtp_sub_configs) {
+        RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_config must not be null");
+        mtp_sub_config->block_num = config_.block_num;
+        if (mtp_sub_config->use_independent_block_pools) {
+            mtp_sub_config->finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);
+        }
+    }
     RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
 }
 

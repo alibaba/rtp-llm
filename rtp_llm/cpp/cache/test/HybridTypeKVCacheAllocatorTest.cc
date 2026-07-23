@@ -125,8 +125,7 @@ static CacheConfig makeTinyHybridMtpConfigByCreateSpConfig() {
                                               kv_cache_cfg,
                                               sp_cfg,
                                               /*warm_up_result=*/std::nullopt,
-                                              /*is_mtp=*/true,
-                                              /*is_eagle=*/false);
+                                              /*is_mtp=*/true);
 }
 
 static CompleteTokenIdsPtr makeCompleteTokenIds(int batch_size, int seq_length, int seq_size_per_block) {
@@ -460,7 +459,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     ASSERT_EQ(blocks.size(), 4u);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 4);
 
-    KVCacheResource resource;
+    KVCacheResource             resource;
     std::vector<CacheGroupType> group_types = {CacheGroupType::LINEAR, CacheGroupType::FULL};
     resource.initGroups(/*group_nums=*/2,
                         /*layer_num=*/static_cast<int>(config.layer_all_num),

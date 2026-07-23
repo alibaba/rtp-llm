@@ -251,6 +251,34 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
                     size_per_head=head_dim,
                 )
 
+    def test_cuda_graph_prepare_uses_minimum_kv_length(self):
+        config = self._create_config(
+            head_num=32,
+            head_num_kv=8,
+            size_per_head=128,
+            seq_size_per_block=128,
+        )
+        sequence_lengths = [256, 512]
+        attn_inputs = self._create_attention_inputs(
+            batch_size=2,
+            sequence_lengths=sequence_lengths,
+            seq_size_per_block=config.seq_size_per_block,
+        )
+        attn_inputs.is_cuda_graph = True
+        attn_inputs.sequence_lengths_plus_1_d = torch.tensor(
+            sequence_lengths, dtype=torch.int32, device="cuda"
+        )
+
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs)
+        params = attn_op.prepare(attn_inputs)
+        torch.cuda.synchronize()
+        self.assertEqual(params.decode_page_indptr_d.cpu().tolist(), [0, 1, 2])
+        self.assertEqual(params.paged_kv_last_page_len_d.cpu().tolist(), [1, 1])
+
+        attn_op.prepare_for_cuda_graph_replay(attn_inputs)
+        torch.cuda.synchronize()
+        self.assertEqual(params.kvlen_d.cpu().tolist(), sequence_lengths)
+
     def test_edge_case_sequence_lengths(self):
         """Test edge cases with sequence lengths"""
         logging.info("\n=== Testing edge case sequence lengths ===")
