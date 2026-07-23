@@ -34,6 +34,16 @@ py_test(
     ],
 )
 
+py_test(
+    name = "kvcm_subscriber_launcher_test",
+    srcs = [
+        "kvcm_subscriber_launcher_test.py",
+    ],
+    deps = [
+        "//rtp_llm:kvcm_subscriber_launcher",
+    ],
+)
+
 
 py_test(
     name = "util_test",
