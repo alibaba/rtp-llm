@@ -109,15 +109,17 @@ class Qwen2_VLVitWeight(BaseVitWeights):
 
 
 class Qwen2_VLImageEmbedding(MultiModalEmbeddingInterface):
-    def __init__(self, mm_related_params: VitParameters):
+    def __init__(self, mm_related_params: VitParameters, visual=None):
         self.mm_related_params = mm_related_params
         self.image_processor = Qwen2VLImageProcessor.from_pretrained(
             mm_related_params.config["ckpt_path"]
         )
 
-        self.visual = Qwen2VisionTransformerPretrainedModel(
-            mm_related_params.config
-        ).share_memory()
+        if visual is None:
+            visual = Qwen2VisionTransformerPretrainedModel(
+                mm_related_params.config
+            ).share_memory()
+        self.visual = visual
         self.spatial_merge_size = mm_related_params.config.get("spatial_merge_size", 2)
 
     @property
@@ -325,6 +327,21 @@ class Qwen2_VLImageEmbedding(MultiModalEmbeddingInterface):
 
 class Qwen2_VLMixin(BaseMultiModalMixin):
     def _init_multimodal(self):
+        if self.use_new_loader:
+            from rtp_llm.models_py.new_models.qwen2_vl.vision import (
+                load_qwen2_vl_vision,
+            )
+
+            visual = load_qwen2_vl_vision(
+                vision_config=self.mm_related_params.config,
+                model_path=self.ckpt_path,
+                compute_dtype=self.compute_dtype,
+                device=self.device,
+            )
+            self.mm_part = Qwen2_VLImageEmbedding(self.mm_related_params, visual=visual)
+            self.mm_related_params.vit_weights = None
+            return
+
         self.mm_part = Qwen2_VLImageEmbedding(self.mm_related_params)
         self.mm_related_params.vit_weights = Qwen2_VLVitWeight(
             {"vit": self.mm_part.visual}
