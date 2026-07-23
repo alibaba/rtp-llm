@@ -133,15 +133,16 @@ private:
                                            torch::Tensor&            kv_scale_tensor);
     void processLayerTensors(size_t layout_idx, const MemoryLayoutConfig& layout_cfg, size_t& global_layer_begin);
 
-    // Helper functions for regUserMr/deregUserMr
-    void registerUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> memory_util,
+    // Helper functions for regUserMr/deregUserMr. Return false on failure (instead of aborting) so
+    // the caller can roll back / surface a clean error into the sleep hook.
+    bool registerUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> memory_util,
                                  size_t                               layout_idx,
                                  size_t                               offset_bytes,
                                  size_t                               bytes,
                                  size_t                               stride_bytes,
                                  bool                                 gpu,
                                  const std::string&                   buffer_type);
-    void deregisterUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> memory_util,
+    bool deregisterUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> memory_util,
                                    size_t                               layout_idx,
                                    size_t                               offset_bytes,
                                    bool                                 gpu,

@@ -4,6 +4,10 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
+#if USING_CUDA
+#include <cuda_runtime.h>
+#endif
+
 namespace rtp_llm {
 
 // ---------------------------------------------------------------------------
@@ -17,6 +21,26 @@ FnType probeSymbol(const char* symbol_name) {
     // The torch_memory_saver shim is injected via LD_PRELOAD, so its exports live in the
     // global symbol namespace and are reachable through RTLD_DEFAULT without linking.
     return reinterpret_cast<FnType>(dlsym(RTLD_DEFAULT, symbol_name));
+}
+
+// Best-effort runtime error probe around the void torch_memory_saver shim calls. The shim does the
+// real cuMemUnmap/cuMemMap and returns void, so a failed unmap/remap is not reported directly. We
+// bracket the call with this probe: it reads-and-clears the CUDA runtime error state, returning
+// false (after logging) if an error is pending. Clearing is deliberate -- an un-cleared sticky
+// error would otherwise resurface on an unrelated later CUDA call and be misattributed. Note this
+// only catches errors that reach the runtime error state; a driver-API-only failure inside the
+// shim may not, which is why the higher layers still verify (weight reload / KV access) on wake.
+bool cudaErrorStateClean(const char* what) {
+#if USING_CUDA
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        RTP_LLM_LOG_ERROR("VmmBackend: CUDA error at %s: %s", what, cudaGetErrorString(err));
+        return false;
+    }
+#else
+    (void)what;
+#endif
+    return true;
 }
 
 }  // namespace
@@ -50,7 +74,11 @@ bool VmmBackend::pause(const std::string& tag) {
         RTP_LLM_LOG_ERROR("VmmBackend::pause(tag=%s) failed: shim not available", tag.c_str());
         return false;
     }
+    cudaErrorStateClean("pause(pre, cleared)");  // clear any prior sticky so the probe below attributes to this op
     pause_fn_(tag.empty() ? nullptr : tag.c_str());
+    if (!cudaErrorStateClean("pause")) {
+        return false;
+    }
     return true;
 }
 
@@ -59,7 +87,11 @@ bool VmmBackend::resume(const std::string& tag) {
         RTP_LLM_LOG_ERROR("VmmBackend::resume(tag=%s) failed: shim not available", tag.c_str());
         return false;
     }
+    cudaErrorStateClean("resume(pre, cleared)");  // clear any prior sticky so the probe below attributes to this op
     resume_fn_(tag.empty() ? nullptr : tag.c_str());
+    if (!cudaErrorStateClean("resume")) {
+        return false;
+    }
     return true;
 }
 

@@ -97,12 +97,14 @@ bool synchronizeSleepDevice(const char* stage) {
     const auto err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
         RTP_LLM_LOG_ERROR("sleep device synchronize failed at %s: %s", stage, cudaGetErrorString(err));
+        cudaGetLastError();  // clear the sticky error so it cannot resurface on an unrelated later CUDA call
         return false;
     }
 #elif USING_ROCM
     const auto err = hipDeviceSynchronize();
     if (err != hipSuccess) {
         RTP_LLM_LOG_ERROR("sleep device synchronize failed at %s: %s", stage, hipGetErrorString(err));
+        hipGetLastError();  // clear the sticky error so it cannot resurface on an unrelated later HIP call
         return false;
     }
 #else

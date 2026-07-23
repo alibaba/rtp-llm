@@ -718,7 +718,19 @@ absl::Status NormalEngine::maybeReachCollectiveSleepQuiesce() {
             // Armed-only (handle==0 && pending/engaged), so steady serving never reaches this.
 #if USING_CUDA
             if (pending || collective_quiesce_engaged_) {
-                cudaDeviceSynchronize();
+                if (auto err = cudaDeviceSynchronize(); err != cudaSuccess) {
+                    // A failed drain means the device is already in a bad state (e.g. a peer's
+                    // mega-MoE NVLink barrier trapped -> CUDA_ERROR_LAUNCH_FAILED). Do NOT enqueue a
+                    // consensus round on a poisoned context; clear the sticky error and bail this
+                    // step. The coordinator's pauseAndWaitQuiesced timeout bounds the retry and rolls
+                    // the sleep back cleanly. A non-OK return here is fatal (loop() ->
+                    // THROW_IF_STATUS_ERROR kills the engine thread), so we stay OK and simply refuse
+                    // to progress the quiesce.
+                    RTP_LLM_LOG_ERROR("collective sleep quiesce pre-round drain sync failed, skipping round: %s",
+                                      cudaGetErrorString(err));
+                    cudaGetLastError();  // clear sticky so it cannot resurface on an unrelated later call
+                    return absl::OkStatus();
+                }
             }
 #endif
             // No round in flight: fill this rank's contribution and enqueue an async round.
@@ -772,6 +784,28 @@ absl::Status NormalEngine::maybeReachCollectiveSleepQuiesce() {
     }
 
     if (reached) {
+        // Final drain BEFORE any teardown bookkeeping: the CPU consensus above only proves no rank
+        // will enqueue new work; it does NOT prove the GPU is idle. This step's runExecutorProcess()
+        // launched a (fake-MoE) forward whose EP dispatch/combine is still async-retiring; for
+        // internode DeepEP the cross-node combine has a real RDMA tail. All ranks reach this branch
+        // in the same step (consensus is derived from the shared all-reduce), so draining here is
+        // symmetric and cannot hang. Combined with the coordinator's two-phase protocol (commit is
+        // sent only after every rank's prepare/quiesce returns, i.e. after this sync), it guarantees
+        // no rank tears down its MR / unmaps weight pages while a peer's collective still references
+        // them -- which is what otherwise poisons the CUDA context and makes torch_memory_saver's
+        // cuMemUnmap return a sticky CUDA 999 and abort the whole fleet.
+#if USING_CUDA
+        if (auto err = cudaDeviceSynchronize(); err != cudaSuccess) {
+            // The context is poisoned; committing the park now would unmap weight/KV pages on top of
+            // a broken context. Stay engaged (do not disengage or park) and let the coordinator's
+            // pauseAndWaitQuiesced timeout roll the sleep back. A non-OK return is fatal here
+            // (loop() -> THROW_IF_STATUS_ERROR), so clear the sticky error and stay OK.
+            RTP_LLM_LOG_ERROR("collective sleep quiesce final drain sync failed, refusing to park: %s",
+                              cudaGetErrorString(err));
+            cudaGetLastError();  // clear sticky so it cannot resurface on an unrelated later call
+            return absl::OkStatus();
+        }
+#endif
         // Disengage before parking so a subsequent wake resumes at the steady zero-cost path.
         collective_quiesce_engaged_ = false;
         if (scheduler_) {
@@ -782,19 +816,6 @@ absl::Status NormalEngine::maybeReachCollectiveSleepQuiesce() {
         RTP_LLM_LOG_INFO("normal engine collective sleep quiesce reached, epoch=%lu, world_size=%ld",
                          pause_epoch,
                          parallelism_config.world_size);
-        // CPU consensus above only proves no rank will enqueue new work; it does NOT prove the
-        // GPU is idle. This step's runExecutorProcess() launched a (fake-MoE) forward whose
-        // EP dispatch/combine is still async-retiring; for internode DeepEP the cross-node
-        // combine has a real RDMA tail. All ranks reach this branch in the same step (consensus
-        // is derived from the shared all-reduce), so draining here is symmetric and cannot hang.
-        // Combined with the coordinator's two-phase protocol (commit is sent only after every
-        // rank's prepare/quiesce returns, i.e. after this sync), it guarantees no rank tears down
-        // its MR / unmaps weight pages while a peer's collective still references them -- which
-        // is what otherwise poisons the CUDA context and makes torch_memory_saver's cuMemUnmap
-        // return a sticky CUDA 999 and abort the whole fleet.
-#if USING_CUDA
-        cudaDeviceSynchronize();
-#endif
         enterPausedState();
     }
     return absl::OkStatus();

@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
+#include "rtp_llm/cpp/utils/Exception.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
@@ -721,27 +722,56 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
         auto       memory_util = cache_store_->getMemoryUtil();
         const bool gpu         = where() == MemoryType::MEMORY_GPU;
 
+        // Track buffers registered in THIS call so a mid-loop failure rolls them back instead of
+        // leaking already-registered MRs (a leak also makes a wake retry double-register). On the
+        // wake path this runs inside the registerMr hook, whose invokeHookNoThrow catches the throw
+        // below and drives the controller to ERROR -- a clean recoverable failure, not an abort.
+        struct Registered {
+            size_t      layout_idx;
+            size_t      offset_bytes;
+            std::string type;
+        };
+        std::vector<Registered> registered;
+        auto                    rollback = [&]() {
+            for (auto it = registered.rbegin(); it != registered.rend(); ++it) {
+                deregisterUserMrForBuffer(memory_util, it->layout_idx, it->offset_bytes, gpu, it->type);
+            }
+        };
+
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];
 
             // Register KV buffer
-            registerUserMrForBuffer(memory_util,
+            if (!registerUserMrForBuffer(memory_util,
+                                         layout_idx,
+                                         layout_cfg.kv_cache_offset_bytes,
+                                         layout_cfg.kv_block_pool_size_bytes,
+                                         layout_cfg.kv_block_stride_bytes,
+                                         gpu,
+                                         "kv")) {
+                rollback();
+                throw RTP_EXCEPTION("register user mr for block pool layout[%zu] kv buffer failed (rolled back %zu)",
                                     layout_idx,
-                                    layout_cfg.kv_cache_offset_bytes,
-                                    layout_cfg.kv_block_pool_size_bytes,
-                                    layout_cfg.kv_block_stride_bytes,
-                                    gpu,
-                                    "kv");
+                                    registered.size());
+            }
+            registered.push_back({layout_idx, layout_cfg.kv_cache_offset_bytes, "kv"});
 
             // Register scale buffer if present
             if (layout_cfg.hasScale()) {
-                registerUserMrForBuffer(memory_util,
-                                        layout_idx,
-                                        layout_cfg.kv_scale_offset_bytes,
-                                        layout_cfg.kv_scale_pool_size_bytes,
-                                        layout_cfg.kv_scale_stride_bytes,
-                                        gpu,
-                                        "scale");
+                if (!registerUserMrForBuffer(memory_util,
+                                             layout_idx,
+                                             layout_cfg.kv_scale_offset_bytes,
+                                             layout_cfg.kv_scale_pool_size_bytes,
+                                             layout_cfg.kv_scale_stride_bytes,
+                                             gpu,
+                                             "scale")) {
+                    rollback();
+                    throw RTP_EXCEPTION(
+                        "register user mr for block pool layout[%zu] scale buffer failed (rolled back %zu)",
+                        layout_idx,
+                        registered.size());
+                }
+                registered.push_back({layout_idx, layout_cfg.kv_scale_offset_bytes, "scale"});
             }
         }
 
@@ -755,16 +785,27 @@ void BlockPool::deregUserMr() {
         auto       memory_util = cache_store_->getMemoryUtil();
         const bool gpu         = where() == MemoryType::MEMORY_GPU;
 
+        // Attempt ALL deregs even if one fails, so we never leave a subset registered.
+        bool all_ok = true;
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];
 
             // Deregister KV buffer
-            deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_cache_offset_bytes, gpu, "kv");
+            all_ok &= deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_cache_offset_bytes, gpu, "kv");
 
             // Deregister scale buffer if present
             if (layout_cfg.hasScale()) {
-                deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_scale_offset_bytes, gpu, "scale");
+                all_ok &=
+                    deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_scale_offset_bytes, gpu, "scale");
             }
+        }
+
+        if (!all_ok) {
+            // A dereg failed: the MR may still pin KV pages the sleep path is about to VMM-unmap.
+            // Leave kvcache_reg_mr_ set (MRs believed live) and throw so the synchronizeAndDeregisterMr
+            // hook fails into ERROR rather than releasing physical memory under a live MR -- a dangling
+            // MR is exactly what historically forced a GPU reset. Caught by invokeHookNoThrow.
+            throw RTP_EXCEPTION("deregister user mr for block pool failed for one or more buffers");
         }
 
         RTP_LLM_LOG_INFO("deregister user mr for block pool success");
@@ -772,7 +813,7 @@ void BlockPool::deregUserMr() {
     }
 }
 
-void BlockPool::registerUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> memory_util,
+bool BlockPool::registerUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> memory_util,
                                         size_t                               layout_idx,
                                         size_t                               offset_bytes,
                                         size_t                               bytes,
@@ -783,7 +824,9 @@ void BlockPool::registerUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> mem
     auto  start_us = currentTimeUs();
 
     if (!memory_util->regUserMr(base_ptr, bytes, gpu, stride_bytes)) {
-        RTP_LLM_FAIL("register user mr for block pool layout[%zu] %s buffer failed", layout_idx, buffer_type.c_str());
+        RTP_LLM_LOG_ERROR(
+            "register user mr for block pool layout[%zu] %s buffer failed", layout_idx, buffer_type.c_str());
+        return false;
     }
 
     auto cost_ms = (currentTimeUs() - start_us) / 1000;
@@ -796,9 +839,10 @@ void BlockPool::registerUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> mem
                      bytes,
                      stride_bytes,
                      cost_ms);
+    return true;
 }
 
-void BlockPool::deregisterUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> memory_util,
+bool BlockPool::deregisterUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> memory_util,
                                           size_t                               layout_idx,
                                           size_t                               offset_bytes,
                                           bool                                 gpu,
@@ -806,8 +850,11 @@ void BlockPool::deregisterUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> m
     void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
 
     if (!memory_util->deregUserMr(base_ptr, gpu)) {
-        RTP_LLM_FAIL("deregister user mr for block pool layout[%zu] %s buffer failed", layout_idx, buffer_type.c_str());
+        RTP_LLM_LOG_ERROR(
+            "deregister user mr for block pool layout[%zu] %s buffer failed", layout_idx, buffer_type.c_str());
+        return false;
     }
+    return true;
 }
 
 size_t BlockPool::freeBlocksNum() const {

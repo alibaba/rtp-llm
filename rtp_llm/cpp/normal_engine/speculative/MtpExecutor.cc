@@ -2101,11 +2101,31 @@ void MtpExecutor::drainAsyncRunners() {
     // stream work would still reference weights/KV when torch_memory_saver releases them at
     // sleep -- corrupting NCCL/CUDA state so the next sleep's SLEEP_QUIESCE all-reduce hangs.
     // Drain them all here. sync() is a no-op for a runner with nothing in flight.
+    //
+    // AsyncRunner::sync() rethrows any exception its worker fn raised. This runs on the engine loop
+    // thread inside the sleep-quiesce arm path (step() -> maybeReachCollectiveSleepQuiesce), where an
+    // uncaught throw would escape step()/loop() and kill the engine thread. Swallow it here: log +
+    // clear any sticky CUDA error. The drain is best-effort (its point is to retire cross-step work
+    // before torch_memory_saver releases weights/KV); if a runner actually failed, the subsequent
+    // quiesce cudaDeviceSynchronize (NormalEngine) detects the poisoned context and refuses to commit
+    // the sleep, so we never park on a broken state.
     const auto stream = cuda_graph::graphGetCurrentStream();
-    target_verify_prepare_runner_.sync(stream);
-    draft_prefill_prepare_runner_.sync(stream);
-    spec_logits_verify_async_runner_.sync(stream);
-    spec_bookkeeping_runner_.sync(stream);
+    try {
+        target_verify_prepare_runner_.sync(stream);
+        draft_prefill_prepare_runner_.sync(stream);
+        spec_logits_verify_async_runner_.sync(stream);
+        spec_bookkeeping_runner_.sync(stream);
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("drainAsyncRunners: async runner sync failed during sleep quiesce: %s", e.what());
+#if USING_CUDA
+        cudaGetLastError();  // clear sticky so it cannot resurface on an unrelated later call
+#endif
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("drainAsyncRunners: async runner sync failed during sleep quiesce (unknown exception)");
+#if USING_CUDA
+        cudaGetLastError();
+#endif
+    }
 }
 
 absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
