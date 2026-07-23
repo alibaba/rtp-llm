@@ -25,6 +25,25 @@ def _model_data_type_name(dtype: torch.dtype) -> str:
     raise ValueError(f"unsupported cuda graph decode test dtype: {dtype}")
 
 
+class _AuxHiddenModel:
+    def __init__(self, model: GptModelBase) -> None:
+        self.model = model
+        self.aux_hidden = None
+
+    def prepare_fmha_impl(self, *args, **kwargs):
+        return self.model.prepare_fmha_impl(*args, **kwargs)
+
+    def forward(self, *args, **kwargs):
+        outputs = self.model.forward(*args, **kwargs)
+        self.aux_hidden = outputs.hidden_states * 2
+        return outputs
+
+    def get_mtp_target_hidden_states(self, num_tokens: int):
+        if self.aux_hidden is None or num_tokens < 0:
+            return self.aux_hidden
+        return self.aux_hidden[:num_tokens]
+
+
 class TestCudaGraphDecodePadding(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
@@ -33,7 +52,9 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         # Test parameters (can be configured)
         self.max_seq_len = 64
         self.tokens_per_block = 64
-        self.max_batch_size = 64
+        self.max_batch_size = int(
+            os.getenv("RTP_LLM_CUDA_GRAPH_TEST_MAX_BATCH_SIZE", "64")
+        )
         self.device = "cuda:0"
 
         # Generate decode_capture_batch_sizes from 1 to max_batch_size, excluding some values
@@ -47,7 +68,11 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         # Build model using shared model builder
         self.model_builder = CudaGraphTestModelBuilder(
             ModelBuildConfig(
-                model_path="/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+                model_path=os.getenv(
+                    "RTP_LLM_CUDA_GRAPH_TEST_MODEL_PATH",
+                    "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+                ),
+                tokenizer_path=os.getenv("RTP_LLM_CUDA_GRAPH_TEST_TOKENIZER_PATH"),
                 tokens_per_block=self.tokens_per_block,
                 device=self.device,
             )
@@ -71,9 +96,10 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         ), "hidden_size must be set for CudaGraphRunner decode (from model_config in engine build path)"
         self.hidden_size = hidden_size
 
+        self.graph_model = _AuxHiddenModel(model)
         self.op = CudaGraphRunner()
         self.op.init_decode(
-            model,
+            self.graph_model,
             hidden_size,
             self.max_seq_len,
             self.tokens_per_block,
@@ -213,32 +239,59 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
             pass_ratio >= 0.999
         ), f"Only {pass_ratio*100:.2f}% elements pass, expected >= 99.9%"
 
+        aux_hidden = self.op.getMtpTargetHiddenStates(batch_size)
+        torch.testing.assert_close(
+            aux_hidden,
+            outputs2.hidden_states * 2,
+            rtol=1e-2,
+            atol=1e-2,
+        )
+
     def test_batch_decode(self):
         batch_range = [
-            1,
-            2,
-            3,
-            4,
-            5,
-            6,
-            7,
-            8,
-            9,
-            10,
-            11,
-            12,
-            13,
-            14,
-            15,
-            19,
-            27,
-            48,
-            64,
+            batch_size
+            for batch_size in [
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12,
+                13,
+                14,
+                15,
+                19,
+                27,
+                48,
+                64,
+            ]
+            if batch_size <= self.max_batch_size
         ]
 
         for bs in batch_range:
             self._test_single(bs)
             print(f"success for batch size: {bs}")
+
+        incompatible_inputs = self.build_inputs(
+            batch_size=1,
+            max_seq_len=self.max_seq_len,
+            seq_size_per_block=self.kernel_tokens_per_block,
+        )
+        incompatible_inputs.input_hiddens = torch.zeros(
+            (1, self.hidden_size * 3),
+            dtype=self.compute_dtype,
+            device="cuda",
+        )
+        self.assertFalse(
+            self.op.canRun(incompatible_inputs),
+            "an H-width CUDA graph must not replay a 3H draft handoff input",
+        )
 
 
 if __name__ == "__main__":

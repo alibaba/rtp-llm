@@ -820,6 +820,7 @@ def build_model_config(
         Any
     ] = None,  # QuantizationConfig (optional, for quantization)
     vit_config: Optional[VitConfig] = None,
+    apply_hack_layer_num: bool = True,
 ) -> None:
     """Build and initialize ModelConfig from model_args.
 
@@ -833,6 +834,7 @@ def build_model_config(
         profiling_debug_logging_config: ProfilingDebugLoggingConfig for hack_layer_num
         embedding_config: Optional EmbeddingConfig (for check_task_type)
         quantization_config: Optional QuantizationConfig (for quantization settings)
+        apply_hack_layer_num: Whether to apply the target-model debug layer override
     """
     model_config.ckpt_path = model_args.ckpt_path
     model_config.tokenizer_path = model_args.tokenizer_path
@@ -890,7 +892,7 @@ def build_model_config(
 
     # Apply hack_layer_num if needed
     hack_layer_num = profiling_debug_logging_config.hack_layer_num
-    if hack_layer_num:
+    if apply_hack_layer_num and hack_layer_num:
         logging.info(f"hack layernum to {hack_layer_num}")
         model_config.num_layers = hack_layer_num
 

@@ -52,12 +52,18 @@ public:
 
             const auto& mtp_spec = mtp_sub_config->cache_specs[0];
             // mtp block size is not same with main model block size
+            // All layouts in one BlockPool share the same block-id space. The
+            // parent block count may have been reduced by cross-rank sync after
+            // the MTP sub-configs were created, so size the draft layout with
+            // the synchronized parent count as well.
+            CacheConfig mtp_layout_config = *mtp_sub_config;
+            mtp_layout_config.block_num   = cache_config.block_num;
             MemoryLayoutConfig mtp_layout = createMemoryLayoutConfig(false,
                                                                      mtp_layer_num,
                                                                      mtp_sub_config->kv_block_stride_bytes,
                                                                      mtp_sub_config->kv_scale_stride_bytes,
                                                                      mtp_spec,
-                                                                     *mtp_sub_config);
+                                                                     mtp_layout_config);
 
             mtp_layout.kv_cache_offset_bytes = current_offset;
             RTP_LLM_LOG_INFO("mtp_layout.kv_block_pool_size_bytes = %ld", mtp_layout.kv_block_pool_size_bytes);
