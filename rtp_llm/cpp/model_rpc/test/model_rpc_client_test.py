@@ -191,6 +191,18 @@ class ModelRpcClientTest(TestCase):
         self.assertAlmostEqual(logits_2[0][0], 0.0, places=6)
         self.assertAlmostEqual(logits_2[0][1], 0.0, places=6)
 
+    def test_trans_input_carries_unique_key(self):
+        generate_config = GenerateConfig(unique_key="reuse-session-a")
+        input = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=generate_config,
+            request_id=123,
+            mm_inputs=[],
+        )
+
+        input_pb = trans_input(input)
+
+        self.assertEqual(input_pb.generate_config.unique_key, "reuse-session-a")
 
 if __name__ == "__main__":
     setup_logging()

@@ -156,6 +156,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.enable_remote_cache = (
         input_py.generate_config.enable_remote_cache
     )
+    generate_config_pb.unique_key = input_py.generate_config.unique_key
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "trace_id", functools.partial(str)
     )
