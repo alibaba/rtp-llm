@@ -681,6 +681,14 @@ void MtpBatchStreamProcessor::updatePrefillPostDSparkDraftModelInput(GptModelInp
     model_input.last_hidden_states = aux.reshape({aux.size(0), -1});
     model_input.dspark_ctx_lengths = suffix_lengths;
 
+    // PD separation: this draft forward's attention prefix below is the full
+    // (unaligned) prompt, which the cache-store registration cannot digest.
+    // Register draft-layer blocks from the block-aligned reuse over the
+    // computed suffix + query block instead (covers the injected ctx feature
+    // KV; the query-window rows are re-injected by the decode tail).
+    model_input.cache_store_prefix_lengths = reuse_lengths;
+    model_input.cache_store_input_lengths  = suffix_lengths + static_cast<int32_t>(width);
+
     model_input.combo_tokens     = combo_2d.reshape({-1});
     model_input.prefix_lengths   = reuse_lengths + suffix_lengths;  // = full prompt length
     model_input.input_lengths    = fullInt32OnCuda({batch_size}, width);

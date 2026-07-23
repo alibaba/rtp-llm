@@ -138,6 +138,14 @@ struct PyCacheStoreInputs {
     // Opaque cache_store reference (C++ only; passes through Python without inspection)
     std::shared_ptr<rtp_llm::CacheStore> cache_store;
     rtp_llm::CacheStoreAsyncWriter*      cache_store_async_writer = nullptr;
+
+    // Optional overrides for the block-range computation (see
+    // GptModelInputs::cache_store_*_lengths, set by the dspark seeding
+    // forward); undefined = use the attention input/prefix lengths handed to
+    // WriteCacheStoreOp.  Kept last: this struct is brace-initialized
+    // positionally and the tensors are assigned by name afterwards.
+    torch::Tensor store_input_lengths;
+    torch::Tensor store_prefix_lengths;
 };
 
 struct PyPrefillCudaGaphCopyParams {

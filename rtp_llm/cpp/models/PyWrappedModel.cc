@@ -426,6 +426,14 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
                                                   && mla_ops_type_ != rtp_llm::MlaOpsType::MHA,
                                               cache_manager_ ? cache_manager_->getCacheStore() : nullptr,
                                               cache_store_async_writer_.get()};
+        // dspark seeding: the draft forward's attention prefix is the full
+        // (unaligned) prompt; register blocks from the aligned reuse instead.
+        if (inputs.cache_store_input_lengths.defined()) {
+            cache_store_inputs.store_input_lengths = async_to_pinned_host(inputs.cache_store_input_lengths);
+        }
+        if (inputs.cache_store_prefix_lengths.defined()) {
+            cache_store_inputs.store_prefix_lengths = async_to_pinned_host(inputs.cache_store_prefix_lengths);
+        }
         params = cache_store_inputs;
     }
     return params;
@@ -782,15 +790,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // and token_ids/combo_position_ids use direct .to(non_blocking=true). All are
         // async on the current stream and ordered correctly with the kernels below.
 
-        auto           py_model_inputs = PyModelInputs({token_ids,
-                                                        input_hiddens,
-                                                        combo_position_ids,
-                                                        embedding_inputs,
-                                                        multimodal_inputs,
-                                                        attention_inputs_,
-                                                        bert_embedding_inputs});
-        py_model_inputs.dspark_ctx_lengths        = inputs.dspark_ctx_lengths;
-        py_model_inputs.dspark_ctx_starts         = inputs.dspark_ctx_starts;
+        auto py_model_inputs               = PyModelInputs({token_ids,
+                                              input_hiddens,
+                                              combo_position_ids,
+                                              embedding_inputs,
+                                              multimodal_inputs,
+                                              attention_inputs_,
+                                              bert_embedding_inputs});
+        py_model_inputs.dspark_ctx_lengths = inputs.dspark_ctx_lengths;
+        py_model_inputs.dspark_ctx_starts  = inputs.dspark_ctx_starts;
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -813,8 +821,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             // the [B, k, V] distribution never persists as a graph output.
             if (is_dspark_ && !use_spec_decoding_) {
                 py::gil_scoped_acquire gil;
-                auto tail_obj = py_model_.attr("draft_tail")(py_model_outputs, py_model_inputs);
-                py_model_outputs = tail_obj.cast<PyModelOutputs>();
+                auto                   tail_obj = py_model_.attr("draft_tail")(py_model_outputs, py_model_inputs);
+                py_model_outputs                = tail_obj.cast<PyModelOutputs>();
             }
             hidden_states = py_model_outputs.hidden_states.clone();
             // Graph output buffers are reused across replays; detach copies of

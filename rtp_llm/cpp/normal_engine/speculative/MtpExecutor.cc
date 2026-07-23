@@ -373,6 +373,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                     || role_type_ == RoleType::DECODE,
                                 "dspark supports PDFUSION/PREFILL/DECODE roles, got role_type=%d",
                                 static_cast<int>(role_type_));
+        // The cache_store_*_lengths seeding overrides are not tp-synced yet.
+        RTP_LLM_CHECK_WITH_INFO(role_type_ == RoleType::PDFUSION || params.parallelism_config.tp_size <= 1,
+                                "dspark PD separation does not support tp_size > 1 yet, got tp=%zu",
+                                (size_t)params.parallelism_config.tp_size);
         RTP_LLM_CHECK_WITH_INFO(!params.parallelism_config.prefill_cp_config.is_enabled()
                                     && !params.parallelism_config.prefill_cp_config.is_prefill_enabled(),
                                 "dspark phase-1a does not support context parallel");

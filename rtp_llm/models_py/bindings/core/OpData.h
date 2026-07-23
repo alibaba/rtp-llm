@@ -79,6 +79,14 @@ struct GptModelInputs {
     torch::Tensor request_id;             // int64, [context_batch_size]
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
+    // PD cache-store registration overrides, int32 [context_batch_size].
+    // The dspark seeding forward runs the draft with attention-semantics
+    // prefix_lengths = full prompt (not block-aligned); the cache store still
+    // needs (block-aligned reuse, suffix + block width) to register the right
+    // block range.  Undefined = use input_lengths/prefix_lengths as before.
+    // NOT tp-synced yet: dspark PD is gated to tp_size == 1 at init.
+    torch::Tensor cache_store_input_lengths;
+    torch::Tensor cache_store_prefix_lengths;
     size_t        kv_block_stride_bytes;
     size_t        kv_scale_stride_bytes;
     size_t        seq_size_per_block;

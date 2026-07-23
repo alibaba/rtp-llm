@@ -19,8 +19,11 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
 
     // Capture all torch::Tensors by value so the underlying memory stays alive
     // in the background thread. torch::Tensor copy is a cheap refcount bump.
-    auto captured_input_lengths          = input_lengths;
-    auto captured_prefix_lengths         = prefix_lengths;
+    // The store_* overrides (dspark seeding) win over the attention lengths.
+    auto captured_input_lengths =
+        cache_store_inputs.store_input_lengths.defined() ? cache_store_inputs.store_input_lengths : input_lengths;
+    auto captured_prefix_lengths =
+        cache_store_inputs.store_prefix_lengths.defined() ? cache_store_inputs.store_prefix_lengths : prefix_lengths;
     auto captured_kv_cache_block_id_host = kv_cache_block_id_host;
     auto captured_cache_store            = cache_store_inputs;
     auto captured_kv_cache               = kv_cache.value();

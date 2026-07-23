@@ -355,6 +355,12 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
     grpc::ServerBuilder builder;
     const GrpcConfig&   grpc_config   = maga_init_params.grpc_config;
     auto                server_config = grpc_config.get_server_config();
+    // Match the client pool (RPCPool.h) default: PD side-channel payloads can
+    // exceed gRPC's 4MB default (e.g. the dspark [1, k, vocab] propose probs).
+    // An explicit server_config entry still wins.
+    if (server_config.find(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH) == server_config.end()) {
+        server_config[GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH] = -1;
+    }
     for (auto it = server_config.begin(); it != server_config.end(); ++it) {
         RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);
         builder.AddChannelArgument(it->first, it->second);
