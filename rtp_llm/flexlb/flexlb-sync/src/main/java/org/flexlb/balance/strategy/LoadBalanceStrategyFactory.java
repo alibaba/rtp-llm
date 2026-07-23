@@ -20,4 +20,18 @@ public class LoadBalanceStrategyFactory {
         }
         return loadBalancer;
     }
+
+    /**
+     * Test-only: clears the global registry so a test starts from a known-empty state and
+     * neither inherits nor leaks strategy registrations across classes (the map is process-wide
+     * static, so registration order would otherwise make tests order-dependent).
+     *
+     * <p>Never call from production code. Strategies register exactly once during Spring
+     * initialization; clearing the registry at runtime is unrecoverable — every subsequent
+     * {@link #getLoadBalancer} throws until the process restarts. Public only because test
+     * callers live in more than one package.
+     */
+    public static void resetForTesting() {
+        loadBalancerFactory.clear();
+    }
 }

@@ -51,7 +51,6 @@ class RandomStrategyTest {
         // Given: No workers registered for the model
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
@@ -70,7 +69,6 @@ class RandomStrategyTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
 
         Request req = new Request();
-
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -94,7 +92,6 @@ class RandomStrategyTest {
         prefillStatusMap.put("127.0.0.1:8080", workerStatus);
 
         Request req = new Request();
-
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -121,7 +118,6 @@ class RandomStrategyTest {
         prefillStatusMap.put("127.0.0.3:8080", worker3);
 
         Request req = new Request();
-
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -150,7 +146,6 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
@@ -174,7 +169,6 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
@@ -195,7 +189,6 @@ class RandomStrategyTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.1:8080", worker);
 
         Request req = new Request();
-
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -235,7 +228,6 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
@@ -269,7 +261,7 @@ class RandomStrategyTest {
     }
 
     @Test
-    void should_select_dead_workers_with_warning() {
+    void should_skip_dead_workers_and_only_select_alive_ones() {
         // Given: Model with mix of alive and dead workers
         Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
 
@@ -283,7 +275,6 @@ class RandomStrategyTest {
         prefillStatusMap.put("127.0.0.2:8080", aliveWorker);
 
         Request req = new Request();
-
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -302,10 +293,40 @@ class RandomStrategyTest {
             }
         }
 
-        // Then: Both workers should be selected (RandomStrategy doesn't filter dead workers)
-        // Note: RandomStrategy doesn't filter dead workers, it just warns
-        assertTrue(selectionCount.containsKey("127.0.0.1") || selectionCount.containsKey("127.0.0.2"));
-        assertEquals(totalRuns, selectionCount.getOrDefault("127.0.0.1", 0) + selectionCount.getOrDefault("127.0.0.2", 0));
+        // Then: select() skips dead workers via wrap-around, so the dead worker is never chosen
+        // and every request lands on the only alive worker. Flipping the isAlive() guard in
+        // RandomStrategy.select() would let 127.0.0.1 appear here and turn this red.
+        assertFalse(selectionCount.containsKey("127.0.0.1"),
+                "dead worker must never be selected");
+        assertEquals(totalRuns, selectionCount.getOrDefault("127.0.0.2", 0),
+                "every request must route to the only alive worker");
+    }
+
+    @Test
+    void should_return_error_when_all_workers_are_dead() {
+        // Given: Model with only dead workers
+        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+
+        WorkerStatus deadWorker1 = createWorkerStatus("127.0.0.1");
+        deadWorker1.setAlive(false);
+        prefillStatusMap.put("127.0.0.1:8080", deadWorker1);
+
+        WorkerStatus deadWorker2 = createWorkerStatus("127.0.0.2");
+        deadWorker2.setAlive(false);
+        prefillStatusMap.put("127.0.0.2:8080", deadWorker2);
+
+        Request req = new Request();
+
+        BalanceContext balanceContext = new BalanceContext();
+        balanceContext.setRequest(req);
+
+        // When: Select a worker
+        ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
+
+        // Then: wrap-around exhausts every worker without finding an alive one -> NO_AVAILABLE_WORKER
+        assertFalse(result.isSuccess());
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), result.getCode());
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorMsg(), result.getMessage());
     }
 
     @Test
@@ -345,7 +366,6 @@ class RandomStrategyTest {
         prefillStatusMap.put("127.0.0.1:8080", worker);
 
         Request req = new Request();
-
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);

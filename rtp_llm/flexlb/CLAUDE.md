@@ -22,6 +22,7 @@ Key classes:
 
 New HTTP endpoints in `HttpLoadBalanceServer`:
 - `POST /rtp_llm/schedule`: Main load balance endpoint
+- `POST /rtp_llm/batch_schedule`: Resolve N worker targets in one shot (`{"batch_count": N}` → `{"server_status": [...]}`); single-role deployments only, count capped by `batchScheduleMaxCount`
 - `POST /rtp_llm/master/info`: Get master info
 - `POST /rtp_llm/schedule_snapshot`: Dump LB status
 - `POST /rtp_llm/notify_master`: Notify participant of master change
@@ -166,11 +167,12 @@ The `DefaultRouter` orchestrates routing across these stages. If a later stage f
 
 ### Load Balancing Strategies
 
-Three strategies are available (registered with `LoadBalanceStrategyFactory`):
+Four strategies are available (registered with `LoadBalanceStrategyFactory`):
 
 - **RANDOM**: Random worker selection
-- **SHORTEST_TTFT**: Select worker with shortest Time-To-First-Token
-- **WEIGHTED_CACHE**: Cache-aware selection prioritizing workers with matching KV cache blocks
+- **SHORTEST_TTFT**: Select worker with shortest Time-To-First-Token (default for PDFUSION/PREFILL)
+- **WEIGHTED_CACHE**: Cache-aware selection prioritizing workers with matching KV cache blocks (default for DECODE)
+- **ROUND_ROBIN**: Cursor-based round-robin. No load awareness, much cheaper than SHORTEST_TTFT — no resource scan or scoring; selection is a cursor bump plus an O(alive) liveness filter (`RoundRobinLoadBalancer`). Supports both `select` and batch-aware `selectBatch`; cursors are keyed per `(role, group)`. Use when worker fleets are typically uniform; trades off the ability to avoid hot workers under load skew.
 
 Each `RoleType` can use a different strategy. See `LoadBalanceStrategyEnum` in flexlb-common.
 
@@ -297,7 +299,7 @@ FlexLB reads configuration from environment variables:
 ```json
 {
   "deploy": "DISAGGREGATED",
-  "loadBalanceStrategy": "ROUND_ROBIN_LOWEST_CONCURRENCY",
+  "loadBalanceStrategy": "SHORTEST_TTFT",
   "prefillBatchWaitTimeMs": 100,
   "kvCache": "LOCAL_STATIC",
   "staticCacheBlockSize": 500,
@@ -317,6 +319,16 @@ New configuration fields:
 - `maxQueueSize`: Maximum queue capacity for `QueueManager`
 - `scheduleWorkerSize`: Worker thread pool size for `RequestScheduler`
 - `resourceCheckIntervalMs`: Resource check interval for `DynamicWorkerManager`
+- `batchLoadBalanceStrategy`: Strategy for `/batch_schedule`, decoupled from `/schedule`'s (default: `ROUND_ROBIN`, the only batch-capable strategy today)
+- `batchScheduleMaxCount`: Upper bound accepted for `batch_count` on `/batch_schedule` (default: 1000)
+- `engineType`: `LLM` (default) or `EMBEDDING`. EMBEDDING flips three behaviors at once: liveness trusts the service-discovery host list instead of gRPC probing (embedding engines expose no `GetWorkerStatus`), `/batch_schedule` targets carry `arpc_port` instead of `grpc_port`, and the single-call `/schedule` path is refused (batch-only). EMBEDDING requires load-unaware strategies (`ROUND_ROBIN`/`RANDOM`) for all deployed roles — boot fails otherwise (`validateEngineTypeConfig`)
+- `discoveryFailureGraceMs`: How long a service-discovery outage may keep already-known workers in the roster before they age out (default: 300000). An **empty** result from a lookup that otherwise "succeeded" counts as an outage, not as an empty fleet: a discovery client that swallows a failed lookup reports it exactly like a fleet that scaled to zero, so an empty list never overwrites non-empty known state — it rides this same grace window. Partial shrinkage (a non-empty list that dropped some hosts) is unambiguous and still takes effect immediately.
+
+  What the window governs differs by `engineType`, because the two engines learn liveness differently:
+  - **LLM**: *within* the window the window governs membership, and liveness stays probe-driven. Discovery never was the liveness signal here — gRPC probing is — so during the outage the known workers keep being probed and their staleness clocks are refreshed by probe success alone. A worker that dies mid-outage fails its probe, is marked dead, stops being refreshed, and ages out on the normal `ExpirationCleaner` schedule (~3 s), **not** at the end of the grace window; a fleet that genuinely scaled to zero therefore drains at probe speed. Past the window the probing stops as well (`rideOutDiscoveryGap` returns before submitting any), so the clocks go stale and the roster drains whether or not the workers are healthy: the window bounds how long an outage can be ridden out at all, not merely how long membership additions/removals stay frozen. A discovery outage that outlives the window takes a healthy LLM fleet out of rotation.
+  - **EMBEDDING**: the window governs *routability*, because discovery presence is the only liveness signal (no `GetWorkerStatus` to probe). During the outage the staleness clocks of workers still marked alive are refreshed so they survive; workers a previous authoritative round already marked dead are left to age out. Here a fleet that scaled to zero does drain only after the window.
+
+Env override semantics (`EnvConfigOverrides`, applies to every field above via `FIELD_NAME_UPPER_SNAKE` env vars — e.g. `BATCH_SCHEDULE_MAX_COUNT`): **behavior changed vs. older builds** — an invalid *enum* value (e.g. a mistyped `LOAD_BALANCE_STRATEGY` or `ENGINE_TYPE`) now fails startup instead of being silently ignored, and enum values are now case-insensitive (a lowercase value that older builds ignored now takes effect). Audit lingering env vars before upgrading. Numeric typos still log-and-keep-default; booleans follow `Boolean.parseBoolean` (anything but "true" reads as false).
 
 ### MODEL_SERVICE_CONFIG (required)
 ```json
@@ -333,6 +345,64 @@ New configuration fields:
 
 ### FLEXLB_SYNC_CONSISTENCY_CONFIG (optional, for master election)
 ZooKeeper connection configuration for distributed coordination.
+
+### DISPATCH_CONFIG (optional, opt-in)
+
+A non-blank `fePoolServiceId` is the enable signal (there is no separate `enabled` flag): every dispatcher bean is gated on `dispatch.fe-pool-service-id`. Either style sets it — the `DISPATCH_FE_POOL_SERVICE_ID` env (Spring relaxed binding) or a `fePoolServiceId` inside the `DISPATCH_CONFIG` JSON (expanded into the property at startup by `DispatchConfigEnvironmentPostProcessor`), so configuring everything through `DISPATCH_CONFIG` alone enables the dispatcher too. When enabled, FlexLB serves `/dispatcher/<original_fe_path>` on its 7001 listener. Requests are matched against the hard-coded **batch endpoint registry** (`BatchEndpointSpec.SPECS`); registered paths whose array field is present (as a JSON array) are split across the FE pool and merged; any other JSON-object body on a registered path — and every unregistered path — is passthrough-forwarded verbatim to one FE. For `/v1/embeddings` the array only counts as a batch when every element is a string (`splitRequiresStringItems`); a single multimodal input expressed as `List[ContentPart]`/`List[ChatMessage]` is passthrough-forwarded whole, not split per element. For the `prompt_batch` endpoints (`/`, `/batch_infer`) a body that carries a companion field FE positionally aligns to the prompt count but the dispatcher does not slice — top-level `images`/`urls` (each `list[list]`) or a list-form `generate_config.adapter_name` — is likewise passthrough-forwarded whole (`requiresWholeBody`), since a split chunk would carry the full-length companion against a shorter prompt slice and FE's `request_extractor` would reject every chunk. Rejected with 400 on registered paths: non-JSON-object bodies (empty, malformed, top-level array), and a body whose `generate_config` is present but not a JSON object (chunk assembly copies it per chunk, so a scalar there is a deterministic caller error rather than a dispatch failure).
+
+```json
+{
+  "fePoolServiceId": "rtp_llm.frontend.service",
+  "subBatch": "count:5",
+  "batchTimeoutMs": 30000,
+  "probePath": "/frontend_health",
+  "preAssignBe": true
+}
+```
+
+- `subBatch`: chunk-splitting DSL — `count:N` (exactly N chunks, default), `size:N` (≤N items per chunk), bare integer = `size:N`.
+- `batchTimeoutMs`: per sub-call wait for FE response headers (default 30000). For non-streaming generation endpoints FE sends headers only after the whole chunk finishes generating, so this must cover one chunk's full generation time; tune down for embedding-only deployments. The body read is separately capped at `batchTimeoutMs + bodyReadMarginMs`, and the passthrough path bounds its headers wait with the same knob (its body stream has its own 10-min inactivity cap). The headers window starts at subscribe, so it also includes connection acquisition and inbound request-body upload time — relevant on the passthrough path, whose catch-all traffic can carry large bodies. A non-streaming passthrough request whose TTFB exceeds `batchTimeoutMs` (e.g. a single long generation) gets a 502: deployments with such traffic must raise `batchTimeoutMs` or have those clients hit FE directly. For the same reason, before tuning down for an embedding-only deployment, verify the passthrough traffic's TTFB also fits the lower value.
+- `bodyReadMarginMs`: extra budget past `batchTimeoutMs` for reading the FE response body (default 30000). `batchTimeoutMs` only bounds time-to-headers; this caps the whole call so an FE that sends headers and then stalls mid-body cannot pin the request and its pooled connection forever. Raise it for FE fleets on slow links.
+- `probePath`: FE liveness probe path (`/frontend_health` for rtp_llm, `/health` for vLLM).
+- `preAssignBe`: BE pre-assignment toggle (see Known limits below). Note `/dispatcher/_dryrun` ignores this default and never pre-assigns unless called with `?pre_assign=true`: resolving BE targets advances master's round-robin cursor, and a diagnostic must not perturb live distribution.
+
+**FE pool and empty discovery:** an empty discovery snapshot rides a bounded grace window measured from the last non-empty snapshot. Within the window it is treated as suspect — indistinguishable from a swallowed lookup failure — and the known FEs are kept; liveness is not discovery's job here: `FeHealthChecker` probes the known FEs directly, so hosts that are genuinely gone still leave rotation via the probe. Past the window the empty result is accepted as the truth (the fleet scaled to zero): the pool drains and `FePool.next()` fails fast until discovery reports hosts again. The window follows the same `FlexlbConfig.discoveryFailureGraceMs` the sync side reads (default 5 min; an absent or non-positive value falls back to 5 min). Lookup FAILURES throw and never touch the pool — only a lookup that succeeded with an empty list enters the grace logic. A cold pool (nothing known yet) still accepts an empty snapshot, and any non-empty answer replaces the retained one and resets the grace clock.
+
+Loading order: defaults → `DISPATCH_CONFIG` JSON → per-field `DISPATCH_*` env overrides (e.g. `DISPATCH_BATCH_TIMEOUT_MS`, `DISPATCH_PROBE_PATH`), matching the `FLEXLB_CONFIG` contract. Connection-pool/timeout knobs that are never operator-tuned (connect timeout, max connections, pending acquire, stream duration cap, max response bytes) are constants in `DispatcherConfiguration` / `FeClient` / `PassthroughClient`.
+
+**Batch endpoint registry (built-in):**
+
+| Path under `/dispatcher/` | Request array field | Response array field | Failure shape | Cross-chunk aggregation |
+|---|---|---|---|---|
+| `/` | `prompt_batch` | `response_batch` | `null` | — |
+| `/batch_infer` | `prompt_batch` | `response_batch` | `null` | — |
+| `/v1/batch/chat/completions` | `requests` | `responses` | `{index, error: {code, message}}` | — |
+| `/v1/embeddings` | `input` (when list) | `data` | `{index, embedding: null, error: <reason>}` | `data[i].index` renumbered to absolute offset; `usage.{prompt_tokens, total_tokens}` summed across successful sub-bodies |
+
+An empty batch array on a registered path is short-circuited locally by the dispatcher: it answers 200 with an empty response array and never reaches an FE.
+
+**Header & query relay:** both paths relay the caller's end-to-end headers (hop-by-hop filtered per RFC 7230 §6.1, shared via `DispatcherHeaders`) and the original query string, so a request does not lose its `Authorization`/tenant/tracing context merely because it was batch-shaped and took the split path. The fanout path additionally drops `accept-encoding` (it parses each FE body, so a gzipped response would break the parse) and `content-type` (each chunk body is re-serialized as JSON).
+
+**Client-facing error text:** failure reasons in the response body are a bounded set — `fe_client_error`, `fe_server_error`, `fe_unavailable`, `malformed_sub_batch` — never the raw exception text, which embeds the FE address. Full detail goes to the rate-limited WARN and `pv.log`.
+
+**Partial-failure contract:**
+- HTTP 200 on full success or any partial success.
+- HTTP 500 only when **every** sub-batch failed — except when every FE-reachable sub-batch failed with the *same* FE 4xx (a client error), in which case that shared 4xx is returned instead of masking it as 500. Transport/pick failures carry no HTTP status and don't vote, so they can't hide a 4xx the reachable chunks agreed on.
+- On partial success, the response body contains an extra top-level object: `_partial_failure: { failed_count: N, total_count: M, failed_indices: [...] }`.
+- Failed positions in the response array are filled in-place by the per-endpoint failure factory (see table). **Indices are preserved** so callers can correlate failures back to input positions.
+
+**Migration:**
+- **Service-discovery empty-vs-failure contract (behavior change):** `ServiceDiscovery.getHosts` now means "empty list = empty fleet, failed lookup = throw". `NoOpServiceDiscovery` accordingly **throws** on a malformed `DOMAIN_ADDRESS:<addr>` value (e.g. `ip` with no port) instead of the older return-empty; the internal `VipServerDiscovery` likewise propagates a failed VipServer lookup instead of swallowing it into an empty list. Audit `DOMAIN_ADDRESS` values before upgrading — a value that used to be silently ignored now fails the lookup (which the engine rides out via `discoveryFailureGraceMs`, then ages the workers out). A genuinely empty fleet is unaffected.
+- Pre-dispatcher clients calling `<fe>/batch_infer` keep working — they hit FE directly. To opt in, change the URL to `<master>:7001/dispatcher/batch_infer` (everything else stays the same; the registered field names match FE's existing wire format). Note a batch routed through the master is ONE scheduling unit: FE's `/schedule` call reports the batch's aggregate prompt length (`backend_rpc_server_visitor.batch_enqueue` passes `seq_len_hint` = sum of the batch's `prompt_length`s), so the master's load view accounts the whole batch, not just its first request.
+- Streaming endpoints (e.g. `/v1/chat/completions` with `stream=true`) work through the passthrough as long as `PassthroughClient.STREAM_TIMEOUT_MS` (10 min) exceeds the longest expected response time.
+- Direct-to-FE remains the bypass for any client that can't change URLs.
+
+**Known limits (deferred):**
+- Bare `POST /dispatcher` (no trailing slash) does not match the root batch route; it is passthrough-forwarded with the path normalized to `/`, i.e. it reaches one FE unsplit.
+- Bare `POST /` aliases `/batch_infer`: it batches only when the body carries `prompt_batch` (rtp_llm FE historically exposes batch generation on the root path with the same wire shape). The `prompt: [...]` variant is NOT batched (known FE-side footgun) — such requests fall through to passthrough-forward to a single FE.
+- `request_id` set by `frontend_server.py` overwrites any upstream id — dispatcher to FE trace linkage is broken. Tracked in `project_frontend_request_id_overwrite.md`.
+- BE pre-assignment is enabled by default (`DISPATCH_PRE_ASSIGN_BE=true`) and applies **only to the `prompt_batch` endpoints** (`/`, `/batch_infer`): FE's pydantic models for `/v1/batch/chat/completions` and `/v1/embeddings` ignore unknown top-level fields, so a stamped `generate_config` would be silently dropped — the dispatcher skips the `/batch_schedule` round-trip for those endpoints entirely. For the prompt_batch endpoints, the dispatcher resolves N BE targets via master `/rtp_llm/batch_schedule` and stamps each chunk's `generate_config.role_addrs` with `{role, ip, http_port, grpc_port}` so FE skips its own master round-trip (existing FE path: `backend_rpc_server_visitor.route_ips` honors non-empty `role_addrs`). **FE version precondition**: the FE build must include `RoleAddr.validate_role` (`@field_validator("role", mode="before")` in `rtp_llm/config/generate_config.py`, on main since `53dc319bd`); older FE builds leave `role_addrs` as `list[dict]` and 500 every stamped request at `model_rpc_client`'s `addr.role` — verified in production 2026-05-28. Against an FE fleet of unknown vintage, start with `DISPATCH_PRE_ASSIGN_BE=false`. `/batch_schedule`'s strategy is decoupled from `/schedule`'s via `FlexlbConfig.batchLoadBalanceStrategy` (default `ROUND_ROBIN`). Failed pre-assigned BE targets still do not auto-failover at the dispatcher; FE handles dead-target fallback by re-invoking `/schedule`.
+- Embedding variants (`/v1/embeddings/{dense,sparse,colbert,similarity}`, `/v1/reranker`, `/v1/classifier`) — not in the registry yet; add one row each after verifying wire shape.
 
 ## Important Implementation Details
 

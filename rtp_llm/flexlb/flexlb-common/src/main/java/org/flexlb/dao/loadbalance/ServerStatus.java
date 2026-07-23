@@ -3,7 +3,9 @@ package org.flexlb.dao.loadbalance;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.util.CommonUtils;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
@@ -46,6 +48,22 @@ public class ServerStatus {
         result.setSuccess(false);
         result.setCode(code.getErrorCode());
         result.setMessage(code.getErrorMsg());
+        return result;
+    }
+
+    /**
+     * Successful schedule result for {@code worker}: the wire shape every strategy returns
+     * ({@code grpcPort} derived from the HTTP port — {@link ServerStatus} has no ARPC slot).
+     */
+    public static ServerStatus ok(WorkerStatus worker, RoleType roleType, long requestId) {
+        ServerStatus result = new ServerStatus();
+        result.setSuccess(true);
+        result.setServerIp(worker.getIp());
+        result.setHttpPort(worker.getPort());
+        result.setGrpcPort(CommonUtils.toGrpcPort(worker.getPort()));
+        result.setRole(roleType);
+        result.setGroup(worker.getGroup());
+        result.setRequestId(requestId);
         return result;
     }
 }

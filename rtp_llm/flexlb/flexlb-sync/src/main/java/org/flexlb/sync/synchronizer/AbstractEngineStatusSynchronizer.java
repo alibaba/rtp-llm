@@ -1,12 +1,12 @@
 package org.flexlb.sync.synchronizer;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
-import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.util.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,7 +50,8 @@ public abstract class AbstractEngineStatusSynchronizer {
     public AbstractEngineStatusSynchronizer(WorkerAddressService workerAddressService,
                                             EngineHealthReporter engineHealthReporter,
                                             EngineWorkerStatus engineWorkerStatus,
-                                            ModelMetaConfig modelMetaConfig) {
+                                            ModelMetaConfig modelMetaConfig,
+                                            ConfigService configService) {
         this.workerAddressService = workerAddressService;
         this.engineHealthReporter = engineHealthReporter;
         this.engineWorkerStatus = engineWorkerStatus;
@@ -66,15 +67,9 @@ public abstract class AbstractEngineStatusSynchronizer {
                 new LinkedBlockingQueue<>(15000), new NamedThreadFactory("status-checker-executor"),
                 new ThreadPoolExecutor.AbortPolicy());
 
-        String masterConfigStr = System.getenv("FLEXLB_CONFIG");
-        logger.warn("FLEXLB_CONFIG = {}", masterConfigStr);
-        FlexlbConfig masterConfig;
-        if (masterConfigStr != null) {
-            masterConfig = JsonUtils.toObject(masterConfigStr, FlexlbConfig.class);
-        } else {
-            masterConfig = new FlexlbConfig();
-        }
-        this.flexlbConfig = masterConfig;
+        // Reuse the single FLEXLB_CONFIG parse/override pipeline owned by ConfigService rather than
+        // re-loading env -> JSON -> overrides here, so the two config views never diverge.
+        this.flexlbConfig = configService.loadBalanceConfig();
     }
 
     protected abstract void syncEngineStatus();
