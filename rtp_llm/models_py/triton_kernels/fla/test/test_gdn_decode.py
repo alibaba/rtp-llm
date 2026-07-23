@@ -71,6 +71,8 @@ def test_fused_recurrent_continuous_batching(
     scale: float,
     gate_logit_normalizer: float,
     dtype: torch.dtype,
+    sequence_lengths: List[int] = None,
+    use_narrow_block_map: bool = False,
 ):
     device = "cuda"
     torch.manual_seed(42)
@@ -100,12 +102,13 @@ def test_fused_recurrent_continuous_batching(
     )
 
     seq_size_per_block = 128
-    sequence_lengths = [random.randint(10, 1024) for _ in range(B)]
+    sequence_lengths = sequence_lengths or [random.randint(10, 1024) for _ in range(B)]
     block_num = [
         math.ceil(sequence_lengths[i] / seq_size_per_block) + (S - 1) for i in range(B)
     ]
     total_block_num = sum(block_num) + 1
-    block_map = torch.zeros([B, total_block_num], dtype=torch.int32)
+    block_map_width = 2 if use_narrow_block_map else total_block_num
+    block_map = torch.zeros([B, block_map_width], dtype=torch.int32)
     offset = 1
     for i in range(B):
         # start from 1 to avoid treated as padding batch in kernel
@@ -114,6 +117,10 @@ def test_fused_recurrent_continuous_batching(
         )
         offset += block_num[i]
     block_map = block_map.to(device)
+    if use_narrow_block_map:
+        # Preserve the production shape while retaining the padded row stride.
+        # The kernel must use stride(0), not shape[1], to address this view.
+        block_map = block_map[:, :1]
     load_block_offset = [(x - 2) // seq_size_per_block for x in sequence_lengths]
     # ssm_cache is the kernel's V-first (..., V, K) cache (see refactor commit
     # 5f271c1b). h0 above comes from recurrent_gated_delta_rule_ref which still
@@ -155,6 +162,29 @@ def test_fused_recurrent_continuous_batching(
                 int(block_map[bs, write_block_offset[bs] + seq])
             ].transpose(-1, -2)
     assert_close("ht", ref_ht, tri_ht, 0.005)
+    return tri.detach().clone(), ssm_cache.detach().clone()
+
+
+def test_fused_recurrent_narrow_block_map_view():
+    kwargs = dict(
+        B=4,
+        S=1,
+        H=16,
+        HV=32,
+        D=128,
+        scale=1,
+        gate_logit_normalizer=0.1,
+        dtype=torch.bfloat16,
+        sequence_lengths=[10, 11, 12, 13],
+    )
+    contiguous_output, contiguous_cache = test_fused_recurrent_continuous_batching(
+        **kwargs
+    )
+    narrow_output, narrow_cache = test_fused_recurrent_continuous_batching(
+        **kwargs, use_narrow_block_map=True
+    )
+    assert_close("narrow output", contiguous_output, narrow_output, 0.0)
+    assert_close("narrow cache", contiguous_cache, narrow_cache, 0.0)
 
 
 if __name__ == "__main__":
