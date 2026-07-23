@@ -94,6 +94,10 @@ public:
         return runner_ != nullptr ? runner_->getCurrentRealGraphBs(state_) : 0;
     }
 
+    torch::Tensor getMtpTargetHiddenStates(int64_t num_tokens) {
+        return runner_ != nullptr ? runner_->getMtpTargetHiddenStates(state_, num_tokens) : torch::Tensor();
+    }
+
     ~CudaGraphTestRunner() {
         reset_runner();
     }
@@ -136,5 +140,6 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("model_data_type"))
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
+        .def("getMtpTargetHiddenStates", &CudaGraphTestRunner::getMtpTargetHiddenStates)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
 }

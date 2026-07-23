@@ -728,18 +728,19 @@ GenerateStreamPtr MtpExecutor::createMinFakePrefillStream(int                   
 
 GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    max_new_tokens,
                                                          const ModelConfig&     model_config,
+                                                         const ModelConfig&     draft_model_config,
                                                          const RuntimeConfig&   runtime_config,
                                                          const ResourceContext& resource_context,
                                                          int                    vocab_size) {
     auto fake_stream =
         makeFakeStream(max_new_tokens, 1 + max_new_tokens, model_config, runtime_config, resource_context);
 
-    // Fake SP buffer's hidden_states stands in for the target's pre-output
-    // residual that the draft consumes (DSv4: [T, hc_mult*hidden_size];
-    // non-DSv4 keeps hc_mult=1 so the shape is plain [T, hidden_size]).
-    auto sp_buffer = makeFakeSPOutputBuffer(model_config.data_type,
-                                            model_config.hidden_size * model_config.hc_mult,
-                                            model_config.vocab_size,
+    // SPOutputBuffer stores the recurrent state consumed by draft decode.
+    // Derive its width from the draft contract: target and draft widths may
+    // differ (for example, EAGLE3 has a 3H target handoff and H recurrence).
+    auto sp_buffer = makeFakeSPOutputBuffer(draft_model_config.data_type,
+                                            draft_model_config.hidden_size * draft_model_config.hc_mult,
+                                            vocab_size,
                                             max_new_tokens);
 
     auto new_tokens = torch::zeros({1, 1}, torch::kInt32);
@@ -812,11 +813,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     // profiling state to the worker thread can crash while perf timelines are
     // being recorded.
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true), false) {
-    data_type_        = params.model_config_.data_type;
-    hidden_size_      = params.model_config_.hidden_size * params.model_config_.hc_mult;
-    propose_step_     = propose_params->gen_num_per_circle;
-    vocab_size_       = params.model_config_.vocab_size;
-    draft_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
+    const auto& draft_model_config = propose_params->getEngineInitParams().model_config_;
+    data_type_                     = draft_model_config.data_type;
+    hidden_size_                   = draft_model_config.hidden_size * draft_model_config.hc_mult;
+    propose_step_                  = propose_params->gen_num_per_circle;
+    vocab_size_                    = params.model_config_.vocab_size;
+    draft_vocab_size_              = propose_params->getEngineInitParams().model_config_.vocab_size;
 
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
 
@@ -999,8 +1001,17 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                             "[speculative decoding] py_sp_model has no clone_for_cuda_graph(); sp_prefill CUDA graph will share Python runtime state with eager draft model");
                     }
                 }
-                sp_prefill_draft_model_.reset(new PyWrappedModel(
-                    model_params, sp_prefill_py_model, true, false, draft_cache_layer_layout.layer_to_groups));
+                // Draft decode consumes the draft's recurrent hidden state,
+                // while draft prefill consumes the target model's output
+                // contract. They are identical for legacy MTP/DSv4 models,
+                // but EAGLE3 has H-wide recurrence and a 3H target handoff.
+                auto sp_prefill_model_params    = model_params;
+                sp_prefill_model_params.hc_mult = params.model_config_.hc_mult;
+                sp_prefill_draft_model_.reset(new PyWrappedModel(sp_prefill_model_params,
+                                                                 sp_prefill_py_model,
+                                                                 true,
+                                                                 false,
+                                                                 draft_cache_layer_layout.layer_to_groups));
             }
         }
         break;  // NOTE: only support one mtp model now
@@ -1206,11 +1217,12 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         tpSyncModelInputs(model_input, parallelism_config_);
         model_input.mtp_iteration_step = 0;
         maybePrintModelInput(model_input, "prefill post draft model");
-        int64_t     start_time_us           = autil::TimeUtility::currentTimeInMicroSeconds();
-        const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
-        model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
-        model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
-        model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
+        int64_t     start_time_us             = autil::TimeUtility::currentTimeInMicroSeconds();
+        const auto& mtp_cache_cfg             = cache_manager_->getMTPModuleCacheConfig(0);
+        model_input.kv_block_stride_bytes     = mtp_cache_cfg.kv_block_stride_bytes;
+        model_input.kv_scale_stride_bytes     = mtp_cache_cfg.kv_scale_stride_bytes;
+        model_input.use_opaque_kv_cache_store = mtp_cache_cfg.use_opaque_kv_cache_store;
+        model_input.kv_cache_layer_to_group   = draft_kv_cache_layer_to_group;
         if (!cp_enabled || use_target_mtp_hidden_buffer) {
             // Source = main (just ran prefill; its pre-hc buffer is current).
             maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
@@ -1770,11 +1782,12 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
         RTP_LLM_LOG_DEBUG("[MTP decode] skip target-verify async prepare for CP context request");
         return;
     }
-    const auto& cache_cfg                    = cache_manager_->cacheConfig();
-    auto        model_input_copy             = model_input;
-    model_input_copy.kv_block_stride_bytes   = cache_cfg.kv_block_stride_bytes;
-    model_input_copy.kv_scale_stride_bytes   = cache_cfg.kv_scale_stride_bytes;
-    model_input_copy.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
+    const auto& cache_cfg                      = cache_manager_->cacheConfig();
+    auto        model_input_copy               = model_input;
+    model_input_copy.kv_block_stride_bytes     = cache_cfg.kv_block_stride_bytes;
+    model_input_copy.kv_scale_stride_bytes     = cache_cfg.kv_scale_stride_bytes;
+    model_input_copy.use_opaque_kv_cache_store = cache_cfg.use_opaque_kv_cache_store;
+    model_input_copy.kv_cache_layer_to_group   = target_kv_cache_layer_to_group;
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_target_verify_input)");
         const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
@@ -1862,9 +1875,10 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     // main-stream mutations cannot affect draft prefill prepare.
     auto* prefill_model    = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
     auto  model_input_copy = model_input;
-    model_input_copy.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input_copy.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
-    model_input_copy.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
+    model_input_copy.kv_block_stride_bytes     = mtp_cache_cfg.kv_block_stride_bytes;
+    model_input_copy.kv_scale_stride_bytes     = mtp_cache_cfg.kv_scale_stride_bytes;
+    model_input_copy.use_opaque_kv_cache_store = mtp_cache_cfg.use_opaque_kv_cache_store;
+    model_input_copy.kv_cache_layer_to_group   = draft_kv_cache_layer_to_group;
     ensureModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare");
     auto input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     input_ready_event->record(cuda_graph::graphGetCurrentStream());
@@ -2126,9 +2140,10 @@ void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input, cons
             }
         }
     }
-    model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
-    model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
+    model_input.kv_block_stride_bytes     = mtp_cache_cfg.kv_block_stride_bytes;
+    model_input.kv_scale_stride_bytes     = mtp_cache_cfg.kv_scale_stride_bytes;
+    model_input.use_opaque_kv_cache_store = mtp_cache_cfg.use_opaque_kv_cache_store;
+    model_input.kv_cache_layer_to_group   = draft_kv_cache_layer_to_group;
 }
 
 GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input) {
@@ -2415,9 +2430,10 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         return;
     }
 
-    const auto& mtp_cache_cfg         = cache_manager_->getMTPModuleCacheConfig(0);
-    model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
+    const auto& mtp_cache_cfg             = cache_manager_->getMTPModuleCacheConfig(0);
+    model_input.kv_block_stride_bytes     = mtp_cache_cfg.kv_block_stride_bytes;
+    model_input.kv_scale_stride_bytes     = mtp_cache_cfg.kv_scale_stride_bytes;
+    model_input.use_opaque_kv_cache_store = mtp_cache_cfg.use_opaque_kv_cache_store;
 
     GptModelOutputs            draft_decode_model_output;
     std::vector<torch::Tensor> draft_token_columns;
@@ -2622,9 +2638,10 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             execBroadcast({{model_input.combo_tokens}, 0});
         }
 
-        const auto& cache_cfg             = cache_manager_->cacheConfig();
-        model_input.kv_block_stride_bytes = cache_cfg.kv_block_stride_bytes;
-        model_input.kv_scale_stride_bytes = cache_cfg.kv_scale_stride_bytes;
+        const auto& cache_cfg                 = cache_manager_->cacheConfig();
+        model_input.kv_block_stride_bytes     = cache_cfg.kv_block_stride_bytes;
+        model_input.kv_scale_stride_bytes     = cache_cfg.kv_scale_stride_bytes;
+        model_input.use_opaque_kv_cache_store = cache_cfg.use_opaque_kv_cache_store;
     }
 }
 
