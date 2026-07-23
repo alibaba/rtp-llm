@@ -407,14 +407,12 @@ class WeightManager:
             # buffer to the driver, so the following KV-cache resume has full
             # headroom (region-scoped transients were stuck and OOM'd cu_mem_create).
             #
-            # force_nogds=True: the default 'shm' copier's LoadWithShm C++ ext
-            # faults in cuMemcpyHtoDAsync_v2 when it runs after a
-            # torch_memory_saver pause/resume (its /dev/shm bounce buffer's host
-            # registration goes stale across the VMM remap). The nogds copier
-            # reads the same safetensors shards via pread and survives, so the
-            # wake reload stays on the fast bulk safetensors path (not scratch).
+            # Keep the default SHM copier on wake. Earlier force_nogds handling
+            # targeted a suspected copier failure, but repeated-cycle profiling
+            # localized the slowdown to the downstream Mega pageable-D2H stash;
+            # both copier paths feed the same shuffle/transform pipeline.
             source = self._weights_loader.prepare_weights_fastsafetensor(
-                device, in_weights_region=False, force_nogds=True
+                device, in_weights_region=False
             )
             method = "fastsafetensors"
         else:
@@ -444,6 +442,11 @@ class WeightManager:
         mega_by_layer: dict = {}
         mega_routed_keys: set = set()
         mega_acc: dict = {}
+        mega_done: set = set()
+        mega_active_gpu_layer = None
+        mega_peak_layers = 0
+        mega_peak_gpu_bytes = 0
+        mega_peak_host_bytes = 0
         compressors: list = []
         try:
             from rtp_llm.models_py.modules.dsv4.fp8.compressor import iter_compressors
@@ -517,22 +520,87 @@ class WeightManager:
                         # DSV4 Mega-MoE raw routed weights are popped at cold load
                         # (their transform outputs are the resident kernel weights),
                         # so they have no live ModelWeights tensor to copy into.
-                        # Stash them per MoE layer for the post-loop re-transform.
-                        # Stage to HOST, not GPU: after resume("weights") the full
-                        # resident weight set (incl the blank Mega kernel buffers)
-                        # already occupies its private weights MemPool, and these
-                        # raws are allocated in the DEFAULT pool (needing fresh
-                        # driver physical). The stream is shard-ordered (not layer
-                        # grouped), so keeping raws resident on GPU piles many
-                        # layers' worth on top of the resident set and OOMs near
-                        # capacity. Moving each raw to host as it arrives keeps the
-                        # GPU default-pool footprint ~0; _rederive brings back one
-                        # layer at a time to transform (peak ~1 layer of raws).
+                        # Keep each raw ON GPU and re-derive the layer's Mega
+                        # kernel weights as soon as all six routed keys have
+                        # arrived, mirroring the cold-load inline transform. This
+                        # removes the pageable D2H stash that degrades on fresh
+                        # default-pool allocations on coherent arm64 platforms.
+                        # The current DSV4 checkpoint stream completes one layer
+                        # at a time, so the normal path needs no host staging. The
+                        # iterator does not, however, promise layer ordering: if a
+                        # different layer arrives before the active one completes,
+                        # spill the incomplete layer to temporary pinned host
+                        # buffers. This keeps GPU residency bounded without paying
+                        # the old pageable-D2H penalty or retaining the pinned
+                        # buffers across reloads.
+                        #
+                        # reload_routed_weights runs the wake transform in the
+                        # default pool and copies the results IN PLACE into the
+                        # existing tagged buffers, so calling it mid-loop does
+                        # not replace resident weight allocations.
                         if layer_id in mega_by_layer and name in mega_routed_keys:
-                            mega_acc.setdefault(layer_id, {})[name] = tensor.to(
-                                "cpu", copy=True
-                            )
+                            if (
+                                mega_active_gpu_layer is not None
+                                and mega_active_gpu_layer != layer_id
+                            ):
+                                previous = mega_acc.get(mega_active_gpu_layer, {})
+                                for previous_name, previous_tensor in list(
+                                    previous.items()
+                                ):
+                                    if previous_tensor.is_cuda:
+                                        host_tensor = torch.empty(
+                                            previous_tensor.shape,
+                                            dtype=previous_tensor.dtype,
+                                            device="cpu",
+                                            pin_memory=True,
+                                        )
+                                        host_tensor.copy_(previous_tensor)
+                                        previous[previous_name] = host_tensor
+                                self._working_stream.synchronize()
+                            mega_active_gpu_layer = layer_id
+                            acc = mega_acc.setdefault(layer_id, {})
+                            if name in acc:
+                                raise RuntimeError(
+                                    "reload_weights_from_loader: duplicate Mega raw "
+                                    f"weight for layer {layer_id}: {name}"
+                                )
+                            acc[name] = tensor
                             del tensor
+                            if set(acc) == mega_routed_keys:
+                                mega_acc.pop(layer_id, None)
+                                gpu_acc = {
+                                    key: (
+                                        value
+                                        if value.is_cuda
+                                        else value.to(device, non_blocking=False)
+                                    )
+                                    for key, value in acc.items()
+                                }
+                                del acc
+                                mega_by_layer[layer_id].reload_routed_weights(gpu_acc)
+                                del gpu_acc
+                                self._working_stream.synchronize()
+                                mega_done.add(layer_id)
+                                mega_active_gpu_layer = None
+                            pending_gpu_bytes = sum(
+                                t.nelement() * t.element_size()
+                                for values in mega_acc.values()
+                                for t in values.values()
+                                if t.is_cuda
+                            )
+                            pending_host_bytes = sum(
+                                t.nelement() * t.element_size()
+                                for values in mega_acc.values()
+                                for t in values.values()
+                                if not t.is_cuda
+                            )
+                            mega_peak_layers = max(mega_peak_layers, len(mega_acc))
+                            mega_peak_gpu_bytes = max(
+                                mega_peak_gpu_bytes, pending_gpu_bytes
+                            )
+                            mega_peak_host_bytes = max(
+                                mega_peak_host_bytes, pending_host_bytes
+                            )
                             continue
                         # The loader can yield tensors not tracked in the live
                         # ModelWeights (e.g. misc weights); nothing to reload in
@@ -644,17 +712,32 @@ class WeightManager:
                 _sys.stderr.flush()
             except Exception:
                 pass
-        # Re-derive DSV4 computed weights blanked by the level-2 resume (Mega-MoE
-        # kernel weights + compressor fused wkv/wgate). Runs OUTSIDE
-        # suppress_weights_region (so the fresh buffers are re-tagged `weights` for
-        # the next sleep) and before the KV-cache resume (so it has full headroom).
-        # Also non-expandable: the transform reads the staged raw routed weights
-        # and writes the fused kernel buffers through default-pool scratch, which
-        # must not straddle the tms pause/resume boundary in an expandable segment
-        # (same corruption reason as the reload loop above).
+        # Re-derive DSV4 computed weights blanked by the level-2 resume. Most Mega
+        # layers were already re-derived in-loop when their six raws completed;
+        # only incomplete layers plus the compressors remain. This runs outside
+        # suppress_weights_region so fresh buffers are tagged as weights for the
+        # next sleep, and before KV-cache resume while full headroom is available.
+        if mega_by_layer:
+            logging.info(
+                "reload_weights_from_loader: in-loop mega rederive %d/%d layers, "
+                "peak pending %d layer(s) / %.0f MiB GPU raws / "
+                "%.0f MiB pinned fallback",
+                len(mega_done),
+                len(mega_by_layer),
+                mega_peak_layers,
+                mega_peak_gpu_bytes / (1024.0**2),
+                mega_peak_host_bytes / (1024.0**2),
+            )
+        mega_remaining = {
+            layer_id: strategy
+            for layer_id, strategy in mega_by_layer.items()
+            if layer_id not in mega_done
+        }
+        # Keep the fallback transform non-expandable for the same TMS corruption
+        # reason as the reload loop above.
         with expandable_segments_disabled():
             self._rederive_dsv4_computed_weights(
-                mega_by_layer, mega_acc, mega_routed_keys, compressors
+                mega_remaining, mega_acc, mega_routed_keys, compressors
             )
         if pending:
             sample = sorted(str(k) for k in pending)[:10]

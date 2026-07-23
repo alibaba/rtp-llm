@@ -395,13 +395,11 @@ class ModelLoader:
           isolation (a private ``MemPool``), which aborts under
           torch_memory_saver — see ``mempool-destroy-crashes-under-tms``.
 
-        ``force_nogds`` selects the fastsafetensors 'nogds' copier (pread into a
-        framework host buffer) over the default 'shm' copier. The level-2 wake
-        reload sets it: the 'shm' copier's ``LoadWithShm`` C++ ext faults in
-        ``cuMemcpyHtoDAsync_v2`` when it runs after a torch_memory_saver
-        pause/resume (its /dev/shm bounce buffer's host registration goes stale
-        across the VMM remap). Cold load leaves it ``False`` (shm is faster and
-        unaffected).
+        ``force_nogds`` explicitly selects the fastsafetensors ``nogds`` copier
+        (pread into a framework host buffer) over the default SHM copier. It is
+        retained as a deployment/debug fallback; the level-2 wake path does not
+        force it because repeated-cycle profiling localized the observed
+        regression to the downstream Mega pageable-D2H stash, not the copier.
         """
         logging.info(f"load weight by device: {device}")
         tensor_to_weight_map, weight_info_list = self._generate_weight_info()
