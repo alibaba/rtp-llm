@@ -52,6 +52,18 @@ void AsyncRunner::sync(const torch::Stream& wait_stream) {
 }
 
 void AsyncRunner::streamWait(const torch::Stream& wait_stream) {
+    // A cudaStreamWaitEvent issued before the worker records this task's event
+    // only observes the event's previous generation (or is a no-op when it has
+    // never been recorded).  Wait until the worker has enqueued the current
+    // task and recorded event_ before adding the cross-stream dependency.
+    //
+    // This CPU wait is required for correctness: callers use streamWait() at
+    // the beginning of the next iteration, while the worker may still be doing
+    // host bookkeeping before it can enqueue any CUDA work.
+    std::unique_lock<std::mutex> lk(mutex_);
+    cv_done_.wait(lk, [this] { return task_done_; });
+    rethrowPendingExceptionIfAny(lk);
+    lk.unlock();
     event_.block(wait_stream);
 }
 

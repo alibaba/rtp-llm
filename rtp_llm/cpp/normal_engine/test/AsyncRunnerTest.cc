@@ -168,6 +168,23 @@ TEST_F(AsyncRunnerTest, RethrowsWorkerExceptionFromSync) {
     EXPECT_EQ(counter.load(), 1);
 }
 
+TEST_F(AsyncRunnerTest, StreamWaitWaitsForCurrentTaskAndRethrows) {
+    auto        stream = makeStream();
+    AsyncRunner runner(stream);
+
+    // A wait on an unrecorded/reused event can return before the worker has
+    // finished the current task.  An exception makes that race deterministic:
+    // the worker never reaches event_.record(), so the old implementation
+    // silently returned while the corrected implementation waits and rethrows.
+    runner.launch([] { throw std::runtime_error("async failure before event record"); });
+    EXPECT_THROW(runner.streamWait(currentStream()), std::runtime_error);
+
+    std::atomic<int> counter{0};
+    runner.launch([&counter] { counter.fetch_add(1); });
+    runner.streamWait(currentStream());
+    EXPECT_EQ(counter.load(), 1);
+}
+
 TEST_F(AsyncRunnerTest, RethrowsWorkerExceptionFromNextLaunch) {
     auto        stream = makeStream();
     AsyncRunner runner(stream);
