@@ -532,9 +532,14 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         stream_generator = chat_renderer.render_response_stream(
             id_generator, request, GenerateConfig()
         )
-        generate = OpenaiEndpoint._complete_stream_response(stream_generator, None)
-        response = [x async for x in generate][-1]
+        generate = OpenaiEndpoint._complete_stream_response(
+            stream_generator, None, model_name="test-model"
+        )
+        chunks = [x async for x in generate]
+        self.assertTrue(chunks)
+        self.assertTrue(all(chunk.model == "test-model" for chunk in chunks))
         response = await generate.gen_complete_response_once()
+        self.assertEqual(response.model, "test-model")
         print(response.choices[0].model_dump_json())
         self.assertEqual(1, len(response.choices))
         self.assertEqual(
