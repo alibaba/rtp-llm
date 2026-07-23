@@ -103,11 +103,13 @@ else:
     # Only register FP4 strategies on SM_100+ (and only if CUDA GPU is available)
     if torch.cuda.is_available() and is_cuda() and get_sm()[0] >= 10:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
+            CudaFp4B12xNoDPStrategy,
             CudaFp4EpLowLatencyStrategy,
             CudaFp4EpNormalStrategy,
             CudaFp4NoDPStrategy,
         )
 
+        registry.register(CudaFp4B12xNoDPStrategy())
         registry.register(CudaFp4EpLowLatencyStrategy())
         registry.register(CudaFp4EpNormalStrategy())
         registry.register(CudaFp4NoDPStrategy())

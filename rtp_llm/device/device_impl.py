@@ -364,6 +364,10 @@ class CudaImpl(GpuImpl):
                 and self.py_env_configs.moe_config.use_deepep_low_latency
             ):
                 self.py_env_configs.moe_config.fp4_moe_op = "cutedsl"
+            from rtp_llm.models_py.utils.arch import is_sm12x
+
+            if is_sm12x():
+                self.py_env_configs.moe_config.fp4_moe_op = "b12x"
 
     def _get_mem_info(self) -> MemInfo:
         import pynvml
@@ -663,6 +667,15 @@ class CudaImpl(GpuImpl):
                     ],
                     dim=1,
                 )
+            swizzled_scale = self.swizzle_blockscale(scale)
+            return kernel, swizzled_scale
+
+        if self.py_env_configs.moe_config.fp4_moe_op == "b12x":
+            # The SM120 b12x kernel is up-first: its SwiGLU applies silu to the
+            # SECOND half (gate) and multiplies the first half (up). w13 is
+            # already loaded as [up; gate], so NO half-swap is applied here
+            # (swapping would produce silu(up)*gate). Only swizzle the block
+            # scales into the Blackwell blockscale storage.
             swizzled_scale = self.swizzle_blockscale(scale)
             return kernel, swizzled_scale
 

@@ -181,6 +181,7 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
             "fp4_ep_low_latency",
             "fp4_ep_normal",
             "fp4_no_dp",
+            "fp4_b12x",
         ],
         default="auto",
         help="指定moe strategy, 默认为auto",
@@ -190,7 +191,7 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         env_name="FP4_MOE_OP",
         bind_to=(moe_config, "fp4_moe_op"),
         type=str,
-        choices=["auto", "trtllm", "cutedsl"],
+        choices=["auto", "trtllm", "cutedsl", "b12x"],
         default="auto",
-        help="指定 FP4 MOE算子。可选值: auto (自动选择), trtllm (使用 TensorRT-LLM), cutedsl (使用 CuTe DSL)。",
+        help="指定 FP4 MOE算子。可选值: auto (自动选择), trtllm (使用 TensorRT-LLM), cutedsl (使用 CuTe DSL), b12x (sm_120/121 flashinfer b12x)。",
     )
