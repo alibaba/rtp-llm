@@ -8,11 +8,16 @@ from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
+    FinisheReason,
     FunctionCall,
     RoleEnum,
     ToolCall,
 )
-from rtp_llm.openai.renderers.custom_renderer import RendererParams
+from rtp_llm.openai.renderers.custom_renderer import (
+    CustomChatRenderer,
+    RendererParams,
+    ThinkStatus,
+)
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolBaseRenderer,
     ReasoningToolStreamStatus,
@@ -58,6 +63,34 @@ class ProcessReasoningAndToolCallsTest(IsolatedAsyncioTestCase):
         aux_info.reuse_len = 0
         self.output = Mock(spec=GenerateOutput)
         self.output.aux_info = aux_info
+
+    async def test_incomplete_tool_call_preserves_length_finish_reason(self):
+        self.status.output = self.output
+        self.status.generating_tool_call = True
+        self.status.finish_reason = FinisheReason.length
+
+        response = await CustomChatRenderer._generate_final(
+            self.renderer,
+            [self.status],
+            self.status.request,
+            [ThinkStatus()],
+        )
+
+        self.assertEqual(response.choices[0].finish_reason, FinisheReason.length)
+
+    async def test_completed_tool_call_uses_tool_calls_finish_reason(self):
+        self.status.output = self.output
+        self.status.generating_tool_call = True
+        self.status.finish_reason = FinisheReason.stop
+
+        response = await CustomChatRenderer._generate_final(
+            self.renderer,
+            [self.status],
+            self.status.request,
+            [ThinkStatus()],
+        )
+
+        self.assertEqual(response.choices[0].finish_reason, FinisheReason.tool_calls)
 
     async def test_only_reasoning_streaming(self):
         # Only reasoning content, no tool calls, streaming mode

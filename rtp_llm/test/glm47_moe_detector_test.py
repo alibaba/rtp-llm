@@ -17,6 +17,9 @@ import json
 import unittest
 from typing import List
 
+from rtp_llm.openai.renderer_factory_register import _renderer_factory
+from rtp_llm.openai.renderers.chatglm45_renderer import ChatGlm45Renderer
+from rtp_llm.openai.renderers.chatglm47_renderer import ChatGlm47Renderer
 from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import (
     Function,
     Tool,
@@ -124,6 +127,13 @@ def collect_streaming_results(
         result = detector.parse_streaming_increment(chunk, tools)
         results.append(result)
     return results
+
+
+class TestGlm5RendererRegistration(unittest.TestCase):
+    def test_glm5_uses_incremental_tool_renderer(self):
+        self.assertIs(_renderer_factory.get("glm_5"), ChatGlm47Renderer)
+        self.assertIs(_renderer_factory.get("glm47_moe"), ChatGlm47Renderer)
+        self.assertIs(_renderer_factory.get("glm4_moe"), ChatGlm45Renderer)
 
 
 class TestGlm47MoeDetectorHelpers(unittest.TestCase):
@@ -472,6 +482,56 @@ class TestGlm47MoeDetectorStreaming(unittest.TestCase):
         # First chunk should return normal text
         self.assertEqual(results[0].normal_text, "Let me check: ")
         self.assertEqual(len(results[0].calls), 0)
+
+    def test_streaming_todowrite_array_argument(self):
+        tools = [
+            Tool(
+                type="function",
+                function=Function(
+                    name="todowrite",
+                    description="Update the todo list",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "todos": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "content": {"type": "string"},
+                                        "status": {"type": "string"},
+                                        "priority": {"type": "string"},
+                                    },
+                                },
+                            }
+                        },
+                        "required": ["todos"],
+                    },
+                ),
+            )
+        ]
+        chunks = [
+            "<tool_call>todowrite<arg_key>todos</arg_key><arg_value>",
+            '[{"content":"inspect","status":"in_progress","priority":"high"}]',
+            "</arg_value></tool_call>",
+        ]
+
+        results = collect_streaming_results(Glm47MoeDetector(), chunks, tools)
+        calls = [call for result in results for call in result.calls]
+        self.assertEqual([call.name for call in calls if call.name], ["todowrite"])
+        parameters = "".join(call.parameters for call in calls if call.parameters)
+        self.assertEqual(
+            json.loads(parameters),
+            {
+                "todos": [
+                    {
+                        "content": "inspect",
+                        "status": "in_progress",
+                        "priority": "high",
+                    }
+                ]
+            },
+        )
 
 
 class TestGlm47MoeDetectorMTP(unittest.TestCase):

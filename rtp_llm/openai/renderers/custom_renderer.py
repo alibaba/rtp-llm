@@ -918,6 +918,7 @@ class CustomChatRenderer:
             if (
                 isinstance(buffer, ReasoningToolStreamStatus)
                 and buffer.generating_tool_call
+                and buffer.finish_reason != FinisheReason.length
             ):
                 buffer.finish_reason = FinisheReason.tool_calls
 

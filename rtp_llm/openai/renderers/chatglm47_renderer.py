@@ -14,7 +14,7 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.glm47_moe_detector im
 
 
 class ChatGlm47Renderer(ChatGlm45Renderer):
-    """ChatGLM45Renderer 使用 GLM4MoeDetector 进行工具调用解析"""
+    """ChatGLM renderer using the incremental GLM-4.7/GLM-5 tool parser."""
 
     @override
     def _create_detector(
@@ -28,3 +28,4 @@ class ChatGlm47Renderer(ChatGlm45Renderer):
 
 
 register_renderer("glm47_moe", ChatGlm47Renderer)
+register_renderer("glm_5", ChatGlm47Renderer)

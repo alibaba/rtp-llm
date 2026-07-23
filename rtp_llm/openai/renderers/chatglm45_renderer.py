@@ -110,4 +110,3 @@ class ChatGlm45Renderer(ReasoningToolBaseRenderer):
 
 
 register_renderer("glm4_moe", ChatGlm45Renderer)
-register_renderer("glm_5", ChatGlm45Renderer)
