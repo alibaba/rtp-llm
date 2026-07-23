@@ -4,7 +4,6 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
-#include <unordered_map>
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/Types.h"
@@ -278,9 +277,8 @@ void FIFOScheduler::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams) {
 void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>&       waiting_streams,
                                            const list<GenerateStreamPtr>& already_admitted_streams) {
     RTP_LLM_PROFILE_FUNCTION();
-    // A prepared front group forms the beginning of this round's batch. Ordinary
-    // waiting streams may fill the remaining capacity, while legacy groups in
-    // waiting_streams_ keep their existing isolation behavior.
+    // Explicit groups are scheduled through the dedicated group queues. group_id is retained only for worker status,
+    // so streams that fall back to waiting_streams_ must follow ordinary FIFO admission.
     list<GenerateStreamPtr>             admitted_streams = already_admitted_streams;
     std::unordered_set<GenerateStream*> admitted_stream_ptrs;
     last_admitted_context_batch_size_ = 0;
@@ -297,64 +295,8 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>&       waitin
     size_t inited_kv_streams         = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
     size_t admitted_new_init_streams = 0;
 
-    // Preserve the legacy grouping contract for streams submitted individually through enqueue().
-    // Explicit enqueueGroup() requests use the dedicated group queues and do not carry group metadata here.
-
-    struct GroupInfo {
-        int64_t first_arrival_time = 0;
-        int     count              = 0;
-    };
-    std::unordered_map<int64_t, GroupInfo> request_group_info;
-
-    int64_t now = autil::TimeUtility::currentTimeInMilliSeconds();
-
-    // Build group info statistics for group streams
-    for (const auto& stream : waiting_streams) {
-        if (stream->isGroup()) {
-            auto& info = request_group_info[stream->groupId()];
-            if (info.count == 0) {
-                info.first_arrival_time = stream->enqueueTime() / 1000;
-            }
-            info.count++;
-        }
-    }
-
-    int64_t group_id = -1;
-
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
         auto& stream = *it;
-        bool  group  = stream->isGroup();
-
-        // Check if this stream can be scheduled based on group rules
-        if (group) {
-            auto& info = request_group_info[stream->groupId()];
-            // Check timeout: if expired, treat as normal stream
-            if (now - info.first_arrival_time > stream->groupTimeout()) {
-                group = false;
-            } else if (info.count < stream->groupSize()) {
-                // Group incomplete, skip this stream
-                it++;
-                continue;
-            }
-        }
-
-        // Batch isolation: group streams and normal streams cannot mix in the same round.
-        // The first stream that passes checks determines the batch type for this round.
-        if (!admitted_streams.empty()) {
-            if (group_id != -1) {
-                // Already in group mode, only accept same group
-                if (!group || stream->groupId() != group_id) {
-                    it++;
-                    continue;
-                }
-            } else {
-                // Already in normal mode, skip group streams
-                if (group) {
-                    it++;
-                    continue;
-                }
-            }
-        }
 
         // Check for errors and memory constraints
         //
@@ -377,11 +319,6 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>&       waitin
             admitted_stream_ptrs.insert(stream.get());
             if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv) {
                 ++admitted_new_init_streams;
-            }
-
-            // Lock batch type based on first scheduled stream
-            if (admitted_streams.size() == 1 && group) {
-                group_id = stream->groupId();
             }
         }
         it++;

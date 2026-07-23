@@ -236,23 +236,29 @@ TEST(PrefillBatchRpcServerTest, FailsFastWhenEnqueueGroupOmitsAResult) {
     EXPECT_EQ(response.successes_size() + response.errors_size(), 1);
 }
 
-TEST(PrefillBatchRpcServerTest, AdmitGroupStripsLegacySchedulerMetadata) {
+TEST(PrefillBatchRpcServerTest, AdmitGroupCopiesBatchIdToStreamMetadata) {
     TestPrefillBatchRpcServer server;
     server.setParallelism(/*dp_size=*/1, /*dp_rank=*/0);
 
     EnqueueGroupRequestPB request;
+    request.set_batch_id(7);
     request.set_dp_rank(0);
     auto* input = request.add_requests()->mutable_input();
     input->set_request_id(61);
-    input->set_group_size(2);
-    input->mutable_group_id()->set_value(7);
+    input->set_group_size(99);
+    input->mutable_group_id()->set_value(99);
+    request.add_requests()->mutable_input()->set_request_id(62);
     EnqueueBatchResponsePB                        response;
     std::vector<PrefillBatchRpcServer::BatchSlot> slots;
 
     ASSERT_TRUE(server.admitGroup(&request, &response, slots).ok());
-    ASSERT_EQ(slots.size(), 1);
-    EXPECT_EQ(slots[0].input->group_size(), 0);
-    EXPECT_FALSE(slots[0].input->has_group_id());
+    ASSERT_EQ(slots.size(), 2);
+    EXPECT_EQ(slots[0].input->group_size(), 2);
+    ASSERT_TRUE(slots[0].input->has_group_id());
+    EXPECT_EQ(slots[0].input->group_id().value(), 7);
+    EXPECT_EQ(slots[1].input->group_size(), 2);
+    ASSERT_TRUE(slots[1].input->has_group_id());
+    EXPECT_EQ(slots[1].input->group_id().value(), 7);
 }
 
 TEST(PrefillBatchRpcServerTest, PartialSchedulerRejectionCleansRejectedPrefillResources) {
