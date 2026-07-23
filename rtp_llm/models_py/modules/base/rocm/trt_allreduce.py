@@ -5,10 +5,14 @@
 from typing import Optional, Tuple
 from contextlib import contextmanager
 
+import logging
+
 import torch
 from torch import Tensor
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
+
+logger = logging.getLogger(__name__)
 
 def _get_handle_class():
     from rtp_llm.ops.compute_ops import rtp_llm_ops
@@ -48,6 +52,20 @@ class TrtllmDistEnv:
 
     _SUPPORTED_WORLD_SIZES = [2, 4, 8]
 
+    def _consensus(self, ok: bool) -> bool:
+        """Return True only if every rank passed ok=True."""
+        try:
+            flags = [None] * self.world_size
+            dist.all_gather_object(flags, ok, group=self.group)
+            return all(flags)
+        except Exception:
+            return False
+
+    def _abort(self, reason: str):
+        logger.info("TRT-LLM AllReduce disabled: %s", reason)
+        self.handle = None
+        self.disabled = True
+
     def __init__(
         self,
         group: ProcessGroup = None,
@@ -67,41 +85,58 @@ class TrtllmDistEnv:
         self._capture_handles_pending = False
         torch.cuda.set_device(self.device_id)
 
-        if self.world_size == 1:
-            return
-
-        if self.world_size not in self._SUPPORTED_WORLD_SIZES:
-            return
-
-        try:
-            TrtllmArFusionHandle = _get_handle_class()
-            self.handle = TrtllmArFusionHandle(
-                self.device_id, self.rank, self.world_size,
-                max_size_in_bytes, comm_ptrs_buf_len
-            )
-
-            barrier_handle = self.handle.get_barrier_handle()
-            data_handle = self.handle.get_data_handle()
-        except Exception as e:
-            import logging
-            logging.warning(
-                "TRT-LLM AllReduce initialization failed (likely insufficient GPU memory, "
-                "requested %d bytes for data buffer). Falling back to RCCL. Error: %s",
-                max_size_in_bytes * 2, e,
-            )
-            self.handle = None
+        if self.world_size == 1 or self.world_size not in self._SUPPORTED_WORLD_SIZES:
             self.disabled = True
             return
 
-        self._barrier()
+        # Phase 1: local allocation + consensus
+        local_ok = False
+        try:
+            Handle = _get_handle_class()
+            self.handle = Handle(
+                self.device_id, self.rank, self.world_size,
+                max_size_in_bytes, comm_ptrs_buf_len,
+            )
+            local_ok = True
+        except Exception as e:
+            logger.warning("TRT-LLM AllReduce local init failed: %s", e)
 
-        barrier_handle_list = [None] * self.world_size
-        data_handle_list = [None] * self.world_size
-        dist.all_gather_object(barrier_handle_list, barrier_handle, group=self.group)
-        dist.all_gather_object(data_handle_list, data_handle, group=self.group)
+        if not self._consensus(local_ok):
+            self._abort("local init failed" if not local_ok else "a peer rank failed")
+            return
 
-        self.handle.open_barrier_handles(barrier_handle_list)
-        self.handle.open_data_handles(data_handle_list)
+        # Phase 2a: local handle acquisition + consensus
+        local_bh = None
+        local_dh = None
+        handles_ok = False
+        try:
+            local_bh = self.handle.get_barrier_handle()
+            local_dh = self.handle.get_data_handle()
+            handles_ok = True
+        except Exception as e:
+            logger.warning("TRT-LLM AllReduce handle acquisition failed: %s", e)
+
+        if not self._consensus(handles_ok):
+            self._abort("handle acquisition failed" if not handles_ok else "a peer rank failed handle acquisition")
+            return
+
+        # Phase 2b: IPC handle exchange (all ranks guaranteed to participate)
+        phase2_ok = False
+        try:
+            self._barrier()
+            bh = [None] * self.world_size
+            dh = [None] * self.world_size
+            dist.all_gather_object(bh, local_bh, group=self.group)
+            dist.all_gather_object(dh, local_dh, group=self.group)
+            self.handle.open_barrier_handles(bh)
+            self.handle.open_data_handles(dh)
+            phase2_ok = True
+        except Exception as e:
+            logger.warning("TRT-LLM AllReduce IPC exchange failed: %s", e)
+
+        if not self._consensus(phase2_ok):
+            self._abort("IPC exchange failed" if not phase2_ok else "a peer rank failed exchange")
+            return
 
         self._barrier()
 
