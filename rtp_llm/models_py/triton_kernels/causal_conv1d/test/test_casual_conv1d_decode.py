@@ -93,9 +93,10 @@ class TestCausalConv1dUpdate(unittest.TestCase):
                 ]
                 max_block_num = max(block_nums)
                 total_block_num = sum(block_nums)
-                block_map = torch.zeros(
-                    [batch, max_block_num], dtype=torch.int32, device=device
+                block_map_storage = torch.zeros(
+                    [batch, max_block_num + 1], dtype=torch.int32, device=device
                 )
+                block_map = block_map_storage[:, :max_block_num]
                 offset = 0
                 for i in range(batch):
                     block_map[i, : block_nums[i]] = torch.arange(
