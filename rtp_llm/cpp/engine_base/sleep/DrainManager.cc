@@ -7,6 +7,29 @@
 
 namespace rtp_llm {
 
+namespace {
+
+// Counter providers are injected lambdas (normally plain atomic reads) that must not throw. A throw
+// would otherwise escape drained()/waitDrained() into the sleep hook and, uncaught, could wedge the
+// drain. Evaluate defensively: on exception, log and report the provider as busy (non-zero) so drain
+// never *falsely* completes -- the bounded waitDrained timeout then rolls the sleep back cleanly
+// rather than committing a sleep while work may still be in flight.
+size_t safeCount(const std::string& name, const std::function<size_t()>& fn) {
+    try {
+        return fn();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING(
+            "drain manager: counter provider [%s] threw: %s (treating as busy)", name.c_str(), e.what());
+        return 1;
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("drain manager: counter provider [%s] threw unknown exception (treating as busy)",
+                            name.c_str());
+        return 1;
+    }
+}
+
+}  // namespace
+
 void DrainManager::registerCounter(const std::string& name, CounterFn fn, CounterKind kind) {
     if (!fn) {
         RTP_LLM_LOG_WARNING("drain manager: reject null counter provider [%s]", name.c_str());
@@ -38,7 +61,7 @@ std::vector<std::pair<std::string, DrainManager::CounterEntry>> DrainManager::sn
 
 bool DrainManager::drained() const {
     for (const auto& [name, entry] : snapshotCounters()) {
-        if (entry.fn() != 0) {
+        if (safeCount(name, entry.fn) != 0) {
             return false;
         }
     }
@@ -48,7 +71,7 @@ bool DrainManager::drained() const {
 std::string DrainManager::pendingCountersDebugString() const {
     std::string result;
     for (const auto& [name, entry] : snapshotCounters()) {
-        const size_t value = entry.fn();
+        const size_t value = safeCount(name, entry.fn);
         if (value != 0) {
             if (!result.empty()) {
                 result += ", ";
@@ -125,7 +148,16 @@ void DrainManager::forceCancel() {
         return;
     }
     RTP_LLM_LOG_INFO("drain manager: invoking abort callback (streaming requests are exempted by provider)");
-    callback();
+    // The cancel callback is injected engine code; a throw here would escape drain() into the sleep
+    // hook. Swallow it (log) so abort-mode drain degrades to a plain wait-drain (bounded by
+    // waitDrained's timeout) instead of wedging or crashing the sleep path.
+    try {
+        callback();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("drain manager: abort callback threw: %s (falling back to wait-drain)", e.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("drain manager: abort callback threw unknown exception (falling back to wait-drain)");
+    }
     notifyDrainProgress();
 }
 
@@ -133,7 +165,7 @@ int64_t DrainManager::sumByKind(CounterKind kind) const {
     int64_t total = 0;
     for (const auto& [name, entry] : snapshotCounters()) {
         if (entry.kind == kind) {
-            total += static_cast<int64_t>(entry.fn());
+            total += static_cast<int64_t>(safeCount(name, entry.fn));
         }
     }
     return total;

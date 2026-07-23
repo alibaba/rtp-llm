@@ -68,6 +68,9 @@ enum class KvMemoryState {
     PAUSING,
     PAUSED,
     WAKING_UP,
+    FAILED,  // a release/restore hook failed mid-transition; KV backing is in an indeterminate state
+             // and the controller has gone to ERROR (terminal, needs restart). Set instead of leaving
+             // a stale PAUSING/WAKING_UP half-state so status() reflects reality.
 };
 
 std::string kvMemoryStateToString(KvMemoryState state);

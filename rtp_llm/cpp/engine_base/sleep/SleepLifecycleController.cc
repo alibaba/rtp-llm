@@ -78,6 +78,8 @@ std::string kvMemoryStateToString(KvMemoryState state) {
             return "PAUSED";
         case KvMemoryState::WAKING_UP:
             return "WAKING_UP";
+        case KvMemoryState::FAILED:
+            return "FAILED";
         default:
             return "UNKNOWN";
     }
@@ -343,6 +345,12 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
     }
 
     if (!ok) {
+        // If releaseKvMemoryBacking itself failed, kv_memory_state_ is stuck at the transient
+        // PAUSING; mark it FAILED so status() reports reality instead of a half-state. If a *later*
+        // hook failed, KV is legitimately PAUSED and that accurate value is left untouched.
+        if (kv_memory_state_.load(std::memory_order_acquire) == KvMemoryState::PAUSING) {
+            kv_memory_state_.store(KvMemoryState::FAILED, std::memory_order_release);
+        }
         transitionLocked(SleepState::SUSPENDING, SleepState::ERROR);
         return SleepResult::failedPrecondition(lastError());
     }
@@ -443,6 +451,11 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
     if (!ok) {
         // Admission remains closed in ERROR. Control plane only observes wake_up
         // failure; recovery is an explicit retry or operator action.
+        // Only the transient WAKING_UP is a half-state to clear; if the KV restore already completed
+        // (ACTIVE) and a later hook failed, ACTIVE is accurate and left untouched.
+        if (kv_memory_state_.load(std::memory_order_acquire) == KvMemoryState::WAKING_UP) {
+            kv_memory_state_.store(KvMemoryState::FAILED, std::memory_order_release);
+        }
         transitionLocked(SleepState::WAKING_UP, SleepState::ERROR);
         return SleepResult::failedPrecondition(lastError());
     }

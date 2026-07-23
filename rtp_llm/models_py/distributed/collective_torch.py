@@ -21,6 +21,9 @@ _UDS_SUN_PATH_LIMIT = 108
 # Dedicated communicator for the sleep-quiesce consensus all-reduce (see OpData.h
 # ParallelMode::SLEEP_QUIESCE). Same rank set as DP_AND_TP but a separate NCCL comm.
 _CPP_PARALLEL_MODE_SLEEP_QUIESCE = 6
+# Bounded deadline for the one-shot SLEEP_QUIESCE group warmup at startup, so a peer that died
+# during launch fails the warmup fast instead of hanging boot on the group's ~infinite timeout.
+_SLEEP_QUIESCE_WARMUP_TIMEOUT_S = 30
 
 
 class Group(Enum):
@@ -371,11 +374,19 @@ def _maybe_create_sleep_quiesce_group(
     # Rank-symmetric: every rank that created the group reaches this call.
     try:
         _warm = torch.zeros(1, dtype=torch.int64)  # CPU tensor for the gloo group
-        torch.distributed.all_reduce(_warm, group=quiesce_group)
+        # Bounded wait: the group carries a ~infinite (100-year) collective timeout so the per-step
+        # async consensus never spuriously times out, but that means a BLOCKING warmup here would
+        # hang launch forever if a peer died during startup. Issue it async and wait with a short
+        # deadline instead -- a rank that never arrives fails the warmup fast (lazy init then runs on
+        # the first sleep) rather than wedging the whole process at boot.
+        _warm_work = torch.distributed.all_reduce(
+            _warm, group=quiesce_group, async_op=True
+        )
+        _warm_work.wait(timeout=timedelta(seconds=_SLEEP_QUIESCE_WARMUP_TIMEOUT_S))
         logging.info(f"[rank: {world_rank}] warmed up SLEEP_QUIESCE gloo group")
     except Exception as e:  # pragma: no cover - never block startup on the warmup
         logging.warning(
-            f"[rank: {world_rank}] SLEEP_QUIESCE group warmup failed "
+            f"[rank: {world_rank}] SLEEP_QUIESCE group warmup failed or timed out "
             f"(lazy init will run on first sleep): {e}"
         )
 
