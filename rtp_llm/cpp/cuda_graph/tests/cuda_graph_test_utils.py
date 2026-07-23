@@ -30,6 +30,7 @@ class ModelBuildConfig:
     """Configuration for building a model."""
 
     model_path: str
+    tokenizer_path: Optional[str] = None
     max_seq_len: int = 4096
     tokens_per_block: int = 64
     kernel_tokens_per_block: int = 64
@@ -76,6 +77,9 @@ class CudaGraphTestModelBuilder:
         model_path, model_type = get_model_info_from_hf(self.config.model_path, None)
         self.py_env_configs.model_args.model_type = model_type
         self.py_env_configs.model_args.ckpt_path = model_path
+        self.py_env_configs.model_args.tokenizer_path = (
+            self.config.tokenizer_path or model_path
+        )
         self.py_env_configs.model_args.max_seq_len = self.config.max_seq_len
         self.py_env_configs.kv_cache_config.seq_size_per_block = (
             self.config.tokens_per_block

@@ -31,8 +31,7 @@ public:
                                       const KVCacheConfig&               kv_cache_config,
                                       const SpeculativeExecutionConfig&  sp_config,
                                       const std::optional<WarmUpResult>& warm_up_result,
-                                      bool                               is_mtp,
-                                      bool                               is_eagle);
+                                      bool                               is_mtp);
 
 private:
     // Removed functions moved to MemoryEvaluationHelper:

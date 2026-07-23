@@ -464,7 +464,17 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         self.fmha_impl.prepare(attn_inputs, forbid_realloc=True)
         if self.rope_kvcache_impl is not None:
-            self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+            new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+            if self.rope_params is None:
+                self.rope_params = new_rope_params
+            elif (
+                self.rope_params.kv_cache_offset is not None
+                and new_rope_params.kv_cache_offset is not None
+            ):
+                common.copy_kv_cache_offset(
+                    self.rope_params.kv_cache_offset,
+                    new_rope_params.kv_cache_offset,
+                )
 
     def create_params(self, attn_inputs: PyAttentionInputs):
         """Create the FlashInfer FMHA params and the fused-RoPE params.
@@ -628,10 +638,18 @@ class PyFlashinferDecodeAttnOp(object):
         else:  # BASE
             kv_datatype = get_scalar_type(attn_inputs.dtype)
 
+        # FlashInfer's captured decode schedule is not safe when a graph planned
+        # for many KV pages is replayed with fewer pages. Plan CUDA Graphs with
+        # the minimum one-token KV length; the replay path below grows the
+        # in-place metadata to the current sequence length.
+        planning_sequence_lengths = attn_inputs.sequence_lengths
+        if getattr(attn_inputs, "is_cuda_graph", False):
+            planning_sequence_lengths = torch.zeros_like(attn_inputs.sequence_lengths)
+
         # Steady-state decode drops the host metadata loop and H2D copy.
         self.fmha_params.fill_params_mha_device(
             self._prefix_lengths_for_decode(attn_inputs),
-            attn_inputs.sequence_lengths,
+            planning_sequence_lengths,
             attn_inputs.input_lengths,
             attn_inputs.kv_cache_kernel_block_id_device,
             self.seq_size_per_block,
