@@ -39,6 +39,14 @@ class AccMetrics(Enum):
     VIT_RPC_SERVER_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_server_error_qps"
     VIT_RPC_PROXY_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_proxy_error_qps"
 
+    # topology KV policy
+    TOPOLOGY_KV_COORDINATE_FALLBACK_LAYER_EVENT_METRIC = (
+        "py_rtp_topology_kv_coordinate_fallback_layer_forward_event"
+    )
+    TOPOLOGY_KV_POLICY_BYPASS_LAYER_EVENT_METRIC = (
+        "py_rtp_topology_kv_policy_bypass_layer_forward_event"
+    )
+
 
 class GaugeMetrics(Enum):
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
@@ -100,6 +108,15 @@ class GaugeMetrics(Enum):
     # Number of requests merged into one GPU forward by the MMScheduler. 1 on the
     # serial path (gpu_max_batch_size == 1); > 1 means cross-request batching kicked in.
     VIT_EMBEDDING_BATCH_SIZE_METRIC = "py_rtp_vit_embedding_batch_size"
+
+    # topology KV policy
+    TOPOLOGY_KV_POLICY_SCHEDULE_MS_METRIC = "py_rtp_topology_kv_policy_schedule_ms"
+    TOPOLOGY_KV_POLICY_SELECTED_TOKENS_METRIC = (
+        "py_rtp_topology_kv_policy_selected_tokens"
+    )
+    TOPOLOGY_KV_POLICY_EVICTED_TOKENS_METRIC = (
+        "py_rtp_topology_kv_policy_evicted_tokens"
+    )
 
 
 class MetricReporter(object):

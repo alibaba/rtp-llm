@@ -92,3 +92,22 @@ py_test (
    tags = ["open_skip", "H20"],
    exec_properties = {'gpu':'H20'},
 )
+
+py_test (
+   name = "topology_kv_cuda_integration_test",
+   srcs = ["topology_kv_cuda_integration_test.py"],
+   deps = py_test_deps + [
+        "//rtp_llm/metrics:metrics",
+        "//rtp_llm:testlib",
+   ],
+    env = {
+        "RTP_LLM_TOPOLOGY_KV_ALLOW_CUDA_SYNC": "1",
+        # 2049 production-width rows exercise real truncation without hitting
+        # the opt-in Python policy's default online-path capacity guard.
+        "RTP_LLM_TOPOLOGY_MAX_TOPK_ELEMENTS": "4196352",
+    },
+    timeout = "long",
+   visibility = ["//rtp_llm/test/smoke:__pkg__"],
+   tags = ["H20"],
+   exec_properties = {'gpu':'H20'},
+)
