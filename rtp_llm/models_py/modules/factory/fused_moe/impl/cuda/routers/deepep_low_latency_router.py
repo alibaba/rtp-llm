@@ -225,7 +225,11 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             "return_recv_hook": self._return_recv_hook,
         }
         # Set quantization config for DeepEP low latency dispatch
-        if self.quant_config.is_block_quantized and is_deep_gemm_e8m0_used():
+        if (
+            self._use_fp8_dispatch
+            and self.quant_config.is_block_quantized
+            and is_deep_gemm_e8m0_used()
+        ):
             dispatch_args.update({"round_scale": True, "use_ue8m0": True})
         elif self.quant_config.is_per_act_token:
             dispatch_args.update({"pertoken_quant": True})

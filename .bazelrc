@@ -161,6 +161,7 @@ test:cuda13_arm --test_env=LD_PRELOAD=/usr/lib64/librt.so.1
 test:cuda13_arm --test_env=PYTHONNOUSERSITE=1
 test:cuda13_arm --test_env=FLASHINFER_DISABLE_VERSION_CHECK=1
 test:cuda13_arm --test_env=DG_JIT_CPP_STANDARD=20
+test:cuda13_arm --test_env=DG_JIT_CACHE_DIR=/home/admin/.cache/deep_gemm-cu13-2.5.0
 test:cuda13_arm --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
 test:cuda13_arm --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 test:cuda13_arm --test_env=CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++

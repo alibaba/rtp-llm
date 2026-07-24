@@ -2,8 +2,6 @@ from typing import Optional
 
 import torch
 from flashinfer.cute_dsl.blockscaled_gemm import grouped_gemm_nt_masked
-from flashinfer import (scaled_fp4_grouped_quantize,
-                        silu_and_mul_scaled_nvfp4_experts_quantize)
 
 try:
     from rtp_llm.ops.compute_ops import (
@@ -50,8 +48,10 @@ def scaled_fp4_grouped_quant(
     padded_k = (scale_k + (4 - 1)) // 4 * 4
     padded_k_int32 = padded_k // 4
     padded_m = (m + (128 - 1)) // 128 * 128
-    output = torch.empty(l, m, k // 2, device=device, dtype=torch.uint8)
-    output_scales = torch.empty(
+    # The quantization kernel only writes valid rows. Keep masked-out rows
+    # deterministic because the Blackwell GEMM consumes padded 128-row tiles.
+    output = torch.zeros(l, m, k // 2, device=device, dtype=torch.uint8)
+    output_scales = torch.zeros(
         l, padded_m, padded_k_int32, device=device, dtype=torch.int32
     )
 
@@ -116,8 +116,10 @@ def silu_and_mul_scaled_fp4_grouped_quant(
     padded_k = (scale_k + (4 - 1)) // 4 * 4
     padded_k_int32 = padded_k // 4
     padded_m = (m + (128 - 1)) // 128 * 128
-    output = torch.empty(l, m, k // 2, device=device, dtype=torch.uint8)
-    output_scales = torch.empty(
+    # The quantization kernel only writes valid rows. Keep masked-out rows
+    # deterministic because the Blackwell GEMM consumes padded 128-row tiles.
+    output = torch.zeros(l, m, k // 2, device=device, dtype=torch.uint8)
+    output_scales = torch.zeros(
         l, padded_m, padded_k_int32, device=device, dtype=torch.int32
     )
 
@@ -231,10 +233,10 @@ def flashinfer_cutedsl_moe_masked(
             num_experts,
         ), f"input_global_scale must be (l,), got {input_global_scale.shape}"
 
-        a_q, a_q_sf = scaled_fp4_grouped_quantize(
+        a_q, a_q_sf = scaled_fp4_grouped_quant(
             hidden_states[0],
-            masked_m,
             input_global_scale,
+            masked_m,
         )
 
     assert w1.shape[-2] == 2 * n, f"w1 last-2 dim must be 2*n, got {w1.shape}"
@@ -256,7 +258,7 @@ def flashinfer_cutedsl_moe_masked(
     ), f"w2_alpha must be (l,), got {w2_alpha.shape}"
 
     # TODO(kaixih@nvidia): dtype should be based on inputs.
-    gateup_output = torch.empty(
+    gateup_output = torch.zeros(
         (num_experts, m, n * 2), dtype=torch.bfloat16, device=a_q.device
     )
     gateup_output = gateup_output.permute(1, 2, 0)  # requirement of kernel
@@ -282,17 +284,17 @@ def flashinfer_cutedsl_moe_masked(
     )  # in logical [m, n, l]
 
     # SILU and quantization
-    diq, diq_sf = silu_and_mul_scaled_nvfp4_experts_quantize(
+    diq, diq_sf = silu_and_mul_scaled_fp4_grouped_quant(
         gateup_output.permute(2, 0, 1),
-        masked_m,
         a2_global_scale,
+        masked_m,
     )
 
     if down_start_event is not None:
         down_start_event.record()
 
     # Gemm2
-    out = torch.empty((num_experts, m, k), dtype=torch.bfloat16, device=a_q.device)
+    out = torch.zeros((num_experts, m, k), dtype=torch.bfloat16, device=a_q.device)
     out = out.permute(1, 2, 0)  # requirement of kernel
     grouped_gemm_nt_masked(
         (diq, diq_sf),
