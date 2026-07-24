@@ -6,6 +6,9 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.benchmark_workspace import (
+    in_benchmark_workspace_scope,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.utils.arch import is_blackwell, is_sm12x
 from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
@@ -439,10 +442,23 @@ class FlashInferTRTLLMDecodeOp(object):
         self.seq_size_per_block = attn_configs.kernel_tokens_per_block
         self.local_head_num = attn_configs.head_num
         self.local_head_kv_num = attn_configs.kv_head_num
-        self.workspace_buffer = get_trt_workspace_buffer()
+        self._workspace_from_pool = not in_benchmark_workspace_scope()
+        if self._workspace_from_pool:
+            self.workspace_buffer = get_trt_workspace_buffer()
+        else:
+            self.workspace_buffer = torch.zeros(
+                DEFAULT_TRT_WORKSPACE_SIZE_MB * 1024 * 1024,
+                dtype=torch.uint8,
+                device="cuda",
+            )
 
     def __del__(self):
-        release_trt_workspace_buffer(self.workspace_buffer)
+        workspace_buffer = getattr(self, "workspace_buffer", None)
+        if (
+            getattr(self, "_workspace_from_pool", False)
+            and workspace_buffer is not None
+        ):
+            release_trt_workspace_buffer(workspace_buffer)
 
     def support(self, attention_inputs: PyAttentionInputs):
         if not is_blackwell():

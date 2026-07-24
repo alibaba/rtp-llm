@@ -5,14 +5,12 @@ from typing import Any, Optional, Type
 import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.benchmark_workspace import (
+    in_benchmark_workspace_scope,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm, is_sm12x
-from rtp_llm.ops import (
-    AttentionConfigs,
-    FMHAConfig,
-    FMHAType,
-    ParallelismConfig,
-)
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
     LayerKVCache,
@@ -83,10 +81,12 @@ class XQAImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        if attn_configs.use_mla:
+            return False
         # XQA cubin covers sm_90 only; sm_120a (Blackwell consumer, e.g.
         # RTX 5000 Pro) lacks a binding and triggers cudaErrorInvalidSymbol
-        # at first forward. C++ XQAAttnOp.support gate is `>= kSM_90` and
-        # passes sm_120 erroneously — short-circuit here so dispatch falls
+        # at first forward. Keep this Python guard aligned with the strict
+        # SM90 check in C++ so dispatch falls
         # through to PyFlashinferPaged. See blockers.md R-4.
         if is_sm12x():
             return False
@@ -148,16 +148,13 @@ class XQADecodeImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        if attn_configs.use_mla:
+            return False
         if attn_inputs.is_prefill:
             return False
-        # sm_120a consumer Blackwell: the FlashInfer xqa() build here rejects
-        # the nb_sub_seq_per_seq kwarg used in forward(), and XQA has no
-        # sm_120a binding anyway. Gate it off so decode dispatch falls through
-        # to PyFlashinferDecodeImpl (the working sm_120 path), mirroring the
-        # XQAImpl.support gate.
-        if is_sm12x():
-            return False
-        if get_sm()[0] not in [9, 10]:
+        # SM100 capture/replay succeeds, but the FP8 KV-cache path failed the
+        # independent SM100 output golden during hardware qualification.
+        if get_sm()[0] != 9:
             return False
         group_size = attn_configs.head_num // attn_configs.kv_head_num
         return (
@@ -236,7 +233,15 @@ class XQAWrapper:
         self.attn_inputs = attn_inputs
         self.cu_qseqlens = attn_inputs.cu_seqlens_device
         assert not self.attn_inputs.is_prefill, "XQA is not supported"
-        self.workspace_buffer = get_xqa_workspace_buffer()
+        self._workspace_from_pool = not in_benchmark_workspace_scope()
+        if self._workspace_from_pool:
+            self.workspace_buffer = get_xqa_workspace_buffer()
+        else:
+            self.workspace_buffer = torch.zeros(
+                DEFAULT_XQA_WORKSPACE_SIZE_MB * 1024 * 1024,
+                dtype=torch.uint8,
+                device="cuda",
+            )
         self.semaphores = torch.zeros(8 * 1024 * 1024, dtype=torch.uint8, device="cuda")
 
         self.enable_pdl = False
@@ -259,7 +264,12 @@ class XQAWrapper:
         self._seq_lens_4d: Optional[torch.Tensor] = None
 
     def __del__(self):
-        release_xqa_workspace_buffer(self.workspace_buffer)
+        workspace_buffer = getattr(self, "workspace_buffer", None)
+        if (
+            getattr(self, "_workspace_from_pool", False)
+            and workspace_buffer is not None
+        ):
+            release_xqa_workspace_buffer(workspace_buffer)
 
     def support(self, attn_inputs: Any) -> bool:
         group_size = self.config.head_num // self.config.kv_head_num
@@ -471,30 +481,25 @@ class XQAWrapper:
 
 
 def get_xqa_impl() -> Type[FMHAImplBase]:
-    """
-    Select the appropriate XQA implementation based on CUDA version and flashinfer availability.
-
-    Returns XQADecodeImpl if CUDA >= 12.8 and flashinfer.xqa is available,
-    otherwise falls back to XQAImpl.
-    """
+    """Return the optional FlashInfer XQA decode candidate when available."""
     try:
         major, minor = map(int, torch.version.cuda.split(".")[:2])
         if (major, minor) >= (12, 8):
             try:
-                from flashinfer.xqa import xqa
+                from flashinfer.xqa import xqa  # noqa: F401
 
-                logging.info(
-                    "CUDA >= 12.8 and flashinfer.xqa available, using XQADecodeImpl"
+                logging.debug(
+                    "CUDA >= 12.8 and flashinfer.xqa available, registering XQADecodeImpl as fallback candidate"
                 )
                 return XQADecodeImpl
             except (ImportError, AttributeError) as e:
-                logging.info(
-                    f"CUDA >= 12.8 but flashinfer.xqa not available ({e}), falling back to XQAImpl"
+                logging.debug(
+                    f"CUDA >= 12.8 but flashinfer.xqa not available ({e}), skipping XQADecodeImpl"
                 )
-                return XQAImpl
         else:
-            logging.info(f"CUDA version {major}.{minor} < 12.8, using XQAImpl")
-            return XQAImpl
+            logging.debug(
+                f"CUDA version {major}.{minor} < 12.8, skipping XQADecodeImpl"
+            )
     except Exception as e:
-        logging.warning(f"Failed to check CUDA version ({e}), using XQAImpl")
-        return XQAImpl
+        logging.warning(f"Failed to check CUDA version ({e}), skipping XQADecodeImpl")
+    return XQAImpl

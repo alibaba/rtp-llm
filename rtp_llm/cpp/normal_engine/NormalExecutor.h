@@ -47,6 +47,12 @@ public:
 
     bool updateEplbConfig(const EPLBConfig& config) override;
 
+    void triggerInitCapture() override {
+        if (model_) {
+            model_->triggerInitCapture();
+        }
+    }
+
 private:
     std::unique_ptr<ModelBase>                                               model_;
     std::unique_ptr<Sampler>                                                 sampler_;

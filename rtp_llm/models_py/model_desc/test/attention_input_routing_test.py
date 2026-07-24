@@ -5,6 +5,7 @@ from unittest.mock import patch
 import torch
 from torch import nn
 
+from rtp_llm.device.device_type import DeviceType
 from rtp_llm.models_py.model_desc.block_map import get_group_tags_for_layers
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3_next import (
@@ -33,6 +34,35 @@ class RoutingModel(GptModelBase):
 
     def _get_fmha_group_tags(self) -> list[str] | None:
         return self.fmha_group_tags
+
+
+def _dynamic_routing_model():
+    model = RoutingModel(None)
+    model.py_hw_kernel_config = SimpleNamespace(enable_dynamic_decode_backend=True)
+    model.backend_plan = {}
+    model._logged_decode_backend = {}
+    model.device_type = DeviceType.Cuda
+    model.kv_cache = object()
+    model.fmha_config = object()
+    model.parallelism_config = SimpleNamespace(
+        tp_rank=0,
+        tp_size=1,
+        dp_rank=0,
+        get_attn_tp_size=lambda: 1,
+    )
+    model.config = SimpleNamespace(
+        headwise_config=None,
+        hybrid_attention_config=None,
+        getAttentionConfigs=lambda _tp: SimpleNamespace(use_mla=False),
+    )
+    return model
+
+
+def _decode_inputs(bs=2, *, is_prefill=False):
+    return SimpleNamespace(
+        input_lengths=torch.ones(bs, dtype=torch.int32),
+        is_prefill=is_prefill,
+    )
 
 
 class AttentionInputRoutingTest(unittest.TestCase):
@@ -159,6 +189,191 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
         self.assertEqual(fmha_impl, inputs_by_tag)
         self.assertEqual(factory.call_count, 2)
+
+    def test_dynamic_output_probe_does_not_log_or_mark_backend(self):
+        model = _dynamic_routing_model()
+        attention_inputs = _decode_inputs()
+        static_impl = object()
+        with (
+            patch(
+                "rtp_llm.models_py.model_desc.module_base.get_attention_inputs_value",
+                return_value=attention_inputs,
+            ),
+            patch(
+                "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
+                return_value=static_impl,
+            ) as factory,
+            patch.object(model, "_log_decode_backend_once") as log_backend,
+        ):
+            actual = model.prepare_fmha_impl(object(), is_cuda_graph=True)
+
+        self.assertIs(actual, static_impl)
+        factory.assert_called_once()
+        log_backend.assert_not_called()
+        self.assertEqual(model._logged_decode_backend, {})
+
+    def test_completed_plan_miss_logs_fixed_priority_once(self):
+        model = _dynamic_routing_model()
+        attention_inputs = _decode_inputs()
+
+        class StaticImpl:
+            pass
+
+        model.backend_plan[2] = None
+        with (
+            patch(
+                "rtp_llm.models_py.model_desc.module_base.get_attention_inputs_value",
+                return_value=attention_inputs,
+            ),
+            patch(
+                "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
+                return_value=StaticImpl(),
+            ) as factory,
+            patch("rtp_llm.models_py.model_desc.module_base.logging.info") as info,
+        ):
+            model.prepare_fmha_impl(object(), is_cuda_graph=True)
+            model.prepare_fmha_impl(object(), is_cuda_graph=True)
+
+        self.assertEqual(factory.call_count, 2)
+        info.assert_called_once_with(
+            "[dispatcher] decode backend in use: bs=%d -> %s (%s)",
+            2,
+            "StaticImpl",
+            "fixed-priority",
+        )
+        self.assertEqual(model._logged_decode_backend, {2: "StaticImpl"})
+
+    def test_completed_winner_applies_and_logs_once_without_static_factory(self):
+        model = _dynamic_routing_model()
+        attention_inputs = _decode_inputs()
+        winner_impl = object()
+        model.backend_plan[2] = "WinnerImpl"
+        with (
+            patch(
+                "rtp_llm.models_py.model_desc.module_base.get_attention_inputs_value",
+                return_value=attention_inputs,
+            ),
+            patch(
+                "rtp_llm.models_py.modules.factory.attention.dispatch.backend_selector.instantiate_decode_impl",
+                return_value=winner_impl,
+            ) as instantiate,
+            patch(
+                "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl"
+            ) as factory,
+            patch("rtp_llm.models_py.model_desc.module_base.logging.info") as info,
+        ):
+            first = model.prepare_fmha_impl(object(), is_cuda_graph=True)
+            second = model.prepare_fmha_impl(object(), is_cuda_graph=True)
+
+        self.assertIs(first, winner_impl)
+        self.assertIs(second, winner_impl)
+        self.assertEqual(instantiate.call_count, 2)
+        factory.assert_not_called()
+        info.assert_called_once_with(
+            "dynamic_decode_plan_applied bs=%d backend=%s tp_rank=%d dp_rank=%d",
+            2,
+            "WinnerImpl",
+            0,
+            0,
+        )
+
+    def test_winner_apply_failure_never_uses_static_factory(self):
+        from rtp_llm.models_py.modules.factory.attention.dispatch import (
+            backend_selector,
+        )
+
+        model = _dynamic_routing_model()
+        attention_inputs = _decode_inputs()
+        model.backend_plan[2] = "WinnerImpl"
+        with (
+            patch(
+                "rtp_llm.models_py.model_desc.module_base.get_attention_inputs_value",
+                return_value=attention_inputs,
+            ),
+            patch.object(
+                backend_selector,
+                "instantiate_decode_impl",
+                side_effect=backend_selector.DynamicDecodeFatalError("fatal"),
+            ),
+            patch(
+                "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl"
+            ) as factory,
+        ):
+            with self.assertRaises(backend_selector.DynamicDecodeFatalError):
+                model.prepare_fmha_impl(object(), is_cuda_graph=True)
+
+        factory.assert_not_called()
+        self.assertEqual(model._logged_decode_backend, {})
+
+    def test_selection_miss_and_recoverable_exception_write_explicit_none(self):
+        model = _dynamic_routing_model()
+        attention_inputs = _decode_inputs()
+        from rtp_llm.models_py.modules.factory.attention.dispatch import (
+            backend_selector,
+        )
+
+        with patch(
+            "rtp_llm.models_py.model_desc.module_base.get_attention_inputs_value",
+            return_value=attention_inputs,
+        ):
+            with patch.object(
+                backend_selector, "run_backend_selection", return_value=None
+            ):
+                model.select_decode_backend(object())
+            self.assertIn(2, model.backend_plan)
+            self.assertIsNone(model.backend_plan[2])
+
+            model.backend_plan.clear()
+            with patch.object(
+                backend_selector,
+                "run_backend_selection",
+                side_effect=RuntimeError("pre-probe failure"),
+            ):
+                model.select_decode_backend(object())
+            self.assertIn(2, model.backend_plan)
+            self.assertIsNone(model.backend_plan[2])
+
+    def test_capability_guard_and_nonfinal_paths_keep_plan_and_logs_empty(self):
+        model = _dynamic_routing_model()
+        attention_inputs = _decode_inputs()
+        model.py_hw_kernel_config.enable_dynamic_decode_backend = False
+        with patch(
+            "rtp_llm.models_py.model_desc.module_base.get_attention_inputs_value",
+            return_value=attention_inputs,
+        ):
+            model.select_decode_backend(object())
+        self.assertEqual(model.backend_plan, {})
+
+        model.py_hw_kernel_config.enable_dynamic_decode_backend = True
+        with (
+            patch(
+                "rtp_llm.models_py.model_desc.module_base.get_attention_inputs_value",
+                return_value=attention_inputs,
+            ),
+            patch(
+                "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
+                return_value=object(),
+            ),
+            patch.object(model, "_log_decode_backend_once") as log_backend,
+        ):
+            model.prepare_fmha_impl(object(), is_cuda_graph=False)
+        log_backend.assert_not_called()
+
+        prefill_inputs = _decode_inputs(is_prefill=True)
+        model.backend_plan[2] = None
+        with (
+            patch(
+                "rtp_llm.models_py.model_desc.module_base.get_attention_inputs_value",
+                return_value=prefill_inputs,
+            ),
+            patch(
+                "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
+                return_value=object(),
+            ),
+            patch.object(model, "_log_decode_backend_once") as log_backend,
+        ):
+            model.prepare_fmha_impl(object(), is_cuda_graph=True)
+        log_backend.assert_not_called()
 
 
 if __name__ == "__main__":

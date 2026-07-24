@@ -1,11 +1,16 @@
 import logging
 import unittest
 from typing import List
+from unittest.mock import patch
 
 import torch
 from attention_ref import compute_flashinfer_decode_reference
 from base_attention_test import BaseAttentionTest, compare_tensors
 
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import (
+    XQADecodeImpl,
+    XQAImpl,
+)
 from rtp_llm.ops.compute_ops import PyAttentionInputs, XQAAttnOp, XQAParams
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -322,6 +327,40 @@ class TestXQAAttnOp(BaseAttentionTest):
             )
 
         logging.info("\n=== XQAAttnOp support() testing completed ===")
+
+    def test_decode_impl_architecture_matrix(self):
+        config = self._create_config()
+        attn_inputs = self._create_attention_inputs(
+            batch_size=1,
+            sequence_lengths=[128],
+            seq_size_per_block=config.seq_size_per_block,
+        )
+
+        for sm, expected in [
+            ((8, 0), False),
+            ((9, 0), True),
+            ((10, 0), False),
+            ((12, 0), False),
+        ]:
+            with self.subTest(sm=sm), patch(
+                "rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa.get_sm",
+                return_value=sm,
+            ):
+                self.assertEqual(
+                    XQADecodeImpl.support(config.attn_configs, attn_inputs), expected
+                )
+
+    def test_decode_impl_registry_keeps_static_xqa_as_default(self):
+        from rtp_llm.models_py.modules.factory.attention.attn_factory import (
+            DECODE_MHA_IMPS,
+        )
+
+        self.assertIn(XQAImpl, DECODE_MHA_IMPS)
+        if XQADecodeImpl in DECODE_MHA_IMPS:
+            self.assertLess(
+                DECODE_MHA_IMPS.index(XQAImpl),
+                DECODE_MHA_IMPS.index(XQADecodeImpl),
+            )
 
     def test_support_functionality(self):
         """Test XQAAttnOp support function with various configurations"""
