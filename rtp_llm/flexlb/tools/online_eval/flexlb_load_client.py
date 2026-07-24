@@ -176,6 +176,7 @@ class LoadClient:
         self._inflight_count: int = 0
         self._success_count: int = 0
         self._error_count: int = 0
+        self._cancelled_count: int = 0
         self._last_gradient_log: float = 0.0
         self._replay_started_monotonic: Optional[float] = None
         self._replay_started_epoch_ms: float = 0.0
@@ -463,78 +464,119 @@ class LoadClient:
         self, req: ReplayRequest, sem: asyncio.Semaphore, due_s: float
     ) -> None:
         started = time.monotonic()
+        result: Optional[dict] = None
 
-        # Phase 1: Schedule RPC (within semaphore)
-        async with sem:
-            self._inflight_count += 1
-            try:
-                result, input_pb, schedule_response = await self._do_schedule(
-                    req, started, due_s
-                )
-            finally:
-                self._inflight_count -= 1
+        try:
+            # Phase 1: Schedule RPC (within semaphore)
+            async with sem:
+                self._inflight_count += 1
+                try:
+                    result, input_pb, schedule_response = await self._do_schedule(
+                        req, started, due_s
+                    )
+                finally:
+                    self._inflight_count -= 1
 
-        # Phase 2: Fetch response or fallback (outside semaphore).
-        # _read_engine_stream fetches directly from the engine, not via Master,
-        # so it doesn't need the semaphore.  Engine-side concurrency is
-        # controlled by per-engine semaphores.
-        if schedule_response is not None:
-            try:
-                first_frame_s, terminal_s = await self._read_engine_stream(
-                    input_pb, schedule_response
-                )
-                end = terminal_s or time.monotonic()
-                if first_frame_s:
-                    result["ttft_ms"] = round((first_frame_s - started) * 1000.0, 3)
-                result["total_ms"] = round((end - started) * 1000.0, 3)
-                result["status"] = "ok"
-                result["route_path"] = "master"
-                result["wall_clock_ts"] = time.time()
-            except Exception as exc:
+            # Phase 2: Fetch response or fallback (outside semaphore).
+            # _read_engine_stream fetches directly from the engine, not via Master,
+            # so it doesn't need the semaphore.  Engine-side concurrency is
+            # controlled by per-engine semaphores.
+            if schedule_response is not None:
+                try:
+                    first_frame_s, terminal_s = await self._read_engine_stream(
+                        input_pb, schedule_response
+                    )
+                    end = terminal_s or time.monotonic()
+                    if first_frame_s:
+                        result["ttft_ms"] = round((first_frame_s - started) * 1000.0, 3)
+                    result["total_ms"] = round((end - started) * 1000.0, 3)
+                    result["status"] = "ok"
+                    result["route_path"] = "master"
+                    result["wall_clock_ts"] = time.time()
+                except Exception as exc:
+                    if self.args.enable_fallback and self._fallback_prefill_addrs:
+                        try:
+                            result = await self._try_fallback(req, result, started)
+                        except Exception as fb_exc:
+                            result["status"] = "exception"
+                            result["error"] = f"fetch={exc!r}; fallback={fb_exc!r}"
+                            result["error_type"] = "fetch_failed"
+                            result["route_path"] = "fallback"
+                            result["total_ms"] = round(
+                                (time.monotonic() - started) * 1000.0, 3
+                            )
+                            result["wall_clock_ts"] = time.time()
+                    else:
+                        result["status"] = "exception"
+                        result["error"] = repr(exc)
+                        result["error_type"] = "fetch_failed"
+                        result["total_ms"] = round(
+                            (time.monotonic() - started) * 1000.0, 3
+                        )
+            elif result["status"] in ("exception", "schedule_error"):
+                # Schedule failed — try fallback outside semaphore
                 if self.args.enable_fallback and self._fallback_prefill_addrs:
+                    schedule_exc = result.pop("_schedule_exc", None)
+                    original_error = result.get("error", "")
                     try:
                         result = await self._try_fallback(req, result, started)
                     except Exception as fb_exc:
                         result["status"] = "exception"
-                        result["error"] = f"fetch={exc!r}; fallback={fb_exc!r}"
+                        if schedule_exc is not None:
+                            result["error"] = (
+                                f"master={schedule_exc!r}; fallback={fb_exc!r}"
+                            )
+                        else:
+                            result["error"] = (
+                                f"master={original_error}; fallback={fb_exc!r}"
+                            )
                         result["route_path"] = "fallback"
                         result["total_ms"] = round(
                             (time.monotonic() - started) * 1000.0, 3
                         )
                         result["wall_clock_ts"] = time.time()
-                else:
-                    result["status"] = "exception"
-                    result["error"] = repr(exc)
-                    result["total_ms"] = round((time.monotonic() - started) * 1000.0, 3)
-        elif result["status"] in ("exception", "schedule_error"):
-            # Schedule failed — try fallback outside semaphore
-            if self.args.enable_fallback and self._fallback_prefill_addrs:
-                schedule_exc = result.pop("_schedule_exc", None)
-                original_error = result.get("error", "")
-                try:
-                    result = await self._try_fallback(req, result, started)
-                except Exception as fb_exc:
-                    result["status"] = "exception"
-                    if schedule_exc is not None:
-                        result["error"] = (
-                            f"master={schedule_exc!r}; fallback={fb_exc!r}"
-                        )
-                    else:
-                        result["error"] = (
-                            f"master={original_error}; fallback={fb_exc!r}"
-                        )
-                    result["route_path"] = "fallback"
-                    result["total_ms"] = round((time.monotonic() - started) * 1000.0, 3)
-                    result["wall_clock_ts"] = time.time()
 
-        # Clean up internal fields before writing
-        result.pop("_schedule_exc", None)
+            # Clean up internal fields before writing
+            result.pop("_schedule_exc", None)
+
+        except asyncio.CancelledError:
+            # Task was cancelled (e.g. response_timeout reached).
+            # Ensure the result is still recorded for statistics.
+            # Note: CancelledError is a BaseException subclass in Python 3.9+,
+            # so it is NOT caught by "except Exception" above.
+            if result is None:
+                result = {
+                    "rid": req.source_rid,
+                    "trace_id": req.trace_id,
+                    "request_id": req.request_id,
+                    "ts": req.ts_ms,
+                    "input_len": req.input_len,
+                    "output_len": req.output_len,
+                    "status": "cancelled",
+                    "schedule_ms": 0.0,
+                    "ttft_ms": 0.0,
+                    "total_ms": round((time.monotonic() - started) * 1000.0, 3),
+                    "enqueued_by_master": False,
+                    "prefill": "",
+                    "decode": "",
+                    "error": "cancelled",
+                    "error_type": "cancelled",
+                    "route_path": "master",
+                    "wall_clock_ts": time.time(),
+                }
+            else:
+                result["status"] = "cancelled"
+                result["error_type"] = "cancelled"
+                result["error"] = "cancelled"
+                result["total_ms"] = round((time.monotonic() - started) * 1000.0, 3)
 
         # All request coroutines run on this event loop and there is no await in
         # this block, so list/counter updates are serialized without a lock.
         self._results.append(result)
         if result.get("status") in ("ok", "scheduled"):
             self._success_count += 1
+        elif result.get("status") == "cancelled":
+            self._cancelled_count += 1
         else:
             self._error_count += 1
 
@@ -592,6 +634,7 @@ class LoadClient:
             "prefill": "",
             "decode": "",
             "error": "",
+            "error_type": "",
             "route_path": "master",
             "wall_clock_ts": 0.0,
             "send_due_epoch_ms": round(
@@ -620,6 +663,7 @@ class LoadClient:
             if response.code != 200 or not response.success:
                 result["status"] = "schedule_error"
                 result["error"] = response.error_message or f"code={response.code}"
+                result["error_type"] = "schedule_rejected"
                 result["total_ms"] = round((time.monotonic() - started) * 1000.0, 3)
                 return result, None, None
 
@@ -633,9 +677,22 @@ class LoadClient:
                 return result, None, None
 
             return result, input_pb, response
-        except Exception as exc:
+        except asyncio.TimeoutError:
             result["status"] = "exception"
-            result["error"] = repr(exc)
+            result["error"] = "asyncio timeout"
+            result["error_type"] = "rpc_timeout"
+            result["_schedule_exc"] = asyncio.TimeoutError()
+            result["total_ms"] = round((time.monotonic() - started) * 1000.0, 3)
+            return result, None, None
+        except Exception as exc:
+            exc_repr = repr(exc)
+            if "DEADLINE_EXCEEDED" in exc_repr or "DeadlineExceeded" in exc_repr:
+                error_type = "rpc_timeout"
+            else:
+                error_type = "unknown"
+            result["status"] = "exception"
+            result["error"] = exc_repr
+            result["error_type"] = error_type
             result["_schedule_exc"] = exc
             result["total_ms"] = round((time.monotonic() - started) * 1000.0, 3)
             return result, None, None
@@ -909,11 +966,20 @@ class LoadClient:
         }[self.args.schedule_mode]
 
     async def _write_summary(self, elapsed_s: float) -> None:
-        ok = [r for r in self._results if r["status"] == "ok"]
+        ok = [r for r in self._results if r["status"] in ("ok", "scheduled")]
         scheduled = [r for r in self._results if r["status"] in ("ok", "scheduled")]
         ttft = [r["ttft_ms"] for r in ok if r["ttft_ms"] > 0]
         total = [r["total_ms"] for r in ok if r["total_ms"] > 0]
         schedule = [r["schedule_ms"] for r in self._results if r["schedule_ms"] > 0]
+        error_results = [
+            r for r in self._results if r["status"] not in ("ok", "scheduled")
+        ]
+        error_latency = [r["total_ms"] for r in error_results if r["total_ms"] > 0]
+        all_latency = [r["total_ms"] for r in self._results if r["total_ms"] > 0]
+        error_schedule_latency = [
+            r["schedule_ms"] for r in error_results if r["schedule_ms"] > 0
+        ]
+        error_type_counts = _count_by(error_results, "error_type")
         client_schedule_summary = summarize_latencies(schedule)
         server_latency = await self._fetch_server_latency()
         server_schedule_summary = server_latency.get("server_total_ms", {})
@@ -969,6 +1035,7 @@ class LoadClient:
             "errors": len(self._results) - len(scheduled),
             "success_count": self._success_count,
             "error_count": self._error_count,
+            "cancelled_count": self._cancelled_count,
             "offered_qps": (
                 round(len(self._results) / elapsed_s, 3) if elapsed_s > 0 else 0.0
             ),
@@ -978,6 +1045,12 @@ class LoadClient:
             ),
             "error_qps": (
                 round(self._error_count / elapsed_s, 3) if elapsed_s > 0 else 0.0
+            ),
+            "client_recv_qps": (
+                round(len(self._results) / elapsed_s, 3) if elapsed_s > 0 else 0.0
+            ),
+            "client_success_qps": (
+                round(self._success_count / elapsed_s, 3) if elapsed_s > 0 else 0.0
             ),
             "send_duration_s": round(send_duration_s, 3),
             "sent_count": self._sent_count,
@@ -1011,10 +1084,14 @@ class LoadClient:
             "client_schedule_latency_ms": client_schedule_summary,
             "ttft_ms": summarize_latencies(ttft),
             "total_ms": summarize_latencies(total),
+            "error_latency_ms": summarize_latencies(error_latency),
+            "all_latency_ms": summarize_latencies(all_latency),
+            "error_schedule_latency_ms": summarize_latencies(error_schedule_latency),
             "prefill_balance": load_balance_summary(r["prefill"] for r in ok),
             "decode_balance": load_balance_summary(r["decode"] for r in ok),
             "status_counts": _count_by(self._results, "status"),
             "route_path_counts": _count_by(self._results, "route_path"),
+            "error_type_counts": error_type_counts,
         }
         self.summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
         write_markdown_report(
@@ -1108,6 +1185,9 @@ class LoadClient:
         )
         lines.append(
             f'flexlb_client_error_total{{route_path="master"}} {self._error_count}'
+        )
+        lines.append(
+            f'flexlb_client_cancelled_total{{route_path="master"}} {self._cancelled_count}'
         )
 
         # Semaphore inflight count

@@ -182,7 +182,13 @@ class FlexLBSmokeBase:
         req = self._build_schedule_request(request_id, **kwargs)
         return await stub.Schedule(req, timeout=30.0)
 
-    def _role_addr(self, response, role: str) -> str:
+    def _role_addr(self, response, role) -> str:
+        # Accept both string ("PREFILL") and enum integer
+        # (self.pb2.ROLE_TYPE_PREFILL).  FlexlbServerStatusPB.role is a string
+        # field set to "PREFILL"/"DECODE"/"PDFUSION" by the master, but some
+        # callers pass the RoleTypePB enum integer instead.
+        if not isinstance(role, str):
+            role = self.pb2.RoleTypePB.Name(role).replace("ROLE_TYPE_", "")
         for status in response.server_status:
             if status.role == role and status.server_ip:
                 return f"{status.server_ip}:{status.grpc_port}"
@@ -359,6 +365,32 @@ class FlexLBSmokeBase:
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"http://127.0.0.1:{self.args.mock_http_port}/clear_inject",
+                json={"engine": engine_name},
+            ) as resp:
+                return await resp.json()
+
+    async def _stop_engine(self, engine_name: str):
+        """Stop a single engine's gRPC server (simulates process kill).
+
+        The MockEngineState persists; only the gRPC server is stopped,
+        causing connection-refused errors for any new or in-flight RPC.
+        """
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"http://127.0.0.1:{self.args.mock_http_port}/stop_engine",
+                json={"engine": engine_name},
+            ) as resp:
+                return await resp.json()
+
+    async def _start_engine(self, engine_name: str):
+        """Restart a stopped engine's gRPC server on the same port."""
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"http://127.0.0.1:{self.args.mock_http_port}/start_engine",
                 json={"engine": engine_name},
             ) as resp:
                 return await resp.json()

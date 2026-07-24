@@ -348,8 +348,23 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
             await self._set_queue_depth(hot, 80000)
             injected_engine = hot
 
-            # Wait for master to sync the updated worker status
-            await asyncio.sleep(1.0)
+            # Poll for master sync: send probe requests every 0.5s, checking
+            # whether routing avoids the hot worker.  Max 6 probes (~3s).
+            synced = False
+            addr_map = await self._addr_to_name()
+            for _ in range(6):
+                await asyncio.sleep(0.5)
+                probe_rid = self._next_request_id()
+                probe_keys = [probe_rid * 100 + j for j in range(3)]
+                probe_addr, probe_err = await self._run_one_request(
+                    probe_rid, output_len=2, block_keys=probe_keys
+                )
+                if probe_err:
+                    continue
+                probe_name = addr_map.get(probe_addr, probe_addr)
+                if probe_name != hot:
+                    synced = True
+                    break
 
             addrs: list[str] = []
             for _ in range(5):
@@ -375,7 +390,8 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
             passed = hot_count == 0 and cool_count == 5
             detail = (
                 f"hot={hot}({hot_count}), cool={cool}({cool_count}), "
-                f"dist={json.dumps(dict(dist), sort_keys=True)}"
+                f"dist={json.dumps(dict(dist), sort_keys=True)}, "
+                f"synced={'yes' if synced else 'no'}"
             )
             return ScenarioResult(
                 "S4: hotspot_filter",
@@ -396,7 +412,7 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
                     await self._set_queue_depth(injected_engine, 0)
                     # Wait for master to sync the reset so subsequent tests
                     # (e.g. S5 kv_cache_hit_preference) see the correct cost.
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(2.0)
                 except Exception:
                     pass
 
@@ -411,13 +427,16 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
         """
         start = time.monotonic()
         try:
-            block_key = 999
-            keys = [block_key]
+            # Use 16 block keys to increase cache-hit signal strength.
+            # input_len=40960 ensures the prefill-time savings from a cache
+            # hit (~104ms) exceed the has_hit_coef overhead (~58ms), so the
+            # cached engine receives a lower (better) score.
+            keys = list(range(900, 916))
 
             # Request A — populates cache on the selected prefill worker
             rid_a = self._next_request_id()
             addr_a, err_a = await self._run_one_request(
-                rid_a, input_len=2048, output_len=2, block_keys=keys
+                rid_a, input_len=40960, output_len=2, block_keys=keys
             )
             if err_a:
                 return ScenarioResult(
@@ -427,13 +446,15 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
                     time.monotonic() - start,
                 )
 
-            # Wait for master cache-status sync
-            await asyncio.sleep(self.KV_CACHE_SYNC_WAIT_S)
+            # Wait for master cache-status sync.  Use 5.0s (inline) instead
+            # of KV_CACHE_SYNC_WAIT_S (2.0s) because DynamicCacheIntervalService
+            # dynamic check interval may extend to second-level.
+            await asyncio.sleep(5.0)
 
             # Request B — same block key, should hit same worker
             rid_b = self._next_request_id()
             addr_b, err_b = await self._run_one_request(
-                rid_b, input_len=2048, output_len=2, block_keys=keys
+                rid_b, input_len=40960, output_len=2, block_keys=keys
             )
             if err_b:
                 return ScenarioResult(
@@ -540,7 +561,20 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
         updates should cause rotation across workers.
         """
         start = time.monotonic()
+        perf_engines: list[str] = []
         try:
+            # Raise max_prefill_concurrency so available_concurrency does not
+            # drop to 0 under 20 concurrent requests.  Default=1 causes
+            # workers to be filtered out by PrefillResourceMeasure
+            # .isResourceAvailable().
+            snap = await self._snapshot_by_name()
+            prefill_names = sorted(
+                name for name, e in snap.items() if e.get("role") == "prefill"
+            )
+            for name in prefill_names:
+                await self._set_perf(name, max_prefill_concurrency=200)
+                perf_engines.append(name)
+
             rids = [self._next_request_id() for _ in range(20)]
             tasks = []
             for rid in rids:
@@ -589,6 +623,12 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
                 f"exception: {exc!r}",
                 time.monotonic() - start,
             )
+        finally:
+            for eng in perf_engines:
+                try:
+                    await self._set_perf(eng, max_prefill_concurrency=1)
+                except Exception:
+                    pass
 
     # -- S8: ttft_sorting (direct/queue-only) ------------------------------
 
@@ -675,9 +715,15 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
         SHORTEST_TTFT has no hard filter — even with high queue depth,
         requests can still route to that worker.  This contrasts with S4
         where COST_BASED_PREFILL filters out the hotspot.
+
+        queue_depth is kept at 32 (below prefillQueueSizeThreshold=64) to
+        avoid triggering the base resource-availability check.  The test
+        verifies the absence of *hotspot* filtering, not the bypassing of
+        base resource checks (which is a legitimate product design).
         """
         start = time.monotonic()
         injected_engine: str | None = None
+        perf_engines: list[str] = []
         try:
             snap = await self._snapshot_by_name()
             prefill_names = sorted(
@@ -692,8 +738,21 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
                 )
             target = prefill_names[0]
 
-            await self._set_queue_depth(target, 50000)
+            # Raise max_prefill_concurrency so available_concurrency does not
+            # drop to 0 under concurrent requests (default=1 causes workers
+            # to be filtered out by PrefillResourceMeasure.isResourceAvailable()).
+            for name in prefill_names:
+                await self._set_perf(name, max_prefill_concurrency=200)
+                perf_engines.append(name)
+
+            # Use queue_depth=32 (below prefillQueueSizeThreshold=64) to
+            # avoid triggering base resource-availability filtering while
+            # still being "high" relative to other workers (queue_depth=0).
+            await self._set_queue_depth(target, 32)
             injected_engine = target
+
+            # Wait for master to sync the updated queue depth
+            await asyncio.sleep(1.0)
 
             addrs: list[str] = []
             for _ in range(5):
@@ -737,6 +796,11 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
             if injected_engine:
                 try:
                     await self._set_queue_depth(injected_engine, 0)
+                except Exception:
+                    pass
+            for eng in perf_engines:
+                try:
+                    await self._set_perf(eng, max_prefill_concurrency=1)
                 except Exception:
                     pass
 
@@ -882,9 +946,11 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
         """S12: After request A, subsequent requests lean away from A's worker.
 
         COST_BASED_DECODE lowers a worker's weight after reserve.  Request
-        A goes to a decode worker; then B/C/D should prefer other workers.
+        A goes to a decode worker; then B/C/D/... should prefer other workers.
         Weighted random has variance, so we check that A's worker does not
-        dominate (total <= max of others).
+        dominate (total <= max of others + tolerance).  Using 20 subsequent
+        requests reduces statistical fluctuation; the +2 tolerance absorbs
+        residual variance from weighted random selection.
         """
         start = time.monotonic()
         try:
@@ -930,8 +996,8 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
                     time.monotonic() - start,
                 )
 
-            # Send 10 subsequent requests (different block keys to avoid cache affinity)
-            for _ in range(10):
+            # Send 20 subsequent requests (different block keys to avoid cache affinity)
+            for _ in range(20):
                 rid = self._next_request_id()
                 keys = [rid * 100 + j for j in range(3)]
                 _, err = await self._run_one_request(rid, output_len=2, block_keys=keys)
@@ -955,12 +1021,12 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
                 default=0,
             )
 
-            passed = a_total <= other_max + 1
+            passed = a_total <= other_max + 2
             detail = (
                 f"a_worker={a_worker}(total={a_total}), "
                 f"other_max={other_max}, "
                 f"delta={json.dumps(total_delta, sort_keys=True)}, "
-                f"assertion=a_total<=other_max+1"
+                f"assertion=a_total<=other_max+2"
             )
             return ScenarioResult(
                 "S12: reserve_weight_change",

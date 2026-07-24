@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# -- Preflight: reject root execution --
+if [ "$(whoami)" = "root" ]; then
+    echo "FATAL: Running as root inside container." >&2
+    echo "       Use: docker exec -u \${SSH_USER:-wuran.wzy} <container> bash -lc '...'" >&2
+    exit 1
+fi
+
 # ===========================================================================
 # run_matrix_smoke.sh — Matrix orchestration for FlexLB smoke tests.
 #
-# Runs three test suites (cancel, scheduling, anomaly) across three
+# Runs four test suites (cancel, scheduling, anomaly, resilience) across three
 # path/algorithm configurations (batch+fixed_window, direct, queue)
 # against a single mock engine cluster (2P + 4D).
 #
 # Flow:
 #   1. Start mock_engine_cluster once (reused across all groups)
-#   2. For each group: set env → start master → run 3 suites → stop master
+#   2. For each group: set env → start master → run 4 suites → stop master
 #   3. Summarise pass/fail per group
 #   4. cleanup (stop mock cluster)
 #
@@ -234,7 +241,7 @@ set_group_config() {
       ENABLE_QUEUEING="false"
       SCHEDULE_MODE="batch"
       DEFAULT_SCHEDULE_MODE="BATCH"
-      TEST_RID_BASES=(10000 20000 30000)
+      TEST_RID_BASES=(10000 20000 30000 31000)
       ;;
     direct)
       LOAD_BALANCE_STRATEGY="SHORTEST_TTFT"
@@ -242,7 +249,7 @@ set_group_config() {
       ENABLE_QUEUEING="false"
       SCHEDULE_MODE="direct"
       DEFAULT_SCHEDULE_MODE="DIRECT"
-      TEST_RID_BASES=(40000 50000 60000)
+      TEST_RID_BASES=(40000 50000 60000 61000)
       ;;
     queue)
       LOAD_BALANCE_STRATEGY="SHORTEST_TTFT"
@@ -250,7 +257,7 @@ set_group_config() {
       ENABLE_QUEUEING="true"
       SCHEDULE_MODE="queue"
       DEFAULT_SCHEDULE_MODE="QUEUE"
-      TEST_RID_BASES=(70000 80000 90000)
+      TEST_RID_BASES=(70000 80000 90000 91000)
       ;;
     *)
       echo "Unknown group: $1" >&2
@@ -320,11 +327,8 @@ run_test_suite() {
     --schedule-mode "${SCHEDULE_MODE}"
     --request-id-base "${rid_base}"
   )
-  # scheduling_smoke.py and anomaly_smoke.py need --mock-http-port;
-  # cancel_smoke.py does not accept it.
-  if [[ "${script}" != "cancel_smoke.py" ]]; then
-    cmd_args+=(--mock-http-port "${MOCK_HTTP_PORT}")
-  fi
+  # All scripts accept --mock-http-port (cancel_smoke.py included).
+  cmd_args+=(--mock-http-port "${MOCK_HTTP_PORT}")
   set +e
   PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/${script}" \
     "${cmd_args[@]}" 2>&1 | tee "${group_dir}/${name}.stdout"
@@ -338,11 +342,11 @@ run_test_suite() {
   return "${exit_code}"
 }
 
-# -- Main loop: 3 groups x 3 test suites ------------------------------------
+# -- Main loop: 3 groups x 4 test suites ------------------------------------
 
 GROUP_NAMES=("batch" "direct" "queue")
-TEST_NAMES=("cancel_smoke" "scheduling_smoke" "anomaly_smoke")
-TEST_SCRIPTS=("cancel_smoke.py" "scheduling_smoke.py" "anomaly_smoke.py")
+TEST_NAMES=("cancel_smoke" "scheduling_smoke" "anomaly_smoke" "resilience_smoke")
+TEST_SCRIPTS=("cancel_smoke.py" "scheduling_smoke.py" "anomaly_smoke.py" "resilience_smoke.py")
 TOTAL_PASS=0
 TOTAL_FAIL=0
 GROUP_RESULTS=()
@@ -371,7 +375,7 @@ for group in "${GROUP_NAMES[@]}"; do
 
   TOTAL_PASS=$((TOTAL_PASS + group_pass))
   TOTAL_FAIL=$((TOTAL_FAIL + group_fail))
-  GROUP_RESULTS+=("${group}: ${group_pass}/3 passed")
+  GROUP_RESULTS+=("${group}: ${group_pass}/4 passed")
 
   stop_master
 done
