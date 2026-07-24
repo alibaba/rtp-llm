@@ -10,8 +10,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
-
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 namespace rtp_llm {
 
 struct TestKVCacheSpec: public KVCacheSpec {

@@ -9,7 +9,7 @@
 #include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
 #endif
 
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"

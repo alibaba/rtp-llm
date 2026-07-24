@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/models/SamplingOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 
 namespace rtp_llm {
@@ -34,7 +34,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                                      const std::list<GenerateStreamPtr>& streams,
                                      SamplerOutput&                      draft_sampler_output,
                                      SamplerOutput&                      target_sampler_output) const {
-    torch::Device target_device = getTorchCudaDevice();
+    torch::Device target_device = torch::Device(torch::kCUDA);
     torch::Device host_device   = torch::Device(torch::kCPU);
 
     int batch_size = streams.size();
@@ -72,7 +72,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             idx++;
         }
     }
-    torch::Tensor output_token_ids_d     = torch::zeros({(long)batch_size, (long)propose_step_ + 1},
+    torch::Tensor output_token_ids_d = torch::zeros({(long)batch_size, (long)propose_step_ + 1},
                                                     torch::TensorOptions().device(target_device).dtype(torch::kInt32));
     torch::Tensor output_accepted_token_num_d =
         torch::zeros({(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32));

@@ -29,7 +29,8 @@ cc_library(
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
     ] + select({
         "@//:using_rocm": [
-            "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+            "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+            "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
         ],
         "//conditions:default": [
             "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
@@ -68,7 +69,7 @@ cc_library(
     ],
     deps = [
         ":device_test_utils",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/cpp/models:sampling_ops",
         "//rtp_llm/models_py/bindings/core/ops:torch_beam_search_op_impl",
         "//rtp_llm/cpp/models:models",
     ],

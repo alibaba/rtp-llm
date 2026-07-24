@@ -25,6 +25,7 @@
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/core/CopyOps.h"
 
 namespace rtp_llm {
 namespace test {

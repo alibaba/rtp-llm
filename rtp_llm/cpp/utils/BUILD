@@ -208,7 +208,7 @@ cc_library(
         "DebugUtils.cc",
     ],
     deps = [
-        "//rtp_llm/models_py/bindings/cuda/ops:exec_ctx_fwd",
+        "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
         "//rtp_llm/models_py/bindings/core:type_convert",
         "//rtp_llm/models_py/bindings/core:common_defines",
     ] + select({
@@ -226,7 +226,6 @@ cc_library(
         "DevicePerfWrapper.h",
     ],
     deps = [
-        "//rtp_llm/models_py/bindings/cuda/ops:exec_ctx_fwd",
         "//rtp_llm/cpp/utils:core_utils",
     ],
     copts = copts(),

@@ -13,14 +13,6 @@ config_setting(
     },
 )
 
-# exec_ctx_fwd provides ExecOps.h header + transitive deps for all platforms.
-# The actual method implementations are linked via gpu_base (CUDA) or exec_ctx_rocm (ROCm).
-cc_library(
-    name = "exec_ctx_fwd",
-    deps = ["//rtp_llm/models_py/bindings/core:exec_ops_hdr"],
-    visibility = ["//visibility:public"],
-)
-
 cc_library(
     name = "gpu_base",
     hdrs = select({
@@ -37,7 +29,6 @@ cc_library(
     }),
     deps = [
         "//rtp_llm/models_py/bindings/core:device_data",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core:op_data",
         "//rtp_llm/models_py/bindings/core:type_convert",
         "//rtp_llm/cpp/utils:signal_utils",

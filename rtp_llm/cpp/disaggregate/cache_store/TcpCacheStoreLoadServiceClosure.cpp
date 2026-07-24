@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreLoadServiceClosure.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreDevicePin.h"
+#include "rtp_llm/cpp/core/CopyOps.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include <torch/torch.h>
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreUtil.h"

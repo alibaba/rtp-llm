@@ -1,9 +1,10 @@
 #include "rtp_llm/cpp/models/Sampler.h"
 #include <cstring>
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/models/SamplingOps.h"
 #include <algorithm>
 #include <exception>
 #include <unordered_set>

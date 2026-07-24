@@ -30,11 +30,10 @@ struct ExecProperties {
 };
 
 struct MemoryStatus {
-    size_t used_bytes         = 0;
-    size_t free_bytes         = 0;
-    size_t available_bytes    = 0;  // free GPU memory available for allocation
-    size_t allocated_bytes    = 0;  // memory allocated via current device
-    size_t max_consumed_bytes = 0;  // only applicable if RTP_LLM_TRACE_MEMORY is enabled.
+    size_t used_bytes      = 0;
+    size_t free_bytes      = 0;
+    size_t available_bytes = 0;  // free GPU memory available for allocation
+    size_t allocated_bytes = 0;  // memory allocated via current device
 };
 
 // runtime device status, such as available memory.

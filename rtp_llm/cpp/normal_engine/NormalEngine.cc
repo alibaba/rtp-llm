@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -244,16 +245,13 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     auto fake_input                                   = makeFakeInput((size_t)model_config_.max_seq_len - 1);
     fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
-    rtp_llm::setTraceMemory(true);
     executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
-    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
-    rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
     const auto device_status = getGpuExecStatus();
-    return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
+    return WarmUpResult({device_status.device_memory_status.available_bytes, 0});
 #endif
 }
 
@@ -265,7 +263,6 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     auto fake_input                                   = makeFakeInput((size_t)model_config_.max_seq_len - 1);
     fake_input->generate_config->num_return_sequences = runtime_config.max_generate_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
-    rtp_llm::setTraceMemory(true);
 
     auto cache_config      = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, 0);
     cache_config.block_num = 5;
@@ -278,13 +275,11 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     }
     executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, mla_ops_type_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
-    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
-    rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
     const auto device_status = getGpuExecStatus();
-    return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
+    return WarmUpResult({device_status.device_memory_status.available_bytes, 0});
 #endif
 }
 

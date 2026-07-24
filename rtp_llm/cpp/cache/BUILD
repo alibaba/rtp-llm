@@ -24,6 +24,45 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Header-only; safe to link everywhere.
+cc_library(
+    name = "cache_store_writer_hdrs",
+    hdrs = ["CacheStoreWriter.h"],
+    deps = [
+        ":cache_group_type",
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:error_code",
+        "//rtp_llm/cpp/utils:kv_cache_utils",
+        "//rtp_llm/models_py/bindings/core:op_data",
+    ] + torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+# Impl; MUST live in exactly one .so (librtp_compute_ops.so via
+# th_compute_lib) so that engine-side callers (libth_transformer.so) resolve
+# writeCacheStore symbols via dynamic linker to the single canonical copy.
+cc_library(
+    name = "cache_store_writer_impl",
+    srcs = ["CacheStoreWriter.cc"],
+    deps = [
+        ":cache_store_writer_hdrs",
+        "//rtp_llm/cpp/runtime:cuda_runtime",
+    ] + torch_deps(),
+    copts = copts(),
+    visibility = [
+        "//rtp_llm/cpp/pybind:__pkg__",
+        "//rtp_llm/models_py/bindings/core:__pkg__",
+    ],
+    alwayslink = True,
+)
+
+alias(
+    name = "cache_store_writer",
+    actual = ":cache_store_writer_hdrs",
+    visibility = ["//visibility:public"],
+)
 
 cc_library(
     name = "block_info",
@@ -243,8 +282,9 @@ cc_library(
         ":cp_slot_mapper",
         ":kv_cache_allocator_hdr",
         ":kv_cache_group",
+        "//rtp_llm/cpp/core:copy_ops",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/core:op_data",
     ],
 )
 
@@ -290,7 +330,7 @@ cc_library(
         ":kv_cache_allocator",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
         "//rtp_llm/models_py/bindings/core:type_convert",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/metrics",
@@ -342,7 +382,9 @@ cc_library(
         ":cache_core",
         ":cp_slot_mapper",
         "//rtp_llm/cpp/cache/connector",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/cpp/comm:collective_backend_hdrs",
+        "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
+        "//rtp_llm/models_py/bindings/core:types_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + torch_deps(),
 )

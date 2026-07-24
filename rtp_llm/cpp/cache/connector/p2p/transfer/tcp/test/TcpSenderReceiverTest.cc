@@ -16,7 +16,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpKVCacheReceiver.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpKVCacheSender.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "autil/NetUtil.h"
 #include <torch/torch.h>

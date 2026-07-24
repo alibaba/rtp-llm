@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/utils/SignalUtils.h"
 #include "rtp_llm/cpp/pybind/common/InitEngineOps.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/core/CopyOps.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
+#include "rtp_llm/models_py/bindings/core/WeightPreprocess.h"
 #include "absl/debugging/symbolize.h"
 #include <cstdio>
 #include <string>

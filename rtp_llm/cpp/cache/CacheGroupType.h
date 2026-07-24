@@ -68,7 +68,7 @@ struct CacheStoreBlockPair {
     int offset_index;
 };
 
-// Keep cache-store projection header-only so bindings that consume ExecOps.cc
+// Keep cache-store projection header-only so bindings that consume CacheStoreWriter.cc
 // as a source file do not need to link the full CPSlotMapper implementation.
 inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPolicy& policy,
                                                             size_t                  total_logical_blocks,

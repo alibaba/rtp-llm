@@ -104,8 +104,9 @@ cc_library(
     deps = [
         ":context_parallel_interface",
         "//:rtp_compute_ops",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/cpp/comm:collective_backend_hdrs",
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings/core:op_data",
     ],
     visibility = ["//visibility:public"],
 )
@@ -125,20 +126,28 @@ cc_library(
 
 cc_library(
     name = "models",
-    hdrs = glob([
-        "*.h",
-    ], exclude = ["ModelInputsLogger.h"]),
-    srcs = glob([
-        "*.cc",
-    ], exclude = ["ModelInputsLogger.cc"]),
+    hdrs = glob(
+        ["*.h"],
+        exclude = [
+            "ModelInputsLogger.h",
+            "SamplingOps.h",
+        ],
+    ),
+    srcs = glob(
+        ["*.cc"],
+        exclude = [
+            "ModelInputsLogger.cc",
+            "SamplingOps.cc",
+        ],
+    ),
     deps = [
         ":model_inputs_logger",
         ":sample_infos",
+        ":sampling_ops",
         ":logits_processor",
         ":dfa_utils",
         ":context_parallel",
         "//:rtp_compute_ops",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:cache",
@@ -148,18 +157,67 @@ cc_library(
         "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
-        "//rtp_llm/models_py/bindings/common:fuse_copy_op",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
+        "//rtp_llm/cpp/comm:collective_backend_hdrs",
+        "//rtp_llm/cpp/core:copy_ops",
+        "//rtp_llm/cpp/runtime:cuda_runtime",
     ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "sampling_ops_hdrs",
+    hdrs = ["SamplingOps.h"],
+    deps = [
+        "//rtp_llm/models_py/bindings/core:op_data",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "sampling_ops_impl",
+    srcs = ["SamplingOps.cc"],
+    deps = [":sampling_ops_hdrs"],
+    alwayslink = True,
+    visibility = [
+        "//rtp_llm/cpp/pybind:__pkg__",
+        "//rtp_llm/models_py/bindings/core:__pkg__",
+    ],
+)
+
+alias(
+    name = "sampling_ops",
+    actual = ":sampling_ops_hdrs",
     visibility = ["//visibility:public"],
 )
 
 # Expert statistics - monitoring component
 cc_library(
-    name = "stats",
+    name = "stats_hdrs",
     hdrs = [
         "eplb/stats/ExpertStats.h",
+        "eplb/stats/MoeExpertStats.h",
     ],
+    deps = torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "stats_impl",
+    srcs = [
+        "eplb/stats/MoeExpertStats.cc",
+    ],
+    deps = [":stats_hdrs"] + torch_deps(),
+    alwayslink = True,
+    visibility = [
+        "//rtp_llm/cpp/pybind:__pkg__",
+        "//rtp_llm/models_py/bindings/core:__pkg__",
+    ],
+)
+
+alias(
+    name = "stats",
+    actual = ":stats_hdrs",
     visibility = ["//visibility:public"],
 )
 

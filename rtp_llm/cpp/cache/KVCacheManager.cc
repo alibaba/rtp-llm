@@ -16,7 +16,8 @@
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/comm/CollectiveBackend.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 

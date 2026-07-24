@@ -52,10 +52,7 @@ cc_library(
     name = "th_compute_lib",
     srcs = [
         "ComputeInit.cc",
-    ] + select({
-        "@//:using_cuda12": ["//rtp_llm/models_py/bindings/core:exec_ops_srcs"],
-        "//conditions:default": [],
-    }),
+    ],
     hdrs = [],
     deps = [
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
@@ -67,12 +64,34 @@ cc_library(
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
     ] + torch_deps() + select_py_bindings() + select({
+        "@//:using_cuda": [
+            "//rtp_llm/cpp/cache:cache_store_writer_impl",
+            "//rtp_llm/cpp/comm:collective_backend_impl",
+            "//rtp_llm/cpp/core:copy_ops_impl",
+            "//rtp_llm/cpp/models:sampling_ops_impl",
+            "//rtp_llm/cpp/models:stats_impl",
+            "//rtp_llm/cpp/runtime:bootstrap_impl",
+            "//rtp_llm/cpp/runtime:cuda_runtime_impl",
+            "//rtp_llm/models_py/bindings/core:weight_preprocess_impl",
+        ],
+        "@//:using_rocm": [
+            "//rtp_llm/cpp/cache:cache_store_writer_impl",
+            "//rtp_llm/cpp/comm:collective_backend_impl",
+            "//rtp_llm/cpp/core:copy_ops_impl",
+            "//rtp_llm/cpp/models:sampling_ops_impl",
+            "//rtp_llm/cpp/models:stats_impl",
+            "//rtp_llm/cpp/runtime:bootstrap_impl",
+            "//rtp_llm/cpp/runtime:cuda_runtime_impl",
+            "//rtp_llm/models_py/bindings/core:weight_preprocess_impl",
+        ],
+        "//conditions:default": [],
+    }) + select({
         "@//:using_cuda12": [
-            "//rtp_llm/cpp/utils:device_pin",
-            "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
             "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
         ],
-        "@//:using_rocm": ["//rtp_llm/models_py/bindings/core:exec_ctx_rocm"],
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
+        ],
         "//conditions:default": [],
     }) + no_block_copy_link_deps(),
     copts = copts(),
@@ -111,7 +130,6 @@ cc_library(
         # from librtp_compute_ops.so.
         "@//:using_rocm": [
             "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
-            "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         ],
         "//conditions:default": [],

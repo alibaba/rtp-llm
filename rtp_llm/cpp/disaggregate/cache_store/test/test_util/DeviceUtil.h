@@ -1,6 +1,10 @@
+#include <mutex>
+#include <unordered_map>
 #include <vector>
 
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include <torch/torch.h>
+
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {
 
