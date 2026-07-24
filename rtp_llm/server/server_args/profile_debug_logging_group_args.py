@@ -120,3 +120,14 @@ def init_profile_debug_logging_group_args(parser, profiling_debug_config):
         default=False,
         help="控制是否check nan, 为了排查。可选值: True (启用), False (禁用)。默认为 False",
     )
+    profile_debug_logging_group.add_argument(
+        "--enable_model_inputs_log",
+        env_name="ENABLE_MODEL_INPUTS_LOG",
+        bind_to=(profiling_debug_config, "enable_model_inputs_log"),
+        type=str2bool,
+        default=False,
+        help=(
+            "保存每次模型 forward 的输入到 LOG_PATH/model_inputs，用于问题排查。输入中可能包含 token、embedding "
+            "和请求标识，写入繁忙时可能丢失部分记录。默认为 False"
+        ),
+    )

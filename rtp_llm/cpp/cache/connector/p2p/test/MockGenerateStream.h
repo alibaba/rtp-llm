@@ -20,7 +20,7 @@ public:
     MockGenerateStream(const std::shared_ptr<GenerateInput>& input):
         GenerateStream(input, createMockModelConfig(), RuntimeConfig{}, ResourceContext{}, nullptr) {}
 
-    ErrorResult<GenerateOutputs> nextOutput() override {
+    ErrorResult<GenerateOutputs> nextOutput(int64_t = 0) override {
         return ErrorResult<GenerateOutputs>(GenerateOutputs{});
     }
     void updateOutput(const StreamUpdateInfo&) override {}

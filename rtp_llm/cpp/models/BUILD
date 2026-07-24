@@ -131,16 +131,36 @@ cc_library(
 )
 
 cc_library(
+    name = "model_inputs_logger",
+    srcs = ["ModelInputsLogger.cc"],
+    hdrs = ["ModelInputsLogger.h"],
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings/core:op_data",
+        "@havenask//aios/autil:env_util",
+        "@havenask//aios/kmonitor:kmonitor_client_cpp",
+    ] + torch_deps(),
+    visibility = ["//rtp_llm/cpp/models/test:__pkg__"],
+)
+
+cc_library(
     name = "models",
     hdrs = glob(
         ["*.h"],
-        exclude = ["ModelTypes.h"],
+        exclude = [
+            "ModelInputsLogger.h",
+            "ModelTypes.h",
+        ],
     ),
     srcs = glob(
         ["*.cc"],
-        exclude = ["ModelTypes.cc"],
+        exclude = [
+            "ModelInputsLogger.cc",
+            "ModelTypes.cc",
+        ],
     ),
     deps = [
+        ":model_inputs_logger",
         ":model_types",
         ":sample_infos",
         ":logits_processor",

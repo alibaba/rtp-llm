@@ -1267,6 +1267,7 @@ class ProfilingDebugLoggingConfig:
     debug_start_fake_process: bool
     enable_detail_log: bool
     enable_device_perf: bool
+    enable_model_inputs_log: bool
     ft_alog_conf_path: str
     ft_core_dump_on_exception: bool
     gen_timeline_sync: bool

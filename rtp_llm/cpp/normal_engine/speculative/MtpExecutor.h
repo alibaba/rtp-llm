@@ -15,6 +15,10 @@
 
 namespace rtp_llm {
 
+enum class ModelInputsModelRole;
+
+class ModelInputsLogger;
+
 struct MtpMetricsCollector {
     RtpLLMExecutorMetricsCollector          executor_collector;
     RtpLLMTokenPSMetricsCollector           tps_collector;
@@ -106,10 +110,13 @@ protected:
                         std::list<GenerateStreamPtr>&       decode_streams);
 
 private:
+    GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role);
+
     std::unique_ptr<ModelBase>               model_;
     std::unique_ptr<Sampler>                 sampler_;
     std::unique_ptr<MtpBatchStreamProcessor> batch_stream_processor_;
     std::shared_ptr<KVCacheManager>          cache_manager_;
+    std::shared_ptr<ModelInputsLogger>       model_inputs_logger_;
     bool                                     enable_ffn_disaggregate_ = false;
     bool                                     enable_detail_log_       = false;
     int                                      tp_rank_                 = 0;

@@ -91,7 +91,7 @@ def prepare_causal_conv1d_metadata(
     )
 
 
-@triton.jit(do_not_specialize=["max_block_size"])
+@triton.jit(do_not_specialize=["stride_block_map"])
 def _causal_conv1d_fwd_kernel(  # continuous batching
     # Pointers to matrices
     x_ptr,  # (dim, cu_seqlen) holding `batch` of actual sequences + padded sequences
@@ -107,7 +107,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     # Matrix dimensions
     batch: tl.int32,  # actually padded_batch
     dim: tl.constexpr,
-    max_block_size: tl.int32,
+    stride_block_map: tl.int64,
     # Strides
     stride_x_seq: tl.constexpr,  # stride to get to next sequence,
     stride_x_dim: tl.constexpr,  # stride to get to next feature-value,
@@ -179,7 +179,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
         if HAS_CACHE and prefix_length > 0:
             init_state_block_pos = (prefix_length - 1) // SEQ_SIZE_PER_BLOCK
             init_state_block_idx = tl.load(
-                block_map_ptr + idx_seq * max_block_size + init_state_block_pos
+                block_map_ptr + idx_seq * stride_block_map + init_state_block_pos
             ).to(tl.int64)
             tl.device_assert(
                 init_state_block_idx >= 0,
@@ -353,13 +353,13 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
         if write_to_block:
             write_page_idx = tl.load(
                 block_map_ptr
-                + idx_seq * max_block_size
+                + idx_seq * stride_block_map
                 + dest_idx // SEQ_SIZE_PER_BLOCK
             ).to(tl.int64)
 
         if write_to_block and write_page_idx >= 0:
             # tl.device_print("idx_seq:", idx_seq)
-            # tl.device_print("max_block_size:", max_block_size)
+            # tl.device_print("stride_block_map:", stride_block_map)
             # tl.device_print("dest_idx:", dest_idx)
             # tl.device_print("SEQ_SIZE_PER_BLOCK:", SEQ_SIZE_PER_BLOCK)
 
@@ -539,7 +539,7 @@ def causal_conv1d_fn(
     stride_istate_seq = 0
     stride_istate_dim = 0
     stride_istate_token = 0
-    max_block_size = block_map.size(1) if block_map is not None else 0
+    stride_block_map = block_map.stride(0) if block_map is not None else 0
     if conv_states is not None:
         # extensions to support vLLM:
         # 1. conv_states is used to replaced initial_states
@@ -605,7 +605,7 @@ def causal_conv1d_fn(
         # Matrix dimensions
         padded_batch,
         dim,
-        max_block_size,
+        stride_block_map,
         # stride
         stride_x_seq,
         stride_x_dim,
@@ -644,7 +644,7 @@ def _causal_conv1d_update_kernel(
     conv_state_ptr,
     cache_seqlens_ptr,  # circular buffer
     block_map_ptr,
-    stride_block_map: tl.int32,
+    stride_block_map: tl.int64,
     sequence_lengths_ptr,
     query_start_loc_ptr,  # (batch + 1)
     o_ptr,  # (batch, dim, seqlen)
@@ -1039,7 +1039,7 @@ def causal_conv1d_update(
     # when speculative, we load (width - 2) token from conv_state and (seqlen) token from x, then store them in different block
     np2_statelen_total = triton.next_power_of_2(state_len - 1 + seqlen)
 
-    stride_block_map = block_map.size(1) if block_map is not None else 0
+    stride_block_map = block_map.stride(0) if block_map is not None else 0
 
     def grid(META):
         return (
