@@ -86,8 +86,7 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# Stateless compatibility implementation. Keep it in librtp_compute_ops.so so
-# exec_ops_hdr remains an interface-only dependency bundle.
+# Stateless compatibility implementation. Keep it in librtp_compute_ops.so.
 cc_library(
     name = "weight_preprocess_impl",
     srcs = ["WeightPreprocess.cc"],
@@ -103,41 +102,11 @@ alias(
     visibility = ["//visibility:public"],
 )
 
-# Interface-only dependency bundle. Engine targets (KVCacheManager etc., linked into
-# libth_transformer.so) depend on this; they must NOT pull the stateful _impl
-# targets, because the `g_*_fn` callback trio and the CudaRuntime legacy globals
-# live in exactly one .so (librtp_compute_ops.so via th_compute_lib -> :_impl).
-# A second copy in libth_transformer.so would be unregistered -> crash at
-# KVCacheManager::allocateAndSync -> execAllGather assert.
-cc_library(
-    name = "exec_ops_hdr",
-    deps = [
-        ":op_data",
-        ":device_data",
-        ":weight_preprocess",
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/models:stats",
-        "//rtp_llm/cpp/models:sampling_ops",
-        "//rtp_llm/cpp/runtime:bootstrap",
-        "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
-        "//rtp_llm/cpp/comm:collective_backend_hdrs",
-        "//rtp_llm/cpp/cache:cache_store_writer",
-        "//rtp_llm/cpp/core:copy_ops",
-        "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_util",
-    ] + torch_deps() + select({
-        "@//:using_rocm": ["@local_config_rocm//rocm:rocm_headers"],
-        "//conditions:default": [],
-    }),
-    copts = copts(),
-    visibility = ["//visibility:public"],
-)
-
 # Test aggregator; tests link the _impl targets directly because they produce
 # a single cc_test binary and need the symbol definitions locally.
 cc_library(
     name = "exec_ops_test_lib",
     deps = [
-        ":exec_ops_hdr",
         "//rtp_llm/cpp/runtime:cuda_runtime_impl",
         "//rtp_llm/cpp/runtime:bootstrap_impl",
         "//rtp_llm/cpp/comm:collective_backend_impl",
@@ -189,7 +158,6 @@ cc_library(
         "CudaBeamSearchOp.cc",
     ],
     deps = [
-        ":exec_ops_hdr",
         ":device_data",
         ":op_data",
         ":type_convert",

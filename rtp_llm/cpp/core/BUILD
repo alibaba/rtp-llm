@@ -26,7 +26,8 @@ cc_library(
 )
 
 # Impl + thread_local streams.  MUST live in exactly one .so (via
-# th_compute_lib -> librtp_compute_ops.so).
+# th_compute_lib -> librtp_compute_ops.so). The non-CUDA/ROCm branch is only a
+# host-copy compile/link fallback; RTP-LLM has no supported CPU engine backend.
 cc_library(
     name = "copy_ops_impl",
     srcs = ["CopyOps.cc"],
@@ -54,6 +55,10 @@ cc_library(
     }) + torch_deps(),
     copts = copts(),
     alwayslink = True,
+    visibility = [
+        "//rtp_llm/cpp/pybind:__pkg__",
+        "//rtp_llm/models_py/bindings/core:__pkg__",
+    ],
 )
 
 # Back-compat alias; header-only view.  Callers that want the impl must

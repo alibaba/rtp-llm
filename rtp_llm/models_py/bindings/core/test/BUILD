@@ -8,7 +8,6 @@ test_copts = [
 exec_ops_test_deps = [
     "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     "//rtp_llm/models_py/bindings/common:common",
-    "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
     "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
     "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",

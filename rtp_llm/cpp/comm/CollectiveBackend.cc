@@ -18,30 +18,30 @@ py::function
 }  // anonymous namespace
 
 void execBroadcast(const BroadcastParams& params) {
-    py::function fn;
+    py::gil_scoped_acquire gil;
+    py::function           fn;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
         fn = g_broadcast_fn;
     }
     RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(fn),
                             "execBroadcast called but broadcast callback not registered via register_comm_ops");
-    py::gil_scoped_acquire gil;
-    py::list               tensors;
+    py::list tensors;
     for (auto& t : params.buffers)
         tensors.append(t);
     fn(tensors, params.root, static_cast<int>(params.mode));
 }
 
 AllReduceOutput execAllReduce(const AllReduceParams& params) {
-    py::function fn;
+    py::gil_scoped_acquire gil;
+    py::function           fn;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
         fn = g_allreduce_fn;
     }
     RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(fn),
                             "execAllReduce called but allreduce callback not registered via register_comm_ops");
-    py::gil_scoped_acquire gil;
-    auto                   result = fn(params.buffer,
+    auto result = fn(params.buffer,
                      static_cast<int>(params.op),
                      static_cast<int>(params.mode),
                      params.dest.defined() ? py::cast(params.dest) : py::none());
@@ -49,15 +49,15 @@ AllReduceOutput execAllReduce(const AllReduceParams& params) {
 }
 
 void execAllGather(const AllGatherParams& params) {
-    py::function fn;
+    py::gil_scoped_acquire gil;
+    py::function           fn;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
         fn = g_allgather_fn;
     }
     RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(fn),
                             "execAllGather called but allgather callback not registered via register_comm_ops");
-    py::gil_scoped_acquire gil;
-    py::list               recv_list, send_list;
+    py::list recv_list, send_list;
     for (auto& t : params.recv_buffers)
         recv_list.append(t);
     for (auto& t : params.send_buffers)

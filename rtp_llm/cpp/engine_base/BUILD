@@ -13,8 +13,8 @@ cc_library(
     ],
     deps = [
         "//:rtp_compute_ops",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/pybind:py_utils",
+        "//rtp_llm/models_py/bindings/core:op_data",
     ],
     visibility = ["//visibility:public"],
 )
@@ -89,5 +89,4 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
 )
-
 

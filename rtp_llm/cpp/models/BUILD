@@ -104,8 +104,9 @@ cc_library(
     deps = [
         ":context_parallel_interface",
         "//:rtp_compute_ops",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/cpp/comm:collective_backend_hdrs",
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings/core:op_data",
     ],
     visibility = ["//visibility:public"],
 )
@@ -147,7 +148,6 @@ cc_library(
         ":dfa_utils",
         ":context_parallel",
         "//:rtp_compute_ops",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:cache",
@@ -158,6 +158,7 @@ cc_library(
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
+        "//rtp_llm/cpp/comm:collective_backend_hdrs",
         "//rtp_llm/cpp/core:copy_ops",
         "//rtp_llm/cpp/runtime:cuda_runtime",
     ],

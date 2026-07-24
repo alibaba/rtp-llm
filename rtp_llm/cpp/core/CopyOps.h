@@ -11,6 +11,10 @@ namespace rtp_llm {
 // Copy ops
 // ===================================================================
 
+// Non-CUDA/ROCm builds are not a supported engine runtime. Their implementation
+// is a compile/link compatibility fallback for host-only tools: only host copies
+// are accepted, while accelerator-only operations fail explicitly.
+
 // Synchronous copy honoring CopyParams::overlapped (CUDA: optional overlap stream).
 void runtimeCopy(const CopyParams& params);
 

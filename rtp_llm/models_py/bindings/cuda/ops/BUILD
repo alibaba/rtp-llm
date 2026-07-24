@@ -13,16 +13,6 @@ config_setting(
     },
 )
 
-# exec_ctx_fwd aliases :exec_ops_hdr (the transitional dep-bundle of all
-# runtime/comm/copy/cache/sample homes).  Kept as a named alias so a few CUDA
-# op BUILD files don't have to be re-plumbed right now.
-# Sample impls still come from gpu_base (CUDA) or exec_ctx_ops (ROCm).
-cc_library(
-    name = "exec_ctx_fwd",
-    deps = ["//rtp_llm/models_py/bindings/core:exec_ops_hdr"],
-    visibility = ["//visibility:public"],
-)
-
 cc_library(
     name = "gpu_base",
     hdrs = select({
@@ -39,7 +29,6 @@ cc_library(
     }),
     deps = [
         "//rtp_llm/models_py/bindings/core:device_data",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core:op_data",
         "//rtp_llm/models_py/bindings/core:type_convert",
         "//rtp_llm/cpp/utils:signal_utils",

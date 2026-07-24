@@ -51,7 +51,10 @@ cc_library(
         "//rtp_llm/cpp/runtime:cuda_runtime",
     ] + torch_deps(),
     copts = copts(),
-    visibility = ["//visibility:public"],
+    visibility = [
+        "//rtp_llm/cpp/pybind:__pkg__",
+        "//rtp_llm/models_py/bindings/core:__pkg__",
+    ],
     alwayslink = True,
 )
 
@@ -279,8 +282,9 @@ cc_library(
         ":cp_slot_mapper",
         ":kv_cache_allocator_hdr",
         ":kv_cache_group",
+        "//rtp_llm/cpp/core:copy_ops",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/core:op_data",
     ],
 )
 
@@ -326,7 +330,7 @@ cc_library(
         ":kv_cache_allocator",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
         "//rtp_llm/models_py/bindings/core:type_convert",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/metrics",
@@ -378,7 +382,9 @@ cc_library(
         ":cache_core",
         ":cp_slot_mapper",
         "//rtp_llm/cpp/cache/connector",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/cpp/comm:collective_backend_hdrs",
+        "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
+        "//rtp_llm/models_py/bindings/core:types_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + torch_deps(),
 )

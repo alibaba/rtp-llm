@@ -29,6 +29,10 @@ cc_library(
     ] + torch_deps(),
     copts = copts(),
     alwayslink = True,
+    visibility = [
+        "//rtp_llm/cpp/pybind:__pkg__",
+        "//rtp_llm/models_py/bindings/core:__pkg__",
+    ],
 )
 
 # Compat alias; most callers only need the header.  Anything that previously

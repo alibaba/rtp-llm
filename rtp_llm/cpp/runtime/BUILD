@@ -38,6 +38,10 @@ cc_library(
     }) + torch_deps(),
     copts = copts(),
     alwayslink = True,
+    visibility = [
+        "//rtp_llm/cpp/pybind:__pkg__",
+        "//rtp_llm/models_py/bindings/core:__pkg__",
+    ],
 )
 
 alias(
@@ -88,6 +92,10 @@ cc_library(
     }) + torch_deps(),
     copts = copts(),
     alwayslink = True,
+    visibility = [
+        "//rtp_llm/cpp/pybind:__pkg__",
+        "//rtp_llm/models_py/bindings/core:__pkg__",
+    ],
 )
 
 # Compat alias; header-only for generic callers.  th_compute_lib must depend

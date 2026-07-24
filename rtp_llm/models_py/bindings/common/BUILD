@@ -7,10 +7,11 @@ cc_library(
     srcs = glob(["*.cc"]),
     hdrs = glob(["*.h"]),
     deps = [
+        "//rtp_llm/cpp/cache:cache_store_writer",
         "//rtp_llm/cpp/core:copy_ops",
+        "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/core:op_data",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
         "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_kernel",
     ] + torch_deps() + select({

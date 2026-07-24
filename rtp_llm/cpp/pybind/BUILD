@@ -88,10 +88,8 @@ cc_library(
     }) + select({
         "@//:using_cuda12": [
             "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
-            "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         ],
         "@//:using_rocm": [
-            "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
             "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
         ],
         "//conditions:default": [],
@@ -132,7 +130,6 @@ cc_library(
         # from librtp_compute_ops.so.
         "@//:using_rocm": [
             "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
-            "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         ],
         "//conditions:default": [],
