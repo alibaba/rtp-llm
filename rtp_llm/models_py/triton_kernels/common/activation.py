@@ -956,6 +956,20 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
     T = input.shape[0]
 
     if T >= _SILU_MUL_FP8_QUANT_M_THRESHOLD:
+        # MiniMax-M3 prefill (SwiGLU-OAI + MXFP8): the tiled fused kernel beats
+        # the unfused swiglu_oai_torch + mxfp8_quant_act_packed path (the
+        # torch.compile `triton_poi_fused_add_clamp_mul_sigmoid_split_0` in the
+        # timeline) by ~3x at prefill T. It emits fp32 row-major scale; the
+        # MXFP8 down_proj (CudaMxfp8Linear) packs it into DeepGEMM's int32
+        # layout, exactly like the small-T fused path below. The kernel matches
+        # flashinfer byte-for-byte incl. small-magnitude groups (1e-20 floor).
+        if mxfp8_mode and gemm1_alpha > 0:
+            return silu_and_mul_mxfp8_quant_tiled_fwd(
+                input,
+                quant_group_size=quant_group_size,
+                gemm1_alpha=gemm1_alpha,
+                gemm1_clamp_limit=gemm1_clamp_limit,
+            )
         if gemm1_alpha > 0:
             from rtp_llm.models_py.triton_kernels.common.swiglu_oai import (
                 swiglu_oai_torch,
@@ -1038,6 +1052,211 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
         GEMM1_ALPHA=gemm1_alpha,
         GEMM1_CLAMP_LIMIT=gemm1_clamp_limit,
         num_warps=1,
+    )
+    return output, output_scale
+
+
+# ---------------------------------------------------------------------------
+# Tiled fused kernel: SwiGLU-OAI + MXFP8 quant, optimized for large T (prefill).
+# ---------------------------------------------------------------------------
+#
+# The original _silu_and_mul_post_quant_dense_packed_kernel uses
+# grid=(num_groups, T) with num_warps=1 — one program per (row, group), each
+# processing only 32 elements.  At T=8192 this creates 786K tiny programs
+# that saturate the SM scheduler, causing O(T) scaling that loses to the
+# unfused path (swiglu_oai_torch + mxfp8_quant_act) for T >= 1024.
+#
+# This kernel tiles along BOTH the T and group dimensions:
+#   grid = (cdiv(num_groups, NG), cdiv(T, BLOCK_T))
+# Each program processes BLOCK_T rows × NG *contiguous* groups.  Instead of a
+# per-group loop of narrow [BLOCK_T, 32] loads (64 B/row — poor coalescing),
+# it issues ONE wide contiguous load of [BLOCK_T, NG*32] for gate and one for
+# up, then reshapes to [BLOCK_T, NG, 32] and reduces along the last axis for
+# the per-group absmax.  The wide load (NG*32*2 B/row, e.g. 1 KB at NG=16) is
+# what makes this memory-bound kernel approach peak HBM bandwidth at large T.
+#
+# BLOCK_T / NG / num_warps are autotuned per H_out (`size_n`), so the shared
+# expert (size_n=3072) and dense MLP (size_n=12288) each get their best config.
+#
+# Output format: fp32 row-major scale [T, num_groups] (same as original
+# MXFP8 mode).  Caller packs via pack_mxfp8_scale if DeepGEMM needs int32.
+# ---------------------------------------------------------------------------
+
+
+def _tiled_swiglu_mxfp8_configs():
+    """Autotune space (tile size kept <= 16384 elems to bound registers).
+
+    Autotuned per H_out (`size_n`); the reciprocal-multiply quantize made the
+    kernel cheaper per element, so wider tiles / higher warp counts can now win
+    by exposing more memory-level parallelism.
+    """
+    cfgs = []
+    tiles = (
+        (8, 16), (16, 16), (8, 32), (16, 32), (32, 16), (32, 8),
+        (64, 8), (8, 64), (16, 8), (4, 32), (64, 4), (4, 64),
+    )
+    for block_t, ng in tiles:
+        for num_warps in (4, 8, 16):
+            cfgs.append(
+                triton.Config({"BLOCK_T": block_t, "NG": ng}, num_warps=num_warps)
+            )
+    return cfgs
+
+
+@triton.autotune(configs=_tiled_swiglu_mxfp8_configs(), key=["size_n"])
+@triton.jit
+def _silu_and_mul_mxfp8_quant_tiled_kernel(
+    input_ptr,             # [T, 2*H_out] bf16
+    stride_input_t,
+    output_ptr,            # [T, H_out] fp8_e4m3fn
+    stride_output_t,
+    output_scale_ptr,      # [T, num_groups] fp32
+    stride_scale_t,
+    stride_scale_g,
+    T,
+    size_n,                # H_out
+    n_groups,
+    fp8_max,
+    fp8_min,
+    BLOCK_N: tl.constexpr,   # MX_BLOCK = 32
+    GEMM1_ALPHA: tl.constexpr,
+    GEMM1_CLAMP_LIMIT: tl.constexpr,
+    BLOCK_T: tl.constexpr,   # rows per program (autotuned)
+    NG: tl.constexpr,        # groups per program (autotuned)
+):
+    """Tiled SwiGLU-OAI + MXFP8 quant: BLOCK_T rows × NG groups per program.
+
+    One wide contiguous load per operand, then a reshape+reduce over the group
+    axis (no per-group loop) for coalesced, near-peak-bandwidth access.
+    """
+    pid_g = tl.program_id(0)
+    pid_t = tl.program_id(1)
+
+    stride_input_t = tl.cast(stride_input_t, dtype=tl.int64)
+    stride_output_t = tl.cast(stride_output_t, dtype=tl.int64)
+    stride_scale_t = tl.cast(stride_scale_t, dtype=tl.int64)
+    stride_scale_g = tl.cast(stride_scale_g, dtype=tl.int64)
+
+    BLOCK_W: tl.constexpr = NG * BLOCK_N  # contiguous columns per program
+
+    offs_t = pid_t * BLOCK_T + tl.arange(0, BLOCK_T)
+    mask_t = offs_t < T
+    offs_w = pid_g * BLOCK_W + tl.arange(0, BLOCK_W)
+    col_mask = offs_w < size_n
+    load_mask = mask_t[:, None] & col_mask[None, :]
+
+    # One wide contiguous load for gate and up: [BLOCK_T, BLOCK_W].
+    in_base = input_ptr + offs_t[:, None] * stride_input_t
+    gate = tl.load(in_base + offs_w[None, :], mask=load_mask, other=0.0).to(tl.float32)
+    up = tl.load(
+        in_base + (size_n + offs_w)[None, :], mask=load_mask, other=0.0
+    ).to(tl.float32)
+
+    # SwiGLU-OAI: gate * sigmoid(gate*alpha) * (up+1) with clamps
+    gate = tl.minimum(gate, GEMM1_CLAMP_LIMIT)
+    up = tl.clamp(up, -GEMM1_CLAMP_LIMIT, GEMM1_CLAMP_LIMIT)
+    activated = gate * tl.sigmoid(gate * GEMM1_ALPHA) * (up + 1)
+    # Match production precision: bf16 round-trip (DenseMLP does this)
+    activated = activated.to(tl.bfloat16).to(tl.float32)
+
+    # Split into groups: [BLOCK_T, NG, BLOCK_N], reduce along the MX block axis.
+    act_g = tl.reshape(activated, (BLOCK_T, NG, BLOCK_N))
+    absmax = tl.max(tl.abs(act_g), axis=2)  # [BLOCK_T, NG]
+    # Floor must match the unfused/flashinfer path (1e-20), NOT 1e-4: a larger
+    # floor inflates the scale of small-magnitude groups and mis-quantizes them,
+    # which broke the MiniMax-M3 long-context smoke (random benchmark data never
+    # hit sub-1e-4 group absmax, so it went unnoticed).
+    absmax = tl.maximum(absmax, 1e-20)
+    # IEEE-RNE div (match _silu_and_mul_post_quant_dense_packed_kernel)
+    s0 = _ieee_rn_div_f32(absmax, fp8_max)
+    log_s = tl.ceil(tl.log2(tl.abs(s0)))  # [BLOCK_T, NG]
+    output_s = tl.exp2(log_s)             # power-of-two scale to store
+    recip = tl.exp2(-log_s)               # exact 1/scale (pow2 → bit-exact)
+
+    # Quantize by multiplying with the exact reciprocal. Because the scale is a
+    # power of two, x * (1/scale) == x / scale bit-for-bit, so this stays byte
+    # identical to the div.rn.f32 path while avoiding a per-element divide.
+    recip_b = tl.broadcast_to(recip[:, :, None], (BLOCK_T, NG, BLOCK_N))
+    output_q = tl.clamp(act_g * recip_b, fp8_min, fp8_max)
+    output_q = tl.reshape(output_q, (BLOCK_T, BLOCK_W)).to(output_ptr.dtype.element_ty)
+
+    out_base = output_ptr + offs_t[:, None] * stride_output_t
+    tl.store(out_base + offs_w[None, :], output_q, mask=load_mask)
+
+    group_ids = pid_g * NG + tl.arange(0, NG)
+    group_ok = group_ids < n_groups
+    scale_ptrs = (
+        output_scale_ptr
+        + offs_t[:, None] * stride_scale_t
+        + group_ids[None, :] * stride_scale_g
+    )
+    tl.store(scale_ptrs, output_s, mask=mask_t[:, None] & group_ok[None, :])
+
+
+def silu_and_mul_mxfp8_quant_tiled_fwd(
+    input: torch.Tensor,
+    quant_group_size: int = 32,
+    gemm1_alpha: float = 0.0,
+    gemm1_clamp_limit: float = 0.0,
+    block_t: int = 8,  # deprecated: kept for BC, BLOCK_T is autotuned
+    ng: int = 16,      # deprecated: kept for BC, NG is autotuned
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Tiled fused SwiGLU-OAI + MXFP8 quant, optimized for large T.
+
+    Drop-in replacement for silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd
+    in the MXFP8 + SwiGLU-OAI configuration.  Tiles along both T and group
+    dimensions; BLOCK_T / NG / num_warps are autotuned per H_out.
+
+    Args:
+        input:  [T, 2*H_out] bf16, contiguous, layout [gate | up].
+        quant_group_size: MX block size (default 32).
+        gemm1_alpha: SwiGLU-OAI alpha (>0 enables OAI math).
+        gemm1_clamp_limit: SwiGLU-OAI clamp limit.
+        block_t, ng: deprecated, ignored (the kernel autotunes these).
+
+    Returns:
+        (fp8_e4m3 [T, H_out], fp32 scale [T, H_out // quant_group_size]).
+    """
+    del block_t, ng  # autotuned; retained only for backward compatibility
+    assert input.is_contiguous(), "input must be contiguous"
+    assert input.dim() == 2
+    T = input.shape[0]
+    size_n = input.shape[1] // 2
+    assert size_n % quant_group_size == 0
+    num_groups = size_n // quant_group_size
+
+    output = torch.empty((T, size_n), dtype=torch.float8_e4m3fn, device=input.device)
+    output_scale = torch.empty((T, num_groups), dtype=torch.float32, device=input.device)
+
+    if T == 0:
+        return output, output_scale
+
+    finfo = torch.finfo(torch.float8_e4m3fn)
+    fp8_max = finfo.max
+    fp8_min = -fp8_max
+
+    def grid(meta):
+        return (
+            triton.cdiv(num_groups, meta["NG"]),
+            triton.cdiv(T, meta["BLOCK_T"]),
+        )
+
+    _silu_and_mul_mxfp8_quant_tiled_kernel[grid](
+        input,
+        input.stride(0),
+        output,
+        output.stride(0),
+        output_scale,
+        output_scale.stride(0),
+        output_scale.stride(1),
+        T,
+        size_n,
+        num_groups,
+        fp8_max,
+        fp8_min,
+        BLOCK_N=quant_group_size,
+        GEMM1_ALPHA=gemm1_alpha,
+        GEMM1_CLAMP_LIMIT=gemm1_clamp_limit,
     )
     return output, output_scale
 
