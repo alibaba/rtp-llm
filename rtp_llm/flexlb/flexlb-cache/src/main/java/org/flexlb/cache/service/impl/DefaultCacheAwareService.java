@@ -65,7 +65,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
         try {
             if (workerStatus.getCacheStatus() == null) {
                 WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, "Worker Cache Status is null");
-                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(engineIpPort, role, startTime, "0");
+                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "0");
                 return result;
             }
 
@@ -73,7 +73,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
             CacheStatus cacheStatus = workerStatus.getCacheStatus();
             if (cacheStatus.getCachedKeys() == null) {
                 WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, "Worker Cached Keys is null");
-                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(engineIpPort, role, startTime, "0");
+                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "0");
                 return result;
             }
 
@@ -84,7 +84,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
             
             WorkerCacheUpdateResult result = buildSuccessResult(workerStatus, cacheStatus);
 
-            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(ipPort, role, startTime, "1");
+            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "1");
             
             return result;
                 
@@ -93,7 +93,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
             
             WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, e.getMessage());
 
-            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(engineIpPort, role, startTime, "0");
+            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "0");
             
             return result;
         }
