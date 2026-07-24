@@ -635,7 +635,8 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     auto next_draft_input               = GptModelInputs{};
     auto next_draft_output              = GptModelOutputs{};
     next_draft_output.logits            = torch::tensor({1.9f, 1.10f, 1.11f, 1.12f}).reshape({(int64_t)batch_size, 4});
-    next_draft_output.all_hidden_states = torch::tensor({0.1f, 0.1f, 0.2f, 0.22f, 0.3f, 0.33f}).reshape({3, 2});
+    next_draft_output.all_hidden_states =
+        torch::tensor({0.1f, 0.1f, 0.2f, 0.22f, 0.3f, 0.33f, 0.0f, 0.0f, 0.0f, 0.0f}).reshape({5, 2});
 
     next_draft_input.combo_tokens      = torch::tensor({3, 2, 0, 0, 0}, torch::kInt32);
     next_draft_input.input_lengths     = torch::tensor({5}, torch::kInt32);
