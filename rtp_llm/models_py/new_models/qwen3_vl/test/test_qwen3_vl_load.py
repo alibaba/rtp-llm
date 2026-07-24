@@ -61,6 +61,8 @@ def _language_config():
         enable_fp32_lm_head=False,
         tie_word_embeddings=True,
         expert_num=0,
+        moe_k=0,
+        moe_style=0,
     )
 
 
@@ -283,8 +285,21 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
         self.assertIsInstance(model, Qwen3VLForCausalLM)
         torch.testing.assert_close(model.lm_head.weight, model.embed_tokens.weight)
         self.assertTrue(
-            any("treating the model as dense" in message for message in logs.output)
+            any("identify a dense model" in message for message in logs.output)
         )
+
+    def test_ep_rejects_zero_experts_when_moe_markers_are_enabled(self):
+        config = _language_config()
+        config.moe_k = 1
+        config.moe_style = 1
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(_language_weights(), f"{model_path}/model.safetensors")
+            with self.assertRaisesRegex(ValueError, "MoE markers.*zero experts"):
+                NewModelLoader(
+                    model_config=config,
+                    load_config=_load_config(ep_size=2),
+                    model_path=model_path,
+                ).load()
 
     def test_language_forward_handles_text_only_input(self):
         class IdentityLayer(torch.nn.Module):

@@ -460,6 +460,8 @@ class Qwen3VLVisionTransformer(RtpModule):
                 f"got {grid_thw.device}"
             )
 
+        # Materialize only the three shape scalars per item for validation and
+        # control flow. Per-patch interpolation stays tensorized below.
         values = [tuple(int(value) for value in row) for row in grid_thw.tolist()]
         for value in values:
             t, h, w = value
@@ -510,8 +512,8 @@ class Qwen3VLVisionTransformer(RtpModule):
     def _interpolated_position_embeddings(
         self, grid_values: list[tuple[int, int, int]]
     ) -> torch.Tensor:
-        index_lists: list[list[int]] = [[], [], [], []]
-        weight_lists: list[list[float]] = [[], [], [], []]
+        index_tensors: list[list[torch.Tensor]] = [[], [], [], []]
+        weight_tensors: list[list[torch.Tensor]] = [[], [], [], []]
         for _, h, w in grid_values:
             h_indexes = torch.linspace(0, self.num_grid_per_side - 1, h)
             w_indexes = torch.linspace(0, self.num_grid_per_side - 1, w)
@@ -537,11 +539,18 @@ class Qwen3VLVisionTransformer(RtpModule):
                 (delta_h[:, None] * delta_w[None]).flatten(),
             )
             for index in range(4):
-                index_lists[index].extend(indexes[index].tolist())
-                weight_lists[index].extend(weights[index].tolist())
+                index_tensors[index].append(indexes[index])
+                weight_tensors[index].append(weights[index])
 
-        index_tensor = torch.tensor(index_lists, dtype=torch.long, device=self.device)
-        weight_tensor = torch.tensor(weight_lists, dtype=self.dtype, device=self.device)
+        # Keep the Transformers-compatible CPU interpolation arithmetic, but
+        # concatenate tensors directly instead of synchronizing through
+        # per-element Python lists. Transfer each compact table only once.
+        index_tensor = torch.stack([torch.cat(values) for values in index_tensors]).to(
+            device=self.device, dtype=torch.long
+        )
+        weight_tensor = torch.stack(
+            [torch.cat(values) for values in weight_tensors]
+        ).to(device=self.device, dtype=self.dtype)
         position_embeddings = self.pos_embed(index_tensor) * weight_tensor[:, :, None]
         interpolated = (
             position_embeddings[0]

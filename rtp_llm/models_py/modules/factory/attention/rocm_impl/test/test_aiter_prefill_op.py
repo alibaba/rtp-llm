@@ -1374,7 +1374,9 @@ class TestAiterPrefillImplMropeRealOp(unittest.TestCase):
         self.device = torch.device("cuda")
         self.dtype = torch.bfloat16
 
-    def _check_mrope_matches_reference(self, impl_cls):
+    def _check_mrope_matches_reference(
+        self, impl_cls, *, define_padding_offset: bool = True
+    ):
         input_lengths = [3, 2]
         head_num = 4
         head_num_kv = 2
@@ -1383,6 +1385,8 @@ class TestAiterPrefillImplMropeRealOp(unittest.TestCase):
             head_num, head_num_kv, head_dim, dtype=self.dtype
         )
         attn_inputs = _make_rope_prefill_inputs(input_lengths, self.device, self.dtype)
+        if not define_padding_offset:
+            attn_inputs.padding_offset = torch.Tensor()
         position_ids = torch.tensor(
             [
                 [0, 0, 0],
@@ -1424,6 +1428,11 @@ class TestAiterPrefillImplMropeRealOp(unittest.TestCase):
 
     def test_nonasm_mrope_uses_all_three_position_axes(self):
         self._check_mrope_matches_reference(AiterPrefillImplNonAsm)
+
+    def test_asm_mrope_accepts_undefined_padding_offset(self):
+        self._check_mrope_matches_reference(
+            AiterPrefillImplAsm, define_padding_offset=False
+        )
 
     def test_prepare_in_place_refreshes_mrope_position_ids(self):
         input_lengths = [3, 2]
@@ -1599,6 +1608,27 @@ class TestRocmDecodeMropeRealOp(unittest.TestCase):
             [3, 5],
             torch.tensor([[2, 5, 7], [4, 1, 9]], dtype=torch.int32),
         )
+
+    def test_decode_without_kv_cache_fails_in_release_builds(self):
+        cfg = _make_mrope_attn_configs(4, 2, 128, dtype=self.dtype)
+        cfg.max_seq_len = 64
+        attn_inputs, _ = _make_mrope_decode_inputs(
+            [3],
+            torch.tensor([[2, 5, 7]], dtype=torch.int32),
+            self.device,
+            self.dtype,
+        )
+        op = FusedRopeKVCacheDecodeOpAsm(cfg)
+        params = op.prepare(attn_inputs)
+        qkv = torch.randn(
+            1,
+            4 * 128 + 2 * 2 * 128,
+            dtype=self.dtype,
+            device=self.device,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "decode should have kv cache"):
+            op.forward(qkv, None, params)
 
 
 if __name__ == "__main__":

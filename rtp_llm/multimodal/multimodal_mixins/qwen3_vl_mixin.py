@@ -50,6 +50,9 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         )
         self._uses_new_loader_vision = visual is not None
         if visual is None:
+            # Keep AutoProcessor's native Qwen3-VL image processor. The old
+            # forced Qwen2-VL override changes the image grid for Qwen3-VL
+            # checkpoints (950 instead of 2752 tokens for the smoke image).
             config_hf = Qwen3VLConfig.from_pretrained(
                 mm_related_params.config["ckpt_path"]
             )

@@ -9,6 +9,31 @@ from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
 
 
 class MultimodalPrefixCacheInjectorTest(TestCase):
+    def test_mixed_cached_and_uncached_features_remain_independent(self):
+        embeddings = torch.arange(20, dtype=torch.float32).reshape(10, 2)
+        first = torch.arange(8, dtype=torch.float32).reshape(4, 2) + 100
+        second = torch.arange(6, dtype=torch.float32).reshape(3, 2) + 200
+        locations = torch.tensor([-2, 4], dtype=torch.int32)
+
+        expected_embeddings = embeddings.clone()
+        expected_embeddings[:2] = first[2:]
+        expected_embeddings[4:7] = second
+        actual_embeddings = MultimodalEmbeddingInjector()(
+            embeddings.clone(), [first, second], locations
+        )
+        torch.testing.assert_close(actual_embeddings, expected_embeddings)
+
+        hidden = embeddings.clone()
+        first_stack = torch.stack((first, first + 10))
+        second_stack = torch.stack((second, second + 10))
+        expected_hidden = hidden.clone()
+        expected_hidden[:2] += first_stack[1, 2:]
+        expected_hidden[4:7] += second_stack[1]
+        actual_hidden = MultimodalDeepstackInjector()(
+            hidden, [first_stack, second_stack], locations, layer_id=1
+        )
+        torch.testing.assert_close(actual_hidden, expected_hidden)
+
     def test_embedding_injector_drops_cached_feature_prefix_on_cpu(self):
         embeddings = torch.arange(18, dtype=torch.float32).reshape(6, 3)
         feature = torch.arange(12, dtype=torch.float32).reshape(4, 3) + 100
