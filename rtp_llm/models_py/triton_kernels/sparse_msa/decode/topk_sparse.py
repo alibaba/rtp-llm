@@ -493,15 +493,41 @@ def _merge_topk_attn_out_kernel(
     )
     lse_ptrs = lse_ptr + pid_b * stride_l_b + pid_h * stride_l_h + off_c * stride_l_c
     o = tl.load(o_ptrs, boundary_check=(0, 1), padding_option="zero")
-    lse = tl.load(lse_ptrs)  # empty chunks contribute -inf -> weight 0
+    lse = tl.load(lse_ptrs)  # empty chunks contribute -inf
     # standard flash-decoding merge in linear (not log2) space, matching the
     # decode kernel which uses tl.exp / tl.log.
     lse_max = tl.max(lse, axis=0)
-    weights = tl.exp(lse - lse_max)
-    weights = weights / tl.sum(weights, axis=0)
+    has_valid_chunk = lse_max > float("-inf")
+    safe_lse_max = tl.where(has_valid_chunk, lse_max, 0.0)
+    weights = tl.where(has_valid_chunk, tl.exp(lse - safe_lse_max), 0.0)
+    weight_sum = tl.sum(weights, axis=0)
+    weights = weights / tl.where(has_valid_chunk, weight_sum, 1.0)
     o_merged = tl.sum(o * weights[:, None], axis=0)
     o_out_ptrs = o_ptr + pid_b * stride_o_b + pid_h * stride_o_h + off_d * stride_o_d
     tl.store(o_out_ptrs, o_merged.to(o_ptr.dtype.element_ty), mask=off_d < head_dim)
+
+
+def _merge_topk_attn_out(
+    o_partial: torch.Tensor, lse_partial: torch.Tensor
+) -> torch.Tensor:
+    batch_size = int(o_partial.shape[1])
+    num_q_heads = int(o_partial.shape[2])
+    head_dim = int(o_partial.shape[3])
+    num_topk_chunks = int(o_partial.shape[0])
+    _merge_topk_attn_out_kernel[(batch_size, num_q_heads)](
+        o_partial,
+        lse_partial,
+        head_dim,
+        o_partial.stride(0),
+        o_partial.stride(1),
+        o_partial.stride(2),
+        o_partial.stride(3),
+        lse_partial.stride(0),
+        lse_partial.stride(1),
+        lse_partial.stride(2),
+        NUM_TOPK_CHUNKS=num_topk_chunks,
+    )
+    return o_partial[0].contiguous()
 
 
 @torch.no_grad()
@@ -613,22 +639,7 @@ def flash_decode_with_gqa_share_sparse(
         BLOCK_SIZE_N=block_size,
         NUM_TOPK_CHUNKS=NUM_TOPK_CHUNKS,
     )
-    # merge partials into chunk 0
-    merge_grid = (batch_size, num_q_heads)
-    _merge_topk_attn_out_kernel[merge_grid](
-        o_partial,
-        lse_partial,
-        head_dim,
-        o_partial.stride(0),
-        o_partial.stride(1),
-        o_partial.stride(2),
-        o_partial.stride(3),
-        lse_partial.stride(0),
-        lse_partial.stride(1),
-        lse_partial.stride(2),
-        NUM_TOPK_CHUNKS=NUM_TOPK_CHUNKS,
-    )
-    return o_partial[0].contiguous()
+    return _merge_topk_attn_out(o_partial, lse_partial)
 
 
 @torch.no_grad()
@@ -642,6 +653,7 @@ def flash_decode_with_gqa_share_sparse_paged(
     block_size: int,  # sparse block size; MUST equal page size (k_paged.shape[2])
     topk_idx: torch.Tensor,  # [num_kv_heads, batch_size, topk] logical block ids
     sm_scale: Optional[float] = None,
+    num_topk_chunks: Optional[int] = None,
 ) -> torch.Tensor:
     """Zero-copy paged sparse decode (drop-in for
     ``flash_decode_with_gqa_share_sparse``). Reads the persistent paged K/V pool
@@ -670,12 +682,21 @@ def flash_decode_with_gqa_share_sparse_paged(
     max_topk = topk_idx.shape[2]
     if sm_scale is None:
         sm_scale = head_dim**-0.5
-    TARGET_GRID = 256
-    target = max(
-        1,
-        min(max_topk, TARGET_GRID // max(1, batch_size * num_kv_heads)),
-    )
-    NUM_TOPK_CHUNKS = 1 << (target.bit_length() - 1)
+    if num_topk_chunks is None:
+        target = max(
+            1,
+            min(max_topk, 256 // max(1, batch_size * num_kv_heads)),
+        )
+        num_topk_chunks = 1 << (target.bit_length() - 1)
+    if (
+        num_topk_chunks <= 0
+        or num_topk_chunks > max_topk
+        or num_topk_chunks & (num_topk_chunks - 1)
+    ):
+        raise ValueError(
+            "num_topk_chunks must be a positive power of two no larger than topk"
+        )
+    NUM_TOPK_CHUNKS = num_topk_chunks
     o_partial = torch.empty(
         NUM_TOPK_CHUNKS,
         batch_size,
@@ -737,18 +758,4 @@ def flash_decode_with_gqa_share_sparse_paged(
         BLOCK_SIZE_N=block_size,
         NUM_TOPK_CHUNKS=NUM_TOPK_CHUNKS,
     )
-    merge_grid = (batch_size, num_q_heads)
-    _merge_topk_attn_out_kernel[merge_grid](
-        o_partial,
-        lse_partial,
-        head_dim,
-        o_partial.stride(0),
-        o_partial.stride(1),
-        o_partial.stride(2),
-        o_partial.stride(3),
-        lse_partial.stride(0),
-        lse_partial.stride(1),
-        lse_partial.stride(2),
-        NUM_TOPK_CHUNKS=NUM_TOPK_CHUNKS,
-    )
-    return o_partial[0].contiguous()
+    return _merge_topk_attn_out(o_partial, lse_partial)

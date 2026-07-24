@@ -30,6 +30,9 @@ from rtp_llm.models_py.modules.hybrid.msa_attention import (
     _build_target_verify_token_metadata,
     _repeat_request_block_table_for_verify_tokens,
 )
+from rtp_llm.models_py.triton_kernels.sparse_msa.decode.topk_sparse import (
+    _merge_topk_attn_out,
+)
 
 
 class EagleConfigTest(unittest.TestCase):
@@ -425,6 +428,20 @@ class TargetVerifyTokenMetadataTest(unittest.TestCase):
                 total_tokens=4,
                 device=torch.device("cpu"),
             )
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+class SparseDecodeMergeTest(unittest.TestCase):
+    def test_all_empty_chunks_merge_to_finite_zeros(self):
+        o_partial = torch.randn(4, 3, 8, 128, dtype=torch.bfloat16, device="cuda")
+        lse_partial = torch.full(
+            (4, 3, 8), float("-inf"), dtype=torch.float32, device="cuda"
+        )
+
+        actual = _merge_topk_attn_out(o_partial, lse_partial)
+
+        self.assertTrue(torch.isfinite(actual).all().item())
+        torch.testing.assert_close(actual, torch.zeros_like(actual))
 
 
 if __name__ == "__main__":

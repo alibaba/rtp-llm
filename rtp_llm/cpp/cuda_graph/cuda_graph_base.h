@@ -39,6 +39,9 @@ struct GraphParams {
     // the DSv4 MTP draft graph captures with the [T, hc*dim] residual shape
     // produced by the target's getMtpTargetHiddenStates accessor.
     int64_t hc_mult = 1;
+    // Some draft models intentionally execute prefill with a fixed max-batch token layout.
+    // Keep this execution capability separate from hidden-width expansion.
+    bool draft_prefill_requires_full_token_capacity = false;
     // Per-token position-id factor for combo_position_ids capture buffer.
     // 0 = model does not use combo_position_ids (no buffer allocated, capture skips it).
     // >0 = factor (e.g. Mrope = rope_config.index_factor). Sourced from
