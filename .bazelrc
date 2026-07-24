@@ -97,6 +97,9 @@ build:cuda12_9_base --copt="-DENABLE_FP4=1"
 
 build:cuda12_9 --config=cuda12_9_base
 build:cuda12_9 --define=using_cuda12_9_x86=true
+# FP8 PER_BLOCK GEMM for sm_120 family (consumer Blackwell). x86 only —
+# cuda12_9_arm is GB200 sm_10x and the kernel would trap at runtime.
+build:cuda12_9 --copt="-DENABLE_FP8_SM120=1"
 
 
 

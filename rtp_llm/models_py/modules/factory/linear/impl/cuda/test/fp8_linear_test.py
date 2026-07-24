@@ -22,6 +22,7 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear im
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
     CudaFp8GEMMLinear,
 )
+from rtp_llm.models_py.utils.arch import is_sm12x
 from rtp_llm.test.utils.bench_util import bench
 from rtp_llm.test.utils.numeric_util import calc_diff, per_block_cast_to_fp8
 
@@ -1044,6 +1045,54 @@ class CudaFp8GEMMDispatchTest(CudaFp8LinearTestBase, unittest.TestCase):
             self.assertIsInstance(linear._flashinfer_linear, CudaFp8FlashinferLinear)
         else:
             self.assertIsNone(linear._flashinfer_linear)
+
+
+@unittest.skipUnless(
+    torch.cuda.is_available() and not is_sm12x(),
+    "Non-SM120 direct binding guard requires a non-sm12x CUDA device",
+)
+class CudaFp8VllmBlockwiseNonSM120GuardTest(unittest.TestCase):
+
+    def setUp(self):
+        try:
+            from rtp_llm.ops.compute_ops import cutlass_scaled_mm_blockwise_sm120_fp8
+        except ImportError:
+            self.skipTest("SM120 FP8 blockwise binding is not compiled in this build")
+
+        torch.manual_seed(42)
+        torch.cuda.manual_seed(42)
+        self.cutlass_scaled_mm_blockwise_sm120_fp8 = (
+            cutlass_scaled_mm_blockwise_sm120_fp8
+        )
+        self.device = "cuda"
+        self.M = 8
+        self.K = 128
+        self.N = 128
+
+    def _make_op_inputs(self):
+        input_tensor = torch.randn(
+            self.M, self.K, dtype=torch.bfloat16, device=self.device
+        ).contiguous()
+        weight_bf16 = (
+            torch.randn((self.N, self.K), dtype=torch.bfloat16, device=self.device)
+            * 0.1
+        ).contiguous()
+        A, A_sf = sgl_per_token_group_quant_fp8(
+            input_tensor,
+            group_size=128,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=False,
+            scale_ue8m0=False,
+        )
+        B, B_sf = per_block_cast_to_fp8(weight_bf16, use_ue8m0=False)
+        D = torch.empty(self.M, self.N, dtype=torch.bfloat16, device=self.device)
+        return D, A, B, A_sf, B_sf
+
+    def test_direct_binding_rejects_non_sm120_before_launch(self):
+        D, A, B, A_sf, B_sf = self._make_op_inputs()
+        with self.assertRaisesRegex(RuntimeError, "requires sm_120 family"):
+            self.cutlass_scaled_mm_blockwise_sm120_fp8(D, A, B, A_sf, B_sf)
 
 
 CudaFp8DeepGEMMLinearTestBase = CudaFp8GEMMLinearTestBase
