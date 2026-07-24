@@ -23,7 +23,7 @@ bool BlockTransferRequestConverter::hasTargetDisk(const CopyItem& item) {
 }
 
 std::vector<std::string> BlockTransferRequestConverter::normalizedTags(const CopyItem& item) {
-    std::vector<std::string> tags(item.component_group_tags().begin(), item.component_group_tags().end());
+    std::vector<std::string> tags(item.group_set_tags().begin(), item.group_set_tags().end());
     if (tags.empty() || std::any_of(tags.begin(), tags.end(), [](const std::string& tag) { return tag.empty(); })) {
         return {};
     }
@@ -34,18 +34,18 @@ std::vector<std::string> BlockTransferRequestConverter::normalizedTags(const Cop
     return tags;
 }
 
-const ComponentGroup*
-BlockTransferRequestConverter::findComponentGroup(const std::vector<std::string>&       normalized_tags,
-                                                  const std::vector<ComponentGroupPtr>& component_groups) {
+const GroupSet*
+BlockTransferRequestConverter::findGroupSet(const std::vector<std::string>&       normalized_tags,
+                                                  const std::vector<GroupSetPtr>& group_sets) {
     if (normalized_tags.empty()) {
         return nullptr;
     }
-    const ComponentGroup* match = nullptr;
-    for (const auto& component_group : component_groups) {
-        if (component_group == nullptr) {
+    const GroupSet* match = nullptr;
+    for (const auto& group_set : group_sets) {
+        if (group_set == nullptr) {
             continue;
         }
-        auto local_tags = component_group->tags();
+        auto local_tags = group_set->groupTags();
         std::sort(local_tags.begin(), local_tags.end());
         if (local_tags != normalized_tags) {
             continue;
@@ -53,18 +53,18 @@ BlockTransferRequestConverter::findComponentGroup(const std::vector<std::string>
         if (match != nullptr) {
             return nullptr;
         }
-        match = component_group.get();
+        match = group_set.get();
     }
     return match;
 }
 
 bool BlockTransferRequestConverter::validDeviceBlocks(const std::vector<BlockIdxType>& blocks,
-                                                      const ComponentGroup&            component_group) {
-    if (blocks.size() != component_group.layout().componentCount() || blocks.empty()) {
+                                                      const GroupSet&            group_set) {
+    if (blocks.size() != group_set.groupIds().size() || blocks.empty()) {
         return false;
     }
 
-    const std::vector<DeviceBlockPoolPtr>& device_pools = component_group.devicePools();
+    const std::vector<DeviceBlockPoolPtr>& device_pools = group_set.devicePools();
     if (blocks.size() != device_pools.size()) {
         return false;
     }
@@ -82,49 +82,50 @@ bool BlockTransferRequestConverter::validDeviceBlocks(const std::vector<BlockIdx
     return has_valid_block;
 }
 
-bool BlockTransferRequestConverter::validHostBlock(BlockIdxType block, const ComponentGroup& component_group) {
-    const auto host_pool = component_group.hostPool();
+bool BlockTransferRequestConverter::validHostBlock(BlockIdxType block, const GroupSet& group_set) {
+    const auto host_pool = group_set.hostPool();
     return host_pool != nullptr && host_pool->validBlock(block);
 }
 
-bool BlockTransferRequestConverter::validDiskBlock(BlockIdxType block, const ComponentGroup& component_group) {
-    const auto disk_pool = component_group.diskPool();
+bool BlockTransferRequestConverter::validDiskBlock(BlockIdxType block, const GroupSet& group_set) {
+    const auto disk_pool = group_set.diskPool();
     return disk_pool != nullptr && disk_pool->validBlock(block);
 }
 
 bool BlockTransferRequestConverter::directionFor(const TransferDescriptor&                descriptor,
-                                                 const ComponentGroup&                    component_group,
+                                                 const GroupSet&                    group_set,
                                                  MemoryOperationRequestPB::CopyDirection& request_direction) {
     if (descriptor.source_tier == Tier::DEVICE && descriptor.target_tier == Tier::HOST) {
         request_direction = MemoryOperationRequestPB::D2H;
-        return validDeviceBlocks(descriptor.device_blocks, component_group)
-               && validHostBlock(descriptor.host_block, component_group);
+        return validDeviceBlocks(descriptor.device_blocks, group_set)
+               && validHostBlock(descriptor.host_block, group_set);
     }
     if (descriptor.source_tier == Tier::HOST && descriptor.target_tier == Tier::DEVICE) {
         request_direction = MemoryOperationRequestPB::H2D;
-        return validHostBlock(descriptor.host_block, component_group)
-               && validDeviceBlocks(descriptor.device_blocks, component_group);
+        return validHostBlock(descriptor.host_block, group_set)
+               && validDeviceBlocks(descriptor.device_blocks, group_set);
     }
     if (descriptor.source_tier == Tier::HOST && descriptor.target_tier == Tier::DISK) {
         request_direction = MemoryOperationRequestPB::H2DISK;
-        return descriptor.device_blocks.empty() && validHostBlock(descriptor.host_block, component_group)
-               && validDiskBlock(descriptor.disk_block, component_group);
+        return descriptor.device_blocks.empty() && validHostBlock(descriptor.host_block, group_set)
+               && validDiskBlock(descriptor.disk_block, group_set);
     }
     if (descriptor.source_tier == Tier::DISK && descriptor.target_tier == Tier::HOST) {
         request_direction = MemoryOperationRequestPB::DISK2H;
-        return descriptor.device_blocks.empty() && validDiskBlock(descriptor.disk_block, component_group)
-               && validHostBlock(descriptor.host_block, component_group);
+        return descriptor.device_blocks.empty() && validDiskBlock(descriptor.disk_block, group_set)
+               && validHostBlock(descriptor.host_block, group_set);
     }
     return false;
 }
 
 void BlockTransferRequestConverter::setDeviceBlocks(const std::vector<BlockIdxType>& blocks,
-                                                    const ComponentGroup&            component_group,
+                                                    const GroupSet&            group_set,
                                                     CopyItem&                        item) {
-    RTP_LLM_CHECK(blocks.size() == component_group.tags().size());
+    const auto tags = group_set.groupTags();
+    RTP_LLM_CHECK(blocks.size() == tags.size());
     for (size_t i = 0; i < blocks.size(); ++i) {
         auto* tagged_block = item.add_tagged_gpu_blocks();
-        tagged_block->set_tag(component_group.tags()[i]);
+        tagged_block->set_tag(tags[i]);
         tagged_block->set_block_id(blocks[i]);
         // BlockTreeCache transfers one block from each tag-owned physical pool.
         // -1 distinguishes this pool coordinate from target connector layer slots.
@@ -133,9 +134,10 @@ void BlockTransferRequestConverter::setDeviceBlocks(const std::vector<BlockIdxTy
 }
 
 bool BlockTransferRequestConverter::decodeDeviceBlocks(const CopyItem&            item,
-                                                       const ComponentGroup&      component_group,
+                                                       const GroupSet&      group_set,
                                                        std::vector<BlockIdxType>& blocks) {
-    if (item.tagged_gpu_blocks_size() != static_cast<int>(component_group.tags().size())) {
+    const auto tags = group_set.groupTags();
+    if (item.tagged_gpu_blocks_size() != static_cast<int>(tags.size())) {
         return false;
     }
     std::unordered_map<std::string, BlockIdxType> blocks_by_tag;
@@ -146,37 +148,37 @@ bool BlockTransferRequestConverter::decodeDeviceBlocks(const CopyItem&          
         }
     }
     blocks.clear();
-    blocks.reserve(component_group.tags().size());
-    for (const auto& tag : component_group.tags()) {
+    blocks.reserve(tags.size());
+    for (const auto& tag : tags) {
         const auto it = blocks_by_tag.find(tag);
         if (it == blocks_by_tag.end()) {
             return false;
         }
         blocks.push_back(it->second);
     }
-    return blocks_by_tag.size() == component_group.tags().size() && validDeviceBlocks(blocks, component_group);
+    return blocks_by_tag.size() == tags.size() && validDeviceBlocks(blocks, group_set);
 }
 
 bool BlockTransferRequestConverter::decodeDeviceHostTransfer(const MemoryOperationRequestPB& request,
                                                              const CopyItem&                 item,
-                                                             const ComponentGroup&           component_group,
+                                                             const GroupSet&           group_set,
                                                              TransferDescriptor&             descriptor) {
-    if (item.backing_type() != MemoryOperationRequestPB::MEMORY || !validHostBlock(item.mem_block(), component_group)
+    if (item.backing_type() != MemoryOperationRequestPB::MEMORY || !validHostBlock(item.mem_block(), group_set)
         || hasTargetDisk(item) || hasSourceMemory(item) || hasSourceDisk(item)) {
         return false;
     }
     std::vector<BlockIdxType> device_blocks;
-    if (!decodeDeviceBlocks(item, component_group, device_blocks)) {
+    if (!decodeDeviceBlocks(item, group_set, device_blocks)) {
         return false;
     }
     if (request.copy_direction() == MemoryOperationRequestPB::D2H) {
         descriptor = TransferDescriptor::deviceToHost(
-            component_group.component_group_id, std::move(device_blocks), item.mem_block());
+            group_set.groupSetId(), std::move(device_blocks), item.mem_block());
         return true;
     }
     if (request.copy_direction() == MemoryOperationRequestPB::H2D) {
         descriptor = TransferDescriptor::hostToDevice(
-            component_group.component_group_id, item.mem_block(), std::move(device_blocks));
+            group_set.groupSetId(), item.mem_block(), std::move(device_blocks));
         return true;
     }
     return false;
@@ -184,67 +186,66 @@ bool BlockTransferRequestConverter::decodeDeviceHostTransfer(const MemoryOperati
 
 bool BlockTransferRequestConverter::decodeHostDiskTransfer(const MemoryOperationRequestPB& request,
                                                            const CopyItem&                 item,
-                                                           const ComponentGroup&           component_group,
+                                                           const GroupSet&           group_set,
                                                            TransferDescriptor&             descriptor) {
     if (item.tagged_gpu_blocks_size() != 0) {
         return false;
     }
     if (request.copy_direction() == MemoryOperationRequestPB::H2DISK
         && item.backing_type() == MemoryOperationRequestPB::DISK && hasTargetDisk(item)
-        && validDiskBlock(item.disk_slot(), component_group) && isNullBlockIdx(item.mem_block())
+        && validDiskBlock(item.disk_slot(), group_set) && isNullBlockIdx(item.mem_block())
         && hasSourceMemory(item) && !hasSourceDisk(item) && item.src_backing_type() == MemoryOperationRequestPB::MEMORY
-        && validHostBlock(item.src_mem_block(), component_group)) {
+        && validHostBlock(item.src_mem_block(), group_set)) {
         descriptor =
-            TransferDescriptor::hostToDisk(component_group.component_group_id, item.src_mem_block(), item.disk_slot());
+            TransferDescriptor::hostToDisk(group_set.groupSetId(), item.src_mem_block(), item.disk_slot());
         return true;
     }
     if (request.copy_direction() == MemoryOperationRequestPB::DISK2H
-        && item.backing_type() == MemoryOperationRequestPB::MEMORY && validHostBlock(item.mem_block(), component_group)
+        && item.backing_type() == MemoryOperationRequestPB::MEMORY && validHostBlock(item.mem_block(), group_set)
         && !hasTargetDisk(item) && !hasSourceMemory(item) && hasSourceDisk(item)
         && item.src_backing_type() == MemoryOperationRequestPB::DISK
-        && validDiskBlock(item.src_disk_slot(), component_group)) {
+        && validDiskBlock(item.src_disk_slot(), group_set)) {
         descriptor =
-            TransferDescriptor::diskToHost(component_group.component_group_id, item.src_disk_slot(), item.mem_block());
+            TransferDescriptor::diskToHost(group_set.groupSetId(), item.src_disk_slot(), item.mem_block());
         return true;
     }
     return false;
 }
 
 bool BlockTransferRequestConverter::appendTransfer(const TransferDescriptor&             descriptor,
-                                                   const std::vector<ComponentGroupPtr>& component_groups,
-                                                   MemoryOperationRequestPB&             request) {
-    const ComponentGroup* component_group = nullptr;
-    if (descriptor.component_group_id >= 0
-        && static_cast<size_t>(descriptor.component_group_id) < component_groups.size()) {
-        component_group = component_groups[static_cast<size_t>(descriptor.component_group_id)].get();
+                                                   const std::vector<GroupSetPtr>& group_sets,
+    MemoryOperationRequestPB&             request) {
+    const GroupSet* group_set = nullptr;
+    if (descriptor.group_set_id < group_sets.size()) {
+        group_set = group_sets[descriptor.group_set_id].get();
     }
-    if (component_group == nullptr || component_group->component_group_id != descriptor.component_group_id
-        || component_group->tags().empty()) {
+    if (group_set == nullptr || group_set->groupSetId() != descriptor.group_set_id
+        || group_set->groupIds().empty()) {
         return false;
     }
 
     MemoryOperationRequestPB::CopyDirection request_direction;
-    if (!directionFor(descriptor, *component_group, request_direction)
+    if (!directionFor(descriptor, *group_set, request_direction)
         || (request.copy_items_size() != 0 && request.copy_direction() != request_direction)) {
         return false;
     }
 
     CopyItem item;
-    auto     sorted_tags = component_group->tags();
+    auto     sorted_tags = group_set->groupTags();
     std::sort(sorted_tags.begin(), sorted_tags.end());
     for (const auto& tag : sorted_tags) {
-        item.add_component_group_tags(tag);
+        item.add_group_set_tags(tag);
     }
     item.set_is_complete(true);
 
     if (descriptor.source_tier == Tier::DEVICE && descriptor.target_tier == Tier::HOST) {
         item.set_backing_type(MemoryOperationRequestPB::MEMORY);
         item.set_mem_block(descriptor.host_block);
-        setDeviceBlocks(descriptor.device_blocks, *component_group, item);
+        setDeviceBlocks(descriptor.device_blocks, *group_set, item);
     } else if (descriptor.source_tier == Tier::HOST && descriptor.target_tier == Tier::DEVICE) {
         item.set_backing_type(MemoryOperationRequestPB::MEMORY);
         item.set_mem_block(descriptor.host_block);
-        setDeviceBlocks(descriptor.device_blocks, *component_group, item);
+        setDeviceBlocks(descriptor.device_blocks, *group_set, item);
     } else if (descriptor.source_tier == Tier::HOST && descriptor.target_tier == Tier::DISK) {
         item.set_backing_type(MemoryOperationRequestPB::DISK);
         item.set_mem_block(NULL_BLOCK_IDX);
@@ -269,26 +270,26 @@ bool BlockTransferRequestConverter::appendTransfer(const TransferDescriptor&    
 
 bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestPB&       request,
                                                    int                                   item_index,
-                                                   const std::vector<ComponentGroupPtr>& component_groups,
+                                                   const std::vector<GroupSetPtr>& group_sets,
                                                    TransferDescriptor&                   descriptor) {
     if (item_index < 0 || item_index >= request.copy_items_size()) {
         return false;
     }
     const CopyItem& item            = request.copy_items(item_index);
     const auto      normalized_tags = normalizedTags(item);
-    const auto*     component_group = findComponentGroup(normalized_tags, component_groups);
-    if (component_group == nullptr) {
-        RTP_LLM_LOG_WARNING("cannot resolve exact block tree component tag set, item=%d", item_index);
+    const auto*     group_set = findGroupSet(normalized_tags, group_sets);
+    if (group_set == nullptr) {
+        RTP_LLM_LOG_WARNING("cannot resolve exact BlockTree GroupSet tag set, item=%d", item_index);
         return false;
     }
 
     switch (request.copy_direction()) {
         case MemoryOperationRequestPB::D2H:
         case MemoryOperationRequestPB::H2D:
-            return decodeDeviceHostTransfer(request, item, *component_group, descriptor);
+            return decodeDeviceHostTransfer(request, item, *group_set, descriptor);
         case MemoryOperationRequestPB::H2DISK:
         case MemoryOperationRequestPB::DISK2H:
-            return decodeHostDiskTransfer(request, item, *component_group, descriptor);
+            return decodeHostDiskTransfer(request, item, *group_set, descriptor);
         default:
             return false;
     }

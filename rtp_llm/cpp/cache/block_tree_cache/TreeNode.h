@@ -35,7 +35,7 @@ inline const char* tierName(Tier tier) {
     return "UNKNOWN";
 }
 
-// Sorting metadata for a candidate node. A single copy per GroupSlot follows the
+// Sorting metadata for a candidate node. A single copy per GroupSetResource follows the
 // data to its current serving tier (steady-state single-tier-service invariant).
 struct CandidateMeta {
     uint64_t last_access_seq{0};  // LRU: logical clock of the last real match
@@ -45,16 +45,16 @@ struct CandidateMeta {
 };
 
 // Real data-transfer state; a slot is excluded from all heaps while != IDLE.
-enum class SlotTransferState : uint8_t {
+enum class GroupSetTransferState : uint8_t {
     IDLE,
     DEMOTING,           // Device -> Host, or Host -> Disk
     LOAD_BACK_PENDING,  // Host/Disk source reserved by a deferred load-back ticket
     LOADING_BACK        // Host/Disk -> Device
 };
 
-// Per-ComponentGroup data location across storage tiers.
-// Each GroupSlot corresponds to one ComponentGroup on one TreeNode.
-struct GroupSlot {
+// Per-GroupSet data location across storage tiers.
+// Each GroupSetResource corresponds to one GroupSet on one TreeNode.
+struct GroupSetResource {
     // L1: GPU Device — one block per independent DeviceBlockPool
     std::vector<BlockIdxType> device_blocks;
     // L2: CPU Host — one packed block
@@ -63,10 +63,10 @@ struct GroupSlot {
     BlockIdxType disk_slot{NULL_BLOCK_IDX};
 
     // Async migration state and the single sorting-metadata copy (current serving tier).
-    SlotTransferState transfer_state{SlotTransferState::IDLE};
+    GroupSetTransferState transfer_state{GroupSetTransferState::IDLE};
     CandidateMeta     candidate_meta;
 
-    bool has_value(Tier tier) const {
+    bool hasTier(Tier tier) const {
         switch (tier) {
             case Tier::DEVICE:
                 return std::any_of(
@@ -79,11 +79,18 @@ struct GroupSlot {
                 return false;
         }
     }
+    size_t servingTierCount() const {
+        return static_cast<size_t>(hasTier(Tier::DEVICE)) + static_cast<size_t>(hasTier(Tier::HOST))
+               + static_cast<size_t>(hasTier(Tier::DISK));
+    }
+    bool isValidSteadyState() const {
+        return transfer_state == GroupSetTransferState::IDLE && servingTierCount() <= 1;
+    }
     bool is_empty() const {
-        return !has_value(Tier::DEVICE) && !has_value(Tier::HOST) && !has_value(Tier::DISK);
+        return !hasTier(Tier::DEVICE) && !hasTier(Tier::HOST) && !hasTier(Tier::DISK);
     }
     bool is_removable() const {
-        return transfer_state == SlotTransferState::IDLE && is_empty();
+        return transfer_state == GroupSetTransferState::IDLE && is_empty();
     }
 };
 
@@ -96,8 +103,8 @@ struct TreeNode {
     std::unordered_map<CacheKeyType, TreeNode*> children;
     TreeNode*                                   parent{nullptr};
 
-    // Multi-tier data locations, indexed by component_group_id
-    std::vector<GroupSlot> group_slots;
+    // Multi-tier data locations, indexed by group_set_id
+    std::vector<GroupSetResource> group_set_resources;
 };
 
 }  // namespace rtp_llm

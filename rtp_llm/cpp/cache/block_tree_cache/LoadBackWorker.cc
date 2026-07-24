@@ -11,7 +11,7 @@
 namespace rtp_llm {
 
 bool LoadBackWorker::createTask(const LoadBackTicket::PendingLoadBackItems&  items,
-                                const std::vector<ComponentGroupPtr>&        component_groups,
+                                const std::vector<GroupSetPtr>&              group_sets,
                                 const std::shared_ptr<LoadBackAsyncContext>& context,
                                 TaskPtr&                                     task) {
     task.reset();
@@ -21,15 +21,15 @@ bool LoadBackWorker::createTask(const LoadBackTicket::PendingLoadBackItems&  ite
     }
 
     LoadBackTicket::PendingLoadBackItems task_items;
-    std::vector<ComponentGroupPtr>       task_item_groups;
+    std::vector<GroupSetPtr>              task_item_groups;
     for (const LoadBackTicket::PendingLoadBackItem& item : items) {
-        if (item.group_id < 0 || static_cast<size_t>(item.group_id) >= component_groups.size()) {
-            RTP_LLM_LOG_ERROR("invalid load-back task group, group=%d", item.group_id);
+        if (item.group_set_id >= group_sets.size()) {
+            RTP_LLM_LOG_ERROR("invalid load-back task group, group_set=%zu", item.group_set_id);
             return false;
         }
-        const ComponentGroupPtr& group = component_groups[static_cast<size_t>(item.group_id)];
-        if (group == nullptr || group->component_group_id != item.group_id) {
-            RTP_LLM_LOG_ERROR("mismatched load-back task group, group=%d", item.group_id);
+        const GroupSetPtr& group = group_sets[item.group_set_id];
+        if (group == nullptr || group->groupSetId() != item.group_set_id) {
+            RTP_LLM_LOG_ERROR("mismatched load-back task group, group_set=%zu", item.group_set_id);
             return false;
         }
         if (item.joined_load_back) {
@@ -58,31 +58,32 @@ LoadBackWorker::PrepareStatus LoadBackWorker::prepareTransferItem(Task& task, si
     }
 
     const LoadBackTicket::PendingLoadBackItem& item  = task.items[item_index];
-    const ComponentGroupPtr&                   group = task.item_groups[item_index];
-    if (group == nullptr || item.group_id < 0 || group->component_group_id != item.group_id) {
-        RTP_LLM_LOG_WARNING("invalid group id, group=%d", item.group_id);
+    const GroupSetPtr&                         group = task.item_groups[item_index];
+    if (group == nullptr || group->groupSetId() != item.group_set_id) {
+        RTP_LLM_LOG_WARNING("invalid group set id, group_set=%zu", item.group_set_id);
         return PrepareStatus::FAILED;
     }
     if (item.target_device_blocks.size() != group->devicePoolCount()) {
-        RTP_LLM_LOG_WARNING("target block count mismatch, group=%d expected=%zu actual=%zu",
-                            item.group_id,
+        RTP_LLM_LOG_WARNING("target block count mismatch, group_set=%zu expected=%zu actual=%zu",
+                            item.group_set_id,
                             group->devicePoolCount(),
                             item.target_device_blocks.size());
         return PrepareStatus::FAILED;
     }
     if (item.source_tier == Tier::DEVICE) {
         if (item.source_blocks.empty() || item.source_blocks != item.target_device_blocks) {
-            RTP_LLM_LOG_WARNING("resident identity changed, group=%d", item.group_id);
+            RTP_LLM_LOG_WARNING("resident identity changed, group_set=%zu", item.group_set_id);
             return PrepareStatus::FAILED;
         }
         return PrepareStatus::READY;
     }
     if (item.node == nullptr) {
-        RTP_LLM_LOG_WARNING("invalid copy item node, group=%d", item.group_id);
+        RTP_LLM_LOG_WARNING("invalid copy item node, group_set=%zu", item.group_set_id);
         return PrepareStatus::FAILED;
     }
     if ((item.source_tier != Tier::HOST && item.source_tier != Tier::DISK) || item.source_blocks.size() != 1) {
-        RTP_LLM_LOG_WARNING("invalid copy item, group=%d source=%s", item.group_id, tierName(item.source_tier));
+        RTP_LLM_LOG_WARNING(
+            "invalid copy item, group_set=%zu source=%s", item.group_set_id, tierName(item.source_tier));
         return PrepareStatus::FAILED;
     }
 
@@ -96,16 +97,16 @@ LoadBackWorker::PrepareStatus LoadBackWorker::prepareTransferItem(Task& task, si
         }
         task.staging_host_blocks[item_index] = source_host_block;
         task.disk_to_host_descriptors.push_back(
-            TransferDescriptor::diskToHost(item.group_id, item.source_blocks[0], source_host_block));
+            TransferDescriptor::diskToHost(item.group_set_id, item.source_blocks[0], source_host_block));
     }
 
     if (isNullBlockIdx(source_host_block)) {
         RTP_LLM_LOG_WARNING(
-            "failed to prepare source, group=%d source=%s", item.group_id, tierName(item.source_tier));
+            "failed to prepare source, group_set=%zu source=%s", item.group_set_id, tierName(item.source_tier));
         return PrepareStatus::FAILED;
     }
     task.host_to_device_descriptors.push_back(
-        TransferDescriptor::hostToDevice(item.group_id, source_host_block, item.target_device_blocks));
+        TransferDescriptor::hostToDevice(item.group_set_id, source_host_block, item.target_device_blocks));
     return PrepareStatus::READY;
 }
 
@@ -127,45 +128,60 @@ bool LoadBackWorker::runTransfer(Task&                          task,
 
     int64_t host_transfer_begin_time_us = 0;
     int64_t disk_transfer_begin_time_us = 0;
-    if (host_transfer_blocks > 0) {
-        host_transfer_begin_time_us = metrics_reporter.reportTransferStarted(Tier::HOST, Tier::DEVICE);
-    }
-    if (disk_transfer_blocks > 0) {
-        disk_transfer_begin_time_us = metrics_reporter.reportTransferStarted(Tier::DISK, Tier::DEVICE);
-    }
+    bool    host_transfer_started       = false;
+    bool    disk_transfer_started       = false;
+    auto finish_metrics = [&](bool success) {
+        if (host_transfer_started) {
+            host_transfer_started = false;
+            metrics_reporter.reportTransferFinished(
+                Tier::HOST, Tier::DEVICE, host_transfer_blocks, host_transfer_begin_time_us, success);
+        }
+        if (disk_transfer_started) {
+            disk_transfer_started = false;
+            metrics_reporter.reportTransferFinished(
+                Tier::DISK, Tier::DEVICE, disk_transfer_blocks, disk_transfer_begin_time_us, success);
+        }
+    };
 
-    bool copy_success = prepared;
     try {
+        if (host_transfer_blocks > 0) {
+            host_transfer_begin_time_us = metrics_reporter.reportTransferStarted(Tier::HOST, Tier::DEVICE);
+            host_transfer_started       = true;
+        }
+        if (disk_transfer_blocks > 0) {
+            disk_transfer_begin_time_us = metrics_reporter.reportTransferStarted(Tier::DISK, Tier::DEVICE);
+            disk_transfer_started       = true;
+        }
+
+        bool copy_success = prepared;
         if (copy_success) {
             copy_success = transfer_dispatcher.executeMultiRank(task.disk_to_host_descriptors, disk_timeout_ms);
         }
         if (copy_success) {
             copy_success = transfer_dispatcher.executeMultiRank(task.host_to_device_descriptors, host_timeout_ms);
         }
-    } catch (const std::exception& error) {
-        copy_success = false;
-        RTP_LLM_LOG_ERROR("load-back execution failed with exception: %s", error.what());
+        finish_metrics(copy_success);
+        return copy_success;
+    } catch (...) {
+        try {
+            finish_metrics(false);
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_ERROR("failed to finalize load-back metrics: %s", error.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("failed to finalize load-back metrics with unknown exception");
+        }
+        throw;
     }
-    if (host_transfer_blocks > 0) {
-        metrics_reporter.reportTransferFinished(
-            Tier::HOST, Tier::DEVICE, host_transfer_blocks, host_transfer_begin_time_us, copy_success);
-    }
-    if (disk_transfer_blocks > 0) {
-        metrics_reporter.reportTransferFinished(
-            Tier::DISK, Tier::DEVICE, disk_transfer_blocks, disk_transfer_begin_time_us, copy_success);
-    }
-
-    releaseStagingBlocks(task);
-    return copy_success;
 }
 
 void LoadBackWorker::releaseTaskResources(Task& task) {
+    releaseStagingBlocks(task);
     releaseUninstalledTargetHolders(task);
 }
 
 void LoadBackWorker::releaseStagingBlocks(Task& task) {
     for (size_t item_index = 0; item_index < task.items.size(); ++item_index) {
-        const ComponentGroupPtr& group = task.item_groups[item_index];
+        const GroupSetPtr& group = task.item_groups[item_index];
         if (group != nullptr && !isNullBlockIdx(task.staging_host_blocks[item_index])) {
             group->releaseSingleBlock(Tier::HOST, task.staging_host_blocks[item_index], BlockRefType::REQUEST);
             task.staging_host_blocks[item_index] = NULL_BLOCK_IDX;
@@ -176,12 +192,12 @@ void LoadBackWorker::releaseStagingBlocks(Task& task) {
 void LoadBackWorker::releaseUninstalledTargetHolders(const Task& task) {
     for (size_t item_index = 0; item_index < task.items.size(); ++item_index) {
         const LoadBackTicket::PendingLoadBackItem& item  = task.items[item_index];
-        const ComponentGroupPtr&                   group = task.item_groups[item_index];
+        const GroupSetPtr&                         group = task.item_groups[item_index];
         if (item.source_tier == Tier::DEVICE || task.target_installed[item_index] || group == nullptr) {
             continue;
         }
-        group->unreferenceBlocks(
-            GroupBlockSet{item.group_id, Tier::DEVICE, {item.target_device_blocks}}, BlockRefType::REQUEST);
+        group->unreferenceBlocks(MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}},
+                                 BlockRefType::REQUEST);
     }
 }
 
@@ -196,28 +212,30 @@ bool LoadBackWorker::cancelLoadBackNolock(const std::shared_ptr<AsyncContext>& c
 }
 
 bool LoadBackWorker::startLoading(TreeNode*                                    node,
-                                  int                                          group_id,
+                                  size_t                                       group_set_id,
                                   const std::vector<BlockIdxType>&             target_blocks,
                                   const std::shared_ptr<LoadBackAsyncContext>& context) {
-    if (node == nullptr || group_id < 0 || target_blocks.empty() || context == nullptr
+    if (node == nullptr || target_blocks.empty() || context == nullptr
         || std::any_of(
             target_blocks.begin(), target_blocks.end(), [](BlockIdxType block) { return isNullBlockIdx(block); })) {
         return false;
     }
 
-    const LoadingKey                                  key{node, group_id};
+    const LoadingKey                                  key{node, group_set_id};
     const std::pair<LoadingRecordMap::iterator, bool> insert_result =
         loading_records_.emplace(key, LoadingRecord{target_blocks, {context}});
     return insert_result.second;
 }
 
 std::optional<std::vector<BlockIdxType>>
-LoadBackWorker::joinLoading(TreeNode* node, int group_id, const std::shared_ptr<LoadBackAsyncContext>& context) {
-    if (node == nullptr || group_id < 0 || context == nullptr) {
+LoadBackWorker::joinLoading(TreeNode* node,
+                            size_t group_set_id,
+                            const std::shared_ptr<LoadBackAsyncContext>& context) {
+    if (node == nullptr || context == nullptr) {
         return std::nullopt;
     }
 
-    const LoadingKey                 key{node, group_id};
+    const LoadingKey                 key{node, group_set_id};
     const LoadingRecordMap::iterator record_it = loading_records_.find(key);
     if (record_it == loading_records_.end()) {
         return std::nullopt;
@@ -232,42 +250,38 @@ LoadBackWorker::joinLoading(TreeNode* node, int group_id, const std::shared_ptr<
     return record_it->second.target_blocks;
 }
 
-bool LoadBackWorker::finishLoading(TreeNode* node, int group_id, bool success) {
-    if (node == nullptr || group_id < 0) {
+bool LoadBackWorker::finishLoading(TreeNode* node, size_t group_set_id, bool success) {
+    if (node == nullptr) {
         return false;
     }
 
-    const LoadingKey                 key{node, group_id};
+    const LoadingKey                 key{node, group_set_id};
     const LoadingRecordMap::iterator record_it = loading_records_.find(key);
     if (record_it == loading_records_.end()) {
         return false;
     }
 
     std::vector<std::shared_ptr<LoadBackAsyncContext>> contexts = std::move(record_it->second.contexts);
-    const size_t                                       erased   = loading_records_.erase(key);
-    if (erased != 1) {
-        RTP_LLM_LOG_ERROR("failed to erase loading record, group=%d", group_id);
-        return false;
-    }
+    loading_records_.erase(record_it);
 
     bool all_completed = true;
     for (const std::shared_ptr<LoadBackAsyncContext>& context : contexts) {
         if (context == nullptr || !context->completeOne(success)) {
             all_completed = false;
-            RTP_LLM_LOG_WARNING("failed to complete joined load-back context, group=%d", group_id);
+            RTP_LLM_LOG_WARNING("failed to complete joined load-back context, group_set=%zu", group_set_id);
         }
     }
     return all_completed;
 }
 
 bool LoadBackWorker::eraseLoadingForOneContext(TreeNode*                                    node,
-                                               int                                          group_id,
+                                               size_t                                       group_set_id,
                                                const std::shared_ptr<LoadBackAsyncContext>& context) {
-    if (node == nullptr || group_id < 0 || context == nullptr) {
+    if (node == nullptr || context == nullptr) {
         return false;
     }
 
-    const LoadingKey                 key{node, group_id};
+    const LoadingKey                 key{node, group_set_id};
     const LoadingRecordMap::iterator record_it = loading_records_.find(key);
     if (record_it == loading_records_.end()) {
         return false;
@@ -279,11 +293,7 @@ bool LoadBackWorker::eraseLoadingForOneContext(TreeNode*                        
     }
     record_it->second.contexts.erase(context_it);
     if (record_it->second.contexts.empty()) {
-        const size_t erased = loading_records_.erase(key);
-        if (erased != 1) {
-            RTP_LLM_LOG_ERROR("failed to erase empty loading record, group=%d", group_id);
-            return false;
-        }
+        loading_records_.erase(record_it);
     }
     return true;
 }

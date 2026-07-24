@@ -3,25 +3,26 @@
 #include <algorithm>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
 namespace rtp_llm {
 namespace {
 using block_tree_cache_test::BlockTreeCacheTestPeer;
+using block_tree_cache_test::makeBlockTreeCacheForTest;
 
-// Test double that records which nodes FullComponentGroup::isSlotEvictable is
+// Test double that records which nodes FullGroupSet::isSlotEvictable is
 // asked about while recording is enabled, then forwards to the base class.
 // During a no-eviction insert, refreshCandidate is the only caller of
 // isSlotEvictable, so recording these evaluations lets a test verify exactly
 // which nodes the evictor re-evaluates -- without any production-side hook.
-class CountingFullComponentGroup: public FullComponentGroup {
+class CountingFullGroupSet: public FullGroupSet {
 public:
     bool isSlotEvictable(const TreeNode& node, Tier tier) const override {
         if (recording_) {
             checked_nodes_.push_back(&node);
         }
-        return FullComponentGroup::isSlotEvictable(node, tier);
+        return FullGroupSet::isSlotEvictable(node, tier);
     }
 
     mutable bool                         recording_{false};
@@ -33,19 +34,17 @@ class FullEvictionTest: public ::testing::Test {
 protected:
     void SetUp() override {
         std::unique_ptr<BlockTree> tree       = std::make_unique<BlockTree>(1);
-        auto                       full       = std::make_shared<CountingFullComponentGroup>();
-        full->component_group_id              = 0;
+        auto                       full       = std::make_shared<CountingFullGroupSet>();
         counting_full_                        = full.get();
-        std::vector<ComponentGroupPtr> groups = {full};
-        cache_                                = block_tree_cache_test::makeBlockTreeCacheForTest(std::move(tree),
-                                                                  std::move(groups),
-                                                                  std::vector<Component>{},
-                                                                  BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+        std::vector<GroupSetPtr> groups = {full};
+        cache_                                = makeBlockTreeCacheForTest(std::move(tree),
+                                                            std::move(groups),
+                                                            BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
     }
 
     // Insert a path with given device block for group 0.
     void insertPath(const CacheKeysType& keys, BlockIdxType dev_block) {
-        std::vector<std::vector<GroupSlot>> slots(keys.size(), std::vector<GroupSlot>(1));
+        std::vector<std::vector<GroupSetResource>> slots(keys.size(), std::vector<GroupSetResource>(1));
         for (size_t i = 0; i < keys.size(); ++i) {
             slots[i][0].device_blocks = {static_cast<BlockIdxType>(dev_block + i)};
         }
@@ -53,7 +52,7 @@ protected:
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
-    CountingFullComponentGroup*     counting_full_{nullptr};
+    CountingFullGroupSet*     counting_full_{nullptr};
 };
 
 // ---------------------------------------------------------------------------
@@ -82,11 +81,11 @@ TEST_F(FullEvictionTest, ExtendingExistingLeafRefreshesDirectParent) {
     ASSERT_EQ(before.path.size(), 4u);
     std::vector<CandidateMeta> ancestor_meta_before;
     for (size_t index = 0; index + 1 < before.path.size(); ++index) {
-        ancestor_meta_before.push_back(before.path[index]->group_slots[0].candidate_meta);
+        ancestor_meta_before.push_back(before.path[index]->group_set_resources[0].candidate_meta);
     }
     const std::vector<TreeNode*> path_before               = before.path;
     const TreeNode* const        direct_parent             = before.path.back();
-    const CandidateMeta          direct_parent_meta_before = direct_parent->group_slots[0].candidate_meta;
+    const CandidateMeta          direct_parent_meta_before = direct_parent->group_set_resources[0].candidate_meta;
 
     // Record every isSlotEvictable evaluation during the extending insert.
     // Metadata alone cannot distinguish "refresh only the direct parent" from
@@ -114,11 +113,11 @@ TEST_F(FullEvictionTest, ExtendingExistingLeafRefreshesDirectParent) {
         EXPECT_EQ(refresh_count(path_before[index]), 0) << "ancestor=" << index << " must not be re-scanned";
     }
 
-    EXPECT_EQ(after.path[3]->group_slots[0].candidate_meta.last_access_seq, direct_parent_meta_before.last_access_seq);
-    EXPECT_EQ(after.path[3]->group_slots[0].candidate_meta.admission_seq, direct_parent_meta_before.admission_seq);
-    EXPECT_EQ(after.path[3]->group_slots[0].candidate_meta.hit_count, direct_parent_meta_before.hit_count);
+    EXPECT_EQ(after.path[3]->group_set_resources[0].candidate_meta.last_access_seq, direct_parent_meta_before.last_access_seq);
+    EXPECT_EQ(after.path[3]->group_set_resources[0].candidate_meta.admission_seq, direct_parent_meta_before.admission_seq);
+    EXPECT_EQ(after.path[3]->group_set_resources[0].candidate_meta.hit_count, direct_parent_meta_before.hit_count);
     for (size_t index = 0; index < ancestor_meta_before.size(); ++index) {
-        const CandidateMeta& after_meta = after.path[index]->group_slots[0].candidate_meta;
+        const CandidateMeta& after_meta = after.path[index]->group_set_resources[0].candidate_meta;
         EXPECT_EQ(after_meta.last_access_seq, ancestor_meta_before[index].last_access_seq) << "ancestor=" << index;
         EXPECT_EQ(after_meta.admission_seq, ancestor_meta_before[index].admission_seq) << "ancestor=" << index;
         EXPECT_EQ(after_meta.hit_count, ancestor_meta_before[index].hit_count) << "ancestor=" << index;
@@ -257,7 +256,7 @@ TEST_F(FullEvictionTest, MatchRefreshesLruOrder) {
 
     auto match = cache_->match({100});
     ASSERT_EQ(match.matched_blocks, 1u);
-    cache_->releaseMatchedBlocks(match.matched_block_sets);
+    cache_->releaseMatchedResources(match.matched_resources);
 
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
     cache_->waitForPendingTasks();
@@ -276,12 +275,12 @@ TEST_F(FullEvictionTest, MatchReleaseDoesNotMutateHeat) {
     ASSERT_EQ(match.matched_blocks, 1u);
     auto found = cache_->tree()->findNode({100});
     ASSERT_NE(found.matched_node, nullptr);
-    const CandidateMeta meta_after_match = found.matched_node->group_slots[0].candidate_meta;
+    const CandidateMeta meta_after_match = found.matched_node->group_set_resources[0].candidate_meta;
     ASSERT_EQ(meta_after_match.hit_count, 1u);
 
-    cache_->releaseMatchedBlocks(match.matched_block_sets);
+    cache_->releaseMatchedResources(match.matched_resources);
 
-    const CandidateMeta meta_after_release = found.matched_node->group_slots[0].candidate_meta;
+    const CandidateMeta meta_after_release = found.matched_node->group_set_resources[0].candidate_meta;
     EXPECT_EQ(meta_after_release.last_access_seq, meta_after_match.last_access_seq);
     EXPECT_EQ(meta_after_release.admission_seq, meta_after_match.admission_seq);
     EXPECT_EQ(meta_after_release.hit_count, meta_after_match.hit_count);
@@ -294,8 +293,8 @@ TEST_F(FullEvictionTest, MatchReleaseDoesNotMutateHeat) {
     auto cold_match = cache_->match({200});
     EXPECT_EQ(hot_match.matched_blocks, 1u);
     EXPECT_EQ(cold_match.matched_blocks, 0u);
-    cache_->releaseMatchedBlocks(hot_match.matched_block_sets);
-    cache_->releaseMatchedBlocks(cold_match.matched_block_sets);
+    cache_->releaseMatchedResources(hot_match.matched_resources);
+    cache_->releaseMatchedResources(cold_match.matched_resources);
 }
 
 // An insert that completely overlaps an existing path creates no inserted_nodes.
@@ -307,7 +306,7 @@ TEST_F(FullEvictionTest, OverlappingInsertDoesNotOverwriteOrRefreshLru) {
 
     auto before = cache_->tree()->findNode({100});
     ASSERT_NE(before.matched_node, nullptr);
-    ASSERT_EQ(before.matched_node->group_slots[0].device_blocks, std::vector<BlockIdxType>({10}));
+    ASSERT_EQ(before.matched_node->group_set_resources[0].device_blocks, std::vector<BlockIdxType>({10}));
 
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
     cache_->waitForPendingTasks();

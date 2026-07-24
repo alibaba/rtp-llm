@@ -8,9 +8,9 @@
 
 namespace rtp_llm {
 
-MultiRankBlockTransferEngine::MultiRankBlockTransferEngine(std::vector<ComponentGroupPtr>    component_groups,
+MultiRankBlockTransferEngine::MultiRankBlockTransferEngine(std::vector<GroupSetPtr>    group_sets,
                                                            std::shared_ptr<BroadcastManager> broadcast_manager):
-    component_groups_(std::move(component_groups)), broadcast_manager_(std::move(broadcast_manager)) {}
+    group_sets_(std::move(group_sets)), broadcast_manager_(std::move(broadcast_manager)) {}
 
 bool MultiRankBlockTransferEngine::execute(const std::vector<TransferDescriptor>& descriptors, int timeout_ms) const {
     if (descriptors.empty() || timeout_ms <= 0) {
@@ -20,10 +20,10 @@ bool MultiRankBlockTransferEngine::execute(const std::vector<TransferDescriptor>
 
     MemoryOperationRequestPB request;
     for (const TransferDescriptor& descriptor : descriptors) {
-        if (!BlockTransferRequestConverter::appendTransfer(descriptor, component_groups_, request)) {
+        if (!BlockTransferRequestConverter::appendTransfer(descriptor, group_sets_, request)) {
             RTP_LLM_LOG_WARNING("failed to encode transfer, "
-                                "group=%d source=%s target=%s",
-                                descriptor.component_group_id,
+                                "group=%zu source=%s target=%s",
+                                descriptor.group_set_id,
                                 tierName(descriptor.source_tier),
                                 tierName(descriptor.target_tier));
             return false;

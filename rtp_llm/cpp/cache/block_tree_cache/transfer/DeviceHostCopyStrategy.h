@@ -21,8 +21,8 @@ struct DeviceHostCopyTile {
     size_t host_offset{0};
     size_t bytes{0};
     int    device_index{-1};
-    int    component_index{-1};
-    int    layer_id{-1};
+    size_t local_group_index{0};
+    size_t local_layer_index{0};
 };
 
 struct HostZeroTile {
@@ -38,7 +38,7 @@ struct HostPayloadView {
 struct DeviceHostCopyPlan {
     bool                            device_to_host{false};
     bool                            single_device{true};
-    int                             component_group_id{-1};
+    size_t                          group_set_id{0};
     HostPayloadView                 host;
     std::vector<DeviceHostCopyTile> copy_tiles;
     std::vector<HostZeroTile>       zero_tiles;

@@ -12,7 +12,7 @@ namespace rtp_llm {
 // Pluggable remote storage interface (replaces old RemoteConnector).
 // All remote I/O is asynchronous and batch-oriented.
 // The tree orchestrates prefetch/backup scheduling but does not track
-// remote state in GroupSlot — the backend manages its own key mapping.
+// remote state in GroupSetResource — the backend manages its own key mapping.
 class StorageBackend {
 public:
     virtual ~StorageBackend() = default;

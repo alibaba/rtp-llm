@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <limits>
 #include <memory>
+#include <numeric>
 #include <string>
 #include <utility>
 #include <vector>
@@ -12,7 +14,7 @@
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyStrategy.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
@@ -26,7 +28,10 @@ using block_transfer_engine_test::expectStatus;
 using block_transfer_engine_test::makeDescriptor;
 using block_transfer_engine_test::makeDiskPool;
 using block_transfer_engine_test::makeHostPool;
+using block_transfer_engine_test::makeTestGroupSet;
+using block_transfer_engine_test::makeTestTopology;
 using block_transfer_engine_test::poolMalloc;
+using block_transfer_engine_test::TestGroupSpec;
 
 struct DeviceLayerBufferSpec {
     size_t kv_bytes{0};
@@ -129,46 +134,37 @@ static std::vector<uint8_t> readDeviceLayer(const DeviceBlockPoolPtr& pool, int 
     return out;
 }
 
-static Component makeComponent(int                        component_id,
-                               int                        component_group_id,
-                               const std::vector<size_t>& layer_bytes,
-                               const std::string&         tag             = "",
-                               const std::vector<int>&    model_layer_ids = {}) {
-    return block_transfer_engine_test::makeSchemaComponent(component_id,
-                                                           component_group_id,
-                                                           tag.empty() ? ("comp_" + std::to_string(component_id)) : tag,
-                                                           layer_bytes,
-                                                           model_layer_ids);
+static TestGroupSpec makeGroupSpec(std::string      tag,
+                                   std::vector<int> layer_ids,
+                                   size_t           kv_bytes,
+                                   size_t           scale_bytes = 0) {
+    TestGroupSpec spec;
+    spec.tag                        = std::move(tag);
+    spec.policy                     = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    spec.policy.enable_prefix_reuse = true;
+    spec.layer_ids                  = std::move(layer_ids);
+    spec.kv_block_stride_bytes      = kv_bytes;
+    spec.kv_scale_stride_bytes      = scale_bytes;
+    return spec;
 }
 
-static ComponentGroupPtr makeDeviceHostGroup(int                                     group_id,
-                                             std::vector<int>                        component_indices,
-                                             std::vector<DeviceBlockPoolPtr>         device_pools,
-                                             std::shared_ptr<HostBlockPool>          host_pool,
-                                             const std::vector<Component>&           components,
-                                             std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = nullptr) {
-    auto group                = std::make_shared<FullComponentGroup>();
-    group->component_group_id = group_id;
-    group->group_type         = CacheGroupType::FULL;
-    std::vector<std::string> tags;
-    tags.reserve(component_indices.size());
-    for (int component_index : component_indices) {
-        tags.push_back(components[static_cast<size_t>(component_index)].tag);
-    }
-    group->setDevicePools(std::move(device_pools), std::move(tags));
+static GroupSetPtr makeDeviceHostGroup(size_t                                   group_set_id,
+                                       std::vector<DeviceBlockPoolPtr>          device_pools,
+                                       std::shared_ptr<HostBlockPool>           host_pool,
+                                       std::vector<TestGroupSpec>               group_specs,
+                                       std::shared_ptr<BlockTreeDiskBlockPool>  disk_pool = nullptr) {
+    auto topology = makeTestTopology(std::move(group_specs));
+    std::vector<size_t> group_ids(device_pools.size());
+    std::iota(group_ids.begin(), group_ids.end(), 0);
+    auto group = makeTestGroupSet(group_set_id, std::move(topology), std::move(group_ids), std::move(device_pools));
     group->setHostPool(std::move(host_pool));
     group->setDiskPool(std::move(disk_pool));
-    block_transfer_engine_test::setComponentGroupLayout(*group, std::move(component_indices), components);
     return group;
 }
 
-static std::shared_ptr<PerRankBlockTransferEngine> makeEngine(std::vector<ComponentGroupPtr> groups,
-                                                              std::vector<Component>         components,
+static std::shared_ptr<PerRankBlockTransferEngine> makeEngine(std::vector<GroupSetPtr> groups,
                                                               DeviceHostCopyOptions          options = {}) {
-    return std::make_shared<PerRankBlockTransferEngine>(
-        std::move(groups),
-        block_transfer_engine_test::makeComponentRegistry(std::move(components)),
-        std::move(options));
+    return std::make_shared<PerRankBlockTransferEngine>(std::move(groups), std::move(options));
 }
 
 struct StrategyCounters {
@@ -226,8 +222,8 @@ protected:
     void SetUp() override {
         ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
 
-        layer_bytes_     = {100, 200, 150};
-        host_block_size_ = 450;
+        layer_bytes_     = {100, 100, 100};
+        host_block_size_ = 300;
 
         // Create host pool — 10 usable blocks
         host_pool_ = makeHostPool(host_block_size_, 10, true);
@@ -237,11 +233,10 @@ protected:
         ASSERT_NE(device_block_, NULL_BLOCK_IDX);
         device_blocks_ = {device_block_};
 
-        component_       = makeComponent(0, 0, layer_bytes_);
-        component_group_ = makeDeviceHostGroup(0, {0}, {device_pool_}, host_pool_, {component_});
-        ASSERT_TRUE(component_group_->hasLayout());
-        ASSERT_EQ(component_group_->layout().payloadBytes(), host_block_size_);
-        per_rank_transfer_engine_ = makeEngine({component_group_}, {component_});
+        group_set_ = makeDeviceHostGroup(
+            0, {device_pool_}, host_pool_, {makeGroupSpec("group_0", {0, 1, 2}, 100)});
+        ASSERT_EQ(group_set_->payloadBytes(), host_block_size_);
+        per_rank_transfer_engine_ = makeEngine({group_set_});
     }
 
     std::vector<size_t>                         layer_bytes_;
@@ -251,8 +246,7 @@ protected:
     DeviceBlockPoolPtr                          device_pool_;
     BlockIdxType                                device_block_;
     std::vector<BlockIdxType>                   device_blocks_;
-    Component                                   component_;
-    ComponentGroupPtr                           component_group_;
+    GroupSetPtr                           group_set_;
 };
 
 TEST_F(PerRankBlockTransferEngineTest, SubmitDeviceHostRoundTripPreservesLayout) {
@@ -286,23 +280,26 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitDeviceHostRoundTripPreservesLayout)
     auto d2 = readDeviceLayer(device_pool_, 2, device_block_);
     for (size_t i = 0; i < layer_bytes_[0]; ++i)
         EXPECT_EQ(d0[i], static_cast<uint8_t>(i & 0xFF));
-    for (auto byte : d1)
-        EXPECT_EQ(byte, 0x5A);
+    for (size_t i = 0; i < layer_bytes_[1]; ++i)
+        EXPECT_EQ(d1[i], 0x5A);
+    for (size_t i = layer_bytes_[1]; i < d1.size(); ++i)
+        EXPECT_EQ(d1[i], 0x00);
     for (size_t i = 0; i < layer_bytes_[2]; ++i)
         EXPECT_EQ(d2[i], static_cast<uint8_t>(i & 0xFF));
+    for (size_t i = layer_bytes_[2]; i < d2.size(); ++i)
+        EXPECT_EQ(d2[i], 0x00);
 
     host_pool_->free(host_block);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, SharedDevicePoolComponentsIsolateByBlockId) {
+TEST_F(PerRankBlockTransferEngineTest, SharedDevicePoolGroupsIsolateByBlockId) {
     auto shared_pool = makeDevicePool({{64, 0}, {32, 0}}, 4, "per_rank_transfer_engine_shared_pool");
-    auto host_pool   = makeHostPool(192, 4, true);
-    // Non-identity model layer ids: any path that leaked them into pool lookups
-    // would address out-of-range slots instead of descriptor-local {0, 1}.
-    auto comp_a = makeComponent(0, 0, {64, 32}, "tag_a", {2, 5});
-    auto comp_b = makeComponent(1, 0, {64, 32}, "tag_b", {3, 7});
-    auto group  = makeDeviceHostGroup(0, {0, 1}, {shared_pool, shared_pool}, host_pool, {comp_a, comp_b});
-    auto engine = makeEngine({group}, {comp_a, comp_b});
+    auto host_pool   = makeHostPool(128, 4, true);
+    auto group       = makeDeviceHostGroup(0,
+                                    {shared_pool, shared_pool},
+                                    host_pool,
+                                    {makeGroupSpec("tag_a", {0, 1}, 32), makeGroupSpec("tag_b", {0, 1}, 32)});
+    auto engine      = makeEngine({group});
 
     const BlockIdxType block_a = poolMalloc(*shared_pool);
     const BlockIdxType block_b = poolMalloc(*shared_pool);
@@ -320,14 +317,14 @@ TEST_F(PerRankBlockTransferEngineTest, SharedDevicePoolComponentsIsolateByBlockI
     ASSERT_TRUE(engine->submit(makeDescriptor(Tier::DEVICE, Tier::HOST, {block_a, block_b}, host_block)).ok());
 
     const uint8_t* host_data = static_cast<const uint8_t*>(host_pool->blockBuffer(host_block).addr);
-    for (size_t i = 0; i < 64; ++i)
+    for (size_t i = 0; i < 32; ++i)
         EXPECT_EQ(host_data[i], 0xA0);
     for (size_t i = 0; i < 32; ++i)
-        EXPECT_EQ(host_data[64 + i], 0xA1);
-    for (size_t i = 0; i < 64; ++i)
-        EXPECT_EQ(host_data[96 + i], 0xB0);
+        EXPECT_EQ(host_data[32 + i], 0xA1);
     for (size_t i = 0; i < 32; ++i)
-        EXPECT_EQ(host_data[160 + i], 0xB1);
+        EXPECT_EQ(host_data[64 + i], 0xB0);
+    for (size_t i = 0; i < 32; ++i)
+        EXPECT_EQ(host_data[96 + i], 0xB1);
 
     fillDeviceLayer(shared_pool, 0, block_a, {0x00});
     fillDeviceLayer(shared_pool, 1, block_a, {0x00});
@@ -335,12 +332,18 @@ TEST_F(PerRankBlockTransferEngineTest, SharedDevicePoolComponentsIsolateByBlockI
     fillDeviceLayer(shared_pool, 1, block_b, {0x00});
     ASSERT_TRUE(engine->submit(makeDescriptor(Tier::HOST, Tier::DEVICE, {block_a, block_b}, host_block)).ok());
 
-    for (auto byte : readDeviceLayer(shared_pool, 0, block_a))
-        EXPECT_EQ(byte, 0xA0);
+    const auto a0 = readDeviceLayer(shared_pool, 0, block_a);
+    for (size_t i = 0; i < 32; ++i)
+        EXPECT_EQ(a0[i], 0xA0);
+    for (size_t i = 32; i < a0.size(); ++i)
+        EXPECT_EQ(a0[i], 0x00);
     for (auto byte : readDeviceLayer(shared_pool, 1, block_a))
         EXPECT_EQ(byte, 0xA1);
-    for (auto byte : readDeviceLayer(shared_pool, 0, block_b))
-        EXPECT_EQ(byte, 0xB0);
+    const auto b0 = readDeviceLayer(shared_pool, 0, block_b);
+    for (size_t i = 0; i < 32; ++i)
+        EXPECT_EQ(b0[i], 0xB0);
+    for (size_t i = 32; i < b0.size(); ++i)
+        EXPECT_EQ(b0[i], 0x00);
     for (auto byte : readDeviceLayer(shared_pool, 1, block_b))
         EXPECT_EQ(byte, 0xB1);
 
@@ -433,8 +436,8 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitRejectsMismatchedDeviceBlockCount) 
     host_pool_->free(host_block);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, SubmitRejectsInvalidComponentGroupId) {
-    for (int group_id : {-1, 99}) {
+TEST_F(PerRankBlockTransferEngineTest, SubmitRejectsInvalidGroupSetId) {
+    for (size_t group_id : {std::numeric_limits<size_t>::max(), size_t{99}}) {
         SCOPED_TRACE(::testing::Message() << "group_id=" << group_id);
         expectStatus(per_rank_transfer_engine_,
                      makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, NULL_BLOCK_IDX, NULL_BLOCK_IDX, group_id),
@@ -469,10 +472,39 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitRejectsIncompleteDeviceHostLayout) 
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     const auto desc = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block);
 
-    auto missing_host_group  = makeDeviceHostGroup(0, {0}, {device_pool_}, nullptr, {component_});
-    auto missing_host_engine = makeEngine({missing_host_group}, {component_});
+    auto missing_host_group = makeDeviceHostGroup(
+        0, {device_pool_}, nullptr, {makeGroupSpec("group_0", {0, 1, 2}, 100)});
+    auto missing_host_engine = makeEngine({missing_host_group});
     expectStatus(missing_host_engine, desc, TransferStatus::INVALID_ARGS);
     host_pool_->free(host_block);
+}
+
+TEST_F(PerRankBlockTransferEngineTest, SubmitRejectsInvalidLayerSlotLayout) {
+    {
+        auto host_pool   = makeHostPool(128, 2, true);
+        auto device_pool = makeDevicePool({{64, 0}, {16, 0}}, 2, "per_rank_transfer_engine_zero_stride");
+        auto block       = poolMalloc(*device_pool);
+        auto host_block  = poolMalloc(*host_pool);
+        auto group = makeDeviceHostGroup(
+            0, {device_pool}, host_pool, {makeGroupSpec("too_small_second_layer", {0, 1}, 64)});
+        auto engine = makeEngine({group});
+        expectStatus(
+            engine, makeDescriptor(Tier::DEVICE, Tier::HOST, {block}, host_block), TransferStatus::INVALID_ARGS);
+    }
+
+    {
+        auto host_pool   = makeHostPool(65, 2, true);
+        auto device_pool = makeDevicePool({{64, 0}}, 2, "per_rank_transfer_engine_slot_mismatch");
+        auto block       = poolMalloc(*device_pool);
+        auto host_block  = poolMalloc(*host_pool);
+        auto group =
+            makeDeviceHostGroup(0, {device_pool}, host_pool, {makeGroupSpec("too_small_buffer", {0}, 65)});
+        auto engine = makeEngine({group});
+        expectStatus(
+            engine, makeDescriptor(Tier::DEVICE, Tier::HOST, {block}, host_block), TransferStatus::INVALID_ARGS);
+        expectStatus(
+            engine, makeDescriptor(Tier::HOST, Tier::DEVICE, {block}, host_block), TransferStatus::INVALID_ARGS);
+    }
 }
 
 TEST_F(PerRankBlockTransferEngineTest, UnusableCopyBufferReturnsDeviceIoError) {
@@ -482,10 +514,10 @@ TEST_F(PerRankBlockTransferEngineTest, UnusableCopyBufferReturnsDeviceIoError) {
     device_pool_->layout_strategies_[0]->config_.kv_block_stride_bytes = 0;
     expectStatus(per_rank_transfer_engine_,
                  makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block),
-                 TransferStatus::DEVICE_IO_ERROR);
+                 TransferStatus::INVALID_ARGS);
     expectStatus(per_rank_transfer_engine_,
                  makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, host_block),
-                 TransferStatus::DEVICE_IO_ERROR);
+                 TransferStatus::INVALID_ARGS);
     host_pool_->free(host_block);
 }
 
@@ -568,18 +600,20 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitHostToDeviceIndependentDescriptors)
         per_rank_transfer_engine_->submit(makeDescriptor(Tier::HOST, Tier::DEVICE, second_device_blocks, host_block_2));
     ASSERT_TRUE(result_2.ok());
 
-    for (auto byte : readDeviceLayer(device_pool_, 0, device_block_))
-        EXPECT_EQ(byte, 0x12);
-    for (auto byte : readDeviceLayer(device_pool_, 1, device_block_))
-        EXPECT_EQ(byte, 0x34);
-    for (auto byte : readDeviceLayer(device_pool_, 2, device_block_))
-        EXPECT_EQ(byte, 0x9A);
-    for (auto byte : readDeviceLayer(device_pool_, 0, second_device_block))
-        EXPECT_EQ(byte, 0x56);
-    for (auto byte : readDeviceLayer(device_pool_, 1, second_device_block))
-        EXPECT_EQ(byte, 0x78);
-    for (auto byte : readDeviceLayer(device_pool_, 2, second_device_block))
-        EXPECT_EQ(byte, 0xBC);
+    const auto first_layer0 = readDeviceLayer(device_pool_, 0, device_block_);
+    const auto first_layer1 = readDeviceLayer(device_pool_, 1, device_block_);
+    const auto first_layer2 = readDeviceLayer(device_pool_, 2, device_block_);
+    const auto second_layer0 = readDeviceLayer(device_pool_, 0, second_device_block);
+    const auto second_layer1 = readDeviceLayer(device_pool_, 1, second_device_block);
+    const auto second_layer2 = readDeviceLayer(device_pool_, 2, second_device_block);
+    for (size_t i = 0; i < 100; ++i) {
+        EXPECT_EQ(first_layer0[i], 0x12);
+        EXPECT_EQ(first_layer1[i], 0x34);
+        EXPECT_EQ(first_layer2[i], 0x9A);
+        EXPECT_EQ(second_layer0[i], 0x56);
+        EXPECT_EQ(second_layer1[i], 0x78);
+        EXPECT_EQ(second_layer2[i], 0xBC);
+    }
 
     host_pool_->free(host_block_1);
     host_pool_->free(host_block_2);
@@ -590,26 +624,26 @@ class PerRankBlockTransferEngineMixedNullTest: public ::testing::Test {
 protected:
     void SetUp() override {
         ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
-        host_pool_ = makeHostPool(168, 4, true);
+        host_pool_ = makeHostPool(240, 4, true);
         pools_     = {
             makeDevicePool({{64, 16}}, 4, "per_rank_transfer_engine_mixed_0"),
-            makeDevicePool({{48, 0}}, 4, "per_rank_transfer_engine_mixed_1"),
-            makeDevicePool({{32, 8}}, 4, "per_rank_transfer_engine_mixed_2"),
+            makeDevicePool({{64, 16}}, 4, "per_rank_transfer_engine_mixed_1"),
+            makeDevicePool({{64, 16}}, 4, "per_rank_transfer_engine_mixed_2"),
         };
         for (const auto& pool : pools_) {
             blocks_.push_back(poolMalloc(*pool));
             ASSERT_NE(blocks_.back(), NULL_BLOCK_IDX);
         }
 
-        std::vector<Component> components = {
-            makeComponent(0, 0, {80}, "kv_scale_0"),
-            makeComponent(1, 0, {48}, "missing"),
-            makeComponent(2, 0, {40}, "kv_scale_2"),
-        };
         // Pool bindings remain concrete in the declarative topology. The middle
         // descriptor block is NULL, so lowering must skip it without touching its pool.
-        auto group  = makeDeviceHostGroup(0, {0, 1, 2}, pools_, host_pool_, components);
-        engine_     = makeEngine({group}, components);
+        auto group = makeDeviceHostGroup(0,
+                                         pools_,
+                                         host_pool_,
+                                         {makeGroupSpec("kv_scale_0", {0}, 64, 16),
+                                          makeGroupSpec("missing", {0}, 64, 16),
+                                          makeGroupSpec("kv_scale_2", {0}, 64, 16)});
+        engine_ = makeEngine({group});
         host_block_ = poolMalloc(*host_pool_);
         ASSERT_NE(host_block_, NULL_BLOCK_IDX);
     }
@@ -621,12 +655,12 @@ protected:
     BlockIdxType                                host_block_{NULL_BLOCK_IDX};
 };
 
-TEST_F(PerRankBlockTransferEngineMixedNullTest, DeviceToHostMixedNullComponentsPreserveOffsets) {
+TEST_F(PerRankBlockTransferEngineMixedNullTest, DeviceToHostMixedNullGroupsPreserveOffsets) {
     fillDeviceLayer(pools_[0], 0, blocks_[0], {0xA1, 0xA2});
-    fillDeviceLayer(pools_[1], 0, blocks_[1], {0xB1});
+    fillDeviceLayer(pools_[1], 0, blocks_[1], {0xB1, 0xB2});
     fillDeviceLayer(pools_[2], 0, blocks_[2], {0xC1, 0xC2});
     auto* host_data = static_cast<uint8_t*>(host_pool_->blockBuffer(host_block_).addr);
-    std::memset(host_data, 0xFF, 168);
+    std::memset(host_data, 0xFF, 240);
 
     expectStatus(engine_,
                  makeDescriptor(Tier::DEVICE, Tier::HOST, {blocks_[0], NULL_BLOCK_IDX, blocks_[2]}, host_block_),
@@ -635,23 +669,24 @@ TEST_F(PerRankBlockTransferEngineMixedNullTest, DeviceToHostMixedNullComponentsP
         EXPECT_EQ(host_data[i], 0xA1);
     for (size_t i = 64; i < 80; ++i)
         EXPECT_EQ(host_data[i], 0xA2);
-    for (size_t i = 80; i < 128; ++i)
+    for (size_t i = 80; i < 160; ++i)
         EXPECT_EQ(host_data[i], 0x00);
-    for (size_t i = 128; i < 160; ++i)
+    for (size_t i = 160; i < 224; ++i)
         EXPECT_EQ(host_data[i], 0xC1);
-    for (size_t i = 160; i < 168; ++i)
+    for (size_t i = 224; i < 240; ++i)
         EXPECT_EQ(host_data[i], 0xC2);
 }
 
-TEST_F(PerRankBlockTransferEngineMixedNullTest, HostToDeviceMixedNullComponentsPreserveOffsets) {
+TEST_F(PerRankBlockTransferEngineMixedNullTest, HostToDeviceMixedNullGroupsPreserveOffsets) {
     auto* host_data = static_cast<uint8_t*>(host_pool_->blockBuffer(host_block_).addr);
     std::memset(host_data, 0x11, 64);
     std::memset(host_data + 64, 0x12, 16);
-    std::memset(host_data + 80, 0x22, 48);
-    std::memset(host_data + 128, 0x31, 32);
-    std::memset(host_data + 160, 0x32, 8);
+    std::memset(host_data + 80, 0x22, 64);
+    std::memset(host_data + 144, 0x23, 16);
+    std::memset(host_data + 160, 0x31, 64);
+    std::memset(host_data + 224, 0x32, 16);
     fillDeviceLayer(pools_[0], 0, blocks_[0], {0x00, 0x00});
-    fillDeviceLayer(pools_[1], 0, blocks_[1], {0xEE});
+    fillDeviceLayer(pools_[1], 0, blocks_[1], {0xEE, 0xEF});
     fillDeviceLayer(pools_[2], 0, blocks_[2], {0x00, 0x00});
 
     expectStatus(engine_,
@@ -665,11 +700,13 @@ TEST_F(PerRankBlockTransferEngineMixedNullTest, HostToDeviceMixedNullComponentsP
         EXPECT_EQ(comp0[i], 0x11);
     for (size_t i = 64; i < 80; ++i)
         EXPECT_EQ(comp0[i], 0x12);
-    for (auto byte : comp1)
-        EXPECT_EQ(byte, 0xEE);
-    for (size_t i = 0; i < 32; ++i)
+    for (size_t i = 0; i < 64; ++i)
+        EXPECT_EQ(comp1[i], 0xEE);
+    for (size_t i = 64; i < 80; ++i)
+        EXPECT_EQ(comp1[i], 0xEF);
+    for (size_t i = 0; i < 64; ++i)
         EXPECT_EQ(comp2[i], 0x31);
-    for (size_t i = 32; i < 40; ++i)
+    for (size_t i = 64; i < 80; ++i)
         EXPECT_EQ(comp2[i], 0x32);
 }
 
@@ -687,9 +724,9 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceHostDiskHostDeviceRoundTri
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
-    auto component = makeComponent(0, 0, {payload_bytes}, "kv_scale");
-    auto group     = makeDeviceHostGroup(0, {0}, {device_pool}, host_pool, {component}, disk_pool);
-    auto engine    = makeEngine({group}, {component});
+    auto group = makeDeviceHostGroup(
+        0, {device_pool}, host_pool, {makeGroupSpec("kv_scale", {0}, 64, 16)}, disk_pool);
+    auto engine = makeEngine({group});
     fillDeviceLayer(device_pool, 0, device_block, {0x6A, 0xD3});
     const auto expected = readDeviceLayer(device_pool, 0, device_block);
 
@@ -721,8 +758,8 @@ protected:
     void SetUp() override {
         ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
 
-        layer_bytes_     = {128, 256};
-        host_block_size_ = 384;
+        layer_bytes_     = {128, 128};
+        host_block_size_ = 256;
 
         host_pool_    = makeHostPool(host_block_size_, 10, true);
         device_pool_  = makeDevicePool({{128, 0}, {256, 0}}, 10, "strategy_test_device");
@@ -730,13 +767,12 @@ protected:
         ASSERT_NE(device_block_, NULL_BLOCK_IDX);
         device_blocks_ = {device_block_};
 
-        component_       = makeComponent(0, 0, layer_bytes_);
-        component_group_ = makeDeviceHostGroup(0, {0}, {device_pool_}, host_pool_, {component_});
-        ASSERT_TRUE(component_group_->hasLayout());
+        group_set_ = makeDeviceHostGroup(
+            0, {device_pool_}, host_pool_, {makeGroupSpec("strategy", {0, 1}, 128)});
     }
 
     std::shared_ptr<PerRankBlockTransferEngine> makePerRankBlockTransferEngine(DeviceHostCopyOptions options = {}) {
-        return makeEngine({component_group_}, {component_}, std::move(options));
+        return makeEngine({group_set_}, std::move(options));
     }
 
     std::vector<size_t>            layer_bytes_;
@@ -745,8 +781,7 @@ protected:
     DeviceBlockPoolPtr             device_pool_;
     BlockIdxType                   device_block_;
     std::vector<BlockIdxType>      device_blocks_;
-    Component                      component_;
-    ComponentGroupPtr              component_group_;
+    GroupSetPtr              group_set_;
 };
 
 TEST_F(PerRankBlockTransferEngineStrategyTest, GenericStrategyRoundTrip) {
@@ -768,7 +803,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, GenericStrategyRoundTrip) {
     const auto* host_data = static_cast<const uint8_t*>(host_pool_->blockBuffer(host_block).addr);
     for (size_t i = 0; i < 128; ++i)
         EXPECT_EQ(host_data[i], 0xAA);
-    for (size_t i = 128; i < 384; ++i)
+    for (size_t i = 128; i < 256; ++i)
         EXPECT_EQ(host_data[i], 0xBB);
 
     fillDeviceLayer(device_pool_, 0, device_block_, {0x00});
@@ -781,8 +816,10 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, GenericStrategyRoundTrip) {
     auto d1 = readDeviceLayer(device_pool_, 1, device_block_);
     for (auto b : d0)
         EXPECT_EQ(b, 0xAA);
-    for (auto b : d1)
-        EXPECT_EQ(b, 0xBB);
+    for (size_t i = 0; i < 128; ++i)
+        EXPECT_EQ(d1[i], 0xBB);
+    for (size_t i = 128; i < d1.size(); ++i)
+        EXPECT_EQ(d1[i], 0x00);
     EXPECT_EQ(counters[0].not_applicable, 2);
     EXPECT_EQ(counters[1].not_applicable, 2);
     EXPECT_EQ(counters[2].done, 2);
@@ -811,7 +848,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, BatchStrategyExecutesWhenSupporte
     const auto* host_data = static_cast<const uint8_t*>(host_pool_->blockBuffer(host_block).addr);
     for (size_t i = 0; i < 128; ++i)
         EXPECT_EQ(host_data[i], 0x11);
-    for (size_t i = 128; i < 384; ++i)
+    for (size_t i = 128; i < 256; ++i)
         EXPECT_EQ(host_data[i], 0x22);
 
     fillDeviceLayer(device_pool_, 0, device_block_, {0x00});
@@ -824,8 +861,10 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, BatchStrategyExecutesWhenSupporte
     auto d1 = readDeviceLayer(device_pool_, 1, device_block_);
     for (auto b : d0)
         EXPECT_EQ(b, 0x11);
-    for (auto b : d1)
-        EXPECT_EQ(b, 0x22);
+    for (size_t i = 0; i < 128; ++i)
+        EXPECT_EQ(d1[i], 0x22);
+    for (size_t i = 128; i < d1.size(); ++i)
+        EXPECT_EQ(d1[i], 0x00);
 
     EXPECT_EQ(counters[0].attempts, 2);
     EXPECT_EQ(counters[0].done, 0);
@@ -862,7 +901,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, BatchNotApplicableFallsBackToGene
     DeviceHostCopyPlan plan;
     plan.device_to_host     = true;
     plan.single_device      = true;
-    plan.component_group_id = 0;
+    plan.group_set_id = 0;
     plan.host               = {host_data, device_buffer.size_bytes};
     plan.copy_tiles.push_back(DeviceHostCopyTile{host_data, device_buffer.addr, 0, device_buffer.size_bytes, -1, 0, 0});
     EXPECT_EQ(executor.executeStrategies(plan), TransferStatus::OK);
@@ -894,7 +933,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedEnabledBelowThresholdFallsB
     const auto* host_data = static_cast<const uint8_t*>(host_pool_->blockBuffer(host_block).addr);
     for (size_t i = 0; i < 128; ++i)
         EXPECT_EQ(host_data[i], 0xCC);
-    for (size_t i = 128; i < 384; ++i)
+    for (size_t i = 128; i < 256; ++i)
         EXPECT_EQ(host_data[i], 0xDD);
     EXPECT_EQ(counters[0].not_applicable, 1);
     EXPECT_EQ(counters[1].not_applicable, 1);
@@ -924,7 +963,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyAboveThresholdRound
     const auto* host_data = static_cast<const uint8_t*>(host_pool_->blockBuffer(host_block).addr);
     for (size_t i = 0; i < 128; ++i)
         EXPECT_EQ(host_data[i], 0x31);
-    for (size_t i = 128; i < 384; ++i)
+    for (size_t i = 128; i < 256; ++i)
         EXPECT_EQ(host_data[i], 0x42);
 
     fillDeviceLayer(device_pool_, 0, device_block_, {0x00});
@@ -933,8 +972,11 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyAboveThresholdRound
     ASSERT_TRUE(per_rank_transfer_engine->submit(h2d).ok());
     for (auto byte : readDeviceLayer(device_pool_, 0, device_block_))
         EXPECT_EQ(byte, 0x31);
-    for (auto byte : readDeviceLayer(device_pool_, 1, device_block_))
-        EXPECT_EQ(byte, 0x42);
+    const auto staged_layer1 = readDeviceLayer(device_pool_, 1, device_block_);
+    for (size_t i = 0; i < 128; ++i)
+        EXPECT_EQ(staged_layer1[i], 0x42);
+    for (size_t i = 128; i < staged_layer1.size(); ++i)
+        EXPECT_EQ(staged_layer1[i], 0x00);
     EXPECT_EQ(counters[0].done, 2);
     EXPECT_EQ(counters[1].attempts, 0);
     EXPECT_EQ(counters[2].attempts, 0);

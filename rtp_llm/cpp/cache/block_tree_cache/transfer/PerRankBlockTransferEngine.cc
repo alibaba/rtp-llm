@@ -13,11 +13,9 @@
 
 namespace rtp_llm {
 
-PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<ComponentGroupPtr>                component_groups,
-                                                       std::shared_ptr<const std::vector<Component>> components,
-                                                       DeviceHostCopyOptions device_host_options):
-    component_groups_(std::move(component_groups)),
-    components_(std::move(components)),
+PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
+                                                       DeviceHostCopyOptions    device_host_options):
+    group_sets_(std::move(group_sets)),
     device_host_executor_(std::make_unique<DeviceHostTransferExecutor>(std::move(device_host_options))),
     host_disk_executor_(std::make_unique<HostDiskTransferExecutor>()) {}
 
@@ -110,17 +108,17 @@ TransferHandle PerRankBlockTransferEngine::submit(const TransferDescriptor& desc
 }
 
 TransferStatus PerRankBlockTransferEngine::execute(const TransferDescriptor& desc) {
-    const ComponentGroup* group  = nullptr;
+    const GroupSet* group  = nullptr;
     const TransferStatus  status = validateRequest(desc, group);
     if (status != TransferStatus::OK) {
         return status;
     }
 
     if (desc.source_tier == Tier::DEVICE && desc.target_tier == Tier::HOST) {
-        return device_host_executor_->execute(desc, *group, *components_);
+        return device_host_executor_->execute(desc, *group);
     }
     if (desc.source_tier == Tier::HOST && desc.target_tier == Tier::DEVICE) {
-        return device_host_executor_->execute(desc, *group, *components_);
+        return device_host_executor_->execute(desc, *group);
     }
     if (desc.source_tier == Tier::HOST && desc.target_tier == Tier::DISK) {
         return host_disk_executor_->hostToDisk(desc, *group);
@@ -129,37 +127,43 @@ TransferStatus PerRankBlockTransferEngine::execute(const TransferDescriptor& des
 }
 
 TransferStatus PerRankBlockTransferEngine::validateRequest(const TransferDescriptor& desc,
-                                                           const ComponentGroup*&    group) const {
-    if (desc.component_group_id < 0 || static_cast<size_t>(desc.component_group_id) >= component_groups_.size()) {
-        RTP_LLM_LOG_WARNING("invalid component_group_id=%d", desc.component_group_id);
+                                                           const GroupSet*&    group) const {
+    if (desc.group_set_id >= group_sets_.size()) {
+        RTP_LLM_LOG_WARNING("invalid group_set_id=%zu", desc.group_set_id);
         return TransferStatus::INVALID_ARGS;
     }
-    group = component_groups_[static_cast<size_t>(desc.component_group_id)].get();
+    const GroupSetPtr& group_ptr = group_sets_[desc.group_set_id];
+    if (group_ptr == nullptr) {
+        RTP_LLM_LOG_WARNING("null group set=%zu", desc.group_set_id);
+        return TransferStatus::INVALID_ARGS;
+    }
+    group = group_ptr.get();
 
     const bool device_host = (desc.source_tier == Tier::DEVICE && desc.target_tier == Tier::HOST)
                              || (desc.source_tier == Tier::HOST && desc.target_tier == Tier::DEVICE);
     if (device_host) {
         const auto host_pool = group->hostPool();
         if (host_pool == nullptr || !host_pool->validBlock(desc.host_block)) {
-            RTP_LLM_LOG_WARNING("device-host request has invalid host block group=%d", desc.component_group_id);
+            RTP_LLM_LOG_WARNING("device-host request has invalid host block group=%zu", desc.group_set_id);
             return TransferStatus::INVALID_ARGS;
         }
-        if (desc.device_blocks.size() != group->componentIndices().size()) {
-            RTP_LLM_LOG_WARNING("device-host request device block count %zu != component count %zu group=%d",
+        if (desc.device_blocks.size() != group->groupIds().size()) {
+            RTP_LLM_LOG_WARNING("device-host request device block count %zu != group count %zu group_set=%zu",
                                 desc.device_blocks.size(),
-                                group->componentIndices().size(),
-                                desc.component_group_id);
+                                group->groupIds().size(),
+                                desc.group_set_id);
             return TransferStatus::INVALID_ARGS;
         }
         bool has_device_block = false;
-        for (size_t component_idx = 0; component_idx < desc.device_blocks.size(); ++component_idx) {
-            const BlockIdxType block = desc.device_blocks[component_idx];
+        for (size_t local_group_index = 0; local_group_index < desc.device_blocks.size(); ++local_group_index) {
+            const BlockIdxType block = desc.device_blocks[local_group_index];
             if (isNullBlockIdx(block)) {
                 continue;
             }
-            const DeviceBlockPoolPtr& pool = group->devicePools()[component_idx];
-            if (!pool->validBlock(block)) {
-                RTP_LLM_LOG_WARNING("invalid device block %d for component=%zu", block, component_idx);
+            const DeviceBlockPoolPtr& pool = group->devicePools()[local_group_index];
+            if (pool == nullptr || !pool->validBlock(block)) {
+                RTP_LLM_LOG_WARNING(
+                    "invalid device block %d for local_group=%zu", block, local_group_index);
                 return TransferStatus::INVALID_ARGS;
             }
             has_device_block = true;
@@ -174,7 +178,7 @@ TransferStatus PerRankBlockTransferEngine::validateRequest(const TransferDescrip
         const auto disk_pool = group->diskPool();
         if (host_pool == nullptr || disk_pool == nullptr || !host_pool->validBlock(desc.host_block)
             || !disk_pool->validBlock(desc.disk_block)) {
-            RTP_LLM_LOG_WARNING("invalid host-disk request group=%d", desc.component_group_id);
+            RTP_LLM_LOG_WARNING("invalid host-disk request group=%zu", desc.group_set_id);
             return TransferStatus::INVALID_ARGS;
         }
         return TransferStatus::OK;

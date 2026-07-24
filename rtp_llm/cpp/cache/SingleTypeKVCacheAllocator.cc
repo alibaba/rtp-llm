@@ -74,18 +74,17 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
         common_seq_len = cp_slot_mapper_->effectiveSeqLenForAlloc(config_, 0, common_seq_len);
     }
-    const auto&        cache_keys = kv_resource->cacheKeys(0);
-    const std::string& tag        = config_.tagForGroup(0);
+    const auto& cache_keys = kv_resource->cacheKeys(0);
     RTP_LLM_CHECK_WITH_INFO(block_tree_cache_ != nullptr, "BlockTreeCache must be injected before allocation");
 
     int64_t                         match_cost_time_us = 0;
     size_t                          reuse_blocks       = 0;
     std::shared_ptr<LoadBackTicket> load_back_ticket;
-    std::vector<GroupBlockSet>      matched_block_sets;
+    std::vector<MultiNodeResource>      matched_resources;
     bool                            matched_blocks_released = false;
     auto                            release_matched_blocks  = [&]() {
         if (!matched_blocks_released) {
-            block_tree_cache_->releaseMatchedBlocks(matched_block_sets);
+            block_tree_cache_->releaseMatchedResources(matched_resources);
             matched_blocks_released = true;
         }
     };
@@ -115,13 +114,11 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         auto          match_result        = block_tree_cache_->match(match_keys);
         match_cost_time_us                = currentTimeUs() - match_begin_time_us;
         load_back_ticket                  = match_result.load_back_ticket;
-        matched_block_sets                = std::move(match_result.matched_block_sets);
+        matched_resources                = std::move(match_result.matched_resources);
         const size_t ready_blocks         = match_result.matched_blocks;
         reuse_blocks =
             load_back_ticket && !load_back_ticket->empty() ? load_back_ticket->logicalMatchedBlocks() : ready_blocks;
-        const auto       group_it = match_result.group_block_indices.find(tag);
-        BlockIndicesType ready_group_blocks =
-            group_it == match_result.group_block_indices.end() ? BlockIndicesType{} : group_it->second;
+        BlockIndicesType ready_group_blocks = block_tree_cache_->matchedBlocksForGroup(0, matched_resources);
         if (ready_group_blocks.size() != ready_blocks || ready_blocks > reuse_blocks) {
             return rollback();
         }
@@ -135,12 +132,12 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
 
         if (load_back_ticket && !load_back_ticket->empty()) {
             for (size_t item_index = 0; item_index < load_back_ticket->itemCount(); ++item_index) {
-                const int   group_id          = load_back_ticket->groupId(item_index);
-                const auto& device_group_tags = load_back_ticket->deviceGroupTags(item_index);
-                const auto& source_blocks     = load_back_ticket->sourceBlocks(item_index);
-                const auto  path_index        = load_back_ticket->pathIndex(item_index);
-                if (!block_tree_cache_->validateDeviceGroupTagsForComponentGroup(group_id, device_group_tags)
-                    || device_group_tags.size() != 1 || device_group_tags.front() != tag
+                const size_t group_set_id  = load_back_ticket->groupSetId(item_index);
+                const auto& source_blocks = load_back_ticket->sourceBlocks(item_index);
+                const auto  path_index    = load_back_ticket->pathIndex(item_index);
+                if (group_set_id >= block_tree_cache_->groupSets().size()
+                    || block_tree_cache_->groupSets()[group_set_id]->groupIds()
+                           != std::vector<size_t>{0}
                     || path_index >= reuse_blocks || source_blocks.size() != 1
                     || isNullBlockIdx(source_blocks.front())) {
                     return rollback();
@@ -356,14 +353,13 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
             continue;
         }
         insert_keys.resize(block_num);
-        const auto& component_groups = block_tree_cache_->componentGroups();
-        if (component_groups.size() != 1 || !component_groups[0] || component_groups[0]->tags().size() != 1
-            || component_groups[0]->tags().front() != config_.tagForGroup(0)
-            || component_groups[0]->devicePoolCount() != 1) {
-            RTP_LLM_LOG_WARNING("SingleType insert rejected inconsistent stable tag/component mapping");
+        const auto& group_sets = block_tree_cache_->groupSets();
+        if (group_sets.size() != 1 || !group_sets[0] || group_sets[0]->groupIds() != std::vector<size_t>{0}
+            || group_sets[0]->devicePoolCount() != 1) {
+            RTP_LLM_LOG_WARNING("SingleType insert rejected inconsistent GroupSet membership");
             continue;
         }
-        std::vector<std::vector<GroupSlot>> slots(block_num, std::vector<GroupSlot>(1));
+        std::vector<std::vector<GroupSetResource>> slots(block_num, std::vector<GroupSetResource>(1));
         for (auto& per_key_slots : slots) {
             per_key_slots[0].device_blocks.assign(1, NULL_BLOCK_IDX);
         }

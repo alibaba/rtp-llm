@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
@@ -12,8 +12,8 @@ enum class BlockIOStatus;
 // maps BlockIOStatus to TransferStatus.
 class HostDiskTransferExecutor {
 public:
-    TransferStatus hostToDisk(const TransferDescriptor& desc, const ComponentGroup& group) const;
-    TransferStatus diskToHost(const TransferDescriptor& desc, const ComponentGroup& group) const;
+    TransferStatus hostToDisk(const TransferDescriptor& desc, const GroupSet& group) const;
+    TransferStatus diskToHost(const TransferDescriptor& desc, const GroupSet& group) const;
 
 private:
     static TransferStatus blockIOStatusToTransferStatus(BlockIOStatus status);

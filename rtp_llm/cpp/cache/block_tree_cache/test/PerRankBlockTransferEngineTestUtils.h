@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
@@ -11,6 +12,27 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
 
 namespace rtp_llm::block_transfer_engine_test {
+
+struct TestGroupSpec {
+    std::string      tag;
+    CacheGroupPolicy policy;
+    std::vector<int> layer_ids{0};
+    size_t           kv_block_stride_bytes{16};
+    size_t           kv_scale_stride_bytes{0};
+    uint32_t         block_num{128};
+    size_t           seq_size_per_block{1};
+};
+
+std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<TestGroupSpec> specs);
+
+GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
+                             std::shared_ptr<const CacheTopology> topology,
+                             std::vector<size_t>                  group_ids,
+                             std::vector<DeviceBlockPoolPtr>     device_pools);
+
+DeviceBlockPoolPtr makeTestDevicePool(const std::vector<std::pair<size_t, size_t>>& layer_bytes,
+                                      size_t                                         usable_count,
+                                      const std::string&                             pool_name);
 
 std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count, bool enable_pinned);
 
@@ -33,24 +55,12 @@ std::shared_ptr<BlockTreeDiskBlockPool> makeDiskPool(size_t                     
 
 BlockIdxType poolMalloc(IBlockPool& pool);
 
-Component makeSchemaComponent(int                        component_id,
-                              int                        component_group_id,
-                              const std::string&         tag,
-                              const std::vector<size_t>& layer_bytes,
-                              const std::vector<int>&    model_layer_ids = {});
-
-std::shared_ptr<const std::vector<Component>> makeComponentRegistry(std::vector<Component> components);
-
-void setComponentGroupLayout(ComponentGroup&                 group,
-                             std::vector<int>                component_indices,
-                             const std::vector<Component>&   components);
-
 TransferDescriptor makeDescriptor(Tier                             source_tier,
                                   Tier                             target_tier,
                                   const std::vector<BlockIdxType>& device_blocks,
                                   BlockIdxType                     host_block = NULL_BLOCK_IDX,
                                   BlockIdxType                     disk_block = NULL_BLOCK_IDX,
-                                  int                              group_id   = 0);
+                                  size_t                           group_set_id = 0);
 
 void expectStatus(const std::shared_ptr<PerRankBlockTransferEngine>& engine,
                   const TransferDescriptor&                          desc,

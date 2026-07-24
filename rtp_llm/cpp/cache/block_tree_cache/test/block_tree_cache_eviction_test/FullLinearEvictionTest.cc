@@ -1,30 +1,30 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
 namespace rtp_llm {
 namespace {
 using block_tree_cache_test::BlockTreeCacheTestPeer;
+using block_tree_cache_test::makeBlockTreeCacheForTest;
 
 // Helper: build BlockTreeCache with Full(REUSABLE, gid=0) + Linear(REUSABLE, gid=1).
 class FullLinearEvictionTest: public ::testing::Test {
 protected:
     void SetUp() override {
         std::unique_ptr<BlockTree> tree       = std::make_unique<BlockTree>(2);
-        auto                       full       = std::make_shared<FullComponentGroup>();
-        full->component_group_id              = 0;
-        auto linear                           = std::make_shared<LinearComponentGroup>();
-        linear->component_group_id            = 1;
-        std::vector<ComponentGroupPtr> groups = {full, linear};
-        cache_                                = block_tree_cache_test::makeBlockTreeCacheForTest(std::move(tree),
-                                                                  std::move(groups),
-                                                                  std::vector<Component>{},
-                                                                  BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+        auto                       full       = std::make_shared<FullGroupSet>();
+        auto linear                           = std::make_shared<LinearGroupSet>();
+        std::vector<GroupSetPtr> groups = {full, linear};
+        cache_                                = makeBlockTreeCacheForTest(std::move(tree),
+                                                            std::move(groups),
+                                                            BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_block, BlockIdxType linear_block) {
-        std::vector<std::vector<GroupSlot>> slots(keys.size(), std::vector<GroupSlot>(2));
+        std::vector<std::vector<GroupSetResource>> slots(keys.size(), std::vector<GroupSetResource>(2));
         for (size_t i = 0; i < keys.size(); ++i) {
             slots[i][0].device_blocks = {static_cast<BlockIdxType>(full_block + i)};
             slots[i][1].device_blocks = {static_cast<BlockIdxType>(linear_block + i)};
@@ -71,16 +71,14 @@ TEST_F(FullLinearEvictionTest, FullReclaimCascadesToLinear) {
 // ---------------------------------------------------------------------------
 TEST_F(FullLinearEvictionTest, LinearOnlySequentialDrain) {
     std::unique_ptr<BlockTree> tree        = std::make_unique<BlockTree>(1);
-    auto                       linear      = std::make_shared<LinearComponentGroup>();
-    linear->component_group_id             = 0;
-    std::vector<ComponentGroupPtr>  groups = {linear};
+    auto                       linear      = std::make_shared<LinearGroupSet>();
+    std::vector<GroupSetPtr>  groups = {linear};
     std::unique_ptr<BlockTreeCache> lin_cache =
-        block_tree_cache_test::makeBlockTreeCacheForTest(std::move(tree),
-                                                         std::move(groups),
-                                                         std::vector<Component>{},
-                                                         BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+        makeBlockTreeCacheForTest(std::move(tree),
+                                                   std::move(groups),
+                                                   BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
 
-    std::vector<std::vector<GroupSlot>> slots(3, std::vector<GroupSlot>(1));
+    std::vector<std::vector<GroupSetResource>> slots(3, std::vector<GroupSetResource>(1));
     slots[0][0].device_blocks = {30};
     slots[1][0].device_blocks = {31};
     slots[2][0].device_blocks = {32};

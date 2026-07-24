@@ -55,7 +55,7 @@ struct BlockTreeSeedResult {
     std::unordered_map<std::string, BlockIndicesType> blocks_by_tag;
 };
 
-// Seed a physically valid path through every reusable declarative component group.
+// Seed a physically valid path through every reusable declarative group set.
 // The request references are dropped after insertion; BlockTreeCache's own holders
 // keep the seeded blocks alive until the path is reclaimed.
 template<typename Allocator>
@@ -71,23 +71,22 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
         return result;
     }
 
-    const auto&                         component_groups = cache->componentGroups();
-    std::vector<std::vector<GroupSlot>> slots(keys.size(), std::vector<GroupSlot>(component_groups.size()));
+    const auto&                         group_sets = cache->groupSets();
+    std::vector<std::vector<GroupSetResource>> slots(keys.size(), std::vector<GroupSetResource>(group_sets.size()));
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIndicesType>> request_holds;
 
-    for (const auto& component_group : component_groups) {
-        if (!component_group || component_group->component_group_id < 0
-            || static_cast<size_t>(component_group->component_group_id) >= component_groups.size()
-            || component_group->tags().size() != component_group->devicePools().size()) {
+    for (const auto& group_set : group_sets) {
+        if (!group_set || group_set->groupSetId() >= group_sets.size()
+            || group_set->groupTags().size() != group_set->devicePools().size()) {
             for (const auto& [pool, blocks] : request_holds) {
                 pool->decRef(blocks, BlockRefType::REQUEST);
             }
             return result;
         }
 
-        const size_t component_group_id = static_cast<size_t>(component_group->component_group_id);
-        for (size_t pool_index = 0; pool_index < component_group->devicePools().size(); ++pool_index) {
-            const auto& device_pool = component_group->devicePools()[pool_index];
+        const size_t group_set_id = group_set->groupSetId();
+        for (size_t pool_index = 0; pool_index < group_set->devicePools().size(); ++pool_index) {
+            const auto& device_pool = group_set->devicePools()[pool_index];
             if (!device_pool) {
                 for (const auto& [pool, blocks] : request_holds) {
                     pool->decRef(blocks, BlockRefType::REQUEST);
@@ -109,11 +108,11 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
             device_pool->incRef(blocks, BlockRefType::REQUEST);
 
             for (size_t path_index = 0; path_index < keys.size(); ++path_index) {
-                auto& device_blocks = slots[path_index][component_group_id].device_blocks;
-                device_blocks.resize(component_group->devicePools().size(), NULL_BLOCK_IDX);
+                auto& device_blocks = slots[path_index][group_set_id].device_blocks;
+                device_blocks.resize(group_set->devicePools().size(), NULL_BLOCK_IDX);
                 device_blocks[pool_index] = blocks[path_index];
             }
-            result.blocks_by_tag.emplace(component_group->tags()[pool_index], blocks);
+            result.blocks_by_tag.emplace(group_set->groupTags()[pool_index], blocks);
             request_holds.emplace_back(device_pool, std::move(blocks));
         }
     }
@@ -126,7 +125,7 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
 
     auto match     = cache->match(keys);
     result.success = match.matched_blocks == keys.size();
-    cache->releaseMatchedBlocks(match.matched_block_sets);
+    cache->releaseMatchedResources(match.matched_resources);
     return result;
 }
 

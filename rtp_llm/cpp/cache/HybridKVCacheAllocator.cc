@@ -56,10 +56,12 @@ BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) 
     return valid;
 }
 
-int groupIdForStableTag(const CacheConfig& config, const std::string& tag) {
-    const auto tags = config.groupTagsSnapshot();
-    const auto it   = std::find(tags.begin(), tags.end(), tag);
-    return it == tags.end() ? -1 : static_cast<int>(std::distance(tags.begin(), it));
+const std::vector<size_t>* groupIdsForGroupSet(const BlockTreeCache* cache, size_t group_set_id) {
+    if (cache == nullptr || group_set_id >= cache->groupSets().size()) {
+        return nullptr;
+    }
+    const auto& group_set = cache->groupSets()[group_set_id];
+    return group_set == nullptr ? nullptr : &group_set->groupIds();
 }
 
 }  // namespace
@@ -95,17 +97,12 @@ bool HybridKVCacheAllocator::preflightLoadBackMappings(const std::shared_ptr<Loa
         return true;
     }
     for (size_t item_index = 0; item_index < ticket->itemCount(); ++item_index) {
-        const int   group_id          = ticket->groupId(item_index);
-        const auto& device_group_tags = ticket->deviceGroupTags(item_index);
-        if (!block_tree_cache_
-            || !block_tree_cache_->validateDeviceGroupTagsForComponentGroup(group_id, device_group_tags)
-            || device_group_tags.empty()) {
+        const auto* group_ids = groupIdsForGroupSet(block_tree_cache_, ticket->groupSetId(item_index));
+        if (group_ids == nullptr || group_ids->empty()) {
             return false;
         }
-        std::unordered_set<std::string> unique_tags;
-        for (const auto& tag : device_group_tags) {
-            const int gid = groupIdForStableTag(config_, tag);
-            if (tag.empty() || !unique_tags.emplace(tag).second || gid < 0 || skipReuseCacheGroup(gid)) {
+        for (const size_t group_id : *group_ids) {
+            if (group_id >= kv_cache_groups_.size() || skipReuseCacheGroup(static_cast<int>(group_id))) {
                 return false;
             }
         }
@@ -127,8 +124,8 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     ticket                 = match_result.load_back_ticket;
     auto fail_match        = [&]() {
         ticket.reset();
-        auto matched_block_sets = std::move(match_result.matched_block_sets);
-        block_tree_cache_->releaseMatchedBlocks(matched_block_sets);
+        auto matched_resources = std::move(match_result.matched_resources);
+        block_tree_cache_->releaseMatchedResources(matched_resources);
         return -1;
     };
     if (!preflightLoadBackMappings(ticket)) {
@@ -137,10 +134,8 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     const int ready_reuse_blocks = static_cast<int>(match_result.matched_blocks);
     const int logical_reuse_blocks =
         ticket != nullptr && !ticket->empty() ? static_cast<int>(ticket->logicalMatchedBlocks()) : ready_reuse_blocks;
-    auto groupBlocks = [&](int gid) -> const BlockIndicesType& {
-        static const BlockIndicesType empty;
-        const auto it = match_result.group_block_indices.find(config_.tagForGroup(static_cast<size_t>(gid)));
-        return it == match_result.group_block_indices.end() ? empty : it->second;
+    auto groupBlocks = [&](int gid) {
+        return block_tree_cache_->matchedBlocksForGroup(static_cast<size_t>(gid), match_result.matched_resources);
     };
 
     for (int gid : full_group_ids_) {
@@ -190,16 +185,16 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
             if (ticket->sourceTier(item_index) != Tier::DEVICE && !ticket->joinedLoadBack(item_index)) {
                 continue;
             }
-            const auto& source_blocks     = ticket->sourceBlocks(item_index);
-            const auto& device_group_tags = ticket->deviceGroupTags(item_index);
+            const auto& source_blocks = ticket->sourceBlocks(item_index);
+            const auto* group_ids     = groupIdsForGroupSet(block_tree_cache_, ticket->groupSetId(item_index));
             const BlockIndicesType& reusable_blocks =
                 ticket->joinedLoadBack(item_index) ? ticket->targetDeviceBlocks(item_index) : source_blocks;
-            if (reusable_blocks.size() != device_group_tags.size() || reusable_blocks.empty()) {
+            if (group_ids == nullptr || reusable_blocks.size() != group_ids->size() || reusable_blocks.empty()) {
                 return fail_match();
             }
-            for (size_t local = 0; local < device_group_tags.size(); ++local) {
-                const int gid = groupIdForStableTag(config_, device_group_tags[local]);
-                if (gid < 0 || gid >= kv_resource.groupNums() || skipReuseCacheGroup(gid)
+            for (size_t local = 0; local < group_ids->size(); ++local) {
+                const int gid = static_cast<int>((*group_ids)[local]);
+                if (gid >= kv_resource.groupNums() || skipReuseCacheGroup(gid)
                     || isNullBlockIdx(reusable_blocks[local])) {
                     return fail_match();
                 }
@@ -232,7 +227,7 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
             referenced_blocks[static_cast<size_t>(gid)] = std::move(valid);
         }
     }
-    block_tree_cache_->releaseMatchedBlocks(match_result.matched_block_sets);
+    block_tree_cache_->releaseMatchedResources(match_result.matched_resources);
     return logical_reuse_blocks;
 }
 
@@ -287,9 +282,14 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
             if (load_back_ticket->joinedLoadBack(item_index)) {
                 continue;
             }
-            for (const auto& tag : load_back_ticket->deviceGroupTags(item_index)) {
-                const int gid = groupIdForStableTag(config_, tag);
-                if (gid < 0 || gid >= kv_resource->groupNums() || skipReuseCacheGroup(gid)) {
+            const auto* group_ids =
+                groupIdsForGroupSet(block_tree_cache_, load_back_ticket->groupSetId(item_index));
+            if (group_ids == nullptr) {
+                return rollback({});
+            }
+            for (const size_t group_id : *group_ids) {
+                const int gid = static_cast<int>(group_id);
+                if (gid >= kv_resource->groupNums() || skipReuseCacheGroup(gid)) {
                     return rollback({});
                 }
                 const auto   type = config_.typeForGroup(static_cast<size_t>(gid));
@@ -357,13 +357,14 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     }
     if (load_back_ticket != nullptr && !load_back_ticket->empty()) {
         for (size_t item_index = 0; item_index < load_back_ticket->itemCount(); ++item_index) {
-            const auto& device_group_tags = load_back_ticket->deviceGroupTags(item_index);
-            const auto& source_blocks     = load_back_ticket->sourceBlocks(item_index);
+            const auto* group_ids =
+                groupIdsForGroupSet(block_tree_cache_, load_back_ticket->groupSetId(item_index));
+            const auto& source_blocks = load_back_ticket->sourceBlocks(item_index);
             BlockIndicesType target_device_blocks;
-            bool             valid = !device_group_tags.empty();
-            for (size_t local = 0; local < device_group_tags.size(); ++local) {
-                const int gid = groupIdForStableTag(config_, device_group_tags[local]);
-                if (gid < 0 || gid >= kv_resource->groupNums()) {
+            bool             valid = group_ids != nullptr && !group_ids->empty();
+            for (size_t local = 0; valid && local < group_ids->size(); ++local) {
+                const int gid = static_cast<int>((*group_ids)[local]);
+                if (gid >= kv_resource->groupNums()) {
                     valid = false;
                     break;
                 }
@@ -390,7 +391,9 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                 }
                 continue;
             }
-            if (!load_back_ticket->bindTargetDeviceBlocks(item_index, std::move(target_device_blocks))) {
+            if ((load_back_ticket->sourceTier(item_index) == Tier::DEVICE
+                 && source_blocks.size() != target_device_blocks.size())
+                || !load_back_ticket->bindTargetDeviceBlocks(item_index, std::move(target_device_blocks))) {
                 return rollback(original_sizes);
             }
         }
@@ -537,23 +540,22 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
         if (insert_keys.empty()) {
             continue;
         }
-        const auto&                         component_groups = block_tree_cache_->componentGroups();
-        std::vector<std::vector<GroupSlot>> slots(insert_keys.size(), std::vector<GroupSlot>(component_groups.size()));
+        const auto&                         group_sets = block_tree_cache_->groupSets();
+        std::vector<std::vector<GroupSetResource>> slots(insert_keys.size(), std::vector<GroupSetResource>(group_sets.size()));
         bool                                mapping_valid = true;
-        for (size_t component_index = 0; component_index < component_groups.size(); ++component_index) {
-            const auto& component_group = component_groups[component_index];
-            if (!component_group || component_group->component_group_id != static_cast<int>(component_index)
-                || component_group->tags().empty()
-                || component_group->tags().size() != component_group->devicePoolCount()) {
+        for (size_t group_set_index = 0; group_set_index < group_sets.size(); ++group_set_index) {
+            const auto& group_set = group_sets[group_set_index];
+            if (!group_set || group_set->groupSetId() != group_set_index
+                || group_set->groupIds().empty() || group_set->groupIds().size() != group_set->devicePoolCount()) {
                 mapping_valid = false;
                 break;
             }
             for (auto& per_key_slots : slots) {
-                per_key_slots[component_index].device_blocks.assign(component_group->devicePoolCount(), NULL_BLOCK_IDX);
+                per_key_slots[group_set_index].device_blocks.assign(group_set->devicePoolCount(), NULL_BLOCK_IDX);
             }
-            for (size_t local_pool = 0; local_pool < component_group->tags().size(); ++local_pool) {
-                const int gid = groupIdForStableTag(config_, component_group->tags()[local_pool]);
-                if (gid < 0 || gid >= group_nums || skipReuseCacheGroup(gid)) {
+            for (size_t local_pool = 0; local_pool < group_set->groupIds().size(); ++local_pool) {
+                const int gid = static_cast<int>(group_set->groupIds()[local_pool]);
+                if (gid >= group_nums || skipReuseCacheGroup(gid)) {
                     mapping_valid = false;
                     break;
                 }
@@ -567,7 +569,7 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                     if (position >= blocks.size() || isNullBlockIdx(blocks[position])) {
                         continue;
                     }
-                    slots[i][component_index].device_blocks[local_pool] = blocks[position];
+                    slots[i][group_set_index].device_blocks[local_pool] = blocks[position];
                 }
             }
             if (!mapping_valid) {
@@ -575,7 +577,7 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
             }
         }
         if (!mapping_valid) {
-            RTP_LLM_LOG_WARNING("Hybrid insert rejected inconsistent stable tag/component mapping");
+            RTP_LLM_LOG_WARNING("Hybrid insert rejected inconsistent topology group/GroupSet mapping");
             continue;
         }
 
@@ -583,14 +585,14 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
         for (size_t i = 0; i < slots.size(); ++i) {
             bool key_valid    = true;
             bool key_has_data = false;
-            for (size_t component_index = 0; component_index < component_groups.size(); ++component_index) {
-                auto&       device_blocks = slots[i][component_index].device_blocks;
-                const auto& component     = component_groups[component_index];
+            for (size_t group_set_index = 0; group_set_index < group_sets.size(); ++group_set_index) {
+                auto&       device_blocks = slots[i][group_set_index].device_blocks;
+                const auto& group_set     = group_sets[group_set_index];
                 const auto  valid_blocks  = static_cast<size_t>(
                     std::count_if(device_blocks.begin(), device_blocks.end(), [](BlockIdxType block) {
                         return !isNullBlockIdx(block);
                     }));
-                if (valid_blocks == 0 && component->group_type != CacheGroupType::FULL) {
+                if (valid_blocks == 0 && group_set->groupType() != CacheGroupType::FULL) {
                     device_blocks.clear();
                     continue;
                 }

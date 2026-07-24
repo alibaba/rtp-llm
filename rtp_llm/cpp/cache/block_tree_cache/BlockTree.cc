@@ -7,11 +7,11 @@
 
 namespace rtp_llm {
 
-BlockTree::BlockTree(int group_slot_count): group_slot_count_(group_slot_count) {
+BlockTree::BlockTree(size_t group_set_resource_count): group_set_resource_count_(group_set_resource_count) {
     root_            = std::make_unique<TreeNode>();
     root_->cache_key = 0;
     root_->parent    = nullptr;
-    root_->group_slots.resize(static_cast<size_t>(group_slot_count));
+    root_->group_set_resources.resize(group_set_resource_count);
 }
 
 BlockTree::~BlockTree() {
@@ -28,7 +28,7 @@ TreeNode* BlockTree::createNode(CacheKeyType key, TreeNode* parent) {
     auto node       = std::make_unique<TreeNode>();
     node->cache_key = key;
     node->parent    = parent;
-    node->group_slots.resize(static_cast<size_t>(group_slot_count_));
+    node->group_set_resources.resize(group_set_resource_count_);
     auto* raw = node.get();
     node_pool_.push_back(std::move(node));
     return raw;
@@ -61,21 +61,28 @@ BlockTreeFindResult BlockTree::findNode(const CacheKeysType& cache_keys) const {
 }
 
 bool BlockTree::isNodeMatchReady(const TreeNode& node) const {
-    if (node.group_slots.size() != static_cast<size_t>(group_slot_count_)) {
-        RTP_LLM_LOG_WARNING("malformed group slot count, node_key=%ld expected=%d actual=%zu",
+    RTP_LLM_CHECK_WITH_INFO(node.group_set_resources.size() == group_set_resource_count_,
+                            "BlockTree node resource count mismatch: node_key=%ld expected=%zu actual=%zu",
                             node.cache_key,
-                            group_slot_count_,
-                            node.group_slots.size());
-        return false;
+                            group_set_resource_count_,
+                            node.group_set_resources.size());
+    for (const GroupSetResource& slot : node.group_set_resources) {
+        if (slot.transfer_state != GroupSetTransferState::IDLE
+            && slot.transfer_state != GroupSetTransferState::LOADING_BACK) {
+            return false;
+        }
+        if (slot.transfer_state == GroupSetTransferState::IDLE) {
+            RTP_LLM_CHECK_WITH_INFO(slot.isValidSteadyState(),
+                                    "BlockTree encountered invalid IDLE multi-tier resource, node_key=%ld",
+                                    node.cache_key);
+        }
     }
-    return std::all_of(node.group_slots.begin(), node.group_slots.end(), [](const GroupSlot& slot) {
-        return slot.transfer_state == SlotTransferState::IDLE || slot.transfer_state == SlotTransferState::LOADING_BACK;
-    });
+    return true;
 }
 
 BlockTreeInsertResult BlockTree::insertNode(TreeNode*                                  parent,
                                             const CacheKeysType&                       cache_keys,
-                                            const std::vector<std::vector<GroupSlot>>& slots) {
+                                            const std::vector<std::vector<GroupSetResource>>& slots) {
     BlockTreeInsertResult result;
     if (cache_keys.empty()) {
         result.leaf = parent ? parent : root_.get();
@@ -83,6 +90,13 @@ BlockTreeInsertResult BlockTree::insertNode(TreeNode*                           
     }
     RTP_LLM_CHECK_WITH_INFO(slots.size() == cache_keys.size(),
                             "BlockTree::insertNode: slots.size() must equal cache_keys.size()");
+    for (size_t i = 0; i < slots.size(); ++i) {
+        RTP_LLM_CHECK_WITH_INFO(slots[i].empty() || slots[i].size() == group_set_resource_count_,
+                                "BlockTree input resource count mismatch: key=%ld expected=%zu actual=%zu",
+                                cache_keys[i],
+                                group_set_resource_count_,
+                                slots[i].size());
+    }
 
     result.inserted_mask.assign(cache_keys.size(), false);
     TreeNode* current = parent ? parent : root_.get();
@@ -97,52 +111,43 @@ BlockTreeInsertResult BlockTree::insertNode(TreeNode*                           
                 break;
             }
             current = existing_node;
-            if (current->group_slots.size() != static_cast<size_t>(group_slot_count_)) {
-                RTP_LLM_LOG_WARNING("malformed existing node, key=%ld expected=%d actual=%zu",
+            RTP_LLM_CHECK_WITH_INFO(current->group_set_resources.size() == group_set_resource_count_,
+                                    "BlockTree existing node resource count mismatch: key=%ld expected=%zu actual=%zu",
                                     key,
-                                    group_slot_count_,
-                                    current->group_slots.size());
-                break;
-            }
+                                    group_set_resource_count_,
+                                    current->group_set_resources.size());
             // An empty per-node input means this topology position carries no
             // group payload. Keep traversing so callers can append a suffix
-            // without manufacturing placeholder GroupSlots for every existing
+            // without manufacturing placeholder GroupSetResources for every existing
             // prefix node.
             if (slots[i].empty()) {
                 continue;
             }
-            if (slots[i].size() != static_cast<size_t>(group_slot_count_)) {
-                RTP_LLM_LOG_WARNING(
-                    "malformed input slots, key=%ld expected=%d actual=%zu", key, group_slot_count_, slots[i].size());
-                continue;
-            }
             const auto& incoming_slots = slots[i];
-            for (size_t gid = 0; gid < static_cast<size_t>(group_slot_count_); ++gid) {
-                GroupSlot&       existing     = current->group_slots[gid];
-                const GroupSlot& incoming     = incoming_slots[gid];
+            for (size_t group_set_index = 0; group_set_index < group_set_resource_count_; ++group_set_index) {
+                GroupSetResource&       existing = current->group_set_resources[group_set_index];
+                const GroupSetResource& incoming = incoming_slots[group_set_index];
                 const bool       source_valid = !incoming.device_blocks.empty()
                                           && std::all_of(incoming.device_blocks.begin(),
                                                          incoming.device_blocks.end(),
                                                          [](BlockIdxType block) { return !isNullBlockIdx(block); });
-                if (!existing.is_empty() || existing.transfer_state != SlotTransferState::IDLE || !source_valid) {
+                if (!existing.is_empty() || existing.transfer_state != GroupSetTransferState::IDLE || !source_valid) {
                     continue;
                 }
                 existing.device_blocks  = incoming.device_blocks;
                 existing.host_block     = NULL_BLOCK_IDX;
                 existing.disk_slot      = NULL_BLOCK_IDX;
-                existing.transfer_state = SlotTransferState::IDLE;
+                existing.transfer_state = GroupSetTransferState::IDLE;
                 existing.candidate_meta = {};
-                result.adopted_slots.push_back(BlockTreeAdoptedSlot{current, i, static_cast<int>(gid)});
+                result.adopted_slots.push_back(
+                    BlockTreeAdoptedSlot{current, i, group_set_index});
             }
         } else {
             TreeNode* child        = createNode(key, current);
             current->children[key] = child;
             current                = child;
-            if (slots[i].size() == static_cast<size_t>(group_slot_count_)) {
-                current->group_slots = slots[i];
-            } else if (!slots[i].empty()) {
-                RTP_LLM_LOG_WARNING(
-                    "malformed slot count, key=%ld expected=%d actual=%zu", key, group_slot_count_, slots[i].size());
+            if (slots[i].size() == group_set_resource_count_) {
+                current->group_set_resources = slots[i];
             }
             result.inserted_mask[i] = true;
             result.inserted_nodes.push_back(BlockTreeInsertedNode{current, i});
@@ -178,7 +183,7 @@ void BlockTree::removeNode(TreeNode* node) {
     }
 }
 
-TreeNode* BlockTree::removeEmptyAncestors(TreeNode* start_node, const std::vector<int>& reusable_group_ids) {
+TreeNode* BlockTree::removeEmptyAncestors(TreeNode* start_node, const std::vector<size_t>& reusable_group_set_ids) {
     TreeNode* current       = start_node;
     int       removed_count = 0;
 
@@ -189,9 +194,9 @@ TreeNode* BlockTree::removeEmptyAncestors(TreeNode* start_node, const std::vecto
         }
 
         bool removable = true;
-        for (int gid : reusable_group_ids) {
-            if (gid < 0 || static_cast<size_t>(gid) >= current->group_slots.size()
-                || !current->group_slots[static_cast<size_t>(gid)].is_removable()) {
+        for (size_t group_set_id : reusable_group_set_ids) {
+            if (group_set_id >= current->group_set_resources.size()
+                || !current->group_set_resources[group_set_id].is_removable()) {
                 removable = false;
                 break;
             }

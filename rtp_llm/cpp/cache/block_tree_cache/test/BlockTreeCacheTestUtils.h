@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockIO.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
@@ -57,20 +58,15 @@ size_t treeCachedBlocksNum(const IBlockPool& pool);
 
 std::unique_ptr<BlockTreeCache>
 makeBlockTreeCacheForTest(std::unique_ptr<BlockTree>        tree,
-                          std::vector<ComponentGroupPtr>    component_groups,
-                          std::vector<Component>            components,
+                          std::vector<GroupSetPtr>           group_sets,
                           BlockTreeCacheConfig              config            = {},
                           std::shared_ptr<StorageBackend>   storage_backend   = nullptr,
                           std::shared_ptr<BroadcastManager> broadcast_manager = nullptr);
 
-void setComponentGroupLayoutForTest(ComponentGroup&                 group,
-                                    std::vector<int>                component_indices,
-                                    const std::vector<Component>&   components);
-
-bool insertComponentGroupSlots(BlockTreeCache&                            cache,
-                               TreeNode*                                  parent,
-                               const CacheKeysType&                       cache_keys,
-                               const std::vector<std::vector<GroupSlot>>& slots);
+bool insertGroupSetSlots(BlockTreeCache&                                      cache,
+                         TreeNode*                                            parent,
+                         const CacheKeysType&                                 cache_keys,
+                         const std::vector<std::vector<GroupSetResource>>& resources);
 
 class BlockTreeCacheTestPeer {
 public:
@@ -95,7 +91,7 @@ public:
     static void setPerRankBlockTransferEngineForTest(BlockTreeCache&               cache,
                                                      PerRankBlockTransferEnginePtr per_rank_transfer_engine);
     static void runMaintenanceForTest(BlockTreeCache& cache);
-    static bool demoteOneForGroupForTest(BlockTreeCache& cache, int component_group_id, Tier tier);
+    static bool demoteOneForGroupForTest(BlockTreeCache& cache, size_t group_set_id, Tier tier);
     static int  reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier = Tier::DEVICE);
     static int  pendingTasksForTest(const BlockTreeCache& cache);
 
@@ -106,8 +102,7 @@ private:
 
 class ScriptedPerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
-    ScriptedPerRankBlockTransferEngine(const std::vector<ComponentGroupPtr>& groups,
-                                       const std::vector<Component>&         components);
+    explicit ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups);
 
     TransferHandle submit(const TransferDescriptor& descriptor) override;
 
@@ -154,15 +149,15 @@ public:
                               const std::vector<size_t>& disk_free) const;
 
     std::vector<BlockIdxType> blocksForTag(size_t tag_id) const;
-    std::vector<GroupSlot>    slotsForPathNode(size_t path_index) const;
+    std::vector<GroupSetResource> slotsForPathNode(size_t path_index) const;
 
     CacheKeysType                                        keys;
-    std::vector<ComponentGroupPtr>                       groups;
+    std::vector<GroupSetPtr>                             groups;
     std::vector<DeviceBlockPoolPtr>                      device_pools;
     std::vector<std::shared_ptr<HostBlockPool>>          host_pools;
     std::vector<std::shared_ptr<BlockTreeDiskBlockPool>> disk_pools;
-    std::vector<Component>                               components;
-    std::vector<GroupBlockSet>                           request_blocks;
+    std::shared_ptr<const CacheTopology>                 topology;
+    std::vector<MultiNodeResource>                       request_blocks;
     std::shared_ptr<ScriptedPerRankBlockTransferEngine>  scripted_per_rank_transfer_engine;
     std::unique_ptr<BlockTreeCache>                      cache;
 

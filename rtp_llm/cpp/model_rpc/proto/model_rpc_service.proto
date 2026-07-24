@@ -511,7 +511,7 @@ message MemoryOperationRequestPB {
             int32 src_disk_slot = 10;
         }
         repeated TaggedBlockPB tagged_gpu_blocks = 11;
-        repeated string component_group_tags = 12;
+        repeated string group_set_tags = 12;
     }
     enum CopyDirection {
         H2D = 0;

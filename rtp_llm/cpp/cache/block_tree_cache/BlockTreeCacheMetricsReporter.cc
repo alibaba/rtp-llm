@@ -48,18 +48,18 @@ BlockTreePoolMetricsSnapshot makePoolMetricsSnapshot(Tier tier, const IBlockPool
     return snapshot;
 }
 
-DeviceCandidateBlocks collectDeviceCandidateBlocks(const std::vector<ComponentGroupPtr>& component_groups,
+DeviceCandidateBlocks collectDeviceCandidateBlocks(const std::vector<GroupSetPtr>& group_sets,
                                                    const BlockTreeEvictor&               evictor) {
     DeviceCandidateBlocks candidate_blocks;
-    for (const ComponentGroupPtr& group : component_groups) {
-        const std::vector<TreeNode*> candidate_nodes = evictor.candidateNodes(group->component_group_id, Tier::DEVICE);
+    for (const GroupSetPtr& group : group_sets) {
+        const std::vector<TreeNode*> candidate_nodes = evictor.candidateNodes(group->groupSetId(), Tier::DEVICE);
         const std::vector<DeviceBlockPoolPtr>& device_pools = group->devicePools();
         for (TreeNode* node : candidate_nodes) {
-            if (node == nullptr || static_cast<size_t>(group->component_group_id) >= node->group_slots.size()) {
+            if (node == nullptr || group->groupSetId() >= node->group_set_resources.size()) {
                 continue;
             }
             const std::vector<BlockIdxType> blocks =
-                group->getBlocks(node->group_slots[static_cast<size_t>(group->component_group_id)], Tier::DEVICE);
+                group->getBlocks(node->group_set_resources[group->groupSetId()], Tier::DEVICE);
             const size_t block_count = std::min(blocks.size(), device_pools.size());
             for (size_t pool_index = 0; pool_index < block_count; ++pool_index) {
                 if (device_pools[pool_index] == nullptr || isNullBlockIdx(blocks[pool_index])) {
@@ -89,12 +89,12 @@ void BlockTreeCacheMetricsReporter::setMetricsReporter(
 }
 
 std::vector<BlockTreePoolMetricsSnapshot>
-BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<ComponentGroupPtr>& component_groups,
+BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets,
                                                            const BlockTreeEvictor&               evictor) const {
-    const DeviceCandidateBlocks device_candidate_blocks = collectDeviceCandidateBlocks(component_groups, evictor);
+    const DeviceCandidateBlocks device_candidate_blocks = collectDeviceCandidateBlocks(group_sets, evictor);
     std::unordered_set<const IBlockPool*>     reported_device_pools;
     std::vector<BlockTreePoolMetricsSnapshot> snapshots;
-    for (const ComponentGroupPtr& group : component_groups) {
+    for (const GroupSetPtr& group : group_sets) {
         const std::vector<DeviceBlockPoolPtr>& device_pools = group->devicePools();
         for (const DeviceBlockPoolPtr& pool : device_pools) {
             if (pool == nullptr) {
@@ -112,33 +112,33 @@ BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<Com
         const std::shared_ptr<HostBlockPool> host_pool = group->hostPool();
         if (host_pool != nullptr) {
             snapshots.push_back(makePoolMetricsSnapshot(
-                Tier::HOST, *host_pool, evictor.candidateCount(group->component_group_id, Tier::HOST)));
+                Tier::HOST, *host_pool, evictor.candidateCount(group->groupSetId(), Tier::HOST)));
         }
 
         const std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = group->diskPool();
         if (disk_pool != nullptr) {
             snapshots.push_back(makePoolMetricsSnapshot(
-                Tier::DISK, *disk_pool, evictor.candidateCount(group->component_group_id, Tier::DISK)));
+                Tier::DISK, *disk_pool, evictor.candidateCount(group->groupSetId(), Tier::DISK)));
         }
     }
     return snapshots;
 }
 
 std::vector<BlockTreeEvictableMetricsSnapshot>
-BlockTreeCacheMetricsReporter::collectEvictableMetricsSnapshots(const std::vector<ComponentGroupPtr>& component_groups,
+BlockTreeCacheMetricsReporter::collectEvictableMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets,
                                                                 const BlockTreeEvictor&               evictor) const {
     std::array<std::array<size_t, kMetricGroupTypes.size()>, kMetricTiers.size()> evictable_counts{};
-    for (const ComponentGroupPtr& group : component_groups) {
+    for (const GroupSetPtr& group : group_sets) {
         if (group == nullptr) {
             continue;
         }
-        const int group_type_index = metricGroupTypeIndex(group->group_type);
+        const int group_type_index = metricGroupTypeIndex(group->groupType());
         if (group_type_index < 0) {
             continue;
         }
         for (size_t tier_index = 0; tier_index < kMetricTiers.size(); ++tier_index) {
             evictable_counts[tier_index][static_cast<size_t>(group_type_index)] +=
-                evictor.candidateCount(group->component_group_id, kMetricTiers[tier_index]);
+                evictor.candidateCount(group->groupSetId(), kMetricTiers[tier_index]);
         }
     }
 
@@ -174,41 +174,38 @@ void BlockTreeCacheMetricsReporter::reportEvictableBlockCount(
 void BlockTreeCacheMetricsReporter::reportEvictionFinished(
     const BlockTreeEvictor::EvictionPlan&  plan,
     const BlockTreeEvictor::CopyResultSet& results,
-    const std::vector<ComponentGroupPtr>&  component_groups) const {
+    const std::vector<GroupSetPtr>&  group_sets) const {
     if (metrics_reporter_ == nullptr) {
         return;
     }
 
     const int64_t finish_time_us = currentTimeUs();
     if (results.primary_success) {
-        reportEvictionMove(plan.primary, component_groups, finish_time_us);
+        reportEvictionMove(plan.primary, group_sets, finish_time_us);
     }
     for (size_t move_index = 0; move_index < plan.cascade_moves.size(); ++move_index) {
         if (move_index < results.cascade_success.size() && results.cascade_success[move_index]) {
-            reportEvictionMove(plan.cascade_moves[move_index], component_groups, finish_time_us);
+            reportEvictionMove(plan.cascade_moves[move_index], group_sets, finish_time_us);
         }
     }
 }
 
 void BlockTreeCacheMetricsReporter::reportEvictionMove(const EvictionMove&                   eviction_move,
-                                                       const std::vector<ComponentGroupPtr>& component_groups,
+                                                       const std::vector<GroupSetPtr>& group_sets,
                                                        int64_t                               finish_time_us) const {
-    if (eviction_move.component_group_id < 0) {
+    const size_t group_set_index = eviction_move.group_set_id;
+    if (group_set_index >= group_sets.size()) {
         return;
     }
-    const size_t group_id = static_cast<size_t>(eviction_move.component_group_id);
-    if (group_id >= component_groups.size()) {
-        return;
-    }
-    const ComponentGroupPtr& group = component_groups[group_id];
-    if (group == nullptr || group->component_group_id != eviction_move.component_group_id) {
+    const GroupSetPtr& group = group_sets[group_set_index];
+    if (group == nullptr || group->groupSetId() != eviction_move.group_set_id) {
         return;
     }
 
     RtpLLMCacheEvictionMetricsCollector collector;
     collector.source_tier     = tierName(eviction_move.source_tier);
     collector.target_tier     = tierName(eviction_move.target_tier);
-    collector.group_type      = metricCacheGroupTypeName(group->group_type);
+    collector.group_type      = metricCacheGroupTypeName(group->groupType());
     collector.report_eviction = true;
     if (eviction_move.source_tier_enter_time_us > 0 && finish_time_us >= eviction_move.source_tier_enter_time_us) {
         collector.lifetime_ms     = (finish_time_us - eviction_move.source_tier_enter_time_us) / 1000;
@@ -248,7 +245,13 @@ int64_t BlockTreeCacheMetricsReporter::reportTransferStarted(Tier source_tier, T
     collector.target_tier        = tierName(target_tier);
     collector.in_flight          = in_flight;
     collector.transfer_completed = false;
-    metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &collector);
+    try {
+        metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(
+            nullptr, &collector);
+    } catch (...) {
+        transfer_in_flight_[static_cast<size_t>(direction_index)].fetch_sub(1);
+        throw;
+    }
     return begin_time_us;
 }
 

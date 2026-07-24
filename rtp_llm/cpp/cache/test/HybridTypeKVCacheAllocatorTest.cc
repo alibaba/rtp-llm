@@ -632,7 +632,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly
     }
     auto seeded_match = allocator->blockTreeCacheOwner()->match(seed_keys);
     ASSERT_EQ(seeded_match.matched_blocks, seed_keys.size());
-    allocator->blockTreeCacheOwner()->releaseMatchedBlocks(seeded_match.matched_block_sets);
+    allocator->blockTreeCacheOwner()->releaseMatchedResources(seeded_match.matched_resources);
 
     const auto& full_blocks   = seeded_blocks[static_cast<size_t>(gid_full)];
     const auto& linear_blocks = seeded_blocks[static_cast<size_t>(gid_linear)];
@@ -987,13 +987,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
 
     auto match = allocator->blockTreeCacheOwner()->match(CacheKeysType{100, 101, 102});
     EXPECT_EQ(match.matched_blocks, 3u);
-    const auto full_match = match.group_block_indices.find(config.tagForGroup(gid_full));
-    ASSERT_NE(full_match, match.group_block_indices.end());
-    EXPECT_EQ(full_match->second.size(), 3u);
-    const auto linear_match = match.group_block_indices.find(config.tagForGroup(gid_linear));
-    ASSERT_NE(linear_match, match.group_block_indices.end());
-    EXPECT_EQ(linear_match->second.size(), 1u);
-    allocator->blockTreeCacheOwner()->releaseMatchedBlocks(match.matched_block_sets);
+    EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(gid_full, match.matched_resources).size(), 3u);
+    EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(gid_linear, match.matched_resources).size(), 1u);
+    allocator->blockTreeCacheOwner()->releaseMatchedResources(match.matched_resources);
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, DefaultHybridLinearPrefixReuseSupportsInsertThenReuse) {
@@ -1015,10 +1011,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DefaultHybridLinearPrefixReuseSupportsIns
     allocator->insertIntoCache(InsertInfo{seed_res, seed_tokens, /*is_resident=*/false});
     auto seed_match = allocator->blockTreeCacheOwner()->match(CacheKeysType{100, 101, 102});
     EXPECT_EQ(seed_match.matched_blocks, 3u);
-    const auto linear_match = seed_match.group_block_indices.find("linear");
-    ASSERT_NE(linear_match, seed_match.group_block_indices.end());
-    EXPECT_EQ(linear_match->second.size(), 1u);
-    allocator->blockTreeCacheOwner()->releaseMatchedBlocks(seed_match.matched_block_sets);
+    EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(/*group_id=*/0, seed_match.matched_resources).size(),
+              1u);
+    allocator->blockTreeCacheOwner()->releaseMatchedResources(seed_match.matched_resources);
 
     auto hit_res    = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102, 103});
     auto hit_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
@@ -1238,8 +1233,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, EstimatePeakNeedBlocks) {
     auto       result = allocator->malloc(mi);
     ASSERT_TRUE(result.success);
 
-    const int full_slots   = new_res->blocksNum(0, 1);  // full group slots after malloc
-    const int linear_slots = new_res->blocksNum(0, 0);  // linear group slots after malloc
+    const int full_slots   = new_res->blocksNum(0, 1);  // full-group blocks after malloc
+    const int linear_slots = new_res->blocksNum(0, 0);  // linear-group blocks after malloc
 
     // remaining=0: no more slots needed for either group
     EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, new_res, 8, 0, 0, /*enable_reuse_cache=*/false), 0);

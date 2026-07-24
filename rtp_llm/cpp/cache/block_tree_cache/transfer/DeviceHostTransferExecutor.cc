@@ -19,27 +19,24 @@ DeviceHostTransferExecutor::DeviceHostTransferExecutor(DeviceHostCopyOptions opt
 
 DeviceHostTransferExecutor::~DeviceHostTransferExecutor() = default;
 
-TransferStatus DeviceHostTransferExecutor::execute(const TransferDescriptor&     desc,
-                                                   const ComponentGroup&         group,
-                                                   const std::vector<Component>& components) {
+TransferStatus DeviceHostTransferExecutor::execute(const TransferDescriptor& desc, const GroupSet& group) {
     bool device_to_host = (desc.source_tier == Tier::DEVICE && desc.target_tier == Tier::HOST);
-    return lowerAndExecute(desc, group, components, device_to_host);
+    return lowerAndExecute(desc, group, device_to_host);
 }
 
-TransferStatus DeviceHostTransferExecutor::lowerAndExecute(const TransferDescriptor&     desc,
-                                                           const ComponentGroup&         group,
-                                                           const std::vector<Component>& components,
-                                                           bool                          device_to_host) {
+TransferStatus DeviceHostTransferExecutor::lowerAndExecute(const TransferDescriptor& desc,
+                                                           const GroupSet&           group,
+                                                           bool                      device_to_host) {
     TransferStatus lower_status = TransferStatus::OK;
-    auto           plan         = lowerPlan(desc, group, components, device_to_host, lower_status);
+    auto           plan         = lowerPlan(desc, group, device_to_host, lower_status);
     if (lower_status != TransferStatus::OK) {
         return lower_status;
     }
 
     if (plan.copy_tiles.empty()) {
-        RTP_LLM_LOG_WARNING("%s copy plan has no copyable device block group=%d",
+        RTP_LLM_LOG_WARNING("%s copy plan has no copyable device block group=%zu",
                             device_to_host ? "D2H" : "H2D",
-                            desc.component_group_id);
+                            desc.group_set_id);
         return TransferStatus::INVALID_ARGS;
     }
 
@@ -57,14 +54,13 @@ TransferStatus DeviceHostTransferExecutor::lowerAndExecute(const TransferDescrip
     return TransferStatus::OK;
 }
 
-DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescriptor&     desc,
-                                                         const ComponentGroup&         group,
-                                                         const std::vector<Component>& components,
-                                                         bool                          device_to_host,
-                                                         TransferStatus&               out_status) const {
+DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescriptor& desc,
+                                                         const GroupSet&           group,
+                                                         bool                      device_to_host,
+                                                         TransferStatus&           out_status) const {
     DeviceHostCopyPlan plan;
     plan.device_to_host     = device_to_host;
-    plan.component_group_id = desc.component_group_id;
+    plan.group_set_id = desc.group_set_id;
     out_status              = TransferStatus::OK;
 
     const auto host_block = desc.host_block;
@@ -77,8 +73,7 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
         return plan;
     }
 
-    const auto&  layout              = group.layout();
-    const size_t required_host_bytes = layout.payloadBytes();
+    const size_t required_host_bytes = group.payloadBytes();
 
     plan.host.base          = host_base;
     plan.host.payload_bytes = required_host_bytes;
@@ -89,53 +84,83 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
     int  first_device_index = -1;
     bool single_device      = true;
 
-    for (const auto& slice : layout.slices()) {
-        const int        component_index = group.componentIndices()[slice.component_idx];
-        const Component& component       = components[static_cast<size_t>(component_index)];
+    size_t host_offset = 0;
+    for (size_t local_group_index = 0; local_group_index < group.groupIds().size(); ++local_group_index) {
+        const auto& group_base = group.groupAt(local_group_index);
+        const auto  device_block = device_blocks[local_group_index];
+        const bool  has_device_block = !isNullBlockIdx(device_block);
+        auto&       device_pool = *device_pools[local_group_index];
+        const int   pool_device_index = device_pool.deviceIndex();
 
-        const auto   device_block     = device_blocks[slice.component_idx];
-        const bool   has_device_block = !isNullBlockIdx(device_block);
-        const size_t expected_bytes   = component.layerBytes(slice.layer_idx);
-        auto*        slot_host_addr   = static_cast<uint8_t*>(host_base) + slice.offset_bytes;
-        if (!has_device_block) {
-            if (device_to_host) {
-                plan.zero_tiles.push_back(HostZeroTile{slot_host_addr, expected_bytes});
+        if (has_device_block) {
+            if (first_device_index < 0) {
+                first_device_index = pool_device_index;
+            } else if (pool_device_index != first_device_index) {
+                single_device = false;
             }
-            continue;
         }
 
-        auto&     device_pool       = *device_pools[slice.component_idx];
-        const int pool_device_index = device_pool.deviceIndex();
-        if (first_device_index < 0) {
-            first_device_index = pool_device_index;
-        } else if (pool_device_index != first_device_index) {
-            single_device = false;
-        }
+        for (size_t local_layer_index = 0; local_layer_index < group_base.layer_ids.size(); ++local_layer_index) {
+            const size_t kv_bytes    = group_base.kv_block_stride_bytes;
+            const size_t scale_bytes = group_base.kv_scale_stride_bytes;
+            const size_t layer_bytes = kv_bytes + scale_bytes;
+            auto*        layer_host_addr = static_cast<uint8_t*>(host_base) + host_offset;
 
-        // Component layer order matches pool slots; model layer ids do not.
-        auto   buffers           = device_pool.convertIndexToBuffer(static_cast<int>(slice.layer_idx), device_block);
-        size_t slot_device_bytes = 0;
-        for (const auto& buffer : buffers) {
-            if (!buffer.addr || buffer.size_bytes == 0) {
-                RTP_LLM_LOG_WARNING("null device buffer component=%d layer=%zu block=%d",
-                                    component_index,
-                                    slice.layer_idx,
-                                    device_block);
-                out_status = TransferStatus::DEVICE_IO_ERROR;
+            if (!has_device_block) {
+                if (device_to_host) {
+                    plan.zero_tiles.push_back(HostZeroTile{layer_host_addr, layer_bytes});
+                }
+                host_offset += layer_bytes;
+                continue;
+            }
+
+            const auto buffers =
+                device_pool.convertIndexToBuffer(static_cast<int>(local_layer_index), device_block);
+            const auto append_tile = [&](size_t buffer_index, size_t logical_bytes, size_t layer_offset) {
+                if (logical_bytes == 0) {
+                    return true;
+                }
+                if (buffer_index >= buffers.size() || buffers[buffer_index].addr == nullptr
+                    || buffers[buffer_index].size_bytes < logical_bytes) {
+                    RTP_LLM_LOG_WARNING(
+                        "physical buffer cannot cover logical payload group_set=%zu local_group=%zu "
+                        "group_id=%zu local_layer=%zu buffer=%zu physical=%zu logical=%zu block=%d",
+                        desc.group_set_id,
+                        local_group_index,
+                        group.groupIds()[local_group_index],
+                        local_layer_index,
+                        buffer_index,
+                        buffer_index < buffers.size() ? buffers[buffer_index].size_bytes : 0,
+                        logical_bytes,
+                        device_block);
+                    return false;
+                }
+                DeviceHostCopyTile tile;
+                tile.host_addr         = layer_host_addr + layer_offset;
+                tile.device_addr       = buffers[buffer_index].addr;
+                tile.host_offset       = host_offset + layer_offset;
+                tile.bytes             = logical_bytes;
+                tile.device_index      = pool_device_index;
+                tile.local_group_index = local_group_index;
+                tile.local_layer_index = local_layer_index;
+                plan.copy_tiles.push_back(tile);
+                return true;
+            };
+            if (!append_tile(0, kv_bytes, 0) || !append_tile(1, scale_bytes, kv_bytes)) {
+                out_status = TransferStatus::INVALID_ARGS;
                 return plan;
             }
-            DeviceHostCopyTile tile;
-            tile.host_addr       = slot_host_addr + slot_device_bytes;
-            tile.device_addr     = buffer.addr;
-            tile.host_offset     = slice.offset_bytes + slot_device_bytes;
-            tile.bytes           = buffer.size_bytes;
-            tile.device_index    = pool_device_index;
-            tile.component_index = component_index;
-            tile.layer_id        = static_cast<int>(slice.layer_idx);
-            plan.copy_tiles.push_back(tile);
-            slot_device_bytes += buffer.size_bytes;
+            host_offset += layer_bytes;
         }
+    }
 
+    if (host_offset != required_host_bytes) {
+        RTP_LLM_LOG_WARNING("logical payload drift group_set=%zu lowered=%zu expected=%zu",
+                            desc.group_set_id,
+                            host_offset,
+                            required_host_bytes);
+        out_status = TransferStatus::INVALID_ARGS;
+        return plan;
     }
 
     plan.single_device = single_device;
@@ -154,7 +179,7 @@ TransferStatus DeviceHostTransferExecutor::executeStrategies(const DeviceHostCop
                 continue;
         }
     }
-    RTP_LLM_LOG_WARNING("no strategy handled copy plan group=%d", plan.component_group_id);
+    RTP_LLM_LOG_WARNING("no strategy handled copy plan group=%zu", plan.group_set_id);
     return TransferStatus::DEVICE_IO_ERROR;
 }
 
@@ -169,7 +194,7 @@ std::vector<DeviceHostCopyPlan> DeviceHostTransferExecutor::splitByDevice(const 
         if (sub.copy_tiles.empty()) {
             sub.device_to_host     = plan.device_to_host;
             sub.single_device      = true;
-            sub.component_group_id = plan.component_group_id;
+            sub.group_set_id = plan.group_set_id;
             sub.host               = plan.host;
         }
         sub.copy_tiles.push_back(tile);

@@ -1,11 +1,14 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockCacheTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/LinearGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstring>
 #include <exception>
 #include <numeric>
@@ -15,258 +18,6 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm::block_tree_cache_test {
-
-void setComponentGroupLayoutForTest(ComponentGroup& group,
-                                    std::vector<int> component_indices,
-                                    const std::vector<Component>& components) {
-    block_transfer_engine_test::setComponentGroupLayout(group, std::move(component_indices), components);
-}
-
-namespace {
-
-class BlockTreeCacheBuilder {
-public:
-    static std::unique_ptr<BlockTreeCache> makeBlockTreeCache(std::unique_ptr<BlockTree>        tree,
-                                                              std::vector<ComponentGroupPtr>    component_groups,
-                                                              std::vector<Component>            components,
-                                                              BlockTreeCacheConfig              config,
-                                                              std::shared_ptr<StorageBackend>   storage_backend,
-                                                              std::shared_ptr<BroadcastManager> broadcast_manager) {
-        std::vector<BlockTreeCache::PerTagMapping> per_tag_mapping = preparePerTagMapping(component_groups, components);
-        std::vector<std::string>                   per_tag_tags = preparePerTagTags(component_groups, per_tag_mapping);
-        std::vector<std::vector<std::string>>      device_group_tags;
-        device_group_tags.reserve(component_groups.size());
-        for (const ComponentGroupPtr& component_group : component_groups) {
-            device_group_tags.push_back(component_group->tags());
-        }
-        std::vector<DeviceKVCacheGroupPtr>         per_tag_device_groups(per_tag_mapping.size());
-        auto components_ptr  = std::make_shared<const std::vector<Component>>(std::move(components));
-        auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(component_groups, components_ptr);
-        std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
-        if (broadcast_manager != nullptr) {
-            multi_rank_engine =
-                std::make_shared<MultiRankBlockTransferEngine>(component_groups, std::move(broadcast_manager));
-        }
-        auto transfer_dispatcher =
-            std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), std::move(multi_rank_engine));
-        auto task_pool = std::make_unique<BlockCacheTaskPool>(
-            static_cast<size_t>(config.eviction_thread_pool_size), 1000, "BlockTreeEvictionPool");
-        std::unique_ptr<BlockTreeCache> cache = std::make_unique<BlockTreeCache>(std::move(tree),
-                                                                                 std::move(component_groups),
-                                                                                 std::move(components_ptr),
-                                                                                 std::move(config),
-                                                                                 std::move(storage_backend),
-                                                                                 std::move(transfer_dispatcher),
-                                                                                 std::move(task_pool),
-                                                                                 std::move(per_tag_tags),
-                                                                                 std::move(per_tag_device_groups),
-                                                                                 std::move(per_tag_mapping),
-                                                                                 std::move(device_group_tags));
-        if (!cache->init()) {
-            return nullptr;
-        }
-        return cache;
-    }
-
-    static std::unique_ptr<BlockTreeCache> makeBlockTreeCache(std::unique_ptr<BlockTree>     tree,
-                                                              std::vector<ComponentGroupPtr> component_groups,
-                                                              std::vector<Component>         components,
-                                                              BlockTreeCacheConfig           config) {
-        return makeBlockTreeCache(std::move(tree),
-                                  std::move(component_groups),
-                                  std::move(components),
-                                  std::move(config),
-                                  std::shared_ptr<StorageBackend>{},
-                                  std::shared_ptr<BroadcastManager>{});
-    }
-
-    static std::unique_ptr<BlockTreeCache> makeBlockTreeCache(std::unique_ptr<BlockTree>     tree,
-                                                              std::vector<ComponentGroupPtr> component_groups,
-                                                              std::vector<Component>         components) {
-        return makeBlockTreeCache(
-            std::move(tree), std::move(component_groups), std::move(components), BlockTreeCacheConfig{});
-    }
-
-    // Seeds component-group slots directly for Host/Disk transition tests.
-    static bool insertComponentGroupSlots(BlockTreeCache&                            cache,
-                                          TreeNode*                                  parent,
-                                          const CacheKeysType&                       cache_keys,
-                                          const std::vector<std::vector<GroupSlot>>& slots) {
-        BlockTree* tree = cache.tree();
-        if (tree == nullptr) {
-            return false;
-        }
-        const BlockTreeInsertResult           insert_result    = tree->insertNode(parent, cache_keys, slots);
-        const std::vector<ComponentGroupPtr>& component_groups = cache.componentGroups();
-        for (const BlockTreeInsertedNode& inserted : insert_result.inserted_nodes) {
-            TreeNode* node = inserted.node;
-            if (node == nullptr) {
-                continue;
-            }
-            for (const ComponentGroupPtr& group : component_groups) {
-                if (group == nullptr || group->component_group_id < 0) {
-                    continue;
-                }
-                const size_t gid = static_cast<size_t>(group->component_group_id);
-                if (gid >= node->group_slots.size()) {
-                    continue;
-                }
-                GroupSlot& slot = node->group_slots[gid];
-                if (!slot.has_value(Tier::DEVICE)) {
-                    continue;
-                }
-                const std::vector<BlockIdxType> blocks = group->getBlocks(slot, Tier::DEVICE);
-                if (!blocks.empty()) {
-                    group->referenceBlocks(GroupBlockSet{group->component_group_id, Tier::DEVICE, {blocks}},
-                                           BlockRefType::BLOCK_CACHE);
-                }
-            }
-        }
-        for (const BlockTreeAdoptedSlot& adopted : insert_result.adopted_slots) {
-            if (adopted.node == nullptr || adopted.component_group_id < 0) {
-                continue;
-            }
-            const size_t gid = static_cast<size_t>(adopted.component_group_id);
-            if (gid >= component_groups.size() || component_groups[gid] == nullptr
-                || gid >= adopted.node->group_slots.size()) {
-                continue;
-            }
-            const ComponentGroupPtr& group  = component_groups[gid];
-            const auto               blocks = group->getBlocks(adopted.node->group_slots[gid], Tier::DEVICE);
-            if (!blocks.empty()) {
-                group->referenceBlocks(GroupBlockSet{adopted.component_group_id, Tier::DEVICE, {blocks}},
-                                       BlockRefType::BLOCK_CACHE);
-            }
-        }
-        cache.evictor_.onInsertCommitted(insert_result);
-        return insert_result.leaf != nullptr;
-    }
-
-private:
-    BlockTreeCacheBuilder() = delete;
-
-    static DeviceBlockPoolPtr makeStructuralDevicePool(const std::string& tag) {
-        constexpr size_t physical_block_count = 1024;
-        constexpr size_t block_bytes          = 1;
-
-        MemoryLayoutConfig layout;
-        layout.layer_num                  = 1;
-        layout.block_num                  = static_cast<uint32_t>(physical_block_count);
-        layout.dtype                      = TYPE_INT8;
-        layout.kv_cache_offset_bytes      = 0;
-        layout.kv_block_stride_bytes      = block_bytes;
-        layout.kv_block_pool_size_bytes   = physical_block_count * block_bytes;
-        layout.block_stride_bytes         = block_bytes;
-        layout.total_size_bytes           = layout.kv_block_pool_size_bytes;
-        layout.local_head_num_kv          = 1;
-        layout.seq_size_per_block         = 1;
-        layout.kernel_blocks_per_kv_block = 1;
-
-        auto config                     = std::make_shared<DeviceBlockPoolConfig>();
-        config->pool_type               = BlockPoolType::DEVICE;
-        config->pool_name               = "block_tree_cache_test_" + tag;
-        config->physical_block_count    = physical_block_count;
-        config->total_size_bytes        = layout.total_size_bytes;
-        config->memory_layouts          = {layout};
-        config->use_cuda_malloc_backing = false;
-
-        auto pool = std::make_shared<DeviceBlockPool>(config);
-        RTP_LLM_CHECK(pool->init());
-        auto structural_blocks = pool->malloc(physical_block_count - 1);
-        RTP_LLM_CHECK(structural_blocks.has_value());
-        // Reserve every literal structural id as allocated at refCount 0. Tree
-        // insertion takes the sole cache hold, preserving refCount==1 eviction.
-        return pool;
-    }
-
-    static std::vector<BlockTreeCache::PerTagMapping>
-    preparePerTagMapping(std::vector<ComponentGroupPtr>& component_groups, std::vector<Component>& components) {
-        std::vector<BlockTreeCache::PerTagMapping> per_tag_mapping;
-        for (ComponentGroupPtr& component_group : component_groups) {
-            size_t device_pool_count = component_group->devicePoolCount();
-            if (device_pool_count == 0) {
-                const std::string tag = "tag_" + std::to_string(per_tag_mapping.size());
-                component_group->setDevicePools({makeStructuralDevicePool(tag)}, {tag});
-                device_pool_count = 1;
-            }
-            if (!component_group->hasLayout()) {
-                size_t payload_bytes = device_pool_count;
-                if (component_group->hostPool() != nullptr) {
-                    payload_bytes = component_group->hostPool()->payloadBytes();
-                } else if (component_group->diskPool() != nullptr) {
-                    payload_bytes = component_group->diskPool()->payloadBytes();
-                }
-                RTP_LLM_CHECK(payload_bytes >= device_pool_count);
-
-                std::vector<int> membership;
-                membership.reserve(device_pool_count);
-                size_t remaining_bytes = payload_bytes;
-                for (size_t local_pool_index = 0; local_pool_index < device_pool_count; ++local_pool_index) {
-                    Component component;
-                    component.component_id       = static_cast<int>(components.size());
-                    component.component_group_id = component_group->component_group_id;
-                    component.tag                = component_group->tags().empty() ?
-                                                       "test_" + std::to_string(component_group->component_group_id) + "_"
-                                            + std::to_string(local_pool_index) :
-                                                       component_group->tags()[local_pool_index];
-                    component.model_layer_ids    = {0};
-                    const size_t layer_bytes     = local_pool_index + 1 == device_pool_count ? remaining_bytes : 1;
-                    component.layer_bytes        = {layer_bytes};
-                    remaining_bytes -= layer_bytes;
-                    membership.push_back(component.component_id);
-                    components.push_back(std::move(component));
-                }
-                setComponentGroupLayoutForTest(*component_group, std::move(membership), components);
-            }
-
-            {
-                const auto& component_indices = component_group->componentIndices();
-                RTP_LLM_CHECK_WITH_INFO(device_pool_count == component_indices.size(),
-                                        "sealed group %d device pool count %zu != membership count %zu",
-                                        component_group->component_group_id,
-                                        device_pool_count,
-                                        component_indices.size());
-                for (int component_index : component_indices) {
-                    RTP_LLM_CHECK_WITH_INFO(component_index >= 0
-                                                && static_cast<size_t>(component_index) < components.size(),
-                                            "sealed group %d component index %d is outside registry size %zu",
-                                            component_group->component_group_id,
-                                            component_index,
-                                            components.size());
-                    RTP_LLM_CHECK_WITH_INFO(components[static_cast<size_t>(component_index)].component_group_id
-                                                == component_group->component_group_id,
-                                            "component %d belongs to group %d, expected %d",
-                                            component_index,
-                                            components[static_cast<size_t>(component_index)].component_group_id,
-                                            component_group->component_group_id);
-                }
-            }
-            for (size_t local_pool_index = 0; local_pool_index < device_pool_count; ++local_pool_index) {
-                per_tag_mapping.push_back({component_group->component_group_id, static_cast<int>(local_pool_index)});
-            }
-        }
-        return per_tag_mapping;
-    }
-
-    static std::vector<std::string>
-    preparePerTagTags(const std::vector<ComponentGroupPtr>&             component_groups,
-                      const std::vector<BlockTreeCache::PerTagMapping>& per_tag_mapping) {
-        std::vector<std::string> per_tag_tags;
-        per_tag_tags.reserve(per_tag_mapping.size());
-        for (const auto& mapping : per_tag_mapping) {
-            RTP_LLM_CHECK(mapping.component_group_id >= 0);
-            RTP_LLM_CHECK(static_cast<size_t>(mapping.component_group_id) < component_groups.size());
-            const auto& group = component_groups[static_cast<size_t>(mapping.component_group_id)];
-            RTP_LLM_CHECK(group != nullptr);
-            RTP_LLM_CHECK(mapping.local_pool_index >= 0);
-            RTP_LLM_CHECK(static_cast<size_t>(mapping.local_pool_index) < group->tags().size());
-            per_tag_tags.push_back(group->tags()[static_cast<size_t>(mapping.local_pool_index)]);
-        }
-        return per_tag_tags;
-    }
-};
-
-}  // namespace
 
 std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count) {
     return block_transfer_engine_test::makeHostPool(payload_bytes, usable_count, /*enable_pinned=*/true);
@@ -403,25 +154,167 @@ size_t treeCachedBlocksNum(const IBlockPool& pool) {
     return count;
 }
 
+namespace {
+
+DeviceBlockPoolPtr makeStructuralDevicePool(const std::string& tag) {
+    constexpr size_t physical_block_count = 1024;
+    constexpr size_t block_bytes          = 1;
+
+    MemoryLayoutConfig layout;
+    layout.layer_num                  = 1;
+    layout.block_num                  = static_cast<uint32_t>(physical_block_count);
+    layout.dtype                      = TYPE_INT8;
+    layout.kv_cache_offset_bytes      = 0;
+    layout.kv_block_stride_bytes      = block_bytes;
+    layout.kv_block_pool_size_bytes   = physical_block_count * block_bytes;
+    layout.block_stride_bytes         = block_bytes;
+    layout.total_size_bytes           = layout.kv_block_pool_size_bytes;
+    layout.local_head_num_kv          = 1;
+    layout.seq_size_per_block         = 1;
+    layout.kernel_blocks_per_kv_block = 1;
+
+    auto config                     = std::make_shared<DeviceBlockPoolConfig>();
+    config->pool_type               = BlockPoolType::DEVICE;
+    config->pool_name               = "block_tree_cache_test_" + tag;
+    config->physical_block_count    = physical_block_count;
+    config->total_size_bytes        = layout.total_size_bytes;
+    config->memory_layouts          = {layout};
+    config->use_cuda_malloc_backing = false;
+
+    auto pool = std::make_shared<DeviceBlockPool>(config);
+    RTP_LLM_CHECK(pool->init());
+    auto structural_blocks = pool->malloc(physical_block_count - 1);
+    RTP_LLM_CHECK(structural_blocks.has_value());
+    return pool;
+}
+
+void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
+    const bool has_uninitialized =
+        std::any_of(group_sets.begin(), group_sets.end(), [](const GroupSetPtr& group_set) {
+            return group_set != nullptr && group_set->topology() == nullptr;
+        });
+    if (!has_uninitialized) {
+        return;
+    }
+
+    std::vector<block_transfer_engine_test::TestGroupSpec> specs;
+    specs.reserve(group_sets.size());
+    for (size_t group_set_index = 0; group_set_index < group_sets.size(); ++group_set_index) {
+        const GroupSetPtr& group_set = group_sets[group_set_index];
+        RTP_LLM_CHECK(group_set != nullptr && group_set->topology() == nullptr);
+
+        CacheGroupType type               = CacheGroupType::FULL;
+        size_t         seq_size_per_block = 1;
+        if (const auto* swa = dynamic_cast<SWAGroupSet*>(group_set.get()); swa != nullptr) {
+            type               = CacheGroupType::SWA;
+            seq_size_per_block = swa->seqSizePerBlock();
+        } else if (dynamic_cast<LinearGroupSet*>(group_set.get()) != nullptr) {
+            type = CacheGroupType::LINEAR;
+        }
+        auto policy                = defaultCacheGroupPolicy(type);
+        policy.enable_prefix_reuse = true;
+        if (const auto* swa = dynamic_cast<SWAGroupSet*>(group_set.get()); swa != nullptr) {
+            policy.sliding_window_size = static_cast<int>(swa->slidingWindowSize());
+        }
+        size_t payload_bytes = 1;
+        if (group_set->hostPool() != nullptr) {
+            payload_bytes = group_set->hostPool()->payloadBytes();
+        } else if (group_set->diskPool() != nullptr) {
+            payload_bytes = group_set->diskPool()->payloadBytes();
+        }
+        specs.push_back({"tag_" + std::to_string(group_set_index),
+                         policy,
+                         {static_cast<int>(group_set_index)},
+                         payload_bytes,
+                         0,
+                         128,
+                         seq_size_per_block});
+    }
+
+    auto topology = block_transfer_engine_test::makeTestTopology(std::move(specs));
+    for (size_t group_set_index = 0; group_set_index < group_sets.size(); ++group_set_index) {
+        const std::string tag = "tag_" + std::to_string(group_set_index);
+        group_sets[group_set_index]->initialize(
+            group_set_index, topology, {group_set_index}, {makeStructuralDevicePool(tag)});
+    }
+}
+
+}  // namespace
+
 std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::unique_ptr<BlockTree>        tree,
-                                                          std::vector<ComponentGroupPtr>    component_groups,
-                                                          std::vector<Component>            components,
+                                                          std::vector<GroupSetPtr>           group_sets,
                                                           BlockTreeCacheConfig              config,
                                                           std::shared_ptr<StorageBackend>   storage_backend,
                                                           std::shared_ptr<BroadcastManager> broadcast_manager) {
-    return BlockTreeCacheBuilder::makeBlockTreeCache(std::move(tree),
-                                                     std::move(component_groups),
-                                                     std::move(components),
-                                                     std::move(config),
-                                                     std::move(storage_backend),
-                                                     std::move(broadcast_manager));
+    prepareGroupSets(group_sets);
+    auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(group_sets);
+    std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
+    if (broadcast_manager != nullptr) {
+        multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));
+    }
+    auto transfer_dispatcher =
+        std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), std::move(multi_rank_engine));
+    auto task_pool = std::make_unique<BlockCacheTaskPool>(
+        static_cast<size_t>(config.eviction_thread_pool_size), 1000, "BlockTreeEvictionPool");
+    auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
+                                                 std::move(group_sets),
+                                                 std::move(config),
+                                                 std::move(storage_backend),
+                                                 std::move(transfer_dispatcher),
+                                                 std::move(task_pool));
+    if (!cache->init()) {
+        return nullptr;
+    }
+    return cache;
 }
 
-bool insertComponentGroupSlots(BlockTreeCache&                            cache,
-                               TreeNode*                                  parent,
-                               const CacheKeysType&                       cache_keys,
-                               const std::vector<std::vector<GroupSlot>>& slots) {
-    return BlockTreeCacheBuilder::insertComponentGroupSlots(cache, parent, cache_keys, slots);
+bool insertGroupSetSlots(BlockTreeCache&                                      cache,
+                         TreeNode*                                            parent,
+                         const CacheKeysType&                                 cache_keys,
+                         const std::vector<std::vector<GroupSetResource>>& resources) {
+    BlockTree* tree = cache.tree();
+    if (tree == nullptr) {
+        return false;
+    }
+    const BlockTreeInsertResult      insert_result = tree->insertNode(parent, cache_keys, resources);
+    const std::vector<GroupSetPtr>& group_sets    = cache.groupSets();
+    for (const BlockTreeInsertedNode& inserted : insert_result.inserted_nodes) {
+        TreeNode* node = inserted.node;
+        if (node == nullptr) {
+            continue;
+        }
+        for (const GroupSetPtr& group : group_sets) {
+            if (group == nullptr) {
+                continue;
+            }
+            const size_t group_set_id = group->groupSetId();
+            if (group_set_id >= node->group_set_resources.size()) {
+                continue;
+            }
+            GroupSetResource& resource = node->group_set_resources[group_set_id];
+            if (!group->hasCompleteDeviceValue(resource)) {
+                continue;
+            }
+            const auto blocks = group->getBlocks(resource, Tier::DEVICE);
+            group->referenceBlocks(MultiNodeResource{group_set_id, Tier::DEVICE, {blocks}},
+                                   BlockRefType::BLOCK_CACHE);
+        }
+    }
+    for (const BlockTreeAdoptedSlot& adopted : insert_result.adopted_slots) {
+        if (adopted.node == nullptr || adopted.group_set_id >= group_sets.size()
+            || group_sets[adopted.group_set_id] == nullptr
+            || adopted.group_set_id >= adopted.node->group_set_resources.size()) {
+            continue;
+        }
+        const GroupSetPtr& group = group_sets[adopted.group_set_id];
+        const auto blocks = group->getBlocks(adopted.node->group_set_resources[adopted.group_set_id], Tier::DEVICE);
+        if (!blocks.empty()) {
+            group->referenceBlocks(
+                MultiNodeResource{adopted.group_set_id, Tier::DEVICE, {blocks}}, BlockRefType::BLOCK_CACHE);
+        }
+    }
+    cache.evictor_.onInsertCommitted(insert_result);
+    return insert_result.leaf != nullptr;
 }
 
 void BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(
@@ -443,12 +336,12 @@ void BlockTreeCacheTestPeer::runMaintenanceForTest(BlockTreeCache& cache) {
     cache.checkWatermark();
 }
 
-bool BlockTreeCacheTestPeer::demoteOneForGroupForTest(BlockTreeCache& cache, int component_group_id, Tier tier) {
+bool BlockTreeCacheTestPeer::demoteOneForGroupForTest(BlockTreeCache& cache, size_t group_set_id, Tier tier) {
     std::lock_guard<std::mutex> lock(cache.mutex_);
     if (!cache.config_.isTierEnabled(tier)) {
         return false;
     }
-    auto eviction_move = cache.evictor_.chooseVictim(component_group_id, tier);
+    auto eviction_move = cache.evictor_.chooseVictim(group_set_id, tier);
     if (!eviction_move.has_value()) {
         return false;
     }
@@ -541,9 +434,9 @@ bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& c
     return false;
 }
 
-ScriptedPerRankBlockTransferEngine::ScriptedPerRankBlockTransferEngine(const std::vector<ComponentGroupPtr>& groups,
-                                                                       const std::vector<Component>& components):
-    PerRankBlockTransferEngine(groups, std::make_shared<const std::vector<Component>>(components)) {}
+ScriptedPerRankBlockTransferEngine::ScriptedPerRankBlockTransferEngine(
+    const std::vector<GroupSetPtr>& groups):
+    PerRankBlockTransferEngine(groups) {}
 
 TransferHandle ScriptedPerRankBlockTransferEngine::submit(const TransferDescriptor& descriptor) {
     TransferStatus status = TransferStatus::OK;
@@ -584,7 +477,7 @@ size_t ScriptedPerRankBlockTransferEngine::submitCount() const {
 
 namespace {
 
-constexpr size_t kComponentBytes = 16;
+constexpr size_t kGroupPayloadBytes = 16;
 
 uint8_t payloadPattern(size_t tag_id, size_t path_index) {
     return static_cast<uint8_t>(0x10 + tag_id * 0x20 + path_index);
@@ -649,45 +542,44 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
     auto environment = std::unique_ptr<FullSWAEnvironment>(new FullSWAEnvironment(options));
 
     environment->device_pools = {
-        makeDevicePool({{kComponentBytes, 0}}, options.usable_device_blocks, "p1_full_kv"),
-        makeDevicePool({{kComponentBytes, 0}}, options.usable_device_blocks, "p1_full_aux"),
-        makeDevicePool({{kComponentBytes, 0}}, options.usable_device_blocks, "p1_swa_kv"),
+        makeDevicePool({{kGroupPayloadBytes, 0}}, options.usable_device_blocks, "p1_full_kv"),
+        makeDevicePool({{kGroupPayloadBytes, 0}}, options.usable_device_blocks, "p1_full_aux"),
+        makeDevicePool({{kGroupPayloadBytes, 0}}, options.usable_device_blocks, "p1_swa_kv"),
     };
     environment->host_pools = {
-        makeHostPool(2 * kComponentBytes, options.usable_host_blocks),
-        makeHostPool(kComponentBytes, options.usable_host_blocks),
+        makeHostPool(2 * kGroupPayloadBytes, options.usable_host_blocks),
+        makeHostPool(kGroupPayloadBytes, options.usable_host_blocks),
     };
     if (options.enable_disk) {
         environment->disk_pools = {
-            makeDiskPool(2 * kComponentBytes, options.usable_disk_blocks, std::make_unique<MemoryDiskBlockIO>()),
-            makeDiskPool(kComponentBytes, options.usable_disk_blocks, std::make_unique<MemoryDiskBlockIO>()),
+            makeDiskPool(2 * kGroupPayloadBytes, options.usable_disk_blocks, std::make_unique<MemoryDiskBlockIO>()),
+            makeDiskPool(kGroupPayloadBytes, options.usable_disk_blocks, std::make_unique<MemoryDiskBlockIO>()),
         };
     }
 
-    environment->components.resize(3);
-    environment->components[0]      = block_transfer_engine_test::makeSchemaComponent(0, 0, "tag_0", {kComponentBytes});
-    environment->components[1]      = block_transfer_engine_test::makeSchemaComponent(1, 0, "tag_1", {kComponentBytes});
-    environment->components[2]      = block_transfer_engine_test::makeSchemaComponent(2, 1, "tag_2", {kComponentBytes});
-    environment->components[2].type = CacheGroupType::SWA;
+    auto full_policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    full_policy.enable_prefix_reuse = true;
+    auto swa_policy                 = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa_policy.enable_prefix_reuse  = true;
+    swa_policy.sliding_window_size  = 2;
+    environment->topology = block_transfer_engine_test::makeTestTopology({
+        {"tag_0", full_policy, {0}, kGroupPayloadBytes, 0},
+        {"tag_1", full_policy, {0}, kGroupPayloadBytes, 0},
+        {"tag_2", swa_policy, {0}, kGroupPayloadBytes, 0},
+    });
 
-    auto full                = std::make_shared<FullComponentGroup>();
-    full->component_group_id = 0;
-    full->setDevicePools({environment->device_pools[0], environment->device_pools[1]}, {"tag_0", "tag_1"});
+    auto full = block_transfer_engine_test::makeTestGroupSet(
+        0, environment->topology, {0, 1}, {environment->device_pools[0], environment->device_pools[1]});
     full->setHostPool(environment->host_pools[0]);
     if (options.enable_disk) {
         full->setDiskPool(environment->disk_pools[0]);
     }
-    setComponentGroupLayoutForTest(*full, {0, 1}, environment->components);
-
-    auto swa                = std::make_shared<SWAComponentGroup>(/*sliding_window_size=*/2,
-                                                   /*seq_size_per_block=*/1);
-    swa->component_group_id = 1;
-    swa->setDevicePools({environment->device_pools[2]}, {"tag_2"});
+    auto swa =
+        block_transfer_engine_test::makeTestGroupSet(1, environment->topology, {2}, {environment->device_pools[2]});
     swa->setHostPool(environment->host_pools[1]);
     if (options.enable_disk) {
         swa->setDiskPool(environment->disk_pools[1]);
     }
-    setComponentGroupLayoutForTest(*swa, {2}, environment->components);
     environment->groups = {full, swa};
     BlockTreeCacheConfig config;
     config.enable_device_cache     = true;
@@ -697,11 +589,11 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
     config.enable_reverse_eviction = options.enable_reverse_eviction;
 
     environment->scripted_per_rank_transfer_engine =
-        std::make_shared<ScriptedPerRankBlockTransferEngine>(environment->groups, environment->components);
+        std::make_shared<ScriptedPerRankBlockTransferEngine>(environment->groups);
 
-    std::vector<ComponentGroupPtr> cache_groups = environment->groups;
-    environment->cache                          = makeBlockTreeCacheForTest(
-        std::make_unique<BlockTree>(2), std::move(cache_groups), environment->components, std::move(config));
+    std::vector<GroupSetPtr> cache_groups = environment->groups;
+    environment->cache = makeBlockTreeCacheForTest(
+        std::make_unique<BlockTree>(2), std::move(cache_groups), std::move(config));
     if (environment->cache == nullptr) {
         ADD_FAILURE() << "failed to initialize BlockTreeCache test environment";
         return nullptr;
@@ -726,7 +618,7 @@ void FullSWAEnvironment::insertRequestPath() {
     request_refs_released_.assign(2, false);
     fillRequestPayloads();
 
-    std::vector<std::vector<GroupSlot>> slots(options_.path_length, std::vector<GroupSlot>(2));
+    std::vector<std::vector<GroupSetResource>> slots(options_.path_length, std::vector<GroupSetResource>(2));
     for (size_t path_index = 0; path_index < options_.path_length; ++path_index) {
         slots[path_index][0].device_blocks = request_blocks[0].per_node[path_index];
         slots[path_index][1].device_blocks = request_blocks[1].per_node[path_index];
@@ -748,15 +640,15 @@ void FullSWAEnvironment::releaseRequestRefsForGroup(int group_id) {
     }
     const std::vector<TreeNode*> path = topologyPath(*cache->tree(), keys);
     ASSERT_EQ(path.size(), options_.path_length);
-    GroupBlockSet released_blocks = request_blocks[static_cast<size_t>(group_id)];
-    released_blocks.nodes         = path;
-    cache->releaseMatchedBlocks({released_blocks});
+    MultiNodeResource released_blocks = request_blocks[static_cast<size_t>(group_id)];
+    released_blocks.tree_nodes         = path;
+    cache->releaseMatchedResources({released_blocks});
     request_refs_released_[static_cast<size_t>(group_id)] = true;
 }
 
 void FullSWAEnvironment::releaseMatch(BlockTreeMatchResult& result) {
-    cache->releaseMatchedBlocks(result.matched_block_sets);
-    result.matched_block_sets.clear();
+    cache->releaseMatchedResources(result.matched_resources);
+    result.matched_resources.clear();
 }
 
 void FullSWAEnvironment::setTierWatermark(Tier tier, double ratio) {
@@ -776,8 +668,8 @@ void FullSWAEnvironment::demoteAll(Tier tier) {
         runMaintenance();
         bool source_present = false;
         for (size_t path_index = 0; path_index < options_.path_length; ++path_index) {
-            for (const GroupSlot& slot : slotsForPathNode(path_index)) {
-                source_present = source_present || slot.has_value(tier);
+            for (const GroupSetResource& slot : slotsForPathNode(path_index)) {
+                source_present = source_present || slot.hasTier(tier);
             }
         }
         if (!source_present) {
@@ -802,8 +694,8 @@ void FullSWAEnvironment::reclaimAll() {
 
 bool FullSWAEnvironment::allSlotsAtTier(Tier tier) const {
     for (size_t path_index = 0; path_index < options_.path_length; ++path_index) {
-        for (const GroupSlot& slot : slotsForPathNode(path_index)) {
-            if (!slot.has_value(tier)) {
+        for (const GroupSetResource& slot : slotsForPathNode(path_index)) {
+            if (!slot.hasTier(tier)) {
                 return false;
             }
         }
@@ -824,7 +716,7 @@ std::vector<BlockIdxType> FullSWAEnvironment::blocksForTag(size_t tag_id) const 
     return result;
 }
 
-std::vector<GroupSlot> FullSWAEnvironment::slotsForPathNode(size_t path_index) const {
+std::vector<GroupSetResource> FullSWAEnvironment::slotsForPathNode(size_t path_index) const {
     if (path_index >= keys.size()) {
         return {};
     }
@@ -832,7 +724,7 @@ std::vector<GroupSlot> FullSWAEnvironment::slotsForPathNode(size_t path_index) c
     if (path_index >= path.size()) {
         return {};
     }
-    return path[path_index]->group_slots;
+    return path[path_index]->group_set_resources;
 }
 
 void FullSWAEnvironment::fillRequestPayloads() {
@@ -846,34 +738,34 @@ void FullSWAEnvironment::fillRequestPayloads() {
 
 void FullSWAEnvironment::expectPayloads() const {
     for (size_t path_index = 0; path_index < options_.path_length; ++path_index) {
-        const std::vector<GroupSlot> node_slots = slotsForPathNode(path_index);
+        const std::vector<GroupSetResource> node_slots = slotsForPathNode(path_index);
         ASSERT_EQ(node_slots.size(), 2u);
         for (size_t group_id = 0; group_id < node_slots.size(); ++group_id) {
-            const GroupSlot& slot = node_slots[group_id];
-            if (slot.has_value(Tier::DEVICE)) {
+            const GroupSetResource& slot = node_slots[group_id];
+            if (slot.hasTier(Tier::DEVICE)) {
                 const size_t tag_begin = group_id == 0 ? 0 : 2;
                 for (size_t pool_index = 0; pool_index < slot.device_blocks.size(); ++pool_index) {
                     const size_t tag_id = tag_begin + pool_index;
                     expectDeviceBlock(
                         device_pools[tag_id], slot.device_blocks[pool_index], payloadPattern(tag_id, path_index));
                 }
-            } else if (slot.has_value(Tier::HOST)) {
+            } else if (slot.hasTier(Tier::HOST)) {
                 const auto   buffer    = host_pools[group_id]->blockBuffer(slot.host_block);
                 const auto*  data      = static_cast<const uint8_t*>(buffer.addr);
                 const size_t tag_begin = group_id == 0 ? 0 : 2;
                 const size_t tag_count = group_id == 0 ? 2 : 1;
                 for (size_t local = 0; local < tag_count; ++local) {
                     expectBytes(
-                        data + local * kComponentBytes, kComponentBytes, payloadPattern(tag_begin + local, path_index));
+                        data + local * kGroupPayloadBytes, kGroupPayloadBytes, payloadPattern(tag_begin + local, path_index));
                 }
-            } else if (slot.has_value(Tier::DISK)) {
+            } else if (slot.hasTier(Tier::DISK)) {
                 std::vector<uint8_t> data(disk_pools[group_id]->payloadBytes());
                 ASSERT_EQ(disk_pools[group_id]->read(slot.disk_slot, data.data(), data.size()), BlockIOStatus::OK);
                 const size_t tag_begin = group_id == 0 ? 0 : 2;
                 const size_t tag_count = group_id == 0 ? 2 : 1;
                 for (size_t local = 0; local < tag_count; ++local) {
-                    expectBytes(data.data() + local * kComponentBytes,
-                                kComponentBytes,
+                    expectBytes(data.data() + local * kGroupPayloadBytes,
+                                kGroupPayloadBytes,
                                 payloadPattern(tag_begin + local, path_index));
                 }
             } else {

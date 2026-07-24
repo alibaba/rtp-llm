@@ -48,6 +48,13 @@ const std::vector<std::string> kDsv4FlashFirstSeenTags     = {
 const std::vector<std::string> kDsv4ProFirstSeenTags = {
     "hca_kv", "hca_state", "swa_kv", "csa_kv", "indexer_kv", "indexer_state", "csa_state"};
 
+bool containsReusableGroup(const BlockTreeCache& cache, size_t group_id) {
+    return std::any_of(cache.groupSets().begin(), cache.groupSets().end(), [group_id](const GroupSetPtr& group_set) {
+        return std::find(group_set->groupIds().begin(), group_set->groupIds().end(), group_id)
+               != group_set->groupIds().end();
+    });
+}
+
 std::shared_ptr<CompressedKVCacheSpec> buildCompressedSpec(const std::string& tag,
                                                            uint32_t           entry_elems,
                                                            uint32_t           entries_per_block,
@@ -2396,15 +2403,15 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
     // HCA_STATE is runtime scratch state and must not be part of the declarative tree.
     for (int gid = 0; gid < 7; gid++) {
         const auto& tag = config.tagForGroup(gid);
-        const auto  it  = match.group_block_indices.find(tag);
         if (tag == "hca_state") {
-            EXPECT_EQ(it, match.group_block_indices.end());
+            EXPECT_FALSE(containsReusableGroup(*allocator->blockTreeCacheOwner(), static_cast<size_t>(gid)));
             continue;
         }
-        ASSERT_NE(it, match.group_block_indices.end()) << tag;
-        EXPECT_EQ(it->second.size(), config.typeForGroup(gid) == CacheGroupType::FULL ? 3u : 1u) << tag;
+        EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(gid, match.matched_resources).size(),
+                  config.typeForGroup(gid) == CacheGroupType::FULL ? 3u : 1u)
+            << tag;
     }
-    allocator->blockTreeCacheOwner()->releaseMatchedBlocks(match.matched_block_sets);
+    allocator->blockTreeCacheOwner()->releaseMatchedResources(match.matched_resources);
 
     // Free all blocks
     for (int gid = 0; gid < 7; gid++) {
@@ -2455,15 +2462,15 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
 
     for (int gid = 0; gid < 7; gid++) {
         const auto& tag = config.tagForGroup(gid);
-        const auto  it  = match.group_block_indices.find(tag);
         if (tag == "hca_state") {
-            EXPECT_EQ(it, match.group_block_indices.end());
+            EXPECT_FALSE(containsReusableGroup(*allocator->blockTreeCacheOwner(), static_cast<size_t>(gid)));
             continue;
         }
-        ASSERT_NE(it, match.group_block_indices.end()) << tag;
-        EXPECT_EQ(it->second.size(), config.typeForGroup(gid) == CacheGroupType::FULL ? 3u : 1u) << tag;
+        EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(gid, match.matched_resources).size(),
+                  config.typeForGroup(gid) == CacheGroupType::FULL ? 3u : 1u)
+            << tag;
     }
-    allocator->blockTreeCacheOwner()->releaseMatchedBlocks(match.matched_block_sets);
+    allocator->blockTreeCacheOwner()->releaseMatchedResources(match.matched_resources);
 
     for (int gid = 0; gid < 7; gid++) {
         block_pool->decRef(batch_res->blocks(0, gid), BlockRefType::REQUEST);
@@ -2539,13 +2546,13 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
     ASSERT_TRUE(seeded.success);
 
     size_t evicted_tail_blocks = 0;
-    for (const auto& component_group : allocator->blockTreeCacheOwner()->componentGroups()) {
-        if (component_group->group_type == CacheGroupType::FULL) {
+    for (const auto& group_set : allocator->blockTreeCacheOwner()->groupSets()) {
+        if (group_set->groupType() == CacheGroupType::FULL) {
             continue;
         }
-        ASSERT_FALSE(component_group->tags().empty());
+        ASSERT_FALSE(group_set->groupTags().empty());
         evicted_tail_blocks += static_cast<size_t>(
-            allocator->blockTreeCacheOwner()->evictForTag(component_group->tags().front(), cached_keys.size()));
+            allocator->blockTreeCacheOwner()->evictForTag(group_set->groupTags().front(), cached_keys.size()));
     }
     ASSERT_GT(evicted_tail_blocks, 0u);
 
@@ -2621,13 +2628,13 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseAcceptsSingleLatestSWATailHit) {
     const auto    seeded      = seedCompleteBlockTreePath(allocator, cached_keys);
     ASSERT_TRUE(seeded.success);
 
-    // Leave only the latest coordinate resident for each fixed-tail component group.
-    for (const auto& component_group : allocator->blockTreeCacheOwner()->componentGroups()) {
-        if (component_group->group_type == CacheGroupType::FULL) {
+    // Leave only the latest coordinate resident for each fixed-tail group set.
+    for (const auto& group_set : allocator->blockTreeCacheOwner()->groupSets()) {
+        if (group_set->groupType() == CacheGroupType::FULL) {
             continue;
         }
-        ASSERT_FALSE(component_group->tags().empty());
-        EXPECT_EQ(allocator->blockTreeCacheOwner()->evictForTag(component_group->tags().front(), 2), 2);
+        ASSERT_FALSE(group_set->groupTags().empty());
+        EXPECT_EQ(allocator->blockTreeCacheOwner()->evictForTag(group_set->groupTags().front(), 2), 2);
     }
 
     auto batch_res = std::make_shared<BatchKVCacheResource>();

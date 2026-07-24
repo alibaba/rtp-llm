@@ -4,7 +4,7 @@
 #include <mutex>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
@@ -106,48 +106,52 @@ makeBroadcastManager(const std::vector<MultiRankBlockTransferRpcConfig>&        
 
 static std::unique_ptr<BlockTreeCache> makeBroadcastCache(const std::shared_ptr<BroadcastManager>& broadcast_manager) {
     std::unique_ptr<BlockTree>          tree = std::make_unique<BlockTree>(1);
-    std::shared_ptr<FullComponentGroup> full = std::make_shared<FullComponentGroup>();
-    full->component_group_id                 = 0;
+    std::shared_ptr<FullGroupSet> full = std::make_shared<FullGroupSet>();
     full->setHostPool(makeHostPool(256, 8));
     DeviceBlockPoolPtr device_pool = makeDevicePool({{256, 0}}, 8, "multi_rank_engine_device");
-    full->setDevicePools({device_pool}, {"tag_0"});
-    std::vector<Component> components = {block_transfer_engine_test::makeSchemaComponent(0, 0, "tag_0", {256})};
-    setComponentGroupLayoutForTest(*full, {0}, components);
-    std::vector<ComponentGroupPtr> groups = {full};
+    auto topology = block_transfer_engine_test::makeTestTopology(
+        {{"tag_0", defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256, 0}});
+    full->initialize(0, topology, {0}, {device_pool});
+    std::vector<GroupSetPtr> groups = {full};
     return makeBlockTreeCacheForTest(std::move(tree),
                                      std::move(groups),
-                                     std::move(components),
                                      BlockTreeCacheConfig{},
                                      /*storage_backend=*/nullptr,
                                      broadcast_manager);
 }
 
-static BlockIdxType prepareDeviceTarget(const std::shared_ptr<FullComponentGroup>& group,
+static BlockIdxType prepareDeviceTarget(const std::shared_ptr<FullGroupSet>& group,
                                         const std::string&                         pool_name) {
     DeviceBlockPoolPtr device_pool = makeDevicePool({{256, 0}}, 8, pool_name);
+    auto topology = block_transfer_engine_test::makeTestTopology(
+        {{"tag_0", defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256, 0}});
+    group->initialize(0, topology, {0}, {device_pool});
     const auto         block       = device_pool->malloc();
     if (!block.has_value()) {
         return NULL_BLOCK_IDX;
     }
     device_pool->incRef(*block, BlockRefType::REQUEST);
-    group->setDevicePools({device_pool}, {"tag_0"});
     return *block;
 }
 
-static void sealBroadcastLayout(const std::shared_ptr<FullComponentGroup>& group,
-                                std::vector<Component>&                    components,
-                                size_t                                     payload_bytes = 256) {
-    if (group->devicePoolCount() == 0) {
-        const std::string tag = "tag_" + std::to_string(group->component_group_id);
-        group->setDevicePools(
-            {makeDevicePool({{payload_bytes, 0}}, 8, "broadcast_layout_" + std::to_string(group->component_group_id))},
-            {tag});
+static void initializeBroadcastGroups(const std::vector<std::shared_ptr<FullGroupSet>>& groups,
+                                      size_t                                                  payload_bytes = 256) {
+    std::vector<block_transfer_engine_test::TestGroupSpec> specs;
+    specs.reserve(groups.size());
+    for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
+        specs.push_back({"tag_" + std::to_string(group_id),
+                         defaultCacheGroupPolicy(CacheGroupType::FULL),
+                         {0},
+                         payload_bytes,
+                         0});
     }
-    const int         component_index = static_cast<int>(components.size());
-    const std::string component_tag   = group->tags().front();
-    components.push_back(block_transfer_engine_test::makeSchemaComponent(
-        component_index, group->component_group_id, component_tag, {payload_bytes}));
-    setComponentGroupLayoutForTest(*group, {component_index}, components);
+    auto topology = block_transfer_engine_test::makeTestTopology(std::move(specs));
+    for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
+        auto device_pool = makeDevicePool({{payload_bytes, 0}},
+                                          8,
+                                          "broadcast_layout_" + std::to_string(group_id));
+        groups[group_id]->initialize(group_id, topology, {group_id}, {std::move(device_pool)});
+    }
 }
 
 static std::vector<TransferDescriptor> makeBroadcastDescriptors() {
@@ -156,8 +160,8 @@ static std::vector<TransferDescriptor> makeBroadcastDescriptors() {
 
 static void
 expectSingleTaggedBlock(const MemoryOperationRequestPB::CopyItem& item, const std::string& tag, BlockIdxType block) {
-    ASSERT_EQ(item.component_group_tags_size(), 1);
-    EXPECT_EQ(item.component_group_tags(0), tag);
+    ASSERT_EQ(item.group_set_tags_size(), 1);
+    EXPECT_EQ(item.group_set_tags(0), tag);
     ASSERT_EQ(item.tagged_gpu_blocks_size(), 1);
     EXPECT_EQ(item.tagged_gpu_blocks(0).tag(), tag);
     EXPECT_EQ(item.tagged_gpu_blocks(0).block_id(), block);
@@ -167,10 +171,9 @@ class MultiRankBlockTransferEngineTest: public ::testing::Test {
 protected:
     void SetUp() override {
         auto tree                             = std::make_unique<BlockTree>(1);
-        auto full_group                       = std::make_shared<FullComponentGroup>();
-        full_group->component_group_id        = 0;
-        std::vector<ComponentGroupPtr> groups = {full_group};
-        cache_ = makeBlockTreeCacheForTest(std::move(tree), std::move(groups), std::vector<Component>{});
+        auto full_group                       = std::make_shared<FullGroupSet>();
+        std::vector<GroupSetPtr> groups = {full_group};
+        cache_ = makeBlockTreeCacheForTest(std::move(tree), std::move(groups));
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -183,15 +186,14 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastManagerStoredCorrectly) {
     ASSERT_TRUE(broadcast_mgr->init());
 
     auto tree                             = std::make_unique<BlockTree>(1);
-    auto full                             = std::make_shared<FullComponentGroup>();
-    full->component_group_id              = 0;
-    std::vector<ComponentGroupPtr> groups = {full};
+    auto full                             = std::make_shared<FullGroupSet>();
+    std::vector<GroupSetPtr> groups = {full};
 
     BlockTreeCacheConfig cfg;
     cfg.enable_device_cache = true;
 
     auto cache = makeBlockTreeCacheForTest(
-        std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg), nullptr, broadcast_mgr);
+        std::move(tree), std::move(groups), std::move(cfg), nullptr, broadcast_mgr);
 
     // Verify BroadcastManager is stored (access via internal member)
     EXPECT_EQ(cache->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_, broadcast_mgr);
@@ -268,29 +270,25 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadBackCommitsDeviceSlot)
     ASSERT_NE(broadcast_manager, nullptr);
 
     std::shared_ptr<HostBlockPool>      host_pool = makeHostPool(256, 4);
-    std::shared_ptr<FullComponentGroup> group     = std::make_shared<FullComponentGroup>();
-    group->component_group_id                     = 0;
+    std::shared_ptr<FullGroupSet> group     = std::make_shared<FullGroupSet>();
     group->setHostPool(host_pool);
     const BlockIdxType device_block = prepareDeviceTarget(group, "broadcast_host_load_back_success");
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
-    std::vector<Component> components;
-    sealBroadcastLayout(group, components);
     const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     BlockTreeCacheConfig config;
     config.enable_memory_cache                 = true;
     config.enable_load_back                    = true;
-    std::vector<ComponentGroupPtr>      groups = {group};
+    std::vector<GroupSetPtr>      groups = {group};
     std::unique_ptr<BlockTreeCache>     cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
                                                                       std::move(groups),
-                                                                      std::move(components),
                                                                       std::move(config),
                                                                       /*storage_backend=*/nullptr,
                                                                       broadcast_manager);
-    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    std::vector<std::vector<GroupSetResource>> slots(1, std::vector<GroupSetResource>(1));
     slots[0][0].host_block = host_block;
-    ASSERT_TRUE(block_tree_cache_test::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
+    ASSERT_TRUE(insertGroupSetSlots(*cache, nullptr, {100}, slots));
     BlockTreeMatchResult match = cache->match({100});
     ASSERT_NE(match.load_back_ticket, nullptr);
     ASSERT_EQ(match.load_back_ticket->items().size(), 1u);
@@ -303,9 +301,9 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadBackCommitsDeviceSlot)
 
     BlockTreeFindResult find_result = cache->tree()->findNode({100});
     ASSERT_NE(find_result.matched_node, nullptr);
-    const GroupSlot& slot = find_result.matched_node->group_slots[0];
-    EXPECT_EQ(slot.transfer_state, SlotTransferState::IDLE);
-    EXPECT_FALSE(slot.has_value(Tier::HOST));
+    const GroupSetResource& slot = find_result.matched_node->group_set_resources[0];
+    EXPECT_EQ(slot.transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_FALSE(slot.hasTier(Tier::HOST));
     EXPECT_EQ(slot.device_blocks, (std::vector<BlockIdxType>{device_block}));
     EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
     EXPECT_EQ(cache->getStats().host_heap_total_size, 0u);
@@ -338,29 +336,25 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadBackFailureKeepsSource
     ASSERT_NE(broadcast_manager, nullptr);
 
     std::shared_ptr<HostBlockPool>      host_pool = makeHostPool(256, 4);
-    std::shared_ptr<FullComponentGroup> group     = std::make_shared<FullComponentGroup>();
-    group->component_group_id                     = 0;
+    std::shared_ptr<FullGroupSet> group     = std::make_shared<FullGroupSet>();
     group->setHostPool(host_pool);
     const BlockIdxType device_block = prepareDeviceTarget(group, "broadcast_host_load_back_failure");
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
-    std::vector<Component> components;
-    sealBroadcastLayout(group, components);
     const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     BlockTreeCacheConfig config;
     config.enable_memory_cache                 = true;
     config.enable_load_back                    = true;
-    std::vector<ComponentGroupPtr>      groups = {group};
+    std::vector<GroupSetPtr>      groups = {group};
     std::unique_ptr<BlockTreeCache>     cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
                                                                       std::move(groups),
-                                                                      std::move(components),
                                                                       std::move(config),
                                                                       /*storage_backend=*/nullptr,
                                                                       broadcast_manager);
-    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    std::vector<std::vector<GroupSetResource>> slots(1, std::vector<GroupSetResource>(1));
     slots[0][0].host_block = host_block;
-    ASSERT_TRUE(block_tree_cache_test::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
+    ASSERT_TRUE(insertGroupSetSlots(*cache, nullptr, {100}, slots));
     BlockTreeMatchResult match = cache->match({100});
     ASSERT_NE(match.load_back_ticket, nullptr);
     ASSERT_EQ(match.load_back_ticket->items().size(), 1u);
@@ -373,11 +367,11 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadBackFailureKeepsSource
 
     BlockTreeFindResult find_result = cache->tree()->findNode({100});
     ASSERT_NE(find_result.matched_node, nullptr);
-    const GroupSlot& slot = find_result.matched_node->group_slots[0];
-    EXPECT_EQ(slot.transfer_state, SlotTransferState::IDLE);
-    EXPECT_TRUE(slot.has_value(Tier::HOST));
+    const GroupSetResource& slot = find_result.matched_node->group_set_resources[0];
+    EXPECT_EQ(slot.transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_TRUE(slot.hasTier(Tier::HOST));
     EXPECT_EQ(slot.host_block, host_block);
-    EXPECT_FALSE(slot.has_value(Tier::DEVICE));
+    EXPECT_FALSE(slot.hasTier(Tier::DEVICE));
     EXPECT_EQ(host_pool->freeBlocksNum(), 3u);
     EXPECT_EQ(cache->getStats().host_heap_total_size, 1u);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
@@ -404,63 +398,56 @@ TEST_F(MultiRankBlockTransferEngineTest, LoadBackCompletionStateMismatchDoesNotI
     ASSERT_NE(broadcast_manager, nullptr);
 
     std::shared_ptr<HostBlockPool>      host_pool = makeHostPool(256, 4);
-    std::shared_ptr<FullComponentGroup> group     = std::make_shared<FullComponentGroup>();
-    group->component_group_id                     = 0;
+    std::shared_ptr<FullGroupSet> group     = std::make_shared<FullGroupSet>();
     group->setHostPool(host_pool);
     const BlockIdxType device_block = prepareDeviceTarget(group, "load_back_completion_state_mismatch");
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
-    std::vector<Component> components;
-    sealBroadcastLayout(group, components);
     const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     BlockTreeCacheConfig config;
     config.enable_memory_cache                 = true;
-    std::vector<ComponentGroupPtr>      groups = {group};
+    std::vector<GroupSetPtr>      groups = {group};
     std::unique_ptr<BlockTreeCache>     cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
                                                                       std::move(groups),
-                                                                      std::move(components),
                                                                       std::move(config),
                                                                       /*storage_backend=*/nullptr,
                                                                       broadcast_manager);
-    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    std::vector<std::vector<GroupSetResource>> slots(1, std::vector<GroupSetResource>(1));
     slots[0][0].host_block = host_block;
-    ASSERT_TRUE(block_tree_cache_test::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
+    ASSERT_TRUE(insertGroupSetSlots(*cache, nullptr, {100}, slots));
     BlockTreeFindResult find_result = cache->tree()->findNode({100});
     ASSERT_NE(find_result.matched_node, nullptr);
 
-    group->referenceBlocks(GroupBlockSet{0, Tier::HOST, {{host_block}}}, BlockRefType::REQUEST);
-    ASSERT_TRUE(cache->changeLoadBackStateNolock(
-        find_result.matched_node, 0, SlotTransferState::IDLE, SlotTransferState::LOAD_BACK_PENDING));
-    cache->evictor_.eraseNode(find_result.matched_node, 0, Tier::HOST);
-    ASSERT_TRUE(cache->changeLoadBackStateNolock(
-        find_result.matched_node, 0, SlotTransferState::LOAD_BACK_PENDING, SlotTransferState::LOADING_BACK));
-    find_result.matched_node->group_slots[0].transfer_state = SlotTransferState::DEMOTING;
+    group->referenceBlocks(MultiNodeResource{0, Tier::HOST, {{host_block}}}, BlockRefType::REQUEST);
+    ASSERT_TRUE(cache->evictor_.reserveLoadBack(find_result.matched_node, 0, Tier::HOST, {host_block}));
+    ASSERT_TRUE(cache->evictor_.beginLoadBack(find_result.matched_node, 0, Tier::HOST));
 
-    LoadBackTicket::PendingLoadBackItem pending_item;
-    pending_item.node                 = find_result.matched_node;
-    pending_item.group_id             = 0;
-    pending_item.source_tier          = Tier::HOST;
-    pending_item.source_blocks        = {host_block};
-    pending_item.target_device_blocks = {device_block};
+    LoadBackTicket::PendingLoadBackItem item;
+    item.node                 = find_result.matched_node;
+    item.group_set_id         = 0;
+    item.source_tier          = Tier::HOST;
+    item.source_blocks        = {host_block};
+    item.target_device_blocks = {device_block};
     const std::shared_ptr<LoadBackAsyncContext> context = std::make_shared<LoadBackAsyncContext>(1);
     LoadBackWorker::TaskPtr                     task;
-    ASSERT_TRUE(cache->load_back_worker_.createTask({pending_item}, {group}, context, task));
+    ASSERT_TRUE(cache->load_back_worker_.createTask({item}, {group}, context, task));
     ASSERT_NE(task, nullptr);
     ASSERT_TRUE(cache->load_back_worker_.startLoading(
-        find_result.matched_node, 0, pending_item.target_device_blocks, task->context));
+        find_result.matched_node, 0, item.target_device_blocks, task->context));
+    find_result.matched_node->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
     cache->runLoadBackTask(task);
 
-    GroupSlot& slot = find_result.matched_node->group_slots[0];
-    EXPECT_EQ(slot.transfer_state, SlotTransferState::DEMOTING);
+    GroupSetResource& slot = find_result.matched_node->group_set_resources[0];
+    EXPECT_EQ(slot.transfer_state, GroupSetTransferState::DEMOTING);
     EXPECT_EQ(slot.host_block, host_block);
-    EXPECT_FALSE(slot.has_value(Tier::DEVICE));
+    EXPECT_FALSE(slot.hasTier(Tier::DEVICE));
     EXPECT_EQ(host_pool->refCount(host_block), 1u);
     EXPECT_FALSE(group->devicePools()[0]->isAllocated(device_block));
 
     // The synthetic foreign operation is not completed by this test. Restore
     // its state so cache teardown can drain the remaining source cache hold.
-    slot.transfer_state = SlotTransferState::IDLE;
+    slot.transfer_state = GroupSetTransferState::IDLE;
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadBackUsesTwoTransferStages) {
@@ -478,14 +465,11 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadBackUsesTwoTransferSta
 
     std::shared_ptr<HostBlockPool>          host_pool = makeHostPool(256, 4);
     std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = makeDiskPool(256, 4, std::make_unique<MemoryDiskBlockIO>());
-    std::shared_ptr<FullComponentGroup>     group     = std::make_shared<FullComponentGroup>();
-    group->component_group_id                         = 0;
+    std::shared_ptr<FullGroupSet>     group     = std::make_shared<FullGroupSet>();
     group->setHostPool(host_pool);
     group->setDiskPool(disk_pool);
     const BlockIdxType device_block = prepareDeviceTarget(group, "broadcast_disk_load_back");
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
-    std::vector<Component> components;
-    sealBroadcastLayout(group, components);
     const BlockIdxType disk_block = group->allocateSingleBlock(Tier::DISK, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
@@ -493,16 +477,15 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadBackUsesTwoTransferSta
     config.enable_memory_cache                 = true;
     config.enable_disk_cache                   = true;
     config.enable_load_back                    = true;
-    std::vector<ComponentGroupPtr>      groups = {group};
+    std::vector<GroupSetPtr>      groups = {group};
     std::unique_ptr<BlockTreeCache>     cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
                                                                       std::move(groups),
-                                                                      std::move(components),
                                                                       std::move(config),
                                                                       /*storage_backend=*/nullptr,
                                                                       broadcast_manager);
-    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    std::vector<std::vector<GroupSetResource>> slots(1, std::vector<GroupSetResource>(1));
     slots[0][0].disk_slot = disk_block;
-    ASSERT_TRUE(block_tree_cache_test::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
+    ASSERT_TRUE(insertGroupSetSlots(*cache, nullptr, {100}, slots));
     BlockTreeMatchResult match = cache->match({100});
     ASSERT_NE(match.load_back_ticket, nullptr);
     ASSERT_EQ(match.load_back_ticket->items().size(), 1u);
@@ -515,9 +498,9 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadBackUsesTwoTransferSta
 
     BlockTreeFindResult find_result = cache->tree()->findNode({100});
     ASSERT_NE(find_result.matched_node, nullptr);
-    const GroupSlot& slot = find_result.matched_node->group_slots[0];
-    EXPECT_EQ(slot.transfer_state, SlotTransferState::IDLE);
-    EXPECT_FALSE(slot.has_value(Tier::DISK));
+    const GroupSetResource& slot = find_result.matched_node->group_set_resources[0];
+    EXPECT_EQ(slot.transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_FALSE(slot.hasTier(Tier::DISK));
     EXPECT_EQ(slot.device_blocks, (std::vector<BlockIdxType>{device_block}));
     EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 4u);
@@ -563,12 +546,10 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsPlan) {
 
     std::shared_ptr<HostBlockPool>          host_pool = makeHostPool(256, 8);
     std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
-    std::shared_ptr<FullComponentGroup>     full      = std::make_shared<FullComponentGroup>();
-    full->component_group_id                          = 0;
+    std::shared_ptr<FullGroupSet>     full      = std::make_shared<FullGroupSet>();
     full->setHostPool(host_pool);
     full->setDiskPool(disk_pool);
-    std::vector<Component> components;
-    sealBroadcastLayout(full, components);
+    initializeBroadcastGroups({full});
     const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
@@ -576,17 +557,16 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsPlan) {
     config.enable_device_cache             = false;
     config.enable_memory_cache             = true;
     config.enable_disk_cache               = true;
-    std::vector<ComponentGroupPtr>  groups = {full};
+    std::vector<GroupSetPtr>  groups = {full};
     std::unique_ptr<BlockTreeCache> cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
                                                                       std::move(groups),
-                                                                      std::move(components),
                                                                       std::move(config),
                                                                       /*storage_backend=*/nullptr,
                                                                       broadcast_manager);
 
-    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    std::vector<std::vector<GroupSetResource>> slots(1, std::vector<GroupSetResource>(1));
     slots[0][0].host_block = host_block;
-    ASSERT_TRUE(block_tree_cache_test::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
+    ASSERT_TRUE(insertGroupSetSlots(*cache, nullptr, {100}, slots));
     BlockTreeFindResult before = cache->tree()->findNode({100});
     ASSERT_NE(before.matched_node, nullptr);
     ASSERT_EQ(cache->getStats().host_heap_total_size, 1u);
@@ -597,10 +577,10 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsPlan) {
 
     BlockTreeFindResult after = cache->tree()->findNode({100});
     ASSERT_NE(after.matched_node, nullptr);
-    const GroupSlot& slot = after.matched_node->group_slots[0];
-    EXPECT_EQ(slot.transfer_state, SlotTransferState::IDLE);
-    EXPECT_FALSE(slot.has_value(Tier::HOST));
-    EXPECT_TRUE(slot.has_value(Tier::DISK));
+    const GroupSetResource& slot = after.matched_node->group_set_resources[0];
+    EXPECT_EQ(slot.transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_FALSE(slot.hasTier(Tier::HOST));
+    EXPECT_TRUE(slot.hasTier(Tier::DISK));
     const BlockIdxType disk_slot = slot.disk_slot;
     EXPECT_EQ(host_pool->freeBlocksNum(), 8u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 7u);
@@ -614,8 +594,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsPlan) {
         EXPECT_EQ(worker_request.copy_items_size(), 1);
         EXPECT_EQ(worker_request.copy_items(0).src_mem_block(), host_block);
         EXPECT_EQ(worker_request.copy_items(0).disk_slot(), disk_slot);
-        ASSERT_EQ(worker_request.copy_items(0).component_group_tags_size(), 1);
-        EXPECT_EQ(worker_request.copy_items(0).component_group_tags(0), "tag_0");
+        ASSERT_EQ(worker_request.copy_items(0).group_set_tags_size(), 1);
+        EXPECT_EQ(worker_request.copy_items(0).group_set_tags(0), "tag_0");
     }
 }
 
@@ -630,12 +610,10 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackPlan) 
 
     std::shared_ptr<HostBlockPool>          host_pool = makeHostPool(256, 8);
     std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
-    std::shared_ptr<FullComponentGroup>     full      = std::make_shared<FullComponentGroup>();
-    full->component_group_id                          = 0;
+    std::shared_ptr<FullGroupSet>     full      = std::make_shared<FullGroupSet>();
     full->setHostPool(host_pool);
     full->setDiskPool(disk_pool);
-    std::vector<Component> components;
-    sealBroadcastLayout(full, components);
+    initializeBroadcastGroups({full});
     const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
@@ -643,17 +621,16 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackPlan) 
     config.enable_device_cache             = false;
     config.enable_memory_cache             = true;
     config.enable_disk_cache               = true;
-    std::vector<ComponentGroupPtr>  groups = {full};
+    std::vector<GroupSetPtr>  groups = {full};
     std::unique_ptr<BlockTreeCache> cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
                                                                       std::move(groups),
-                                                                      std::move(components),
                                                                       std::move(config),
                                                                       /*storage_backend=*/nullptr,
                                                                       broadcast_manager);
 
-    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    std::vector<std::vector<GroupSetResource>> slots(1, std::vector<GroupSetResource>(1));
     slots[0][0].host_block = host_block;
-    ASSERT_TRUE(block_tree_cache_test::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
+    ASSERT_TRUE(insertGroupSetSlots(*cache, nullptr, {100}, slots));
     BlockTreeFindResult before = cache->tree()->findNode({100});
     ASSERT_NE(before.matched_node, nullptr);
     ASSERT_EQ(cache->getStats().host_heap_total_size, 1u);
@@ -664,10 +641,10 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackPlan) 
 
     BlockTreeFindResult after = cache->tree()->findNode({100});
     ASSERT_NE(after.matched_node, nullptr);
-    const GroupSlot& slot = after.matched_node->group_slots[0];
-    EXPECT_EQ(slot.transfer_state, SlotTransferState::IDLE);
-    EXPECT_TRUE(slot.has_value(Tier::HOST));
-    EXPECT_FALSE(slot.has_value(Tier::DISK));
+    const GroupSetResource& slot = after.matched_node->group_set_resources[0];
+    EXPECT_EQ(slot.transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_TRUE(slot.hasTier(Tier::HOST));
+    EXPECT_FALSE(slot.hasTier(Tier::DISK));
     EXPECT_EQ(slot.host_block, host_block);
     EXPECT_EQ(host_pool->freeBlocksNum(), 7u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 8u);
@@ -678,31 +655,27 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackPlan) 
 TEST_F(MultiRankBlockTransferEngineTest, BuildEvictionTransferRequestIncludesPrimaryAndCascades) {
     std::shared_ptr<HostBlockPool>          host_pool     = makeHostPool(256, 8);
     std::shared_ptr<BlockTreeDiskBlockPool> disk_pool     = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
-    std::shared_ptr<FullComponentGroup>     primary_group = std::make_shared<FullComponentGroup>();
-    primary_group->component_group_id                     = 0;
+    std::shared_ptr<FullGroupSet>     primary_group = std::make_shared<FullGroupSet>();
     primary_group->setHostPool(host_pool);
     primary_group->setDiskPool(disk_pool);
-    std::vector<Component> components;
-    sealBroadcastLayout(primary_group, components);
-    std::shared_ptr<FullComponentGroup> cascade_group = std::make_shared<FullComponentGroup>();
-    cascade_group->component_group_id                 = 1;
+    std::shared_ptr<FullGroupSet> cascade_group = std::make_shared<FullGroupSet>();
     cascade_group->setHostPool(host_pool);
     cascade_group->setDiskPool(disk_pool);
-    sealBroadcastLayout(cascade_group, components);
-    std::vector<ComponentGroupPtr>  groups = {primary_group, cascade_group};
+    initializeBroadcastGroups({primary_group, cascade_group});
+    std::vector<GroupSetPtr>  groups = {primary_group, cascade_group};
     std::unique_ptr<BlockTreeCache> cache =
-        makeBlockTreeCacheForTest(std::make_unique<BlockTree>(2), std::move(groups), std::move(components));
+        makeBlockTreeCacheForTest(std::make_unique<BlockTree>(2), std::move(groups));
     ASSERT_NE(cache, nullptr);
 
     BlockTreeEvictor::EvictionPlan plan;
-    plan.primary.component_group_id = 0;
+    plan.primary.group_set_id = 0;
     plan.primary.source_tier        = Tier::HOST;
     plan.primary.target_tier        = Tier::DISK;
     plan.primary.source_blocks      = {3};
     plan.primary.target_blocks      = {4};
 
     EvictionMove cascade;
-    cascade.component_group_id = 1;
+    cascade.group_set_id = 1;
     cascade.source_tier        = Tier::HOST;
     cascade.target_tier        = Tier::DISK;
     cascade.source_blocks      = {5};
@@ -713,18 +686,18 @@ TEST_F(MultiRankBlockTransferEngineTest, BuildEvictionTransferRequestIncludesPri
     ASSERT_TRUE(cache->buildEvictionTransferBatch(plan, descriptors));
     MemoryOperationRequestPB request;
     for (const TransferDescriptor& descriptor : descriptors) {
-        ASSERT_TRUE(BlockTransferRequestConverter::appendTransfer(descriptor, cache->componentGroups(), request));
+        ASSERT_TRUE(BlockTransferRequestConverter::appendTransfer(descriptor, cache->groupSets(), request));
     }
     ASSERT_EQ(request.copy_items_size(), 2);
     EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::H2DISK);
     EXPECT_EQ(request.copy_items(0).src_mem_block(), 3);
     EXPECT_EQ(request.copy_items(0).disk_slot(), 4);
-    ASSERT_EQ(request.copy_items(0).component_group_tags_size(), 1);
-    EXPECT_EQ(request.copy_items(0).component_group_tags(0), "tag_0");
+    ASSERT_EQ(request.copy_items(0).group_set_tags_size(), 1);
+    EXPECT_EQ(request.copy_items(0).group_set_tags(0), "tag_0");
     EXPECT_EQ(request.copy_items(1).src_mem_block(), 5);
     EXPECT_EQ(request.copy_items(1).disk_slot(), 6);
-    ASSERT_EQ(request.copy_items(1).component_group_tags_size(), 1);
-    EXPECT_EQ(request.copy_items(1).component_group_tags(0), "tag_1");
+    ASSERT_EQ(request.copy_items(1).group_set_tags_size(), 1);
+    EXPECT_EQ(request.copy_items(1).group_set_tags(0), "tag_1");
 }
 
 }  // namespace

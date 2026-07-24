@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/HostDiskTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/PerRankBlockTransferEngineTestUtils.h"
@@ -20,6 +20,9 @@ using block_transfer_engine_test::expectStatus;
 using block_transfer_engine_test::makeDescriptor;
 using block_transfer_engine_test::makeDiskPool;
 using block_transfer_engine_test::makeHostPool;
+using block_transfer_engine_test::makeTestDevicePool;
+using block_transfer_engine_test::makeTestGroupSet;
+using block_transfer_engine_test::makeTestTopology;
 using block_transfer_engine_test::poolMalloc;
 
 class StatusDiskBlockIO: public DiskBlockIO {
@@ -50,51 +53,44 @@ private:
     DiskBlockIOStatus status_;
 };
 
-ComponentGroupPtr makeHostDiskGroup(int                                     group_id,
-                                    std::shared_ptr<HostBlockPool>          host_pool,
-                                    std::shared_ptr<BlockTreeDiskBlockPool> disk_pool,
-                                    const std::vector<Component>&           components) {
-    auto group                = std::make_shared<FullComponentGroup>();
-    group->component_group_id = group_id;
-    group->group_type         = CacheGroupType::FULL;
+GroupSetPtr makeHostDiskGroup(size_t                                  group_set_id,
+                              std::shared_ptr<HostBlockPool>          host_pool,
+                              std::shared_ptr<BlockTreeDiskBlockPool> disk_pool,
+                              size_t                                  payload_bytes) {
+    auto policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    policy.enable_prefix_reuse = true;
+    auto topology = makeTestTopology({{"host_disk", policy, {0}, payload_bytes, 0}});
+    auto device_pool =
+        makeTestDevicePool({{payload_bytes, 0}}, 2, "host_disk_group_" + std::to_string(group_set_id));
+    auto group = makeTestGroupSet(group_set_id, std::move(topology), {0}, {std::move(device_pool)});
     group->setHostPool(std::move(host_pool));
     group->setDiskPool(std::move(disk_pool));
-    std::vector<int> component_indices;
-    for (const Component& component : components) {
-        component_indices.push_back(component.component_id);
-    }
-    block_transfer_engine_test::setComponentGroupLayout(*group, std::move(component_indices), components);
     return group;
 }
 
-std::shared_ptr<PerRankBlockTransferEngine> makeEngine(std::vector<ComponentGroupPtr> groups,
-                                                       std::vector<Component>         components) {
-    return std::make_shared<PerRankBlockTransferEngine>(
-        std::move(groups), block_transfer_engine_test::makeComponentRegistry(std::move(components)));
+std::shared_ptr<PerRankBlockTransferEngine> makeEngine(std::vector<GroupSetPtr> groups) {
+    return std::make_shared<PerRankBlockTransferEngine>(std::move(groups));
 }
 
 class PerRankBlockTransferEngineHostDiskTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        component_       = block_transfer_engine_test::makeSchemaComponent(0, 0, "host_disk", {128, 256});
         host_block_size_ = 384;
 
         host_pool_ = makeHostPool(host_block_size_, 4, false);
         disk_pool_ = makeDiskPool(host_block_size_, 7, temp_dir_.path);
 
-        component_group_ = makeHostDiskGroup(0, host_pool_, disk_pool_, {component_});
-        ASSERT_TRUE(component_group_->hasLayout());
-        ASSERT_EQ(component_group_->layout().payloadBytes(), host_block_size_);
-        per_rank_transfer_engine_ = makeEngine({component_group_}, {component_});
+        group_set_ = makeHostDiskGroup(0, host_pool_, disk_pool_, host_block_size_);
+        ASSERT_EQ(group_set_->payloadBytes(), host_block_size_);
+        per_rank_transfer_engine_ = makeEngine({group_set_});
     }
 
     TempDirGuard                                temp_dir_{"block_transfer_engine_test"};
-    Component                                   component_;
     size_t                                      host_block_size_;
     std::shared_ptr<HostBlockPool>              host_pool_;
     std::shared_ptr<BlockTreeDiskBlockPool>     disk_pool_;
     std::shared_ptr<PerRankBlockTransferEngine> per_rank_transfer_engine_;
-    ComponentGroupPtr                           component_group_;
+    GroupSetPtr                           group_set_;
 };
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRoundTrip) {
@@ -176,8 +172,8 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitRejectsInvalidHostDiskLayou
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
-    auto missing_host_group  = makeHostDiskGroup(0, nullptr, disk_pool_, {component_});
-    auto missing_host_engine = makeEngine({missing_host_group}, {component_});
+    auto missing_host_group  = makeHostDiskGroup(0, nullptr, disk_pool_, host_block_size_);
+    auto missing_host_engine = makeEngine({missing_host_group});
     expectStatus(missing_host_engine,
                  makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block),
                  TransferStatus::INVALID_ARGS);
@@ -185,8 +181,8 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitRejectsInvalidHostDiskLayou
                  makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block, disk_block),
                  TransferStatus::INVALID_ARGS);
 
-    auto missing_disk_group  = makeHostDiskGroup(0, host_pool_, nullptr, {component_});
-    auto missing_disk_engine = makeEngine({missing_disk_group}, {component_});
+    auto missing_disk_group  = makeHostDiskGroup(0, host_pool_, nullptr, host_block_size_);
+    auto missing_disk_engine = makeEngine({missing_disk_group});
     expectStatus(missing_disk_engine,
                  makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block),
                  TransferStatus::INVALID_ARGS);
@@ -225,19 +221,21 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskStatusMapping) {
                                       "per_rank_transfer_engine_status_" + std::to_string(pool_suffix++));
         auto host_block = poolMalloc(*host_pool_);
         auto disk_block = poolMalloc(*disk_pool);
-        auto group      = makeHostDiskGroup(0, host_pool_, disk_pool, {component_});
-        auto engine     = makeEngine({group}, {component_});
+        auto group      = makeHostDiskGroup(0, host_pool_, disk_pool, host_block_size_);
+        auto engine     = makeEngine({group});
         expectStatus(engine, makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block), expected);
         expectStatus(engine, makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block, disk_block), expected);
         host_pool_->free(host_block);
     }
 }
 
-TEST(ComponentGroupLayoutPayloadTest, PayloadBytesIsLayerBytesSum) {
-    const auto component = block_transfer_engine_test::makeSchemaComponent(0, 0, "abc", {100, 200, 300});
-    const auto layout    = ComponentGroupLayout::create({component.layer_bytes});
-    ASSERT_TRUE(layout.has_value());
-    EXPECT_EQ(layout->payloadBytes(), 600u);
+TEST(GroupSetPayloadTest, PayloadBytesUsesLogicalStridesAcrossLayers) {
+    auto policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    policy.enable_prefix_reuse = true;
+    auto topology = makeTestTopology({{"abc", policy, {0, 1, 2}, 160, 40}});
+    auto pool     = makeTestDevicePool({{200, 40}, {220, 40}, {240, 40}}, 2, "group_set_payload_test");
+    auto group    = makeTestGroupSet(0, std::move(topology), {0}, {std::move(pool)});
+    EXPECT_EQ(group->payloadBytes(), 600u);
 }
 
 }  // namespace

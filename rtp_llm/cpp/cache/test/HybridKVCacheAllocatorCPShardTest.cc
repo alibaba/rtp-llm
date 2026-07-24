@@ -223,8 +223,8 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, InsertIntoCacheUsesCanonicalKeysAndVir
 
     auto match = allocator->blockTreeCacheOwner()->match(CacheKeysType{101, 103});
     ASSERT_EQ(match.matched_blocks, 2u);
-    ASSERT_EQ(match.group_block_indices.at(config.tagForGroup(gid_full)), full_blocks);
-    allocator->blockTreeCacheOwner()->releaseMatchedBlocks(match.matched_block_sets);
+    ASSERT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(gid_full, match.matched_resources), full_blocks);
+    allocator->blockTreeCacheOwner()->releaseMatchedResources(match.matched_resources);
 }
 
 // 6) Two-malloc smoke: cp_size=4 sharding, request occupies 8 logical blocks ⇒ 2 per rank.

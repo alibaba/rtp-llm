@@ -614,7 +614,7 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
     for (int item_index = 0; item_index < memory_request.copy_items_size(); ++item_index) {
         TransferDescriptor descriptor;
         if (!BlockTransferRequestConverter::decodeTransfer(
-                memory_request, item_index, block_tree_cache_->componentGroups(), descriptor)) {
+                memory_request, item_index, block_tree_cache_->groupSets(), descriptor)) {
             RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid tagged transfer item, index=%d", item_index);
             return false;
         }

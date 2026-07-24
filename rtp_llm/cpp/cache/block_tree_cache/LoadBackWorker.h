@@ -8,8 +8,8 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/LoadBackAsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/LoadBackTicket.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
@@ -22,7 +22,7 @@ class LoadBackWorker {
 public:
     struct Task {
         LoadBackTicket::PendingLoadBackItems items;
-        std::vector<ComponentGroupPtr>        item_groups;
+        std::vector<GroupSetPtr>              item_groups;
         std::vector<BlockIdxType>             staging_host_blocks;
         std::vector<TransferDescriptor>       disk_to_host_descriptors;
         std::vector<TransferDescriptor>       host_to_device_descriptors;
@@ -38,7 +38,7 @@ public:
     };
 
     bool          createTask(const LoadBackTicket::PendingLoadBackItems&  items,
-                             const std::vector<ComponentGroupPtr>&        component_groups,
+                             const std::vector<GroupSetPtr>&              group_sets,
                              const std::shared_ptr<LoadBackAsyncContext>& context,
                              TaskPtr&                                     task);
     PrepareStatus prepareTransferItem(Task& task, size_t item_index);
@@ -53,28 +53,30 @@ public:
 
     // Registry operations rely on the BlockTreeCache mutex.
     bool startLoading(TreeNode*                                    node,
-                      int                                          group_id,
+                      size_t                                       group_set_id,
                       const std::vector<BlockIdxType>&             target_blocks,
                       const std::shared_ptr<LoadBackAsyncContext>& context);
     std::optional<std::vector<BlockIdxType>>
-    joinLoading(TreeNode* node, int group_id, const std::shared_ptr<LoadBackAsyncContext>& context);
-    bool finishLoading(TreeNode* node, int group_id, bool success);
-    bool eraseLoadingForOneContext(TreeNode* node, int group_id, const std::shared_ptr<LoadBackAsyncContext>& context);
+    joinLoading(TreeNode* node, size_t group_set_id, const std::shared_ptr<LoadBackAsyncContext>& context);
+    bool finishLoading(TreeNode* node, size_t group_set_id, bool success);
+    bool eraseLoadingForOneContext(TreeNode*                                    node,
+                                   size_t                                       group_set_id,
+                                   const std::shared_ptr<LoadBackAsyncContext>& context);
 
 private:
     struct LoadingKey {
         TreeNode* node;
-        int       group_id;
+        size_t    group_set_id;
 
         bool operator==(const LoadingKey& other) const {
-            return node == other.node && group_id == other.group_id;
+            return node == other.node && group_set_id == other.group_set_id;
         }
     };
 
     struct LoadingKeyHash {
         size_t operator()(const LoadingKey& key) const {
             const size_t node_hash  = std::hash<TreeNode*>{}(key.node);
-            const size_t group_hash = std::hash<int>{}(key.group_id);
+            const size_t group_hash = std::hash<size_t>{}(key.group_set_id);
             return node_hash ^ (group_hash << 1);
         }
     };

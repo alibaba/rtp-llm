@@ -6,17 +6,32 @@
 
 #include <gtest/gtest.h>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/PerRankBlockTransferEngineTestUtils.h"
 
 namespace rtp_llm {
+namespace {
+
+GroupSetPtr makeWorkerTestGroupSet() {
+    using namespace block_transfer_engine_test;
+
+    TestGroupSpec spec;
+    spec.tag                        = "load_back_worker";
+    spec.policy                     = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    spec.policy.enable_prefix_reuse = true;
+    spec.layer_ids                  = {0};
+    const std::shared_ptr<const CacheTopology> topology = makeTestTopology({spec});
+    DeviceBlockPoolPtr pool = makeTestDevicePool({{spec.kv_block_stride_bytes, spec.kv_scale_stride_bytes}},
+                                                 /*usable_count=*/1,
+                                                 "load_back_worker");
+    return makeTestGroupSet(0, topology, {0}, {std::move(pool)});
+}
 
 TEST(LoadBackWorkerTest, CreateTaskAllowsNoTransferItems) {
-    LoadBackWorker    worker;
-    ComponentGroupPtr group   = std::make_shared<FullComponentGroup>();
-    group->component_group_id = 0;
+    LoadBackWorker worker;
+    GroupSetPtr    group = makeWorkerTestGroupSet();
 
     LoadBackTicket::PendingLoadBackItem joined_item;
-    joined_item.group_id                                = 0;
+    joined_item.group_set_id                            = 0;
     joined_item.source_tier                             = Tier::HOST;
     joined_item.joined_load_back                        = true;
     const std::shared_ptr<LoadBackAsyncContext> context = std::make_shared<LoadBackAsyncContext>(1);
@@ -168,4 +183,5 @@ TEST(LoadBackWorkerTest, EraseLastLoadingContextRemovesRecord) {
     EXPECT_TRUE(context->onTaskFail());
 }
 
+}  // namespace
 }  // namespace rtp_llm

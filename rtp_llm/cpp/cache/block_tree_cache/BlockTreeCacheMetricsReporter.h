@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/GroupSet.h"
 
 namespace kmonitor {
 class MetricsReporter;
@@ -42,15 +42,15 @@ public:
     void setMetricsReporter(const std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter);
 
     std::vector<BlockTreePoolMetricsSnapshot>
-    collectPoolMetricsSnapshots(const std::vector<ComponentGroupPtr>& component_groups,
+    collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets,
                                 const BlockTreeEvictor&               evictor) const;
     std::vector<BlockTreeEvictableMetricsSnapshot>
-         collectEvictableMetricsSnapshots(const std::vector<ComponentGroupPtr>& component_groups,
+         collectEvictableMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets,
                                           const BlockTreeEvictor&               evictor) const;
     void reportEvictableBlockCount(const std::vector<BlockTreeEvictableMetricsSnapshot>& snapshots) const;
     void reportEvictionFinished(const BlockTreeEvictor::EvictionPlan&  plan,
                                 const BlockTreeEvictor::CopyResultSet& results,
-                                const std::vector<ComponentGroupPtr>&  component_groups) const;
+                                const std::vector<GroupSetPtr>&  group_sets) const;
 
     int64_t reportTransferStarted(Tier source_tier, Tier target_tier);
     void
@@ -59,7 +59,7 @@ public:
 private:
     static int transferDirectionIndex(Tier source_tier, Tier target_tier);
     void       reportEvictionMove(const EvictionMove&                   eviction_move,
-                                  const std::vector<ComponentGroupPtr>& component_groups,
+                                  const std::vector<GroupSetPtr>& group_sets,
                                   int64_t                               finish_time_us) const;
 
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter_;

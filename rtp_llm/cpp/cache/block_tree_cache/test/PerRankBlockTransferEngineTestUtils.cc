@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <utility>
@@ -10,6 +11,10 @@
 #include <dirent.h>
 #include <unistd.h>
 
+#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/LinearGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/SWAGroupSet.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm::block_transfer_engine_test {
@@ -39,6 +44,116 @@ void removeTempDir(const std::string& path) {
 }
 
 }  // namespace
+
+std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<TestGroupSpec> specs) {
+    RTP_LLM_CHECK(!specs.empty());
+    size_t layer_count = 0;
+    for (const auto& spec : specs) {
+        RTP_LLM_CHECK(!spec.tag.empty());
+        RTP_LLM_CHECK(!spec.layer_ids.empty());
+        for (int layer_id : spec.layer_ids) {
+            RTP_LLM_CHECK(layer_id >= 0);
+            layer_count = std::max(layer_count, static_cast<size_t>(layer_id) + 1);
+        }
+    }
+
+    std::vector<GroupBase> groups;
+    std::vector<LayerBase> layers(layer_count);
+    for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id) {
+        layers[layer_id].layer_id = static_cast<int>(layer_id);
+    }
+    groups.reserve(specs.size());
+    for (auto& test_spec : specs) {
+        auto cache_spec = std::make_shared<MHAKVCacheSpec>();
+        cache_spec->tag = test_spec.tag;
+
+        GroupBase group;
+        group.tag                      = test_spec.tag;
+        group.spec                     = std::move(cache_spec);
+        group.policy                   = test_spec.policy;
+        group.layer_ids                = std::move(test_spec.layer_ids);
+        group.block_num                = test_spec.block_num;
+        group.local_kv_head_num        = 1;
+        group.seq_size_per_block       = test_spec.seq_size_per_block;
+        group.kernel_seq_size_per_block = test_spec.seq_size_per_block;
+        group.kv_block_stride_bytes    = test_spec.kv_block_stride_bytes;
+        group.kv_scale_stride_bytes    = test_spec.kv_scale_stride_bytes;
+        for (int layer_id : group.layer_ids) {
+            layers[static_cast<size_t>(layer_id)].group_tags.push_back(group.tag);
+        }
+        groups.push_back(std::move(group));
+    }
+    return CacheTopology::create(std::move(groups), std::move(layers));
+}
+
+GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
+                             std::shared_ptr<const CacheTopology> topology,
+                             std::vector<size_t>                  group_ids,
+                             std::vector<DeviceBlockPoolPtr>     device_pools) {
+    RTP_LLM_CHECK(topology != nullptr);
+    RTP_LLM_CHECK(!group_ids.empty());
+    const auto& first = topology->groupById(group_ids.front());
+
+    GroupSetPtr group_set;
+    switch (first.policy.group_type) {
+        case CacheGroupType::FULL:
+            group_set = std::make_shared<FullGroupSet>();
+            break;
+        case CacheGroupType::SWA:
+            group_set = std::make_shared<SWAGroupSet>(static_cast<size_t>(first.policy.sliding_window_size),
+                                                      first.seq_size_per_block);
+            break;
+        case CacheGroupType::LINEAR:
+            group_set = std::make_shared<LinearGroupSet>();
+            break;
+    }
+    RTP_LLM_CHECK(group_set != nullptr);
+    group_set->initialize(group_set_id, std::move(topology), std::move(group_ids), std::move(device_pools));
+    return group_set;
+}
+
+DeviceBlockPoolPtr makeTestDevicePool(const std::vector<std::pair<size_t, size_t>>& layer_bytes,
+                                      size_t                                         usable_count,
+                                      const std::string&                             pool_name) {
+    RTP_LLM_CHECK(!layer_bytes.empty());
+    const size_t physical_block_count = usable_count + 1;
+    auto         config               = std::make_shared<DeviceBlockPoolConfig>();
+    config->pool_type                 = BlockPoolType::DEVICE;
+    config->pool_name                 = pool_name;
+    config->physical_block_count      = physical_block_count;
+    config->use_cuda_malloc_backing   = false;
+
+    size_t offset = 0;
+    for (const auto& [kv_bytes, scale_bytes] : layer_bytes) {
+        MemoryLayoutConfig layout;
+        layout.layer_num                = 1;
+        layout.block_num                = static_cast<uint32_t>(physical_block_count);
+        layout.dtype                    = TYPE_INT8;
+        layout.kv_cache_offset_bytes    = offset;
+        layout.kv_block_stride_bytes    = kv_bytes;
+        layout.kv_block_pool_size_bytes = physical_block_count * kv_bytes;
+        layout.block_stride_bytes       = kv_bytes + scale_bytes;
+        layout.total_size_bytes         = layout.kv_block_pool_size_bytes;
+        offset += layout.kv_block_pool_size_bytes;
+        if (scale_bytes > 0) {
+            layout.enable_kv_scale          = true;
+            layout.kv_scale_offset_bytes    = offset;
+            layout.kv_scale_stride_bytes    = scale_bytes;
+            layout.kv_scale_pool_size_bytes = physical_block_count * scale_bytes;
+            layout.total_size_bytes += layout.kv_scale_pool_size_bytes;
+            offset += layout.kv_scale_pool_size_bytes;
+        }
+        layout.local_head_num_kv          = 1;
+        layout.seq_size_per_block         = 1;
+        layout.kernel_blocks_per_kv_block = 1;
+        config->memory_layouts.push_back(layout);
+    }
+    config->total_size_bytes = offset;
+
+    auto pool = std::make_shared<DeviceBlockPool>(std::move(config));
+    RTP_LLM_CHECK(pool->init());
+    return pool;
+}
 
 std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count, bool enable_pinned) {
     auto config                  = std::make_shared<HostBlockPoolConfig>();
@@ -89,66 +204,27 @@ BlockIdxType poolMalloc(IBlockPool& pool) {
     return block.has_value() ? *block : NULL_BLOCK_IDX;
 }
 
-Component makeSchemaComponent(int                        component_id,
-                              int                        component_group_id,
-                              const std::string&         tag,
-                              const std::vector<size_t>& layer_bytes,
-                              const std::vector<int>&    model_layer_ids) {
-    Component component;
-    component.component_id       = component_id;
-    component.component_group_id = component_group_id;
-    component.type               = CacheGroupType::FULL;
-    component.tag                = tag;
-    component.layer_bytes        = layer_bytes;
-    if (model_layer_ids.empty()) {
-        for (size_t layer_idx = 0; layer_idx < layer_bytes.size(); ++layer_idx) {
-            component.model_layer_ids.push_back(static_cast<int>(layer_idx));
-        }
-    } else {
-        component.model_layer_ids = model_layer_ids;
-    }
-    return component;
-}
-
-std::shared_ptr<const std::vector<Component>> makeComponentRegistry(std::vector<Component> components) {
-    return std::make_shared<const std::vector<Component>>(std::move(components));
-}
-
-void setComponentGroupLayout(ComponentGroup& group,
-                             std::vector<int> component_indices,
-                             const std::vector<Component>& components) {
-    std::vector<std::vector<size_t>> component_layer_bytes;
-    component_layer_bytes.reserve(component_indices.size());
-    for (const int component_index : component_indices) {
-        RTP_LLM_CHECK(component_index >= 0 && static_cast<size_t>(component_index) < components.size());
-        component_layer_bytes.push_back(components[static_cast<size_t>(component_index)].layer_bytes);
-    }
-    auto layout = ComponentGroupLayout::create(component_layer_bytes);
-    RTP_LLM_CHECK(layout.has_value());
-    RTP_LLM_CHECK(group.setLayout(std::move(component_indices), std::move(*layout)));
-}
-
 TransferDescriptor makeDescriptor(Tier                             source_tier,
                                   Tier                             target_tier,
                                   const std::vector<BlockIdxType>& device_blocks,
                                   BlockIdxType                     host_block,
                                   BlockIdxType                     disk_block,
-                                  int                              group_id) {
+                                  size_t                           group_set_id) {
     if (source_tier == Tier::DEVICE && target_tier == Tier::HOST) {
-        return TransferDescriptor::deviceToHost(group_id, device_blocks, host_block);
+        return TransferDescriptor::deviceToHost(group_set_id, device_blocks, host_block);
     }
     if (source_tier == Tier::HOST && target_tier == Tier::DEVICE) {
-        return TransferDescriptor::hostToDevice(group_id, host_block, device_blocks);
+        return TransferDescriptor::hostToDevice(group_set_id, host_block, device_blocks);
     }
     if (source_tier == Tier::HOST && target_tier == Tier::DISK) {
-        return TransferDescriptor::hostToDisk(group_id, host_block, disk_block);
+        return TransferDescriptor::hostToDisk(group_set_id, host_block, disk_block);
     }
     if (source_tier == Tier::DISK && target_tier == Tier::HOST) {
-        return TransferDescriptor::diskToHost(group_id, disk_block, host_block);
+        return TransferDescriptor::diskToHost(group_set_id, disk_block, host_block);
     }
 
     TransferDescriptor desc;
-    desc.component_group_id = group_id;
+    desc.group_set_id       = group_set_id;
     desc.source_tier        = source_tier;
     desc.target_tier        = target_tier;
     desc.device_blocks      = device_blocks;

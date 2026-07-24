@@ -205,9 +205,9 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheRejectedByReserveBlocks) {
     ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
     const auto block_tree_cache = cache_manager->blockTreeCache();
     ASSERT_NE(block_tree_cache, nullptr);
-    ASSERT_EQ(block_tree_cache->componentGroups().size(), 1u);
-    ASSERT_EQ(block_tree_cache->componentGroups().front()->devicePools().size(), 1u);
-    const auto device_pool = block_tree_cache->componentGroups().front()->devicePools().front();
+    ASSERT_EQ(block_tree_cache->groupSets().size(), 1u);
+    ASSERT_EQ(block_tree_cache->groupSets().front()->devicePools().size(), 1u);
+    const auto device_pool = block_tree_cache->groupSets().front()->devicePools().front();
     ASSERT_NE(device_pool, nullptr);
     ASSERT_EQ(device_pool->freeBlocksNum(), 10);
 }

@@ -44,10 +44,10 @@ cc_test(
 )
 
 cc_test(
-    name = "component_group_layout_test",
-    srcs = ["ComponentGroupLayoutTest.cc"],
+    name = "group_set_test",
+    srcs = ["GroupSetTest.cc"],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [":block_transfer_engine_test_utils"],
     env = {},
 )
 
@@ -182,13 +182,13 @@ cc_test(
     srcs = ["BlockTreeEvictorTest.cc"],
     copts = test_copts,
     tags = ["exclusive"],
-    deps = test_deps,
+    deps = test_deps + [":block_transfer_engine_test_utils"],
     env = {},
 )
 
 cc_test(
-    name = "full_component_group_test",
-    srcs = ["FullComponentGroupTest.cc"],
+    name = "full_group_set_test",
+    srcs = ["FullGroupSetTest.cc"],
     copts = test_copts,
     tags = ["exclusive"],
     deps = test_deps + [":block_tree_cache_test_utils"],
@@ -196,8 +196,8 @@ cc_test(
 )
 
 cc_test(
-    name = "swa_component_group_test",
-    srcs = ["SWAComponentGroupTest.cc"],
+    name = "swa_group_set_test",
+    srcs = ["SWAGroupSetTest.cc"],
     copts = test_copts,
     tags = ["exclusive"],
     deps = test_deps + [":block_tree_cache_test_utils"],
@@ -205,8 +205,8 @@ cc_test(
 )
 
 cc_test(
-    name = "linear_component_group_test",
-    srcs = ["LinearComponentGroupTest.cc"],
+    name = "linear_group_set_test",
+    srcs = ["LinearGroupSetTest.cc"],
     copts = test_copts,
     tags = ["exclusive"],
     deps = test_deps + [":block_tree_cache_test_utils"],
@@ -224,7 +224,7 @@ cc_test(
     name = "load_back_worker_test",
     srcs = ["LoadBackWorkerTest.cc"],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [":block_transfer_engine_test_utils"],
 )
 
 cc_library(
@@ -288,6 +288,6 @@ cc_test(
     name = "block_transfer_request_converter_test",
     srcs = ["BlockTransferRequestConverterTest.cc"],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [":block_transfer_engine_test_utils"],
     env = {},
 )

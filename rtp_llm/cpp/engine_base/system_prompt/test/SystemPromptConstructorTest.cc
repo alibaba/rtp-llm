@@ -144,8 +144,8 @@ TEST_F(SystemPromptConstructorTest, testSecondTaskFailureReleasesEarlierRequestO
     // committed until every task succeeds. On failure only its tree holder
     // remains; the partial tail and all request refs are released.
     EXPECT_EQ(manager->freeBlocksNum(), free_before - 1);
-    ASSERT_EQ(manager->blockTreeCache()->componentGroups().size(), 1u);
-    EXPECT_EQ(manager->blockTreeCache()->componentGroups().front()->devicePools().front()->activeTreeCachedBlocksNum(),
+    ASSERT_EQ(manager->blockTreeCache()->groupSets().size(), 1u);
+    EXPECT_EQ(manager->blockTreeCache()->groupSets().front()->devicePools().front()->activeTreeCachedBlocksNum(),
               0u);
     EXPECT_EQ(manager->blockTreeCache()->getStats().device_heap_total_size, 1u);
 

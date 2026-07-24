@@ -1,15 +1,15 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/GroupSet.h"
 
 namespace rtp_llm {
 
-// FullComponentGroup: manages full KV cache indices.
+// FullGroupSet: manages full KV cache indices.
 // Uses Leaf-based heaps: only nodes without children having data at
 // the same tier are eligible for eviction.
-class FullComponentGroup: public ComponentGroup {
+class FullGroupSet: public GroupSet {
 public:
-    FullComponentGroup();
+    FullGroupSet();
 
     std::unique_ptr<MatchValidator> createMatchValidator() override;
     size_t computeReuseBlockCount(size_t matched_block_count, const std::vector<TreeNode*>& path) const override;
@@ -20,7 +20,7 @@ public:
 
 class FullMatchValidator: public MatchValidator {
 public:
-    bool validate(const TreeNode* node, const GroupSlot& slot) override;
+    bool validate(const TreeNode* node, const GroupSetResource& slot) override;
 
 private:
     bool prefix_valid_{true};

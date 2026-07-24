@@ -1,14 +1,14 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/GroupSet.h"
 
 namespace rtp_llm {
 
-// SWAComponentGroup: manages sliding-window attention KV cache.
+// SWAGroupSet: manages sliding-window attention KV cache.
 // Uses Any-node heaps: any node with data can be evicted.
-class SWAComponentGroup: public ComponentGroup {
+class SWAGroupSet: public GroupSet {
 public:
-    explicit SWAComponentGroup(size_t sliding_window_size = 0, size_t seq_size_per_block = 1);
+    explicit SWAGroupSet(size_t sliding_window_size = 0, size_t seq_size_per_block = 1);
 
     std::unique_ptr<MatchValidator> createMatchValidator() override;
 
@@ -32,7 +32,7 @@ class SWAMatchValidator: public MatchValidator {
 public:
     explicit SWAMatchValidator(size_t sliding_window_size, size_t seq_size_per_block);
 
-    bool validate(const TreeNode* node, const GroupSlot& slot) override;
+    bool validate(const TreeNode* node, const GroupSetResource& slot) override;
 
     bool connectedToRoot() const {
         return connected_to_root_;

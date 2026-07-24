@@ -9,14 +9,10 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/LinearComponentGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/LoadBackTicket.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/LoadBackWorker.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/SWAComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/StorageBackend.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/device_group/DeviceKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
@@ -118,40 +114,27 @@ struct BlockTreeCacheConfig {
 };
 
 // BlockTreeCache: eviction workflow coordinator.
-// Owns BlockTree, ComponentGroups, HostBlockPool (L2), BlockTreeDiskBlockPool (L3),
+// Owns BlockTree, GroupSets, HostBlockPool (L2), BlockTreeDiskBlockPool (L3),
 // StorageBackend, and the cache workflow collaborators injected by the factory.
 // Each storage tier (Device/Host/Disk/Remote) can be independently enabled/disabled.
 class BlockTreeCache {
 public:
     using TierWatermark = BlockTreeCacheConfig::TierWatermark;
 
-    // Resolves a per-tag gid (the allocator-facing id space) to its aggregated
-    // component_group_id and the local device pool index within that group. A
-    // component_group_id of -1 marks a NON_REUSABLE tag that is excluded from the tree.
-    struct PerTagMapping {
-        int component_group_id{-1};
-        int local_pool_index{-1};
-    };
-
     BlockTreeCache(std::unique_ptr<BlockTree>                    tree,
-                   std::vector<ComponentGroupPtr>                component_groups,
-                   std::shared_ptr<const std::vector<Component>> components,
+                   std::vector<GroupSetPtr>                      group_sets,
                    BlockTreeCacheConfig                          config,
                    std::shared_ptr<StorageBackend>               storage_backend,
                    std::unique_ptr<BlockTransferDispatcher>      transfer_dispatcher,
-                   std::unique_ptr<BlockCacheTaskPool>           task_pool,
-                   std::vector<std::string>                      per_tag_tags,
-                   std::vector<DeviceKVCacheGroupPtr>            per_tag_device_groups,
-                   std::vector<PerTagMapping>                    per_tag_mapping,
-                   std::vector<std::vector<std::string>>         device_group_tags);
+                   std::unique_ptr<BlockCacheTaskPool>           task_pool);
 
     ~BlockTreeCache();
     bool init();
 
     BlockTreeMatchResult match(const CacheKeysType& cache_keys);
-    void insert(TreeNode* parent, const CacheKeysType& cache_keys, const std::vector<std::vector<GroupSlot>>& slots);
-    // Directly reclaim up to num_blocks device blocks belonging to a single component
-    // group (target_tier = NONE, content dropped). Returns the number actually freed.
+    void insert(TreeNode* parent, const CacheKeysType& cache_keys, const std::vector<std::vector<GroupSetResource>>& slots);
+    // Directly reclaim up to num_blocks device blocks belonging to one group set
+    // (target_tier = NONE, content dropped). Returns the number actually freed.
     int evictForTag(const std::string& tag, size_t num_blocks);
 
     CacheStats                                getStats() const;
@@ -163,7 +146,10 @@ public:
     bool                                      cancelLoadBack(const std::shared_ptr<AsyncContext>& context);
 
     // Release path-lock references acquired during match().
-    void releaseMatchedBlocks(const std::vector<GroupBlockSet>& sets);
+    void releaseMatchedResources(const std::vector<MultiNodeResource>& resources);
+
+    BlockIndicesType matchedBlocksForGroup(size_t                                group_id,
+                                           const std::vector<MultiNodeResource>& matched_resources) const;
 
     TransferStatus executeTransfer(const TransferDescriptor& descriptor);
 
@@ -195,21 +181,8 @@ public:
     BlockTree* tree() const {
         return tree_.get();
     }
-    const std::vector<ComponentGroupPtr>& componentGroups() const {
-        return component_groups_;
-    }
-    bool validateDeviceGroupTagsForComponentGroup(int component_group_id, const std::vector<std::string>& tags) const;
-    // Resolve a stable declarative tag to its allocator-local group.
-    DeviceKVCacheGroupPtr deviceKVGroup(const std::string& tag) const {
-        for (size_t i = 0; i < per_tag_tags_.size(); ++i) {
-            if (per_tag_tags_[i] == tag) {
-                return i < per_tag_device_groups_.size() ? per_tag_device_groups_[i] : nullptr;
-            }
-        }
-        return nullptr;
-    }
-    const std::vector<Component>& components() const {
-        return *components_;
+    const std::vector<GroupSetPtr>& groupSets() const {
+        return group_sets_;
     }
     std::shared_ptr<StorageBackend> storageBackend() const {
         return storage_backend_;
@@ -239,15 +212,16 @@ public:
 private:
     friend class HybridKVCacheAllocator;
 
+    bool initializeConfiguration();
     void
-    insertSparse(TreeNode* parent, const CacheKeysType& cache_keys, const std::vector<std::vector<GroupSlot>>& slots);
+    insertSparse(TreeNode* parent, const CacheKeysType& cache_keys, const std::vector<std::vector<GroupSetResource>>& slots);
     void insertImpl(TreeNode*                                  parent,
                     const CacheKeysType&                       cache_keys,
-                    const std::vector<std::vector<GroupSlot>>& slots,
+                    const std::vector<std::vector<GroupSetResource>>& slots,
                     bool                                       allow_sparse_slots);
     void drainTreeHolds();
     void checkWatermark();
-    bool reclaimOneForGroup(int component_group_id, Tier tier);
+    bool reclaimOneForGroup(size_t group_set_id, Tier tier);
     struct DeviceReleaseCredit {
         DeviceBlockPoolPtr pool;
         BlockIdxType       block{NULL_BLOCK_IDX};
@@ -261,7 +235,7 @@ private:
                                     std::vector<TransferDescriptor>&      descriptors) const;
     int  evictionTransferTimeoutMs(const BlockTreeEvictor::EvictionPlan& plan) const;
 
-    bool   isNodeStructurallyMatchable(const TreeNode* node) const;
+    void validateMatchedResource(const MultiNodeResource& resource) const;
     void   prepareMatchedBlocks(const std::vector<TreeNode*>&         matched_path,
                                 const std::vector<bool>&              candidate_logically_valid,
                                 BlockTreeMatchResult&                 result,
@@ -269,40 +243,35 @@ private:
     size_t computeReadyMatchedBlockCount(const std::vector<TreeNode*>& matched_path,
                                          const std::vector<bool>&      candidate_logically_valid) const;
     void   prepareMatchedLoadBackItem(TreeNode*                             path_node,
-                                      const ComponentGroupPtr&              component_group,
-                                      const GroupSlot&                      group_slot,
+                                      const GroupSetPtr&                    group_set,
+                                      const GroupSetResource&              group_set_resource,
                                       size_t                                path_index,
-                                      const std::vector<std::string>&       device_group_tags,
                                       BlockTreeMatchResult&                 result,
                                       LoadBackTicket::PendingLoadBackItems& pending_load_back_items);
     std::shared_ptr<LoadBackTicket> prepareLoadBackTicket(LoadBackTicket::PendingLoadBackItems& items,
                                                           size_t                                logical_matched_blocks);
     bool                            prepareJoinedLoadBackItem(LoadBackTicket::PendingLoadBackItem&         item,
                                                               const std::shared_ptr<LoadBackAsyncContext>& context);
-    bool   changeLoadBackStateNolock(TreeNode*         node,
-                                     int               group_id,
-                                     SlotTransferState from,
-                                     SlotTransferState to);
     bool   reserveLoadBackItems(const LoadBackTicket::PendingLoadBackItems& items);
     std::shared_ptr<AsyncContext> commitLoadBack(const LoadBackTicket& ticket);
     void                          abortLoadBack(const LoadBackTicket& ticket);
-    void abortLoadBackNolock(const LoadBackTicket::PendingLoadBackItems&  items,
+    void abortLoadBackUnsafe(const LoadBackTicket::PendingLoadBackItems&  items,
                              size_t                                       prepared_item_count,
                              const std::shared_ptr<LoadBackAsyncContext>& context);
     void runLoadBackTask(const LoadBackWorker::TaskPtr& task);
     bool settleLoadBackNolock(LoadBackWorker::Task& task, bool copy_success);
 
+    struct GroupLocation {
+        size_t group_set_id{0};
+        size_t local_group_index{0};
+    };
+
     BlockTreeCacheConfig                          config_;
     std::unique_ptr<BlockTree>                    tree_;
-    std::vector<ComponentGroupPtr>                component_groups_;
-    std::shared_ptr<const std::vector<Component>> components_;
-    // Stable CacheTopology tags, aligned with allocator-local group storage.
-    const std::vector<std::string>     per_tag_tags_;
-    std::vector<DeviceKVCacheGroupPtr> per_tag_device_groups_;
-    // Per-tag gid -> (component_group_id, local_pool_index).
-    std::vector<PerTagMapping> per_tag_mapping_;
-    // component_group_id -> local_pool_index -> stable declarative tag.
-    std::vector<std::vector<std::string>>    device_group_tags_;
+    std::vector<GroupSetPtr>                     group_sets_;
+    // Reusable topology group_id -> GroupSet/local position. Non-reusable groups
+    // never enter this index or the BlockTree resource space.
+    std::unordered_map<size_t, GroupLocation> reusable_group_locations_;
     LoadBackWorker                          load_back_worker_;
     std::shared_ptr<LoadBackTicketRegistry>  load_back_ticket_registry_;
     std::shared_ptr<StorageBackend>          storage_backend_;

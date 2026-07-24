@@ -35,9 +35,8 @@ using PendingLoadBackItem            = LoadBackTicket::PendingLoadBackItem;
 
 class CountingSingleTypePerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
-    CountingSingleTypePerRankBlockTransferEngine(const std::vector<ComponentGroupPtr>& groups,
-                                 const std::vector<Component>&         components):
-        PerRankBlockTransferEngine(groups, std::make_shared<const std::vector<Component>>(components)) {}
+    explicit CountingSingleTypePerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
+        PerRankBlockTransferEngine(groups) {}
 
     TransferHandle submit(const TransferDescriptor&) override {
         ++submit_count_;
@@ -107,13 +106,13 @@ KVCacheConfig makeSingleTypeTieredConfig(Tier source_tier, const std::string& di
 }
 
 BlockIdxType seedSingleTypeLowerTier(BlockTreeCache& cache, Tier source_tier, CacheKeyType key) {
-    const auto& group        = cache.componentGroups().front();
+    const auto& group        = cache.groupSets().front();
     const auto  source_block = group->allocateSingleBlock(source_tier, BlockRefType::BLOCK_CACHE);
     EXPECT_NE(source_block, NULL_BLOCK_IDX);
     if (isNullBlockIdx(source_block)) {
         return source_block;
     }
-    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    std::vector<std::vector<GroupSetResource>> slots(1, std::vector<GroupSetResource>(1));
     if (source_tier == Tier::HOST) {
         slots[0][0].host_block = source_block;
     } else {
@@ -578,7 +577,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, OrdinaryAllocationEvictsOnlyAfterTreeEntr
     const BlockIdxType seed_block = seed->blocks(0, 0).front();
     allocator_->insertIntoCache(InsertInfo{seed, seed_tokens, /*is_resident=*/false});
 
-    const auto& device_pool = allocator_->blockTreeCacheOwner()->componentGroups().front()->devicePools().front();
+    const auto& device_pool = allocator_->blockTreeCacheOwner()->groupSets().front()->devicePools().front();
     ASSERT_NE(device_pool, nullptr);
     EXPECT_EQ(device_pool->refCount(seed_block), 2u);
 
@@ -620,16 +619,17 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCachePublishesOnlyBatchZero) {
     resource->setBatchCacheKeys(1, CacheKeysType{200});
     allocator_->insertIntoCache(InsertInfo{resource, nullptr, /*is_resident=*/false});
 
-    const auto& tag              = config.tagForGroup(0);
     auto        batch_zero_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{100});
     ASSERT_EQ(batch_zero_match.matched_blocks, 1u);
-    ASSERT_EQ(batch_zero_match.group_block_indices.at(tag), (BlockIndicesType{blocks[0]}));
-    allocator_->blockTreeCacheOwner()->releaseMatchedBlocks(batch_zero_match.matched_block_sets);
+    ASSERT_EQ(allocator_->blockTreeCacheOwner()->matchedBlocksForGroup(0, batch_zero_match.matched_resources),
+              (BlockIndicesType{blocks[0]}));
+    allocator_->blockTreeCacheOwner()->releaseMatchedResources(batch_zero_match.matched_resources);
 
     auto batch_one_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{200});
     EXPECT_EQ(batch_one_match.matched_blocks, 0u);
-    EXPECT_TRUE(batch_one_match.group_block_indices.empty());
-    allocator_->blockTreeCacheOwner()->releaseMatchedBlocks(batch_one_match.matched_block_sets);
+    EXPECT_TRUE(
+        allocator_->blockTreeCacheOwner()->matchedBlocksForGroup(0, batch_one_match.matched_resources).empty());
+    allocator_->blockTreeCacheOwner()->releaseMatchedResources(batch_one_match.matched_resources);
 
     block_pool->decRef(blocks, BlockRefType::REQUEST);
 }
@@ -653,13 +653,13 @@ TEST_F(SingleTypeKVCacheAllocatorTest, CPInsertAndAllocatorMatchShareLastRankCan
 
     auto noncanonical_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{100, 102});
     EXPECT_EQ(noncanonical_match.matched_blocks, 0u);
-    allocator_->blockTreeCacheOwner()->releaseMatchedBlocks(noncanonical_match.matched_block_sets);
+    allocator_->blockTreeCacheOwner()->releaseMatchedResources(noncanonical_match.matched_resources);
 
-    const auto& tag             = config.tagForGroup(0);
     auto        canonical_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{101, 103});
     ASSERT_EQ(canonical_match.matched_blocks, 2u);
-    EXPECT_EQ(canonical_match.group_block_indices.at(tag), seed_blocks);
-    allocator_->blockTreeCacheOwner()->releaseMatchedBlocks(canonical_match.matched_block_sets);
+    EXPECT_EQ(allocator_->blockTreeCacheOwner()->matchedBlocksForGroup(0, canonical_match.matched_resources),
+              seed_blocks);
+    allocator_->blockTreeCacheOwner()->releaseMatchedResources(canonical_match.matched_resources);
 
     auto hit = createBatchKVCacheResource(/*batch_size=*/1, config);
     hit->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 200, 201});
@@ -689,7 +689,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, EarlyCommonMallocFailureAbortsTicketBefor
         ASSERT_NE(cache, nullptr);
         const BlockIdxType source_block = seedSingleTypeLowerTier(*cache, source_tier, /*key=*/100);
         ASSERT_NE(source_block, NULL_BLOCK_IDX);
-        const auto&  group             = cache->componentGroups().front();
+        const auto&  group             = cache->groupSets().front();
         const size_t source_ref_before = source_tier == Tier::HOST ? group->hostPool()->refCount(source_block) :
                                                                      group->diskPool()->refCount(source_block);
         const size_t free_before       = allocator_->freeBlocksNum();
@@ -752,13 +752,13 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LowerTierHitFollowedByOuterIncrFailureNev
 
         const auto& cache = allocator_->blockTreeCacheOwner();
         ASSERT_NE(cache, nullptr);
-        auto per_rank_transfer_engine = std::make_shared<CountingSingleTypePerRankBlockTransferEngine>(
-            cache->componentGroups(), cache->components());
+        auto per_rank_transfer_engine =
+            std::make_shared<CountingSingleTypePerRankBlockTransferEngine>(cache->groupSets());
         cache->transfer_dispatcher_->per_rank_engine_ = per_rank_transfer_engine;
 
         const BlockIdxType source_block = seedSingleTypeLowerTier(*cache, source_tier, /*key=*/100);
         ASSERT_NE(source_block, NULL_BLOCK_IDX);
-        const auto&  group             = cache->componentGroups().front();
+        const auto&  group             = cache->groupSets().front();
         const size_t source_ref_before = source_tier == Tier::HOST ? group->hostPool()->refCount(source_block) :
                                                                      group->diskPool()->refCount(source_block);
         const size_t free_before       = allocator_->freeBlocksNum();
@@ -798,8 +798,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LowerTierHitFollowedByOuterIncrFailureNev
         EXPECT_EQ(snapshot_after.keys, snapshot_before.keys);
         const auto find = cache->tree()->findNode(CacheKeysType{100});
         ASSERT_NE(find.matched_node, nullptr);
-        const auto& slot = find.matched_node->group_slots[0];
-        EXPECT_EQ(slot.transfer_state, SlotTransferState::IDLE);
+        const auto& slot = find.matched_node->group_set_resources[0];
+        EXPECT_EQ(slot.transfer_state, GroupSetTransferState::IDLE);
         if (source_tier == Tier::HOST) {
             EXPECT_EQ(slot.host_block, source_block);
             EXPECT_EQ(group->hostPool()->refCount(source_block), source_ref_before);
@@ -824,7 +824,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadBackE
     const auto& cache = allocator_->blockTreeCacheOwner();
     ASSERT_NE(cache, nullptr);
     auto per_rank_transfer_engine =
-        std::make_shared<CountingSingleTypePerRankBlockTransferEngine>(cache->componentGroups(), cache->components());
+        std::make_shared<CountingSingleTypePerRankBlockTransferEngine>(cache->groupSets());
     cache->transfer_dispatcher_->per_rank_engine_ = per_rank_transfer_engine;
     ASSERT_NE(seedSingleTypeLowerTier(*cache, Tier::HOST, /*key=*/100), NULL_BLOCK_IDX);
 
@@ -850,10 +850,10 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadBackE
 
     const auto find = cache->tree()->findNode(CacheKeysType{100});
     ASSERT_NE(find.matched_node, nullptr);
-    const auto& slot = find.matched_node->group_slots.front();
+    const auto& slot = find.matched_node->group_set_resources.front();
     ASSERT_EQ(slot.device_blocks.size(), 1u);
     const BlockIdxType published_target = slot.device_blocks.front();
-    const auto&        device_pool      = cache->componentGroups().front()->devicePools().front();
+    const auto&        device_pool      = cache->groupSets().front()->devicePools().front();
     ASSERT_NE(device_pool, nullptr);
     ASSERT_FALSE(resource->blocks(0, 0).empty());
     ASSERT_FALSE(resource->blocks(1, 0).empty());
@@ -866,7 +866,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadBackE
     cache->onBlocksReleased();
     cache->waitForPendingTasks();
     EXPECT_EQ(cache->getKeySnapshot(/*limit=*/16).version, before_watermark_retry.version);
-    EXPECT_EQ(find.matched_node->group_slots.front().device_blocks, (BlockIndicesType{published_target}));
+    EXPECT_EQ(find.matched_node->group_set_resources.front().device_blocks, (BlockIndicesType{published_target}));
     EXPECT_EQ(cache->evictForTag(config.tagForGroup(0), 1), 0);
 
     allocator_->free(FreeInfo{resource, token_ids});
@@ -883,7 +883,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, PrefixReuseDisabledSkipsMatchAndInsert) {
     allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
     ASSERT_NE(allocator_->blockTreeCacheOwner(), nullptr);
-    EXPECT_TRUE(allocator_->blockTreeCacheOwner()->componentGroups().empty());
+    EXPECT_TRUE(allocator_->blockTreeCacheOwner()->groupSets().empty());
 
     auto hit_resource = createBatchKVCacheResource(/*batch_size=*/1, config);
     hit_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 200});

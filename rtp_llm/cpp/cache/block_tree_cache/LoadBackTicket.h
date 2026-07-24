@@ -6,7 +6,6 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -20,7 +19,6 @@ class LoadBackShutdownTestPeer;
 }
 
 class AsyncContext;
-class BlockTreeCache;
 class LoadBackAsyncContext;
 class LoadBackTicketRegistry;
 
@@ -28,15 +26,15 @@ class LoadBackTicket {
 public:
     struct PendingLoadBackItem {
         TreeNode*                 node{nullptr};
-        int                       group_id{-1};
+        size_t                    group_set_id{0};
         size_t                    path_index{0};
         Tier                      source_tier{Tier::NONE};
         std::vector<BlockIdxType> source_blocks;
         // This ticket joins an existing transfer and does not own its source or state.
         bool joined_load_back{false};
-        // DEVICE means this logical coordinate is already resident but lies
-        // outside the ready boundary; target blocks must preserve its identity.
-        std::vector<std::string>  device_group_tags;
+        // DEVICE denotes an already-resident logical coordinate that lies outside
+        // the public ready boundary. It is ticket-owned and settled asynchronously
+        // without a copy; target_device_blocks must preserve source identity.
         std::vector<BlockIdxType> target_device_blocks;
     };
     using PendingLoadBackItems = std::vector<PendingLoadBackItem>;
@@ -68,8 +66,8 @@ public:
         return items_.size();
     }
 
-    int groupId(size_t item_index) const {
-        return items_.at(item_index).group_id;
+    size_t groupSetId(size_t item_index) const {
+        return items_.at(item_index).group_set_id;
     }
 
     size_t pathIndex(size_t item_index) const {
@@ -84,10 +82,6 @@ public:
         return items_.at(item_index).source_blocks;
     }
 
-    const std::vector<std::string>& deviceGroupTags(size_t item_index) const {
-        return items_.at(item_index).device_group_tags;
-    }
-
     bool joinedLoadBack(size_t item_index) const {
         return items_.at(item_index).joined_load_back;
     }
@@ -100,7 +94,12 @@ public:
         if (item_index >= items_.size()) {
             return false;
         }
-        items_[item_index].target_device_blocks = std::move(target_device_blocks);
+        PendingLoadBackItem& item = items_[item_index];
+        if (item.joined_load_back
+            || (item.source_tier == Tier::DEVICE && item.source_blocks != target_device_blocks)) {
+            return false;
+        }
+        item.target_device_blocks = std::move(target_device_blocks);
         return true;
     }
 

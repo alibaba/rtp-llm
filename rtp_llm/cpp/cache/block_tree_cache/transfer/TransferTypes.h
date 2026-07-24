@@ -57,9 +57,9 @@ private:
 
 struct TransferDescriptor {
     static TransferDescriptor
-    deviceToHost(int component_group_id, std::vector<BlockIdxType> device_blocks, BlockIdxType host_block) {
+    deviceToHost(size_t group_set_id, std::vector<BlockIdxType> device_blocks, BlockIdxType host_block) {
         TransferDescriptor desc;
-        desc.component_group_id = component_group_id;
+        desc.group_set_id = group_set_id;
         desc.source_tier        = Tier::DEVICE;
         desc.target_tier        = Tier::HOST;
         desc.device_blocks      = std::move(device_blocks);
@@ -68,9 +68,9 @@ struct TransferDescriptor {
     }
 
     static TransferDescriptor
-    hostToDevice(int component_group_id, BlockIdxType host_block, std::vector<BlockIdxType> device_blocks) {
+    hostToDevice(size_t group_set_id, BlockIdxType host_block, std::vector<BlockIdxType> device_blocks) {
         TransferDescriptor desc;
-        desc.component_group_id = component_group_id;
+        desc.group_set_id = group_set_id;
         desc.source_tier        = Tier::HOST;
         desc.target_tier        = Tier::DEVICE;
         desc.host_block         = host_block;
@@ -78,9 +78,9 @@ struct TransferDescriptor {
         return desc;
     }
 
-    static TransferDescriptor hostToDisk(int component_group_id, BlockIdxType host_block, BlockIdxType disk_block) {
+    static TransferDescriptor hostToDisk(size_t group_set_id, BlockIdxType host_block, BlockIdxType disk_block) {
         TransferDescriptor desc;
-        desc.component_group_id = component_group_id;
+        desc.group_set_id = group_set_id;
         desc.source_tier        = Tier::HOST;
         desc.target_tier        = Tier::DISK;
         desc.host_block         = host_block;
@@ -88,9 +88,9 @@ struct TransferDescriptor {
         return desc;
     }
 
-    static TransferDescriptor diskToHost(int component_group_id, BlockIdxType disk_block, BlockIdxType host_block) {
+    static TransferDescriptor diskToHost(size_t group_set_id, BlockIdxType disk_block, BlockIdxType host_block) {
         TransferDescriptor desc;
-        desc.component_group_id = component_group_id;
+        desc.group_set_id = group_set_id;
         desc.source_tier        = Tier::DISK;
         desc.target_tier        = Tier::HOST;
         desc.disk_block         = disk_block;
@@ -98,7 +98,7 @@ struct TransferDescriptor {
         return desc;
     }
 
-    int  component_group_id{-1};
+    size_t group_set_id{0};
     Tier source_tier{Tier::NONE};
     Tier target_tier{Tier::NONE};
 

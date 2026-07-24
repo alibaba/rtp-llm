@@ -376,9 +376,22 @@ TEST_F(KVCacheManagerTest, InitPublishesOneOwnedBlockTreeCacheAndInjectsSameObse
 
     const auto target_groups = cache_manager->allocator_->cacheGroups();
     ASSERT_EQ(target_groups.size(), static_cast<size_t>(cache_config.groupNums()));
-    for (const auto& target_group : target_groups) {
+    for (size_t group_id = 0; group_id < target_groups.size(); ++group_id) {
+        const auto& target_group = target_groups[group_id];
         ASSERT_NE(target_group, nullptr);
-        EXPECT_EQ(cache_manager->blockTreeCache()->deviceKVGroup(target_group->tag()).get(), target_group.get());
+        bool found = false;
+        for (const GroupSetPtr& group_set : cache_manager->blockTreeCache()->groupSets()) {
+            const auto group_id_it = std::find(group_set->groupIds().begin(), group_set->groupIds().end(), group_id);
+            if (group_id_it == group_set->groupIds().end()) {
+                continue;
+            }
+            const size_t local_group_index =
+                static_cast<size_t>(std::distance(group_set->groupIds().begin(), group_id_it));
+            EXPECT_EQ(group_set->devicePools()[local_group_index].get(), target_group->blockPool().get());
+            found = true;
+            break;
+        }
+        EXPECT_TRUE(found);
     }
 }
 
@@ -976,8 +989,8 @@ TEST_F(KVCacheManagerTest, TieredMemoryCacheIsOwnedOnlyByBlockTreeCache) {
     ASSERT_TRUE(manager->init());
     ASSERT_NE(manager->blockTreeCache(), nullptr);
     EXPECT_TRUE(manager->blockTreeCache()->isMemoryCacheEnabled());
-    ASSERT_EQ(manager->blockTreeCache()->componentGroups().size(), 1u);
-    EXPECT_NE(manager->blockTreeCache()->componentGroups().front()->hostPool(), nullptr);
+    ASSERT_EQ(manager->blockTreeCache()->groupSets().size(), 1u);
+    EXPECT_NE(manager->blockTreeCache()->groupSets().front()->hostPool(), nullptr);
 }
 
 TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsEmptyMemoryRequestWithoutCoordinatorFallback) {
@@ -997,7 +1010,7 @@ static void appendValidTaggedTransfer(const std::shared_ptr<KVCacheManager>& man
     ASSERT_NE(manager->blockTreeCache(), nullptr);
     const TransferDescriptor descriptor = TransferDescriptor::deviceToHost(/*group_id=*/0, {1}, /*host_block=*/1);
     ASSERT_TRUE(BlockTransferRequestConverter::appendTransfer(
-        descriptor, manager->blockTreeCache()->componentGroups(), *request.mutable_mem_request()));
+        descriptor, manager->blockTreeCache()->groupSets(), *request.mutable_mem_request()));
 }
 
 TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesAllTaggedMemoryItemsOnlyToTieredBlockTree) {
@@ -1031,7 +1044,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsMixedPartialUnavailableAndOutOf
         appendValidTaggedTransfer(tiered_manager, request);
         auto* mixed = request.mutable_mem_request()->add_copy_items();
         mixed->CopyFrom(request.mem_request().copy_items(0));
-        mixed->clear_component_group_tags();
+        mixed->clear_group_set_tags();
         FunctionResponsePB response;
         EXPECT_FALSE(tiered_manager->executeFunction(request, response));
         EXPECT_FALSE(response.mem_response().success());
@@ -1061,7 +1074,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsMixedPartialUnavailableAndOutOf
         appendValidTaggedTransfer(tiered_manager, request);
         auto*              item   = request.mutable_mem_request()->mutable_copy_items(0);
         const BlockIdxType usable = static_cast<BlockIdxType>(
-            tiered_manager->blockTreeCache()->componentGroups().front()->devicePools().front()->totalBlocksNum());
+            tiered_manager->blockTreeCache()->groupSets().front()->devicePools().front()->totalBlocksNum());
         ASSERT_EQ(item->tagged_gpu_blocks_size(), 1);
         const std::string stable_tag = item->tagged_gpu_blocks(0).tag();
         item->mutable_tagged_gpu_blocks(0)->set_block_id(usable + 1);
@@ -1541,22 +1554,22 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     const CacheKeysType keys_a = res_a->cacheKeys(0);
     ASSERT_FALSE(keys_a.empty());
     struct FullPrefixSnapshot {
-        size_t                                 component_group_id;
+        size_t                                 group_set_id;
         std::vector<std::vector<BlockIdxType>> blocks_per_node;
     };
     std::vector<FullPrefixSnapshot> full_prefix_before_swa_pressure;
     {
         const auto find_a = manager->blockTreeCache()->tree()->findNode(keys_a);
         ASSERT_EQ(find_a.path.size(), keys_a.size());
-        const auto& components = manager->blockTreeCache()->componentGroups();
-        for (size_t component_group_id = 0; component_group_id < components.size(); ++component_group_id) {
-            const auto& component = components[component_group_id];
-            if (component->group_type != CacheGroupType::FULL) {
+        const auto& group_sets = manager->blockTreeCache()->groupSets();
+        for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
+            const auto& group_set = group_sets[group_set_id];
+            if (group_set->groupType() != CacheGroupType::FULL) {
                 continue;
             }
-            FullPrefixSnapshot snapshot{component_group_id, {}};
+            FullPrefixSnapshot snapshot{group_set_id, {}};
             for (TreeNode* node : find_a.path) {
-                snapshot.blocks_per_node.push_back(node->group_slots[component_group_id].device_blocks);
+                snapshot.blocks_per_node.push_back(node->group_set_resources[group_set_id].device_blocks);
             }
             full_prefix_before_swa_pressure.push_back(std::move(snapshot));
         }
@@ -1584,43 +1597,43 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     const CacheKeysType keys_b = res_b->cacheKeys(0);
     ASSERT_FALSE(keys_b.empty());
     struct SwaCachedSlotSnapshot {
-        size_t                    component_group_id;
+        size_t                    group_set_id;
         TreeNode*                 node;
         std::vector<BlockIdxType> device_blocks;
         uint64_t                  last_access_seq;
     };
     std::vector<SwaCachedSlotSnapshot> swa_cached_before;
-    std::vector<size_t>                swa_component_ids;
+    std::vector<size_t>                swa_group_set_ids;
     {
-        const auto& components = manager->blockTreeCache()->componentGroups();
+        const auto& group_sets = manager->blockTreeCache()->groupSets();
         const auto  find_a     = manager->blockTreeCache()->tree()->findNode(keys_a);
         const auto  find_b     = manager->blockTreeCache()->tree()->findNode(keys_b);
         ASSERT_EQ(find_a.path.size(), keys_a.size());
         ASSERT_EQ(find_b.path.size(), keys_b.size());
-        for (size_t component_group_id = 0; component_group_id < components.size(); ++component_group_id) {
-            const auto& component = components[component_group_id];
-            if (component->group_type != CacheGroupType::SWA) {
+        for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
+            const auto& group_set = group_sets[group_set_id];
+            if (group_set->groupType() != CacheGroupType::SWA) {
                 continue;
             }
-            swa_component_ids.push_back(component_group_id);
-            for (const auto& pool : component->devicePools()) {
+            swa_group_set_ids.push_back(group_set_id);
+            for (const auto& pool : group_set->devicePools()) {
                 ASSERT_LT(pool->freeBlocksNum(), 2u)
-                    << "SWA pool must not satisfy the next request without eviction, component_group_id="
-                    << component_group_id;
+                    << "SWA pool must not satisfy the next request without eviction, group_set_id="
+                    << group_set_id;
             }
             for (const auto* path : {&find_a.path, &find_b.path}) {
                 for (TreeNode* node : *path) {
-                    const GroupSlot& slot = node->group_slots[component_group_id];
-                    if (!slot.has_value(Tier::DEVICE)) {
+                    const GroupSetResource& slot = node->group_set_resources[group_set_id];
+                    if (!slot.hasTier(Tier::DEVICE)) {
                         continue;
                     }
                     swa_cached_before.push_back(SwaCachedSlotSnapshot{
-                        component_group_id, node, slot.device_blocks, slot.candidate_meta.last_access_seq});
+                        group_set_id, node, slot.device_blocks, slot.candidate_meta.last_access_seq});
                 }
             }
         }
     }
-    ASSERT_FALSE(swa_component_ids.empty());
+    ASSERT_FALSE(swa_group_set_ids.empty());
     ASSERT_FALSE(swa_cached_before.empty());
 
     // === Phase 2: 3rd request triggers eviction on SWA groups ===
@@ -1638,24 +1651,24 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     ASSERT_TRUE(result_c.success) << "3rd allocation must succeed via SWA eviction";
 
     // Independently exhausting and evicting the SWA pools must not disturb the
-    // older request's FULL prefix. Validate the FULL component path directly so
+    // older request's FULL prefix. Validate the FULL group_set path directly so
     // a missing SWA tail cannot hide preservation behind the joint ready boundary.
     {
         const auto find_a = manager->blockTreeCache()->tree()->findNode(keys_a);
         ASSERT_EQ(find_a.path.size(), keys_a.size());
-        const auto& components = manager->blockTreeCache()->componentGroups();
+        const auto& group_sets = manager->blockTreeCache()->groupSets();
         for (const FullPrefixSnapshot& snapshot : full_prefix_before_swa_pressure) {
-            ASSERT_LT(snapshot.component_group_id, components.size());
-            const auto& component = components[snapshot.component_group_id];
-            auto        validator = component->createMatchValidator();
+            ASSERT_LT(snapshot.group_set_id, group_sets.size());
+            const auto& group_set = group_sets[snapshot.group_set_id];
+            auto        validator = group_set->createMatchValidator();
             ASSERT_EQ(snapshot.blocks_per_node.size(), find_a.path.size());
             for (size_t path_index = 0; path_index < find_a.path.size(); ++path_index) {
-                const GroupSlot& slot = find_a.path[path_index]->group_slots[snapshot.component_group_id];
+                const GroupSetResource& slot = find_a.path[path_index]->group_set_resources[snapshot.group_set_id];
                 ASSERT_TRUE(validator->validate(find_a.path[path_index], slot));
                 ASSERT_EQ(slot.device_blocks, snapshot.blocks_per_node[path_index]);
-                ASSERT_EQ(slot.device_blocks.size(), component->devicePools().size());
+                ASSERT_EQ(slot.device_blocks.size(), group_set->devicePools().size());
                 for (size_t pool_index = 0; pool_index < slot.device_blocks.size(); ++pool_index) {
-                    EXPECT_EQ(component->devicePools()[pool_index]->refCount(slot.device_blocks[pool_index]), 1u);
+                    EXPECT_EQ(group_set->devicePools()[pool_index]->refCount(slot.device_blocks[pool_index]), 1u);
                 }
             }
         }
@@ -1663,32 +1676,32 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
 
     // Direct proof of the SWA eviction itself: at least one cached SWA slot was
     // evicted, the evicted set is exactly an LRU-first prefix (every evicted
-    // slot is older than every surviving one within its component group), and
+    // resource is older than every surviving one within its group set), and
     // surviving slots keep their exact device blocks.
     {
         size_t evicted_count = 0;
         for (const SwaCachedSlotSnapshot& snapshot : swa_cached_before) {
-            const GroupSlot& slot = snapshot.node->group_slots[snapshot.component_group_id];
-            if (!slot.has_value(Tier::DEVICE)) {
+            const GroupSetResource& slot = snapshot.node->group_set_resources[snapshot.group_set_id];
+            if (!slot.hasTier(Tier::DEVICE)) {
                 ++evicted_count;
                 continue;
             }
             EXPECT_EQ(slot.device_blocks, snapshot.device_blocks)
-                << "surviving SWA slot changed, component_group_id=" << snapshot.component_group_id;
+                << "surviving SWA slot changed, group_set_id=" << snapshot.group_set_id;
         }
         ASSERT_GT(evicted_count, 0u) << "third allocation must evict from the SWA cache";
         for (const SwaCachedSlotSnapshot& evicted : swa_cached_before) {
-            if (evicted.node->group_slots[evicted.component_group_id].has_value(Tier::DEVICE)) {
+            if (evicted.node->group_set_resources[evicted.group_set_id].hasTier(Tier::DEVICE)) {
                 continue;
             }
             for (const SwaCachedSlotSnapshot& survivor : swa_cached_before) {
-                if (survivor.component_group_id != evicted.component_group_id
-                    || !survivor.node->group_slots[survivor.component_group_id].has_value(Tier::DEVICE)) {
+                if (survivor.group_set_id != evicted.group_set_id
+                    || !survivor.node->group_set_resources[survivor.group_set_id].hasTier(Tier::DEVICE)) {
                     continue;
                 }
                 EXPECT_LT(evicted.last_access_seq, survivor.last_access_seq)
-                    << "evicted SWA slot must be LRU-older than every survivor, component_group_id="
-                    << evicted.component_group_id;
+                    << "evicted SWA slot must be LRU-older than every survivor, group_set_id="
+                    << evicted.group_set_id;
             }
         }
     }

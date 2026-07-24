@@ -1292,14 +1292,16 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionMarksCanonicalResour
     const auto before             = allocator->blockTreeCacheOwner()->getKeySnapshot(expected_canonical.size() + 1);
     EXPECT_EQ(before.keys, expected_canonical);
 
-    const auto& component_groups = allocator->blockTreeCacheOwner()->componentGroups();
-    const auto  target_component =
-        std::find_if(component_groups.begin(), component_groups.end(), [&](const ComponentGroupPtr& component) {
-            return component != nullptr
-                   && std::find(component->tags().begin(), component->tags().end(), target_tag)
-                          != component->tags().end();
+    const auto& group_sets = allocator->blockTreeCacheOwner()->groupSets();
+    const auto  target_group_set =
+        std::find_if(group_sets.begin(), group_sets.end(), [&](const GroupSetPtr& group_set) {
+            if (group_set == nullptr) {
+                return false;
+            }
+            const auto tags = group_set->groupTags();
+            return std::find(tags.begin(), tags.end(), target_tag) != tags.end();
         });
-    ASSERT_NE(target_component, component_groups.end());
+    ASSERT_NE(target_group_set, group_sets.end());
 
     std::vector<size_t> free_before;
     free_before.reserve(allocator->groupBlockPools().size());
@@ -1330,10 +1332,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionMarksCanonicalResour
 
     for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
         const auto& pool = allocator->groupBlockPools()[gid];
-        const bool  same_component =
-            std::find((*target_component)->tags().begin(), (*target_component)->tags().end(), config.tagForGroup(gid))
-            != (*target_component)->tags().end();
-        const size_t expected_delta = same_component ? reclaimed : 0u;
+        const auto  target_tags = (*target_group_set)->groupTags();
+        const bool  same_group_set =
+            std::find(target_tags.begin(), target_tags.end(), config.tagForGroup(gid)) != target_tags.end();
+        const size_t expected_delta = same_group_set ? reclaimed : 0u;
         EXPECT_EQ(pool->freeBlocksNum(), free_before[gid] + expected_delta) << "gid=" << gid;
     }
     EXPECT_EQ(allocator->groupBlockPools()[static_cast<size_t>(target_gid)]->freeBlocksNum(),
