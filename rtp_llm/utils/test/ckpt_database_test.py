@@ -167,6 +167,21 @@ class TensorIndexTest(unittest.TestCase):
         all_names = database.get_pretrain_tensor_names()
         self.assertFalse(database.has_tensor(all_names[0]))
 
+    def test_load_tensor_slice_matches_full_tensor(self):
+        path = os.path.join(self._testdata_path(), "safetensor_testdata")
+        database = CkptDatabase(path)
+        tensor_name = next(iter(database.pretrain_file_list[0].metadata))
+        full = database.load_tensor(tensor_name)[0]
+        tensor_slice = (slice(0, max(1, full.shape[0] // 2)),) + (slice(None),) * (
+            full.ndim - 1
+        )
+
+        sliced = database.load_tensor_slice(tensor_name, tensor_slice)
+
+        self.assertEqual(sliced.shape, full[tensor_slice].shape)
+        self.assertTrue(sliced.is_contiguous())
+        self.assertTrue(sliced.equal(full[tensor_slice]))
+
 
 class SafetensorHandleCacheTest(unittest.TestCase):
     """Tests for CkptFileInfo safetensor handle caching."""

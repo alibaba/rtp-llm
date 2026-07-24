@@ -4,7 +4,7 @@ import logging
 import os
 import struct
 from pathlib import PosixPath
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import torch
 from safetensors import safe_open
@@ -147,6 +147,19 @@ class CkptFileInfo:
         if hasattr(self, "_st_handle") and self._st_handle is not None:
             self._st_handle.__exit__(None, None, None)
             self._st_handle = None
+
+    def get_tensor_shape(self, name: str) -> torch.Size:
+        assert self.is_safetensor()
+        return torch.Size(self._get_safetensor_handle().get_slice(name).get_shape())
+
+    def load_tensor_slice(
+        self,
+        name: str,
+        tensor_slice: Tuple[slice, ...],
+        datatype: torch.dtype = torch.float16,
+    ) -> torch.Tensor:
+        assert self.is_safetensor()
+        return self._get_safetensor_handle().get_slice(name)[tensor_slice].to(datatype)
 
     def load_tensor(self, name: str, datatype: str = torch.float16) -> torch.Tensor:
         """Load a single tensor by name.

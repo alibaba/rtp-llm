@@ -8,14 +8,29 @@ from pydantic import BaseModel
 
 from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.model_loader.load_config import LoadConfig
-from rtp_llm.model_loader.tensor_source import StackSplitTensorSource, TensorSource
+from rtp_llm.model_loader.tensor_source import (
+    DatabaseTensorSource,
+    StackSplitTensorSource,
+    TensorSource,
+)
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
     CompositeWeight,
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
+from rtp_llm.utils.model_weight import (
+    CkptWeightInfo,
+    W,
+    identity,
+    sp_moe_neg1,
+    sp_moe_w1,
+)
+
+_PURE_TP_LAYOUTS = {
+    "stack_moe_w1": (sp_moe_w1, 2),
+    "stack_": (sp_moe_neg1, 1),
+}
 
 
 class FfnConfig(BaseModel):
@@ -289,6 +304,11 @@ class MoeConfig(BaseModel):
     align_size: int = 0  # 0 means no padding needed (for MoE)
 
 
+class _PreShardedTensor:
+    def __init__(self, tensor: torch.Tensor):
+        self.tensor = tensor
+
+
 class MoeAtomicWeight(AtomicWeight):
     def __init__(
         self,
@@ -310,6 +330,12 @@ class MoeAtomicWeight(AtomicWeight):
         else:
             self._process_fun_name = process_fun.__name__
         super().__init__(name, weights, process_fun, data_type, *args, **kwargs)
+
+    def _split(self, tensor, load_config: LoadConfig):
+        raw_tensor = tensor.get(self.name) if isinstance(tensor, dict) else tensor
+        if isinstance(raw_tensor, _PreShardedTensor):
+            return {self.name: raw_tensor.tensor}
+        return super()._split(tensor, load_config)
 
     def _expert_key_pattern(self, idx: int) -> str:
         """Generate a logical per-expert key for the idx-th stacked weight."""
@@ -403,6 +429,24 @@ class MoeAtomicWeight(AtomicWeight):
             and target_device.type == "cuda"
             and self._process_fun_name in ("stack_moe_w1", "stack_", "stack_moe_w1_s2")
         ):
+            if (
+                load_config.moe_pure_tp_mode
+                and not load_config.merge_lora
+                and isinstance(tensor_source, DatabaseTensorSource)
+                and tensor_source.get_database().is_safetensor
+                and all(weight.merge_fun is identity for weight in ckpt_weights)
+                and _PURE_TP_LAYOUTS.get(self._process_fun_name)
+                == (self._get_split_func(), num_ckpt_weights)
+            ):
+                return self._load_raw_tensor_pure_tp(
+                    tensor_source,
+                    layer_id,
+                    device,
+                    load_config,
+                    ckpt_weights,
+                    selected_experts,
+                    convert_type,
+                )
             result = self._load_raw_tensor_gpu_preallocate(
                 tensor_source,
                 layer_id,
@@ -464,6 +508,59 @@ class MoeAtomicWeight(AtomicWeight):
         except Exception as e:
             logging.error(f"加载 {name} 失败，完整堆栈:\n{traceback.format_exc()}")
             raise e
+
+    def _load_raw_tensor_pure_tp(
+        self,
+        tensor_source,
+        layer_id,
+        device,
+        load_config,
+        ckpt_weights,
+        selected_experts,
+        convert_type,
+    ):
+        database = tensor_source.get_database()
+        is_w1 = self._process_fun_name == "stack_moe_w1"
+        split_dim = 0 if is_w1 else 1
+        first_name = ckpt_weights[0].name.format(
+            i=str(layer_id),
+            i_1=str(layer_id + 1),
+            expert_id=str(selected_experts[0]),
+        )
+        expert_shape = list(database.get_tensor_shape(first_name))
+        assert len(expert_shape) == 2
+        assert expert_shape[split_dim] % load_config.tp_size == 0
+
+        shard_size = expert_shape[split_dim] // load_config.tp_size
+        tensor_slice = [slice(None), slice(None)]
+        tensor_slice[split_dim] = slice(
+            load_config.tp_rank * shard_size,
+            (load_config.tp_rank + 1) * shard_size,
+        )
+        output_shape = expert_shape.copy()
+        output_shape[split_dim] = shard_size * len(ckpt_weights)
+        out = torch.empty(
+            [len(selected_experts)] + output_shape,
+            dtype=convert_type,
+            device=device,
+        )
+
+        for weight_idx, ckpt_weight in enumerate(ckpt_weights):
+            for local_idx, expert_id in enumerate(selected_experts):
+                name = ckpt_weight.name.format(
+                    i=str(layer_id),
+                    i_1=str(layer_id + 1),
+                    expert_id=str(expert_id),
+                )
+                target = out[local_idx]
+                if is_w1:
+                    target = target.narrow(
+                        split_dim, weight_idx * shard_size, shard_size
+                    )
+                target.copy_(
+                    database.load_tensor_slice(name, tuple(tensor_slice), convert_type)
+                )
+        return {self.name: _PreShardedTensor(out)}
 
     def _load_raw_tensor_gpu_preallocate(
         self,
