@@ -150,15 +150,13 @@ public class CacheMetricsReporter {
      * Report cache hit rate metrics
      *
      * @param roleType  Role type
-     * @param engineIp  Engine IP
      * @param hitTokens Number of hit tokens
      * @param hitRatio  Hit percentage
      */
-    public void reportCacheHitMetrics(RoleType roleType, String engineIp, long hitTokens, double hitRatio) {
+    public void reportCacheHitMetrics(RoleType roleType, long hitTokens, double hitRatio) {
 
         FlexMetricTags baseTags = FlexMetricTags.of(
-                "role", roleType.name(),
-                "engineIp", engineIp
+                "role", roleType.name()
         );
 
         // Report hit token count and hit percentage
@@ -168,33 +166,33 @@ public class CacheMetricsReporter {
     }
 
     /**
-     * Report request-level routing cache-match token metrics for the selected engine.
+     * Report request-level routing cache-match token metrics for the selected worker pool.
      */
     public void reportRoutingSelectedCacheMatchMetrics(RoleType roleType,
-                                                       String engineIp,
                                                        long hitTokens,
                                                        long totalTokens) {
         reportRoutingCacheMatchMetrics(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS,
                 CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS,
                 roleType,
-                engineIp,
                 hitTokens,
                 totalTokens);
     }
 
     /**
-     * Report the request-level best candidate using the selected engine tags.
+     * Report the request-level maximum cache match across available candidates.
+     *
+     * <p>The matching input-token denominator is reported by
+     * {@link #reportRoutingSelectedCacheMatchMetrics(RoleType, long, long)}
+     * for the same successfully selected request.</p>
      */
     public void reportRoutingCandidateMaxCacheMatchMetrics(RoleType roleType,
-                                                           String selectedEngineIp,
                                                            long hitTokens) {
         if (roleType == null) {
             return;
         }
 
         FlexMetricTags tags = FlexMetricTags.of(
-                "role", roleType.name(),
-                "engineIp", selectedEngineIp == null ? "" : selectedEngineIp
+                "role", roleType.name()
         );
         monitor.report(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, tags, hitTokens);
     }
@@ -202,7 +200,6 @@ public class CacheMetricsReporter {
     private void reportRoutingCacheMatchMetrics(String hitMetric,
                                                 String totalMetric,
                                                 RoleType roleType,
-                                                String engineIp,
                                                 long hitTokens,
                                                 long totalTokens) {
         if (roleType == null || totalTokens <= 0L) {
@@ -210,8 +207,7 @@ public class CacheMetricsReporter {
         }
 
         FlexMetricTags tags = FlexMetricTags.of(
-                "role", roleType.name(),
-                "engineIp", engineIp == null ? "" : engineIp
+                "role", roleType.name()
         );
 
         monitor.report(hitMetric, tags, hitTokens);
@@ -378,14 +374,12 @@ public class CacheMetricsReporter {
     /**
      * Report response time for updating engine cache
      *
-     * @param engineIpPort Engine IP:Port
      * @param role         Engine role
      * @param startTime    Start time in microseconds
      * @param success      Whether successful
      */
-    public void reportUpdateEngineBlockCacheRT(String engineIpPort, String role, long startTime, String success) {
+    public void reportUpdateEngineBlockCacheRT(String role, long startTime, String success) {
         FlexMetricTags tags = FlexMetricTags.of(
-                "engineIpPort", engineIpPort,
                 "role", role,
                 "success", success
         );
@@ -396,18 +390,12 @@ public class CacheMetricsReporter {
     /**
      * Report cache diff calculation metrics
      *
-     * @param engineIp          Engine IP
      * @param role              Role
      * @param addedBlocksSize   Number of added blocks
      * @param removedBlocksSize Number of removed blocks
      */
-    public void reportCacheDiffMetrics(String engineIp, String role, int addedBlocksSize, int removedBlocksSize) {
-        if (engineIp == null) {
-            return;
-        }
-
+    public void reportCacheDiffMetrics(String role, int addedBlocksSize, int removedBlocksSize) {
         FlexMetricTags tags = FlexMetricTags.of(
-                "engineIp", engineIp,
                 "role", role != null ? role : "unknown"
         );
 

@@ -149,7 +149,7 @@ public class EngineSyncRunner implements Runnable {
 
         } catch (Exception e) {
             logger.error("sync engine workers status exception, modelName:{}, error:{}", modelName, e.getMessage(), e);
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, null, null);
+            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, null);
         } finally {
             logger.debug("Entering finally block for model: {}", modelName);
             int size = workerStatusMap.size();

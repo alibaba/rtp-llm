@@ -91,14 +91,12 @@ class CacheMetricsReporterTest {
 
     @Test
     void should_report_routing_cache_match_token_metrics() {
-        reporter.reportRoutingSelectedCacheMatchMetrics(RoleType.PREFILL, "127.0.0.2", 128L, 1024L);
-        reporter.reportRoutingCandidateMaxCacheMatchMetrics(RoleType.PREFILL, "127.0.0.2", 256L);
+        reporter.reportRoutingSelectedCacheMatchMetrics(RoleType.PREFILL, 128L, 1024L);
+        reporter.reportRoutingCandidateMaxCacheMatchMetrics(RoleType.PREFILL, 256L);
 
-        FlexMetricTags selectedTags = FlexMetricTags.of(
-                "role", RoleType.PREFILL.name(),
-                "engineIp", "127.0.0.2");
-        verify(monitor).report(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, selectedTags, 128L);
-        verify(monitor).report(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, selectedTags, 1024L);
-        verify(monitor).report(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, selectedTags, 256L);
+        FlexMetricTags roleTags = FlexMetricTags.of("role", RoleType.PREFILL.name());
+        verify(monitor).report(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, roleTags, 128L);
+        verify(monitor).report(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, roleTags, 1024L);
+        verify(monitor).report(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, roleTags, 256L);
     }
 }
