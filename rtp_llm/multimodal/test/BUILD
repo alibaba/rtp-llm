@@ -98,6 +98,7 @@ py_test(
     deps = [
         "//rtp_llm:config",
         "//rtp_llm:multimodal",
+        "//rtp_llm:models",
         "//rtp_llm:safetensors",
         "//rtp_llm:testlib",
         "//rtp_llm:torch",

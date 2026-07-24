@@ -120,6 +120,24 @@ inline __device__ void convert_to_fp8(__hip_fp8x2_e4m3_fnuz* v, const uint32_t u
     *v                              = *reinterpret_cast<const __hip_fp8x2_e4m3_fnuz*>(&raw_fp8x2);
 }
 
+inline __device__ int get_rope_position_id(const RopeConfig& rope_config,
+                                           const int*        position_ids,
+                                           const int         token_idx,
+                                           const int         rotary_pair_idx) {
+    if (position_ids == nullptr) {
+        return -1;
+    }
+    int position_axis = 0;
+    if (rope_config.style == RopeStyle::Mrope) {
+        const int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
+        const int pair_idx = rotary_pair_idx % rope_dim;
+        position_axis      = pair_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2 ?
+                                 2 :
+                                 (pair_idx >= rope_config.mrope_dim1 ? 1 : 0);
+    }
+    return position_ids[token_idx * rope_config.index_factor + position_axis];
+}
+
 template<typename T, typename Tcache, bool PREFIX_PROMPT, bool USE_PAGED_FMHA, RopeStyle ROPE_STYLE>
 __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                            q_buf,
                                                               T*                            k_buf,
@@ -215,19 +233,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
             v      = add(v, v_bias);
         }
     }
-    int position_id = -1;
-    if (rope_config.style == RopeStyle::Mrope && position_ids) {
-        int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
-        int now_idx = tidx % rope_dim, now_dim = 0;
-        if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
-            now_dim = 2;
-        } else if (now_idx >= rope_config.mrope_dim1) {
-            now_dim = 1;
-        }
-        position_id = position_ids[token_idx * rope_config.index_factor + now_dim];
-    } else if (position_ids) {
-        position_id = position_ids[token_idx * rope_config.index_factor];
-    }
+    const int position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
     const int pre_len   = cu_seqlens[batch_idx];
     const int input_len = cu_seqlens[batch_idx + 1] - pre_len;
     context_rope<T, Vec_t, ROPE_STYLE>(rope_config,
@@ -849,19 +855,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
             v      = add(v, v_bias);
         }
     }
-    int position_id = -1;
-    if (rope_config.style == RopeStyle::Mrope && position_ids) {
-        int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
-        int now_idx = tidx % rope_dim, now_dim = 0;
-        if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
-            now_dim = 2;
-        } else if (now_idx >= rope_config.mrope_dim1) {
-            now_dim = 1;
-        }
-        position_id = position_ids[token_idx * rope_config.index_factor + now_dim];
-    } else if (position_ids) {
-        position_id = position_ids[token_idx * rope_config.index_factor];
-    }
+    const int position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
     const int pre_len   = cu_seqlens[batch_idx];
     const int input_len = cu_seqlens[batch_idx + 1] - pre_len;
     context_rope<T, Vec_t, ROPE_STYLE>(rope_config,
@@ -1200,7 +1194,7 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel_v1(T*                 
 
     // refer to the implementation of hipify decode attention
     const auto batch_beam_idx = blockIdx.y;
-    const int  position_id    = position_ids == nullptr ? -1 : position_ids[token_idx * rope_config.index_factor];
+    const int  position_id    = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
 
     const int input_len = (input_lengths == nullptr) ? 0 : input_lengths[batch_beam_idx];
     const int timestep  = tlength;
@@ -1360,7 +1354,7 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
 
     // refer to the implementation of hipify decode attention
     const auto batch_beam_idx = blockIdx.y;
-    const int  position_id    = position_ids == nullptr ? -1 : position_ids[token_idx * rope_config.index_factor];
+    const int  position_id    = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
 
     const int input_len = (input_lengths == nullptr) ? 0 : input_lengths[batch_beam_idx];
     const int timestep  = tlength;

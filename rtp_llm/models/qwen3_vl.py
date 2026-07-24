@@ -2,22 +2,10 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
-import torch
-import torch.library as tl
-from PIL import Image
-from transformers import AutoProcessor, Qwen3VLConfig, Qwen3VLVisionModel
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.qwen_v3 import QwenV3, QWenV3Weight
-
-if not hasattr(tl, "wrap_triton"):
-
-    def wrap_triton(fn):
-        return fn
-
-    tl.wrap_triton = wrap_triton
 
 
 class QWen3_VL(QwenV3):
@@ -105,12 +93,37 @@ class QWen3_VL(QwenV3):
         config.attn_config.rope_config.dim = config.attn_config.size_per_head
         config.layernorm_eps = text_config.get("rms_norm_eps", 1e-06)
         config.tie_word_embeddings = text_config.get("tie_word_embeddings", False)
-        config.config_dtype = text_config.get(
-            "dtype", text_config.get("torch_dtype", None)
-        )
+        config.config_dtype = text_config.get("dtype")
+        if config.config_dtype is None:
+            config.config_dtype = text_config.get("torch_dtype")
+
+        rope_scaling = text_config.get("rope_scaling")
+        if not isinstance(rope_scaling, dict):
+            raise ValueError(
+                "Qwen3-VL config.json text_config must contain rope_scaling"
+            )
+        mrope_section = rope_scaling.get("mrope_section", [16, 24, 24])
+        if (
+            not isinstance(mrope_section, (list, tuple))
+            or len(mrope_section) != 3
+            or any(
+                isinstance(section, bool)
+                or not isinstance(section, int)
+                or section <= 0
+                for section in mrope_section
+            )
+        ):
+            raise ValueError(
+                "Qwen3-VL text_config.rope_scaling.mrope_section must contain "
+                "three positive integers"
+            )
+        if sum(mrope_section) * 2 != config.attn_config.size_per_head:
+            raise ValueError(
+                "Qwen3-VL text_config.rope_scaling.mrope_section must cover "
+                "half of head_dim"
+            )
 
         config.attn_config.rope_config.style = 7
-        mrope_section = text_config["rope_scaling"].get("mrope_section", [16, 24, 24])
         config.attn_config.rope_config.index_factor = len(mrope_section)
         config.attn_config.rope_config.mrope_dim1 = mrope_section[0]
         config.attn_config.rope_config.mrope_dim2 = mrope_section[1]

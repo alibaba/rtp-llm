@@ -54,6 +54,8 @@ class Qwen3VLVisionConfig:
         ):
             raise TypeError("deepstack_visual_indexes must be a sequence of integers")
         indexes = tuple(raw_indexes)
+        if not indexes:
+            raise ValueError("deepstack_visual_indexes must contain at least one layer")
         if any(
             isinstance(index, bool) or not isinstance(index, int) for index in indexes
         ):
@@ -166,14 +168,34 @@ class Qwen3VisionPatchEmbed(RtpModule):
 class Qwen3VisionRotaryEmbedding(nn.Module):
     def __init__(self, dim: int, theta: float = 10000.0):
         super().__init__()
+        self.dim = dim
+        self.theta = theta
         inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def forward(self, seqlen: int) -> torch.Tensor:
+        # Match Transformers' device-context construction. CPU and accelerator
+        # pow implementations can differ by one ULP (notably on ROCm), so a
+        # buffer computed on CPU and later moved is not numerically equivalent
+        # to constructing the legacy vision module on its runtime device.
+        inv_freq = 1.0 / (
+            self.theta
+            ** (
+                torch.arange(
+                    0,
+                    self.dim,
+                    2,
+                    device=self.inv_freq.device,
+                    dtype=torch.float,
+                )
+                / self.dim
+            )
+        )
+        inv_freq = inv_freq.to(self.inv_freq.dtype)
         positions = torch.arange(
             seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
         )
-        return torch.outer(positions, self.inv_freq)
+        return torch.outer(positions, inv_freq)
 
 
 def _rotate_half(tensor: torch.Tensor) -> torch.Tensor:
@@ -438,6 +460,8 @@ class Qwen3VLVisionTransformer(RtpModule):
                 f"got {grid_thw.device}"
             )
 
+        # Materialize only the three shape scalars per item for validation and
+        # control flow. Per-patch interpolation stays tensorized below.
         values = [tuple(int(value) for value in row) for row in grid_thw.tolist()]
         for value in values:
             t, h, w = value
@@ -488,8 +512,8 @@ class Qwen3VLVisionTransformer(RtpModule):
     def _interpolated_position_embeddings(
         self, grid_values: list[tuple[int, int, int]]
     ) -> torch.Tensor:
-        index_lists: list[list[int]] = [[], [], [], []]
-        weight_lists: list[list[float]] = [[], [], [], []]
+        index_tensors: list[list[torch.Tensor]] = [[], [], [], []]
+        weight_tensors: list[list[torch.Tensor]] = [[], [], [], []]
         for _, h, w in grid_values:
             h_indexes = torch.linspace(0, self.num_grid_per_side - 1, h)
             w_indexes = torch.linspace(0, self.num_grid_per_side - 1, w)
@@ -515,11 +539,18 @@ class Qwen3VLVisionTransformer(RtpModule):
                 (delta_h[:, None] * delta_w[None]).flatten(),
             )
             for index in range(4):
-                index_lists[index].extend(indexes[index].tolist())
-                weight_lists[index].extend(weights[index].tolist())
+                index_tensors[index].append(indexes[index])
+                weight_tensors[index].append(weights[index])
 
-        index_tensor = torch.tensor(index_lists, dtype=torch.long, device=self.device)
-        weight_tensor = torch.tensor(weight_lists, dtype=self.dtype, device=self.device)
+        # Keep the Transformers-compatible CPU interpolation arithmetic, but
+        # concatenate tensors directly instead of synchronizing through
+        # per-element Python lists. Transfer each compact table only once.
+        index_tensor = torch.stack([torch.cat(values) for values in index_tensors]).to(
+            device=self.device, dtype=torch.long
+        )
+        weight_tensor = torch.stack(
+            [torch.cat(values) for values in weight_tensors]
+        ).to(device=self.device, dtype=self.dtype)
         position_embeddings = self.pos_embed(index_tensor) * weight_tensor[:, :, None]
         interpolated = (
             position_embeddings[0]
@@ -642,6 +673,19 @@ class Qwen3VLForVisionEmbedding(RtpModule):
                     # tensor through FP16 before converting it to the runtime dtype.
                     # Preserve that numerical contract so newloader and legacy
                     # inference produce the same BF16/FP32 features and tokens.
+                    if (
+                        target_dtype != torch.float16
+                        and tensor.dtype
+                        in (torch.bfloat16, torch.float32, torch.float64)
+                        and tensor.numel()
+                        and tensor.detach().abs().amax().item()
+                        > torch.finfo(torch.float16).max
+                    ):
+                        raise ValueError(
+                            f"Qwen3-VL vision weight {name!r} exceeds the "
+                            "FP16-compatible range required by the legacy "
+                            "staging contract"
+                        )
                     tensor = tensor.to(torch.float16).to(target_dtype)
                 yield name, tensor
 

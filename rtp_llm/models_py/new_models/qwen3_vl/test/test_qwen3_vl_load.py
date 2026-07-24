@@ -61,6 +61,8 @@ def _language_config():
         enable_fp32_lm_head=False,
         tie_word_embeddings=True,
         expert_num=0,
+        moe_k=0,
+        moe_style=0,
     )
 
 
@@ -271,14 +273,50 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
     def test_dense_language_ignores_runtime_ep_topology(self):
         with tempfile.TemporaryDirectory() as model_path:
             save_file(_language_weights(), f"{model_path}/model.safetensors")
-            model = NewModelLoader(
-                model_config=_language_config(),
-                load_config=_load_config(ep_size=2),
-                model_path=model_path,
-            ).load()
+            with self.assertLogs(
+                "rtp_llm.models_py.model_loader", level="WARNING"
+            ) as logs:
+                model = NewModelLoader(
+                    model_config=_language_config(),
+                    load_config=_load_config(ep_size=2),
+                    model_path=model_path,
+                ).load()
 
         self.assertIsInstance(model, Qwen3VLForCausalLM)
         torch.testing.assert_close(model.lm_head.weight, model.embed_tokens.weight)
+        self.assertTrue(
+            any("identify a dense model" in message for message in logs.output)
+        )
+        self.assertTrue(
+            any("model_type='qwen3_vl'" in message for message in logs.output)
+        )
+
+    def test_ep_rejects_zero_experts_when_moe_markers_are_enabled(self):
+        config = _language_config()
+        config.moe_k = 1
+        config.moe_style = 1
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(_language_weights(), f"{model_path}/model.safetensors")
+            with self.assertRaisesRegex(ValueError, "MoE model.*zero experts"):
+                NewModelLoader(
+                    model_config=config,
+                    load_config=_load_config(ep_size=2),
+                    model_path=model_path,
+                ).load()
+
+    def test_ep_rejects_known_moe_model_type_with_zero_experts(self):
+        config = _language_config()
+        config.model_type = "qwen3_vl_moe"
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(_language_weights(), f"{model_path}/model.safetensors")
+            with self.assertRaisesRegex(
+                ValueError, "model_type='qwen3_vl_moe'.*zero experts"
+            ):
+                NewModelLoader(
+                    model_config=config,
+                    load_config=_load_config(ep_size=2),
+                    model_path=model_path,
+                ).load()
 
     def test_language_forward_handles_text_only_input(self):
         class IdentityLayer(torch.nn.Module):
@@ -316,6 +354,85 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
             outputs = model(inputs, fmha_impl)
 
         torch.testing.assert_close(outputs.hidden_states, model.embed_tokens(input_ids))
+
+    def test_language_forward_injects_multimodal_features_and_deepstack(self):
+        class IdentityLayer(torch.nn.Module):
+            def forward(self, hidden_states, fmha_impl, kv_cache=None):
+                return hidden_states
+
+        class EmbeddingInjector:
+            def __init__(self):
+                self.input_at_mm_location = None
+
+            def __call__(self, hidden_states, features, locations):
+                loc = int(locations.item())
+                self.input_at_mm_location = hidden_states[loc].clone()
+                output = hidden_states.clone()
+                output[loc] = features[0]
+                return output
+
+        class DeepstackInjector:
+            def __init__(self):
+                self.calls = []
+
+            def __call__(self, hidden_states, deepstack, locations, layer_id):
+                self.calls.append((tuple(locations), layer_id))
+                output = hidden_states.clone()
+                output[locations[0]] += deepstack[layer_id]
+                return output
+
+        model = Qwen3VLForCausalLM.__new__(Qwen3VLForCausalLM)
+        torch.nn.Module.__init__(model)
+        model.embed_tokens = torch.nn.Embedding(8, 4)
+        with torch.no_grad():
+            model.embed_tokens.weight.copy_(
+                torch.arange(32, dtype=torch.float32).reshape(8, 4)
+            )
+        model.layers = torch.nn.ModuleList([IdentityLayer(), IdentityLayer()])
+        model.norm = torch.nn.Identity()
+        model.kv_cache = None
+        embedding_injector = EmbeddingInjector()
+        deepstack_injector = DeepstackInjector()
+        model.multimodal_embedding_injector = embedding_injector
+        model.multimodal_deepstack_injector = deepstack_injector
+
+        input_ids = torch.tensor([1, 99, 2])
+        text_mask = torch.tensor([True, False, True])
+        mm_feature = torch.tensor([10.0, 20.0, 30.0, 40.0])
+        mm_feature_locs = torch.tensor([1])
+        deepstack = [
+            torch.tensor([1.0, 2.0, 3.0, 4.0]),
+            torch.tensor([5.0, 6.0, 7.0, 8.0]),
+        ]
+        inputs = types.SimpleNamespace(
+            input_ids=input_ids,
+            embedding_inputs=types.SimpleNamespace(text_tokens_mask=text_mask),
+            multimodal_inputs=types.SimpleNamespace(
+                multimodal_features=[mm_feature],
+                mm_features_locs=mm_feature_locs,
+                mm_extra_input=[object()],
+            ),
+            attention_inputs=object(),
+        )
+        fmha_impl = types.SimpleNamespace(fmha_params=None)
+
+        with mock.patch(
+            "rtp_llm.models_py.new_models.qwen3_vl.model."
+            "reshape_extra_input_to_deepstack",
+            return_value=deepstack,
+        ), mock.patch(
+            "rtp_llm.models_py.new_models.qwen3_vl.model." "select_block_map_for_layer"
+        ) as select_block_map:
+            outputs = model(inputs, fmha_impl)
+
+        torch.testing.assert_close(
+            embedding_injector.input_at_mm_location, torch.zeros(4)
+        )
+        expected = model.embed_tokens(torch.tensor([1, 0, 2])).detach()
+        expected[1] = mm_feature + deepstack[0] + deepstack[1]
+        torch.testing.assert_close(outputs.hidden_states, expected)
+        self.assertEqual(deepstack_injector.calls, [((1,), 0), ((1,), 1)])
+        self.assertEqual(select_block_map.call_count, 2)
 
     def test_vision_loader_matches_independent_cpu_reference(self):
         torch.manual_seed(7)
@@ -404,6 +521,13 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "integer dtype"):
             model(torch.zeros(4, 8), torch.tensor([[1.0, 2.0, 2.0]]))
 
+    def test_vision_config_rejects_empty_deepstack_indexes(self):
+        config = _vision_model_config()
+        config["vision_config"] = dict(config["vision_config"])
+        config["vision_config"]["deepstack_visual_indexes"] = []
+        with self.assertRaisesRegex(ValueError, "at least one layer"):
+            Qwen3VLForVisionEmbedding(config, _load_config())
+
     def test_vision_loader_matches_legacy_fp16_staging_for_runtime_dtypes(self):
         torch.manual_seed(19)
         source = Qwen3VLForVisionEmbedding(
@@ -445,6 +569,22 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
                         loaded.visual.blocks[0].attn.qkv.weight,
                         before,
                     )
+
+    def test_vision_loader_rejects_fp16_staging_overflow(self):
+        source = Qwen3VLForVisionEmbedding(
+            _vision_model_config(), _load_config()
+        ).eval()
+        weights = _vision_checkpoint(source)
+        key = "model.visual.blocks.0.attn.qkv.weight"
+        weights[key] = torch.full_like(weights[key], 70000, dtype=torch.bfloat16)
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(weights, f"{model_path}/model.safetensors")
+            with self.assertRaisesRegex(ValueError, "FP16-compatible range"):
+                NewModelLoader(
+                    model_config=_vision_model_config(),
+                    load_config=_load_config(torch.bfloat16),
+                    model_path=model_path,
+                ).load()
 
 
 if __name__ == "__main__":

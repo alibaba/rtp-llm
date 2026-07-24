@@ -119,6 +119,27 @@ class MultimodalEmbeddingTest(TestCase):
             ):
                 self._run_deepstack_embedding_test(*params)
 
+    def test_partial_prefix_cache_moves_cpu_features_to_cuda(self):
+        embeddings = torch.zeros(5, 3, device="cuda", dtype=torch.float32)
+        feature = torch.arange(12, device="cpu", dtype=torch.float32).reshape(4, 3)
+        output = MultimodalEmbeddingInjector().cuda()(
+            embeddings, [feature], torch.tensor([-2], device="cuda")
+        )
+        expected = torch.zeros_like(embeddings)
+        expected[:2] = feature[2:].cuda()
+        self.assertEqual(output.device.type, "cuda")
+        torch.testing.assert_close(output, expected)
+
+        hidden = torch.zeros(5, 3, device="cuda", dtype=torch.float32)
+        deepstack = torch.arange(24, device="cpu", dtype=torch.float32).reshape(2, 4, 3)
+        output = MultimodalDeepstackInjector().cuda()(
+            hidden, [deepstack], torch.tensor([-1], device="cuda"), layer_id=1
+        )
+        expected = torch.zeros_like(hidden)
+        expected[:3] = deepstack[1, 1:].cuda()
+        self.assertEqual(output.device.type, "cuda")
+        torch.testing.assert_close(output, expected)
+
 
 if __name__ == "__main__":
     main()

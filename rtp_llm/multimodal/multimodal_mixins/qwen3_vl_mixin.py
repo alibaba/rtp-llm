@@ -4,7 +4,6 @@ import os
 from typing import Any, Dict, List, Optional
 
 import torch
-import torch.library as tl
 from PIL import Image
 from transformers import AutoProcessor, Qwen3VLConfig, Qwen3VLVisionModel
 
@@ -28,6 +27,7 @@ from rtp_llm.multimodal.vit_metrics import (
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
+from rtp_llm.utils.torch_compat import ensure_torch_library_wrap_triton
 
 default_attn_impl = "sdpa"
 try:
@@ -38,21 +38,21 @@ except Exception as e:
         f"initialize flash_attn failed, exception {e}, using sdpa attention in qwen2.5 vl vit"
     )
 
-if not hasattr(tl, "wrap_triton"):
-
-    def wrap_triton(fn):
-        return fn
-
-    tl.wrap_triton = wrap_triton
-
 
 class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
     def __init__(self, mm_related_params: VitParameters, visual=None):
+        # Some supported Torch releases do not expose wrap_triton. Initialize
+        # that process-wide compatibility only when Qwen3-VL vision is created,
+        # rather than as an import-time side effect.
+        ensure_torch_library_wrap_triton()
         self.mm_processor = AutoProcessor.from_pretrained(
             mm_related_params.config["ckpt_path"]
         )
         self._uses_new_loader_vision = visual is not None
         if visual is None:
+            # Keep AutoProcessor's native Qwen3-VL image processor. The old
+            # forced Qwen2-VL override changes the image grid for Qwen3-VL
+            # checkpoints (950 instead of 2752 tokens for the smoke image).
             config_hf = Qwen3VLConfig.from_pretrained(
                 mm_related_params.config["ckpt_path"]
             )
@@ -77,6 +77,8 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
             raise TypeError("Qwen3-VL vision embeddings must be a tensor")
         if not isinstance(deepstack_embeds, (list, tuple)):
             raise TypeError("Qwen3-VL deepstack features must be a sequence")
+        if not deepstack_embeds:
+            raise ValueError("Qwen3-VL deepstack features must not be empty")
         if not all(isinstance(item, torch.Tensor) for item in deepstack_embeds):
             raise TypeError("Qwen3-VL deepstack features must contain only tensors")
         return embeds, deepstack_embeds
@@ -211,12 +213,23 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
     def batched_embedding(
         self, data_list: List[Any], mm_types: List[MMUrlType], **kwargs
     ):
-        if not all(mm_type == MMUrlType.IMAGE for mm_type in mm_types):
-            return super().batched_embedding(data_list, mm_types, **kwargs)
+        if len(data_list) != len(mm_types):
+            raise ValueError(
+                f"data_list has {len(data_list)} entries but mm_types has "
+                f"{len(mm_types)}"
+            )
+        if not data_list:
+            return []
+        supported_types = {MMUrlType.DEFAULT, MMUrlType.IMAGE, MMUrlType.VIDEO}
+        for index, mm_type in enumerate(mm_types):
+            if mm_type not in supported_types:
+                raise ValueError(
+                    f"unsupported mm_types[{index}] for Qwen3-VL batching: {mm_type}"
+                )
         res_list = []
         pixel_values_list = []
         grid_thw_list = []
-        for data, mm_type in zip(data_list, mm_types):
+        for data in data_list:
             pixel_values_list.append(data[0])
             grid_thw_list.append(data[1])
         pixel_values = (
@@ -270,5 +283,4 @@ class Qwen3_VLMixin(Qwen2_5_VLMixin):
         return Qwen3_VLImageEmbedding(mm_related_params).visual
 
 
-register_multimodal_mixin(["qwen3_vl"], Qwen3_VLMixin)
-register_multimodal_mixin(["qwen3_vl_moe"], Qwen3_VLMixin)
+register_multimodal_mixin(["qwen3_vl", "qwen3_vl_moe"], Qwen3_VLMixin)
