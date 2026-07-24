@@ -54,6 +54,45 @@ public class FePool {
      * @throws IllegalStateException if the current snapshot has no endpoints at all.
      */
     public String next() {
+        List<String> pool = livePool();
+        return pool.get(Math.floorMod(cursor.getAndIncrement(), pool.size()));
+    }
+
+    /**
+     * Returns {@code count} FE base URLs for a single batch, advancing the shared cursor by exactly
+     * {@code count}. Resolves the liveness-filtered pool <em>once</em> (vs {@link #next()} per pick),
+     * so a large fanout — a {@code size:5} batch of 500 items splits into 100 chunks — no longer
+     * rebuilds and re-filters the FE snapshot per chunk. Per-pick semantics are identical to
+     * {@link #next()}: round-robin over the alive subset, or over the full snapshot when all dead.
+     * The returned list has exactly {@code count} elements (empty when {@code count <= 0}), so the
+     * caller can zip it 1:1 with its targets.
+     *
+     * @throws IllegalStateException if the current snapshot has no endpoints at all — thrown before
+     *     any pick, so an empty snapshot yields no partial assignment (all-or-nothing per batch).
+     */
+    public List<String> nextBatch(int count) {
+        if (count <= 0) {
+            return new ArrayList<>();
+        }
+        List<String> pool = livePool();
+        // Reserve a contiguous cursor block so concurrent batches interleave into disjoint ranges
+        // rather than contending pick-by-pick; floorMod tolerates the int wrap past MAX_VALUE.
+        int base = cursor.getAndAdd(count);
+        List<String> picks = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            picks.add(pool.get(Math.floorMod(base + i, pool.size())));
+        }
+        return picks;
+    }
+
+    /**
+     * The non-empty pool to round-robin over for this call: the alive subset, or — when every host
+     * is dead — the full snapshot (see class javadoc). Resolved from a fresh supplier snapshot on
+     * every call so upstream discovery owns freshness.
+     *
+     * @throws IllegalStateException if the snapshot has no endpoints at all.
+     */
+    private List<String> livePool() {
         List<String> snapshot = source.get();
         if (snapshot == null || snapshot.isEmpty()) {
             throw new IllegalStateException("no FE endpoints available");
@@ -68,7 +107,7 @@ public class FePool {
         }
         if (!alive.isEmpty()) {
             allDeadReported.set(false);
-            return alive.get(Math.floorMod(cursor.getAndIncrement(), alive.size()));
+            return alive;
         }
         // All dead — fall through to plain round-robin over the full snapshot. Log once per
         // outage so the operator knows the dispatcher is gambling rather than refusing,
@@ -77,6 +116,6 @@ public class FePool {
             Logger.warn("FE pool all-dead fallback: pool size={}, returning RR pick anyway "
                     + "(stale probe data is preferred over refusing service)", snapshot.size());
         }
-        return snapshot.get(Math.floorMod(cursor.getAndIncrement(), snapshot.size()));
+        return snapshot;
     }
 }

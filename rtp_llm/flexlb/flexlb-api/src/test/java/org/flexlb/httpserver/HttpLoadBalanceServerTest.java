@@ -117,7 +117,7 @@ class HttpLoadBalanceServerTest {
         when(batchScheduleCoordinator.schedule(batchRequest)).thenReturn(Mono.just(success));
 
         FePool pool = org.mockito.Mockito.mock(FePool.class);
-        when(pool.next()).thenReturn("http://fe-1", "http://fe-2");
+        when(pool.nextBatch(2)).thenReturn(java.util.List.of("http://fe-1", "http://fe-2"));
         when(fePoolProvider.getIfAvailable()).thenReturn(pool);
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
         when(lbStatusConsistencyService.isMaster()).thenReturn(true);
@@ -170,7 +170,7 @@ class HttpLoadBalanceServerTest {
         when(batchScheduleCoordinator.schedule(batchRequest)).thenReturn(Mono.just(success));
 
         FePool pool = org.mockito.Mockito.mock(FePool.class);
-        when(pool.next()).thenThrow(new IllegalStateException("no FE endpoints available"));
+        when(pool.nextBatch(1)).thenThrow(new IllegalStateException("no FE endpoints available"));
         when(fePoolProvider.getIfAvailable()).thenReturn(pool);
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
         when(lbStatusConsistencyService.isMaster()).thenReturn(true);

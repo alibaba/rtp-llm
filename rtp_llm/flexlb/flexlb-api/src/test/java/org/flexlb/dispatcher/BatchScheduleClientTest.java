@@ -115,7 +115,7 @@ class BatchScheduleClientTest {
                 new BatchScheduleTarget("10.0.0.2", 23840, 23841));
         when(coordinator.schedule(any())).thenReturn(Mono.just(BatchScheduleResponse.success(targets)));
         FePool pool = mock(FePool.class);
-        when(pool.next()).thenReturn("http://fe-1", "http://fe-2");
+        when(pool.nextBatch(2)).thenReturn(List.of("http://fe-1", "http://fe-2"));
         MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, true, true);
 
         BatchScheduleClient client = new BatchScheduleClient(coordinator, assigner);
@@ -162,7 +162,7 @@ class BatchScheduleClientTest {
         List<BatchScheduleTarget> targets = List.of(new BatchScheduleTarget("10.0.0.1", 23840, 23841));
         when(coordinator.schedule(any())).thenReturn(Mono.just(BatchScheduleResponse.success(targets)));
         FePool pool = mock(FePool.class);
-        when(pool.next()).thenReturn("http://fe-solo");
+        when(pool.nextBatch(1)).thenReturn(List.of("http://fe-solo"));
         MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, false, false);
 
         BatchScheduleClient client = new BatchScheduleClient(coordinator, assigner);

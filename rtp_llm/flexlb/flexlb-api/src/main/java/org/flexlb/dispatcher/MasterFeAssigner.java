@@ -78,11 +78,16 @@ public class MasterFeAssigner {
             return;
         }
         try {
-            for (BatchScheduleTarget target : targets) {
-                target.setFeUrl(pool.next());
+            // One snapshot for the whole batch: nextBatch returns exactly targets.size() urls (so the
+            // zip below is 1:1 by construction) or throws before assigning any — an empty snapshot
+            // leaves every target's fe_url null rather than stamping a prefix, keeping assignment
+            // all-or-nothing per batch.
+            List<String> feUrls = pool.nextBatch(targets.size());
+            for (int i = 0; i < targets.size(); i++) {
+                targets.get(i).setFeUrl(feUrls.get(i));
             }
         } catch (IllegalStateException e) {
-            // Expected operational failure, not a bug: FePool.next() throws IllegalStateException
+            // Expected operational failure, not a bug: FePool.nextBatch() throws IllegalStateException
             // when its snapshot is empty (an FE outage / discovery gap). It fires on every request
             // while the pool is empty, so throttle it. The affected chunks fail downstream with
             // CHUNK_NO_FE; the schedule (BE assignment already computed) is not aborted.

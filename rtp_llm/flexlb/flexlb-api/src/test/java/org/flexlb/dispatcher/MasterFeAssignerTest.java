@@ -75,8 +75,10 @@ class MasterFeAssignerTest {
 
     @Test
     void masterStampsEachTargetFromTheCursorInOrder() {
+        // One nextBatch(count) call feeds the whole batch: url[i] must land on target[i]. Mutation
+        // guard: zip the urls in reverse (or off by one) and the fe_url assignments swap.
         FePool pool = mock(FePool.class);
-        when(pool.next()).thenReturn("http://fe-1", "http://fe-2");
+        when(pool.nextBatch(2)).thenReturn(List.of("http://fe-1", "http://fe-2"));
         MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, true, true);
         BatchScheduleTarget a = target("10.0.0.1");
         BatchScheduleTarget b = target("10.0.0.2");
@@ -87,12 +89,12 @@ class MasterFeAssignerTest {
 
     @Test
     void emptyPoolSnapshotIsSwallowedLeavingFeUrlNull() {
-        // FePool.next() throws IllegalStateException when its snapshot is empty (FE outage). This is
-        // the expected operational failure: swallow (throttled WARN), leave fe_url null, do NOT
-        // abort the schedule — the chunk fails downstream with CHUNK_NO_FE. Mutation guard: remove
-        // the IllegalStateException catch and the exception aborts the whole schedule.
+        // FePool.nextBatch() throws IllegalStateException when its snapshot is empty (FE outage).
+        // This is the expected operational failure: swallow (throttled WARN), leave fe_url null, do
+        // NOT abort the schedule — the chunk fails downstream with CHUNK_NO_FE. Mutation guard:
+        // remove the IllegalStateException catch and the exception aborts the whole schedule.
         FePool pool = mock(FePool.class);
-        when(pool.next()).thenThrow(new IllegalStateException("no FE endpoints available"));
+        when(pool.nextBatch(1)).thenThrow(new IllegalStateException("no FE endpoints available"));
         MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, true, true);
         BatchScheduleTarget t = target("10.0.0.1");
         assertDoesNotThrow(() -> assigner.assign(List.of(t)));
@@ -100,21 +102,19 @@ class MasterFeAssignerTest {
     }
 
     @Test
-    void midLoopThrowKeepsAlreadyStampedTargetsAndNullsTheRest() {
-        // Stamping is not transactional: next() returns for the first target then throws on the
-        // second (e.g. the FE snapshot emptied mid-batch). The already-stamped target must keep its
-        // url; the rest stay null (those chunks fail CHUNK_NO_FE). Mutation guard: change assign to
-        // collect into a temp list and write back only on full success — the first target's fe_url
-        // would then come back null.
+    void emptyPoolLeavesEveryTargetNullWithNoPartialStamp() {
+        // nextBatch resolves the FE snapshot once and throws before any pick, so an empty pool
+        // assigns nothing rather than stamping a prefix: assignment is all-or-nothing per batch.
+        // Mutation guard: stamp inside a per-target loop that calls a throwing pick and the first
+        // target would come back partially stamped.
         FePool pool = mock(FePool.class);
-        when(pool.next()).thenReturn("http://fe-1")
-                .thenThrow(new IllegalStateException("no FE endpoints available"));
+        when(pool.nextBatch(2)).thenThrow(new IllegalStateException("no FE endpoints available"));
         MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, true, true);
         BatchScheduleTarget a = target("10.0.0.1");
         BatchScheduleTarget b = target("10.0.0.2");
         assertDoesNotThrow(() -> assigner.assign(List.of(a, b)));
-        assertEquals("http://fe-1", a.getFeUrl(), "the target stamped before the throw keeps its url");
-        assertNull(b.getFeUrl(), "the target after the throw stays null (chunk fails CHUNK_NO_FE)");
+        assertNull(a.getFeUrl(), "empty pool must stamp nothing (chunk fails CHUNK_NO_FE)");
+        assertNull(b.getFeUrl(), "empty pool must stamp nothing (chunk fails CHUNK_NO_FE)");
     }
 
     @Test
@@ -124,7 +124,7 @@ class MasterFeAssignerTest {
         // computed BE assignment is not lost. fe_url stays null → chunk fails CHUNK_NO_FE. Mutation
         // guard: narrow the second catch away and this propagates out of assign().
         FePool pool = mock(FePool.class);
-        when(pool.next()).thenThrow(new IllegalArgumentException("unexpected"));
+        when(pool.nextBatch(1)).thenThrow(new IllegalArgumentException("unexpected"));
         MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, true, true);
         BatchScheduleTarget t = target("10.0.0.1");
         assertDoesNotThrow(() -> assigner.assign(List.of(t)));
