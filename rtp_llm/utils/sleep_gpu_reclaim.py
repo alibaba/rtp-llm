@@ -40,39 +40,56 @@ def _clear_module_device_caches() -> list[str]:
     and is therefore opt-in.
     """
     notes: list[str] = []
-    # MegaMoE per-token output staging buffer: a plain torch.empty tensor cached at
-    # module scope, recreated lazily on the next MoE forward (wake warmup).
     try:
         from rtp_llm.models_py.modules.dsv4.moe import mega_buf
 
-        n, freed = mega_buf.release_mega_output_buffers()
-        if n:
-            notes.append(f"mega_output_cache released ({n} entries, ~{freed:.3f} GiB)")
-        # MegaMoE symmetric-memory buffer (~4.4 GiB/rank). Its cross-rank state
-        # (CUDA multicast binding + peer P2P imports, keyed to the physical VMM
-        # handle) cannot be VMM-paused at a fixed VA -- a pause/resume would break
-        # the bindings, so releasing it requires a full destroy + re-rendezvous on
-        # wake. Opt-in via RTP_LLM_SLEEP_FREE_MEGA_SYMM=1: destroy at sleep, lazily
-        # re-create (collective rendezvous, run in lockstep) on the first post-wake
-        # forward. Default off: keep it resident (safe, no wake-side collective).
+        # The two Mega MoE device buffers -- the symmetric-memory dispatch buffer
+        # (``_mega_buf``, ~4.4 GiB/rank) and the bf16 output staging buffer
+        # (``_mega_y``) -- both feed the same MoE kernel and have their pointers
+        # baked into the same captured decode graph, so they are ONE coupled unit:
+        # released together or kept together. Release is a single opt-in switch,
+        # ``RTP_LLM_SLEEP_FREE_MEGA_SYMM=1`` -- ``release_mega_symm_buffers()`` drops
+        # the symm buffer AND the output buffer (destroy + collective re-rendezvous
+        # lazily on the first post-wake forward, run in lockstep). The symm buffer's
+        # cross-rank state (CUDA multicast binding + peer P2P imports, keyed to the
+        # physical VMM handle) cannot be VMM-paused at a fixed VA, which is why the
+        # release is opt-in rather than automatic.
+        #
+        # Hard safety interlock: when the forward is captured into a CUDA graph both
+        # buffers MUST stay resident across sleep/wake -- freeing a baked buffer
+        # dangles the VA a post-wake replay writes into (illegal access on every
+        # rank -> abort), and the graph replay never runs Python so the lazy
+        # re-create cannot fire. ``mega_buffers_graph_baked()`` keeps them resident
+        # unconditionally in that mode, making the crash impossible-by-construction
+        # even if the env is set on a graph engine by mistake (see mega_buf).
+        graph_baked = mega_buf.mega_buffers_graph_baked()
+        output_gib = mega_buf.mega_output_buffer_gib()
         symm = 0.0
-        for key, buf in getattr(mega_buf, "_MEGA_BUF_CACHE", {}).items():
+        for _key, buf in getattr(mega_buf, "_MEGA_BUF_CACHE", {}).items():
             try:
                 symm += buf.buffer.numel() * buf.buffer.element_size()
             except Exception:
                 pass
-        if os.environ.get("RTP_LLM_SLEEP_FREE_MEGA_SYMM", "0") == "1":
+        symm_gib = symm / _GiB
+
+        if graph_baked:
+            notes.append(
+                f"mega buffers kept ~{output_gib:.3f} GiB output + ~{symm_gib:.3f} GiB "
+                "symm (baked into CUDA graph)"
+            )
+        elif os.environ.get("RTP_LLM_SLEEP_FREE_MEGA_SYMM", "0") == "1":
             try:
                 freed = mega_buf.release_mega_symm_buffers()
                 notes.append(
-                    f"mega_symm_buffer RELEASED ~{freed:.3f} GiB "
-                    "(destroy+recreate; re-rendezvous on next forward)"
+                    f"mega buffers RELEASED ~{freed:.3f} GiB symm + ~{output_gib:.3f} GiB "
+                    "output (destroy+recreate; re-rendezvous on next forward)"
                 )
             except Exception as e:
-                notes.append(f"mega_symm_buffer release failed: {e}")
-        elif symm:
+                notes.append(f"mega buffers release failed: {e}")
+        else:
             notes.append(
-                f"mega_symm_buffer kept ~{symm / _GiB:.3f} GiB (symmetric-mem, not torch pool)"
+                f"mega buffers kept ~{output_gib:.3f} GiB output + ~{symm_gib:.3f} GiB "
+                "symm (RTP_LLM_SLEEP_FREE_MEGA_SYMM not set)"
             )
     except Exception as e:  # module may be absent on non-dsv4 models
         notes.append(f"mega_buf cache skip: {e}")

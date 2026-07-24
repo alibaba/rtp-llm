@@ -32,6 +32,51 @@ _MEGA_OUTPUT_CACHE: dict = {}
 # reclaim reach them without keeping them alive. See ``release_mega_symm_buffers``.
 _MEGA_STRATEGY_REGISTRY: "weakref.WeakSet" = weakref.WeakSet()
 
+# Set True when this engine captures its decode forward into a CUDA graph.
+#
+# Both Mega MoE device buffers -- the symmetric-memory dispatch buffer
+# (``_mega_buf``) and the bf16 output staging buffer (``_mega_y``) -- are cached
+# at module scope and read directly by the MoE kernel, so their device pointers
+# get BAKED into the captured graph. A CUDA graph is REPLAYED after wake, and
+# Python does not run during replay, so the lazy re-create in
+# ``_ensure_mega_buffers`` never fires. If sleep freed either buffer (drop ref +
+# ``empty_cache`` returns the segment to the driver, unmapping the VA), the first
+# post-wake decode replay writes into a dangling VA -> illegal access on every
+# rank. The sticky CUDA error then surfaces at the async output dispatch and
+# escalates to ``std::terminate`` (SIGABRT).
+#
+# So when graphs are captured, both buffers must stay resident at a stable VA
+# across sleep/wake. Without graphs (e.g. the prefill role) the buffers are
+# recreated eagerly on every forward, so freeing them at sleep is safe -- and for
+# the output buffer worthwhile, since a large-context prefill sizes it into GBs.
+_MEGA_BUFFERS_GRAPH_BAKED: bool = False
+
+
+def set_mega_buffers_graph_baked(enabled: bool) -> None:
+    """Record whether this engine captures CUDA graphs (see the flag docstring).
+
+    Called once at model setup from the config's ``enable_cuda_graph``. When set,
+    the sleep-time buffer releases below become no-ops so the graph-baked device
+    pointers stay valid across the wake boundary.
+    """
+    global _MEGA_BUFFERS_GRAPH_BAKED
+    _MEGA_BUFFERS_GRAPH_BAKED = bool(enabled)
+
+
+def mega_buffers_graph_baked() -> bool:
+    return _MEGA_BUFFERS_GRAPH_BAKED
+
+
+def mega_output_buffer_gib() -> float:
+    """Best-effort resident size of the Mega MoE output staging buffer(s)."""
+    total = 0
+    for buf in _MEGA_OUTPUT_CACHE.values():
+        try:
+            total += buf.numel() * buf.element_size()
+        except Exception:
+            pass
+    return total / (1024**3)
+
 
 def _register_mega_strategy(strategy) -> None:
     """Track a live Mega MoE strategy so its per-layer buffer refs can be dropped
@@ -70,8 +115,12 @@ def iter_mega_strategies() -> list:
 def release_mega_output_buffers() -> tuple[int, float]:
     """Drop per-layer refs to the shared bf16 output staging buffer.
 
-    Returns ``(cache_entries, GiB)`` for sleep-reclaim diagnostics.
+    Returns ``(cache_entries, GiB)`` for sleep-reclaim diagnostics. A no-op when
+    CUDA graphs are captured (the buffer's pointer is baked into the graph and
+    must stay resident across sleep/wake -- see ``_MEGA_BUFFERS_GRAPH_BAKED``).
     """
+    if _MEGA_BUFFERS_GRAPH_BAKED:
+        return 0, 0.0
     freed_bytes = 0
     for buf in _MEGA_OUTPUT_CACHE.values():
         try:
@@ -103,7 +152,13 @@ def release_mega_symm_buffers() -> float:
     first forward after wake via ``MegaStrategy._ensure_mega_buffers`` -- that
     path runs ``symm_mem.rendezvous`` (a collective), which is safe because all
     ranks execute the same MoE layer's forward in lockstep, exactly as at init.
+
+    A no-op when CUDA graphs are captured: the symm buffer's pointer is baked into
+    the graph, and a graph replay after wake would deref the destroyed buffer
+    (Python's re-create never runs during replay). See ``_MEGA_BUFFERS_GRAPH_BAKED``.
     """
+    if _MEGA_BUFFERS_GRAPH_BAKED:
+        return 0.0
     freed_bytes = 0.0
     for buf in _MEGA_BUF_CACHE.values():
         try:

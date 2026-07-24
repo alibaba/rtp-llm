@@ -37,7 +37,10 @@ _TMS_MODULE = "torch_memory_saver"
 def _tms_torch_mode_available() -> bool:
     if not torch.cuda.is_available():
         return False
-    # TorchMemorySaver refuses to run with expandable_segments (see _sanity_checks).
+    # This test constructs TorchMemorySaver directly (bypassing weights_region's
+    # expandable_segments normalization), so its _sanity_checks would refuse to
+    # run under expandable_segments. The coexistence path itself is covered
+    # GPU-free by ExpandableCoexistenceTest in weight_memory_saver_test.py.
     if "expandable_segments:True" in os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""):
         return False
     try:

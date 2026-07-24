@@ -19,6 +19,13 @@ low-level developer override for isolated memory-saver tests. When the switch
 is off or the package is unavailable, every API in this module degrades to a
 no-op so production startup paths are unaffected.
 
+``expandable_segments:True`` can be requested alongside sleep mode, but it is
+kept OFF through the whole init path (weight load + KV arena allocation + KV MR
+registration) so those land at low, RDMA-registerable virtual addresses, and is
+turned on only after the engine is ready so runtime forward buffers still get
+the fragmentation benefit -- see :func:`_prepare_expandable_coexistence` and
+:func:`enable_runtime_expandable`.
+
 Coverage checklist (weight tensors that must land inside ``weights_region``)
 ----------------------------------------------------------------------------
 - [covered] Main ``ModelWeights`` incl. quantization scales/zeros:
@@ -89,6 +96,23 @@ _model_scope = threading.local()
 # the threadlocal (exact, when build and registration share a thread) and falls
 # back to this global (cross-thread build).
 _model_scope_global: Any = None
+
+# Expandable-segments coexistence (see _prepare_expandable_coexistence).
+_EXPANDABLE_KEY: str = "expandable_segments"
+_expandable_prepared: bool = False
+# The user requested expandable_segments:True, but we defer turning it on until
+# after startup (see _prepare_expandable_coexistence / enable_runtime_expandable).
+_expandable_requested: bool = False
+# expandable_segments is currently live (only true after enable_runtime_expandable).
+_expandable_active: bool = False
+# The *live* torch caching-allocator expandable_segments state, mirrored from
+# every _set_expandable_segments() call. Distinct from _expandable_active (which
+# latches True for the whole runtime): this tracks the instantaneous setting,
+# so it correctly reads False inside an expandable_segments_disabled() block.
+# assert_pausable_alloc_safe() reads it to catch a sleep-persistent allocation
+# about to happen while expandable is on.
+_expandable_live: bool = False
+_expandable_base_conf: str = ""
 
 
 @contextmanager
@@ -270,6 +294,211 @@ def is_paused() -> bool:
     return _paused
 
 
+def _alloc_conf_without_expandable(conf: str) -> str:
+    """Drop the ``expandable_segments`` key from a PYTORCH_CUDA_ALLOC_CONF string,
+    preserving all other comma-separated ``key:value`` settings."""
+    kept = [
+        part.strip()
+        for part in conf.split(",")
+        if part.strip() and not part.strip().startswith(_EXPANDABLE_KEY + ":")
+    ]
+    return ",".join(kept)
+
+
+def _set_expandable_segments(enabled: bool) -> None:
+    """Flip the *live* torch caching-allocator ``expandable_segments`` setting,
+    keeping any other allocator settings intact.
+
+    Applies to future segments only; existing segments keep their nature.
+    Prefers the current ``torch._C._accelerator_setAllocatorSettings`` and falls
+    back to the deprecated ``torch.cuda.memory._set_allocator_settings``.
+    """
+    import torch
+
+    setting = f"{_EXPANDABLE_KEY}:{'True' if enabled else 'False'}"
+    full = f"{_expandable_base_conf},{setting}" if _expandable_base_conf else setting
+    setter = getattr(torch._C, "_accelerator_setAllocatorSettings", None)
+    if setter is not None:
+        setter(full)
+    else:
+        torch.cuda.memory._set_allocator_settings(full)
+    # Mirror the applied setting so assert_pausable_alloc_safe() has a reliable
+    # live view (only reached on setter success; a raising setter leaves the
+    # previous value, which matches the un-applied reality).
+    global _expandable_live
+    _expandable_live = enabled
+
+
+def _prepare_expandable_coexistence() -> None:
+    """Let ``expandable_segments:True`` coexist with the torch_memory_saver pool.
+
+    torch_memory_saver routes weight allocations through a private
+    ``torch.cuda.MemPool`` backed by a CUDA-VMM pluggable allocator so pages can
+    be unmapped on sleep. That pool is incompatible with expandable segments
+    (pytorch/pytorch#147851), and torch_memory_saver enforces it by *raising* at
+    init when ``PYTORCH_CUDA_ALLOC_CONF`` requests expandable segments -- forcing
+    the whole process to choose one or the other.
+
+    Following vllm-project/vllm#40812 we strip ``expandable_segments`` out of the
+    env var so the torch_memory_saver sanity check passes, but -- unlike vllm --
+    we do NOT re-apply it live yet. Enabling expandable during init lets torch's
+    cuMem segments reserve the low virtual-address range while weights load;
+    the (correctly non-expandable) torch_memory_saver KV arena is then pushed to
+    a high VA where a plain nv_peer_mem ``ibv_reg_mr`` (PD/RDMA cache-store MR
+    registration, no dmabuf) EFAULTs. So we keep expandable OFF through the whole
+    init path -- weight load, KV arena allocation, and KV MR registration all
+    land at low, registerable VA -- and only turn it on afterwards via
+    :func:`enable_runtime_expandable`, once no more RDMA-registered buffers are
+    allocated. Runtime/forward activation buffers then still get the
+    fragmentation benefit. Runs once per process; a no-op unless expandable
+    segments were actually requested.
+
+    Workaround note: this deferral exists only because expandable segments and
+    the torch_memory_saver MemPool cannot currently coexist for RDMA-registered
+    VMM memory. If a future torch supports expandable inside a pluggable MemPool
+    (pytorch/pytorch#147851), the deferral can be dropped and expandable applied
+    live from here.
+    """
+    global _expandable_prepared, _expandable_requested, _expandable_base_conf
+    if _expandable_prepared:
+        return
+    _expandable_prepared = True
+
+    conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+    if f"{_EXPANDABLE_KEY}:True" not in conf:
+        return
+
+    _expandable_base_conf = _alloc_conf_without_expandable(conf)
+    # Remove it from the env so torch_memory_saver._sanity_checks() (which reads
+    # the env var, not the live setting) does not refuse to initialize, and so
+    # torch does not pick it up when the caching allocator initializes.
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = _expandable_base_conf
+    _expandable_requested = True
+    # Actively force the live setting OFF as well: if the caching allocator has
+    # already parsed the env (e.g. an earlier torch.cuda call latched
+    # expandable_segments:True), stripping the env alone would not undo it. This
+    # makes the init phase non-expandable regardless of allocator-init timing.
+    try:
+        _set_expandable_segments(False)
+    except Exception:
+        # Setter unavailable this early: the env strip above still prevents the
+        # allocator from turning expandable on when it first parses the config.
+        logging.warning(
+            "WeightMemorySaver: could not force expandable_segments off at init; "
+            "relying on the stripped env var instead",
+            exc_info=True,
+        )
+    logging.info(
+        "WeightMemorySaver: expandable_segments requested alongside sleep mode; "
+        "deferred until after startup so weights/KV land at low registerable VA "
+        "(see pytorch/pytorch#147851, vllm-project/vllm#40812)"
+    )
+
+
+def prepare_expandable_coexistence() -> None:
+    """Public entry to normalize expandable_segments before CUDA initializes.
+
+    Call once at process start (before any ``torch.cuda`` allocation) so the env
+    var is stripped and expandable is forced off ahead of the caching-allocator
+    init. Idempotent and a no-op unless ``expandable_segments:True`` was requested
+    with sleep mode. ``weights_region`` also calls the internal helper, so this
+    early call only tightens the timing; it is safe to skip on paths that do not
+    touch CUDA early."""
+    if not is_enabled():
+        return
+    _prepare_expandable_coexistence()
+
+
+def enable_runtime_expandable() -> None:
+    """Turn expandable_segments on for the remaining (runtime) allocations.
+
+    Call once the engine is ready -- after weights are loaded and the KV cache
+    arena has been allocated and RDMA-registered. Applies to future segments
+    only, so the already-resident weights and KV arena keep their low-VA
+    non-expandable form (and stay registerable), while per-forward activation
+    buffers allocated from here on get the expandable fragmentation benefit.
+
+    No-op unless ``expandable_segments:True`` was requested and successfully
+    deferred by :func:`_prepare_expandable_coexistence`.
+    """
+    global _expandable_active
+    if not _expandable_requested or _expandable_active:
+        return
+    try:
+        _set_expandable_segments(True)
+        _expandable_active = True
+        logging.info(
+            "WeightMemorySaver: enabled expandable_segments live for runtime "
+            "allocations (engine ready; weights + KV already registered)"
+        )
+    except Exception:
+        # Setter unavailable: keep running with expandable off (safe -- matches
+        # the init state) rather than leave a half-applied setting.
+        logging.warning(
+            "WeightMemorySaver: could not enable expandable_segments post-startup; "
+            "continuing with expandable_segments disabled",
+            exc_info=True,
+        )
+
+
+@contextmanager
+def expandable_segments_disabled() -> Iterator[None]:
+    """Disable expandable segments for the duration of a torch_memory_saver pool
+    allocation, restoring the previous setting on exit. No-op unless coexistence
+    is active (see :func:`_prepare_expandable_coexistence`).
+
+    Used both for weight-region allocations (keep weights non-expandable) and by
+    the level-2 wake reload (:meth:`WeightManager.reload_weights_from_loader`),
+    which streams checkpoint transients and re-derives computed weights: those
+    must NOT land in expandable segments, because an expandable-segment tensor
+    read/written across the torch_memory_saver pause/resume boundary comes back
+    with corrupted contents (silent -- coverage counts stay correct but the
+    values are wrong -> garbage post-wake output). Forcing the whole wake weight
+    path non-expandable matches the verified-correct expandable-off wake while
+    leaving runtime forward buffers expandable for the fragmentation benefit."""
+    if not _expandable_active:
+        yield
+        return
+    _set_expandable_segments(False)
+    try:
+        yield
+    finally:
+        _set_expandable_segments(True)
+
+
+def assert_pausable_alloc_safe(where: str) -> None:
+    """Fail loudly if a sleep-persistent allocation is about to happen while
+    expandable_segments is live.
+
+    WHY (this is the corruption the guard exists to prevent): torch_memory_saver
+    sleep unmaps the physical pages of the ``weights`` region and remaps fresh
+    pages at the same virtual address on wake. A tensor that lives in a torch
+    *expandable* cuMem segment and is read or written across that pause/resume
+    boundary comes back with the WRONG bytes -- and does so SILENTLY: the
+    tensor's address, shape, dtype and any coverage/count logs all stay correct,
+    only the values are corrupt. The failure therefore does not surface at
+    allocation, at sleep, or at wake; it surfaces much later as garbage model
+    output, with nothing in between to point at the cause. (Observed on DSV4 L2
+    wake: reload ``copy_`` sources and re-derive scratch had landed in expandable
+    segments -> post-wake output was garbled while every count said 1480/1480 OK.)
+
+    Any allocation whose contents must survive a sleep -- weight-region tensors,
+    and the transient sources/scratch the wake reload copies FROM -- must be made
+    with expandable off (see :func:`expandable_segments_disabled`). This guard
+    turns that latent, near-undebuggable data corruption into an immediate,
+    located ``RuntimeError`` at the offending allocation site. No-op unless
+    expandable coexistence is active.
+    """
+    if _expandable_live:
+        raise RuntimeError(
+            f"[WeightMemorySaver] refusing a sleep-persistent allocation at {where!r} "
+            "while expandable_segments is live. Tensors read/written across the "
+            "torch_memory_saver pause/resume boundary in expandable segments come "
+            "back silently corrupted (correct shape/counts, wrong values -> garbage "
+            "post-wake output). Wrap the allocation in expandable_segments_disabled()."
+        )
+
+
 @contextmanager
 def weights_region() -> Iterator[None]:
     """Context manager registering CUDA allocations as pausable weight memory.
@@ -280,8 +509,13 @@ def weights_region() -> Iterator[None]:
     """
     # Explicitly suppressed on this thread (e.g. level-2 wake reload): the
     # resident weights already occupy their VA, so nothing allocated now should
-    # join the region -- see suppress_weights_region().
+    # join the region -- see suppress_weights_region(). Suppression bypasses the
+    # expandable_segments_disabled() guard below, so these transient allocations
+    # are only safe if the CALLER already disabled expandable (the wake reload
+    # does). Assert it: allocating reload scratch here with expandable live would
+    # silently corrupt it across the resume boundary (see assert_pausable_alloc_safe).
     if getattr(_region_suppressed, "value", False):
+        assert_pausable_alloc_safe("weights_region(suppressed)")
         yield
         return
 
@@ -298,6 +532,10 @@ def weights_region() -> Iterator[None]:
         finally:
             _region_depth.value = getattr(_region_depth, "value", 1) - 1
         return
+
+    # Normalize expandable_segments before torch_memory_saver initializes on the
+    # first tms.region() below (must run before its env-var sanity check).
+    _prepare_expandable_coexistence()
 
     # Drop cached allocator blocks so weight tensors cannot be served from
     # physically-backed cache blocks allocated *before* this region (those
@@ -318,8 +556,18 @@ def weights_region() -> Iterator[None]:
     enable_cpu_backup = sleep_mode_level() != 2
     _region_depth.value = 1
     try:
-        with tms.region(tag=WEIGHTS_TAG, enable_cpu_backup=enable_cpu_backup):
-            yield
+        # Keep weights non-expandable. During init this is already the case
+        # (expandable is deferred, see _prepare_expandable_coexistence); this
+        # guard matters only for weights allocated after enable_runtime_expandable
+        # (e.g. dynamic LoRA), which must stay out of expandable segments.
+        with expandable_segments_disabled():
+            # Self-check: the disable above must have actually taken effect
+            # (a silently-failed setter, or enable_runtime_expandable() firing too
+            # early in a future regression, would leave expandable live and let
+            # these weight pages corrupt across the first sleep/wake).
+            assert_pausable_alloc_safe("weights_region")
+            with tms.region(tag=WEIGHTS_TAG, enable_cpu_backup=enable_cpu_backup):
+                yield
     finally:
         _region_depth.value = 0
 
@@ -425,9 +673,16 @@ def resume_weights() -> bool:
 def _reset_for_testing() -> None:
     """Reset module-level caches/state. Test-only helper."""
     global _tms, _import_attempted, _paused, _enabled_override
+    global _expandable_prepared, _expandable_requested, _expandable_active
+    global _expandable_base_conf, _expandable_live
     with _lock:
         _tms = None
         _import_attempted = False
         _paused = False
         _enabled_override = None
+        _expandable_prepared = False
+        _expandable_requested = False
+        _expandable_active = False
+        _expandable_live = False
+        _expandable_base_conf = ""
     _region_depth.value = 0

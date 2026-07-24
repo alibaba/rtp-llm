@@ -16,6 +16,7 @@ from rtp_llm.config.sleep_mode_compatibility import (
 from rtp_llm.distribute.distributed_server import DistributedServer, get_world_info
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
+from rtp_llm.model_loader.weight_memory_saver import enable_runtime_expandable
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
 from rtp_llm.ops import TaskType, VitSeparation
 from rtp_llm.utils.concurrency_controller import get_global_controller
@@ -158,6 +159,15 @@ class BackendManager(object):
             "engine created successfully: self.engine.task_type=%s",
             self.engine.task_type,
         )
+
+        # Engine is ready: weights are loaded and the KV cache arena has been
+        # allocated and (for PD/RDMA) MR-registered -- RtpLLMOp.init() blocks on
+        # is_server_ready_, so from_model_configs above does not return until the
+        # cache-store MR registration on the grpc init thread has finished. Only
+        # now turn on expandable_segments (deferred through init so weights + KV
+        # land at low, registerable VA); runtime forward buffers get the benefit.
+        # No-op unless expandable_segments:True was requested with sleep mode.
+        enable_runtime_expandable()
 
     def serve_forever(self):
         """Enter service loop to keep the process alive until shutdown is requested"""

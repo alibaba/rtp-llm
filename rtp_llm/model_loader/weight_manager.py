@@ -10,6 +10,7 @@ import torch
 from rtp_llm.config.sleep_mode_compatibility import reject_dynamic_weight_update
 from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.model_loader.weight_memory_saver import expandable_segments_disabled
 from rtp_llm.model_loader.weight_memory_saver import is_enabled as sleep_mode_enabled
 from rtp_llm.model_loader.weight_memory_saver import (
     sleep_mode_level,
@@ -486,7 +487,18 @@ class WeightManager:
         # that stick (growing with weight count) and OOM the KV-cache resume -- the
         # same failure prepare_weights_fastsafetensor(in_weights_region=False) fixes
         # for the fast path.
-        with self._lock, suppress_weights_region():
+        # expandable_segments_disabled: the reload streams checkpoint tensors as
+        # copy_ SOURCES (fastsafetensors shards / dequant / TP-split intermediates)
+        # and copies them into the resident weights. suppress_weights_region keeps
+        # those transients out of the torch_memory_saver weights region, but with
+        # runtime expandable_segments enabled they would otherwise land in torch
+        # expandable segments -- and a tensor read/written across the tms
+        # pause/resume boundary comes back CORRUPTED (silent: coverage stays
+        # correct, values are wrong -> garbage output after wake). Force the whole
+        # reload non-expandable so the copy_ sources are plain, driver-backed
+        # allocations, matching the verified-correct expandable-off wake. No-op
+        # unless expandable coexistence is active.
+        with self._lock, suppress_weights_region(), expandable_segments_disabled():
             with torch.cuda.stream(self._working_stream), torch.inference_mode():
                 for layer_id, name, tensor in source:
                     seen += 1
@@ -696,7 +708,9 @@ class WeightManager:
                 pass
         # Re-derive DSV4 computed weights blanked by the level-2 resume. Most Mega
         # layers were already re-derived in-loop when their six raws completed;
-        # only incomplete layers plus the compressors remain.
+        # only incomplete layers plus the compressors remain. This runs outside
+        # suppress_weights_region so fresh buffers are tagged as weights for the
+        # next sleep, and before KV-cache resume while full headroom is available.
         if mega_by_layer:
             logging.info(
                 "reload_weights_from_loader: in-loop mega rederive %d/%d layers, "
@@ -713,9 +727,12 @@ class WeightManager:
             for layer_id, strategy in mega_by_layer.items()
             if layer_id not in mega_done
         }
-        self._rederive_dsv4_computed_weights(
-            mega_remaining, mega_acc, mega_routed_keys, compressors
-        )
+        # Keep the fallback transform non-expandable for the same TMS corruption
+        # reason as the reload loop above.
+        with expandable_segments_disabled():
+            self._rederive_dsv4_computed_weights(
+                mega_remaining, mega_acc, mega_routed_keys, compressors
+            )
         if pending:
             sample = sorted(str(k) for k in pending)[:10]
             raise RuntimeError(
