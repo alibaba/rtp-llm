@@ -168,3 +168,13 @@ register_lazy_model(
     "rtp_llm.models_py.new_models.qwen2_vl.vision",
     "Qwen2VLForVisionEmbedding",
 )
+register_lazy_model(
+    "qwen3_vl",
+    "rtp_llm.models_py.new_models.qwen3_vl",
+    "Qwen3VLForCausalLM",
+)
+register_lazy_model(
+    "qwen3_vl_vision",
+    "rtp_llm.models_py.new_models.qwen3_vl.vision",
+    "Qwen3VLForVisionEmbedding",
+)
