@@ -17,6 +17,7 @@ import org.springframework.http.codec.HttpMessageWriter;
 import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
 import org.springframework.mock.web.reactive.function.server.MockServerRequest;
 import org.springframework.mock.web.server.MockServerWebExchange;
+import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.server.EntityResponse;
 import org.springframework.web.reactive.function.server.HandlerStrategies;
@@ -33,6 +34,10 @@ import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 @Timeout(30)
 class PassthroughClientTest {
@@ -218,6 +223,49 @@ class PassthroughClientTest {
                             "502 body must not leak exception class text: " + body);
                 })
                 .verifyComplete();
+    }
+
+    @Test
+    void assemblyFailureAfterHeadersReleasesFeBodyAndReturns502() {
+        // exchange() defers FE connection release to body consumption at writeTo time. If building
+        // the passthrough ServerResponse throws AFTER FE headers arrive (e.g. copyEndToEnd chokes on
+        // a pathological header set), the body is never handed to a self-releasing consumer, so that
+        // non-consuming exit must release it explicitly or the pooled connection leaks. Drive the
+        // real catch branch by injecting a ClientResponse whose header copy throws, and assert both
+        // the shared 502 envelope and that releaseBody() was actually subscribed.
+        AtomicBoolean released = new AtomicBoolean(false);
+        ClientResponse.Headers headers = mock(ClientResponse.Headers.class);
+        when(headers.asHttpHeaders()).thenThrow(new RuntimeException("boom copying FE headers"));
+        ClientResponse feResponse = mock(ClientResponse.class);
+        when(feResponse.rawStatusCode()).thenReturn(200);
+        when(feResponse.headers()).thenReturn(headers);
+        when(feResponse.releaseBody()).thenReturn(Mono.<Void>fromRunnable(() -> released.set(true)));
+
+        WebClient webClient = WebClient.builder()
+                .exchangeFunction(req -> Mono.just(feResponse))
+                .build();
+        FePool pool = DispatcherTestSupport.fePool(() -> List.of("http://fe-unused:8088"), url -> true);
+        PassthroughClient client =
+                new PassthroughClient(webClient, pool, DispatcherTestSupport.noopMetrics(), new DispatchConfig());
+
+        MockServerRequest request = MockServerRequest.builder()
+                .method(HttpMethod.GET)
+                .uri(URI.create("/worker_status"))
+                .body(Flux.empty());
+
+        StepVerifier.create(client.forward(request))
+                .assertNext(r -> {
+                    Assertions.assertEquals(502, r.statusCode().value());
+                    String body = new String((byte[]) ((EntityResponse<?>) r).entity(), StandardCharsets.UTF_8);
+                    Assertions.assertTrue(body.contains("passthrough_failed"),
+                            "assembly failure must surface the shared passthrough 502 envelope: " + body);
+                })
+                .verifyComplete();
+
+        // Mutation guard: drop `clientResponse.releaseBody().subscribe()` from the assembly catch and
+        // this fails — the FE body (its pooled connection) would leak on this non-consuming exit.
+        Assertions.assertTrue(released.get(),
+                "assembly failure must release the FE body so the pooled connection is not leaked");
     }
 
     @Test

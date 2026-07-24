@@ -58,9 +58,13 @@ public class PassthroughClient {
 
     /**
      * Forwards the request to one FE verbatim and streams the response back. Uses {@code exchange()}
-     * so connection release is deferred until the body Flux is consumed at {@code writeTo} time;
-     * {@code doOnCancel} releases the channel if the request is cancelled before the body is
-     * subscribed. PV is emitted when FE response headers arrive or when an upstream step throws.
+     * so connection release is deferred until the body Flux is consumed at {@code writeTo} time
+     * (the modern {@code exchangeToMono} would auto-release the body when the mapping function
+     * returns, which for a streamed passthrough — the body is written later, not within the
+     * function — would drop the response). Release is covered on every non-consuming exit: {@code
+     * doOnCancel} for a cancel before the body is subscribed, and an explicit release if assembling
+     * the response throws after headers arrive. PV is emitted when FE response headers arrive or
+     * when an upstream step throws.
      *
      * <p>Upstream failures surface to the client as a 502 with the same {@code {error, message}}
      * JSON envelope the batch path uses, so callers parse one error shape regardless of which
@@ -101,17 +105,27 @@ public class PassthroughClient {
                             .timeout(headersTimeout)
                             .flatMap(clientResponse -> {
                                 int status = clientResponse.rawStatusCode();
+                                Mono<ServerResponse> response;
+                                try {
+                                    response = ServerResponse.status(status)
+                                            .headers(h -> DispatcherHeaders.copyEndToEnd(
+                                                    clientResponse.headers().asHttpHeaders(), h, DispatcherHeaders.HOP_BY_HOP))
+                                            .body(BodyInserters.fromDataBuffers(
+                                                    clientResponse.bodyToFlux(DataBuffer.class)
+                                                            .timeout(Duration.ofMillis(STREAM_TIMEOUT_MS))))
+                                            .doOnCancel(() -> clientResponse.releaseBody().subscribe());
+                                } catch (RuntimeException assemblyFailure) {
+                                    // Headers arrived but building the passthrough response threw before the FE
+                                    // body was handed to a self-releasing consumer; release it now or the pooled
+                                    // connection leaks. The shared 502 envelope below answers the caller.
+                                    clientResponse.releaseBody().subscribe();
+                                    throw assemblyFailure;
+                                }
                                 pv.finish(status, null);
                                 pv.emit();
                                 metricsReporter.reportRequest("passthrough", metricPathTag(fePath),
                                         status, pv.getCostMs());
-                                return ServerResponse.status(status)
-                                        .headers(h -> DispatcherHeaders.copyEndToEnd(
-                                                clientResponse.headers().asHttpHeaders(), h, DispatcherHeaders.HOP_BY_HOP))
-                                        .body(BodyInserters.fromDataBuffers(
-                                                clientResponse.bodyToFlux(DataBuffer.class)
-                                                        .timeout(Duration.ofMillis(STREAM_TIMEOUT_MS))))
-                                        .doOnCancel(() -> clientResponse.releaseBody().subscribe());
+                                return response;
                             });
                 })
                 .doOnError(e -> {
