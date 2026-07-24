@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import requests
 
+import rtp_llm.utils.fuser as fuser
 from rtp_llm.utils.fuser import Fuser, retry_with_timeout
 
 
@@ -93,6 +94,15 @@ class TestFuser(unittest.TestCase):
 
         # Assert everything was umounted
         self.assertEqual(self.fuser._mount_src_map, {})
+
+    def test_module_umount_all_releases_fuse_and_nfs(self):
+        # The shutdown hook must force-unmount both FUSE and NFS (os._exit path).
+        with patch.object(fuser._fuser, "umount_all") as fuse_umount, patch.object(
+            fuser._nfs_manager, "unmount_all"
+        ) as nfs_umount:
+            fuser.umount_all()
+        fuse_umount.assert_called_once_with(force=True)
+        nfs_umount.assert_called_once_with()
 
 
 class RetryDecoratorTest(unittest.TestCase):

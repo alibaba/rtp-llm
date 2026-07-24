@@ -1,18 +1,19 @@
+"""JIT setup run on the executor via the gpu_lock run_under — two independent mechanisms:
+
+- Package-path cache (this module's job): copy JIT-producing packages (torch /
+  flashinfer / deep_gemm / tvm_ffi) into a versioned local dir and prepend them to the
+  test's PYTHONPATH, so producers keep a stable import path across bazel runs. Keyed by
+  `_JIT_CACHE_PATHS`.
+- REMOTE_JIT_DIR bootstrap: a separate feature (jit_cache_manager / resolve_remote_root)
+  whose dir must pre-exist; created here only because gpu_lock is the sole executor-side
+  hook (basic_test.sh's driver-side mkdir can't reach remote workers).
 """
-FlashInfer Path Setup Utility
 
-This module ensures flashinfer is imported from the specified custom path
-by inserting it at the beginning of sys.path before any imports.
-
-This is particularly useful in testing environments where you want to use
-a specific version of flashinfer different from the system-installed one.
-"""
-
+import importlib
 import importlib.metadata
 import logging
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -22,9 +23,6 @@ from filelock import FileLock
 def get_package_info(package_name):
     """Get package version and installation path"""
     try:
-        # Try to import the package first to get its location
-        import importlib
-
         runfiles_dir = os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")
         meta_package_name = package_name
         if package_name == "tvm_ffi":
@@ -210,13 +208,20 @@ def modify_bazel_wrapper_pythonpath(wrapper_path):
 
 
 def setup_jit_cache(cache_dir=None, packages=None):
+    # Bootstrap the remote JIT snapshot cache dir on this executor — separate from the
+    # package-path cache below (see module docstring). Absolute, traversal-free, fail-open.
+    remote_jit_dir = os.environ.get("REMOTE_JIT_DIR", "").strip()
+    if remote_jit_dir.startswith("/") and ".." not in remote_jit_dir:
+        try:
+            Path(remote_jit_dir).mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logging.info(f"[JIT] failed to create REMOTE_JIT_DIR {remote_jit_dir}: {e}")
+
     # Use defaults if not provided
     if cache_dir is None:
         cache_dir = Path.home().as_posix() + "/.cache"
     if packages is None:
         packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
-
-    runfiles_dir = os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")
 
     # Copy packages to cache with file locking
     copied_paths = []
