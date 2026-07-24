@@ -45,12 +45,20 @@ class PrefillWarmupComparer(BaseComparer):
         return "\n".join(chunks)
 
     def _server_env(self, name: str, default: str) -> str:
-        server_env = getattr(self.server_manager, "_env_args", {})
+        if not hasattr(self.server_manager, "env_args"):
+            raise AssertionError(
+                "server manager must expose env_args for warmup validation"
+            )
+        server_env = self.server_manager.env_args
         return str(server_env.get(name, os.environ.get(name, default)))
 
     def _configured_ep_size(self) -> int:
         value = self._server_env("EP_SIZE", "1")
-        tokens = shlex.split(getattr(self.server_manager, "_smoke_args_str", ""))
+        if not hasattr(self.server_manager, "smoke_args_str"):
+            raise AssertionError(
+                "server manager must expose smoke_args_str for warmup validation"
+            )
+        tokens = shlex.split(self.server_manager.smoke_args_str)
         for index, token in enumerate(tokens):
             if token == "--ep_size" and index + 1 < len(tokens):
                 value = tokens[index + 1]

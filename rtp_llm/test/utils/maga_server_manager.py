@@ -73,6 +73,16 @@ class MagaServerManager(object):
         return self._log_file
 
     @property
+    def env_args(self) -> Dict[str, Any]:
+        """Return a copy of the explicit environment used to launch the server."""
+        return dict(self._env_args)
+
+    @property
+    def smoke_args_str(self) -> str:
+        """Return the command-line arguments used to launch the server."""
+        return self._smoke_args_str
+
+    @property
     def server_pid(self) -> Optional[int]:
         if self._server_process is not None:
             return self._server_process.pid

@@ -55,8 +55,8 @@ class DecodeWarmupComparer(BaseComparer):
             r"warm up.*max_seq_len.*query begin",
             # Engine constructor log: "warm up done" with memory info
             r"warm up done.*max runtime used memory.*device reserved memory",
-            # KV allocation used warmup result (warm_up=1 and torch_peak > 0)
-            r"\[KV_ALLOC\] warm_up=1.*torch_peak=[1-9][0-9]* MiB",
+            # torch_peak may legitimately be zero when the measured growth is non-torch.
+            r"\[KV_ALLOC\] warm_up=1.*torch_peak=\d+ MiB",
             # Final block allocation succeeded
             r"\[KV_ALLOC\] final block_num=[1-9][0-9]*",
             # CUDA graph capture completed rather than silently falling back.
@@ -71,6 +71,15 @@ class DecodeWarmupComparer(BaseComparer):
             raise AssertionError(
                 "decode warmup did not emit the expected evidence: "
                 + ", ".join(missing)
+            )
+
+        memory_match = re.search(
+            r"warm up done, max runtime used memory: (\d+) bytes", logs
+        )
+        if memory_match is None or int(memory_match.group(1)) <= 0:
+            actual = memory_match.group(1) if memory_match else "missing"
+            raise AssertionError(
+                f"decode warmup max runtime memory must be positive, got {actual} bytes"
             )
 
         # Exact-value contract: the warmup must actually run at the declared max_seq_len and

@@ -21,6 +21,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
 from rtp_llm.models_py.modules.factory.fused_moe.defs.warmup_diagnostics import (
+    MoeWarmupDiagnostics,
     diagnostics,
 )
 
@@ -237,7 +238,6 @@ class RuntimeSlotDistributionTest(unittest.TestCase):
     def test_disabled_slot_log_does_not_run_startup_collective(self):
         with (
             patch.object(diagnostics, "runtime_slot_log_requested", False),
-            patch.object(diagnostics, "warmup_enabled", False),
             patch(
                 "rtp_llm.models_py.distributed.collective_torch.all_reduce"
             ) as all_reduce,
@@ -248,6 +248,25 @@ class RuntimeSlotDistributionTest(unittest.TestCase):
 
 
 class TraceMemoryBindingTest(unittest.TestCase):
+    def test_runtime_env_is_loaded_only_when_explicitly_reloaded(self):
+        with patch.dict(
+            os.environ,
+            {
+                "MOE_RUNTIME_MEM_LOG": "1",
+                "MOE_RUNTIME_SLOT_LOG": "1",
+                "MOE_RUNTIME_SLOT_MIN_SLOTS": "64",
+            },
+        ):
+            local_diagnostics = MoeWarmupDiagnostics()
+            self.assertFalse(local_diagnostics.runtime_mem_log_enabled)
+            self.assertFalse(local_diagnostics.runtime_slot_log_requested)
+            self.assertEqual(local_diagnostics.runtime_slot_min_slots, 0)
+
+            local_diagnostics.reload_runtime_settings()
+            self.assertTrue(local_diagnostics.runtime_mem_log_enabled)
+            self.assertTrue(local_diagnostics.runtime_slot_log_requested)
+            self.assertEqual(local_diagnostics.runtime_slot_min_slots, 64)
+
     def test_binding_is_importable_and_callable(self):
         from rtp_llm.ops.compute_ops import get_trace_memory_state, is_trace_memory
 
@@ -256,25 +275,9 @@ class TraceMemoryBindingTest(unittest.TestCase):
         self.assertTrue(callable(get_trace_memory_state))
         self.assertIn(get_trace_memory_state(), (0, 1, 2))
 
-    def test_final_warmup_config_resets_trace_latch(self):
-        with (
-            patch.object(diagnostics, "warmup_enabled", True),
-            patch.object(diagnostics, "trace_memory_finished", False),
-        ):
-            diagnostics.configure_warmup_trace(False)
-            self.assertFalse(diagnostics.warmup_enabled)
-            self.assertTrue(diagnostics.trace_memory_finished)
-
-            diagnostics.configure_warmup_trace(True)
-            self.assertTrue(diagnostics.warmup_enabled)
-            self.assertFalse(diagnostics.trace_memory_finished)
-
     def test_ep_warmup_requires_binding(self):
         router = _FakeRouter(ep_size=2, expert_num_per_rank=1)
-        with (
-            patch.object(diagnostics, "warmup_enabled", True),
-            patch.object(diagnostics, "get_trace_memory_state", None),
-        ):
+        with patch.object(diagnostics, "get_trace_memory_state", None):
             with self.assertRaisesRegex(RuntimeError, "get_trace_memory_state"):
                 FusedMoe(
                     router=router,
@@ -282,22 +285,9 @@ class TraceMemoryBindingTest(unittest.TestCase):
                     expert_num=2,
                 )
 
-    def test_disabled_warmup_skips_binding_requirement(self):
-        router = _FakeRouter(ep_size=2, expert_num_per_rank=1)
-        with (
-            patch.object(diagnostics, "warmup_enabled", False),
-            patch.object(diagnostics, "get_trace_memory_state", None),
-        ):
-            FusedMoe(
-                router=router,
-                fused_experts=_SlotExecutor(),
-                expert_num=2,
-            )
-
     def test_completed_startup_trace_stops_binding_queries(self):
         binding = MagicMock(side_effect=[0, 1, 1, 2])
         with (
-            patch.object(diagnostics, "warmup_enabled", True),
             patch.object(diagnostics, "get_trace_memory_state", binding),
             patch.object(diagnostics, "trace_memory_finished", False),
         ):
