@@ -1,6 +1,12 @@
 load("//:def.bzl", "rpm_library", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
+filegroup(
+    name = "exec_ops_source",
+    srcs = ["ExecOps.cc"],
+    visibility = ["//rtp_llm/models_py/bindings/core/test:__pkg__"],
+)
+
 cc_library(
     name = "types_hdr",
     hdrs = [
@@ -122,6 +128,7 @@ cc_library(
         ":type_convert",
         ":types_hdr",
         ":common_defines",
+        "//rtp_llm/cpp/distribute:cpu_broadcaster",
         "//rtp_llm/cpp/utils:signal_utils",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:debug_utils",
@@ -204,6 +211,7 @@ cc_library(
         ":type_convert",
         ":types_hdr",
         ":common_defines",
+        "//rtp_llm/cpp/distribute:cpu_broadcaster",
         "//rtp_llm/cpp/utils:signal_utils",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:debug_utils",

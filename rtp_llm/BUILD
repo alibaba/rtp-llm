@@ -145,6 +145,12 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+filegroup(
+    name = "librtp_compute_ops_stub",
+    srcs = ["ops/librtp_compute_ops/__init__.pyi"],
+    visibility = ["//rtp_llm/models_py/bindings/core/test:__pkg__"],
+)
+
 py_library(
     name = "utils",
     srcs = glob([

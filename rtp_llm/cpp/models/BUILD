@@ -111,6 +111,26 @@ cc_library(
 )
 
 cc_library(
+    name = "model_types",
+    hdrs = ["ModelTypes.h"],
+    srcs = ["ModelTypes.cc"],
+    deps = [
+        ":stats",
+        "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/distribute:cpu_broadcast_hdr",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/models/models_weight:weights_define",
+        "//rtp_llm/models_py/bindings:op_defs",
+        "//rtp_llm/models_py/bindings/core:device_data",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/core:type_convert",
+    ] + torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "model_inputs_logger",
     srcs = ["ModelInputsLogger.cc"],
     hdrs = ["ModelInputsLogger.h"],
@@ -125,14 +145,23 @@ cc_library(
 
 cc_library(
     name = "models",
-    hdrs = glob([
-        "*.h",
-    ], exclude = ["ModelInputsLogger.h"]),
-    srcs = glob([
-        "*.cc",
-    ], exclude = ["ModelInputsLogger.cc"]),
+    hdrs = glob(
+        ["*.h"],
+        exclude = [
+            "ModelInputsLogger.h",
+            "ModelTypes.h",
+        ],
+    ),
+    srcs = glob(
+        ["*.cc"],
+        exclude = [
+            "ModelInputsLogger.cc",
+            "ModelTypes.cc",
+        ],
+    ),
     deps = [
         ":model_inputs_logger",
+        ":model_types",
         ":sample_infos",
         ":logits_processor",
         ":dfa_utils",

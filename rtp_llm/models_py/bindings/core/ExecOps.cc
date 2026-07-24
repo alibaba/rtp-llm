@@ -1,6 +1,7 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include "rtp_llm/cpp/distribute/CpuBroadcaster.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
@@ -574,30 +575,36 @@ py::function
 }  // anonymous namespace
 
 void execBroadcast(const BroadcastParams& params) {
-    py::function fn;
+    // Acquiring the GIL before copying the callback protects Python's
+    // reference count.  Keep it declared first so fn is also destroyed while
+    // the GIL is still held.
+    py::gil_scoped_acquire gil;
+    py::function           fn;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
         fn = g_broadcast_fn;
     }
     RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(fn),
                             "execBroadcast called but broadcast callback not registered via register_comm_ops");
-    py::gil_scoped_acquire gil;
-    py::list               tensors;
+    py::list tensors;
     for (auto& t : params.buffers)
         tensors.append(t);
+    // The Python c10d callback owns stream ordering and error propagation.
+    // Do not add a CUDA device sync here; GPU callers depend on keeping the
+    // broadcast on the asynchronous communication path.
     fn(tensors, params.root, static_cast<int>(params.mode));
 }
 
 AllReduceOutput execAllReduce(const AllReduceParams& params) {
-    py::function fn;
+    py::gil_scoped_acquire gil;
+    py::function           fn;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
         fn = g_allreduce_fn;
     }
     RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(fn),
                             "execAllReduce called but allreduce callback not registered via register_comm_ops");
-    py::gil_scoped_acquire gil;
-    auto                   result = fn(params.buffer,
+    auto result = fn(params.buffer,
                      static_cast<int>(params.op),
                      static_cast<int>(params.mode),
                      params.dest.defined() ? py::cast(params.dest) : py::none());
@@ -605,15 +612,15 @@ AllReduceOutput execAllReduce(const AllReduceParams& params) {
 }
 
 void execAllGather(const AllGatherParams& params) {
-    py::function fn;
+    py::gil_scoped_acquire gil;
+    py::function           fn;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
         fn = g_allgather_fn;
     }
     RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(fn),
                             "execAllGather called but allgather callback not registered via register_comm_ops");
-    py::gil_scoped_acquire gil;
-    py::list               recv_list, send_list;
+    py::list recv_list, send_list;
     for (auto& t : params.recv_buffers)
         recv_list.append(t);
     for (auto& t : params.send_buffers)
@@ -745,6 +752,28 @@ void registerExecCtxOps(pybind11::module& m) {
             g_allgather_fn = py::function();
         },
         "Clear registered Python communication callbacks.");
+
+    m.def(
+        "init_cpu_tp_broadcaster",
+        [](int tp_rank, int tp_size, const std::string& base_path) {
+            py::gil_scoped_release release;
+            CpuBroadcaster::instance().initialize(tp_rank, tp_size, base_path);
+        },
+        py::arg("tp_rank"),
+        py::arg("tp_size"),
+        py::arg("base_path"),
+        "Bootstrap the UDS-backed intra-node TP broadcaster used by tpSyncModelInputs. "
+        "Request-time broadcastCPU may run from the C++ engine thread; "
+        "do not call broadcastCPU concurrently.");
+
+    m.def(
+        "destroy_cpu_tp_broadcaster",
+        []() {
+            py::gil_scoped_release release;
+            CpuBroadcaster::instance().reset();
+        },
+        "Tear down the UDS-backed intra-node TP broadcaster and clear its singleton state. "
+        "Do not race with broadcastCPU.");
 }
 
 }  // namespace rtp_llm

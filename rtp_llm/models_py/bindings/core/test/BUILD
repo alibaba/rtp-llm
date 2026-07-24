@@ -6,6 +6,8 @@ test_copts = [
 ] + copts()
 
 exec_ops_test_deps = [
+    "//rtp_llm/cpp/distribute:cpu_broadcast",
+    "//rtp_llm/cpp/distribute:cpu_broadcaster",
     "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     "//rtp_llm/models_py/bindings/common:common",
     "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
@@ -60,4 +62,13 @@ cc_test_wrapper(
         "@com_google_googletest//:gtest_main",
     ],
     copts = copts(),
+)
+
+py_test(
+    name = "exec_ops_stub_consistency_test",
+    srcs = ["exec_ops_stub_consistency_test.py"],
+    data = [
+        "//rtp_llm:librtp_compute_ops_stub",
+        "//rtp_llm/models_py/bindings/core:exec_ops_source",
+    ],
 )

@@ -32,6 +32,7 @@ cc_library(
             "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
         ],
         "//conditions:default": [
+            "//rtp_llm/cpp/distribute:cpu_broadcast",
             "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
             "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
             "//:rtp_compute_ops",

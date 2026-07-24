@@ -89,6 +89,10 @@ void             execRejectionSampling(const RejectionSamplingParams& params);
 // Communication ops (backed by c10d ProcessGroup)
 // ===================================================================
 
+// c10d broadcast wrapper. For CUDA tensors, the callback must keep normal
+// PyTorch stream ordering so later GPU work can consume the buffer without a
+// device-wide sync. Communication errors must propagate as exceptions from the
+// callback.
 void            execBroadcast(const BroadcastParams& params);
 AllReduceOutput execAllReduce(const AllReduceParams& params);
 void            execAllGather(const AllGatherParams& params);
