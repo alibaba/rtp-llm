@@ -160,7 +160,20 @@ grpc::Status statusFromErrorInfo(const ErrorInfo& error_info) {
     if (!error_info.hasError()) {
         return grpc::Status::OK;
     }
-    return grpc::Status(grpc::StatusCode::INTERNAL, error_info.ToString());
+    const auto     error_msg       = error_info.ToString();
+    auto           grpc_error_code = transErrorCodeToGrpc(error_info.code());
+    ErrorDetailsPB error_details;
+    error_details.set_error_code(static_cast<int>(error_info.code()));
+    error_details.set_error_message(error_msg);
+    std::string error_details_serialized;
+    if (error_details.SerializeToString(&error_details_serialized)) {
+        return grpc::Status(grpc_error_code, error_msg, error_details_serialized);
+    }
+    RTP_LLM_LOG_WARNING(
+        "statusFromErrorInfo error details serialize to string failed, error code [%s], error message [%s]",
+        ErrorCodeToString(error_info.code()).c_str(),
+        error_msg.c_str());
+    return grpc::Status(grpc_error_code, error_msg);
 }
 
 void addBatchSuccess(EnqueueBatchResponsePB* response, int64_t request_id) {
@@ -1088,7 +1101,7 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
 void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
-    auto start_time_us = currentTimeUs();
+    auto start_time_us         = currentTimeUs();
     prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
     prefill_context.stat_info.remote_load_cache_wait_stream_rt_us += currentTimeUs() - start_time_us;
     if (prefill_context.error_info.hasError()) {

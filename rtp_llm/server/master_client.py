@@ -277,28 +277,15 @@ class MasterClient:
 
         # Absolute-deadline propagation: if absolute_deadline_ms is set (>0),
         # compute remaining time and use it as the gRPC timeout instead of the
-        # full ttft_timeout_ms. If remaining is below the minimum threshold,
-        # abort immediately without making the gRPC call.
+        # full ttft_timeout_ms.
         absolute_deadline_ms = getattr(input.generate_config, "absolute_deadline_ms", 0)
         if absolute_deadline_ms > 0:
             remaining_ms = absolute_deadline_ms - int(time.time() * 1000)
-            min_remaining = self.master_config.min_remaining_deadline_ms
             # ttft_timeout_ms caps the Schedule phase; absolute_deadline_ms is the
             # overall deadline.  Cap remaining by ttft_timeout_ms so the Schedule
             # gRPC call never exceeds the TTFT budget.
             if ttft_timeout_ms > 0:
                 remaining_ms = min(remaining_ms, ttft_timeout_ms)
-            if remaining_ms < min_remaining:
-                route_logger.warning(
-                    "Schedule aborted: remaining %dms < min %dms, request_id=%s",
-                    remaining_ms,
-                    min_remaining,
-                    request_id,
-                )
-                raise FtRuntimeException(
-                    exception_type=ExceptionType.DEADLINE_EXCEEDED,
-                    message=f"FlexLB schedule deadline exceeded (remaining {remaining_ms}ms < min {min_remaining}ms) for request {request_id}",
-                )
             timeout_s = remaining_ms / 1000.0
             # generate_timeout passes remaining so that the Java side computes
             # absoluteDeadlineMs = request_time_ms + remaining = original deadline,

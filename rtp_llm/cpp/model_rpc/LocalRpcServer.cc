@@ -139,7 +139,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
         if (!writer->Write(outputs_pb)) {
             stream->reportError(ErrorCode::CANCELLED, "write outputs pb failed");
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
-            return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
+            return grpc::Status(grpc::StatusCode::CANCELLED, "request output consumer closed");
         }
         if (stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
             break;
@@ -308,8 +308,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     response->set_precision(status_info.precision);
     response->set_dp_rank(status_info.dp_rank);
     response->set_max_seq_len(maga_init_params_.model_config_.max_seq_len);
-    response->set_max_batch_tokens_size(
-        maga_init_params_.runtime_config.fifo_scheduler_config.max_batch_tokens_size);
+    response->set_max_batch_tokens_size(maga_init_params_.runtime_config.fifo_scheduler_config.max_batch_tokens_size);
     auto kv_info = engine_->getCacheStatusInfo(-1, false);
     response->set_available_kv_cache(kv_info.available_kv_cache);
     response->set_total_kv_cache(kv_info.total_kv_cache);

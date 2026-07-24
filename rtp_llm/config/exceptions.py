@@ -103,8 +103,8 @@ class ExceptionType(IntEnum):
     MASTER_NO_DECODE_WORKER = 8403, ExceptionCategory.CAPACITY
     MASTER_NO_PDFUSION_WORKER = 8404, ExceptionCategory.CAPACITY
     MASTER_NO_VIT_WORKER = 8405, ExceptionCategory.CAPACITY
-    # duplicate request_id from master (460 < 8000, naturally non-retryable, avoids 409 clash)
-    DUPLICATE_REQUEST = 460, ExceptionCategory.BAD_REQUEST
+    # duplicate request_id from master (4406 in 4000 range for non-retryable, mirrors 84xx partition of 8000 range)
+    DUPLICATE_REQUEST = 4406, ExceptionCategory.BAD_REQUEST
     MASTER_INVALID_REQUEST = 8406, ExceptionCategory.BAD_REQUEST
 
     # route error

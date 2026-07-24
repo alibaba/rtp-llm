@@ -27,7 +27,7 @@ public enum StrategyErrorType {
     NO_PDFUSION_WORKER(8404, true),
     NO_VIT_WORKER(8405, true),
     NO_FRONTEND_WORKER(8407, true),
-    DUPLICATE_REQUEST(460, false),
+    DUPLICATE_REQUEST(4406, false),
     INVALID_REQUEST(8406, false),
 
     // queue error
@@ -37,7 +37,10 @@ public enum StrategyErrorType {
     // batch dispatch error
     BATCH_DISPATCH_FAILED(8510, true),
     BATCH_SLO_EXPIRED(8511, false),
-    BATCH_BUILD_FAILED(8512, false);
+    BATCH_BUILD_FAILED(8512, false),
+    // worker (decode engine) execution failure — non-retryable to prevent retry storms
+    // on persistent errors such as OOM or input-too-long.
+    WORKER_EXECUTION_FAILED(8513, false);
 
     private final int errorCode;
     private final String errorMsg;

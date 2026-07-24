@@ -95,13 +95,6 @@ class BackendRPCServerVisitor:
         max_rpc_timeout_ms = pd_sep_config.max_rpc_timeout_ms
         decode_entrance = pd_sep_config.decode_entrance
 
-        # Get min_remaining_deadline_ms from master_config (default 500 if not set)
-        min_remaining_deadline_ms = (
-            getattr(master_config, "min_remaining_deadline_ms", 500)
-            if master_config is not None
-            else 500
-        )
-
         # Get client_config from grpc_config if provided, otherwise use empty dict
         if grpc_config is not None:
             client_config = grpc_config.get_client_config()
@@ -113,7 +106,6 @@ class BackendRPCServerVisitor:
             client_config=client_config,
             max_rpc_timeout_ms=max_rpc_timeout_ms,
             decode_entrance=decode_entrance,
-            min_remaining_deadline_ms=min_remaining_deadline_ms,
         )
 
         host_args = HostServiceArgs.create_from_env()

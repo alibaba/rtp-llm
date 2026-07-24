@@ -336,8 +336,11 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     }
                     if (task.getErrorCode() == 0) {
                         terminal = entry.lifecycle.complete("decode completed");
+                        completeSuccess(entry.item);
                     } else {
                         terminal = entry.lifecycle.fail("worker error code " + task.getErrorCode());
+                        completeError(entry.item.future(), StrategyErrorType.WORKER_EXECUTION_FAILED,
+                                "worker error code " + task.getErrorCode());
                     }
                     if (isPrefill) {
                         rollbackOnce(entry);
@@ -415,13 +418,15 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 rollbackOnce(entry);
                 RequestLifecycleSnapshot terminal = entry.lifecycle.fail(
                         "batcher offer failed: " + error.getMessage());
+                completeError(item.future(), StrategyErrorType.BATCH_DISPATCH_FAILED,
+                        "Batcher offer failed: " + error.getMessage());
                 finishEntry(entry, terminal);
             }
         } else if (!item.future().isDone() && !terminalStates.containsKey(item.requestId())) {
             rollback(item);
+            completeError(item.future(), StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    "Batcher offer failed: " + error.getMessage());
         }
-        completeError(item.future(), StrategyErrorType.BATCH_DISPATCH_FAILED,
-                "Batcher offer failed: " + error.getMessage());
     }
 
     // ==================== Dispatch pipeline ====================
@@ -515,17 +520,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     public void onSuccess(BatchItem item, long batchId) {
         InflightEntry entry = entryFor(item);
         if (entry == null) {
-            // A fast worker can report decode completion before the EnqueueBatch
-            // ACK callback runs. The lifecycle is tombstoned, but the Schedule
-            // future still needs the successful ACK response.
-            RequestLifecycleSnapshot terminal = terminalStates.get(item.requestId());
-            if (terminal != null
-                    && terminal.state() == RequestLifecycleState.COMPLETED
-                    && !item.future().isDone()) {
-                item.ctx().setAckAtMs(System.currentTimeMillis());
-                item.ctx().setAckAtNanos(System.nanoTime());
-                completeSuccess(item);
-            }
+            // entry 已被 worker-status/cancel/timeout/onFailure/onOfferFailure 等终态路径移除，
+            // 所有终态路径均在 finishEntry 前完成 future，故此处无需补发。
             return;
         }
 
@@ -583,6 +579,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     }
 
     private void completeSuccess(BatchItem item) {
+        if (item.future().isDone()) {
+            return;
+        }
         Response success = copyResponse(item.routeResponse());
         success.setSuccess(true);
         success.setCode(200);
@@ -599,8 +598,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 rollbackOnce(entry);
                 repackPrefillBatch(entry);
                 RequestLifecycleSnapshot terminal = entry.lifecycle.fail(error.getMessage());
-                finishEntry(entry, terminal);
                 completeError(item.future(), StrategyErrorType.BATCH_DISPATCH_FAILED, error.getMessage());
+                finishEntry(entry, terminal);
             }
             return;
         }

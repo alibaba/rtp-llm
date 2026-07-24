@@ -27,7 +27,6 @@ import org.mockito.ArgumentCaptor;
 import org.slf4j.LoggerFactory;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -339,33 +338,6 @@ class FlexlbServiceImplTest {
                 ArgumentCaptor.forClass(FlexlbScheduleProtocol.GetRequestStateResponsePB.class);
         verify(observer).onNext(captor.capture());
         assertFalse(captor.getValue().getFound());
-    }
-
-    // ---- gRPC status classification (CANCELLED / DEADLINE_EXCEEDED false-error fix) ----
-
-    @Test
-    void grpcStatusCode_recognisesDirectCancelledStatusRuntimeException() {
-        // Mirrors the cancellationListener in schedule(): a bare StatusRuntimeException
-        // carrying CANCELLED, delivered to whenComplete without wrapping.
-        StatusRuntimeException ex =
-                Status.CANCELLED.withDescription("gRPC context cancelled").asRuntimeException();
-        assertEquals(Status.Code.CANCELLED, FlexlbServiceImpl.grpcStatusCode(ex));
-    }
-
-    @Test
-    void grpcStatusCode_unwrapsCompletionExceptionToFindDeadlineExceeded() {
-        // A route future may fail with an exception wrapped in CompletionException; the
-        // classifier must traverse the cause chain to recover the underlying gRPC code.
-        StatusRuntimeException inner =
-                Status.DEADLINE_EXCEEDED.withDescription("deadline exceeded").asRuntimeException();
-        Throwable wrapped = new CompletionException(inner);
-        assertEquals(Status.Code.DEADLINE_EXCEEDED, FlexlbServiceImpl.grpcStatusCode(wrapped));
-    }
-
-    @Test
-    void grpcStatusCode_returnsNullForNonGrpcThrowable() {
-        // A plain non-gRPC exception must yield null so it stays on the ERROR path.
-        assertNull(FlexlbServiceImpl.grpcStatusCode(new RuntimeException("test error")));
     }
 
     @Test

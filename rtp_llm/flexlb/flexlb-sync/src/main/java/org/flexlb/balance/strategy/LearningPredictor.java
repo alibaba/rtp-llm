@@ -27,6 +27,10 @@ public class LearningPredictor implements PrefillTimePredictor {
     private record BatchUpdateItem(List<BatchItem> items, long actualMs) {
     }
 
+    /** Aggregated normalization features accumulated over a list of batch items. */
+    private record Aggregates(double reuse, double compute, double computeSquare, double reuseMulCompute) {
+    }
+
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final AtomicReference<double[]> weightsRef;
@@ -144,27 +148,14 @@ public class LearningPredictor implements PrefillTimePredictor {
     }
 
     private double[] collectInput(List<BatchItem> items) {
-        double reuse = 0.0;
-        double compute = 0.0;
-        double compute_square = 0.0;
-        double reuse_mul_compute = 0.0;
-        for (BatchItem item : items) {
-            long seq = Math.max(0L, item.seqLen());
-            long hit = Math.max(0L, Math.min(item.hitCache(), seq));
-            double thisReuse = hit / 1024.0;
-            double thisCompute = (seq - hit) / 1024.0;
-            reuse += thisReuse;
-            compute += thisCompute;
-            compute_square += thisCompute * thisCompute;
-            reuse_mul_compute += thisReuse * thisCompute;
-        }
+        Aggregates agg = accumulateItems(items);
         double[] inputs = new double[this.linear_param_count];
         inputs[0] = 1.0;
         inputs[1] = (double) items.size();
-        inputs[2] = reuse;
-        inputs[3] = compute;
-        inputs[4] = compute_square;
-        inputs[5] = reuse_mul_compute;
+        inputs[2] = agg.reuse();
+        inputs[3] = agg.compute();
+        inputs[4] = agg.computeSquare();
+        inputs[5] = agg.reuseMulCompute();
         return inputs;
     }
 
@@ -175,6 +166,34 @@ public class LearningPredictor implements PrefillTimePredictor {
      * {@code batchSize = items.size() + 1}.
      */
     private double[] collectInputWithExtra(List<BatchItem> items, long extraSeqLen, long extraCacheHit) {
+        Aggregates agg = accumulateItems(items);
+        // Virtual item for the new request, accumulated after the real items (same normalization).
+        long extraSeq = Math.max(0L, extraSeqLen);
+        long extraHit = Math.max(0L, Math.min(extraCacheHit, extraSeq));
+        double extraReuse = extraHit / 1024.0;
+        double extraCompute = (extraSeq - extraHit) / 1024.0;
+        double reuse = agg.reuse() + extraReuse;
+        double compute = agg.compute() + extraCompute;
+        double compute_square = agg.computeSquare() + extraCompute * extraCompute;
+        double reuse_mul_compute = agg.reuseMulCompute() + extraReuse * extraCompute;
+
+        double[] inputs = new double[this.linear_param_count];
+        inputs[0] = 1.0;
+        inputs[1] = (double) (items.size() + 1);
+        inputs[2] = reuse;
+        inputs[3] = compute;
+        inputs[4] = compute_square;
+        inputs[5] = reuse_mul_compute;
+        return inputs;
+    }
+
+    /**
+     * Accumulates the four normalization features ({@code reuse}, {@code compute},
+     * {@code compute^2}, {@code reuse*compute}) over the given items. Each item's
+     * {@code seqLen}/{@code hitCache} are clamped and normalized by 1024 exactly as
+     * in {@link #collectInput(List)}.
+     */
+    private Aggregates accumulateItems(List<BatchItem> items) {
         double reuse = 0.0;
         double compute = 0.0;
         double compute_square = 0.0;
@@ -189,24 +208,7 @@ public class LearningPredictor implements PrefillTimePredictor {
             compute_square += thisCompute * thisCompute;
             reuse_mul_compute += thisReuse * thisCompute;
         }
-        // Virtual item for the new request
-        long extraSeq = Math.max(0L, extraSeqLen);
-        long extraHit = Math.max(0L, Math.min(extraCacheHit, extraSeq));
-        double extraReuse = extraHit / 1024.0;
-        double extraCompute = (extraSeq - extraHit) / 1024.0;
-        reuse += extraReuse;
-        compute += extraCompute;
-        compute_square += extraCompute * extraCompute;
-        reuse_mul_compute += extraReuse * extraCompute;
-
-        double[] inputs = new double[this.linear_param_count];
-        inputs[0] = 1.0;
-        inputs[1] = (double) (items.size() + 1);
-        inputs[2] = reuse;
-        inputs[3] = compute;
-        inputs[4] = compute_square;
-        inputs[5] = reuse_mul_compute;
-        return inputs;
+        return new Aggregates(reuse, compute, compute_square, reuse_mul_compute);
     }
 
     @Override

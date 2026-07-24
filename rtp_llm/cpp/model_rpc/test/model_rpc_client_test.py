@@ -153,7 +153,6 @@ class _RoutingStub:
         self.generate_iterator = _FakeResponseIterator(generate_responses or [])
         self.fetch_calls = []
         self.generate_calls = []
-        self.cancel_calls = []
 
     def FetchResponse(self, request, **kwargs):
         self.fetch_calls.append((request, kwargs))
@@ -162,9 +161,6 @@ class _RoutingStub:
     def GenerateStreamCall(self, request, **kwargs):
         self.generate_calls.append((request, kwargs))
         return self.generate_iterator
-
-    async def Cancel(self, request, **kwargs):
-        self.cancel_calls.append((request, kwargs))
 
 
 def _make_response(finished=True):
@@ -347,7 +343,6 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(stub.fetch_calls[0][0].request_id, 321)
         self.assertEqual(stub.fetch_calls[0][1]["timeout"], 1.0)
         self.assertEqual(stub.generate_calls, [])
-        self.assertEqual(stub.cancel_calls, [])
 
     def test_enqueue_uses_generate_stream_without_master_enqueue(self):
         client = ModelRpcClient(
@@ -375,9 +370,8 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(len(stub.generate_calls), 1)
         self.assertEqual(stub.generate_calls[0][0].request_id, 322)
         self.assertEqual(stub.fetch_calls, [])
-        self.assertEqual(stub.cancel_calls, [])
 
-    def test_enqueue_cancels_master_enqueued_fetch_on_early_close(self):
+    def test_enqueue_cancels_fetch_stream_on_early_close(self):
         async def run_and_close():
             gen = client.enqueue(input_py)
             first = await gen.__anext__()
@@ -415,9 +409,6 @@ class ModelRpcClientTest(TestCase):
             asyncio.run(run_and_close())
 
         self.assertTrue(stub.fetch_iterator.cancelled)
-        self.assertEqual(len(stub.cancel_calls), 1)
-        self.assertEqual(stub.cancel_calls[0][0].request_id, 323)
-        self.assertEqual(stub.cancel_calls[0][1]["timeout"], 5.0)
 
     def test_enqueue_fetch_cancel_uses_prefill_when_decode_entrance(self):
         async def run_and_close():
@@ -455,8 +446,6 @@ class ModelRpcClientTest(TestCase):
 
         self.assertEqual(client._channel_pool.targets, ["prefill-worker:9000"])
         self.assertEqual(len(stub.fetch_calls), 1)
-        self.assertEqual(len(stub.cancel_calls), 1)
-        self.assertEqual(stub.cancel_calls[0][0].request_id, 325)
 
     def test_enqueue_does_not_cancel_after_finished_response_is_seen(self):
         async def run_and_close_after_finished():
@@ -491,7 +480,6 @@ class ModelRpcClientTest(TestCase):
             asyncio.run(run_and_close_after_finished())
 
         self.assertFalse(stub.fetch_iterator.cancelled)
-        self.assertEqual(stub.cancel_calls, [])
 
 
 if __name__ == "__main__":

@@ -397,11 +397,6 @@ class MasterConfig:
         # When True, disable domain fallback routing when master is unavailable or not configured.
         # Requests will fail with ROUTE_ERROR instead of falling back to VipServer domain routing.
         self.disable_domain_fallback: bool = False
-        # Minimum remaining deadline (ms) below which a request is rejected before
-        # making a gRPC call. Used by absolute-deadline propagation: if
-        # (absolute_deadline_ms - now) < min_remaining_deadline_ms, the stage
-        # aborts immediately instead of sending a call that would time out.
-        self.min_remaining_deadline_ms: int = 500
 
     def to_string(self):
         return (
@@ -410,8 +405,7 @@ class MasterConfig:
             f"master_max_connect_pool_size: {self.master_max_connect_pool_size}\n"
             f"master_connector_limit_per_host: {self.master_connector_limit_per_host}\n"
             f"master_session_timeout_s: {self.master_session_timeout_s}\n"
-            f"disable_domain_fallback: {self.disable_domain_fallback}\n"
-            f"min_remaining_deadline_ms: {self.min_remaining_deadline_ms}"
+            f"disable_domain_fallback: {self.disable_domain_fallback}"
         )
 
 

@@ -255,7 +255,9 @@ class FlexlbBatchSchedulerTest {
         status.setFinishedTaskInfo(Map.of("85", finished));
         scheduler.onWorkerStatusUpdate(status);
 
-        assertFalse(scheduleFuture.isDone());
+        // After refactor: onWorkerStatusUpdate completes the future directly
+        // (terminal-state-owns-completion), so it is done before the ACK arrives.
+        assertTrue(scheduleFuture.isDone());
         ackFuture.complete(ackFor(sentBatches.getFirst()));
 
         Response response = scheduleFuture.get(2, TimeUnit.SECONDS);
@@ -319,13 +321,14 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
-    void duplicate_active_request_id_is_rejected_before_rerouting() {
+    void duplicate_active_request_id_returns_idempotent_success_without_rerouting() {
         scheduler.submit(context(14));
 
         Response duplicate = scheduler.submit(context(14)).getNow(null);
 
-        assertFalse(duplicate.isSuccess());
-        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), duplicate.getCode());
+        assertTrue(duplicate.isSuccess());
+        assertEquals(200, duplicate.getCode());
+        assertTrue(duplicate.isEnqueuedByMaster());
         verify(router).route(any(BalanceContext.class));
     }
 
