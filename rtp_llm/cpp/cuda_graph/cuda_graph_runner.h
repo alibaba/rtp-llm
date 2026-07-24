@@ -48,13 +48,17 @@ public:
         }
         max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
-        // The DSpark draft splits its forward: the graph captures the backbone
-        // (A+B+C -> head_hidden [., H]) only, and the engine runs the lm_head +
-        // Markov + softmax tail eagerly after replay (draft_tail).  This keeps
-        // the [B, k, V] draft distribution out of the static graph output
-        // buffers -- the vLLM boundary.  The target-verify graph (also is_dspark_)
-        // captures the whole forward as usual.
-        const bool capture_backbone_only = is_dspark_ && !is_target_verify_;
+        // The DSpark draft's forward is split into backbone (A+B+C ->
+        // head_hidden) and draft_tail (lm_head + Markov + softmax).  Default
+        // (dspark_capture_tail): capture the FULL forward including the tail,
+        // mirroring vLLM's FULL-graph DSpark speculator; the [B, k, V] draft
+        // distribution lives in one max-batch static buffer (per-instance
+        // slices, like aux).  Fallback (tail off, e.g. tp>1 or kill switch):
+        // capture the backbone only and let the engine run draft_tail eagerly
+        // after replay.  The target-verify graph (also is_dspark_) captures
+        // the whole forward as usual.
+        capture_draft_tail_              = is_dspark_ && !is_target_verify_ && graph_params.dspark_capture_tail;
+        const bool capture_backbone_only = is_dspark_ && !is_target_verify_ && !capture_draft_tail_;
         py_forward_method_ =
             py_instance_.attr(capture_backbone_only ? "forward_backbone" : "forward");
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
@@ -97,6 +101,9 @@ public:
     int            getCurrentRealGraphBs(const CudaGraphState& state) const;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           initCapture() override;
+    bool           capturesDraftTail() const override {
+        return capture_draft_tail_;
+    }
 
     // Factory methods for test: take GraphParams so callers can reuse the same struct
     static CudaGraphRunner* createForPrefill(py::object py_instance, GraphParams params);
@@ -140,6 +147,9 @@ private:
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
     bool                    is_dspark_{false};
+    // DSpark draft: full forward (incl. lm_head + Markov + softmax tail)
+    // captured; wrapper skips the eager draft_tail after replay.
+    bool                    capture_draft_tail_{false};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};
     size_t                  max_bs_{1};

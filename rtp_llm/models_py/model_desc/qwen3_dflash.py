@@ -438,8 +438,9 @@ class Qwen3DFlashModel(GptModelBase):
         F.linear yields the [B, k, V_pad/tp] vocab shard; all-gather + reorder
         rebuilds the full vocab on every rank (same NCCL collective the engine
         uses for target logits in tpSyncEmbeddingOrLogits), then the sp_0_pad8
-        padding rows are sliced off so argmax can never pick a pad id.  Runs
-        outside the CUDA graph (draft_tail is eager by design).
+        padding rows are sliced off so argmax can never pick a pad id.  Under
+        tp>1 this runs outside the CUDA graph (eager draft_tail); at tp==1 the
+        full-tail graph captures it.
         """
         width = self.dspark_params.block_width
         hidden = head_hidden.view(-1, width, head_hidden.shape[-1])[:, 1:, :]
@@ -505,11 +506,12 @@ class Qwen3DFlashModel(GptModelBase):
     ) -> torch.Tensor:
         """Stages A+B+C: feature combine, inject, block forward -> head_hidden.
 
-        This is the CUDA-graph-capturable region (see forward_backbone): it
-        ends at head_hidden [B*(1+k), H] and deliberately excludes the lm_head
-        + Markov + softmax tail (stage D), which is eager (draft_tail) so no
-        [B, k, V] tensor ever becomes a static graph output.  Matches the vLLM
-        boundary (backbone in graph, compute_logits + sampling eager after).
+        This region ends at head_hidden [B*(1+k), H], excluding the lm_head +
+        Markov + softmax tail (stage D).  Two graph boundaries exist: the
+        default full-tail graph captures forward (backbone + tail, vLLM
+        FULL-graph boundary); the backbone-only graph (tp>1 or
+        DSPARK_GRAPH_TAIL=0) captures forward_backbone and runs draft_tail
+        eagerly after replay.
         """
         width = self.dspark_params.block_width
         attention_inputs = inputs.attention_inputs
@@ -583,17 +585,17 @@ class Qwen3DFlashModel(GptModelBase):
             head_hidden=head_hidden,
         )
 
-    # ---- CUDA-graph split: backbone (captured) + tail (eager) ------------
+    # ---- CUDA-graph split: full forward (default) or backbone-only -------
 
     def forward_backbone(
         self, inputs: PyModelInputs, fmha_impl: Any = None
     ) -> PyModelOutputs:
-        """Graph-captured entry: stages A+B+C only, output = head_hidden.
+        """Backbone-only graph entry: stages A+B+C, output = head_hidden.
 
-        The CUDA graph runner binds THIS (not forward) for the dspark draft
-        (cuda_graph capture_method_name); its single static output buffer is
-        [B*(1+k), H], never the [B, k, V] draft distribution.  The engine runs
-        draft_tail eagerly after replay to produce draft_tokens/draft_probs.
+        The CUDA graph runner binds this when the tail is not captured (tp>1
+        or DSPARK_GRAPH_TAIL=0); the engine then runs draft_tail eagerly after
+        replay to produce draft_tokens/draft_probs.  The default full-tail
+        graph binds forward instead.
         """
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
@@ -603,14 +605,15 @@ class Qwen3DFlashModel(GptModelBase):
     def draft_tail(
         self, outputs: PyModelOutputs, inputs: PyModelInputs
     ) -> PyModelOutputs:
-        """Eager stage D on head_hidden: lm_head + Markov + softmax.
+        """Stage D on head_hidden: lm_head + Markov + softmax.
 
-        Runs OUTSIDE the CUDA graph (vLLM boundary), reading the block hidden
-        states the captured forward_backbone left in outputs.hidden_states and
-        the anchor ids from inputs.input_ids (the static graph input buffer,
-        refreshed pre-replay, valid until the next replay's refresh).  Produces
-        a fresh (non-static) draft_probs [B, k, V] each call, so the vocab-wide
-        tensor never has to persist as a graph output.
+        On the backbone-only graph boundary this runs eagerly after replay,
+        reading the block hidden states the captured forward_backbone left in
+        outputs.hidden_states and the anchor ids from inputs.input_ids (the
+        static graph input buffer, refreshed pre-replay, valid until the next
+        replay's refresh).  On the default full-tail boundary it runs inside
+        the captured forward and the runner persists draft_tokens/draft_probs
+        into static output buffers.
         """
         width = self.dspark_params.block_width
         head_hidden = outputs.hidden_states

@@ -638,6 +638,17 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         if (aux_hold.defined()) {
             outputs.aux_hidden_states = aux_hold.slice(0, 0, state.seq_len_sum);
         }
+        // DSpark draft full-tail capture: surface the batch-major draft
+        // outputs, sliced to the real (unpadded) batch (PyWrappedModel clones
+        // them out of the graph buffers).
+        const auto& draft_tokens_hold =
+            graph_instances_[state.current_real_graph_bs].mem_hold_.dspark_draft_tokens_;
+        if (draft_tokens_hold.defined()) {
+            const int real_bs    = state.seq_len_sum / num_tokens_per_bs_;
+            outputs.draft_tokens = draft_tokens_hold.slice(0, 0, real_bs);
+            outputs.draft_probs =
+                graph_instances_[state.current_real_graph_bs].mem_hold_.dspark_draft_probs_.slice(0, 0, real_bs);
+        }
     }
     // record forward done event
     forward_event_.record(cuda_graph::graphGetCurrentStream());
@@ -1036,6 +1047,28 @@ void CudaGraphRunner::initCapture() {
             capture_mem_hold_.setAuxHiddenStates(
                 torch::zeros(aux_sizes, probe_outputs.aux_hidden_states.options()));
         }
+        // DSpark draft full-tail capture: the captured forward emits
+        // draft_tokens [B, k] and draft_probs [B, k, V]; allocate one
+        // max-batch static buffer per output (per-instance holds slice it,
+        // like aux), sized from the probe forward (the runner does not know
+        // k or the draft vocab).
+        if (capture_draft_tail_) {
+            py::gil_scoped_acquire gil;
+            auto                   probe_outputs = probe_outputs_obj.cast<PyModelOutputs>();
+            RTP_LLM_CHECK_WITH_INFO(probe_outputs.draft_tokens.defined() && probe_outputs.draft_probs.defined(),
+                                    "dspark draft full-tail graph: forward did not emit draft_tokens/draft_probs");
+            auto tokens_sizes = probe_outputs.draft_tokens.sizes().vec();
+            auto probs_sizes  = probe_outputs.draft_probs.sizes().vec();
+            tokens_sizes[0]   = max_bs_;
+            probs_sizes[0]    = max_bs_;
+            capture_mem_hold_.setDSparkDraftOutputs(
+                torch::zeros(tokens_sizes, probe_outputs.draft_tokens.options()),
+                torch::zeros(probs_sizes, probe_outputs.draft_probs.options()));
+            RTP_LLM_LOG_INFO("[CudaGraph] dspark draft full-tail capture on: static draft_probs buffer %zu MiB",
+                             (size_t)(capture_mem_hold_.dspark_draft_probs_.numel()
+                                      * capture_mem_hold_.dspark_draft_probs_.element_size())
+                                 / 1024 / 1024);
+        }
         initCaptureAttentionInputsPost();
         logCudaGraphPoolMemory("before_capture");
 
@@ -1158,6 +1191,14 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                                         "dspark target verify capture: forward did not export aux_hidden_states");
                 graph_instances_[key].mem_hold_.decoder_layer_aux_hidden_states_.copy_(outputs.aux_hidden_states);
             }
+            // DSpark draft full-tail capture: persist draft_tokens/draft_probs
+            // into their static buffers as part of the graph.
+            if (graph_instances_[key].mem_hold_.dspark_draft_tokens_.defined()) {
+                RTP_LLM_CHECK_WITH_INFO(outputs.draft_tokens.defined() && outputs.draft_probs.defined(),
+                                        "dspark draft full-tail capture: forward did not emit draft_tokens/draft_probs");
+                graph_instances_[key].mem_hold_.dspark_draft_tokens_.copy_(outputs.draft_tokens);
+                graph_instances_[key].mem_hold_.dspark_draft_probs_.copy_(outputs.draft_probs);
+            }
             graph.capture_end();
         }
 
@@ -1277,6 +1318,13 @@ CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs
                                   is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1);
     if (capture_mem_hold_.decoder_layer_aux_hidden_states_.defined()) {
         hold.setAuxHiddenStates(capture_mem_hold_.decoder_layer_aux_hidden_states_.slice(0, 0, tokens_count));
+    }
+    if (capture_mem_hold_.dspark_draft_tokens_.defined()) {
+        // Draft outputs are batch-major (dim 0 = B), unlike the token-major
+        // hidden/aux buffers.
+        const int bs = tokens_count / num_tokens_per_bs_;
+        hold.setDSparkDraftOutputs(capture_mem_hold_.dspark_draft_tokens_.slice(0, 0, bs),
+                                   capture_mem_hold_.dspark_draft_probs_.slice(0, 0, bs));
     }
     return hold;
 }

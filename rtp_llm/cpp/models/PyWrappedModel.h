@@ -5,6 +5,7 @@
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <optional>
 #include <string>
+#include <cstdlib>
 #include <atomic>
 #include <mutex>
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -95,10 +96,12 @@ private:
     bool       enable_cuda_graph_{false};
     bool       is_prefill_cuda_graph_mode_{false};
     bool       use_spec_decoding_{false};
-    // DSpark/DFlash draft: its CUDA graph captures the backbone only
-    // (forward_backbone); the lm_head + Markov + softmax tail (draft_tail)
-    // runs eagerly after replay.  Gate = is_dspark_ && !use_spec_decoding_
-    // (the draft, not the target-verify graph).
+    // DSpark/DFlash draft: by default its CUDA graph captures the full
+    // forward including the lm_head + Markov + softmax tail (vLLM FULL-graph
+    // boundary); with the tail not captured (tp>1 or DSPARK_GRAPH_TAIL=0) the
+    // graph covers the backbone only and draft_tail runs eagerly after
+    // replay.  Draft gate = is_dspark_ && !use_spec_decoding_ (not the
+    // target-verify graph).
     bool       is_dspark_{false};
     bool       enable_device_perf_{false};
     bool       check_nan_{false};
@@ -262,6 +265,15 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         }
         graph_params.is_dspark = is_dspark;
         graph_params.is_target_verify = use_spec_decoding;
+        // DSpark draft: capture the full forward including the lm_head +
+        // Markov + softmax tail (vLLM FULL-graph boundary).  tp>1 keeps the
+        // eager tail — the tail's vocab all-gather under graph capture is
+        // unverified (as is graph x TP generally).  DSPARK_GRAPH_TAIL=0 is
+        // the kill switch back to the backbone-only boundary.
+        if (is_dspark && params.model_id && !use_spec_decoding && params.parallelism_config.tp_size == 1) {
+            const char* tail_env         = std::getenv("DSPARK_GRAPH_TAIL");
+            graph_params.dspark_capture_tail = !(tail_env != nullptr && std::string(tail_env) == "0");
+        }
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }

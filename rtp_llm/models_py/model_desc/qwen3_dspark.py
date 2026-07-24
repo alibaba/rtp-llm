@@ -91,8 +91,9 @@ class Qwen3DSparkModel(Qwen3DFlashModel):
 
         base_logits: [B, k, V]; anchor_ids: [B] int64.
         Returns (tokens [B, k] int64, corrected_logits [B, k, V] fp32).
-        Plain python loop over k — small, and CUDA-graph capturable later
-        (vLLM captures the same loop in its FULL graph).
+        Plain python loop over k — small, pure tensor ops, captured in the
+        default full-tail draft graph (vLLM captures the same loop in its
+        FULL graph).
         """
         corrected = base_logits.float()
         k = corrected.shape[1]

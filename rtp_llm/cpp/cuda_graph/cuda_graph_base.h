@@ -27,6 +27,12 @@ struct GraphParams {
     // static logical block table + dspark_ctx_starts and refreshes them per
     // replay (MTP/eagle drafts have no such in-forward cache-write stage).
     bool                 is_dspark                    = false;
+    // DSpark draft graph only: capture the full forward (backbone + lm_head +
+    // Markov + softmax tail) instead of forward_backbone, mirroring vLLM's
+    // FULL-graph DSpark speculator.  Adds two static output buffers
+    // (draft_tokens [maxB, k] + draft_probs [maxB, k, V]); the model wrapper
+    // decides eligibility (draft instance, tp==1, kill switch).
+    bool                 dspark_capture_tail          = false;
     int                  max_seq_len                  = 0;
     int                  tokens_per_block             = 0;  // physical kv block size
     int                  kernel_tokens_per_block      = 0;  // must be explicitly configured
@@ -63,6 +69,13 @@ public:
     // Refresh only captured kv_cache_kernel_block_id state and FlashInfer plan
     // buffers after page-table changes. Other captured fields stay untouched.
     virtual void updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) {}
+
+    // DSpark draft: true when the graph captured the full forward including
+    // the lm_head + Markov + softmax tail, so the wrapper must NOT run the
+    // eager draft_tail after replay.
+    virtual bool capturesDraftTail() const {
+        return false;
+    }
 
     py::object py_instance_;
 };
