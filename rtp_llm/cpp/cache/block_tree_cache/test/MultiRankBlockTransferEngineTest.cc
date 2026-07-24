@@ -8,7 +8,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtil.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/PerRankBlockTransferEngineTestUtils.h"
@@ -291,7 +290,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadBackCommitsDeviceSlot)
                                                                       broadcast_manager);
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].host_block = host_block;
-    ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
+    ASSERT_TRUE(block_tree_cache_test::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
     BlockTreeMatchResult match = cache->match({100});
     ASSERT_NE(match.load_back_ticket, nullptr);
     ASSERT_EQ(match.load_back_ticket->items().size(), 1u);
@@ -361,7 +360,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadBackFailureKeepsSource
                                                                       broadcast_manager);
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].host_block = host_block;
-    ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
+    ASSERT_TRUE(block_tree_cache_test::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
     BlockTreeMatchResult match = cache->match({100});
     ASSERT_NE(match.load_back_ticket, nullptr);
     ASSERT_EQ(match.load_back_ticket->items().size(), 1u);
@@ -426,7 +425,7 @@ TEST_F(MultiRankBlockTransferEngineTest, LoadBackCompletionStateMismatchDoesNotI
                                                                       broadcast_manager);
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].host_block = host_block;
-    ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
+    ASSERT_TRUE(block_tree_cache_test::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
     BlockTreeFindResult find_result = cache->tree()->findNode({100});
     ASSERT_NE(find_result.matched_node, nullptr);
 
@@ -489,7 +488,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadBackUsesTwoTransferSta
                                                                       broadcast_manager);
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].disk_slot = disk_block;
-    ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
+    ASSERT_TRUE(block_tree_cache_test::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
     BlockTreeMatchResult match = cache->match({100});
     ASSERT_NE(match.load_back_ticket, nullptr);
     ASSERT_EQ(match.load_back_ticket->items().size(), 1u);
@@ -573,7 +572,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsPlan) {
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].host_block = host_block;
-    ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
+    ASSERT_TRUE(block_tree_cache_test::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
     BlockTreeFindResult before = cache->tree()->findNode({100});
     ASSERT_NE(before.matched_node, nullptr);
     ASSERT_EQ(cache->getStats().host_heap_total_size, 1u);
@@ -640,7 +639,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackPlan) 
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].host_block = host_block;
-    ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
+    ASSERT_TRUE(block_tree_cache_test::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
     BlockTreeFindResult before = cache->tree()->findNode({100});
     ASSERT_NE(before.matched_node, nullptr);
     ASSERT_EQ(cache->getStats().host_heap_total_size, 1u);

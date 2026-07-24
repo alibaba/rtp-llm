@@ -5,6 +5,7 @@
 
 #include "gtest/gtest.h"
 
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm {
@@ -61,7 +62,7 @@ TEST(IBlockPoolTest, MallocReturnsAllocatedRefcountZeroBlocks) {
     ASSERT_TRUE(block.has_value());
     EXPECT_TRUE(pool.isAllocated(*block));
     EXPECT_EQ(pool.refCount(*block), 0u);
-    EXPECT_EQ(pool.TEST_unreferencedBlocksNum(), 1u);
+    EXPECT_EQ(block_tree_cache_test::unreferencedBlocksNum(pool), 1u);
 }
 
 TEST(IBlockPoolTest, BatchMallocIsAtomic) {
@@ -83,11 +84,11 @@ TEST(IBlockPoolTest, RefcountMetricsFollowAggregateRefcount) {
 
     auto block = pool.malloc();
     ASSERT_TRUE(block.has_value());
-    EXPECT_EQ(pool.TEST_unreferencedBlocksNum(), 1u);
+    EXPECT_EQ(block_tree_cache_test::unreferencedBlocksNum(pool), 1u);
 
     pool.incRef(*block, BlockRefType::REQUEST);
     EXPECT_EQ(pool.refCount(*block), 1u);
-    EXPECT_EQ(pool.TEST_treeCachedBlocksNum(), 1u);
+    EXPECT_EQ(block_tree_cache_test::treeCachedBlocksNum(pool), 1u);
 
     pool.incRef(*block, BlockRefType::REQUEST);
     EXPECT_EQ(pool.refCount(*block), 2u);

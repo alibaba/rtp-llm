@@ -12,7 +12,6 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtil.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/PerRankBlockTransferEngineTestUtils.h"
 
@@ -356,7 +355,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].host_block = host_block;
-    ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
+    ASSERT_TRUE(block_tree_cache_test::insertComponentGroupSlots(*cache, nullptr, {100}, slots));
 
     auto before = cache->tree()->findNode({100});
     ASSERT_NE(before.matched_node, nullptr);
@@ -582,7 +581,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadBackSett
         ASSERT_NE(source_block, NULL_BLOCK_IDX);
         std::vector<std::vector<GroupSlot>> source_slots(1, std::vector<GroupSlot>(1));
         source_slots[0][0].disk_slot = source_block;
-        ASSERT_TRUE(BlockTreeCacheTestUtil::insertComponentGroupSlots(*cache, nullptr, {100}, source_slots));
+        ASSERT_TRUE(block_tree_cache_test::insertComponentGroupSlots(*cache, nullptr, {100}, source_slots));
 
         BlockTreeMatchResult result = cache->match({100});
         ASSERT_NE(result.load_back_ticket, nullptr);

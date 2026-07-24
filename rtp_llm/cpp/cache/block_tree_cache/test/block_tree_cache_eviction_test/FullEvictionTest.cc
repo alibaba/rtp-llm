@@ -4,7 +4,6 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtil.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
 namespace rtp_llm {
@@ -38,10 +37,10 @@ protected:
         full->component_group_id              = 0;
         counting_full_                        = full.get();
         std::vector<ComponentGroupPtr> groups = {full};
-        cache_                                = BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree),
-                                                            std::move(groups),
-                                                            std::vector<Component>{},
-                                                            BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+        cache_                                = block_tree_cache_test::makeBlockTreeCacheForTest(std::move(tree),
+                                                                  std::move(groups),
+                                                                  std::vector<Component>{},
+                                                                  BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
     }
 
     // Insert a path with given device block for group 0.

@@ -196,28 +196,6 @@ size_t IBlockPool::activeTreeCachedBlocksNum() const {
     return active_tree_cached_blocks_num_;
 }
 
-size_t IBlockPool::TEST_unreferencedBlocksNum() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    size_t                      count = 0;
-    for (size_t block = 1; block < allocated_.size(); ++block) {
-        if (allocated_[block] != 0 && refcounts_[block] == 0) {
-            ++count;
-        }
-    }
-    return count;
-}
-
-size_t IBlockPool::TEST_treeCachedBlocksNum() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    size_t                      count = 0;
-    for (size_t block = 1; block < allocated_.size(); ++block) {
-        if (allocated_[block] != 0 && refcounts_[block] > 0) {
-            ++count;
-        }
-    }
-    return count;
-}
-
 void IBlockPool::markInitialized() {
     std::lock_guard<std::mutex> lock(mutex_);
     initialized_ = true;

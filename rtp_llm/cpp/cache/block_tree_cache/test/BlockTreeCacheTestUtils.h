@@ -52,6 +52,9 @@ makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs, size_t usable_co
 
 BlockIdxType poolMalloc(IBlockPool& pool);
 
+size_t unreferencedBlocksNum(const IBlockPool& pool);
+size_t treeCachedBlocksNum(const IBlockPool& pool);
+
 std::unique_ptr<BlockTreeCache>
 makeBlockTreeCacheForTest(std::unique_ptr<BlockTree>        tree,
                           std::vector<ComponentGroupPtr>    component_groups,
@@ -59,6 +62,11 @@ makeBlockTreeCacheForTest(std::unique_ptr<BlockTree>        tree,
                           BlockTreeCacheConfig              config            = {},
                           std::shared_ptr<StorageBackend>   storage_backend   = nullptr,
                           std::shared_ptr<BroadcastManager> broadcast_manager = nullptr);
+
+bool insertComponentGroupSlots(BlockTreeCache&                            cache,
+                               TreeNode*                                  parent,
+                               const CacheKeysType&                       cache_keys,
+                               const std::vector<std::vector<GroupSlot>>& slots);
 
 class BlockTreeCacheTestPeer {
 public:

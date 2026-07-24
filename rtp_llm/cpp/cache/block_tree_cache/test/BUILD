@@ -109,7 +109,7 @@ cc_test(
     name = "i_block_pool_test",
     srcs = ["IBlockPoolTest.cc"],
     copts = pool_test_copts,
-    deps = pool_test_deps,
+    deps = pool_test_deps + [":block_tree_cache_test_utils"],
     env = {},
 )
 
@@ -217,7 +217,6 @@ cc_library(
     name = "block_tree_cache_test_utils",
     srcs = ["BlockTreeCacheTestUtils.cc"],
     hdrs = [
-        "BlockTreeCacheTestUtil.h",
         "BlockTreeCacheTestUtils.h",
     ],
     copts = test_copts,

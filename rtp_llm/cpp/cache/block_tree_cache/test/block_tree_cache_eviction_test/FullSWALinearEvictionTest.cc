@@ -1,7 +1,6 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtil.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
 namespace rtp_llm {
@@ -20,10 +19,10 @@ protected:
         auto linear                           = std::make_shared<LinearComponentGroup>();
         linear->component_group_id            = 2;
         std::vector<ComponentGroupPtr> groups = {full, swa, linear};
-        cache_                                = BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree),
-                                                            std::move(groups),
-                                                            std::vector<Component>{},
-                                                            BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+        cache_                                = block_tree_cache_test::makeBlockTreeCacheForTest(std::move(tree),
+                                                                  std::move(groups),
+                                                                  std::vector<Component>{},
+                                                                  BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_b, BlockIdxType swa_b, BlockIdxType lin_b) {
@@ -187,10 +186,10 @@ TEST_F(FullSWALinearEvictionTest, SWAReclaimCascadesToLinear) {
     linear->component_group_id             = 1;
     std::vector<ComponentGroupPtr>  groups = {swa, linear};
     std::unique_ptr<BlockTreeCache> swa_lin_cache =
-        BlockTreeCacheTestUtil::makeBlockTreeCache(std::move(tree),
-                                                   std::move(groups),
-                                                   std::vector<Component>{},
-                                                   BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+        block_tree_cache_test::makeBlockTreeCacheForTest(std::move(tree),
+                                                         std::move(groups),
+                                                         std::vector<Component>{},
+                                                         BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
 
     std::vector<std::vector<GroupSlot>> slots(2, std::vector<GroupSlot>(2));
     slots[0][0].device_blocks = {20};

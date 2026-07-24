@@ -79,8 +79,6 @@ public:
     size_t freeBlocksNum() const;
     size_t usedBlocksNum() const;
     size_t activeTreeCachedBlocksNum() const;
-    size_t TEST_unreferencedBlocksNum() const;
-    size_t TEST_treeCachedBlocksNum() const;
 
 protected:
     explicit IBlockPool(std::shared_ptr<const BlockPoolConfigBase> config);
