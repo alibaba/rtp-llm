@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
 namespace rtp_llm {
+
 #define TRANS_OPTIONAL(name)                                                                                           \
     if (config_proto->has_##name()) {                                                                                  \
         generate_config->name = config_proto->name().value();                                                          \
@@ -96,10 +97,15 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(top_p_decay);
     TRANS_OPTIONAL(top_p_min);
     TRANS_OPTIONAL(top_p_reset_ids);
+    TRANS_OPTIONAL(json_schema);
+    TRANS_OPTIONAL(regex);
+    TRANS_OPTIONAL(ebnf);
+    TRANS_OPTIONAL(structural_tag);
     TRANS_OPTIONAL(task_id);
     TRANS_OPTIONAL(adapter_name);
-    generate_config->in_think_mode       = config_proto->in_think_mode();
-    generate_config->max_thinking_tokens = config_proto->max_thinking_tokens();
+    generate_config->grammar_terminate_without_stop_token = config_proto->grammar_terminate_without_stop_token();
+    generate_config->in_think_mode                        = config_proto->in_think_mode();
+    generate_config->max_thinking_tokens                  = config_proto->max_thinking_tokens();
     for (const auto& token_id : config_proto->end_think_token_ids()) {
         generate_config->end_think_token_ids.push_back(token_id);
     }

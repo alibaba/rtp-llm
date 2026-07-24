@@ -68,7 +68,9 @@ cc_test(
         "QueryConverterTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [
+        "//rtp_llm/cpp/models:logits_processor",
+    ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

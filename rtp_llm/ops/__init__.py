@@ -135,6 +135,7 @@ try:
         FIFOSchedulerConfig,
         FMHAConfig,
         FMHAType,
+        GrammarConfig,
         HWKernelConfig,
         KVCacheConfig,
         KVCacheSpecDesc,
@@ -156,6 +157,7 @@ try:
         check_rope_cache,
         get_rope_cache,
         get_rope_cache_once,
+        serialize_grammar_tokenizer_info,
         CPRotateMethod,
         PrefillCPConfig,
     )

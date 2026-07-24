@@ -1,5 +1,8 @@
 #pragma once
 
+#include <optional>
+#include <vector>
+
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -20,7 +23,7 @@ public:
     virtual SamplerOutput forward(const SamplerInputs& inputs);
 
 private:
-    void                   preprocessLogits(const SamplerInputs& inputs);
+    std::vector<std::optional<ErrorInfo>> preprocessLogits(const SamplerInputs& inputs);
     void                   ensureGreedySamplingBuffers(size_t batch_size);
     void                   allocateGreedySamplingBuffers(size_t max_batch_size);
     void                   waitGreedySamplingBufferEvents();

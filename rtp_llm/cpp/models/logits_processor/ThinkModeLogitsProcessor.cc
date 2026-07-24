@@ -5,9 +5,10 @@ using namespace std;
 namespace rtp_llm {
 
 ThinkModeLogitsProcessor::ThinkModeLogitsProcessor(std::vector<StreamThinkInfo> think_infos):
-    think_infos_(think_infos) {};
+    think_infos_(think_infos){};
 
-void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
+std::optional<ErrorInfo>
+ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
     RTP_LLM_CHECK(size() == finish_idx - start_idx);
 
     for (size_t i = 0; i < size(); ++i) {
@@ -27,6 +28,7 @@ void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start
                      inputs.vocab_size,
                      enforce);
     }
+    return std::nullopt;
 }
 
 void ThinkModeLogitsProcessor::setVocabMask(std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr,
@@ -49,7 +51,8 @@ void ThinkModeLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_
     think_infos_ = new_think_infos;
 }
 
-void ThinkModeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
+std::optional<ErrorInfo> ThinkModeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens,
+                                                                int32_t              num_new_tokens) {
     RTP_LLM_CHECK(2 == new_tokens.dim());
     RTP_LLM_CHECK(size() == (size_t)new_tokens.size(0));
 
@@ -71,6 +74,7 @@ void ThinkModeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int
 
         info.current_output_length += num_new_tokens;
     }
+    return std::nullopt;
 }
 
 ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> generate_input,

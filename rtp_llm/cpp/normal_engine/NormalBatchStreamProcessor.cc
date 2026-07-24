@@ -66,10 +66,4 @@ void NormalBatchStreamProcessor::fillSamplerCommonInputs(SamplerInputs&         
     sampler_input_gatherer_->fillSamplerCommonInputs(sampler_inputs, all_streams, score_batch, propose_step);
 }
 
-void NormalBatchStreamProcessor::setLogitsProcessorInputs(SamplerInputs&                sampler_inputs,
-                                                          std::list<GenerateStreamPtr>& all_streams,
-                                                          bool                          score_batch) const {
-    sampler_input_gatherer_->setLogitsProcessorInputs(sampler_inputs, all_streams, score_batch);
-}
-
 }  // namespace rtp_llm

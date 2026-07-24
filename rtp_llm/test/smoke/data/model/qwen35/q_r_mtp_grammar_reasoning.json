@@ -1,0 +1,341 @@
+{
+    "model_type": "qwen35_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+    "grammar_constraint_only": true,
+    "_comment": "MTP + grammar + reasoning (sequential, thinking ON). Pairs with q_r_mtp_grammar.json (thinking OFF) and q_r_mtp_grammar_reasoning_concurrent.json (thinking ON + concurrency). Each axis has had a real bug in living memory: (1) MTP rollback non-reasoning active_steps formula bug; (2) ReasonerGrammarObject per-stream tokens_after_think_end reset (GrammarManager.cc:473-474); (3) MTP prefill bonus token T0 must be accepted into matcher; (4) grammar fork/DFS in spec decoding. With reasoning enabled, the matcher is in 'free-accept' (mask off) until </think> is seen, then locks onto the schema. Under MTP this means: the spec engine drafts N tokens including possibly </think>, the matcher must transition state synchronously, AND rollback must use the reasoning-mode active_steps formula. If any of those four breaks, the output is either non-JSON or never closes <think>. grammar_constraint_only=true because reasoning_content is model-version-dependent.",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Generate a person profile as JSON."
+                    }
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "person",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "maxLength": 40
+                                },
+                                "age": {
+                                    "type": "integer"
+                                },
+                                "city": {
+                                    "type": "string",
+                                    "maxLength": 40
+                                }
+                            },
+                            "required": [
+                                "name",
+                                "age",
+                                "city"
+                            ],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "max_tokens": 512,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false,
+                "extra_configs": {
+                    "max_thinking_tokens": 64,
+                    "chat_template_kwargs": {
+                        "enable_thinking": true
+                    }
+                }
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1781319435,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\n  \"name\": \"Elena Rodriguez\",\n  \"age\": 29,\n  \"city\": \"Austin, Texas, USA\"\n}",
+                            "reasoning_content": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Task: Generate a person profile.\n    *   Format: JSON.\n    *   Content: A fictional person's profile (since no specific person was provided).\n\n2.  **Determine the Structure:**\n    *",
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 17,
+                    "total_tokens": 118,
+                    "completion_tokens": 101,
+                    "completion_tokens_details": {
+                        "audio_tokens": null,
+                        "reasoning_tokens": 64
+                    },
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 13855.387,
+                    "iter_count": 28,
+                    "prefix_len": 0,
+                    "input_len": 17,
+                    "output_len": 101,
+                    "step_output_len": 100,
+                    "first_token_cost_time": 10532.104,
+                    "wait_time": 0.0,
+                    "pd_sep": true,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [
+                        {
+                            "role": "DECODE",
+                            "ip": "127.0.0.1",
+                            "http_port": 10500,
+                            "grpc_port": 10501
+                        }
+                    ],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
+            },
+            "_comment": "json_schema #1 (cache MISS) — first request triggers async compile of ReasonerGrammarObject under MTP. Verifies the freshly-built reasoner state propagates through MtpExecutor::dispatchDecode without leaking the compile-time default. max_thinking_tokens=64 caps the reasoning span so the matcher transitions to grammar lock within max_tokens=512."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Generate another person profile."
+                    }
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "person",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "maxLength": 40
+                                },
+                                "age": {
+                                    "type": "integer"
+                                },
+                                "city": {
+                                    "type": "string",
+                                    "maxLength": 40
+                                }
+                            },
+                            "required": [
+                                "name",
+                                "age",
+                                "city"
+                            ],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "max_tokens": 512,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false,
+                "extra_configs": {
+                    "max_thinking_tokens": 64,
+                    "chat_template_kwargs": {
+                        "enable_thinking": true
+                    }
+                }
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1781319437,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\n  \"name\": \"Elena Vance\",\n  \"age\": 29,\n  \"city\": \"Portland, Oregon, USA\"\n}",
+                            "reasoning_content": "Okay, the user wants me to generate another person profile. Let me start by understanding what they need. They might be looking for a fictional character profile for a story, game, or some creative project. Since they said \"another,\" maybe they've asked for one before. But since there's no context, I should",
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 15,
+                    "total_tokens": 116,
+                    "completion_tokens": 101,
+                    "completion_tokens_details": {
+                        "audio_tokens": null,
+                        "reasoning_tokens": 64
+                    },
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 2470.1,
+                    "iter_count": 33,
+                    "prefix_len": 0,
+                    "input_len": 15,
+                    "output_len": 101,
+                    "step_output_len": 100,
+                    "first_token_cost_time": 106.187,
+                    "wait_time": 0.0,
+                    "pd_sep": true,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [
+                        {
+                            "role": "DECODE",
+                            "ip": "127.0.0.1",
+                            "http_port": 10500,
+                            "grpc_port": 10501
+                        }
+                    ],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
+            },
+            "_comment": "json_schema #2 (memory cache HIT under MTP) — same schema, different prompt. The cache-hit branch must independently re-init the reasoner per request."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Give me a hex color code for ocean blue."
+                    }
+                ],
+                "response_format": {
+                    "type": "regex",
+                    "pattern": "#[0-9A-Fa-f]{6}"
+                },
+                "max_tokens": 256,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false,
+                "extra_configs": {
+                    "max_thinking_tokens": 32,
+                    "chat_template_kwargs": {
+                        "enable_thinking": false
+                    }
+                }
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1781319438,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "#0077BE",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 22,
+                    "total_tokens": 29,
+                    "completion_tokens": 7,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 332.547,
+                    "iter_count": 4,
+                    "prefix_len": 0,
+                    "input_len": 22,
+                    "output_len": 7,
+                    "step_output_len": 6,
+                    "first_token_cost_time": 105.476,
+                    "wait_time": 0.0,
+                    "pd_sep": true,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [
+                        {
+                            "role": "DECODE",
+                            "ip": "127.0.0.1",
+                            "http_port": 10500,
+                            "grpc_port": 10501
+                        }
+                    ],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
+            },
+            "_comment": "regex (no-thinking, MTP) — strict 7-char constraint (#RRGGBB). thinking=false because model enters rep-loop for this trivial prompt under thinking mode, consuming max_tokens on reasoning. The json_schema queries above already validate reasoning+grammar path. This query validates grammar ACTIVELY constrains: without masking, the model would output explanatory text around the code. re.fullmatch catches any extra chars."
+        }
+    ]
+}

@@ -13,6 +13,14 @@ enum class ErrorCode {
     EXECUTION_EXCEPTION          = 606,
     EXCEEDS_KV_CACHE_MAX_LEN     = 607,
 
+    // grammar / structured-output errors (608-613)
+    GRAMMAR_PARSER_REJECTED_TOKEN     = 608,
+    GRAMMAR_NON_EOS_AFTER_TERMINAL    = 609,
+    GRAMMAR_BITMASK_BUFFER_TOO_SMALL  = 610,
+    GRAMMAR_VOCAB_EXCEEDS_MODEL_VOCAB = 611,
+    GRAMMAR_EOS_OUT_OF_VOCAB          = 612,
+    GRAMMAR_VERIFY_EXCEPTION          = 613,
+
     // multimodal error
     MM_LONG_PROMPT_ERROR   = 901,
     MM_WRONG_FORMAT_ERROR  = 902,
@@ -113,6 +121,18 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "OUTPUT_QUEUE_NO_UPDATE";
         case ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN:
             return "EXCEEDS_KV_CACHE_MAX_LEN";
+        case ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN:
+            return "GRAMMAR_PARSER_REJECTED_TOKEN";
+        case ErrorCode::GRAMMAR_NON_EOS_AFTER_TERMINAL:
+            return "GRAMMAR_NON_EOS_AFTER_TERMINAL";
+        case ErrorCode::GRAMMAR_BITMASK_BUFFER_TOO_SMALL:
+            return "GRAMMAR_BITMASK_BUFFER_TOO_SMALL";
+        case ErrorCode::GRAMMAR_VOCAB_EXCEEDS_MODEL_VOCAB:
+            return "GRAMMAR_VOCAB_EXCEEDS_MODEL_VOCAB";
+        case ErrorCode::GRAMMAR_EOS_OUT_OF_VOCAB:
+            return "GRAMMAR_EOS_OUT_OF_VOCAB";
+        case ErrorCode::GRAMMAR_VERIFY_EXCEPTION:
+            return "GRAMMAR_VERIFY_EXCEPTION";
         case ErrorCode::GET_HOST_FAILED:
             return "GET_HOST_FAILED";
         case ErrorCode::GET_CONNECTION_FAILED:

@@ -13,11 +13,15 @@
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
-#include <iterator>
+#include "rtp_llm/cpp/utils/AssertUtils.h"
+#include <algorithm>
 #include <condition_variable>
-#include <type_traits>
+#include <cstdint>
+#include <iterator>
+#include <memory>
 #include <mutex>
 #include <optional>
+#include <type_traits>
 #include <utility>
 
 namespace rtp_llm {
@@ -40,6 +44,7 @@ struct StreamUpdateInfo {
     bool                force_update_info      = false;
     // prompt scoring
     std::optional<PromptLogitsOutput> prompt_logits;
+    std::optional<ErrorInfo>          error_info;
 };
 
 struct StreamSpecUpdateInfo {
@@ -50,8 +55,9 @@ struct StreamSpecUpdateInfo {
     const torch::Tensor draft_hidden_states;
     const torch::Tensor draft_token_probs;
 
-    bool update_remote_generate = true;
-    bool force_update_info      = false;
+    bool                     update_remote_generate = true;
+    bool                     force_update_info      = false;
+    std::optional<ErrorInfo> error_info;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -269,6 +275,10 @@ public:
         reportEventWithoutLock(StreamEvents::Error, error_code, std::forward<T>(error_msg));
     }
 
+    // 无锁版本的 reportError，供已持有 mutex_ 的内部路径（dispatch/process/acceptTokens）使用，
+    // 构造期对象尚未发布的路径使用，避免在非递归 mutex 上自死锁。语义上等价于
+    // reportEventWithoutLock(Error, code, msg)，提供独立 API 仅为调用方意图更清晰。
+    void         reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg);
     bool         hasEvent(StreamEvents::EventType event) const;
     virtual bool hasError() const;
     ErrorInfo    statusInfo();
@@ -471,8 +481,13 @@ public:
         return generate_input_->begin_time_us;
     }
 
-    std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
-        return logits_processor_list_;
+    const std::vector<BaseLogitsProcessorPtr>& getAllLogitsProcessorPtr() const {
+        return logits_processors_;
+    }
+
+    void installLogitsProcessor(BaseLogitsProcessorPtr processor) {
+        RTP_LLM_CHECK_WITH_INFO(processor != nullptr, "logits processor must not be null");
+        logits_processors_.push_back(std::move(processor));
     }
 
     at::Generator getGenerator() {
@@ -573,10 +588,13 @@ protected:
     virtual bool consumerReadyWithoutLock() const;
 
     int  estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
-    void updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
-    void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
-    void fillSubGenerateStatus(StreamState state);
-    void resizeSubGenerateStatus(size_t new_size);
+    bool                     reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
+    std::optional<ErrorInfo> updateNormalLogitProcessorStatus(const StreamUpdateInfo& update_info);
+    std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens);
+    void                     updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
+    std::optional<ErrorInfo> validateLogitsProcessorState();
+    void                     fillSubGenerateStatus(StreamState state);
+    void                     resizeSubGenerateStatus(size_t new_size);
 
     void reportStreamMetrics();
     void reportCacheReuseMetrics() const;
@@ -670,7 +688,7 @@ protected:
     rtp_llm::DataType dtype_;
     size_t            hidden_size_;
 
-    std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
+    std::vector<BaseLogitsProcessorPtr> logits_processors_;
     at::Generator                       generator_;
 
     // just for bool test

@@ -61,3 +61,25 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "grammar_logits_processor_test",
+    srcs = [
+        "GrammarLogitsProcessorTest.cc",
+    ],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",
+        "//rtp_llm/cpp/models:logits_processor",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+        "@xgrammar//:xgrammar",
+    ] + torch_deps(),
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)

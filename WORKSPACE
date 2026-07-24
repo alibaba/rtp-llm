@@ -28,6 +28,10 @@ load("@rtp_deps//:git.bzl", "git_deps")
 
 git_deps()
 
+load("//3rdparty/xgrammar:repositories.bzl", "xgrammar_deps")
+
+xgrammar_deps()
+
 load("@rules_python//python:repositories.bzl", "py_repositories")
 
 py_repositories()

@@ -20,6 +20,14 @@ class ExceptionType(IntEnum):
     EXECUTION_EXCEPTION = 606
     EXCEEDS_KV_CACHE_MAX_LEN = 607
 
+    # grammar / structured-output errors (mirror rtp_llm/cpp/utils/ErrorCode.h)
+    GRAMMAR_PARSER_REJECTED_TOKEN = 608
+    GRAMMAR_NON_EOS_AFTER_TERMINAL = 609
+    GRAMMAR_BITMASK_BUFFER_TOO_SMALL = 610
+    GRAMMAR_VOCAB_EXCEEDS_MODEL_VOCAB = 611
+    GRAMMAR_EOS_OUT_OF_VOCAB = 612
+    GRAMMAR_VERIFY_EXCEPTION = 613
+
     # Error codes starting from 8000 can be retried
     CANCELLED = 8100
     OUT_OF_VOCAB_RANGE = 8101
