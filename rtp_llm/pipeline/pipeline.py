@@ -104,8 +104,9 @@ class Pipeline(object):
         if isinstance(generate_config, dict):
             config = GenerateConfig.create_generate_config(generate_config, **kwargs)
         else:
-            # 认为是从frontend_worker传递进来的，不需要再处理一遍
             config = generate_config
+        # 幂等契约:batch 会让多条 query 共享同一 config 对象(_get_adapter 的
+        # [config] * N)并重复走到这里,以下 prepare 方法必须幂等,新增亦然。
         config.add_special_tokens(special_tokens)
         config.convert_select_tokens(vocab_size, tokenizer)
         config.add_thinking_params(tokenizer, generate_env_config)

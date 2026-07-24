@@ -152,6 +152,117 @@ class GenerateConfigTest(TestCase):
                 generate_env_config=GenerateEnvConfig(),
             )
 
+    def test_batch_shared_config_no_accumulation(self):
+        # Regression: batch 请求里 request_extractor 用 [config] * N 让 N 条 query 共享
+        # 同一个 GenerateConfig 对象。Pipeline.create_generate_config 对「对象入参」走
+        # 复用分支(config = generate_config),于是 convert_select_tokens / add_special_tokens
+        # 会在同一个对象上被调用 N 次。修复前:select_tokens_id 累积成 N 份(logits 被重复
+        # N 次)、special stop words 被追加 N 遍。
+        special_tokens = SpecialTokens()
+        special_tokens.stop_words_id_list = [[1233, 19912]]
+        special_tokens.stop_words_str_list = ["gg"]
+        tokenizer = QWenTokenizer(
+            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
+        )
+
+        shared = GenerateConfig(
+            select_tokens_str=["1", "2", "3", "4"],
+            stop_words_str=["hello"],
+            stop_words_list=[[8848]],
+        )
+
+        first_select_len = None
+        for _ in range(3):  # 3 条 query 共享同一个对象
+            cfg = Pipeline.create_generate_config(
+                generate_config=shared,  # 传对象 → 命中复用分支
+                vocab_size=200000,
+                special_tokens=special_tokens,
+                tokenizer=tokenizer,
+                generate_env_config=GenerateEnvConfig(),
+            )
+            self.assertIs(cfg, shared)  # 确认确实复用同一对象
+            if first_select_len is None:
+                first_select_len = len(shared.select_tokens_id)
+            # 每次调用后长度都应等于第一次,不随 batch 累积
+            self.assertEqual(len(shared.select_tokens_id), first_select_len)
+
+        # special stop words 只合入一次,且用户已传入的 stop words 原样保留一份
+        self.assertEqual(shared.stop_words_str, ["hello", "gg"])
+        self.assertEqual(shared.stop_words_str.count("hello"), 1)
+        self.assertEqual(shared.stop_words_list.count([8848]), 1)
+        self.assertEqual(shared.stop_words_list.count([1233, 19912]), 1)
+
+    def test_select_tokens_str_id_union_dedup(self):
+        # 同时提供 select_tokens_str 与 select_tokens_id 时取去重并集:显式 id 保留、
+        # str 派生 token 全部并入、整体无重复;重复调用(batch 共享)保持幂等。
+        tokenizer = QWenTokenizer(
+            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
+        )
+        str_ids = []
+        for token_str in ["1", "2"]:
+            str_ids += tokenizer.encode(token_str)
+
+        config = GenerateConfig(select_tokens_str=["1", "2"], select_tokens_id=[99999])
+        for _ in range(2):  # 幂等:第二次调用不应改变结果
+            Pipeline.create_generate_config(
+                generate_config=config,
+                vocab_size=200000,
+                special_tokens=SpecialTokens(),
+                tokenizer=tokenizer,
+                generate_env_config=GenerateEnvConfig(),
+            )
+
+        # 显式 id 保留,str 未被丢弃,且无重复
+        self.assertIn(99999, config.select_tokens_id)
+        for token_id in str_ids:
+            self.assertIn(token_id, config.select_tokens_id)
+        self.assertEqual(
+            len(config.select_tokens_id), len(set(config.select_tokens_id))
+        )
+
+    def test_prepare_chain_idempotent(self):
+        # 契约守卫:create_generate_config 链上所有 prepare 方法必须幂等。
+        # 共享对象重复调用后,被 mutate 的字段应与首次调用后完全一致;未来新增
+        # 的非幂等 prepare 方法会在此暴露。
+        special_tokens = SpecialTokens()
+        special_tokens.stop_words_id_list = [[1233, 19912]]
+        special_tokens.stop_words_str_list = ["gg"]
+        tokenizer = QWenTokenizer(
+            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
+        )
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = 102
+
+        shared = GenerateConfig(
+            select_tokens_str=["1", "2", "3", "4"],
+            stop_words_str=["hello"],
+            stop_words_list=[[8848]],
+        )
+
+        def snapshot(c):
+            return (
+                list(c.select_tokens_id),
+                [list(x) for x in c.stop_words_list],
+                list(c.stop_words_str),
+                list(c.end_think_token_ids),
+                c.in_think_mode,
+            )
+
+        first = None
+        for _ in range(3):
+            Pipeline.create_generate_config(
+                generate_config=shared,
+                vocab_size=200000,
+                special_tokens=special_tokens,
+                tokenizer=tokenizer,
+                generate_env_config=generate_env_config,
+            )
+            snap = snapshot(shared)
+            if first is None:
+                first = snap
+            self.assertEqual(snap, first)
+
     def test_same(self):
         special_tokens = SpecialTokens()
         special_tokens.stop_words_id_list = [[1233, 19912]]
