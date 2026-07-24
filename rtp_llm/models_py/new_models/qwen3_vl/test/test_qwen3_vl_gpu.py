@@ -96,6 +96,9 @@ def _reference_interpolated_position_embeddings(visual, grid_values):
 
 class Qwen3VLVisionGpuTest(unittest.TestCase):
     def test_rotary_uses_runtime_device_numerics_after_cpu_construction(self):
+        if not torch.cuda.is_available():
+            self.skipTest("A CUDA or ROCm accelerator is required")
+
         cpu_constructed = Qwen3VisionRotaryEmbedding(32).to("cuda:0")
         with torch.device("cuda:0"):
             device_constructed = Qwen3VisionRotaryEmbedding(32)
