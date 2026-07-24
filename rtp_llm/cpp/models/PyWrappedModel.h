@@ -269,7 +269,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // Markov + softmax tail (vLLM FULL-graph boundary).  tp>1 keeps the
         // eager tail — the tail's vocab all-gather under graph capture is
         // unverified (as is graph x TP generally).  DSPARK_GRAPH_TAIL=0 is
-        // the kill switch back to the backbone-only boundary.
+        // the kill switch back to the backbone-only boundary; only the
+        // literal "0" disables the tail, any other value (or unset) keeps
+        // it on.
         if (is_dspark && params.model_id && !use_spec_decoding && params.parallelism_config.tp_size == 1) {
             const char* tail_env         = std::getenv("DSPARK_GRAPH_TAIL");
             graph_params.dspark_capture_tail = !(tail_env != nullptr && std::string(tail_env) == "0");

@@ -628,9 +628,10 @@ class Qwen3DFlashModel(GptModelBase):
         """Eager engine entry: full pipeline (backbone + tail).
 
         Used on the non-graph path (canRun false, e.g. prefill seeding).  The
-        CUDA-graph path calls forward_backbone (captured) then draft_tail
-        (eager) separately; this composes them so the eager fallback keeps the
-        same output contract.
+        default full-tail CUDA graph captures this method whole; the
+        backbone-only boundary (tp>1 or DSPARK_GRAPH_TAIL=0) captures
+        forward_backbone and runs draft_tail eagerly after replay.  All paths
+        keep the same output contract.
 
         G3 contract: draft sampling lives in the model, so the outputs carry
         draft_tokens [B, k] and draft_probs [B, k, V] (softmax of the corrected

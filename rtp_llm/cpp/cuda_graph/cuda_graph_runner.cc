@@ -644,7 +644,7 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         const auto& draft_tokens_hold =
             graph_instances_[state.current_real_graph_bs].mem_hold_.dspark_draft_tokens_;
         if (draft_tokens_hold.defined()) {
-            const int real_bs    = state.seq_len_sum / num_tokens_per_bs_;
+            const int real_bs    = state.current_batch_size;
             outputs.draft_tokens = draft_tokens_hold.slice(0, 0, real_bs);
             outputs.draft_probs =
                 graph_instances_[state.current_real_graph_bs].mem_hold_.dspark_draft_probs_.slice(0, 0, real_bs);
@@ -1036,38 +1036,42 @@ void CudaGraphRunner::initCapture() {
         // (MtpBatchStreamProcessor) hard-requires the export; fail fast at
         // capture time if the model's capture_aux_hidden_layer_ids wiring is
         // missing instead of asserting mid-stream.
-        if (is_dspark_ && is_target_verify_) {
+        if ((is_dspark_ && is_target_verify_) || capture_draft_tail_) {
             py::gil_scoped_acquire gil;
             auto                   probe_outputs = probe_outputs_obj.cast<PyModelOutputs>();
-            RTP_LLM_CHECK_WITH_INFO(probe_outputs.aux_hidden_states.defined(),
-                                    "dspark target verify graph: model did not export aux_hidden_states — "
-                                    "check capture_aux_hidden_layer_ids wiring");
-            auto aux_sizes = probe_outputs.aux_hidden_states.sizes().vec();
-            aux_sizes[0]   = max_num_token_;
-            capture_mem_hold_.setAuxHiddenStates(
-                torch::zeros(aux_sizes, probe_outputs.aux_hidden_states.options()));
-        }
-        // DSpark draft full-tail capture: the captured forward emits
-        // draft_tokens [B, k] and draft_probs [B, k, V]; allocate one
-        // max-batch static buffer per output (per-instance holds slice it,
-        // like aux), sized from the probe forward (the runner does not know
-        // k or the draft vocab).
-        if (capture_draft_tail_) {
-            py::gil_scoped_acquire gil;
-            auto                   probe_outputs = probe_outputs_obj.cast<PyModelOutputs>();
-            RTP_LLM_CHECK_WITH_INFO(probe_outputs.draft_tokens.defined() && probe_outputs.draft_probs.defined(),
-                                    "dspark draft full-tail graph: forward did not emit draft_tokens/draft_probs");
-            auto tokens_sizes = probe_outputs.draft_tokens.sizes().vec();
-            auto probs_sizes  = probe_outputs.draft_probs.sizes().vec();
-            tokens_sizes[0]   = max_bs_;
-            probs_sizes[0]    = max_bs_;
-            capture_mem_hold_.setDSparkDraftOutputs(
-                torch::zeros(tokens_sizes, probe_outputs.draft_tokens.options()),
-                torch::zeros(probs_sizes, probe_outputs.draft_probs.options()));
-            RTP_LLM_LOG_INFO("[CudaGraph] dspark draft full-tail capture on: static draft_probs buffer %zu MiB",
-                             (size_t)(capture_mem_hold_.dspark_draft_probs_.numel()
-                                      * capture_mem_hold_.dspark_draft_probs_.element_size())
-                                 / 1024 / 1024);
+            if (is_target_verify_) {
+                RTP_LLM_CHECK_WITH_INFO(probe_outputs.aux_hidden_states.defined(),
+                                        "dspark target verify graph: model did not export aux_hidden_states — "
+                                        "check capture_aux_hidden_layer_ids wiring");
+                auto aux_sizes = probe_outputs.aux_hidden_states.sizes().vec();
+                aux_sizes[0]   = max_num_token_;
+                capture_mem_hold_.setAuxHiddenStates(
+                    torch::zeros(aux_sizes, probe_outputs.aux_hidden_states.options()));
+            } else {
+                // DSpark draft full-tail capture: the captured forward emits
+                // draft_tokens [B, k] and draft_probs [B, k, V]; allocate one
+                // shared static buffer per output (per-instance holds slice it,
+                // like aux), sized from the probe forward (the runner does not
+                // know k or the draft vocab).  The V-wide fp32 probs buffer is
+                // sized to the largest captured batch, not max_bs_ — no graph
+                // beyond capture_range_.back() can ever write it.
+                RTP_LLM_CHECK_WITH_INFO(probe_outputs.draft_tokens.defined() && probe_outputs.draft_probs.defined(),
+                                        "dspark draft full-tail graph: forward did not emit draft_tokens/draft_probs");
+                auto      tokens_sizes    = probe_outputs.draft_tokens.sizes().vec();
+                auto      probs_sizes     = probe_outputs.draft_probs.sizes().vec();
+                const int draft_buffer_bs = capture_range_.back();
+                tokens_sizes[0]           = draft_buffer_bs;
+                probs_sizes[0]            = draft_buffer_bs;
+                capture_mem_hold_.setDSparkDraftOutputs(
+                    torch::zeros(tokens_sizes, probe_outputs.draft_tokens.options()),
+                    torch::zeros(probs_sizes, probe_outputs.draft_probs.options()));
+                RTP_LLM_LOG_INFO(
+                    "[CudaGraph] dspark draft full-tail capture on: static draft_probs buffer %zu MiB (bs %d)",
+                    (size_t)(capture_mem_hold_.dspark_draft_probs_.numel()
+                             * capture_mem_hold_.dspark_draft_probs_.element_size())
+                        / 1024 / 1024,
+                    draft_buffer_bs);
+            }
         }
         initCaptureAttentionInputsPost();
         logCudaGraphPoolMemory("before_capture");

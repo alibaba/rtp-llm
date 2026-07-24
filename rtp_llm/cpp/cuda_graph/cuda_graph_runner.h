@@ -52,12 +52,14 @@ public:
         // head_hidden) and draft_tail (lm_head + Markov + softmax).  Default
         // (dspark_capture_tail): capture the FULL forward including the tail,
         // mirroring vLLM's FULL-graph DSpark speculator; the [B, k, V] draft
-        // distribution lives in one max-batch static buffer (per-instance
+        // distribution lives in one shared static buffer (per-instance
         // slices, like aux).  Fallback (tail off, e.g. tp>1 or kill switch):
         // capture the backbone only and let the engine run draft_tail eagerly
         // after replay.  The target-verify graph (also is_dspark_) captures
-        // the whole forward as usual.
-        capture_draft_tail_              = is_dspark_ && !is_target_verify_ && graph_params.dspark_capture_tail;
+        // the whole forward as usual.  The prefill graph never captures the
+        // tail — only the decode forward surfaces draft outputs.
+        capture_draft_tail_ = is_dspark_ && !is_target_verify_ && !is_prefill_cuda_graph_mode_
+                              && graph_params.dspark_capture_tail;
         const bool capture_backbone_only = is_dspark_ && !is_target_verify_ && !capture_draft_tail_;
         py_forward_method_ =
             py_instance_.attr(capture_backbone_only ? "forward_backbone" : "forward");
@@ -66,7 +68,7 @@ public:
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, kernel_seq_size_per_block_: %d, \
-            hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d",
+            hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d, capture_draft_tail_: %d",
                          enable_cuda_graph_,
                          max_bs_,
                          enable_cuda_graph_debug_mode_,
@@ -75,7 +77,8 @@ public:
                          hidden_size_,
                          num_tokens_per_bs_,
                          is_prefill_cuda_graph_mode_,
-                         is_target_verify_);
+                         is_target_verify_,
+                         capture_draft_tail_);
     }
 
     ~CudaGraphRunner() {
