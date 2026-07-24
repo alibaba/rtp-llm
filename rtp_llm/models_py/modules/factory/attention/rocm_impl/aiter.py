@@ -1620,16 +1620,29 @@ class AiterPrefillImplPaged(FMHAImplBase):
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
         parallelism_config: Optional[ParallelismConfig] = None,
+        v1_kv_layout: bool = False,
     ) -> None:
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.head_num_kv = attn_configs.kv_head_num
         self.head_dim = attn_configs.size_per_head
         self.tokens_per_block = attn_configs.kernel_tokens_per_block
 
-        self.batch_prefill_impl = AiterPrefillAttnOpPaged(attn_configs)
+        # Reused blocks were written by the prefix=0 implementation selected
+        # by the factory. Keep the writer and reader on that exact V layout.
+        self.v1_kv_layout = v1_kv_layout
+
+        self.batch_prefill_impl = (
+            AiterPrefillAttnOp(attn_configs, v1_kv_layout=True)
+            if self.v1_kv_layout
+            else AiterPrefillAttnOpPaged(attn_configs)
+        )
         self.triton_prefill_impl = AiterPrefillAttnOpTriton(attn_configs)
 
-        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpAsm(attn_configs)
+        self.rope_kvcache_impl = (
+            FusedRopeKVCachePrefillOpNonAsm(attn_configs)
+            if self.v1_kv_layout
+            else FusedRopeKVCachePrefillOpAsm(attn_configs)
+        )
         self.rope_kvcache_impl.use_paged_fmha = True
 
         self.attn_inputs = attn_inputs
@@ -1823,7 +1836,14 @@ class AiterPrefillImplPaged(FMHAImplBase):
         batch_size = cu_seqlens_q.shape[0] - 1
         max_q_len = int(self.fmha_params.max_seqlen_q) if batch_size > 0 else 0
         token_num = int(self.fmha_params.token_q_num) if batch_size > 0 else 0
-        use_triton = batch_size > 0 and 0 < max_q_len <= 4
+        # The internal Triton path consumes vectorized V directly. For a V1
+        # cache, stay on the CK batch-prefill path, which performs the explicit
+        # compact V1 -> vectorized conversion.
+        use_triton = (
+            not getattr(self, "v1_kv_layout", False)
+            and batch_size > 0
+            and 0 < max_q_len <= 4
+        )
 
         if self.need_rope_kv_cache:
             self.rope_kvcache_impl.pad_query = (

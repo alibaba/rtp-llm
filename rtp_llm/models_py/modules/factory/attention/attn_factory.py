@@ -155,6 +155,21 @@ def get_fmha_impl(
 
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
 
+    # Prefix-cache prefill must use the same persistent V-cache layout as the
+    # prefix=0 implementation that originally populated those blocks.  The
+    # ROCm ASM writer stores vectorized V while NonAsm stores V1 linear V.
+    prefill_v1_kv_layout = None
+    if attn_inputs.is_prefill:
+        asm_prefill_impl = next(
+            (impl for impl in mha_impls if impl.__name__ == "AiterPrefillImplAsm"),
+            None,
+        )
+        if asm_prefill_impl is not None:
+            asm_will_populate_cache = not _is_fmha_impl_disabled(
+                asm_prefill_impl.__name__, fmha_config
+            ) and asm_prefill_impl.support(attn_configs, attn_inputs)
+            prefill_v1_kv_layout = not asm_will_populate_cache
+
     for impl in mha_impls:
         # Check if this FMHA implementation is disabled before creating instance
         impl_class_name = impl.__name__
@@ -171,7 +186,18 @@ def get_fmha_impl(
         if not impl.support_parallelism_config(parallelism_config):
             continue
         try:
-            instance = impl(attn_configs, attn_inputs, parallelism_config)
+            if (
+                impl_class_name == "AiterPrefillImplPaged"
+                and prefill_v1_kv_layout is not None
+            ):
+                instance = impl(
+                    attn_configs,
+                    attn_inputs,
+                    parallelism_config,
+                    v1_kv_layout=prefill_v1_kv_layout,
+                )
+            else:
+                instance = impl(attn_configs, attn_inputs, parallelism_config)
             if not is_cuda_graph or instance.support_cuda_graph():
                 return instance
 

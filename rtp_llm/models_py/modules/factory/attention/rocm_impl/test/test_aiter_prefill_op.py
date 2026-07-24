@@ -504,6 +504,68 @@ class TestAiterPrefillImplPagedSupport(unittest.TestCase):
 
 
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillImplPaged module")
+class TestAiterPrefillImplPagedCacheLayout(unittest.TestCase):
+    """The prefix reader/writer must follow the layout that populated cache."""
+
+    def _construct(self, v1_layout):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        cfg = SimpleNamespace(
+            need_rope_kv_cache=True,
+            kv_head_num=8,
+            size_per_head=128,
+            kernel_tokens_per_block=16,
+        )
+        inputs = SimpleNamespace()
+
+        def op_mock():
+            op = MagicMock()
+            op.prepare.return_value = SimpleNamespace()
+            return op
+
+        batch_v1 = op_mock()
+        batch_asm = op_mock()
+        triton = op_mock()
+        rope_v1 = op_mock()
+        rope_asm = op_mock()
+        module = "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter"
+        with patch(
+            f"{module}.AiterPrefillAttnOp", return_value=batch_v1
+        ) as v1_cls, patch(
+            f"{module}.AiterPrefillAttnOpPaged", return_value=batch_asm
+        ) as asm_cls, patch(
+            f"{module}.AiterPrefillAttnOpTriton", return_value=triton
+        ), patch(
+            f"{module}.FusedRopeKVCachePrefillOpNonAsm", return_value=rope_v1
+        ) as rope_v1_cls, patch(
+            f"{module}.FusedRopeKVCachePrefillOpAsm", return_value=rope_asm
+        ) as rope_asm_cls, patch(
+            f"{module}.common.create_write_cache_store_impl", return_value=None
+        ):
+            impl = AiterPrefillImplPaged(cfg, inputs, v1_kv_layout=v1_layout)
+
+        return impl, v1_cls, asm_cls, rope_v1_cls, rope_asm_cls
+
+    def test_v1_cache_selects_nonasm_writer_and_converting_reader(self):
+        impl, v1_cls, asm_cls, rope_v1_cls, rope_asm_cls = self._construct(True)
+        self.assertTrue(impl.v1_kv_layout)
+        v1_cls.assert_called_once()
+        self.assertTrue(v1_cls.call_args.kwargs["v1_kv_layout"])
+        asm_cls.assert_not_called()
+        rope_v1_cls.assert_called_once()
+        rope_asm_cls.assert_not_called()
+
+    def test_asm_cache_keeps_raw_paged_reader_and_asm_writer(self):
+        impl, v1_cls, asm_cls, rope_v1_cls, rope_asm_cls = self._construct(False)
+        self.assertFalse(impl.v1_kv_layout)
+        v1_cls.assert_not_called()
+        asm_cls.assert_called_once()
+        rope_v1_cls.assert_not_called()
+        rope_asm_cls.assert_called_once()
+
+
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillImplPaged module")
 class TestRefreshPrefillParamsForCudaGraph(unittest.TestCase):
     """Unit tests for AiterPrefillImplPaged CUDA graph metadata refresh.
 
