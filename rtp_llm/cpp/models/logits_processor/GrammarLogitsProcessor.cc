@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <ATen/Dispatch.h>
 #include <dlpack/dlpack.h>
@@ -347,6 +348,7 @@ private:
     }
 
     torch::Tensor prepareBitmask(int32_t grammar_vocab_size) {
+        waitForPendingBitmaskUploads();
         const int32_t words = (grammar_vocab_size + 31) / 32;
         if (!reusable_bitmask_cpu_.defined() || reusable_mask_words_ < words) {
             reusable_bitmask_cpu_ = at::full({1, words}, -1, at::dtype(at::kInt)).pin_memory();
@@ -393,6 +395,10 @@ private:
                 }
                 auto packed_allow_mask_gpu = reusable_bitmask_gpu_.narrow(1, 0, words);
                 packed_allow_mask_gpu.copy_(state.packed_allow_mask_cpu, /*non_blocking=*/true);
+                // The source is a view into reusable pinned storage. Record the
+                // upload explicitly so the next decode state cannot overwrite it
+                // while this H2D is still in flight.
+                pending_bitmask_uploads_.push_back(runtimeCreateEvent());
                 runtimeApplyPackedMaskLogits(logits, packed_allow_mask_gpu, mask_vocab_size);
 #else
                 runtimeApplyPackedMaskLogits(logits, state.packed_allow_mask_cpu, mask_vocab_size);
@@ -413,6 +419,15 @@ private:
         return ErrorInfo::OkStatus();
     }
 
+    void waitForPendingBitmaskUploads() {
+#if USING_CUDA
+        for (const auto& upload : pending_bitmask_uploads_) {
+            upload->synchronize();
+        }
+        pending_bitmask_uploads_.clear();
+#endif
+    }
+
     static void forceToken(const torch::Tensor& logits, int64_t token_id) {
         if (token_id < 0 || token_id >= logits.size(0)) {
             return;
@@ -425,6 +440,9 @@ private:
     torch::Tensor   reusable_bitmask_cpu_;
     torch::Tensor   reusable_bitmask_gpu_;
     int32_t         reusable_mask_words_ = 0;
+    // Guards host mutation of reusable_bitmask_cpu_; correctness must not
+    // depend on a later sampler D2H synchronizing the decode stream.
+    std::vector<std::shared_ptr<torch::Event>> pending_bitmask_uploads_;
 };
 
 GrammarLogitsProcessor::GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher, int64_t eos_token_id):

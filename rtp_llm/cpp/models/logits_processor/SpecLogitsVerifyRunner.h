@@ -17,7 +17,8 @@ namespace rtp_llm {
 //
 // Single-flight and non-reentrant: LaunchResult tensors are views into reusable
 // internal buffers. The caller must finish consuming one result, including GPU work
-// that reads its views, before calling run() again on the same runner.
+// that reads its views, before calling run() again on the same runner. The runner
+// separately waits for asynchronous H2D reads before mutating pinned CPU buffers.
 class SpecLogitsVerifyRunner {
 public:
     struct ActiveProcessor {
@@ -47,7 +48,7 @@ public:
 
     SpecLogitsVerifyRunner() = default;
 
-    SpecLogitsVerifyRunner(const SpecLogitsVerifyRunner&) = delete;
+    SpecLogitsVerifyRunner(const SpecLogitsVerifyRunner&)            = delete;
     SpecLogitsVerifyRunner& operator=(const SpecLogitsVerifyRunner&) = delete;
 
     LaunchResult run(const LaunchTask& task);
@@ -79,6 +80,7 @@ private:
     MergeProcessorMasksResult
     mergeProcessorMasks(const LaunchTask& task, const ActiveStreamLayout& layout, const VerifyShape& shape);
     LaunchResult makeResult(const VerifyShape& shape);
+    void         waitForPendingHostUploads();
 
     torch::Tensor draft_tokens_cpu_;
     torch::Tensor processor_bitmask_cpu_;
@@ -87,6 +89,9 @@ private:
     torch::Tensor logits_row_indices_cpu_;  // [active_rows] pinned int32
     torch::Tensor logits_row_indices_gpu_;  // [active_rows] device int32
     torch::Tensor spec_cap_cpu_;
+    // Guards host mutation of merged_bitmask_cpu_ and logits_row_indices_cpu_;
+    // correctness must not depend on a later sampler D2H stream synchronization.
+    std::shared_ptr<torch::Event> pending_host_upload_;
 };
 
 }  // namespace rtp_llm
