@@ -337,6 +337,24 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(generate_config.in_think_mode, True)
         self.assertEqual(generate_config.end_think_token_ids, [151649])
 
+    def test_add_thinking_params_does_not_check_tokenizer_length(self):
+        class Tokenizer:
+            def __len__(self):
+                raise AssertionError("tokenizer length should not be checked")
+
+            def encode(self, text, add_special_tokens=False):
+                return [123]
+
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = -1
+        generate_env_config.think_end_tag = "</think>"
+
+        generate_config = GenerateConfig()
+        generate_config.add_thinking_params(Tokenizer(), generate_env_config)
+
+        self.assertEqual(generate_config.end_think_token_ids, [123])
+
     def test_add_thinking_params_with_think_token_2(self):
         generate_env_config = GenerateEnvConfig()
         generate_env_config.think_mode = 1

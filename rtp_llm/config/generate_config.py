@@ -261,7 +261,7 @@ class GenerateConfig(BaseModel):
         )
         if (
             bool(generate_env_config.think_mode)
-            and tokenizer
+            and tokenizer is not None
             and end_think_token_id == -1
         ):
             think_end_tag: str = generate_env_config.think_end_tag.encode(
