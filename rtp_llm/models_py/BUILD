@@ -142,6 +142,7 @@ py_library(
         "new_models/qwen3_moe/*.py",
         "new_models/qwen3_next/*.py",
         "new_models/qwen3_vl/*.py",
+        "new_models/qwen3_vl_moe/*.py",
         "quant_methods/*.py",
     ]),
     deps = [
