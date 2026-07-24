@@ -417,7 +417,7 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
         fmha_impl = types.SimpleNamespace(fmha_params=None)
 
         with mock.patch(
-            "rtp_llm.models_py.new_models.qwen3_vl.model."
+            "rtp_llm.models_py.new_models.qwen3_vl.multimodal."
             "reshape_extra_input_to_deepstack",
             return_value=deepstack,
         ), mock.patch(

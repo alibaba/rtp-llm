@@ -5,6 +5,7 @@ from unittest import mock
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.models_py.layers.norm import RMSResNorm
 from rtp_llm.models_py.model_loader import (
     NewLoaderConfig,
     NewModelLoader,
@@ -143,6 +144,21 @@ class Qwen3VLMoeNewLoaderTest(unittest.TestCase):
             checkpoint["lm_head.weight"],
         )
 
+    def test_tied_embeddings_load_without_lm_head_tensor(self):
+        model = Qwen3VLMoeForCausalLM(
+            _model_config(tie_word_embeddings=True), _load_config()
+        )
+        checkpoint = _weights()
+        del checkpoint["lm_head.weight"]
+        checkpoint["model.visual.unused.weight"] = torch.ones(1)
+        name_filter = model.checkpoint_weight_name_filter()
+        model.load_weights(
+            (name, tensor) for name, tensor in checkpoint.items() if name_filter(name)
+        )
+
+        NewModelLoader._validate_loaded_weights(model)
+        torch.testing.assert_close(model.lm_head.weight, model.embed_tokens.weight)
+
     def test_unknown_and_missing_language_tensors_are_not_ignored(self):
         model = Qwen3VLMoeForCausalLM(_model_config(), _load_config())
         unknown = _weights()
@@ -274,6 +290,67 @@ class Qwen3VLMoeNewLoaderTest(unittest.TestCase):
             [call.args for call in select_block.call_args_list],
             [(inputs.attention_inputs, 0), (inputs.attention_inputs, 1)],
         )
+
+    def test_deepstack_flows_through_real_rms_residual_add_norm(self):
+        class AddNormLayer(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.input_layernorm = RMSResNorm(
+                    4, eps=1e-6, params_dtype=torch.float32
+                )
+                self.last_residual = None
+
+            def forward(self, hidden_states, residual, fmha_impl, kv_cache=None):
+                _, residual = self.input_layernorm(hidden_states, residual)
+                self.last_residual = residual.detach().clone()
+                return torch.zeros_like(hidden_states), residual
+
+        model = Qwen3VLMoeForCausalLM.__new__(Qwen3VLMoeForCausalLM)
+        torch.nn.Module.__init__(model)
+        model.embed_tokens = torch.nn.Embedding(8, 4)
+        model.embed_tokens.weight.data.copy_(
+            torch.arange(32, dtype=torch.float32).reshape(8, 4)
+        )
+        model.multimodal_embedding_injector = MultimodalEmbeddingInjector()
+        model.multimodal_deepstack_injector = MultimodalDeepstackInjector()
+        model.layers = torch.nn.ModuleList([AddNormLayer(), AddNormLayer()])
+        model.norm = RMSResNorm(4, eps=1e-6, params_dtype=torch.float32)
+        model.kv_cache = None
+
+        input_ids = torch.tensor([1, 100, 2])
+        image_feature = torch.full((1, 4), 50.0)
+        deepstack = torch.stack((torch.full((1, 4), 100.0), torch.full((1, 4), 200.0)))
+        inputs = types.SimpleNamespace(
+            input_ids=input_ids,
+            embedding_inputs=types.SimpleNamespace(
+                text_tokens_mask=torch.tensor([True, False, True])
+            ),
+            multimodal_inputs=types.SimpleNamespace(
+                multimodal_features=[image_feature],
+                mm_features_locs=torch.tensor([1]),
+                mm_extra_input=[deepstack.flatten()],
+            ),
+            attention_inputs=object(),
+        )
+        fmha_impl = types.SimpleNamespace(fmha_params=None)
+
+        with mock.patch(
+            "rtp_llm.models_py.new_models.qwen3_vl_moe.model."
+            "select_block_map_for_layer"
+        ):
+            output = model(inputs, fmha_impl)
+
+        initial = model.embed_tokens(torch.tensor([1, 0, 2]))
+        initial[1] = image_feature[0]
+        after_first_deepstack = initial.clone()
+        after_first_deepstack[1] += deepstack[0, 0]
+        torch.testing.assert_close(model.layers[1].last_residual, after_first_deepstack)
+
+        expected_residual = after_first_deepstack.clone()
+        expected_residual[1] += deepstack[1, 0]
+        variance = expected_residual.float().pow(2).mean(-1, keepdim=True)
+        expected = expected_residual * torch.rsqrt(variance + 1e-6)
+        torch.testing.assert_close(output.hidden_states, expected)
 
     def test_forward_handles_text_only_input(self):
         class IdentityLayer(torch.nn.Module):
